@@ -40,6 +40,13 @@ load automatically when working in `docs/`.
   `Title`, never in an API response.
 - **Identity is our UUIDv7.** `tmdb_id`/`imdb_id` are indexed attributes, never
   primary keys, never identifiers in an API contract.
+- **Domain models are frozen — use `.evolve()`, never `model_copy(update=)`.**
+  Every `usher.domain` model inherits `DomainModel`
+  (`src/usher/domain/base.py`), so `model_copy(update=...)` is reachable on
+  all of them but skips validation entirely: it can hand back an instance
+  with a wrong-typed or out-of-range field that pydantic still serializes
+  without complaint. `.evolve(**changes)` re-validates from scratch and is
+  the only sanctioned write path.
 - **Ship importers, never data.** No third-party metadata may be committed or
   included in a release artifact — IMDb and TMDb both prohibit redistribution.
   Users run importers and hold their own API keys. Attribution strings stay in
