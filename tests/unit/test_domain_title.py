@@ -15,6 +15,17 @@ def test_title_requires_only_kind_and_name() -> None:
     assert title.genres == ()
 
 
+def test_sort_name_may_differ_from_name() -> None:
+    """sort_name has no normalization contract (see the field's comment in
+    title.py) but it is a distinct field, not a mirror of name — e.g. an
+    article-first display name sorts under a different letter than it
+    displays under. The rest of this file's fixtures set sort_name equal
+    to name for brevity; this test exists so that never reads as a rule."""
+    title = Title(kind=TitleKind.MOVIE, name="The Matrix", sort_name="Matrix, The")
+    assert title.name == "The Matrix"
+    assert title.sort_name == "Matrix, The"
+
+
 def test_title_generates_its_own_identity() -> None:
     a = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
     b = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
