@@ -471,12 +471,37 @@ class TitleKind(StrEnum):
 
 class EnrichmentState(StrEnum):
     """How complete a Title's metadata is. Always exposed to clients so they
-    render deliberately rather than inferring from nulls."""
+    render deliberately rather than inferring from nulls.
+
+    A three-rung ladder, not a status: `skeleton` and `stub` differ by
+    *provenance* as much as by completeness — `skeleton` comes from a bulk
+    dataset and often already carries genres, ratings, and runtime; `stub`
+    is only whatever a source's own API returned on first sight. Neither is
+    a strict subset of the other's fields.
+
+    Whether the *last enrichment attempt* failed is tracked separately, on
+    `Title.enrichment_error` — a failed attempt does not consume or reset a
+    tier. See ADR-0008.
+
+    `StrEnum` members compare lexicographically ("enriched" < "skeleton" <
+    "stub"), not by ladder position: `EnrichmentState.ENRICHED >
+    EnrichmentState.SKELETON` is `False`. Never compare members directly to
+    decide "is this an improvement" — use `ENRICHMENT_RANK`.
+    """
 
     SKELETON = "skeleton"  # from a bulk dataset; no overview or artwork
-    STUB = "stub"          # seen on a source; source metadata only
+    STUB = "stub"  # seen on a source; source metadata only
     ENRICHED = "enriched"  # full provider metadata
-    FAILED = "failed"      # enrichment attempted and failed
+
+
+# The only valid way to compare EnrichmentState tiers for "is this an
+# improvement" logic — see EnrichmentState's docstring for why comparing
+# members directly is wrong.
+ENRICHMENT_RANK: dict[EnrichmentState, int] = {
+    EnrichmentState.SKELETON: 0,
+    EnrichmentState.STUB: 1,
+    EnrichmentState.ENRICHED: 2,
+}
 
 
 class SourceKind(StrEnum):
@@ -489,14 +514,41 @@ class WatchStateOrigin(StrEnum):
 
 
 class ProductionStatus(StrEnum):
-    RELEASED = "released"
-    IN_PRODUCTION = "in_production"
-    POST_PRODUCTION = "post_production"
-    PLANNED = "planned"
-    CANCELED = "canceled"
-    ENDED = "ended"
-    RETURNING = "returning"
+    """TMDb production status. Movies and series draw from overlapping but
+    not identical vocabularies (grouped per member below); nothing here
+    enforces the pairing — `Title(kind=MOVIE, status=RETURNING)` is still
+    constructible. The grouping documents intent, not a constraint."""
+
+    RELEASED = "released"  # movie
+    IN_PRODUCTION = "in_production"  # movie, series
+    POST_PRODUCTION = "post_production"  # movie
+    PLANNED = "planned"  # movie, series
+    CANCELED = "canceled"  # movie, series
+    RUMORED = "rumored"  # movie
+    ENDED = "ended"  # series
+    RETURNING = "returning"  # series
+    PILOT = "pilot"  # series
+
+
+class HdrFormat(StrEnum):
+    """Canonical HDR formats. A source's own vocabulary (Emby, for
+    instance, emits strings like "DolbyVision") is translated into one of
+    these by its adapter — this enum, never the source's raw string, is
+    what reaches `MediaItem` and the API. See `source.py`'s docstring."""
+
+    HDR10 = "HDR10"
+    DOLBY_VISION = "DV"
+    HLG = "HLG"
 ```
+
+> **Amended post-implementation.** A quality review after Tasks 3–5 first
+> landed found `FAILED` conflated "how complete is this title" with "did
+> the last enrichment attempt fail", found `ProductionStatus` missing
+> TMDb's `pilot`/`rumored` values, and found `hdr_format` (Task 5) was a
+> free string despite the project's own "no source-specific concept
+> escapes its adapter" rule. The block above is the current, hardened
+> version; see [ADR-0008](../prd/decisions/0008-enrichment-tier-vs-failure.md)
+> and `tests/unit/test_enums.py`.
 
 - [ ] **Step 6: Verify enums import**
 
@@ -579,67 +631,97 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'usher.domain.title'`
 """The canonical production: one film, or one series."""
 
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, Field
 
+from usher.domain.base import DomainModel
 from usher.domain.enums import EnrichmentState, ProductionStatus, TitleKind
 from usher.domain.ids import new_id
 
 
-class Title(BaseModel):
+class Title(DomainModel):
     """A canonical production.
 
     Identity is Usher's own UUIDv7. Provider identifiers are nullable,
     indexed *attributes* — never identity. See ADR-0003.
-    """
 
-    model_config = ConfigDict(frozen=True)
+    Unhashable by design: `field_provenance` is a `dict[str, str]`, which
+    poisons pydantic's generated `__hash__` even under `frozen=True`.
+    `Source`, `MediaItem`, `User`, and `WatchState` carry no dict or list
+    field and are hashable; `Title` is the one exception in this set. See
+    `DomainModel`'s docstring.
+    """
 
     id: uuid.UUID = Field(default_factory=new_id)
     kind: TitleKind
 
     tmdb_id: int | None = None
-    imdb_id: str | None = None
+    imdb_id: str | None = Field(default=None, pattern=r"^tt\d{7,8}$")
     tvdb_id: int | None = None
 
-    name: str
+    name: str = Field(min_length=1)
     original_name: str | None = None
-    sort_name: str
-    year: int | None = None
+    # No normalization contract yet — stored exactly as given (articles
+    # kept, casing preserved as passed). This column gets a btree index
+    # for catalog ordering (Task 8); if article-stripping or casefolding
+    # turns out to be wanted, it belongs here as an explicit validator, not
+    # as an adapter-side convention some adapters will forget.
+    sort_name: str = Field(min_length=1)
+    year: int | None = Field(default=None, ge=0)
     release_date: date | None = None
-    end_year: int | None = None
+    end_year: int | None = Field(default=None, ge=0)  # series
 
     overview: str | None = None
     tagline: str | None = None
-    runtime_minutes: int | None = None
+    runtime_minutes: int | None = Field(default=None, ge=0)
     status: ProductionStatus | None = None
 
-    genres: list[str] = Field(default_factory=list)
-    keywords: list[str] = Field(default_factory=list)
-    original_language: str | None = None
-    spoken_languages: list[str] = Field(default_factory=list)
-    origin_countries: list[str] = Field(default_factory=list)
+    genres: tuple[str, ...] = Field(default_factory=tuple)
+    keywords: tuple[str, ...] = Field(default_factory=tuple)
+    original_language: str | None = None  # ISO 639-1, e.g. "en"
+    spoken_languages: tuple[str, ...] = Field(default_factory=tuple)  # ISO 639-1
+    origin_countries: tuple[str, ...] = Field(default_factory=tuple)  # ISO 3166-1 alpha-2
     content_rating: str | None = None
 
-    community_rating: float | None = None
-    vote_count: int | None = None
-    popularity: float | None = None
+    community_rating: float | None = Field(default=None, ge=0, le=10)  # TMDb's 0-10 scale
+    vote_count: int | None = Field(default=None, ge=0)
+    popularity: float | None = Field(default=None, ge=0)
 
     collection_id: uuid.UUID | None = None
 
     enrichment_state: EnrichmentState = EnrichmentState.SKELETON
-    enriched_at: datetime | None = None
+    # Non-null means the *last* enrichment attempt failed. enrichment_state
+    # is left exactly as it was — failure does not consume a tier. ADR-0008.
+    enrichment_error: str | None = None
+    enriched_at: AwareDatetime | None = None
+    # field -> provider that supplied it
     field_provenance: dict[str, str] = Field(default_factory=dict)
 
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    created_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
 ```
+
+> **Amended post-implementation.** Step 1's test above is the literal
+> starting point Task 4 was implemented from and is left as-is here as a
+> historical record, but a quality review afterward found nine previously
+> accepted bad values (e.g. `year=-40`, `community_rating=99.0`,
+> `name=""`), a naive/aware datetime hazard given every planned column is
+> `TIMESTAMPTZ`, `title.genres.append(...)` silently succeeding on a
+> "frozen" Title, and no `extra="forbid"` guard against a typo'd keyword
+> argument from an adapter. The implementation block above is the current,
+> hardened version — it now inherits the shared `DomainModel` base (Task 3
+> ½, `src/usher/domain/base.py`, added in the same pass) for
+> `frozen=True`, `extra="forbid"`, and the validated-update helper
+> `.evolve()`. `tests/unit/test_domain_title.py` grew from 5 cases to 30;
+> read it directly rather than this task's original Step 1 for the current
+> contract.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/unit/test_domain_title.py -v`
-Expected: 5 passed
+Expected: 5 passed (at the time Task 4 was implemented; 30 passed after the
+hardening pass described above)
 
 - [ ] **Step 5: Commit**
 
@@ -719,55 +801,60 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'usher.domain.source'`
 """Sources and availability — the only place a media server is represented."""
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, Field
 
-from usher.domain.enums import SourceKind
+from usher.domain.base import DomainModel
+from usher.domain.enums import HdrFormat, SourceKind
 from usher.domain.ids import new_id
 
 
-class Source(BaseModel):
+class Source(DomainModel):
     """A configured backend that holds playable media."""
-
-    model_config = ConfigDict(frozen=True)
 
     id: uuid.UUID = Field(default_factory=new_id)
     kind: SourceKind
-    name: str
+    name: str = Field(min_length=1)
     base_url: str
-    credentials_ref: str
-    device_id: str
+    credentials_ref: str  # indirection; never the secret itself
+    device_id: str  # stable; registers us as a durable client
     enabled: bool = True
     supports_push: bool = False
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    created_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class MediaItem(BaseModel):
+class MediaItem(DomainModel):
     """'This title is available on that source', plus the quality facts of
-    that particular copy. A Title may have many, across sources."""
+    that particular copy. A Title may have many, across sources.
 
-    model_config = ConfigDict(frozen=True)
+    Deliberately permissive about `title_id`: NULL means unmatched, sitting
+    in a review queue for manual resolution — a legitimate, expected, and
+    common state, never dropped. Contrast `WatchState`, which enforces the
+    opposite rule (exactly one of `title_id`/`episode_id` must be set)
+    because an unattached watch record has nothing sensible to mean; an
+    unmatched MediaItem has an obvious, useful one.
+    """
 
     id: uuid.UUID = Field(default_factory=new_id)
     source_id: uuid.UUID
-    title_id: uuid.UUID | None = None
+    title_id: uuid.UUID | None = None  # NULL => unmatched, in review queue
     episode_id: uuid.UUID | None = None
     external_id: str
 
     container: str | None = None
     video_codec: str | None = None
     audio_codec: str | None = None
-    width: int | None = None
-    height: int | None = None
-    hdr_format: str | None = None
-    audio_channels: int | None = None
-    file_size_bytes: int | None = None
-    runtime_seconds: int | None = None
+    width: int | None = Field(default=None, ge=0)
+    height: int | None = Field(default=None, ge=0)
+    hdr_format: HdrFormat | None = None
+    audio_channels: int | None = Field(default=None, ge=0)
+    file_size_bytes: int | None = Field(default=None, ge=0)
+    runtime_seconds: int | None = Field(default=None, ge=0)
 
-    added_at: datetime | None = None
-    last_seen_at: datetime | None = None
+    added_at: AwareDatetime | None = None
+    last_seen_at: AwareDatetime | None = None
     available: bool = True
 ```
 
@@ -782,45 +869,93 @@ survives adding, changing, or losing a source.
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, Field, model_validator
 
+from usher.domain.base import DomainModel
 from usher.domain.enums import WatchStateOrigin
 from usher.domain.ids import new_id
 
 
-class User(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class User(DomainModel):
+    """An Usher-owned account — not an Emby (or any other source's) user.
+
+    Usher is not multi-tenant; `User` exists so watch state and taste are
+    per-person within a household, not so Usher can be run as a shared
+    service. v1 has no authentication: every request resolves to the
+    singleton default user (`is_default=True`). Adding real auth later
+    replaces that one lookup without moving anything else, because watch
+    state and taste are already keyed by `User.id`.
+    """
 
     id: uuid.UUID = Field(default_factory=new_id)
-    name: str
+    name: str = Field(min_length=1)
     is_default: bool = False
-    created_at: datetime | None = None
+    created_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class WatchState(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class WatchState(DomainModel):
+    """Progress or completion of one user against one Title or Episode.
+
+    Exactly one of `title_id`/`episode_id` must be set — enforced below.
+    Contrast `MediaItem`, which is deliberately permissive about its
+    equivalent `title_id` (there, NULL means "unmatched, review queue", a
+    legitimate and common state). An unattached `WatchState` has no such
+    reading: it would not be progress on anything.
+    """
 
     id: uuid.UUID = Field(default_factory=new_id)
     user_id: uuid.UUID
     title_id: uuid.UUID | None = None
     episode_id: uuid.UUID | None = None
 
-    position_seconds: int = 0
-    runtime_seconds: int | None = None
+    position_seconds: int = Field(default=0, ge=0)
+    runtime_seconds: int | None = Field(default=None, ge=0)
     played: bool = False
-    play_count: int = 0
-    last_played_at: datetime | None = None
+    play_count: int = Field(default=0, ge=0)
+    last_played_at: AwareDatetime | None = None
 
-    updated_at: datetime | None = None
-    updated_by: WatchStateOrigin = WatchStateOrigin.API
+    updated_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
+    # Who last wrote this record: source | api. Not a user reference (that's
+    # user_id, immediately above it in most schemas — which is exactly why
+    # this field is *not* called updated_by; that name reads as a user FK
+    # here). No default: a sync path that forgets to set this must fail
+    # loudly rather than silently mislabel source-pushed state as
+    # user-originated.
+    origin: WatchStateOrigin
+
+    @model_validator(mode="after")
+    def _exactly_one_of_title_or_episode(self) -> Self:
+        if (self.title_id is None) == (self.episode_id is None):
+            raise ValueError("exactly one of title_id or episode_id must be set")
+        return self
 ```
+
+> **Amended post-implementation.** Step 1's tests above are the literal
+> starting point Task 5 was implemented from and are left as-is here as a
+> historical record, but a quality review afterward found: `frozen=True`
+> was deletable from both files with the suite staying green (neither had
+> a mutation-attempt test); `updated_by` read as a user-FK name next to
+> `user_id` for a field that actually holds `source | api` (renamed to
+> `origin`, and its default removed — a forgotten origin must fail loudly,
+> not silently default to `api`); `WatchState` allowed being attached to
+> neither or both of `title_id`/`episode_id`, and `MediaItem`'s
+> intentionally-opposite permissiveness about its own `title_id` was
+> undocumented; and `hdr_format` was a free string a source's raw
+> vocabulary could reach unchanged. The implementation blocks above are
+> the current, hardened versions, both on the shared `DomainModel` base
+> introduced alongside Task 4 (`src/usher/domain/base.py`).
+> `tests/unit/test_domain_source.py` and `tests/unit/test_domain_watch.py`
+> grew from 2 and 2 cases to 20 and 19; read them directly rather than
+> this task's original Step 1 for the current contract.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/unit/test_domain_source.py tests/unit/test_domain_watch.py -v`
-Expected: 4 passed
+Expected: 4 passed (at the time Task 5 was implemented; 39 passed after the
+hardening pass described above)
 
 - [ ] **Step 6: Commit**
 
@@ -1332,6 +1467,29 @@ Expected: FAIL — `ImportError: cannot import name 'MediaItemRow'`
 
 - [ ] **Step 3: Write `title.py`**
 
+> **Amended post-implementation.** A quality review of the domain models
+> (Tasks 3–5) after they first landed added `enrichment_error`, dropped
+> `EnrichmentState.FAILED`, changed `genres`/`keywords`/`spoken_languages`/
+> `origin_countries` to `tuple[str, ...]`, added a `WatchState` invariant
+> (exactly one of `title_id`/`episode_id`), and value constraints
+> (`ge=0`/range/`min_length` — see ADR-0008 and the domain-model commits
+> for the full rationale). The `TitleRow`/`SourceRow`/`MediaItemRow`/
+> `UserRow`/`WatchStateRow` definitions below already reflect that —
+> unlike Tasks 3–5, Task 8 had not been implemented yet when the review
+> landed, so there is no "original vs. amended" split here, just the
+> current version to implement against.
+>
+> One finding worth flagging explicitly: `ARRAY(Text)` **accepts** a
+> Python `tuple` on write (verified against a real `pgvector/pgvector:pg17`
+> container, both through Core `insert().values()` and through
+> `TitleRow(genres=(...))`), but Postgres/asyncpg always **returns a
+> `list`** on read — never a tuple. So `genres`/`keywords`/
+> `spoken_languages`/`origin_countries` stay `Mapped[list[str]]` below,
+> unchanged; the tuple-ness is purely a `usher.domain.title.Title`-layer
+> concept, and `_to_domain` (Task 10) gets the list→tuple conversion for
+> free from pydantic validation. Do not "fix" these to `Mapped[tuple[str,
+> ...]]` — that would just be wrong about what the driver hands back.
+
 ```python
 # src/usher/db/models/title.py
 """Catalog tables."""
@@ -1341,6 +1499,7 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     ARRAY,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -1380,6 +1539,10 @@ class TitleRow(Base):
     runtime_minutes: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str | None] = mapped_column(String(32))
 
+    # ARRAY(Text) accepts a Python tuple on write and always returns a list
+    # on read (verified against real Postgres) -- Mapped[list[str]] here is
+    # correct for both directions even though the domain model above these
+    # rows uses tuple[str, ...]. See the note above this class.
     genres: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
     keywords: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
     original_language: Mapped[str | None] = mapped_column(String(16))
@@ -1396,6 +1559,9 @@ class TitleRow(Base):
     enrichment_state: Mapped[EnrichmentState] = mapped_column(
         String(16), nullable=False, default=EnrichmentState.SKELETON
     )
+    # Non-null => the last enrichment attempt failed; enrichment_state is
+    # left untouched either way. ADR-0008.
+    enrichment_error: Mapped[str | None] = mapped_column(Text)
     enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     field_provenance: Mapped[dict[str, str]] = mapped_column(JSONB, default=dict)
 
@@ -1425,6 +1591,28 @@ class TitleRow(Base):
         Index("ix_titles_sort_name", "sort_name"),
         Index("ix_titles_enrichment_state", "enrichment_state"),
         Index("ix_titles_popularity", "popularity"),
+        # Mirrors the domain model's Field(ge=0) / Field(ge=0, le=10) /
+        # Field(min_length=1) constraints -- see the Title commit.
+        CheckConstraint("year IS NULL OR year >= 0", name="ck_titles_year_non_negative"),
+        CheckConstraint(
+            "end_year IS NULL OR end_year >= 0", name="ck_titles_end_year_non_negative"
+        ),
+        CheckConstraint(
+            "runtime_minutes IS NULL OR runtime_minutes >= 0",
+            name="ck_titles_runtime_minutes_non_negative",
+        ),
+        CheckConstraint(
+            "vote_count IS NULL OR vote_count >= 0", name="ck_titles_vote_count_non_negative"
+        ),
+        CheckConstraint(
+            "popularity IS NULL OR popularity >= 0", name="ck_titles_popularity_non_negative"
+        ),
+        CheckConstraint(
+            "community_rating IS NULL OR community_rating BETWEEN 0 AND 10",
+            name="ck_titles_community_rating_range",
+        ),
+        CheckConstraint("name <> ''", name="ck_titles_name_not_empty"),
+        CheckConstraint("sort_name <> ''", name="ck_titles_sort_name_not_empty"),
     )
 ```
 
@@ -1440,6 +1628,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -1454,7 +1643,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from usher.db.base import Base
-from usher.domain.enums import SourceKind
+from usher.domain.enums import HdrFormat, SourceKind
 
 
 class SourceRow(Base):
@@ -1479,6 +1668,8 @@ class SourceRow(Base):
         nullable=False,
     )
 
+    __table_args__ = (CheckConstraint("name <> ''", name="ck_sources_name_not_empty"),)
+
 
 class MediaItemRow(Base):
     __tablename__ = "media_items"
@@ -1498,7 +1689,7 @@ class MediaItemRow(Base):
     audio_codec: Mapped[str | None] = mapped_column(String(32))
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
-    hdr_format: Mapped[str | None] = mapped_column(String(16))
+    hdr_format: Mapped[HdrFormat | None] = mapped_column(String(16))
     audio_channels: Mapped[int | None] = mapped_column(Integer)
     file_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     runtime_seconds: Mapped[int | None] = mapped_column(Integer)
@@ -1517,8 +1708,37 @@ class MediaItemRow(Base):
             "source_id",
             postgresql_where=text("title_id IS NULL"),
         ),
+        CheckConstraint(
+            "width IS NULL OR width >= 0", name="ck_media_items_width_non_negative"
+        ),
+        CheckConstraint(
+            "height IS NULL OR height >= 0", name="ck_media_items_height_non_negative"
+        ),
+        CheckConstraint(
+            "audio_channels IS NULL OR audio_channels >= 0",
+            name="ck_media_items_audio_channels_non_negative",
+        ),
+        CheckConstraint(
+            "file_size_bytes IS NULL OR file_size_bytes >= 0",
+            name="ck_media_items_file_size_bytes_non_negative",
+        ),
+        CheckConstraint(
+            "runtime_seconds IS NULL OR runtime_seconds >= 0",
+            name="ck_media_items_runtime_seconds_non_negative",
+        ),
     )
 ```
+
+**Pre-existing, still-unresolved mismatch, flagged rather than silently
+fixed:** `MediaItemRow.last_seen_at` above is `nullable=False` with a
+`server_default`, matching [02-data-model.md](../prd/02-data-model.md)'s
+`last_seen_at: datetime`. `usher.domain.source.MediaItem.last_seen_at` is
+`AwareDatetime | None = None` — nullable, matching Task 5's original code,
+not the PRD. This round's instructions covered `created_at`/`updated_at`
+specifically and did not touch this field, so it is left exactly as Task 5
+built it rather than guessed at; Group D/E should get an explicit call on
+which side is right before `_to_domain`/`_to_row` (Task 10) has to paper
+over the gap.
 
 - [ ] **Step 5: Write `watch.py`**
 
@@ -1531,6 +1751,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -1557,6 +1778,8 @@ class UserRow(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
+    __table_args__ = (CheckConstraint("name <> ''", name="ck_users_name_not_empty"),)
+
 
 class WatchStateRow(Base):
     __tablename__ = "watch_states"
@@ -1582,12 +1805,29 @@ class WatchStateRow(Base):
         onupdate=func.now(),
         nullable=False,
     )
-    updated_by: Mapped[WatchStateOrigin] = mapped_column(String(16), nullable=False)
+    # Renamed from updated_by: that name reads as a user FK in nearly every
+    # schema, and this table has user_id right next to it. No default --
+    # see the domain-model WatchState commit.
+    origin: Mapped[WatchStateOrigin] = mapped_column(String(16), nullable=False)
 
     __table_args__ = (
         UniqueConstraint("user_id", "title_id", name="uq_watch_states_user_title"),
         UniqueConstraint("user_id", "episode_id", name="uq_watch_states_user_episode"),
         Index("ix_watch_states_user_played", "user_id", "played"),
+        # Mirrors WatchState's model_validator: exactly one of
+        # title_id/episode_id, never neither or both.
+        CheckConstraint(
+            "num_nonnulls(title_id, episode_id) = 1",
+            name="ck_watch_states_exactly_one_target",
+        ),
+        CheckConstraint(
+            "position_seconds >= 0", name="ck_watch_states_position_seconds_non_negative"
+        ),
+        CheckConstraint(
+            "runtime_seconds IS NULL OR runtime_seconds >= 0",
+            name="ck_watch_states_runtime_seconds_non_negative",
+        ),
+        CheckConstraint("play_count >= 0", name="ck_watch_states_play_count_non_negative"),
     )
 ```
 
@@ -1608,6 +1848,17 @@ __all__ = ["MediaItemRow", "SourceRow", "TitleRow", "UserRow", "WatchStateRow"]
 
 Run: `uv run pytest tests/unit/test_db_models.py -v`
 Expected: 5 passed
+
+Step 1's test only covers what Task 8 originally shipped. Follow this
+plan's usual TDD order (failing test, then code) and add cases for what
+changed since: `TitleRow.enrichment_error` exists and `EnrichmentState`
+has no `FAILED` member; `WatchStateRow.origin` (not `updated_by`) is
+`nullable=False`; the CHECK constraints above exist and are named as
+shown — e.g. `{c.name for c in WatchStateRow.__table__.constraints} >=
+{"ck_watch_states_exactly_one_target", ...}`. A CHECK constraint's SQL
+text can't be exercised by SQLAlchemy metadata alone — proving `num_nonnulls(title_id,
+episode_id) = 1` actually rejects bad rows needs a real Postgres, i.e. an
+integration test, not a unit test against `Base.metadata`.
 
 - [ ] **Step 8: Commit**
 
@@ -1923,6 +2174,37 @@ class TitleRepository:
         )
         return {EnrichmentState(state): count for state, count in result.all()}
 ```
+
+> **Amended post-implementation — verified, not changed.** The domain-model
+> hardening pass raised two questions about the `_to_domain`/`_to_row`
+> code above; both were checked directly rather than assumed, and neither
+> requires a code change:
+>
+> 1. **Does `extra="forbid"` (now on every domain model, including
+>    `Title`) break `_to_domain`'s
+>    `{c.name: getattr(row, c.name) for c in TitleRow.__table__.columns}`
+>    pattern?** No, as long as `TitleRow`'s column set and `Title`'s field
+>    set stay in exact 1:1 correspondence by name — which they do (Task 8
+>    above added `enrichment_error` to both in the same pass). If a future
+>    migration ever adds a DB-only column with no domain-model equivalent,
+>    `extra="forbid"` will make this line fail loudly at read time instead
+>    of silently dropping the column — arguably correct given this
+>    project's "no source-specific concept escapes its adapter" rule, but
+>    worth knowing before it happens: a future *legitimate* DB-only
+>    bookkeeping column (not domain-visible by design) would need an
+>    explicit `exclude` added to `_to_domain`, not just to `_to_row`.
+> 2. **`created_at`/`updated_at` are now required, non-`None`, domain-level
+>    fields (`default_factory=lambda: datetime.now(UTC)`) — should
+>    `_to_row` stop excluding them?** No: kept as-is, deliberately.
+>    `created_at`'s default and `updated_at`'s `onupdate=func.now()` mean
+>    the database, not the moment a `Title()` was constructed in Python,
+>    is the authoritative clock for these two columns — passing the
+>    domain-level default through would let a delayed or retried `add()`
+>    write a stale timestamp, and would fight `onupdate` on every update
+>    thereafter. The domain-level default now exists purely so
+>    pre-persistence code never has to carry a `created_at is None`
+>    branch — which is the whole point of making the field required — not
+>    so its value reaches the row.
 
 - [ ] **Step 5: Run test to verify it passes**
 
