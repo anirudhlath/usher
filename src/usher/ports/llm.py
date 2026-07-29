@@ -1,7 +1,32 @@
 """Port for large language model completions."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from decimal import Decimal
+from enum import StrEnum
 from typing import Any
+
+
+class LLMPurpose(StrEnum):
+    """`llm_calls.purpose` (PRD 10) — a closed vocabulary so it stays a
+    usable telemetry dimension instead of a cardinality footgun. PRD 10's
+    own text marks this open-ended ("curation | query_expansion | …"): a
+    new call site adds a member here and to PRD 10 in the same change,
+    never a free-form string."""
+
+    CURATION = "curation"
+    QUERY_EXPANSION = "query_expansion"
+
+
+@dataclass(frozen=True)
+class LLMUsage:
+    """Token counts and cost for a single completion."""
+
+    model: str
+    tokens_in: int
+    tokens_out: int
+    cost_usd: Decimal
+    latency_ms: int
 
 
 class LLMClient(ABC):
@@ -13,25 +38,11 @@ class LLMClient(ABC):
         prompt: str,
         schema: dict[str, Any],
         *,
-        purpose: str,
-    ) -> tuple[dict[str, Any], "LLMUsage"]:
+        purpose: LLMPurpose,
+    ) -> tuple[dict[str, Any], LLMUsage]:
         """Return a JSON object conforming to `schema`, plus usage for cost
         accounting. `purpose` is recorded against the call."""
 
-
-class LLMUsage:
-    """Token counts and cost for a single completion."""
-
-    def __init__(
-        self,
-        model: str,
-        tokens_in: int,
-        tokens_out: int,
-        cost_usd: float,
-        latency_ms: int,
-    ) -> None:
-        self.model = model
-        self.tokens_in = tokens_in
-        self.tokens_out = tokens_out
-        self.cost_usd = cost_usd
-        self.latency_ms = latency_ms
+    @abstractmethod
+    async def aclose(self) -> None:
+        """Release the underlying HTTP connection pool."""

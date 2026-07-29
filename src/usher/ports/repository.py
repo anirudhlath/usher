@@ -17,7 +17,33 @@ class TitleRepository(ABC):
 
     @abstractmethod
     async def add(self, title: Title) -> None:
-        """Persist a new title."""
+        """Persist a new title.
+
+        This is an insert, not an upsert — a duplicate `title.id` raises
+        whatever the concrete implementation's backing store raises (this
+        port does not define a shared error for it). See `update` for
+        mutating a title that already exists.
+
+        The caller owns the session and the transaction: this flushes, so
+        the row and any constraint violation are visible immediately, but
+        it never commits. Committing or rolling back is the caller's
+        call.
+        """
+
+    @abstractmethod
+    async def update(self, title: Title) -> None:
+        """Persist a mutated, already-existing title — e.g.
+        `title.evolve(enrichment_state=EnrichmentState.ENRICHED, ...)`
+        after enrichment, which is the read-through design's whole point
+        (PRD 03: stub-on-sight, then enrich in place).
+
+        This is an update, not an upsert: a `title.id` that does not
+        already exist raises whatever the concrete implementation's
+        backing store raises. See `add` for a brand-new title.
+
+        Same session/transaction ownership as `add`: flushes, never
+        commits.
+        """
 
     @abstractmethod
     async def get(self, title_id: uuid.UUID) -> Title | None:
@@ -33,4 +59,12 @@ class TitleRepository(ABC):
 
     @abstractmethod
     async def count_by_state(self) -> dict[EnrichmentState, int]:
-        """Catalog size broken down by enrichment tier."""
+        """Catalog size broken down by enrichment tier.
+
+        Always returns all three `EnrichmentState` members as keys, 0 for
+        any tier with no titles — never a sparse dict. A `GROUP BY` only
+        returns tiers with at least one row; an implementation must fill
+        in the rest itself rather than let the query's own sparsity leak
+        through (a bare `counts[EnrichmentState.ENRICHED]` must never
+        raise `KeyError` just because nothing is enriched yet).
+        """
