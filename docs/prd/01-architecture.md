@@ -20,7 +20,8 @@ services for a household-scale deployment.
 │  domain/      Pydantic models — the canonical language    │
 │  ports/       SourceAdapter · MetadataProvider ·          │
 │               SearchIndex · Embedder · LLMClient ·        │
-│               Row · RowProvider          (all ABCs)       │
+│               TitleRepositoryPort · Row · RowProvider     │
+│               (all ABCs)                                  │
 │  adapters/    emby/ · tmdb/ · imdb_dumps/ · postgres/ ·   │
 │               sentence_transformers/ · litellm/           │
 │  jobs/        priority queue · schedulers · workers       │
@@ -42,11 +43,14 @@ These are the invariants that keep Emby out of everything:
 1. **`domain/` imports nothing from `adapters/`, `db/`, or `api/`.** It is pure
    Pydantic models and value objects.
 2. **`services/` depends only on `domain/` and `ports/`.** A service never
-   imports an adapter; it receives one.
+   imports an adapter; it receives one. Repositories are ports too, for the
+   same reason — see [ADR-0009](decisions/0009-repositories-are-ports.md).
 3. **`adapters/` implement `ports/` and may import `domain/`.** They translate
    foreign shapes into canonical ones at the boundary. Raw Emby or TMDb JSON
    never escapes its adapter package.
-4. **`db/` models are separate from `domain/` models.** Repositories translate.
+4. **`db/` models are separate from `domain/` models.** Repositories translate,
+   and implement the repository ports declared in `ports/` (e.g.
+   `TitleRepositoryPort` — [ADR-0009](decisions/0009-repositories-are-ports.md)).
    This costs a mapping layer and buys the freedom to shape tables for query
    performance without deforming the domain language.
 5. **`api/` maps domain models to response DTOs.** Wire format is versioned
@@ -94,7 +98,21 @@ Other ports follow the same pattern:
 | `SearchIndex` | `PostgresSearchIndex` (`MeilisearchIndex` gated) |
 | `Embedder` | `SentenceTransformerEmbedder` |
 | `LLMClient` | `LiteLLMClient` |
+| `TitleRepositoryPort` | `TitleRepository` ([ADR-0009](decisions/0009-repositories-are-ports.md)) |
 | `Row` / `RowProvider` | see [06](06-rows-and-recommendations.md) |
+
+**`adapters/postgres/` vs `db/repositories/`.** Both ultimately talk to the
+same PostgreSQL instance, which invites conflating them — they are not the
+same thing and do not hold the same kind of data. `adapters/postgres/`
+implements the `SearchIndex` port: weighted full-text, trigram autocomplete,
+and vector search ([ADR-0002](decisions/0002-postgres-first-search.md)).
+Titles, sources, media items, users, and watch state are persisted through
+repositories in `db/repositories/`, which implement repository ports
+declared in `ports/` (`TitleRepositoryPort` —
+[ADR-0009](decisions/0009-repositories-are-ports.md)). Repositories are
+never adapters — the "db is driven, not driving" import-linter contract and
+layering rule 4 above both hold precisely because repositories sit under
+`db/`, not `adapters/`.
 
 ## Repository layout
 
@@ -110,7 +128,7 @@ usher/
 │   ├── adapters/    emby/, tmdb/, bulk/, search/, embedding/, llm/
 │   ├── services/
 │   ├── jobs/        queue.py, scheduler.py, tasks/
-│   ├── db/          models/, repositories/, migrations/
+│   ├── db/          models/, repositories/ (implement ports/), migrations/
 │   └── config.py
 ├── tests/           unit/, integration/, fixtures/
 ├── compose.yml

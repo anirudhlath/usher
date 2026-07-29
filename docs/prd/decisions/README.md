@@ -16,5 +16,6 @@ otherwise be lost and re-litigated in six months.
 | [0006](0006-server-composed-home.md) | Server composes the home screen; REST + OpenAPI | Accepted |
 | [0007](0007-telemetry-architecture.md) | Three datasources; external shared LGTM stack | Accepted |
 | [0008](0008-enrichment-tier-vs-failure.md) | Enrichment tier is orthogonal to enrichment failure | Accepted |
+| [0009](0009-repositories-are-ports.md) | Repositories are ports | Accepted |
 
 Format: context → decision → consequences → evidence. Short is fine.
