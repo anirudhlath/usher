@@ -58,7 +58,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.mypy]
 python_version = "3.13"
-packages = ["usher"]
+files = ["src", "tests"]
 mypy_path = "src"
 strict = true
 plugins = ["pydantic.mypy"]
