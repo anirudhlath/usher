@@ -1,5 +1,6 @@
 """Application configuration, read from the environment."""
 
+from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
@@ -73,11 +74,15 @@ class Settings(BaseSettings):
         return bool(self.otlp_endpoint)
 
 
+@lru_cache
 def get_settings() -> Settings:
-    """Construct Settings from the current environment.
+    """Return the process-wide Settings, built once from the environment.
 
-    A thin wrapper so callers (notably FastAPI's dependency injection) have
-    a single function to depend on rather than instantiating Settings
-    directly.
+    Cached because this exists to be a FastAPI `Depends`: without caching,
+    every request and every injection site would re-read and re-parse the
+    environment (and, once a real `.env` exists, hit disk) for values that
+    do not change during the process lifetime. Call `get_settings.cache_clear()`
+    to force a rebuild — tests that vary the environment must do this
+    explicitly, since the cache otherwise outlives any single test.
     """
     return Settings()

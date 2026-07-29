@@ -1,7 +1,33 @@
 import pytest
 from pydantic import ValidationError
 
-from usher.config import Settings
+from usher.config import Settings, get_settings
+
+
+def test_get_settings_is_cached(monkeypatch):
+    """get_settings() exists to be a FastAPI Depends — it must not re-read
+    and re-parse the environment (and, once .env exists, hit disk) on every
+    call and injection site."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
+    monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
+    get_settings.cache_clear()
+    first = get_settings()
+    second = get_settings()
+    assert first is second
+
+
+def test_get_settings_cache_clear_picks_up_new_environment(monkeypatch):
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
+    monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
+    get_settings.cache_clear()
+    before = get_settings()
+    assert before.port == 8000
+
+    monkeypatch.setenv("USHER_PORT", "9002")
+    get_settings.cache_clear()
+    after = get_settings()
+    assert after.port == 9002
+    assert before is not after
 
 
 def test_settings_read_from_environment(monkeypatch):
