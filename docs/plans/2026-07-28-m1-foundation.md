@@ -1119,6 +1119,9 @@ git commit -m "feat: Source, MediaItem, User, and WatchState domain models"
 - Test: `tests/unit/test_ports.py`
 - Create (added post-planning — see the amendment after Step 8):
   `src/usher/ports/repository.py`
+- Create (added during the later hardening pass described in the
+  amendment at the end of this task — see Step 4 ½):
+  `src/usher/ports/errors.py`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1188,7 +1191,22 @@ from collections.abc import Sequence
 
 
 class Embedder(ABC):
-    """Turns text into vectors. Implementations are expected to batch."""
+    """Turns text into vectors. Implementations are expected to batch.
+
+    Contract: vectors are L2-normalised, so downstream cosine similarity
+    can be computed as a plain dot product (PRD 05 promises "brute-force
+    exact cosine", which is only equivalent to a dot product when inputs
+    are unit-normalised). Callers are responsible for any query-side
+    instruction prefix their chosen model needs before calling `embed` —
+    this port has no query/document distinction, so it cannot apply one
+    itself.
+
+    🔶 Provisional — whether that split is the right one (as opposed to,
+    say, separate `embed_query`/`embed_documents` methods) is undecided.
+    BGE-family models (PRD 05 names `bge-small-en-v1.5`) document a
+    query-side instruction prefix that this contract currently pushes
+    entirely onto the caller. Settle in M6.
+    """
 
     @property
     @abstractmethod
@@ -1203,6 +1221,10 @@ class Embedder(ABC):
     @abstractmethod
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed a batch, returning one vector per input in order."""
+
+    @abstractmethod
+    async def aclose(self) -> None:
+        """Release held resources (e.g. a GPU-resident model)."""
 ```
 
 ```python
@@ -1210,7 +1232,32 @@ class Embedder(ABC):
 """Port for large language model completions."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from decimal import Decimal
+from enum import StrEnum
 from typing import Any
+
+
+class LLMPurpose(StrEnum):
+    """`llm_calls.purpose` (PRD 10) — a closed vocabulary so it stays a
+    usable telemetry dimension instead of a cardinality footgun. PRD 10's
+    own text marks this open-ended ("curation | query_expansion | …"): a
+    new call site adds a member here and to PRD 10 in the same change,
+    never a free-form string."""
+
+    CURATION = "curation"
+    QUERY_EXPANSION = "query_expansion"
+
+
+@dataclass(frozen=True)
+class LLMUsage:
+    """Token counts and cost for a single completion."""
+
+    model: str
+    tokens_in: int
+    tokens_out: int
+    cost_usd: Decimal
+    latency_ms: int
 
 
 class LLMClient(ABC):
@@ -1222,28 +1269,14 @@ class LLMClient(ABC):
         prompt: str,
         schema: dict[str, Any],
         *,
-        purpose: str,
-    ) -> tuple[dict[str, Any], "LLMUsage"]:
+        purpose: LLMPurpose,
+    ) -> tuple[dict[str, Any], LLMUsage]:
         """Return a JSON object conforming to `schema`, plus usage for cost
         accounting. `purpose` is recorded against the call."""
 
-
-class LLMUsage:
-    """Token counts and cost for a single completion."""
-
-    def __init__(
-        self,
-        model: str,
-        tokens_in: int,
-        tokens_out: int,
-        cost_usd: float,
-        latency_ms: int,
-    ) -> None:
-        self.model = model
-        self.tokens_in = tokens_in
-        self.tokens_out = tokens_out
-        self.cost_usd = cost_usd
-        self.latency_ms = latency_ms
+    @abstractmethod
+    async def aclose(self) -> None:
+        """Release the underlying HTTP connection pool."""
 ```
 
 - [ ] **Step 4: Write `metadata.py` and `search.py`**
@@ -1254,9 +1287,26 @@ class LLMUsage:
 
 import uuid
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
+from usher.domain.enums import TitleKind
 from usher.domain.title import Title
+
+
+@dataclass(frozen=True)
+class MetadataCandidate:
+    """One search result from a `MetadataProvider`, normalised enough that
+    the match stage (PRD 03 Stage 2) never indexes into a provider's own
+    JSON keys — e.g. TMDb's movie/TV divergence (`title`/`name`,
+    `release_date`/`first_air_date`) stops here, not one layer up in M4.
+    """
+
+    provider_id: int
+    name: str
+    year: int | None
+    kind: TitleKind
+    popularity: float
 
 
 class MetadataProvider(ABC):
@@ -1268,20 +1318,52 @@ class MetadataProvider(ABC):
         """Provider identifier, recorded in field provenance."""
 
     @abstractmethod
-    async def search(self, name: str, year: int | None) -> list[dict[str, Any]]:
+    async def search(self, name: str, year: int | None) -> list[MetadataCandidate]:
         """Candidate matches for a name and optional year."""
 
     @abstractmethod
-    async def fetch(self, provider_id: int, kind: str) -> dict[str, Any]:
-        """Full raw payload for one item. Stored before normalisation."""
+    async def fetch(self, provider_id: int, kind: TitleKind) -> dict[str, Any]:
+        """Full raw payload for one item. Stored before normalisation,
+        destined for `raw_payloads` and consumed only by `to_title`.
+
+        Returning a raw `dict` here is deliberate and different in kind
+        from `search`'s old raw-dict return (now `MetadataCandidate`):
+        this is an opaque blob by design, not a shortcut that skipped
+        normalisation. Nothing above `to_title` reads it.
+
+        🔶 Provisional — `provider_id: int` bakes in TMDb's integer id
+        scheme; IMDb's own ids (`tt1160419`) don't fit it, which matters
+        the moment a second `MetadataProvider` exists (PRD 01 lists
+        additional metadata providers as an open extension seam; PRD 09
+        names OMDb/TVDb as post-v1 candidates). Settle in M4, when TMDb is
+        still the only implementation and a second provider's real shape
+        isn't guesswork yet.
+        """
 
     @abstractmethod
     def to_title(self, payload: dict[str, Any], title_id: uuid.UUID) -> Title:
-        """Normalise a raw payload into a canonical Title."""
+        """Normalise a raw payload into a canonical Title.
+
+        🔶 Provisional — PRD 03's Enrich stage populates `Season`,
+        `Episode`, `Person`, `Credit`, `Collection`, and `Image` from the
+        same TMDb response alongside `Title`, and sets `field_provenance`.
+        None of those models exist yet, so this signature can only carry
+        the one that does. Designing the real return shape (a `Title`
+        plus an aggregate, an `EnrichmentResult` bundle, or several
+        methods) is guesswork before those models exist. Settle in M4.
+        """
 
     @abstractmethod
     async def changed_since(self, days: int) -> list[int]:
-        """Provider ids mutated in the window, for incremental refresh."""
+        """Provider ids mutated in the window, for incremental refresh.
+
+        🔶 Provisional — TMDb's `/movie/changes` feed is paginated and
+        capped at a 14-day window; `days: int` in, `list[int]` out cannot
+        express a resumable cursor through that pagination, so a caller
+        has no way to pick up where a partial run left off. Settle in M4,
+        alongside the daily re-enrichment job that is this method's only
+        caller (PRD 04, Phase 5).
+        """
 ```
 
 ```python
@@ -1291,6 +1373,7 @@ class MetadataProvider(ABC):
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 
@@ -1300,17 +1383,39 @@ class SearchHit:
     score: float
 
 
+class SearchMode(StrEnum):
+    """`SearchRequest.mode`'s three reachable values. Reciprocal Rank
+    Fusion is the design (ADR-0002), not a hypothetical option alongside a
+    bool — which is why this replaced a `semantic: bool` that could not
+    express `FUSED` at all."""
+
+    FULL_TEXT = "full_text"
+    SEMANTIC = "semantic"
+    FUSED = "fused"
+
+
 @dataclass(frozen=True)
 class SearchRequest:
     query: str
     limit: int = 20
-    semantic: bool = False
+    mode: SearchMode = SearchMode.FULL_TEXT
     filters: dict[str, Any] = field(default_factory=dict)
 
 
 class SearchIndex(ABC):
     """Candidate generation. Ranking blends happen in application code, so
-    this returns hits and scores, not final ordering."""
+    this returns hits and scores, not final ordering.
+
+    🔶 Provisional — this shape is closer to Postgres's own operations
+    than a neutral candidate-generation contract: `index(title_id)` forces
+    a Meilisearch implementation to fetch each title back out to build its
+    document (1.3M round-trips on a full rebuild); `SearchRequest.filters`
+    has no key vocabulary, so two backends would invent different ones;
+    there is no `index_many`/`rebuild` for bulk operations; and semantic
+    search needs the query *vector* itself, which ADR-0002 already
+    anticipates supplying to Meilisearch as `userProvided`. Settle if and
+    when the Meilisearch gate in PRD 05 actually trips, in M6.
+    """
 
     @abstractmethod
     async def index(self, title_id: uuid.UUID) -> None:
@@ -1326,7 +1431,104 @@ class SearchIndex(ABC):
 
     @abstractmethod
     async def suggest(self, prefix: str, limit: int = 10) -> list[SearchHit]:
-        """Typo-tolerant type-ahead over names."""
+        """Typo-tolerant type-ahead over names.
+
+        🔶 Provisional — PRD 05 treats autocomplete as "a separate, narrow
+        path" and ADR-0002 gates Meilisearch "for the instant-search box
+        only", which suggests the real swap boundary may be this one
+        method, not the whole `SearchIndex` class. Whether `suggest`
+        should be its own `SuggestIndex` port is undecided; settle in M6.
+        """
+```
+
+- [ ] **Step 4 ½: Write `errors.py`**
+
+`source.py` (next) raises `SourceNotSupported` under this taxonomy, and
+`repository.py`'s `add()`/`update()` (added post-planning, below) document
+`RepositoryConflict` and `RepositoryNotFound` from it — so it's written
+first. This file did not exist when Steps 1–5 were first drafted, or even
+when `repository.py` was first added as a sixth port (the amendment after
+Step 8): it came out of the later quality-review hardening pass described
+in full in the amendment at the end of this task, which found that no
+error taxonomy existed at all — a service could only catch bare
+`Exception` or import `httpx`/SQLAlchemy errors directly, breaking
+"adapters are driven, not driving" (PRD 01) and "db is driven, not
+driving" (ADR-0009). Steps 3–5 and the `repository.py` block below
+already show the result; this step exists so `errors.py` has a place in
+the read order before anything imports it.
+
+```python
+# src/usher/ports/errors.py
+"""Shared error taxonomy for all ports.
+
+Every port implementation — an adapter talking to an upstream service, or a
+repository talking to a backing store — translates whatever it catches
+(httpx exceptions, Emby's own error shapes, TMDb's rate-limit responses,
+`sqlalchemy.exc.IntegrityError`, ...) into one of these before it crosses
+the port boundary. A service that only knows `usher.ports` can then branch
+on failure kind without importing `httpx`, SQLAlchemy, or any other
+adapter- or storage-specific library — importing one would break "adapters
+are driven, not driving" (PRD 01) for adapters, and "db is driven, not
+driving" (ADR-0009) for repositories, the same mechanism serving both
+contracts.
+"""
+
+
+class UsherPortError(Exception):
+    """Base for every error a port implementation may raise."""
+
+
+class PortUnavailable(UsherPortError):
+    """The upstream could not be reached, or did not respond in time.
+
+    Distinct from "the requested thing does not exist" — see e.g.
+    `SourceAdapter.get_item`, which returns `None` for that and never
+    raises it as an error. A caller that sees this degrades rather than
+    fails: PRD 08's "a degraded subsystem narrows functionality; it never
+    fails a request local state can answer."
+    """
+
+
+class PortAuthFailed(UsherPortError):
+    """Credentials were rejected.
+
+    For `SourceAdapter`, PRD 03 requires the caller to treat this as the
+    trigger for silent re-authentication with the stored credentials and
+    the same device id — not as a terminal failure.
+    """
+
+
+class PortRateLimited(UsherPortError):
+    """The upstream asked to be backed off.
+
+    `retry_after` is seconds, when the upstream supplied a hint (e.g.
+    TMDb's 429, an HTTP `Retry-After` header); `None` when it didn't, and
+    the caller should apply its own backoff policy.
+    """
+
+    def __init__(self, retry_after: float | None = None) -> None:
+        super().__init__(f"rate limited, retry_after={retry_after}")
+        self.retry_after = retry_after
+
+
+class RepositoryConflict(UsherPortError):
+    """`add()` was called for an id — or another unique key — that already
+    exists. An implementation translates its backing store's own conflict
+    error (e.g. Postgres's `IntegrityError` on a unique constraint) into
+    this, so callers never need to import a storage-specific exception
+    type to handle it. See `usher.ports.repository.TitleRepository.add`.
+    """
+
+
+class RepositoryNotFound(UsherPortError):
+    """`update()` targeted a row that does not exist.
+
+    The read-side equivalent of "not found" is a plain `None` return (see
+    e.g. `TitleRepository.get`) — this exists specifically for the
+    write-side case, where absence must be an error rather than a value,
+    because there is nothing sensible to update. See
+    `usher.ports.repository.TitleRepository.update`.
+    """
 ```
 
 - [ ] **Step 5: Write `source.py`**
@@ -1340,9 +1542,13 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import StrEnum
 from typing import Any
+
+from pydantic import AwareDatetime
+
+from usher.domain.enums import HdrFormat
+from usher.ports.errors import UsherPortError
 
 
 class SourceEventKind(StrEnum):
@@ -1352,13 +1558,32 @@ class SourceEventKind(StrEnum):
     WATCH_STATE_CHANGED = "watch_state_changed"
 
 
+class SourceItemKind(StrEnum):
+    """A source's own idea of what kind of thing an item is — narrower
+    than `usher.domain.enums.TitleKind` because sources address individual
+    episodes directly, unlike `Title`."""
+
+    MOVIE = "movie"
+    SERIES = "series"
+    EPISODE = "episode"
+
+
 @dataclass(frozen=True)
 class SourceItem:
-    """One playable item as the source describes it, already normalised."""
+    """One playable item as the source describes it, already normalised.
+
+    A plain dataclass, not a `DomainModel` — nothing here is validated at
+    construction. `SourceItemKind`, `HdrFormat`, and `AwareDatetime` below
+    state the contract an adapter must uphold, the same way `MediaItem`
+    and `Title` enforce it on the far side of the ingest boundary;
+    constructing this with a naive `datetime` or a source's raw HDR string
+    (e.g. Emby's `"DolbyVision"`) will not raise here — only later, if and
+    when something re-validates it, which is one layer too late.
+    """
 
     external_id: str
     name: str
-    kind: str
+    kind: SourceItemKind
     year: int | None = None
     provider_ids: dict[str, str] = field(default_factory=dict)
     container: str | None = None
@@ -1366,14 +1591,19 @@ class SourceItem:
     audio_codec: str | None = None
     width: int | None = None
     height: int | None = None
-    hdr_format: str | None = None
+    hdr_format: HdrFormat | None = None
     audio_channels: int | None = None
     file_size_bytes: int | None = None
     runtime_seconds: int | None = None
-    added_at: datetime | None = None
+    added_at: AwareDatetime | None = None
     series_external_id: str | None = None
     season_number: int | None = None
     episode_number: int | None = None
+    # Opaque; stored in raw_payloads (PRD 03) for debugging and future
+    # reprocessing, never interpreted above the adapter boundary. The one
+    # deliberate exception to "nothing source-specific escapes its
+    # adapter" — every other field above exists so this one doesn't have
+    # to be read by anything above the adapter.
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1383,7 +1613,12 @@ class SourceWatchState:
     position_seconds: int
     played: bool
     play_count: int = 0
-    last_played_at: datetime | None = None
+    last_played_at: AwareDatetime | None = None
+    # Emby is multi-user; None means "the source didn't distinguish", which
+    # today is fine because everything implicitly lands on the singleton
+    # default user (PRD 01's authentication seam). Cheap to carry now —
+    # becomes a breaking DTO change the moment a household has two users.
+    source_user_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1394,25 +1629,39 @@ class WatchStateUpdate:
 
 @dataclass(frozen=True)
 class SourceEvent:
+    """🔶 Provisional — carries no payload, so a `WATCH_STATE_CHANGED`
+    event forces the push lane to re-walk `watch_state(since=...)` to
+    discover what changed, even though Emby's own `UserDataChanged`
+    message already carries the position and played flag. Settle in M5,
+    when the push lane is actually built and the cost of re-walking is
+    measurable against just carrying the payload through.
+    """
+
     kind: SourceEventKind
-    external_ids: list[str] = field(default_factory=list)
+    external_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
 class StreamTarget:
-    """How to play an item. Clients choose between the returned targets."""
+    """How to play an item. Clients choose between the returned targets.
+
+    🔶 Provisional — PRD 07's `/play` response example includes `scheme`
+    (for `kind: "deep_link"` targets like `infuse://...`) and `audio`
+    (e.g. `"truehd_atmos_7_1"`) that this shape doesn't carry yet. Settle
+    in M3, alongside the Emby adapter that first has to populate this.
+    """
 
     kind: str
     url: str
     container: str | None = None
     video_codec: str | None = None
-    hdr_format: str | None = None
+    hdr_format: HdrFormat | None = None
     resolution: str | None = None
     runtime_seconds: int | None = None
     resume_position_seconds: int | None = None
 
 
-class SourceNotSupported(Exception):
+class SourceNotSupported(UsherPortError):
     """Raised by adapters for capabilities they do not have."""
 
 
@@ -1427,41 +1676,108 @@ class SourceAdapter(ABC):
     def source_id(self) -> uuid.UUID:
         """The configured Source this adapter serves."""
 
+    @property
     @abstractmethod
-    async def verify(self) -> bool:
-        """Authenticate and confirm reachability."""
+    def supports_push(self) -> bool:
+        """Whether this adapter has a live push channel right now. PRD 03:
+        when the socket can't be established (or drops and stays down
+        after N reconnect attempts), the adapter reports this `False` and
+        the reconciler's nightly walk covers the gap. Mirrors
+        `usher.domain.source.Source.supports_push`, which this populates.
+        """
 
     @abstractmethod
-    def list_items(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
-        """Walk the library, optionally limited to changes since a cursor."""
+    async def verify(self) -> bool:
+        """Authenticate and confirm reachability.
+
+        🔶 Provisional — a single bool cannot distinguish "bad
+        credentials" from "unreachable" from "reachable but a proxy
+        stripped `Upgrade`", all of which `GET /admin/sources/{id}/status`
+        (PRD 07) needs to report separately. The error taxonomy in
+        `usher.ports.errors` is the prerequisite for settling this (raise
+        `PortAuthFailed`/`PortUnavailable` instead of returning `False`?)
+        — deferred to M3, when the Emby adapter and the admin status
+        endpoint are built together.
+        """
+
+    @abstractmethod
+    def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
+        """Walk the library, or only items changed since a cursor.
+
+        Contract an implementation must guarantee:
+        - `since` is inclusive: an item changed exactly at `since` is
+          included, never dropped at the boundary.
+        - No ordering is promised across items; callers must not rely on
+          one.
+        - The same item may be yielded more than once in a single walk
+          (e.g. a paginated upstream listing whose pages overlap); callers
+          deduplicate by `external_id`.
+        - **Must raise, never truncate silently.** An iterator that stops
+          because the walk finished is indistinguishable from one that
+          stopped because the adapter swallowed an error — and the
+          reconciler cannot tell the difference; it would mark the rest of
+          the library `available = false`. A partial failure raises (e.g.
+          `PortUnavailable` from `usher.ports.errors`) from the generator;
+          it does not just stop yielding.
+        """
 
     @abstractmethod
     async def get_item(self, external_id: str) -> SourceItem | None:
-        """Fetch one item, or None if it is gone."""
+        """Fetch one item.
+
+        `None` means the item is gone from the source — PRD 03's
+        reconcile marks it `available = false`. A transient failure to
+        reach the source is a different outcome and must raise (e.g.
+        `PortUnavailable` from `usher.ports.errors`), never be reported as
+        `None`; conflating the two would mark a healthy item unavailable
+        because of a flaky network, not because it was actually deleted.
+        """
 
     @abstractmethod
     async def stream_targets(self, external_id: str) -> list[StreamTarget]:
         """Ranked ways to play an item."""
 
     @abstractmethod
-    def watch_state(self, since: datetime | None = None) -> AsyncIterator[SourceWatchState]:
-        """Watch state from the source, optionally since a cursor."""
+    def watch_state(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceWatchState]:
+        """Watch state from the source, optionally since a cursor.
+
+        Same `since`-inclusivity, no-ordering, possible-duplicates, and
+        must-raise-never-truncate contract as `list_items`.
+        """
 
     @abstractmethod
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
-        """Write watch state back. Best-effort; may raise."""
+        """Write watch state back to the source.
+
+        Must raise on failure, never swallow it. PRD 03's "best-effort"
+        describes the *caller's* behaviour — the request that triggered
+        this write never blocks or fails on a write-back error, because
+        the caller enqueues a retry instead — not this method's. That
+        guarantee only works if failures are visible: an implementation
+        that swallows an error here means the retry never happens.
+        """
 
     @abstractmethod
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
         """Push channel. Adapters without one raise SourceNotSupported; the
         reconciler covers them."""
+
+    @abstractmethod
+    async def aclose(self) -> None:
+        """Release held resources — connection pools, and (from M5) the
+        push WebSocket. Called when a source is deleted (`DELETE
+        /admin/sources/{id}`, PRD 07) or the process shuts down."""
 ```
 
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `uv run pytest tests/unit/test_ports.py -v`
 Expected: 12 passed (before the repository-port amendment below; 20 passed
-after it)
+after it). Historical counts, from when this step was first carried out —
+Steps 3–5 above have since been updated in place to show each port in its
+final, hardened form rather than the code that originally produced them;
+see the amendment after Step 8 for what changed, why, and the current,
+accurate count (37 passed).
 
 - [ ] **Step 7: Verify layering contracts hold**
 
@@ -1516,7 +1832,35 @@ class TitleRepository(ABC):
 
     @abstractmethod
     async def add(self, title: Title) -> None:
-        """Persist a new title."""
+        """Persist a new title.
+
+        This is an insert, not an upsert: a duplicate `title.id` — or any
+        other unique constraint the backing store enforces — raises
+        `RepositoryConflict` (`usher.ports.errors`). Implementations
+        translate their backing store's own conflict error (e.g.
+        Postgres's `IntegrityError`) into this; callers never import a
+        storage-specific exception to handle it. See `update` for
+        mutating a title that already exists.
+
+        The caller owns the session and the transaction: this flushes, so
+        the row and any conflict are visible immediately, but it never
+        commits. Committing or rolling back is the caller's call.
+        """
+
+    @abstractmethod
+    async def update(self, title: Title) -> None:
+        """Persist a mutated, already-existing title — e.g.
+        `title.evolve(enrichment_state=EnrichmentState.ENRICHED, ...)`
+        after enrichment, which is the read-through design's whole point
+        (PRD 03: stub-on-sight, then enrich in place).
+
+        This is an update, not an upsert: a `title.id` that does not
+        already exist raises `RepositoryNotFound` (`usher.ports.errors`).
+        See `add` for a brand-new title.
+
+        Same session/transaction ownership as `add`: flushes, never
+        commits.
+        """
 
     @abstractmethod
     async def get(self, title_id: uuid.UUID) -> Title | None:
@@ -1532,7 +1876,15 @@ class TitleRepository(ABC):
 
     @abstractmethod
     async def count_by_state(self) -> dict[EnrichmentState, int]:
-        """Catalog size broken down by enrichment tier."""
+        """Catalog size broken down by enrichment tier.
+
+        Always returns all three `EnrichmentState` members as keys, 0 for
+        any tier with no titles — never a sparse dict. A `GROUP BY` only
+        returns tiers with at least one row; an implementation must fill
+        in the rest itself rather than let the query's own sparsity leak
+        through (a bare `counts[EnrichmentState.ENRICHED]` must never
+        raise `KeyError` just because nothing is enriched yet).
+        """
 ```
 
 `tests/unit/test_ports.py` gained `TitleRepository` in the
@@ -1547,7 +1899,11 @@ get unit-tested against from M4 onward, per
 port fakes; no network."
 
 Run: `uv run pytest tests/unit/test_ports.py -v`
-Expected: 20 passed
+Expected: 20 passed. Historical, like Step 6 above — the `repository.py`
+fence above has since been updated in place to its final, hardened form
+(including `update()` and the `RepositoryConflict`/`RepositoryNotFound`
+contract), which this original checkpoint predates. See the amendment
+after Step 8 for the current count (37 passed).
 
 ```bash
 git add src/usher/ports/repository.py tests/unit/test_ports.py
@@ -1565,21 +1921,33 @@ git commit -m "feat: add TitleRepository, the repository driven port"
 > import `httpx`/SQLAlchemy errors directly, breaking "adapters are
 > driven, not driving"; and `SourceItem` typing that let a naive datetime
 > and a raw source string like `"DolbyVision"` through where `MediaItem`
-> rejects both, pushing the failure one layer late. None of this is
-> captured in the Step 1–5 blocks above; the current, hardened ports are
-> summarised below and should be read directly from `src/usher/ports/`,
-> not transcribed from this section.
+> rejects both, pushing the failure one layer late. A follow-up fix then
+> finished a gap that review's hardening left open: `errors.py` had no
+> shared exception for an `add()`/`update()` failure yet, so
+> `FakeTitleRepository` and this test file both still used a bare
+> `ValueError` — which does not subclass `UsherPortError`, so a service
+> catching that base class alone would not see it. The follow-up added
+> `RepositoryConflict`/`RepositoryNotFound` to `errors.py`, updated
+> `repository.py`'s docstrings to name them instead of "raises whatever
+> the concrete implementation's backing store raises", and updated
+> `FakeTitleRepository` and this test file to match. Steps 3–5 and the
+> `repository.py` block after Step 8 have been updated in place to their
+> final, hardened form to reflect all of this — what follows is the *why*
+> behind that code, not a substitute for reading it.
 >
 > - **`src/usher/ports/errors.py` (new).** `UsherPortError` →
->   `PortUnavailable`, `PortAuthFailed`, `PortRateLimited(retry_after)`.
->   `SourceNotSupported` (`source.py`) is reparented under it.
+>   `PortUnavailable`, `PortAuthFailed`, `PortRateLimited(retry_after)`,
+>   `RepositoryConflict`, `RepositoryNotFound`. `SourceNotSupported`
+>   (`source.py`) is reparented under it.
 > - **`source.py`:** `SourceItem.kind` is now `SourceItemKind`
->   (movie/series/episode); `hdr_format` is `HdrFormat`, not a raw string;
->   `added_at` is `AwareDatetime`. `SourceAdapter` gained `supports_push`
->   (a property) and `aclose()`. `SourceWatchState` gained
->   `source_user_id: str | None` (Emby is multi-user). `SourceEvent.
->   external_ids` is now a `tuple`, matching the domain layer's tuple
->   convention. The `list_items`/`watch_state`/`get_item`/
+>   (movie/series/episode); `hdr_format` (on both `SourceItem` and
+>   `StreamTarget`) is `HdrFormat`, not a raw string; `SourceItem.added_at`
+>   and `SourceWatchState.last_played_at` are `AwareDatetime`, as are the
+>   `since` parameters on `list_items`/`watch_state`. `SourceAdapter`
+>   gained `supports_push` (a property) and `aclose()`. `SourceWatchState`
+>   gained `source_user_id: str | None` (Emby is multi-user).
+>   `SourceEvent.external_ids` is now a `tuple`, matching the domain
+>   layer's tuple convention. The `list_items`/`watch_state`/`get_item`/
 >   `push_watch_state` docstrings now state the contract an implementer
 >   must guarantee — ordering, `since` inclusivity, duplicates, and (the
 >   load-bearing one) *must raise, never truncate silently* — not just
@@ -1587,8 +1955,9 @@ git commit -m "feat: add TitleRepository, the repository driven port"
 > - **`metadata.py`:** `search()` returns `list[MetadataCandidate]`
 >   (`provider_id, name, year, kind, popularity`), not
 >   `list[dict[str, Any]]` — the match stage no longer indexes into
->   TMDb's own keys. `fetch()` still returns a raw `dict`, deliberately:
->   it is an opaque blob for `raw_payloads`, not a shortcut that skipped
+>   TMDb's own keys. `fetch()`'s `kind` parameter is `TitleKind`, not
+>   `str`. `fetch()` still returns a raw `dict`, deliberately: it is an
+>   opaque blob for `raw_payloads`, not a shortcut that skipped
 >   normalisation the way `search()`'s old return type was.
 > - **`search.py`:** `SearchRequest.semantic: bool` is now
 >   `mode: SearchMode` (`full_text | semantic | fused`) — the old bool
@@ -1606,9 +1975,15 @@ git commit -m "feat: add TitleRepository, the repository driven port"
 > - **`repository.py`:** gained `update()` alongside `add()` —
 >   insert-only vs. update-only, matching PRD 03's stub-on-sight-then-
 >   enrich shape. Both document that the caller owns the session and the
->   transaction (flush, never commit). `count_by_state()`'s docstring now
->   guarantees all three `EnrichmentState` tiers as keys, 0 for any with
->   no titles — never a sparse dict.
+>   transaction (flush, never commit). `add()`'s and `update()`'s
+>   docstrings now name the exceptions an implementation must translate
+>   its backing store's own errors into — `RepositoryConflict` for a
+>   duplicate key, `RepositoryNotFound` for an update against a missing
+>   row — so a caller depends only on `usher.ports.errors`, never on
+>   `sqlalchemy.exc` directly; [Task 10](#task-10-title-repository) covers
+>   the implementation side of that translation. `count_by_state()`'s
+>   docstring now guarantees all three `EnrichmentState` tiers as keys, 0
+>   for any with no titles — never a sparse dict.
 > - **Several fields and methods are marked 🔶 provisional** in their own
 >   docstrings, each naming the milestone that settles it
 >   (`MetadataProvider.to_title`/`fetch`/`changed_since`, `SearchIndex`/
@@ -1619,15 +1994,19 @@ git commit -m "feat: add TitleRepository, the repository driven port"
 > - **`FakeTitleRepository` moved to `tests/fakes/title_repository.py`**
 >   so M4 can import it without dragging in this module's fixtures and
 >   parametrized tests along with it. It now matches the port's real
->   add/update split — a duplicate `add()` raises instead of silently
->   overwriting, and `count_by_state()` is never sparse.
+>   add/update split — a duplicate `add()` raises `RepositoryConflict`
+>   instead of silently overwriting, a missing-id `update()` raises
+>   `RepositoryNotFound`, and `count_by_state()` is never sparse.
 >
-> `tests/unit/test_ports.py` grew from 20 cases to 35 covering all of the
-> above; read it directly rather than this task's original Step 1 for the
-> current contract.
+> `tests/unit/test_ports.py` grew from 20 cases to 37 covering all of the
+> above (35 right after the signature-hardening pass; 37 once the
+> follow-up fix finished the error taxonomy). Step 1's fence earlier in
+> this task is the file as first written, left as a historical snapshot
+> rather than resynced — read `tests/unit/test_ports.py` directly for the
+> current, 37-case contract.
 >
 > Run: `uv run pytest tests/unit/test_ports.py -v`
-> Expected: 35 passed
+> Expected: 37 passed
 
 ---
 
@@ -2364,6 +2743,29 @@ git commit -m "feat: alembic async migrations and initial core schema"
 > transaction. `count_by_state()` also changed: it now always returns all
 > three `EnrichmentState` tiers, 0 for any with no titles, rather than
 > whatever `GROUP BY` happened to return rows for.
+>
+> **A third amendment, after the port's error taxonomy was completed:**
+> "each raising" above was true but underspecified — `TitleRepository.add`
+> and `.update` (Task 6) now name exactly what they raise:
+> `RepositoryConflict` (`usher.ports.errors`) for a duplicate `title.id`
+> on `add`, `RepositoryNotFound` for an `update` against a row that
+> doesn't exist. Step 4's code block below catches the `IntegrityError`
+> Postgres actually raises on the unique-constraint violation and
+> re-raises it as `RepositoryConflict`; `update()` raises
+> `RepositoryNotFound` in place of the plain `ValueError` an earlier draft
+> used.
+>
+> This is not a cosmetic rename. If `IntegrityError` — or any other
+> `sqlalchemy.exc` type — ever escaped `PostgresTitleRepository` uncaught,
+> the only way a service could catch it would be to `import sqlalchemy`
+> itself, which breaks the `db is driven, not driving` import-linter
+> contract [ADR-0009](../prd/decisions/0009-repositories-are-ports.md)
+> rests on: nothing above `db/` may import it, full stop. Translating the
+> backing store's own exception into the port's vocabulary at the adapter
+> boundary — the same job `usher.ports.errors` does for every adapter — is
+> what makes that contract hold in practice rather than just on paper.
+> Step 2's test steps gained two cases covering both translations; see
+> Step 5 for the updated count.
 
 **Files:**
 - Create: `src/usher/db/repositories/title.py`
@@ -2417,6 +2819,7 @@ from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.title import Title
+from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 
 
 @pytest.fixture
@@ -2436,6 +2839,13 @@ async def test_add_then_get_round_trips_the_domain_model(
     assert fetched.name == "Dune"
     assert fetched.tmdb_id == 438631
     assert fetched.enrichment_state is EnrichmentState.SKELETON
+
+
+async def test_add_rejects_a_duplicate_id(repo: PostgresTitleRepository) -> None:
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
+    await repo.add(title)
+    with pytest.raises(RepositoryConflict):
+        await repo.add(title)
 
 
 async def test_get_returns_none_for_unknown_id(repo: PostgresTitleRepository) -> None:
@@ -2467,6 +2877,12 @@ async def test_update_mutates_an_existing_title(repo: PostgresTitleRepository) -
     assert fetched.enrichment_state is EnrichmentState.ENRICHED
 
 
+async def test_update_rejects_an_unknown_id(repo: PostgresTitleRepository) -> None:
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
+    with pytest.raises(RepositoryNotFound):
+        await repo.update(title)
+
+
 async def test_count_by_state_reports_the_catalog(repo: PostgresTitleRepository) -> None:
     for i in range(3):
         await repo.add(Title(kind=TitleKind.MOVIE, name=f"Film {i}", sort_name=f"Film {i}"))
@@ -2495,11 +2911,13 @@ this module directly — see ADR-0009.
 import uuid
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.models.title import TitleRow
 from usher.domain.enums import EnrichmentState
 from usher.domain.title import Title
+from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import TitleRepository
 
 
@@ -2519,12 +2937,18 @@ class PostgresTitleRepository(TitleRepository):
 
     async def add(self, title: Title) -> None:
         self._session.add(_to_row(title))
-        await self._session.flush()
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            # Postgres's own unique-violation on a duplicate id, translated
+            # so callers depend only on usher.ports.errors -- importing
+            # sqlalchemy.exc here would break "db is driven, not driving".
+            raise RepositoryConflict(f"title {title.id} already exists") from exc
 
     async def update(self, title: Title) -> None:
         row = await self._session.get(TitleRow, title.id)
         if row is None:
-            raise ValueError(f"no existing title {title.id} to update")
+            raise RepositoryNotFound(f"no existing title {title.id} to update")
         # _to_row(title) raises loudly on any field/column mismatch, the same
         # way add() does -- a setattr loop straight off title.model_dump()
         # would not raise, it would just silently skip a would-be column
@@ -2592,7 +3016,13 @@ class PostgresTitleRepository(TitleRepository):
 >    legitimately domain-invisible by design, add it to an explicit
 >    `exclude` set in `_to_domain`, mirroring how `_to_row` already
 >    excludes `created_at`/`updated_at` (point 2) — for a different
->    reason, but the same mechanism.
+>    reason, but the same mechanism. **The constraint is symmetric, not
+>    read-only:** `_to_row` builds `TitleRow(**title.model_dump(...))` in
+>    the opposite direction, and both `add()` and `update()` call it (see
+>    the inline comment on `update()` above), so a broken correspondence
+>    fails just as loudly — as a `TypeError` from the unexpected keyword
+>    argument, right where `add()` or `update()` is called — rather than
+>    only surfacing later on some unrelated read.
 > 2. **`created_at`/`updated_at` are now required, non-`None`, domain-level
 >    fields (`default_factory=lambda: datetime.now(UTC)`) — should
 >    `_to_row` stop excluding them?** No: kept as-is, deliberately.
@@ -2609,7 +3039,10 @@ class PostgresTitleRepository(TitleRepository):
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `uv run pytest tests/integration/test_title_repository.py -v`
-Expected: 6 passed (first run pulls the `pgvector/pgvector:pg17` image)
+Expected: 8 passed (first run pulls the `pgvector/pgvector:pg17` image) —
+6 from the original round-trip/lookup/update coverage plus the two error-
+translation cases the amendment above added
+(`test_add_rejects_a_duplicate_id`, `test_update_rejects_an_unknown_id`)
 
 - [ ] **Step 6: Commit**
 
