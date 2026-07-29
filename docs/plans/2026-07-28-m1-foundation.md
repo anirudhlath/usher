@@ -34,9 +34,10 @@
 | `src/usher/ports/search.py` | `SearchIndex` ABC |
 | `src/usher/ports/embedding.py` | `Embedder` ABC |
 | `src/usher/ports/llm.py` | `LLMClient` ABC |
+| `src/usher/ports/repository.py` | `TitleRepositoryPort` ABC — added post-planning, see Task 6 |
 | `src/usher/db/base.py` | Declarative base, engine, session factory |
 | `src/usher/db/models/*.py` | SQLAlchemy tables |
-| `src/usher/db/repositories/title.py` | `TitleRepository` |
+| `src/usher/db/repositories/title.py` | `TitleRepository`, inherits `TitleRepositoryPort` |
 | `src/usher/db/migrations/` | Alembic environment + versions |
 | `src/usher/api/app.py` | App factory |
 | `src/usher/api/deps.py` | Request-scoped dependencies |
@@ -1081,6 +1082,8 @@ git commit -m "feat: Source, MediaItem, User, and WatchState domain models"
 **Files:**
 - Create: `src/usher/ports/{source,metadata,search,embedding,llm}.py`
 - Test: `tests/unit/test_ports.py`
+- Create (added post-planning — see the amendment after Step 8):
+  `src/usher/ports/repository.py`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1431,13 +1434,90 @@ Expected: 12 passed
 - [ ] **Step 7: Verify layering contracts hold**
 
 Run: `uv run lint-imports`
-Expected: `Contracts: 3 kept, 0 broken.`
+Expected: `Contracts: 4 kept, 0 broken.` (corrected from the plan's original "3
+kept" — stale since Group A's allowlist rewrite added a fourth contract,
+`config stays out of the core`, ahead of this task ever running)
 
 - [ ] **Step 8: Commit**
 
 ```bash
 git add src/usher/ports tests/unit/test_ports.py
 git commit -m "feat: port ABCs for sources, metadata, search, embedding, and LLM"
+```
+
+> **Added post-planning — this was not in the original plan.** Group A's
+> `db is driven, not driving` import-linter contract forbids
+> `usher.domain`, `usher.ports`, and `usher.services` from importing
+> `usher.db` — correctly enforcing [PRD 01](../prd/01-architecture.md)'s
+> "`services/` depends only on `domain/` and `ports/`." But
+> [Task 10](#task-10-title-repository) plans `TitleRepository` as a plain
+> class with no ABC, directly in `db/repositories/title.py`. Under the
+> contract, no service could ever import it — nothing in the plan gave a
+> service a path to persistence. A repository is a driven port like any
+> other in hexagonal terms, so `TitleRepositoryPort` joins the other five
+> ports built by this task. Full rationale:
+> [ADR-0009](../prd/decisions/0009-repositories-are-ports.md).
+
+**Files:**
+- Create: `src/usher/ports/repository.py`
+
+```python
+# src/usher/ports/repository.py
+"""Port for title persistence."""
+
+import uuid
+from abc import ABC, abstractmethod
+
+from usher.domain.enums import EnrichmentState
+from usher.domain.title import Title
+
+
+class TitleRepositoryPort(ABC):
+    """Persistence for canonical titles, kept behind a port so services
+    depend on this ABC and never on `usher.db` directly — see ADR-0009.
+    `usher.db.repositories.title.TitleRepository` is the concrete,
+    SQLAlchemy-backed implementation; `api/`, the composition root,
+    constructs it and injects it into services.
+    """
+
+    @abstractmethod
+    async def add(self, title: Title) -> None:
+        """Persist a new title."""
+
+    @abstractmethod
+    async def get(self, title_id: uuid.UUID) -> Title | None:
+        """Fetch by Usher's own id, or None if it doesn't exist."""
+
+    @abstractmethod
+    async def get_by_tmdb_id(self, tmdb_id: int) -> Title | None:
+        """Fetch by TMDb id, or None if no title carries it."""
+
+    @abstractmethod
+    async def get_by_imdb_id(self, imdb_id: str) -> Title | None:
+        """Fetch by IMDb id, or None if no title carries it."""
+
+    @abstractmethod
+    async def count_by_state(self) -> dict[EnrichmentState, int]:
+        """Catalog size broken down by enrichment tier."""
+```
+
+`tests/unit/test_ports.py` gained `TitleRepositoryPort` in the
+`ALL_PORTS` parametrization — so it gets the same cannot-instantiate-
+directly and declares-abstract-methods coverage as the other five ports
+for free — plus `FakeTitleRepository`, a small in-memory implementation
+exercised with add/get round-trip, `get_by_tmdb_id`, `get_by_imdb_id`,
+and `count_by_state` tests mirroring Task 10's own integration tests.
+This fake is not a throwaway instantiation check: it is what `services`
+get unit-tested against from M4 onward, per
+`docs/specs/2026-07-28-usher-v1-design.md`'s "Unit — services against
+port fakes; no network."
+
+Run: `uv run pytest tests/unit/test_ports.py -v`
+Expected: 20 passed
+
+```bash
+git add src/usher/ports/repository.py tests/unit/test_ports.py
+git commit -m "feat: add TitleRepositoryPort, the repository driven port"
 ```
 
 ---
@@ -2140,6 +2220,27 @@ git commit -m "feat: alembic async migrations and initial core schema"
 
 ## Task 10: Title repository
 
+> **Amended post-planning.** [Task 6](#task-6-port-abcs) grew a sixth port,
+> `TitleRepositoryPort` (`src/usher/ports/repository.py`), after the
+> `db is driven, not driving` import-linter contract turned out to leave no
+> service a path to persistence otherwise — see
+> [ADR-0009](../prd/decisions/0009-repositories-are-ports.md).
+> `TitleRepository` below must inherit it: one new import
+> (`from usher.ports.repository import TitleRepositoryPort`) and one changed
+> base class (`class TitleRepository(TitleRepositoryPort):`). Its five
+> methods were already planned with the exact names and signatures
+> `TitleRepositoryPort` now declares, so this costs Group E nothing beyond
+> those two lines — Step 4's code block below already reflects them.
+>
+> This also fixes what would otherwise be a dead end: nothing above `db/`
+> may construct or import `TitleRepository` directly except `api/`, which
+> is the composition root. `api/` builds the concrete, session-bound
+> `TitleRepository` and injects it into services through the
+> `TitleRepositoryPort` interface — the same shape dependency injection
+> already takes for every other port. Wiring that up is a service-layer
+> concern for a milestone after M1; this task only needs to produce a class
+> that satisfies the port.
+
 **Files:**
 - Create: `src/usher/db/repositories/title.py`
 - Create: `tests/integration/conftest.py`
@@ -2247,7 +2348,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'usher.db.repositories.
 """Persistence for canonical titles.
 
 Repositories translate between SQLAlchemy rows and domain models. Nothing
-above this layer sees a Row type.
+above this layer sees a Row type. Implements TitleRepositoryPort
+(usher.ports.repository) so services can depend on the port instead of
+this module directly — see ADR-0009.
 """
 
 import uuid
@@ -2258,6 +2361,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from usher.db.models.title import TitleRow
 from usher.domain.enums import EnrichmentState
 from usher.domain.title import Title
+from usher.ports.repository import TitleRepositoryPort
 
 
 def _to_domain(row: TitleRow) -> Title:
@@ -2270,7 +2374,7 @@ def _to_row(title: Title) -> TitleRow:
     return TitleRow(**title.model_dump(exclude={"created_at", "updated_at"}))
 
 
-class TitleRepository:
+class TitleRepository(TitleRepositoryPort):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
