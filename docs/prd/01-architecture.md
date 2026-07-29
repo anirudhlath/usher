@@ -20,10 +20,10 @@ services for a household-scale deployment.
 │  domain/      Pydantic models — the canonical language    │
 │  ports/       SourceAdapter · MetadataProvider ·          │
 │               SearchIndex · Embedder · LLMClient ·        │
-│               TitleRepositoryPort · Row · RowProvider     │
+│               TitleRepository · Row · RowProvider         │
 │               (all ABCs)                                  │
-│  adapters/    emby/ · tmdb/ · imdb_dumps/ · postgres/ ·   │
-│               sentence_transformers/ · litellm/           │
+│  adapters/    emby/ · tmdb/ · bulk/ ·                     │
+│               search/ · embedding/ · llm/                 │
 │  jobs/        priority queue · schedulers · workers       │
 │  db/          SQLAlchemy 2.0 async · Alembic · repos      │
 └────────────────────────────┬──────────────────────────────┘
@@ -31,6 +31,13 @@ services for a household-scale deployment.
                        [PostgreSQL]
              canonical catalog · search · vectors · job queue
 ```
+
+**`adapters/` subdirectories are named for the upstream service when a port
+has one implementation** (`emby/` → `SourceAdapter`, `tmdb/` →
+`MetadataProvider`) **and for the capability when a port has — or is
+designed for — more than one** (`bulk/` → `BulkDataset`'s four dataset
+importers, `search/` → `SearchIndex`'s Postgres/Meilisearch pair,
+`embedding/`, `llm/`).
 
 **Deployment:** `compose.yml` with `usher` + `postgres`. One stateful service.
 An optional `meilisearch` service exists behind a feature gate — see
@@ -50,7 +57,7 @@ These are the invariants that keep Emby out of everything:
    never escapes its adapter package.
 4. **`db/` models are separate from `domain/` models.** Repositories translate,
    and implement the repository ports declared in `ports/` (e.g.
-   `TitleRepositoryPort` — [ADR-0009](decisions/0009-repositories-are-ports.md)).
+   `TitleRepository` — [ADR-0009](decisions/0009-repositories-are-ports.md)).
    This costs a mapping layer and buys the freedom to shape tables for query
    performance without deforming the domain language.
 5. **`api/` maps domain models to response DTOs.** Wire format is versioned
@@ -98,17 +105,18 @@ Other ports follow the same pattern:
 | `SearchIndex` | `PostgresSearchIndex` (`MeilisearchIndex` gated) |
 | `Embedder` | `SentenceTransformerEmbedder` |
 | `LLMClient` | `LiteLLMClient` |
-| `TitleRepositoryPort` | `TitleRepository` ([ADR-0009](decisions/0009-repositories-are-ports.md)) |
+| `TitleRepository` | `PostgresTitleRepository` ([ADR-0009](decisions/0009-repositories-are-ports.md)) |
 | `Row` / `RowProvider` | see [06](06-rows-and-recommendations.md) |
 
-**`adapters/postgres/` vs `db/repositories/`.** Both ultimately talk to the
+**`adapters/search/` vs `db/repositories/`.** Both ultimately talk to the
 same PostgreSQL instance, which invites conflating them — they are not the
-same thing and do not hold the same kind of data. `adapters/postgres/`
-implements the `SearchIndex` port: weighted full-text, trigram autocomplete,
+same thing and do not hold the same kind of data. `adapters/search/`
+implements the `SearchIndex` port (`postgres.py`, with a gated
+`meilisearch.py` alongside it): weighted full-text, trigram autocomplete,
 and vector search ([ADR-0002](decisions/0002-postgres-first-search.md)).
 Titles, sources, media items, users, and watch state are persisted through
 repositories in `db/repositories/`, which implement repository ports
-declared in `ports/` (`TitleRepositoryPort` —
+declared in `ports/` (`TitleRepository` —
 [ADR-0009](decisions/0009-repositories-are-ports.md)). Repositories are
 never adapters — the "db is driven, not driving" import-linter contract and
 layering rule 4 above both hold precisely because repositories sit under

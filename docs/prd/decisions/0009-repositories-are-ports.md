@@ -20,16 +20,21 @@ service to reach persistence at all.
 ## Decision
 
 A repository is a driven (secondary) port, the same as `SourceAdapter`,
-`MetadataProvider`, or `SearchIndex`. `TitleRepositoryPort(ABC)` lives in
-`usher.ports.repository`, with abstract methods mirroring Task 10's planned
-`TitleRepository` exactly: `add`, `get`, `get_by_tmdb_id`, `get_by_imdb_id`,
-`count_by_state`.
+`MetadataProvider`, or `SearchIndex` — and named the same way those are:
+port named for role, implementation named for technology (`SourceAdapter` /
+`EmbyAdapter`, `MetadataProvider` / `TMDbProvider`). The ABC is
+`TitleRepository(ABC)`, in `usher.ports.repository`, with abstract methods
+mirroring Task 10's originally-planned class exactly: `add`, `get`,
+`get_by_tmdb_id`, `get_by_imdb_id`, `count_by_state`. Task 10's concrete
+class is renamed `PostgresTitleRepository` to free the plain name for the
+port, rather than have the port carry a `Port` suffix no other port in this
+codebase has.
 
-`usher.db.repositories.title.TitleRepository` (Task 10) inherits
-`TitleRepositoryPort`. Services depend on the port, never on the concrete
-class or on `usher.db` directly. `api/`, the composition root, constructs
-the concrete repository and injects it into services — the same shape
-FastAPI's `Depends` already implies for everything else driven.
+`usher.db.repositories.title.PostgresTitleRepository` (Task 10) inherits
+`TitleRepository`. Services depend on the port, never on the concrete class
+or on `usher.db` directly. `api/`, the composition root, constructs the
+concrete repository and injects it into services — the same shape FastAPI's
+`Depends` already implies for everything else driven.
 
 ## Consequences
 
@@ -46,6 +51,12 @@ FastAPI's `Depends` already implies for everything else driven.
   Nothing about persistence is architecturally different from search,
   metadata, or embeddings in this codebase — all four are "something that
   talks to an external system on the service's behalf."
+- The naming stays symmetric too: `TitleRepository` (port) /
+  `PostgresTitleRepository` (implementation) reads exactly like every other
+  port pair, and sets the pattern M2+ needs (`SourceRepository` port /
+  `PostgresSourceRepository` implementation, and so on) instead of
+  normalizing a `Port`-suffixed name that would need re-explaining at every
+  future repository.
 
 **Given up:**
 
