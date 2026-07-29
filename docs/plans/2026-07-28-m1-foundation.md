@@ -34,10 +34,10 @@
 | `src/usher/ports/search.py` | `SearchIndex` ABC |
 | `src/usher/ports/embedding.py` | `Embedder` ABC |
 | `src/usher/ports/llm.py` | `LLMClient` ABC |
-| `src/usher/ports/repository.py` | `TitleRepositoryPort` ABC — added post-planning, see Task 6 |
+| `src/usher/ports/repository.py` | `TitleRepository` ABC — added post-planning, see Task 6 |
 | `src/usher/db/base.py` | Declarative base, engine, session factory |
 | `src/usher/db/models/*.py` | SQLAlchemy tables |
-| `src/usher/db/repositories/title.py` | `TitleRepository`, inherits `TitleRepositoryPort` |
+| `src/usher/db/repositories/title.py` | `PostgresTitleRepository`, inherits `TitleRepository` |
 | `src/usher/db/migrations/` | Alembic environment + versions |
 | `src/usher/api/app.py` | App factory |
 | `src/usher/api/deps.py` | Request-scoped dependencies |
@@ -379,7 +379,11 @@ the point of use), and `get_settings()` is cached (tests call `get_settings.cach
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/unit/test_config.py -v`
-Expected: 3 passed
+Expected: 3 passed (at the time Task 2 was implemented; 16 passed after the
+later hardening described in the note above — `SecretStr`, the placeholder-
+secret-key rejection validator, `Literal`/`Field(ge=..., le=...)` bounds,
+and the asyncpg-driver and empty-string-coercion validators each brought
+their own tests)
 
 - [ ] **Step 5: Commit**
 
@@ -807,15 +811,16 @@ class Title(DomainModel):
 > hardened version — it now inherits the shared `DomainModel` base (Task 3
 > ½, `src/usher/domain/base.py`, added in the same pass) for
 > `frozen=True`, `extra="forbid"`, and the validated-update helper
-> `.evolve()`. `tests/unit/test_domain_title.py` grew from 5 cases to 30;
-> read it directly rather than this task's original Step 1 for the current
-> contract.
+> `.evolve()`. `tests/unit/test_domain_title.py` grew from 5 cases to 30,
+> then to 36 after a later, independent mutation-testing pass (`a7432f8`)
+> closed nine more gaps; read it directly rather than this task's original
+> Step 1 for the current contract.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/unit/test_domain_title.py -v`
-Expected: 5 passed (at the time Task 4 was implemented; 30 passed after the
-hardening pass described above)
+Expected: 5 passed (at the time Task 4 was implemented; 36 passed after the
+hardening and mutation-testing passes described above)
 
 - [ ] **Step 5: Commit**
 
@@ -1058,14 +1063,16 @@ class WatchState(DomainModel):
 > the note after `MediaItemRow` in Task 8 for the reasoning.
 >
 > `tests/unit/test_domain_source.py` and `tests/unit/test_domain_watch.py`
-> grew from 2 and 2 cases to 24 and 21; read them directly rather than
-> this task's original Step 1 for the current contract.
+> grew from 2 and 2 cases to 24 and 21, then to 25 and 23 after the same
+> later mutation-testing pass (`a7432f8`) mentioned in Task 4's note; read
+> them directly rather than this task's original Step 1 for the current
+> contract.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/unit/test_domain_source.py tests/unit/test_domain_watch.py -v`
-Expected: 4 passed (at the time Task 5 was implemented; 45 passed after the
-hardening passes described above)
+Expected: 4 passed (at the time Task 5 was implemented; 48 passed after the
+hardening and mutation-testing passes described above)
 
 - [ ] **Step 6: Commit**
 
@@ -1429,7 +1436,8 @@ class SourceAdapter(ABC):
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `uv run pytest tests/unit/test_ports.py -v`
-Expected: 12 passed
+Expected: 12 passed (before the repository-port amendment below; 20 passed
+after it)
 
 - [ ] **Step 7: Verify layering contracts hold**
 
@@ -1450,12 +1458,14 @@ git commit -m "feat: port ABCs for sources, metadata, search, embedding, and LLM
 > `usher.domain`, `usher.ports`, and `usher.services` from importing
 > `usher.db` — correctly enforcing [PRD 01](../prd/01-architecture.md)'s
 > "`services/` depends only on `domain/` and `ports/`." But
-> [Task 10](#task-10-title-repository) plans `TitleRepository` as a plain
-> class with no ABC, directly in `db/repositories/title.py`. Under the
-> contract, no service could ever import it — nothing in the plan gave a
-> service a path to persistence. A repository is a driven port like any
-> other in hexagonal terms, so `TitleRepositoryPort` joins the other five
-> ports built by this task. Full rationale:
+> [Task 10](#task-10-title-repository) originally planned `TitleRepository`
+> as a plain class with no ABC, directly in `db/repositories/title.py`.
+> Under the contract, no service could ever import it — nothing in the plan
+> gave a service a path to persistence. A repository is a driven port like
+> any other in hexagonal terms, so this task gains a sixth port,
+> `TitleRepository` — taking the plain name the way `SourceAdapter` and
+> `MetadataProvider` do, which is why Task 10's concrete class is now named
+> `PostgresTitleRepository` instead. Full rationale:
 > [ADR-0009](../prd/decisions/0009-repositories-are-ports.md).
 
 **Files:**
@@ -1472,10 +1482,10 @@ from usher.domain.enums import EnrichmentState
 from usher.domain.title import Title
 
 
-class TitleRepositoryPort(ABC):
+class TitleRepository(ABC):
     """Persistence for canonical titles, kept behind a port so services
     depend on this ABC and never on `usher.db` directly — see ADR-0009.
-    `usher.db.repositories.title.TitleRepository` is the concrete,
+    `usher.db.repositories.title.PostgresTitleRepository` is the concrete,
     SQLAlchemy-backed implementation; `api/`, the composition root,
     constructs it and injects it into services.
     """
@@ -1501,7 +1511,7 @@ class TitleRepositoryPort(ABC):
         """Catalog size broken down by enrichment tier."""
 ```
 
-`tests/unit/test_ports.py` gained `TitleRepositoryPort` in the
+`tests/unit/test_ports.py` gained `TitleRepository` in the
 `ALL_PORTS` parametrization — so it gets the same cannot-instantiate-
 directly and declares-abstract-methods coverage as the other five ports
 for free — plus `FakeTitleRepository`, a small in-memory implementation
@@ -1517,7 +1527,7 @@ Expected: 20 passed
 
 ```bash
 git add src/usher/ports/repository.py tests/unit/test_ports.py
-git commit -m "feat: add TitleRepositoryPort, the repository driven port"
+git commit -m "feat: add TitleRepository, the repository driven port"
 ```
 
 ---
@@ -2221,22 +2231,26 @@ git commit -m "feat: alembic async migrations and initial core schema"
 ## Task 10: Title repository
 
 > **Amended post-planning.** [Task 6](#task-6-port-abcs) grew a sixth port,
-> `TitleRepositoryPort` (`src/usher/ports/repository.py`), after the
+> `TitleRepository` (`src/usher/ports/repository.py`), after the
 > `db is driven, not driving` import-linter contract turned out to leave no
 > service a path to persistence otherwise — see
-> [ADR-0009](../prd/decisions/0009-repositories-are-ports.md).
-> `TitleRepository` below must inherit it: one new import
-> (`from usher.ports.repository import TitleRepositoryPort`) and one changed
-> base class (`class TitleRepository(TitleRepositoryPort):`). Its five
+> [ADR-0009](../prd/decisions/0009-repositories-are-ports.md). The port
+> takes the plain name, the same way `SourceAdapter`/`EmbyAdapter` and
+> `MetadataProvider`/`TMDbProvider` split port from implementation — so the
+> concrete class below is renamed `PostgresTitleRepository` and must
+> inherit the port: one new import
+> (`from usher.ports.repository import TitleRepository`) and one changed
+> base class (`class PostgresTitleRepository(TitleRepository):`). Its five
 > methods were already planned with the exact names and signatures
-> `TitleRepositoryPort` now declares, so this costs Group E nothing beyond
-> those two lines — Step 4's code block below already reflects them.
+> `TitleRepository` now declares, so this costs Group E nothing beyond
+> those two lines and the class rename — Step 4's code block below already
+> reflects them.
 >
 > This also fixes what would otherwise be a dead end: nothing above `db/`
-> may construct or import `TitleRepository` directly except `api/`, which
-> is the composition root. `api/` builds the concrete, session-bound
-> `TitleRepository` and injects it into services through the
-> `TitleRepositoryPort` interface — the same shape dependency injection
+> may construct or import `PostgresTitleRepository` directly except `api/`,
+> which is the composition root. `api/` builds the concrete, session-bound
+> `PostgresTitleRepository` and injects it into services through the
+> `TitleRepository` interface — the same shape dependency injection
 > already takes for every other port. Wiring that up is a service-layer
 > concern for a milestone after M1; this task only needs to produce a class
 > that satisfies the port.
@@ -2288,14 +2302,14 @@ async def session(postgres_url: str) -> AsyncSession:
 # tests/integration/test_title_repository.py
 import pytest
 
-from usher.db.repositories.title import TitleRepository
+from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
 
 
 @pytest.fixture
-def repo(session) -> TitleRepository:
-    return TitleRepository(session)
+def repo(session) -> PostgresTitleRepository:
+    return PostgresTitleRepository(session)
 
 
 async def test_add_then_get_round_trips_the_domain_model(repo):
@@ -2348,7 +2362,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'usher.db.repositories.
 """Persistence for canonical titles.
 
 Repositories translate between SQLAlchemy rows and domain models. Nothing
-above this layer sees a Row type. Implements TitleRepositoryPort
+above this layer sees a Row type. Implements the TitleRepository port
 (usher.ports.repository) so services can depend on the port instead of
 this module directly — see ADR-0009.
 """
@@ -2361,7 +2375,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from usher.db.models.title import TitleRow
 from usher.domain.enums import EnrichmentState
 from usher.domain.title import Title
-from usher.ports.repository import TitleRepositoryPort
+from usher.ports.repository import TitleRepository
 
 
 def _to_domain(row: TitleRow) -> Title:
@@ -2374,7 +2388,7 @@ def _to_row(title: Title) -> TitleRow:
     return TitleRow(**title.model_dump(exclude={"created_at", "updated_at"}))
 
 
-class TitleRepository(TitleRepositoryPort):
+class PostgresTitleRepository(TitleRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
@@ -2908,7 +2922,9 @@ jobs:
 uv run ruff check . && uv run ruff format --check . && uv run lint-imports
 ```
 
-Expected: no lint errors; `Contracts: 3 kept, 0 broken.`
+Expected: no lint errors; `Contracts: 4 kept, 0 broken.` (Group A's
+allowlist rewrite added a fourth contract, `config stays out of the core`,
+ahead of this task ever running — see the same correction in Task 6.)
 
 Fix any formatting differences with `uv run ruff format .` and re-run.
 
@@ -2950,7 +2966,7 @@ git commit -m "ci: lint, format, type check, architecture contracts, and tests"
 ```bash
 cd ~/code/usher
 uv run pytest -v                      # all tests pass
-uv run lint-imports                   # 3 contracts kept
+uv run lint-imports                   # 4 contracts kept
 uv run mypy                           # no issues
 docker compose up -d --build && sleep 15
 curl -sf http://localhost:8000/health/ready
@@ -2999,7 +3015,7 @@ git commit -m "docs: record M1 completion and real project commands"
 ## Definition of done
 
 - [ ] `uv run pytest` passes, unit and integration
-- [ ] `uv run lint-imports` reports 3 contracts kept — the architecture is enforced, not just documented
+- [ ] `uv run lint-imports` reports 4 contracts kept — the architecture is enforced, not just documented
 - [ ] `uv run mypy` is clean under strict mode
 - [ ] `docker compose up` produces a service whose `/health/ready` reports the database healthy
 - [ ] Migrations create the five core tables from a clean database
