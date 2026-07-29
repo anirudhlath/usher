@@ -79,8 +79,8 @@ Verified working as of Group A (scaffold + config):
 
 ```bash
 uv sync                          # install dependencies
-uv run pytest                    # run the test suite (unit tests only so far)
-uv run pytest tests/unit         # fast unit tests only
+uv run pytest                    # run the test suite (now needs Docker — see Group E below)
+uv run pytest tests/unit         # fast unit tests only, no Docker required
 uv run ruff check .              # lint — clean
 uv run ruff format .             # format — clean
 uv run mypy                      # type check, strict mode — clean
@@ -119,6 +119,36 @@ just by running it:**
   the first migration). These aren't SQLAlchemy `Table` metadata at all, so
   autogenerate never sees them, in either direction — adding, dropping, or
   changing one is always a hand-written `op.execute(...)` migration.
+
+Verified working as of Group E (title repository, first integration tests) —
+`tests/integration/` runs against a real PostgreSQL, started and torn down
+per test run by `testcontainers` (`pgvector/pgvector:pg17`; first run pulls
+the image, ~625 MB). Docker must be running; nothing else to set up:
+
+```bash
+uv run pytest                        # full suite — 194 tests, needs Docker for the 23 under tests/integration/
+uv run pytest tests/unit             # 171 tests, no Docker
+uv run pytest tests/integration      # 23 tests, needs Docker
+uv run pytest -m "not integration"   # marker equivalent of tests/unit
+uv run pytest -m integration         # marker equivalent of tests/integration
+```
+
+Two ways to select the same split — pick whichever fits: directory (what
+Task 10 itself was written and verified against) or the `integration`
+marker (registered in `pyproject.toml`, auto-applied to everything under
+`tests/integration/` by that directory's `conftest.py`). Both are kept in
+sync deliberately, so Group G's CI can use either without the two
+diverging. Not wired into `addopts` as a default `-m "not integration"` —
+that would make `pytest tests/integration/...` silently collect zero tests
+instead of running them.
+
+`tests/contract/title_repository_contract.py` holds the behavioural
+assertions every `TitleRepository` implementation must satisfy — the same
+suite runs against `FakeTitleRepository` (`tests/unit/`, no Docker) and
+`PostgresTitleRepository` (`tests/integration/`, real Postgres), so the two
+are verified to actually agree instead of merely looking alike. This is the
+pattern PRD 08 calls the "contract suite" for `SourceAdapter`; M3 is
+expected to reuse it.
 
 Not yet available — depend on code later M1 groups haven't written:
 `docker compose up` (needs Group G's `Dockerfile`/`compose.yml`).

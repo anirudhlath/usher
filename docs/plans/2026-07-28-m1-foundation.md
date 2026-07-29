@@ -3569,6 +3569,110 @@ git add src/usher/db/repositories tests/integration
 git commit -m "feat: title repository translating between rows and domain models"
 ```
 
+> **Amended post-implementation — resolves the session-poisoning open
+> question, and corrects one of its own claims.** Group E chose the
+> `session.begin_nested()` SAVEPOINT over `session.rollback()`, for the
+> reason the open question already gave: `TitleRepository`'s own docstring
+> says "the caller owns the session and the transaction: ... committing or
+> rolling back is the caller's call," and a full `rollback()` inside `add()`
+> would violate that by discarding whatever else the caller had pending on
+> the same session. `add()` wraps `self._session.add(...)` + `flush()` in
+> `async with self._session.begin_nested():`.
+>
+> **`update()` needs the identical translation — the open question's own
+> "it can't yet [raise IntegrityError]" does not hold against the schema
+> this task actually ships against.** `ix_titles_tmdb_id`/`ix_titles_imdb_id`/
+> `ix_titles_tvdb_id` (unique partial indexes, `db/models/title.py`) shipped
+> in Task 8/9, before Task 10 — not a future column. `update()` sets
+> tmdb_id/imdb_id/tvdb_id from the incoming `Title`, so retargeting one to a
+> value another row already holds raises `IntegrityError` today. Verified by
+> writing `update()` without the catch first and watching a raw
+> `sqlalchemy.exc.IntegrityError` escape it — exactly the "db is driven, not
+> driving" violation ADR-0009 exists to prevent. Fixed the same way as
+> `add()`: `update()`'s mutate-and-flush is wrapped in its own
+> `begin_nested()`.
+>
+> **A non-obvious SQLAlchemy ordering trap, found by watching a fix fail:**
+> wrapping only `flush()` in `begin_nested()` while the `setattr` mutation
+> loop ran *before* entering that block left the session's outer transaction
+> `DEACTIVE` after a caught conflict — a second, unrelated call on the same
+> session then raised `PendingRollbackError` instead of succeeding, the
+> exact failure the SAVEPOINT was supposed to prevent. Moving the mutation
+> loop *inside* the `begin_nested()` block (mutate, then flush, both under
+> the same SAVEPOINT) fixed it. Lesson for every repository after this one:
+> everything that will be flushed under a SAVEPOINT — including plain
+> attribute mutation on an already-persistent object, not just
+> `session.add()` on a new one — must happen inside the `begin_nested()`
+> block, not before it. `session`'s rollback-to-SAVEPOINT only cleanly
+> reverts state changes it watched happen within its own scope.
+>
+> **Both properties are covered by tests, not just documented:**
+> `test_add_leaves_the_session_usable_after_a_caught_conflict` and
+> `test_update_leaves_the_session_usable_after_a_caught_conflict`
+> (`tests/integration/test_title_repository.py`) each catch a
+> `RepositoryConflict` and then perform a second, unrelated `add()` on the
+> same session, asserting it succeeds. Both were run against the naive
+> (pre-SAVEPOINT, and pre-fix-ordering) implementations first and watched
+> fail with exactly the errors described above, before the fix made them
+> pass — this is empirical, not asserted.
+>
+> **`FakeTitleRepository` (Task 6) had a real behavioural divergence from
+> the real repository, found the same way:** it only checked `title.id` for
+> conflicts, never tmdb_id/imdb_id/tvdb_id — so a service unit-tested
+> against the fake could add two rows for the same TMDb title, while the
+> real repository (correctly) rejects the identical call with
+> `RepositoryConflict` via its unique partial indexes. Fixed in
+> `tests/fakes/title_repository.py` (`_provider_id_conflict`), verified by
+> first watching the shared contract's
+> `test_add_rejects_a_duplicate_tmdb_id`/
+> `test_update_rejects_a_conflicting_provider_id` fail against the
+> unfixed fake, then pass after the fix.
+>
+> **Shared contract suite, not two hand-maintained copies:** the fake/real
+> agreement above is proven by
+> `tests/contract/title_repository_contract.py` — one `TitleRepositoryContract`
+> base class with the behavioural assertions, subclassed by
+> `tests/unit/test_title_repository_contract.py` (`FakeTitleRepository`, no
+> Docker) and `tests/integration/test_title_repository.py`'s
+> `TestPostgresTitleRepositoryContract` (real Postgres). This is the pattern
+> PRD 08 already names for `SourceAdapter` ("one parametrised test class
+> every adapter must pass... it either passes the same tests the other
+> adapter passes, or the port was wrong") applied to `TitleRepository`, one
+> milestone before `SourceAdapter` has an implementation to apply it to. The
+> equivalent hand-written suite that used to live in
+> `tests/unit/test_ports.py` (Task 6) was removed in favour of it, to avoid
+> exactly the two-copies drift this suite exists to prevent — what remains
+> there is the one ABC-shape check with no real-repository counterpart.
+>
+> **Final count: 194 tests (168 baseline + 23 integration + 12 unit contract
+> − 9 deduped out of `test_ports.py`).** `tests/integration/` runs 23, not
+> the 8 Step 5 above predicts: 6 original + 2 the second amendment added,
+> plus 3 covering the session-usable-after-conflict property, plus 12 from
+> `TestPostgresTitleRepositoryContract`. `pytest -m integration` and
+> `pytest tests/integration` select the identical 23 (verified via
+> `--collect-only`); `pytest -m "not integration"` and `pytest tests/unit`
+> select the identical 171. The marker is applied by a
+> `pytest_collection_modifyitems` hook in `tests/integration/conftest.py`,
+> and *must* filter on `item.path` — that hook receives every item in the
+> whole session, not just the ones under its own directory (verified: an
+> unguarded version marked all ~194 tests "integration", making
+> `-m "not integration"` select nothing).
+>
+> **Three small fence corrections, mechanical, not design changes:**
+> (1) Step 1's `postgres_url`/`session` fixtures are generator functions
+> annotated `-> str`/`-> AsyncSession`; mypy strict requires
+> `-> Iterator[str]`/`-> AsyncIterator[AsyncSession]` on a function that
+> `yield`s. (2) `PostgresContainer(..., password="usher", ...)` trips ruff's
+> `S106` (hardcoded-password) — a real finding against a throwaway
+> container credential, not a false alarm to broaden `tests/**`'s ignore
+> list for; scoped with an inline `# noqa: S106`. (3) `ruff format` rewraps
+> a few of the plan's hand-wrapped lines (e.g. the `title = Title(...)`
+> call in Step 2) that fit within 100 columns unwrapped — cosmetic only.
+> Also noted, no action taken: the installed `testcontainers` (4.15.0) warns
+> that `testcontainers.postgres` is deprecated in favour of
+> `testcontainers.community.postgres`; Step 1's import still works, so this
+> is left for whichever group next touches this fixture.
+
 ---
 
 ## Task 11: Telemetry — logging with trace context
