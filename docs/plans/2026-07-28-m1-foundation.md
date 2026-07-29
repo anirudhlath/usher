@@ -1650,7 +1650,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+config.set_main_option("sqlalchemy.url", get_settings().database_url.get_secret_value())
 target_metadata = Base.metadata
 
 
@@ -2180,7 +2180,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        engine = build_engine(settings.database_url)
+        engine = build_engine(settings.database_url.get_secret_value())
         app.state.engine = engine
         app.state.session_factory = build_session_factory(engine)
         yield

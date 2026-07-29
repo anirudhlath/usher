@@ -29,6 +29,9 @@ Rules:
   command handles the bulk case.
 - No credential ever reaches a client. This is the failure of the setup Usher
   replaces, where a raw Emby token lived in browser-delivered dashboard config.
+- At the config layer, `database_url`, `secret_key`, and `tmdb_api_key` are
+  held as `pydantic.SecretStr` and unwrapped only at the point of use, so the
+  rules above are enforced by the type system, not just convention.
 
 ## Failure and degradation
 

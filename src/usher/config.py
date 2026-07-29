@@ -1,6 +1,6 @@
 """Application configuration, read from the environment."""
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,8 +15,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str
-    secret_key: str = Field(min_length=32)
+    database_url: SecretStr
+    secret_key: SecretStr = Field(min_length=32)
 
     host: str = "0.0.0.0"
     port: int = 8000
@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = True
 
-    tmdb_api_key: str | None = None
+    tmdb_api_key: SecretStr | None = None
 
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")

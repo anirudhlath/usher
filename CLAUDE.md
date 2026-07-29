@@ -47,6 +47,13 @@ load automatically when working in `docs/`.
 - **Use `uv`** for all Python work: `uv sync`, `uv run <cmd>`, `uv add <pkg>`.
   Never pip/conda, never activate a venv.
 - **TDD.** Failing test first, then implementation.
+- **Secrets in `Settings` are `pydantic.SecretStr`**, never plain `str` —
+  `database_url`, `secret_key`, `tmdb_api_key`. Unwrap with
+  `.get_secret_value()` only at the point of use (e.g. handing a DSN to
+  `create_async_engine`); never store the unwrapped value in a variable that
+  outlives that call, and never let it reach a log line or an exception
+  message. This is how `docs/prd/08-operations.md`'s "credentials are never
+  logged" rule is enforced rather than merely asserted.
 
 ## Verified facts worth not re-deriving
 
