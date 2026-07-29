@@ -107,5 +107,18 @@ uv run alembic downgrade base                     # reverse them (0001 is fully 
 uv run alembic revision --autogenerate -m "..."    # generate a migration from model changes
 ```
 
+**`--autogenerate` is blind to two categories of change — verify by eye, not
+just by running it:**
+- **CHECK constraint bodies.** Changing a bound (e.g. loosening
+  `ck_titles_year_non_negative`'s `>= 0`) and running `--autogenerate`
+  produces an empty `pass` migration with no warning — verified directly.
+  This schema deliberately mirrors every Pydantic field constraint as a
+  CHECK, so this will eventually bite: tightening or loosening one in a
+  model file does not, by itself, get picked up.
+- **Triggers and functions** (the three `set_updated_at()` triggers from
+  the first migration). These aren't SQLAlchemy `Table` metadata at all, so
+  autogenerate never sees them, in either direction — adding, dropping, or
+  changing one is always a hand-written `op.execute(...)` migration.
+
 Not yet available — depend on code later M1 groups haven't written:
 `docker compose up` (needs Group G's `Dockerfile`/`compose.yml`).

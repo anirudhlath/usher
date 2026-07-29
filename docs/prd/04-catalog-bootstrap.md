@@ -52,6 +52,14 @@ unless configured otherwise.
 > have ≥100 votes. That subset is the realistic universe for a home library and
 > defines the enrichment priority tier below.
 
+🔶 **Deferred design question:** `ix_titles_sort_name` is a plain btree over
+essentially-random text (`sort_name` has no normalisation contract —
+[02](02-data-model.md)) — worst case for insert locality, and projected at
+~635 MB at IMDb's full 12.7M titles. Whether Phase 0 should drop this index
+before the `COPY` and rebuild it after (standard practice for bulk-loading
+an indexed table) is not yet decided; this phase's importer should measure
+load time with and without that drop/rebuild before committing to either.
+
 ### Phase 1 — TMDb ID universe (< 1 min)
 
 Load movie and series ID exports. `popularity` becomes the default crawl

@@ -100,6 +100,17 @@ hashable.
 `field_provenance` exists so a second metadata provider can be added later
 without ambiguity about which source won a given field.
 
+🔶 **Deferred to M9:** a GIN index on `genres` for faceted `/browse`
+([07](07-client-api.md)) facet counts at catalog scale. Measured at 300k
+rows: a facet count seq-scans in 78.7 ms, projecting to ~3.3 s at IMDb's
+full 12.7M. Not added in M1 because `CREATE INDEX CONCURRENTLY` can add it
+online with no table rewrite whenever M9 lands — there is no cost to
+waiting and a real cost (write overhead through M2's bulk load, and every
+write after) to adding it before anything queries by facet. The same
+applies to indexes on `media_items.added_at`/`last_seen_at`/`available`
+and `titles.collection_id`: none exist yet, and none are needed while
+`media_items` stays in the tens of thousands of rows.
+
 ### Season / Episode
 
 Hierarchy under a series `Title`. Episodes are first-class — they carry watch
@@ -296,3 +307,12 @@ Title      1─1 TitleEmbedding
   possible.
 - **Soft-delete availability, hard-delete nothing.** Items that vanish from a
   source get `available = false`; history and watch state survive.
+- **A `Title` cannot be deleted out from under a `WatchState`.**
+  `watch_states.title_id` is `ON DELETE RESTRICT`, the deliberate opposite of
+  `media_items.title_id`'s `SET NULL` two rules up — an unmatched `MediaItem`
+  is worth keeping (review queue), but a `WatchState` *is* the thing worth
+  keeping. Merging two Titles (the repointing operation the Identity section
+  above describes) must explicitly repoint every `watch_states` row onto the
+  winner before deleting the loser; `RESTRICT` makes skipping that step fail
+  loudly instead of silently discarding watch history. See
+  [ADR-0010](decisions/0010-watch-state-title-fk-restrict.md).
