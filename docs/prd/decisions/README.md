@@ -13,5 +13,6 @@ otherwise be lost and re-litigated in six months.
 | [0003](0003-own-uuid-identity.md) | Usher-owned UUIDs, provider IDs as attributes | Accepted |
 | [0004](0004-push-over-polling.md) | Push events primary, reconcile as backstop | Accepted |
 | [0005](0005-bulk-bootstrap.md) | Pre-build the catalog from bulk datasets | Accepted |
+| [0006](0006-server-composed-home.md) | Server composes the home screen; REST + OpenAPI | Accepted |
 
 Format: context → decision → consequences → evidence. Short is fine.

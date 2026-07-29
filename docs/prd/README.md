@@ -20,14 +20,16 @@ brainstormed, then written here before implementation begins.
 | [04-catalog-bootstrap.md](04-catalog-bootstrap.md) | Bulk dataset import, licensing rules | ✅ agreed |
 | [05-search-and-similarity.md](05-search-and-similarity.md) | Search, embeddings, similarity | ✅ agreed |
 | [06-rows-and-recommendations.md](06-rows-and-recommendations.md) | Row hierarchy, LLM curation | ✅ agreed |
-| [07-client-api.md](07-client-api.md) | HTTP surface, streaming updates, playback | ⏳ not yet brainstormed |
-| [08-operations.md](08-operations.md) | Config, errors, testing, deployment | ⏳ not yet brainstormed |
+| [07-client-api.md](07-client-api.md) | HTTP surface, streaming updates, playback | ✅ agreed |
+| [08-operations.md](08-operations.md) | Config, errors, testing, deployment | ✅ agreed |
 | [09-roadmap.md](09-roadmap.md) | Phasing and milestones | 🔶 provisional |
 | [decisions/](decisions/) | Architecture decision records | ongoing |
 
 **The design spec is a separate artifact.** The PRD says *what and why*; the spec
-(`docs/specs/`) is the point-in-time, reviewed design handed to an implementation
-plan. When the two disagree, the PRD is authoritative and the spec is stale.
+is the point-in-time, reviewed design handed to an implementation plan. When the
+two disagree, the PRD is authoritative and the spec is stale.
+
+Current spec: [`docs/specs/2026-07-28-usher-v1-design.md`](../specs/2026-07-28-usher-v1-design.md)
 
 ## Conventions for maintaining this
 
