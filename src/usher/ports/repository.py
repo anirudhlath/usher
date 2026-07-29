@@ -7,10 +7,10 @@ from usher.domain.enums import EnrichmentState
 from usher.domain.title import Title
 
 
-class TitleRepositoryPort(ABC):
+class TitleRepository(ABC):
     """Persistence for canonical titles, kept behind a port so services
     depend on this ABC and never on `usher.db` directly — see ADR-0009.
-    `usher.db.repositories.title.TitleRepository` is the concrete,
+    `usher.db.repositories.title.PostgresTitleRepository` is the concrete,
     SQLAlchemy-backed implementation; `api/`, the composition root,
     constructs it and injects it into services.
     """

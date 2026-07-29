@@ -13,7 +13,7 @@ from usher.domain.title import Title
 from usher.ports.embedding import Embedder
 from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
-from usher.ports.repository import TitleRepositoryPort
+from usher.ports.repository import TitleRepository
 from usher.ports.search import SearchIndex
 from usher.ports.source import SourceAdapter
 
@@ -23,7 +23,7 @@ ALL_PORTS: list[type[ABC]] = [
     SearchIndex,
     Embedder,
     LLMClient,
-    TitleRepositoryPort,
+    TitleRepository,
 ]
 
 
@@ -62,20 +62,20 @@ def test_complete_implementation_instantiates() -> None:
     assert Fake().dimension == 3
 
 
-# --- TitleRepositoryPort ----------------------------------------------------
+# --- TitleRepository (the port, not the domain model) -----------------------
 #
 # Repositories are ports too (ADR-0009): usher.services may not import
 # usher.db, so a service that needs persistence can only depend on this ABC.
 # FakeTitleRepository is not a throwaway instantiation check — it is the
 # in-memory double services get unit-tested against from M4 onward, standing
-# in for usher.db.repositories.title.TitleRepository the same way a fake
-# Embedder above stands in for a real one.
+# in for usher.db.repositories.title.PostgresTitleRepository the same way a
+# fake Embedder above stands in for a real one.
 
 
-class FakeTitleRepository(TitleRepositoryPort):
-    """In-memory TitleRepositoryPort, keyed the same way the real
-    Postgres-backed TitleRepository (Task 10) is: by id, with tmdb_id and
-    imdb_id as secondary lookups."""
+class FakeTitleRepository(TitleRepository):
+    """In-memory TitleRepository port, keyed the same way the real
+    Postgres-backed PostgresTitleRepository (Task 10) is: by id, with
+    tmdb_id and imdb_id as secondary lookups."""
 
     def __init__(self) -> None:
         self._titles: dict[uuid.UUID, Title] = {}
@@ -111,7 +111,7 @@ def fake_title_repository() -> FakeTitleRepository:
 
 
 def test_complete_title_repository_implementation_instantiates() -> None:
-    assert isinstance(FakeTitleRepository(), TitleRepositoryPort)
+    assert isinstance(FakeTitleRepository(), TitleRepository)
 
 
 async def test_title_repository_add_then_get_round_trips(
