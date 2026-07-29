@@ -76,12 +76,22 @@ def test_watch_state_rejects_unknown_fields() -> None:
         _watch_state(oops="typo")
 
 
+def test_user_rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        User.model_validate({"name": "default", "oops": "typo"})
+
+
 # --- AwareDatetime -----------------------------------------------------------
 
 
 def test_user_rejects_naive_created_at() -> None:
     with pytest.raises(ValidationError):
         User.model_validate({"name": "default", "created_at": datetime(2026, 1, 1)})
+
+
+def test_watch_state_rejects_naive_last_played_at() -> None:
+    with pytest.raises(ValidationError):
+        _watch_state(last_played_at=datetime(2026, 1, 1))
 
 
 def test_watch_state_updated_at_defaults_to_aware_now() -> None:

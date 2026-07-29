@@ -81,12 +81,24 @@ def test_source_rejects_unknown_fields() -> None:
         _source(name_typo="oops")
 
 
+def test_media_item_rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        MediaItem.model_validate({"source_id": new_id(), "external_id": "1", "oops": "typo"})
+
+
 # --- AwareDatetime ---------------------------------------------------------
 
 
 def test_source_rejects_naive_created_at() -> None:
     with pytest.raises(ValidationError):
         _source(created_at=datetime(2026, 1, 1))
+
+
+def test_media_item_rejects_naive_added_at() -> None:
+    with pytest.raises(ValidationError):
+        MediaItem.model_validate(
+            {"source_id": new_id(), "external_id": "1", "added_at": datetime(2026, 1, 1)}
+        )
 
 
 def test_source_created_at_defaults_to_aware_now() -> None:
