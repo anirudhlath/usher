@@ -76,14 +76,16 @@ async def test_count_by_state_reports_the_catalog(repo: PostgresTitleRepository)
     assert counts[EnrichmentState.ENRICHED] == 0
 
 
-# --- SPIKE, not yet the shipped behaviour: proving the session-poisoning
-# gap the plan's "Open question flagged for Group E" left open. Both tests
-# below are expected to FAIL against the naive add()/update() (bare
-# try/except flush(), no SAVEPOINT) -- that failure is the point: it is
-# empirical proof, not just theory, that a caught RepositoryConflict
-# otherwise leaves the session's real transaction aborted. See title.py's
-# module docstring for the decision these drove (a session.begin_nested()
-# SAVEPOINT around each flush) once title.py is fixed below.
+# --- Regression coverage for the session-poisoning decision the plan's
+# "Open question flagged for Group E" left open (see title.py's module
+# docstring for the resolution: session.begin_nested() SAVEPOINTs around
+# both add()'s and update()'s flush, not session.rollback()). The four
+# tests below must keep passing -- that's the property the SAVEPOINT
+# exists for. They are not hypothetical: written and run against a naive
+# bare try/except flush() (no SAVEPOINT) first, they failed with exactly
+# the errors their comments describe -- PendingRollbackError from
+# add()/update(), and a raw, uncaught sqlalchemy.exc.IntegrityError
+# escaping update() -- before the fix in title.py made them pass.
 
 
 async def test_add_leaves_the_session_usable_after_a_caught_conflict(
