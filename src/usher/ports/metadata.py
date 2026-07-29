@@ -37,7 +37,7 @@ class MetadataProvider(ABC):
         """Candidate matches for a name and optional year."""
 
     @abstractmethod
-    async def fetch(self, provider_id: int, kind: str) -> dict[str, Any]:
+    async def fetch(self, provider_id: int, kind: TitleKind) -> dict[str, Any]:
         """Full raw payload for one item. Stored before normalisation,
         destined for `raw_payloads` and consumed only by `to_title`.
 

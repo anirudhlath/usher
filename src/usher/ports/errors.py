@@ -1,11 +1,15 @@
 """Shared error taxonomy for all ports.
 
-Adapters translate whatever their upstream throws (httpx exceptions, Emby's
-own error shapes, TMDb's rate-limit responses, ...) into one of these before
-it crosses the port boundary. A service that only knows `usher.ports` can
-then branch on failure kind without importing `httpx` or any other
-adapter-specific library — importing one would break "adapters are driven,
-not driving" (PRD 01).
+Every port implementation — an adapter talking to an upstream service, or a
+repository talking to a backing store — translates whatever it catches
+(httpx exceptions, Emby's own error shapes, TMDb's rate-limit responses,
+`sqlalchemy.exc.IntegrityError`, ...) into one of these before it crosses
+the port boundary. A service that only knows `usher.ports` can then branch
+on failure kind without importing `httpx`, SQLAlchemy, or any other
+adapter- or storage-specific library — importing one would break "adapters
+are driven, not driving" (PRD 01) for adapters, and "db is driven, not
+driving" (ADR-0009) for repositories, the same mechanism serving both
+contracts.
 """
 
 
@@ -44,3 +48,23 @@ class PortRateLimited(UsherPortError):
     def __init__(self, retry_after: float | None = None) -> None:
         super().__init__(f"rate limited, retry_after={retry_after}")
         self.retry_after = retry_after
+
+
+class RepositoryConflict(UsherPortError):
+    """`add()` was called for an id — or another unique key — that already
+    exists. An implementation translates its backing store's own conflict
+    error (e.g. Postgres's `IntegrityError` on a unique constraint) into
+    this, so callers never need to import a storage-specific exception
+    type to handle it. See `usher.ports.repository.TitleRepository.add`.
+    """
+
+
+class RepositoryNotFound(UsherPortError):
+    """`update()` targeted a row that does not exist.
+
+    The read-side equivalent of "not found" is a plain `None` return (see
+    e.g. `TitleRepository.get`) — this exists specifically for the
+    write-side case, where absence must be an error rather than a value,
+    because there is nothing sensible to update. See
+    `usher.ports.repository.TitleRepository.update`.
+    """

@@ -12,7 +12,14 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.embedding import Embedder
-from usher.ports.errors import PortAuthFailed, PortRateLimited, PortUnavailable, UsherPortError
+from usher.ports.errors import (
+    PortAuthFailed,
+    PortRateLimited,
+    PortUnavailable,
+    RepositoryConflict,
+    RepositoryNotFound,
+    UsherPortError,
+)
 from usher.ports.llm import LLMClient, LLMPurpose, LLMUsage
 from usher.ports.metadata import MetadataCandidate, MetadataProvider
 from usher.ports.repository import TitleRepository
@@ -76,8 +83,21 @@ def test_source_not_supported_is_a_usher_port_error() -> None:
     assert issubclass(SourceNotSupported, UsherPortError)
 
 
-@pytest.mark.parametrize("error", [PortUnavailable, PortAuthFailed, PortRateLimited])
+@pytest.mark.parametrize(
+    "error",
+    [
+        PortUnavailable,
+        PortAuthFailed,
+        PortRateLimited,
+        RepositoryConflict,
+        RepositoryNotFound,
+    ],
+)
 def test_port_errors_are_usher_port_errors(error: type[UsherPortError]) -> None:
+    """A service must be able to catch UsherPortError alone and handle every
+    port failure, without importing httpx or sqlalchemy -- which would break
+    the `adapters are driven, not driving` and `db is driven, not driving`
+    contracts that ADR-0009 rests on."""
     assert issubclass(error, UsherPortError)
 
 
@@ -181,7 +201,7 @@ async def test_title_repository_add_rejects_a_duplicate_id(
     Postgres-backed repository raises IntegrityError on the same call."""
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
     await fake_title_repository.add(title)
-    with pytest.raises(ValueError):
+    with pytest.raises(RepositoryConflict):
         await fake_title_repository.add(title)
 
 
@@ -201,7 +221,7 @@ async def test_title_repository_update_rejects_an_unknown_id(
     fake_title_repository: FakeTitleRepository,
 ) -> None:
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
-    with pytest.raises(ValueError):
+    with pytest.raises(RepositoryNotFound):
         await fake_title_repository.update(title)
 
 

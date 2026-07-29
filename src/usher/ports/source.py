@@ -5,7 +5,6 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -77,7 +76,7 @@ class SourceWatchState:
     position_seconds: int
     played: bool
     play_count: int = 0
-    last_played_at: datetime | None = None
+    last_played_at: AwareDatetime | None = None
     # Emby is multi-user; None means "the source didn't distinguish", which
     # today is fine because everything implicitly lands on the singleton
     # default user (PRD 01's authentication seam). Cheap to carry now —
@@ -119,7 +118,7 @@ class StreamTarget:
     url: str
     container: str | None = None
     video_codec: str | None = None
-    hdr_format: str | None = None
+    hdr_format: HdrFormat | None = None
     resolution: str | None = None
     runtime_seconds: int | None = None
     resume_position_seconds: int | None = None
@@ -165,7 +164,7 @@ class SourceAdapter(ABC):
         """
 
     @abstractmethod
-    def list_items(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
+    def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
         """Walk the library, or only items changed since a cursor.
 
         Contract an implementation must guarantee:
@@ -202,7 +201,7 @@ class SourceAdapter(ABC):
         """Ranked ways to play an item."""
 
     @abstractmethod
-    def watch_state(self, since: datetime | None = None) -> AsyncIterator[SourceWatchState]:
+    def watch_state(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceWatchState]:
         """Watch state from the source, optionally since a cursor.
 
         Same `since`-inclusivity, no-ordering, possible-duplicates, and

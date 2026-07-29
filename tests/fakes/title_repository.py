@@ -10,6 +10,7 @@ import uuid
 
 from usher.domain.enums import EnrichmentState
 from usher.domain.title import Title
+from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import TitleRepository
 
 
@@ -18,8 +19,12 @@ class FakeTitleRepository(TitleRepository):
     `PostgresTitleRepository` (Task 10) is: by id, with tmdb_id and
     imdb_id as secondary lookups. `add`/`update` mirror the real
     insert-only/update-only split documented on `TitleRepository` — a
-    duplicate `add` or a missing-id `update` raises, it does not silently
-    overwrite or no-op.
+    duplicate `add` raises `RepositoryConflict` and a missing-id `update`
+    raises `RepositoryNotFound`, the same exceptions the real,
+    Postgres-backed repository raises (translated from `IntegrityError`
+    and a missing row respectively). A fake that raised anything else
+    would defeat the point: a service unit-tested against this one must
+    see the same failure shape it would see in production.
     """
 
     def __init__(self) -> None:
@@ -27,12 +32,12 @@ class FakeTitleRepository(TitleRepository):
 
     async def add(self, title: Title) -> None:
         if title.id in self._titles:
-            raise ValueError(f"title {title.id} already exists")
+            raise RepositoryConflict(f"title {title.id} already exists")
         self._titles[title.id] = title
 
     async def update(self, title: Title) -> None:
         if title.id not in self._titles:
-            raise ValueError(f"no title {title.id} to update")
+            raise RepositoryNotFound(f"no title {title.id} to update")
         self._titles[title.id] = title
 
     async def get(self, title_id: uuid.UUID) -> Title | None:

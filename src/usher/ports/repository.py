@@ -19,15 +19,17 @@ class TitleRepository(ABC):
     async def add(self, title: Title) -> None:
         """Persist a new title.
 
-        This is an insert, not an upsert — a duplicate `title.id` raises
-        whatever the concrete implementation's backing store raises (this
-        port does not define a shared error for it). See `update` for
+        This is an insert, not an upsert: a duplicate `title.id` — or any
+        other unique constraint the backing store enforces — raises
+        `RepositoryConflict` (`usher.ports.errors`). Implementations
+        translate their backing store's own conflict error (e.g.
+        Postgres's `IntegrityError`) into this; callers never import a
+        storage-specific exception to handle it. See `update` for
         mutating a title that already exists.
 
         The caller owns the session and the transaction: this flushes, so
-        the row and any constraint violation are visible immediately, but
-        it never commits. Committing or rolling back is the caller's
-        call.
+        the row and any conflict are visible immediately, but it never
+        commits. Committing or rolling back is the caller's call.
         """
 
     @abstractmethod
@@ -38,8 +40,8 @@ class TitleRepository(ABC):
         (PRD 03: stub-on-sight, then enrich in place).
 
         This is an update, not an upsert: a `title.id` that does not
-        already exist raises whatever the concrete implementation's
-        backing store raises. See `add` for a brand-new title.
+        already exist raises `RepositoryNotFound` (`usher.ports.errors`).
+        See `add` for a brand-new title.
 
         Same session/transaction ownership as `add`: flushes, never
         commits.
