@@ -106,6 +106,22 @@ def test_source_created_at_defaults_to_aware_now() -> None:
     assert created_at.tzinfo is not None
 
 
+def test_media_item_rejects_naive_last_seen_at() -> None:
+    with pytest.raises(ValidationError):
+        MediaItem.model_validate(
+            {"source_id": new_id(), "external_id": "1", "last_seen_at": datetime(2026, 1, 1)}
+        )
+
+
+def test_media_item_last_seen_at_defaults_to_aware_now_when_omitted() -> None:
+    """A MediaItem only exists because it was just observed on a source --
+    "seen, but we don't know when" isn't a reachable state. Required,
+    matching the nullable=False column Task 8 declares (unlike added_at,
+    which stays optional on both sides)."""
+    item = MediaItem(source_id=new_id(), external_id="12345")
+    assert item.last_seen_at.tzinfo is not None
+
+
 # --- value constraints ----------------------------------------------------
 
 

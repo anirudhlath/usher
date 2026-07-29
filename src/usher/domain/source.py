@@ -54,5 +54,9 @@ class MediaItem(DomainModel):
     runtime_seconds: int | None = Field(default=None, ge=0)
 
     added_at: AwareDatetime | None = None
-    last_seen_at: AwareDatetime | None = None
+    # A MediaItem only exists because it was just observed on a source, so
+    # "seen, but we don't know when" isn't a reachable state -- required,
+    # matching the nullable=False last_seen_at column (Task 8). Contrast
+    # added_at, which stays optional on both sides.
+    last_seen_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     available: bool = True

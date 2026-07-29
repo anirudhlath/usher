@@ -854,7 +854,11 @@ class MediaItem(DomainModel):
     runtime_seconds: int | None = Field(default=None, ge=0)
 
     added_at: AwareDatetime | None = None
-    last_seen_at: AwareDatetime | None = None
+    # A MediaItem only exists because it was just observed on a source, so
+    # "seen, but we don't know when" isn't a reachable state -- required,
+    # matching the nullable=False last_seen_at column (Task 8). Contrast
+    # added_at, which stays optional on both sides.
+    last_seen_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     available: bool = True
 ```
 
@@ -947,15 +951,27 @@ class WatchState(DomainModel):
 > vocabulary could reach unchanged. The implementation blocks above are
 > the current, hardened versions, both on the shared `DomainModel` base
 > introduced alongside Task 4 (`src/usher/domain/base.py`).
+>
+> A follow-up pass then swept every domain field against the nullability
+> Task 8 declares for its column, specifically to catch more of the same
+> "optional in the model, `NOT NULL` in the schema" bug `created_at`/
+> `updated_at` already had. It found exactly one more instance —
+> `MediaItem.last_seen_at`, now required above (`default_factory`, same
+> pattern as `created_at`/`updated_at`) to match `MediaItemRow`'s
+> `nullable=False`. Two things it checked and did **not** change:
+> `MediaItem.added_at` is optional on both the row and the model (no bug);
+> every field on `Source` is required on both sides already (no bug). See
+> the note after `MediaItemRow` in Task 8 for the reasoning.
+>
 > `tests/unit/test_domain_source.py` and `tests/unit/test_domain_watch.py`
-> grew from 2 and 2 cases to 20 and 19; read them directly rather than
+> grew from 2 and 2 cases to 24 and 21; read them directly rather than
 > this task's original Step 1 for the current contract.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/unit/test_domain_source.py tests/unit/test_domain_watch.py -v`
-Expected: 4 passed (at the time Task 5 was implemented; 39 passed after the
-hardening pass described above)
+Expected: 4 passed (at the time Task 5 was implemented; 45 passed after the
+hardening passes described above)
 
 - [ ] **Step 6: Commit**
 
@@ -1467,28 +1483,40 @@ Expected: FAIL — `ImportError: cannot import name 'MediaItemRow'`
 
 - [ ] **Step 3: Write `title.py`**
 
+> **STANDING RULE for every array column below — read this before writing
+> `genres`, `keywords`, `spoken_languages`, or `origin_countries`:**
+> `ARRAY(Text)` **accepts** a Python `tuple` on write (verified against a
+> real `pgvector/pgvector:pg17` container, both through Core
+> `insert().values()` and through `TitleRow(genres=(...))`), but
+> Postgres/asyncpg always **returns a `list`** on read — never a tuple.
+> `genres`/`keywords`/`spoken_languages`/`origin_countries` on `TitleRow`
+> below are therefore `Mapped[list[str]]`, **deliberately**, even though
+> `usher.domain.title.Title` (the model these rows map to) types the same
+> fields `tuple[str, ...]`. **Do not "fix" these to
+> `Mapped[tuple[str, ...]]`** — that would just be wrong about what the
+> driver actually hands back, and would break on the very next read. The
+> tuple-ness is purely a `Title`-layer concept; `_to_domain` (Task 10)
+> gets the list→tuple conversion for free from pydantic validation on the
+> way back in. This is not a one-time observation from the review that
+> happened to be true when it was written — it is a permanent fact about
+> how `ARRAY(Text)` behaves, and it will still be true whenever Task 8 is
+> actually implemented.
+
 > **Amended post-implementation.** A quality review of the domain models
 > (Tasks 3–5) after they first landed added `enrichment_error`, dropped
 > `EnrichmentState.FAILED`, changed `genres`/`keywords`/`spoken_languages`/
-> `origin_countries` to `tuple[str, ...]`, added a `WatchState` invariant
-> (exactly one of `title_id`/`episode_id`), and value constraints
+> `origin_countries` to `tuple[str, ...]` on the domain side (row side
+> covered by the standing rule above), added a `WatchState` invariant
+> (exactly one of `title_id`/`episode_id`), value constraints
 > (`ge=0`/range/`min_length` — see ADR-0008 and the domain-model commits
-> for the full rationale). The `TitleRow`/`SourceRow`/`MediaItemRow`/
-> `UserRow`/`WatchStateRow` definitions below already reflect that —
+> for the full rationale), and — caught in a later sweep that compared
+> every domain field against Task 8's declared column nullability —
+> made `MediaItem.last_seen_at` required (see the note after
+> `MediaItemRow` below). The `TitleRow`/`SourceRow`/`MediaItemRow`/
+> `UserRow`/`WatchStateRow` definitions below already reflect all of it —
 > unlike Tasks 3–5, Task 8 had not been implemented yet when the review
 > landed, so there is no "original vs. amended" split here, just the
 > current version to implement against.
->
-> One finding worth flagging explicitly: `ARRAY(Text)` **accepts** a
-> Python `tuple` on write (verified against a real `pgvector/pgvector:pg17`
-> container, both through Core `insert().values()` and through
-> `TitleRow(genres=(...))`), but Postgres/asyncpg always **returns a
-> `list`** on read — never a tuple. So `genres`/`keywords`/
-> `spoken_languages`/`origin_countries` stay `Mapped[list[str]]` below,
-> unchanged; the tuple-ness is purely a `usher.domain.title.Title`-layer
-> concept, and `_to_domain` (Task 10) gets the list→tuple conversion for
-> free from pydantic validation. Do not "fix" these to `Mapped[tuple[str,
-> ...]]` — that would just be wrong about what the driver hands back.
 
 ```python
 # src/usher/db/models/title.py
@@ -1729,16 +1757,22 @@ class MediaItemRow(Base):
     )
 ```
 
-**Pre-existing, still-unresolved mismatch, flagged rather than silently
-fixed:** `MediaItemRow.last_seen_at` above is `nullable=False` with a
+**Resolved.** `MediaItemRow.last_seen_at` above is `nullable=False` with a
 `server_default`, matching [02-data-model.md](../prd/02-data-model.md)'s
-`last_seen_at: datetime`. `usher.domain.source.MediaItem.last_seen_at` is
-`AwareDatetime | None = None` — nullable, matching Task 5's original code,
-not the PRD. This round's instructions covered `created_at`/`updated_at`
-specifically and did not touch this field, so it is left exactly as Task 5
-built it rather than guessed at; Group D/E should get an explicit call on
-which side is right before `_to_domain`/`_to_row` (Task 10) has to paper
-over the gap.
+`last_seen_at: datetime`. A prior pass here left
+`usher.domain.source.MediaItem.last_seen_at` as `AwareDatetime | None =
+None` — nullable, matching Task 5's original code, not the PRD or this
+column — and flagged the mismatch rather than guess at it. Decision: make
+it required, `default_factory=lambda: datetime.now(UTC)`, the same pattern
+as `created_at`/`updated_at`. Reasoning: a `MediaItem` only exists because
+it was just observed on a source, so "seen, but we don't know when" isn't
+a reachable state; `Title.py`/`source.py` (Task 4/5) already reflect this.
+
+A follow-up sweep compared every other domain field against the column
+nullability declared here and found no further mismatches:
+`MediaItem.added_at` is nullable on both sides (correct — a source may not
+report when an item was added), and every field on `SourceRow`/`Source` is
+`NOT NULL`/required on both sides already.
 
 - [ ] **Step 5: Write `watch.py`**
 
@@ -2177,22 +2211,32 @@ class TitleRepository:
 
 > **Amended post-implementation — verified, not changed.** The domain-model
 > hardening pass raised two questions about the `_to_domain`/`_to_row`
-> code above; both were checked directly rather than assumed, and neither
-> requires a code change:
+> code above; both were checked directly rather than assumed. Point 1 below
+> is a **standing constraint on Tasks 8 and 10 going forward**, not a
+> one-time observation that happened to be true when it was written — read
+> it as a rule, not history. Point 2 is a design rationale that doesn't
+> require a code change.
 >
-> 1. **Does `extra="forbid"` (now on every domain model, including
->    `Title`) break `_to_domain`'s
+> 1. **STANDING CONSTRAINT: `TitleRow`'s column set and `Title`'s field set
+>    must stay in exact 1:1 correspondence by name.** Why this matters:
+>    `extra="forbid"` is set on every domain model, including `Title`
+>    (`DomainModel`, Task 3 ½). `_to_domain`'s
 >    `{c.name: getattr(row, c.name) for c in TitleRow.__table__.columns}`
->    pattern?** No, as long as `TitleRow`'s column set and `Title`'s field
->    set stay in exact 1:1 correspondence by name — which they do (Task 8
->    above added `enrichment_error` to both in the same pass). If a future
->    migration ever adds a DB-only column with no domain-model equivalent,
->    `extra="forbid"` will make this line fail loudly at read time instead
->    of silently dropping the column — arguably correct given this
->    project's "no source-specific concept escapes its adapter" rule, but
->    worth knowing before it happens: a future *legitimate* DB-only
->    bookkeeping column (not domain-visible by design) would need an
->    explicit `exclude` added to `_to_domain`, not just to `_to_row`.
+>    → `Title.model_validate(...)` pattern hands that dict straight to a
+>    model that rejects any key it doesn't recognise. True today — both
+>    sides list exactly 31 fields (verified: `len(Title.model_fields)`);
+>    Task 8 added `enrichment_error` to `TitleRow` in the same pass `Title`
+>    gained it, specifically to keep
+>    this holding. **The moment a migration adds a column to `titles` with
+>    no matching `Title` field — a DB-only bookkeeping column, say — this
+>    line starts raising `ValidationError` on every read.** That is the
+>    correct, wanted failure mode here (loud and at read time, not a
+>    silently dropped column reaching nobody), so **do not work around it
+>    by loosening `extra` to `"ignore"`**. Instead: if a future column is
+>    legitimately domain-invisible by design, add it to an explicit
+>    `exclude` set in `_to_domain`, mirroring how `_to_row` already
+>    excludes `created_at`/`updated_at` (point 2) — for a different
+>    reason, but the same mechanism.
 > 2. **`created_at`/`updated_at` are now required, non-`None`, domain-level
 >    fields (`default_factory=lambda: datetime.now(UTC)`) — should
 >    `_to_row` stop excluding them?** No: kept as-is, deliberately.
