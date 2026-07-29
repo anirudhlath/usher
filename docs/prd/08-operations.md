@@ -60,18 +60,12 @@ Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
 
 ## Observability
 
-Structured JSON logging via loguru, matching Alfred.
+loguru for logs, OpenTelemetry for metrics and traces, and Grafana over three
+datasources. Instrumentation, metric catalogue, dashboards, and alerts are
+specified in [10](10-telemetry-and-dashboards.md).
 
-The metrics that actually predict problems:
-
-| Metric | Why |
-|---|---|
-| Queue depth by priority | Enrichment falling behind demand |
-| Enrichment latency p50/p99 | The read-through promise in [03](03-sources-and-sync.md) |
-| Sync run outcome and duration | Source health over time |
-| Push connection uptime and reconnects | Whether push is actually working |
-| Parked job count | Systematic failure hiding behind retries |
-| Search latency p50/p99 by mode | The [05](05-search-and-similarity.md) upgrade gate |
+Telemetry is optional: with no OTLP endpoint configured the exporters are
+no-ops and Usher runs normally.
 
 `GET /health` is liveness; `GET /health/ready` reports Postgres, migration
 state, and per-source connectivity — degraded rather than binary, so a

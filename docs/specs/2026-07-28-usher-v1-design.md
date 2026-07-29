@@ -31,6 +31,8 @@ direct Emby access entirely, for both films and television.**
   request.
 - **Unified watch state**, canonical in Usher, synced bidirectionally with Emby.
 - **REST + OpenAPI** surface with an SSE update channel and an image proxy.
+- **Telemetry** — loguru + OpenTelemetry, and five Grafana dashboards shipped as
+  provisioned JSON.
 - Single-host Docker deployment.
 
 ### Out
@@ -73,6 +75,7 @@ Each has an ADR carrying the reasoning and evidence:
 | Push events primary, reconciliation as backstop | [0004](../prd/decisions/0004-push-over-polling.md) |
 | Pre-build the catalog from bulk datasets | [0005](../prd/decisions/0005-bulk-bootstrap.md) |
 | Server composes the home screen; REST + OpenAPI | [0006](../prd/decisions/0006-server-composed-home.md) |
+| Three telemetry datasources; external shared LGTM stack | [0007](../prd/decisions/0007-telemetry-architecture.md) |
 
 ## Data model
 
@@ -142,7 +145,7 @@ RowProviders propose scored rows ──▶ rank + diversity constraints
 
 | # | Milestone | Delivers |
 |---|---|---|
-| M1 | Foundation | Repo, uv, compose, Postgres, migrations, domain models, port ABCs, config, health, CI with layering checks |
+| M1 | Foundation | Repo, uv, compose, Postgres, migrations, domain models, port ABCs, config, health, CI with layering checks, **telemetry bootstrap** (loguru + OTel, trace context in logs) |
 | M2 | Bootstrap | IMDb skeleton, TMDb ID export, Wikidata crosswalk; resumable, checkpointed importers |
 | M3 | Emby adapter | Durable-client auth, listing, watch state, stream targets; **contract test suite** |
 | M4 | Ingest pipeline | ingest → match → enrich → index; priority queue; stub-on-sight; review queue |
@@ -151,10 +154,17 @@ RowProviders propose scored rows ──▶ rank + diversity constraints
 | M7 | Rows | `Row`/`RowProvider` hierarchy, system + similarity rows, taste centroid |
 | M8 | Curation | LLM row generation, validation, persistence |
 | M9 | API surface | Full REST surface, image proxy, playback resolution, attribution |
-| M10 | Hardening | Observability, failure modes, backup/restore, docs, public release |
+| M10 | Hardening | Grafana dashboards, alerts, failure modes, backup/restore, docs, public release |
 
 Each milestone is independently testable. M1–M4 produce a browsable catalog;
 M5–M6 make it fast; M7–M9 make it a product.
+
+**Instrumentation is cross-cutting, not a milestone.** M1 lands the telemetry
+bootstrap; every subsequent milestone instruments its own work as it is built
+(spans on the pipeline in M4, push metrics in M5, search metrics and the
+`search_queries` table in M6, `llm_calls` in M8). M10 assembles the dashboards
+over data that is already flowing, rather than retrofitting instrumentation at
+the end.
 
 ## Acceptance criteria
 

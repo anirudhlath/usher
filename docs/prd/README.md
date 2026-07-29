@@ -23,6 +23,7 @@ brainstormed, then written here before implementation begins.
 | [07-client-api.md](07-client-api.md) | HTTP surface, streaming updates, playback | ✅ agreed |
 | [08-operations.md](08-operations.md) | Config, errors, testing, deployment | ✅ agreed |
 | [09-roadmap.md](09-roadmap.md) | Phasing and milestones | 🔶 provisional |
+| [10-telemetry-and-dashboards.md](10-telemetry-and-dashboards.md) | Instrumentation, metrics, Grafana dashboards | ✅ agreed |
 | [decisions/](decisions/) | Architecture decision records | ongoing |
 
 **The design spec is a separate artifact.** The PRD says *what and why*; the spec

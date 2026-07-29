@@ -14,5 +14,6 @@ otherwise be lost and re-litigated in six months.
 | [0004](0004-push-over-polling.md) | Push events primary, reconcile as backstop | Accepted |
 | [0005](0005-bulk-bootstrap.md) | Pre-build the catalog from bulk datasets | Accepted |
 | [0006](0006-server-composed-home.md) | Server composes the home screen; REST + OpenAPI | Accepted |
+| [0007](0007-telemetry-architecture.md) | Three datasources; external shared LGTM stack | Accepted |
 
 Format: context → decision → consequences → evidence. Short is fine.
