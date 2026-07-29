@@ -47,11 +47,12 @@ load automatically when working in `docs/`.
 
 ## Known open risk
 
-Emby's WebSocket (`/embywebsocket`) returned **404** on probe against the target
-server. Inconclusive — the probe was incomplete and the token expired — but it
-is the documented signature of a reverse proxy stripping `Upgrade` headers.
-**Retest with a live token before assuming the push path works.** Reasoning and
-fallbacks: [ADR-0004](docs/prd/decisions/0004-push-over-polling.md).
+Emby's WebSocket handshake against the target server returns **HTTP 101** — the
+proxy forwards upgrades. (An earlier 404 was a malformed-probe artifact; that
+finding was wrong.) Not yet confirmed end to end: a control handshake against
+`/` also returns 101, so message-level verification with a live token is still
+outstanding. Detail and fallbacks:
+[ADR-0004](docs/prd/decisions/0004-push-over-polling.md).
 
 ## Commands
 

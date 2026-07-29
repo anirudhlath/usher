@@ -52,11 +52,24 @@ request, declined). nginx closes idle connections at 60 s and Cloudflare at
 ~100 s, so a 20–25 s client heartbeat is required. Reverse proxies that fail to
 forward `Upgrade` return 404 instead of 101 — the documented failure signature.
 
-## Open risk
+## Open risk — substantially reduced 2026-07-28
 
-A probe of this deployment returned **404** on `/embywebsocket`. Inconclusive —
-the probe was not a complete handshake and the token had expired — but it must
-be retested with a live token before the push path is assumed available.
+**Correction to an earlier finding.** A first probe returned 404 on
+`/embywebsocket`, which looked like a reverse proxy stripping `Upgrade`
+headers. That was wrong: the probe used hand-written curl headers rather than a
+real handshake. A proper handshake (raw TLS socket, valid `Sec-WebSocket-Key`,
+version 13) returns **HTTP 101 Switching Protocols**, with and without an
+`api_key`. Upgrades are not being stripped.
+
+This is consistent with the decompiled behaviour above — Emby does not
+authenticate the upgrade itself, only the subsequent session lookup.
+
+**Remaining uncertainty:** a control handshake against `/` also returned 101,
+so the proxy appears to upgrade any path. That means 101 alone does not
+distinguish "Emby's WebSocket handler answered" from "the proxy upgraded
+blindly". Confirming the push path end to end requires a valid token: connect,
+send `{"MessageType":"SessionsStart","Data":"0,1500"}`, and observe real
+messages arriving.
 
 Fallback order: Emby per-user webhooks (available since 4.8 without dashboard
 access, but requires the server operator to enable "Notifications" under the

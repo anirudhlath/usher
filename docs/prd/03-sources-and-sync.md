@@ -57,14 +57,17 @@ Operational requirements:
   instead of 101. If the socket can't be established, the adapter reports
   `supports_push = false` and the reconciler covers the gap.
 
-> **Open item.** A probe of this deployment's Emby returned 404 on
-> `/embywebsocket`. That is inconclusive — the probe was not a complete
-> handshake and used an expired token — but it is the documented signature of a
-> proxy stripping upgrade headers. **Must be retested with a live token before
-> the push path is assumed available.** Fallbacks, in order: Emby per-user
-> webhooks (needs the server operator to enable "Notifications" under the
-> account's Feature Access — a single checkbox, and Emby Premiere must be
-> active on the server), then polling.
+> **Verified 2026-07-28.** A proper handshake against this deployment's
+> `/embywebsocket` returns **HTTP 101 Switching Protocols**, with and without
+> an `api_key`. An earlier 404 was an artifact of a malformed curl probe, not a
+> proxy stripping upgrades — that finding was wrong and is corrected here.
+>
+> Still to confirm: a control handshake against `/` also returned 101, so the
+> proxy upgrades any path. End-to-end confirmation requires a valid token —
+> connect, subscribe, and observe real messages. Fallbacks if it fails: Emby
+> per-user webhooks (needs the server operator to enable "Notifications" under
+> the account's Feature Access, and Emby Premiere active on the server), then
+> polling.
 
 ## Reconciliation is not optional
 

@@ -195,16 +195,17 @@ TDD throughout: failing test first.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| **Emby WebSocket returned 404 on probe** | Push path unavailable; sync falls back to polling | **Resolve first in M3.** Retest with a live token and a real handshake. Fallbacks: per-user Emby webhooks (needs the host to enable Notifications under Feature Access + Premiere active), then polling. Adapter reports `supports_push`; nothing above it changes. |
+| **Emby WebSocket unconfirmed at message level** | Push path unavailable; sync falls back to polling | Handshake verified 2026-07-28: returns **101**, upgrades are not stripped (the earlier 404 was a bad probe). Remaining step is a token-authenticated subscribe to confirm real messages arrive. Fallbacks: per-user Emby webhooks (needs the host to enable Notifications under Feature Access + Premiere active), then polling. Adapter reports `supports_push`; nothing above it changes. |
 | Postgres typo tolerance below bar | Search UX worse than Meilisearch on short titles | Measurable gate in PRD [05](../prd/05-search-and-similarity.md); `SearchIndex` port makes the swap contained |
 | TMDb crawl slower than estimated | Longer bootstrap | Tiered — Tier 1 (189k) is sufficient; catalog is usable throughout |
 | LLM row quality poor | Weak curated rows | Validated against catalog IDs; rows are additive, system rows carry the screen |
 | Match false positives | Wrong metadata on a title | Confidence bar + review queue + admin override; provenance recorded |
 | Emby token expiry | The original failure mode | Stable `DeviceId` + credential re-auth on 401 |
 
-**Immediate first action:** re-mint a working Emby token and retest
-`/embywebsocket` with a proper handshake. It settles the M5 design and, as a
-side effect, fixes the currently-broken Home Assistant movie tab.
+**Immediate first action:** re-mint a working Emby token, then subscribe over
+the (already verified) WebSocket and confirm real messages arrive. It settles
+the M5 design and, as a side effect, fixes the currently-broken Home Assistant
+movie tab that motivated this project.
 
 ## Licensing
 
