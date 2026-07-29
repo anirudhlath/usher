@@ -52,24 +52,40 @@ request, declined). nginx closes idle connections at 60 s and Cloudflare at
 ~100 s, so a 20–25 s client heartbeat is required. Reverse proxies that fail to
 forward `Upgrade` return 404 instead of 101 — the documented failure signature.
 
-## Open risk — substantially reduced 2026-07-28
+## Risk resolved — push verified end to end 2026-07-29
 
-**Correction to an earlier finding.** A first probe returned 404 on
-`/embywebsocket`, which looked like a reverse proxy stripping `Upgrade`
-headers. That was wrong: the probe used hand-written curl headers rather than a
-real handshake. A proper handshake (raw TLS socket, valid `Sec-WebSocket-Key`,
-version 13) returns **HTTP 101 Switching Protocols**, with and without an
-`api_key`. Upgrades are not being stripped.
+**Confirmed working against the live server.** Authenticated with a normal
+(non-admin) user token and a stable `DeviceId`, connected to
+`/embywebsocket?api_key=…&deviceId=…`, subscribed with
+`{"MessageType":"SessionsStart","Data":"0,1000"}`, and observed:
 
-This is consistent with the decompiled behaviour above — Emby does not
-authenticate the upgrade itself, only the subsequent session lookup.
+| Message | Trigger |
+|---|---|
+| `Sessions` | Periodic, on the subscription interval |
+| `UserDataChanged` ×2 | Fired immediately on a REST played/unplayed toggle |
 
-**Remaining uncertainty:** a control handshake against `/` also returned 101,
-so the proxy appears to upgrade any path. That means 101 alone does not
-distinguish "Emby's WebSocket handler answered" from "the proxy upgraded
-blindly". Confirming the push path end to end requires a valid token: connect,
-send `{"MessageType":"SessionsStart","Data":"0,1500"}`, and observe real
-messages arriving.
+The `UserDataChanged` pair is the decisive result: a state change made out of
+band produced push events on the socket within seconds. **That is the
+watch-state sync mechanism, working.**
+
+**Two earlier findings were wrong and are corrected here:**
+
+1. A first probe returned 404. That was an artifact of hand-written curl
+   headers, not a proxy stripping `Upgrade`. A proper handshake returns
+   **HTTP 101**.
+2. A second test saw a 101 but no messages, and was read as "the proxy upgrades
+   blindly". Also wrong — the socket was simply idle. Nothing was playing and no
+   user data was changing, so there was nothing to push. Triggering a real
+   change produced messages immediately.
+
+The lesson worth keeping: **silence on an event stream is not evidence of a
+broken stream.** Verify push channels by causing an event, never by waiting.
+
+**One genuine quirk:** a control handshake against a nonexistent path also
+upgrades and receives `Sessions`, so Emby's listener appears to handle the
+upgrade regardless of path. Harmless, but it means path alone is not a health
+signal — the adapter's health check must assert on *received messages*, not on
+a successful handshake.
 
 Fallback order: Emby per-user webhooks (available since 4.8 without dashboard
 access, but requires the server operator to enable "Notifications" under the

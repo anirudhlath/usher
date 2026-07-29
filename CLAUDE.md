@@ -45,14 +45,16 @@ load automatically when working in `docs/`.
   Never pip/conda, never activate a venv.
 - **TDD.** Failing test first, then implementation.
 
-## Known open risk
+## Verified facts worth not re-deriving
 
-Emby's WebSocket handshake against the target server returns **HTTP 101** — the
-proxy forwards upgrades. (An earlier 404 was a malformed-probe artifact; that
-finding was wrong.) Not yet confirmed end to end: a control handshake against
-`/` also returns 101, so message-level verification with a live token is still
-outstanding. Detail and fallbacks:
+**Emby push works.** Verified 2026-07-29 against the live server with a normal
+non-admin token: `/embywebsocket` upgrades (101), delivers periodic `Sessions`,
+and pushes `UserDataChanged` within seconds of an out-of-band state change. Two
+earlier negative findings were both wrong — see
 [ADR-0004](docs/prd/decisions/0004-push-over-polling.md).
+
+Health-check caveat: a handshake against *any* path succeeds, so a successful
+upgrade is not a health signal. Assert on received messages instead.
 
 ## Commands
 

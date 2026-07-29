@@ -57,17 +57,16 @@ Operational requirements:
   instead of 101. If the socket can't be established, the adapter reports
   `supports_push = false` and the reconciler covers the gap.
 
-> **Verified 2026-07-28.** A proper handshake against this deployment's
-> `/embywebsocket` returns **HTTP 101 Switching Protocols**, with and without
-> an `api_key`. An earlier 404 was an artifact of a malformed curl probe, not a
-> proxy stripping upgrades — that finding was wrong and is corrected here.
+> **Verified end to end 2026-07-29.** Against this deployment, with a normal
+> non-admin token and a stable `DeviceId`: the handshake returns **101**,
+> `Sessions` arrives periodically, and **`UserDataChanged` fires within seconds
+> of an out-of-band played/unplayed change**. Push is the real mechanism here,
+> not an aspiration. Full detail and two corrected earlier findings:
+> [ADR-0004](decisions/0004-push-over-polling.md).
 >
-> Still to confirm: a control handshake against `/` also returned 101, so the
-> proxy upgrades any path. End-to-end confirmation requires a valid token —
-> connect, subscribe, and observe real messages. Fallbacks if it fails: Emby
-> per-user webhooks (needs the server operator to enable "Notifications" under
-> the account's Feature Access, and Emby Premiere active on the server), then
-> polling.
+> **Health-check caveat:** a handshake against a nonexistent path also upgrades
+> and receives `Sessions`, so a successful upgrade proves nothing. The adapter
+> must assert on *received messages* to consider push healthy.
 
 ## Reconciliation is not optional
 
