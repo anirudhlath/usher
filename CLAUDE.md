@@ -7,9 +7,12 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: pre-implementation.** This repository contains design documentation
-only — no source, no build, no tests yet. Do not invent commands for tooling
-that does not exist.
+**Status: M1 foundation in progress.** The project scaffold and environment
+config exist (`pyproject.toml`, `src/usher/config.py`, `tests/unit/`); domain
+models, ports, persistence, the API, telemetry, and containerization are not
+yet built. See `docs/plans/2026-07-28-m1-foundation.md` for the task
+breakdown. Do not invent commands for tooling that does not exist yet — check
+the Commands section below before assuming something runs.
 
 ## Keep the PRD current
 
@@ -58,5 +61,23 @@ upgrade is not a health signal. Assert on received messages instead.
 
 ## Commands
 
-None yet — no code exists. When the project is scaffolded (milestone M1), add
-the real `uv` commands here and delete this note.
+Verified working as of Group A (scaffold + config):
+
+```bash
+uv sync                          # install dependencies
+uv run pytest                    # run the test suite (unit tests only so far)
+uv run pytest tests/unit         # fast unit tests only
+uv run ruff check .              # lint — clean
+uv run mypy                      # type check, strict mode — clean
+uv run lint-imports              # enforce architecture contracts — 3 kept, 0 broken
+```
+
+Caution: `uv run ruff format .` (unscoped) was not run for real — `--check`
+shows it would also reformat Python code fences embedded in `docs/plans/*.md`
+and `docs/prd/*.md` (ruff 0.16 formats Markdown-embedded code by default).
+Scope it — `uv run ruff format src tests` — until an explicit exclude is
+added (Group G), or it will rewrite plan/PRD prose out from under you.
+
+Not yet available — depend on code later M1 groups haven't written:
+`uv run alembic revision|upgrade` (needs Group D's migrations),
+`docker compose up` (needs Group G's `Dockerfile`/`compose.yml`).
