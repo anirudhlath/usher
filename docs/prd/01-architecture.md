@@ -159,7 +159,8 @@ usher/
 │   ├── jobs/        queue.py, scheduler.py, tasks/
 │   ├── db/          models/, repositories/ (implement ports/), migrations/
 │   └── config.py
-├── tests/           unit/, integration/, fixtures/
+├── tests/           unit/, integration/, fixtures/, fakes/ (port doubles
+│                    services are unit-tested against, e.g. FakeTitleRepository)
 ├── compose.yml
 └── pyproject.toml
 ```
