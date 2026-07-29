@@ -46,15 +46,23 @@ packages = ["src/usher"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --strict-markers --strict-config"
 
 [tool.ruff]
 line-length = 100
 target-version = "py313"
 src = ["src", "tests"]
+# docs/ holds planning and PRD markdown with embedded Python code fences that
+# other groups transcribe verbatim; ruff 0.16+ formats/lints Markdown-embedded
+# code by default, so without this exclude `ruff format .` silently rewrites
+# plan prose out from under whoever runs it.
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # assert is how pytest tests assert; not a bandit finding here
 
 [tool.mypy]
 python_version = "3.13"

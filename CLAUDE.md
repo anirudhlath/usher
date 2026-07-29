@@ -75,15 +75,17 @@ uv sync                          # install dependencies
 uv run pytest                    # run the test suite (unit tests only so far)
 uv run pytest tests/unit         # fast unit tests only
 uv run ruff check .              # lint — clean
+uv run ruff format .             # format — clean
 uv run mypy                      # type check, strict mode — clean
-uv run lint-imports              # enforce architecture contracts — 3 kept, 0 broken
+uv run lint-imports              # enforce architecture contracts — 4 kept, 0 broken
 ```
 
-Caution: `uv run ruff format .` (unscoped) was not run for real — `--check`
-shows it would also reformat Python code fences embedded in `docs/plans/*.md`
-and `docs/prd/*.md` (ruff 0.16 formats Markdown-embedded code by default).
-Scope it — `uv run ruff format src tests` — until an explicit exclude is
-added (Group G), or it will rewrite plan/PRD prose out from under you.
+`[tool.ruff] extend-exclude = ["docs"]` keeps ruff off `docs/plans/*.md` and
+`docs/prd/*.md` — ruff 0.16+ formats/lints Python code fences embedded in
+Markdown by default, and those two directories hold planning and PRD prose
+with embedded code fences that must stay byte-identical for other groups to
+transcribe. Without the exclude, an unscoped `ruff format .` silently
+rewrites that prose.
 
 Not yet available — depend on code later M1 groups haven't written:
 `uv run alembic revision|upgrade` (needs Group D's migrations),

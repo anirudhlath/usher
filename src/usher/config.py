@@ -6,7 +6,9 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_PLACEHOLDER_SECRET_KEY = "change-me-to-a-long-random-string"
+# Not a credential — the exact placeholder .env.example ships, kept only to
+# detect and reject it. See _reject_placeholder_secret_key below.
+_PLACEHOLDER_SECRET_KEY = "change-me-to-a-long-random-string"  # noqa: S105
 _ASYNCPG_DRIVER_PREFIX = "postgresql+asyncpg://"
 
 
@@ -27,7 +29,7 @@ class Settings(BaseSettings):
     database_url: SecretStr
     secret_key: SecretStr = Field(min_length=32)
 
-    host: str = "0.0.0.0"
+    host: str = "0.0.0.0"  # noqa: S104  intentional: default bind-all for a containerized service
     port: int = Field(default=8000, ge=1, le=65535)
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
