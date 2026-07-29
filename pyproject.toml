@@ -47,6 +47,20 @@ packages = ["src/usher"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-q --strict-markers --strict-config"
+# Applied automatically to every test under tests/integration/ by that
+# directory's conftest.py (pytest_collection_modifyitems) -- not hand-applied
+# per test. Registered here because --strict-markers rejects unknown markers.
+# Directory placement (tests/unit vs tests/integration) is still the primary
+# way Docker-dependence is organised; this marker is the secondary, explicit
+# selector for tooling that would rather filter by -m than by path, e.g.
+# `pytest -m "not integration"` / `pytest -m integration`. Deliberately not
+# wired into addopts as a default `-m "not integration"` -- that would make
+# `pytest tests/integration/...` (which Task 10's own TDD steps invoke
+# directly, no `-m` override) silently collect zero tests instead of running
+# them, since addopts marker expressions apply even to an explicit path.
+markers = [
+    "integration: needs a live PostgreSQL via Docker (testcontainers); see tests/integration/conftest.py",
+]
 
 [tool.ruff]
 line-length = 100

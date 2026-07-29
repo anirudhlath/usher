@@ -8,9 +8,7 @@ from decimal import Decimal
 import pytest
 
 from tests.fakes.title_repository import FakeTitleRepository
-from usher.domain.enums import EnrichmentState, TitleKind
-from usher.domain.ids import new_id
-from usher.domain.title import Title
+from usher.domain.enums import TitleKind
 from usher.ports.embedding import Embedder
 from usher.ports.errors import (
     PortAuthFailed,
@@ -173,104 +171,18 @@ def test_metadata_candidate_uses_the_canonical_kind_vocabulary() -> None:
 # Embedder above stands in for a real one. It lives outside this module so
 # M4 can import it without dragging in this file's fixtures and parametrized
 # tests.
-
-
-@pytest.fixture
-def fake_title_repository() -> FakeTitleRepository:
-    return FakeTitleRepository()
+#
+# The behavioural suite that used to live here (add/get round trip, reject
+# duplicate, update, count_by_state, ...) moved to
+# tests/contract/title_repository_contract.py (Task 10), so the identical
+# assertions run against both this fake and the real, Postgres-backed
+# PostgresTitleRepository instead of two hand-maintained copies drifting
+# apart -- see tests/unit/test_title_repository_contract.py and
+# tests/integration/test_title_repository.py's
+# TestPostgresTitleRepositoryContract. What's left here is the one check
+# with no real-repository counterpart to share it with: the ABC-shape
+# assertion this whole file is about.
 
 
 def test_complete_title_repository_implementation_instantiates() -> None:
     assert isinstance(FakeTitleRepository(), TitleRepository)
-
-
-async def test_title_repository_add_then_get_round_trips(
-    fake_title_repository: FakeTitleRepository,
-) -> None:
-    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
-    await fake_title_repository.add(title)
-    assert await fake_title_repository.get(title.id) == title
-
-
-async def test_title_repository_add_rejects_a_duplicate_id(
-    fake_title_repository: FakeTitleRepository,
-) -> None:
-    """The bug this closes: add() used to silently overwrite on a
-    duplicate id -- exactly what a service "updating" a title by
-    re-adding it would do, passing this fake while the real,
-    Postgres-backed repository raises IntegrityError on the same call."""
-    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
-    await fake_title_repository.add(title)
-    with pytest.raises(RepositoryConflict):
-        await fake_title_repository.add(title)
-
-
-async def test_title_repository_update_mutates_an_existing_title(
-    fake_title_repository: FakeTitleRepository,
-) -> None:
-    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
-    await fake_title_repository.add(title)
-    enriched = title.evolve(enrichment_state=EnrichmentState.ENRICHED)
-    await fake_title_repository.update(enriched)
-    fetched = await fake_title_repository.get(title.id)
-    assert fetched is not None
-    assert fetched.enrichment_state is EnrichmentState.ENRICHED
-
-
-async def test_title_repository_update_rejects_an_unknown_id(
-    fake_title_repository: FakeTitleRepository,
-) -> None:
-    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
-    with pytest.raises(RepositoryNotFound):
-        await fake_title_repository.update(title)
-
-
-async def test_title_repository_get_returns_none_for_unknown_id(
-    fake_title_repository: FakeTitleRepository,
-) -> None:
-    assert await fake_title_repository.get(new_id()) is None
-
-
-async def test_title_repository_get_by_tmdb_id_finds_the_title(
-    fake_title_repository: FakeTitleRepository,
-) -> None:
-    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
-    await fake_title_repository.add(title)
-    found = await fake_title_repository.get_by_tmdb_id(438631)
-    assert found is not None
-    assert found.id == title.id
-
-
-async def test_title_repository_get_by_imdb_id_finds_the_title(
-    fake_title_repository: FakeTitleRepository,
-) -> None:
-    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt1160419")
-    await fake_title_repository.add(title)
-    found = await fake_title_repository.get_by_imdb_id("tt1160419")
-    assert found is not None
-    assert found.id == title.id
-
-
-async def test_title_repository_count_by_state_reports_the_catalog(
-    fake_title_repository: FakeTitleRepository,
-) -> None:
-    for i in range(3):
-        await fake_title_repository.add(
-            Title(kind=TitleKind.MOVIE, name=f"Film {i}", sort_name=f"Film {i}")
-        )
-    counts = await fake_title_repository.count_by_state()
-    assert counts[EnrichmentState.SKELETON] == 3
-
-
-async def test_title_repository_count_by_state_is_never_sparse(
-    fake_title_repository: FakeTitleRepository,
-) -> None:
-    """The bug this closes: a bare counts[EnrichmentState.ENRICHED] was a
-    latent KeyError whenever nothing was enriched yet -- real GROUP BY only
-    returns rows that exist, and the old fake matched that by coincidence,
-    not by a documented contract."""
-    await fake_title_repository.add(Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune"))
-    counts = await fake_title_repository.count_by_state()
-    assert counts[EnrichmentState.ENRICHED] == 0
-    assert counts[EnrichmentState.STUB] == 0
-    assert set(counts) == set(EnrichmentState)
