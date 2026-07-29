@@ -79,6 +79,24 @@ def test_telemetry_disabled_when_no_endpoint(monkeypatch):
     assert Settings().telemetry_enabled is False
 
 
+def test_telemetry_enabled_when_endpoint_set(monkeypatch):
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
+    monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+    assert Settings().telemetry_enabled is True
+
+
+def test_service_name_read_without_usher_prefix(monkeypatch):
+    """service_name (and otlp_endpoint) use an explicit alias to the
+    unprefixed OTEL_* convention, bypassing env_prefix="USHER_" entirely —
+    the one interaction in this module a routine refactor would most easily
+    break silently."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
+    monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "usher-test")
+    assert Settings().service_name == "usher-test"
+
+
 def test_blank_tmdb_api_key_is_none(monkeypatch):
     """USHER_TMDB_API_KEY= (present but empty, as .env.example ships it) must
     parse to None, not '' — otherwise `is not None` checks take the wrong
