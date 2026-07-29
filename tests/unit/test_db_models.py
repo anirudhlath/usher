@@ -11,10 +11,19 @@ in Task 9's migration verification, not here.
 
 from typing import cast
 
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy import Table
 
 from usher.db.base import Base
 from usher.db.models import MediaItemRow, SourceRow, TitleRow, UserRow, WatchStateRow
+from usher.domain.enums import (
+    EnrichmentState,
+    HdrFormat,
+    ProductionStatus,
+    SourceKind,
+    TitleKind,
+    WatchStateOrigin,
+)
 
 
 def test_all_core_tables_registered() -> None:
@@ -111,3 +120,124 @@ def test_source_and_user_check_constraint_names() -> None:
     user_names = {c.name for c in user_table.constraints if c.name is not None}
     assert "ck_sources_name_not_empty" in source_names
     assert "ck_users_name_not_empty" in user_names
+
+
+# --- coverage for the schema-hardening review -------------------------------
+
+
+def test_foreign_key_ondelete_semantics() -> None:
+    """Pins the asymmetry that used to be a review finding instead of a
+    design conversation: MediaItem.title_id is SET NULL (an unmatched item
+    is worth keeping -- review queue), WatchState.title_id is RESTRICT (a
+    watch record *is* the thing worth keeping, so a Title merge must
+    repoint it explicitly rather than have it vanish under a DELETE). See
+    ADR-0010."""
+    media_items_source_fk = next(iter(MediaItemRow.__table__.c.source_id.foreign_keys))
+    assert media_items_source_fk.ondelete == "CASCADE"
+    media_items_title_fk = next(iter(MediaItemRow.__table__.c.title_id.foreign_keys))
+    assert media_items_title_fk.ondelete == "SET NULL"
+    watch_states_title_fk = next(iter(WatchStateRow.__table__.c.title_id.foreign_keys))
+    assert watch_states_title_fk.ondelete == "RESTRICT"
+    watch_states_user_fk = next(iter(WatchStateRow.__table__.c.user_id.foreign_keys))
+    assert watch_states_user_fk.ondelete == "CASCADE"
+
+
+def test_enum_columns_are_real_enums_not_bare_strings() -> None:
+    """A bare String(N) column has no result processor, so Mapped[TitleKind]
+    would lie: isinstance(row.kind, TitleKind) is False on read even though
+    mypy believes otherwise (verified). Every enum-typed column must use
+    usher.db.base.enum_column instead, storing each member's .value (the
+    lowercase wire/storage identifier enums.py documents), not its .name."""
+    cases = [
+        (TitleRow.__table__.c.kind, TitleKind),
+        (TitleRow.__table__.c.status, ProductionStatus),
+        (TitleRow.__table__.c.enrichment_state, EnrichmentState),
+        (SourceRow.__table__.c.kind, SourceKind),
+        (MediaItemRow.__table__.c.hdr_format, HdrFormat),
+        (WatchStateRow.__table__.c.origin, WatchStateOrigin),
+    ]
+    for column, enum_cls in cases:
+        column_type = column.type
+        assert isinstance(column_type, SAEnum)
+        assert column_type.enum_class is enum_cls
+        assert column_type.native_enum is False
+        # The critical property: stored values are each member's .value
+        # (e.g. TitleKind.MOVIE -> "movie"), never its .name (-> "MOVIE").
+        # SQLAlchemy's default binds/reads .name -- verified directly that
+        # without values_callable, this assertion fails and, worse, the
+        # result processor cannot even parse this schema's own already-
+        # lowercase-stored data. (HdrFormat's real values -- "HDR10", "DV",
+        # "HLG" -- are legitimately uppercase, so this must compare against
+        # enum_cls's actual .value set, not assert a blanket lowercase rule.)
+        assert set(column_type.enums) == {member.value for member in enum_cls}
+        # No membership CHECK: Pydantic owns that, matching every other
+        # constraint in this schema (see enum_column's docstring).
+        assert column_type.create_constraint is False
+
+
+def test_naming_convention_named_the_previously_unnamed_constraints() -> None:
+    """Spot-checks a PK, an FK, and the one inline unique=True column --
+    the three kinds of constraint that had no explicit name before
+    NAMING_CONVENTION existed, and would otherwise carry a Postgres-
+    generated name like "titles_pkey" or "media_items_title_id_fkey"."""
+    assert cast(Table, TitleRow.__table__).primary_key.name == "pk_titles"
+    media_items_title_fk = next(iter(MediaItemRow.__table__.c.title_id.foreign_keys))
+    # ForeignKey.name is a different (and here unset) attribute from the
+    # name of its parent ForeignKeyConstraint, which is what the naming
+    # convention actually names -- verified directly.
+    assert media_items_title_fk.constraint is not None
+    assert media_items_title_fk.constraint.name == "fk_media_items_title_id_titles"
+    user_table = cast(Table, UserRow.__table__)
+    unique_names = {
+        c.name for c in user_table.constraints if type(c).__name__ == "UniqueConstraint"
+    }
+    assert "uq_users_name" in unique_names
+
+
+def test_naming_convention_does_not_touch_explicit_check_constraint_names() -> None:
+    """The naming convention's "ck" key (deliberately absent -- see
+    NAMING_CONVENTION's docstring) would double-prefix an already-fully-
+    formed explicit name into e.g. "ck_titles_ck_titles_year_non_negative"
+    if it were present -- verified directly. This test would catch that
+    regression if "ck" were ever added back."""
+    table = cast(Table, TitleRow.__table__)
+    # isinstance, not `is not None`: Constraint.name's stub is
+    # `str | Literal[_NoneName.NONE_NAME]`, a sentinel mypy doesn't narrow
+    # away with a plain None check -- needed here (unlike the other
+    # constraint-name tests above) because .startswith below requires str.
+    names = {c.name for c in table.constraints if isinstance(c.name, str)}
+    assert "ck_titles_year_non_negative" in names
+    assert not any(name.startswith("ck_titles_ck_") for name in names)
+
+
+def test_new_indexes_from_the_schema_hardening_review_exist() -> None:
+    titles_indexes = {idx.name for idx in cast(Table, TitleRow.__table__).indexes}
+    assert "ix_titles_tvdb_id" in titles_indexes
+    assert "ix_titles_name_lower_year" in titles_indexes
+    watch_states_indexes = {idx.name for idx in cast(Table, WatchStateRow.__table__).indexes}
+    assert "ix_watch_states_title_id" in watch_states_indexes
+
+
+def test_bulk_load_friendly_columns_have_server_defaults() -> None:
+    """These are exactly the NOT NULL columns whose only default used to be
+    Python-side (default=), so a raw INSERT/COPY that omits them -- M2's
+    entire bulk-load path -- failed with a NotNullViolation. origin is
+    deliberately excluded: it must never get a default, see watch.py."""
+    columns_needing_server_default = [
+        TitleRow.__table__.c.genres,
+        TitleRow.__table__.c.keywords,
+        TitleRow.__table__.c.spoken_languages,
+        TitleRow.__table__.c.origin_countries,
+        TitleRow.__table__.c.field_provenance,
+        TitleRow.__table__.c.enrichment_state,
+        SourceRow.__table__.c.enabled,
+        SourceRow.__table__.c.supports_push,
+        MediaItemRow.__table__.c.available,
+        UserRow.__table__.c.is_default,
+        WatchStateRow.__table__.c.position_seconds,
+        WatchStateRow.__table__.c.played,
+        WatchStateRow.__table__.c.play_count,
+    ]
+    for column in columns_needing_server_default:
+        assert column.server_default is not None, f"{column} has no server_default"
+    assert WatchStateRow.__table__.c.origin.server_default is None
