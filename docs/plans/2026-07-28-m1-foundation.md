@@ -35,6 +35,7 @@
 | `src/usher/ports/embedding.py` | `Embedder` ABC |
 | `src/usher/ports/llm.py` | `LLMClient` ABC |
 | `src/usher/ports/repository.py` | `TitleRepository` ABC — added post-planning, see Task 6 |
+| `src/usher/ports/errors.py` | `UsherPortError` taxonomy — added post-planning, see Task 6 |
 | `src/usher/db/base.py` | Declarative base, engine, session factory |
 | `src/usher/db/models/*.py` | SQLAlchemy tables |
 | `src/usher/db/repositories/title.py` | `PostgresTitleRepository`, inherits `TitleRepository` |
@@ -42,7 +43,7 @@
 | `src/usher/api/app.py` | App factory |
 | `src/usher/api/deps.py` | Request-scoped dependencies |
 | `src/usher/api/routers/health.py` | `/health`, `/health/ready` |
-| `tests/unit/`, `tests/integration/` | Test suites |
+| `tests/unit/`, `tests/integration/`, `tests/fakes/` | Test suites; `fakes/` holds port doubles services are unit-tested against (added post-planning, see Task 6) |
 
 ---
 
@@ -145,6 +146,33 @@ type = "forbidden"
 source_modules = ["usher.services"]
 forbidden_modules = ["usher.adapters"]
 ```
+
+> **Amended post-implementation.** The `pyproject.toml` above is Task 1's
+> original scaffold; the shipped file has diverged in six ways since, none
+> reflected here:
+>
+> - The three denylist-style contracts above (`domain is pure`, `ports
+>   depend only on domain`, `services never import adapters`) became four
+>   allowlist-shaped ones (`hexagonal layering`, `adapters are driven, not
+>   driving`, `db is driven, not driving`, `config stays out of the
+>   core`) — every top-level package's place is now defined by where it
+>   sits, not by a hand-maintained forbidden list per package. This is why
+>   later tasks say "4 kept, 0 broken", not "3 kept" as this block would
+>   suggest.
+> - `[tool.ruff.lint] select` gained `"S"` (bandit-derived security lints).
+> - `[tool.ruff]` gained `extend-exclude = ["docs"]`, so `ruff format .`
+>   doesn't rewrite the embedded code fences in this plan and the PRD out
+>   from under whoever runs it.
+> - `[tool.ruff.lint.per-file-ignores]` gained `"tests/**" = ["S101"]` —
+>   `assert` is how pytest tests assert, not a bandit finding there.
+> - `[tool.pytest.ini_options] addopts` gained `--strict-markers
+>   --strict-config`.
+> - `[tool.mypy]` switched from `packages = ["usher"]` to `files = ["src",
+>   "tests"]` — mypy strict covers `tests/` too as of this change, which
+>   is why test functions need `-> None` annotations from Task 2 onward.
+>
+> Read `pyproject.toml` directly rather than trusting this block for
+> anything beyond the shape of the file.
 
 - [ ] **Step 2: Create `.gitignore`**
 
@@ -1416,15 +1444,11 @@ class SourceAdapter(ABC):
         """Ranked ways to play an item."""
 
     @abstractmethod
-    def watch_state(
-        self, since: datetime | None = None
-    ) -> AsyncIterator[SourceWatchState]:
+    def watch_state(self, since: datetime | None = None) -> AsyncIterator[SourceWatchState]:
         """Watch state from the source, optionally since a cursor."""
 
     @abstractmethod
-    async def push_watch_state(
-        self, external_id: str, state: WatchStateUpdate
-    ) -> None:
+    async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
         """Write watch state back. Best-effort; may raise."""
 
     @abstractmethod
@@ -1529,6 +1553,81 @@ Expected: 20 passed
 git add src/usher/ports/repository.py tests/unit/test_ports.py
 git commit -m "feat: add TitleRepository, the repository driven port"
 ```
+
+> **Amended post-implementation.** A quality review of all six ports found
+> three categories of problem: signatures that would not survive contact
+> with a real implementation (`TitleRepository` had no write path —
+> `add()` alone cannot express PRD 03's stub-on-sight-then-enrich mutation
+> of an *existing* Title, and the original `FakeTitleRepository` concealed
+> this by silently overwriting on a duplicate id where the real,
+> Postgres-backed repository raises `IntegrityError`); no shared error
+> taxonomy at all, so a service could only catch bare `Exception` or
+> import `httpx`/SQLAlchemy errors directly, breaking "adapters are
+> driven, not driving"; and `SourceItem` typing that let a naive datetime
+> and a raw source string like `"DolbyVision"` through where `MediaItem`
+> rejects both, pushing the failure one layer late. None of this is
+> captured in the Step 1–5 blocks above; the current, hardened ports are
+> summarised below and should be read directly from `src/usher/ports/`,
+> not transcribed from this section.
+>
+> - **`src/usher/ports/errors.py` (new).** `UsherPortError` →
+>   `PortUnavailable`, `PortAuthFailed`, `PortRateLimited(retry_after)`.
+>   `SourceNotSupported` (`source.py`) is reparented under it.
+> - **`source.py`:** `SourceItem.kind` is now `SourceItemKind`
+>   (movie/series/episode); `hdr_format` is `HdrFormat`, not a raw string;
+>   `added_at` is `AwareDatetime`. `SourceAdapter` gained `supports_push`
+>   (a property) and `aclose()`. `SourceWatchState` gained
+>   `source_user_id: str | None` (Emby is multi-user). `SourceEvent.
+>   external_ids` is now a `tuple`, matching the domain layer's tuple
+>   convention. The `list_items`/`watch_state`/`get_item`/
+>   `push_watch_state` docstrings now state the contract an implementer
+>   must guarantee — ordering, `since` inclusivity, duplicates, and (the
+>   load-bearing one) *must raise, never truncate silently* — not just
+>   the signature.
+> - **`metadata.py`:** `search()` returns `list[MetadataCandidate]`
+>   (`provider_id, name, year, kind, popularity`), not
+>   `list[dict[str, Any]]` — the match stage no longer indexes into
+>   TMDb's own keys. `fetch()` still returns a raw `dict`, deliberately:
+>   it is an opaque blob for `raw_payloads`, not a shortcut that skipped
+>   normalisation the way `search()`'s old return type was.
+> - **`search.py`:** `SearchRequest.semantic: bool` is now
+>   `mode: SearchMode` (`full_text | semantic | fused`) — the old bool
+>   could not express `fused`, even though RRF fusion is the actual
+>   design (ADR-0002).
+> - **`llm.py`:** `LLMUsage` is a `@dataclass(frozen=True)`, moved above
+>   `LLMClient` (no more forward-ref string), so two calls that recorded
+>   the same numbers compare equal instead of only by identity.
+>   `cost_usd` is `Decimal`. `purpose: str` is `LLMPurpose` (PRD 10's
+>   `curation | query_expansion` vocabulary). `LLMClient` gained
+>   `aclose()`.
+> - **`embedding.py`:** `Embedder` gained `aclose()` and a docstring
+>   contract (vectors are L2-normalised; callers own any query-side
+>   prefix their model needs).
+> - **`repository.py`:** gained `update()` alongside `add()` —
+>   insert-only vs. update-only, matching PRD 03's stub-on-sight-then-
+>   enrich shape. Both document that the caller owns the session and the
+>   transaction (flush, never commit). `count_by_state()`'s docstring now
+>   guarantees all three `EnrichmentState` tiers as keys, 0 for any with
+>   no titles — never a sparse dict.
+> - **Several fields and methods are marked 🔶 provisional** in their own
+>   docstrings, each naming the milestone that settles it
+>   (`MetadataProvider.to_title`/`fetch`/`changed_since`, `SearchIndex`/
+>   `SearchIndex.suggest`, `Embedder`'s query/document split,
+>   `SourceAdapter.verify`, `StreamTarget`, `SourceEvent`). The
+>   corresponding PRD sections carry the same marker — see PRD 03, 04, 05,
+>   and 07.
+> - **`FakeTitleRepository` moved to `tests/fakes/title_repository.py`**
+>   so M4 can import it without dragging in this module's fixtures and
+>   parametrized tests along with it. It now matches the port's real
+>   add/update split — a duplicate `add()` raises instead of silently
+>   overwriting, and `count_by_state()` is never sparse.
+>
+> `tests/unit/test_ports.py` grew from 20 cases to 35 covering all of the
+> above; read it directly rather than this task's original Step 1 for the
+> current contract.
+>
+> Run: `uv run pytest tests/unit/test_ports.py -v`
+> Expected: 35 passed
 
 ---
 
@@ -2254,6 +2353,17 @@ git commit -m "feat: alembic async migrations and initial core schema"
 > already takes for every other port. Wiring that up is a service-layer
 > concern for a milestone after M1; this task only needs to produce a class
 > that satisfies the port.
+>
+> **A second amendment, same review:** `TitleRepository` gained `update()`
+> alongside `add()` — `add()` alone cannot express PRD 03's read-through
+> design, where enrichment mutates an *existing* stub-on-sight Title
+> rather than creating a new one. Step 4's code block below already
+> includes it: an insert-only `add()` and an update-only `update()`, each
+> raising rather than silently doing the other's job on a mismatched id.
+> Both flush and never commit — the caller owns the session and the
+> transaction. `count_by_state()` also changed: it now always returns all
+> three `EnrichmentState` tiers, 0 for any with no titles, rather than
+> whatever `GROUP BY` happened to return rows for.
 
 **Files:**
 - Create: `src/usher/db/repositories/title.py`
@@ -2301,18 +2411,22 @@ async def session(postgres_url: str) -> AsyncSession:
 ```python
 # tests/integration/test_title_repository.py
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.ids import new_id
 from usher.domain.title import Title
 
 
 @pytest.fixture
-def repo(session) -> PostgresTitleRepository:
+def repo(session: AsyncSession) -> PostgresTitleRepository:
     return PostgresTitleRepository(session)
 
 
-async def test_add_then_get_round_trips_the_domain_model(repo):
+async def test_add_then_get_round_trips_the_domain_model(
+    repo: PostgresTitleRepository,
+) -> None:
     title = Title(
         kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", year=2021, tmdb_id=438631
     )
@@ -2324,30 +2438,41 @@ async def test_add_then_get_round_trips_the_domain_model(repo):
     assert fetched.enrichment_state is EnrichmentState.SKELETON
 
 
-async def test_get_returns_none_for_unknown_id(repo):
-    from usher.domain.ids import new_id
-
+async def test_get_returns_none_for_unknown_id(repo: PostgresTitleRepository) -> None:
     assert await repo.get(new_id()) is None
 
 
-async def test_get_by_tmdb_id_finds_the_title(repo):
+async def test_get_by_tmdb_id_finds_the_title(repo: PostgresTitleRepository) -> None:
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
     await repo.add(title)
     found = await repo.get_by_tmdb_id(438631)
     assert found is not None and found.id == title.id
 
 
-async def test_titles_without_provider_ids_are_allowed(repo):
+async def test_titles_without_provider_ids_are_allowed(
+    repo: PostgresTitleRepository,
+) -> None:
     title = Title(kind=TitleKind.MOVIE, name="Home Video 1998", sort_name="Home Video 1998")
     await repo.add(title)
     assert (await repo.get(title.id)) is not None
 
 
-async def test_count_by_state_reports_the_catalog(repo):
+async def test_update_mutates_an_existing_title(repo: PostgresTitleRepository) -> None:
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
+    await repo.add(title)
+    enriched = title.evolve(enrichment_state=EnrichmentState.ENRICHED)
+    await repo.update(enriched)
+    fetched = await repo.get(title.id)
+    assert fetched is not None
+    assert fetched.enrichment_state is EnrichmentState.ENRICHED
+
+
+async def test_count_by_state_reports_the_catalog(repo: PostgresTitleRepository) -> None:
     for i in range(3):
         await repo.add(Title(kind=TitleKind.MOVIE, name=f"Film {i}", sort_name=f"Film {i}"))
     counts = await repo.count_by_state()
     assert counts[EnrichmentState.SKELETON] == 3
+    assert counts[EnrichmentState.ENRICHED] == 0
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
@@ -2396,6 +2521,21 @@ class PostgresTitleRepository(TitleRepository):
         self._session.add(_to_row(title))
         await self._session.flush()
 
+    async def update(self, title: Title) -> None:
+        row = await self._session.get(TitleRow, title.id)
+        if row is None:
+            raise ValueError(f"no existing title {title.id} to update")
+        # _to_row(title) raises loudly on any field/column mismatch, the same
+        # way add() does -- a setattr loop straight off title.model_dump()
+        # would not raise, it would just silently skip a would-be column
+        # that no longer has a match, undoing the "loud, not silent" point
+        # made below.
+        fresh = _to_row(title)
+        for column in TitleRow.__table__.columns:
+            if column.name not in {"id", "created_at", "updated_at"}:
+                setattr(row, column.name, getattr(fresh, column.name))
+        await self._session.flush()
+
     async def get(self, title_id: uuid.UUID) -> Title | None:
         row = await self._session.get(TitleRow, title_id)
         return _to_domain(row) if row else None
@@ -2420,7 +2560,9 @@ class PostgresTitleRepository(TitleRepository):
                 TitleRow.enrichment_state
             )
         )
-        return {EnrichmentState(state): count for state, count in result.all()}
+        counts = dict.fromkeys(EnrichmentState, 0)
+        counts.update({EnrichmentState(state): count for state, count in result.all()})
+        return counts
 ```
 
 > **Amended post-implementation — verified, not changed.** The domain-model
@@ -2467,7 +2609,7 @@ class PostgresTitleRepository(TitleRepository):
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `uv run pytest tests/integration/test_title_repository.py -v`
-Expected: 5 passed (first run pulls the `pgvector/pgvector:pg17` image)
+Expected: 6 passed (first run pulls the `pgvector/pgvector:pg17` image)
 
 - [ ] **Step 6: Commit**
 
