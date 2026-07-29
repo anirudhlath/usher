@@ -10,11 +10,11 @@ forbidden from importing `usher.db`. This is the enforced form of
 [PRD 01](../01-architecture.md)'s layering rule 2, "`services/` depends only
 on `domain/` and `ports/`."
 
-[Task 10](../../plans/2026-07-28-m1-foundation.md) of the M1 plan places
-`TitleRepository` as a plain class — no ABC, no port — directly in
-`src/usher/db/repositories/title.py`. Under the contract above, that means
-no service can ever import it: not `TitleRepository` itself, and not
-anything else `usher.db` exports. As written, the plan has no path for a
+[Task 10](../../plans/2026-07-28-m1-foundation.md) of the M1 plan originally
+placed `TitleRepository` as a plain class — no ABC, no port — directly in
+`src/usher/db/repositories/title.py`. Under the contract above, that meant no
+service could ever import it: not that class itself, and not anything else
+`usher.db` exports. As originally written, the plan had no path for a
 service to reach persistence at all.
 
 ## Decision

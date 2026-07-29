@@ -68,6 +68,14 @@ Operational requirements:
 > and receives `Sessions`, so a successful upgrade proves nothing. The adapter
 > must assert on *received messages* to consider push healthy.
 
+> 🔶 **Provisional.** `SourceEvent`, the push channel's own DTO, carries no
+> payload beyond `kind` and the affected `external_ids`. That forces a
+> `WATCH_STATE_CHANGED` event to re-walk `watch_state(since=...)` to
+> discover what actually changed, even though Emby's own `UserDataChanged`
+> message already carries the position and played flag. Settle in **M5**,
+> when the push lane is built and the cost of re-walking is measurable
+> against just carrying the payload through.
+
 ## Reconciliation is not optional
 
 Push is the fast path, never the only path. Sockets drop, events are missed, and
@@ -157,6 +165,13 @@ Re-enrichment is driven by TMDb's `/movie/changes` feed rather than blind TTL
 sweeps, with a hard re-fetch ceiling under 6 months to respect TMDb's caching
 term.
 
+> 🔶 **Provisional.** `MetadataProvider.to_title()` returns a single
+> `Title`, but this stage populates `Season`, `Episode`, `Person`,
+> `Credit`, `Collection`, and `Image` too — none of which exist as domain
+> models yet, so the real return shape (a `Title` plus its aggregate, an
+> `EnrichmentResult` bundle, or several methods) would be guesswork today.
+> Settle in **M4**, once those models exist.
+
 ### 4. Index
 
 Update the search document and compute the embedding
@@ -181,7 +196,8 @@ unifies automatically instead of fragmenting.
 
 ## Playback
 
-Usher does not stream. `stream_url()` returns a `StreamTarget` describing how to
-play an item — direct URL, container and codec facts, and any client-specific
-deep-link forms the source can produce. Choosing between them is the client's
-business; Usher's job is to hand over complete information.
+Usher does not stream. `stream_targets()` returns ranked `StreamTarget`s
+describing how to play an item — direct URL, container and codec facts, and
+any client-specific deep-link forms the source can produce. Choosing between
+them is the client's business; Usher's job is to hand over complete
+information.

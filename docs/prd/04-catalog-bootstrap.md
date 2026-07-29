@@ -104,6 +104,17 @@ Then embed all titles that have overviews.
 | Daily | TMDb `/movie/changes` → re-enrich mutated titles (minutes, not hours) |
 | Continuous | Demand-driven enrichment ([03](03-sources-and-sync.md)) |
 
+> 🔶 **Provisional.** `MetadataProvider.changed_since(days: int) ->
+> list[int]` (`usher.ports.metadata`) can't express a resumable cursor
+> through TMDb's paginated, 14-day-capped `/movie/changes` feed — a
+> partial run has no way to pick up where it left off. Relatedly,
+> `fetch`'s `provider_id: int` bakes in TMDb's integer id scheme, which
+> IMDb's own ids (`tt1160419`) don't fit — a problem only once a second
+> `MetadataProvider` exists ([01](01-architecture.md) lists this as an
+> open extension seam; [09](09-roadmap.md) names OMDb/TVDb as post-v1
+> candidates). Settle both in **M4**, when TMDb is still the only
+> implementation and a second provider's real shape isn't guesswork yet.
+
 ## Licensing — ship importers, never data
 
 Usher's MIT license is unaffected by any of these sources, because Usher never

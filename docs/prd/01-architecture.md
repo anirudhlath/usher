@@ -32,12 +32,17 @@ services for a household-scale deployment.
              canonical catalog · search · vectors · job queue
 ```
 
-**`adapters/` subdirectories are named for the upstream service when a port
-has one implementation** (`emby/` → `SourceAdapter`, `tmdb/` →
-`MetadataProvider`) **and for the capability when a port has — or is
-designed for — more than one** (`bulk/` → `BulkDataset`'s four dataset
-importers, `search/` → `SearchIndex`'s Postgres/Meilisearch pair,
-`embedding/`, `llm/`).
+**`adapters/` subdirectories are named for the upstream service when a
+port's implementation talks to one nameable external service** (`emby/` →
+`SourceAdapter`, `tmdb/` → `MetadataProvider`) **and for the capability
+otherwise.** That covers two different reasons, not one: a port with more
+than one implementation (`bulk/` → `BulkDataset`'s four dataset importers,
+`search/` → `SearchIndex`'s Postgres/Meilisearch pair) obviously can't be
+named for a single service — but `embedding/` and `llm/` are capability-named
+too, despite one implementation each, because neither implementation is
+itself a single external service to name: `sentence-transformers` runs
+in-process against a local model, and `litellm` is itself a multi-provider
+abstraction, not one upstream.
 
 **Deployment:** `compose.yml` with `usher` + `postgres`. One stateful service.
 An optional `meilisearch` service exists behind a feature gate — see
@@ -79,21 +84,37 @@ adapters both need, instead of each reimplementing it.
 class SourceAdapter(ABC):
     """A backend that holds playable media."""
 
+    @property
     @abstractmethod
-    async def list_items(self, since: datetime | None) -> AsyncIterator[SourceItem]: ...
+    def source_id(self) -> uuid.UUID: ...
+    @property
+    @abstractmethod
+    def supports_push(self) -> bool: ...
+    @abstractmethod
+    async def verify(self) -> bool: ...
+    @abstractmethod
+    def list_items(self, since: datetime | None) -> AsyncIterator[SourceItem]: ...
     @abstractmethod
     async def get_item(self, external_id: str) -> SourceItem | None: ...
     @abstractmethod
-    async def stream_url(self, external_id: str) -> StreamTarget: ...
+    async def stream_targets(self, external_id: str) -> list[StreamTarget]: ...
     @abstractmethod
-    async def watch_state(self, since: datetime | None) -> AsyncIterator[SourceWatchState]: ...
+    def watch_state(self, since: datetime | None) -> AsyncIterator[SourceWatchState]: ...
     @abstractmethod
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None: ...
     @abstractmethod
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
-        """Push channel. Adapters without one raise NotSupported; the
+        """Push channel. Adapters without one raise SourceNotSupported; the
         reconciler covers them."""
+    @abstractmethod
+    async def aclose(self) -> None: ...
 ```
+
+Note `list_items` and `watch_state` are plain `def`, not `async def` — they return an
+`AsyncIterator` directly rather than being coroutines that produce one. The full
+contract each method promises (ordering, `since` inclusivity, duplicates, must-raise
+rather than truncate) lives on the real ABC in `src/usher/ports/source.py`; this sketch
+shows shape, not the whole docstring.
 
 Other ports follow the same pattern:
 

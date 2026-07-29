@@ -70,6 +70,14 @@ be added if a client turns out to need flexible field selection.
 | `POST /admin/rows/regenerate` | Force LLM curation |
 | `GET /admin/bootstrap/status` · `POST /admin/bootstrap/{phase}` | Dataset import |
 
+> 🔶 **Provisional.** `GET /admin/sources/{id}/status` needs to report bad
+> credentials, unreachable, and reachable-but-push-blocked (e.g. a proxy
+> stripping `Upgrade`) as distinct states. `SourceAdapter.verify() -> bool`
+> can't express that split today. The error taxonomy in
+> `usher.ports.errors` (`PortAuthFailed`, `PortUnavailable`) is the
+> prerequisite; settle in **M3**, when the Emby adapter and this endpoint
+> are built together.
+
 ### Meta
 
 | Endpoint | Purpose |
@@ -83,9 +91,12 @@ be added if a client turns out to need flexible field selection.
 ### Enrichment state is always visible
 
 Every title-bearing response carries `enrichment_state`
-(`skeleton | stub | enriched | failed`) so clients render deliberately —
-skeleton shimmer on fields known to be missing — rather than inferring intent
-from nulls.
+(`skeleton | stub | enriched`) so clients render deliberately — skeleton
+shimmer on fields known to be missing — rather than inferring intent from
+nulls. Whether the *last* enrichment attempt failed is a separate,
+independent field, `enrichment_error` — see
+[ADR-0008](decisions/0008-enrichment-tier-vs-failure.md); this wire contract
+does not carry a `failed` tier.
 
 ```jsonc
 {
@@ -189,6 +200,10 @@ arbitrary dimensions.
 The client chooses based on what it can play. Usher supplies complete
 information and never proxies bytes — the deep-link construction currently done
 by hand in the Home Assistant card moves here, where it is testable.
+
+> 🔶 **Provisional.** The `StreamTarget` port DTO (`usher.ports.source`)
+> doesn't yet carry `scheme` or `audio`, both shown above. Settle in
+> **M3**, alongside the Emby adapter that first has to populate this.
 
 ## Authentication seam
 
