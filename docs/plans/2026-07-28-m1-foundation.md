@@ -294,7 +294,7 @@ def test_settings_read_from_environment(monkeypatch):
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
     settings = Settings()
-    assert settings.database_url == "postgresql+asyncpg://u:p@db:5432/usher"
+    assert settings.database_url.get_secret_value() == "postgresql+asyncpg://u:p@db:5432/usher"
     assert settings.port == 8000
 
 
@@ -323,7 +323,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'usher.config'`
 # src/usher/config.py
 """Application configuration, read from the environment."""
 
-from pydantic import Field
+from functools import lru_cache
+
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -338,8 +340,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str
-    secret_key: str = Field(min_length=32)
+    database_url: SecretStr
+    secret_key: SecretStr = Field(min_length=32)
 
     host: str = "0.0.0.0"
     port: int = 8000
@@ -347,7 +349,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = True
 
-    tmdb_api_key: str | None = None
+    tmdb_api_key: SecretStr | None = None
 
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
@@ -358,9 +360,19 @@ class Settings(BaseSettings):
         return bool(self.otlp_endpoint)
 
 
+@lru_cache
 def get_settings() -> Settings:
-    return Settings()  # type: ignore[call-arg]
+    return Settings()
 ```
+
+Note for whoever next touches this file: the real `src/usher/config.py` has grown
+past this minimal walkthrough — `extra="forbid"`, a placeholder-secret-key
+rejection validator, `Literal[...]` bounds on `log_level`, `Field(ge=1, le=65535)`
+on `port`, an asyncpg-driver validator on `database_url`, and an empty-string→`None`
+coercion for the optional fields. Read the file directly rather than trusting this
+block for anything beyond the two facts that matter to other tasks: `database_url`/
+`secret_key`/`tmdb_api_key` are `SecretStr` (unwrap with `.get_secret_value()` at
+the point of use), and `get_settings()` is cached (tests call `get_settings.cache_clear()`).
 
 - [ ] **Step 4: Run test to verify it passes**
 
