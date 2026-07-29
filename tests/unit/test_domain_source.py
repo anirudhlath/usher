@@ -94,6 +94,11 @@ def test_source_rejects_naive_created_at() -> None:
         _source(created_at=datetime(2026, 1, 1))
 
 
+def test_source_rejects_naive_updated_at() -> None:
+    with pytest.raises(ValidationError):
+        _source(updated_at=datetime(2026, 1, 1))
+
+
 def test_media_item_rejects_naive_added_at() -> None:
     with pytest.raises(ValidationError):
         MediaItem.model_validate(

@@ -89,9 +89,23 @@ def test_user_rejects_naive_created_at() -> None:
         User.model_validate({"name": "default", "created_at": datetime(2026, 1, 1)})
 
 
+def test_user_created_at_defaults_to_aware_now_when_omitted() -> None:
+    """Pins that created_at is required and aware-by-default, not merely
+    that an explicit naive value is rejected -- a field that quietly went
+    back to Optional (default None) would still pass the rejection test
+    above but fail this one the moment created_at is read."""
+    user = User(name="default")
+    assert user.created_at.tzinfo is not None
+
+
 def test_watch_state_rejects_naive_last_played_at() -> None:
     with pytest.raises(ValidationError):
         _watch_state(last_played_at=datetime(2026, 1, 1))
+
+
+def test_watch_state_rejects_naive_updated_at() -> None:
+    with pytest.raises(ValidationError):
+        _watch_state(updated_at=datetime(2026, 1, 1))
 
 
 def test_watch_state_updated_at_defaults_to_aware_now() -> None:

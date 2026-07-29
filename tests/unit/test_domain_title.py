@@ -102,13 +102,16 @@ def test_evolve_rejects_what_model_copy_would_silently_accept() -> None:
 # --- AwareDatetime ----------------------------------------------------------
 
 
-def test_naive_datetime_is_rejected_for_created_at() -> None:
+@pytest.mark.parametrize("field", ["created_at", "updated_at", "enriched_at"])
+def test_naive_datetime_is_rejected(field: str) -> None:
     with pytest.raises(ValidationError):
-        Title(
-            kind=TitleKind.MOVIE,
-            name="Dune",
-            sort_name="Dune",
-            created_at=datetime(2026, 1, 1),  # no tzinfo
+        Title.model_validate(
+            {
+                "kind": TitleKind.MOVIE,
+                "name": "Dune",
+                "sort_name": "Dune",
+                field: datetime(2026, 1, 1),  # no tzinfo
+            }
         )
 
 
@@ -121,11 +124,15 @@ def test_created_at_and_updated_at_default_to_aware_now_when_omitted() -> None:
 # --- immutable containers / hashability -------------------------------------
 
 
-def test_genres_is_an_immutable_tuple() -> None:
-    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", genres=["scifi"])
-    assert title.genres == ("scifi",)
+@pytest.mark.parametrize("field", ["genres", "keywords", "spoken_languages", "origin_countries"])
+def test_tuple_fields_are_immutable(field: str) -> None:
+    title = Title.model_validate(
+        {"kind": TitleKind.MOVIE, "name": "Dune", "sort_name": "Dune", field: ["a"]}
+    )
+    value = getattr(title, field)
+    assert value == ("a",)
     with pytest.raises(AttributeError):
-        title.genres.append("thriller")  # type: ignore[attr-defined]
+        value.append("b")
 
 
 def test_field_provenance_dict_is_still_mutable_despite_frozen() -> None:
@@ -157,6 +164,7 @@ def test_title_is_not_hashable() -> None:
         ("runtime_minutes", -9),
         ("vote_count", -1),
         ("popularity", -1.0),
+        ("community_rating", -1.0),
     ],
 )
 def test_negative_values_are_rejected(field: str, value: object) -> None:
