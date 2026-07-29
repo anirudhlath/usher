@@ -25,6 +25,7 @@
 | `src/usher/telemetry.py` | loguru + OTel bootstrap, trace-context injection |
 | `src/usher/domain/enums.py` | Shared enumerations |
 | `src/usher/domain/ids.py` | UUIDv7 generation |
+| `src/usher/domain/base.py` | `DomainModel` — shared frozen/`extra="forbid"` base + `.evolve()` |
 | `src/usher/domain/title.py` | `Title` |
 | `src/usher/domain/source.py` | `Source`, `MediaItem` |
 | `src/usher/domain/watch.py` | `User`, `WatchState` |
@@ -196,7 +197,7 @@ of film and television, treats media servers (Emby first) as interchangeable
 *sources* that answer "where can this be played?", and exposes an API rich
 enough to build a full media browser against.
 
-Design documentation lives in [`docs/prd/`](docs/prd/README.md).
+Design documentation lives in [`docs/prd/`](../prd/README.md).
 
 ## Status
 
@@ -560,6 +561,98 @@ Expected: `movie`
 ```bash
 git add src/usher/domain/ids.py src/usher/domain/enums.py tests/unit/test_ids.py
 git commit -m "feat: UUIDv7 identifiers and shared domain enums"
+```
+
+---
+
+## Task 3 ½: Shared domain model base
+
+**Added post-implementation — this task did not exist in the original
+plan.** A quality review after Tasks 3–5 first landed found
+`model_config = ConfigDict(frozen=True)` repeated identically five times
+with no shared base, and found that none of the five models rejected an
+unrecognized keyword field — short of the standard `usher.config.Settings`
+(Task 2) already held. `DomainModel` is the fix. It's numbered "3 ½"
+because that's chronologically where it belongs in the read order — after
+the enums Task 3 produces, before `Title` (Task 4), the first model that
+needs it — even though the code was actually written later, in the same
+pass that hardened Tasks 4 and 5. `Title` (Task 4) inherits it first;
+`Source`/`MediaItem`/`User`/`WatchState` (Task 5) were retrofitted onto it
+in the same pass.
+
+**Files:**
+- Create: `src/usher/domain/base.py`
+
+```python
+# src/usher/domain/base.py
+"""Shared base for domain models."""
+
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict
+
+
+class DomainModel(BaseModel):
+    """Base for every Usher domain model.
+
+    ``frozen=True``: instances are immutable once constructed. The write
+    path is `.evolve()`, never `model_copy(update=...)` — the latter skips
+    validation entirely and can hand back an instance with a wrong-typed or
+    out-of-range field that serializes fine and only fails much later, on
+    the way back in. See `evolve` below.
+
+    ``extra="forbid"``: adapters hand-map dozens of provider fields onto
+    these models by keyword. A typo'd field name (`tmbd_id=` for
+    `tmdb_id=`) must fail loudly at construction, not be silently dropped —
+    this is the same standard `usher.config.Settings` already holds.
+
+    Note on hashability: a model with a `dict[...]` field is unhashable
+    even though it is frozen — Python cannot hash a dict, and pydantic's
+    generated `__hash__` hashes every field's value. `Title` carries
+    `field_provenance: dict[str, str]` and is therefore the one domain
+    model in this set that is *not* hashable; the other four carry no dict
+    or list field and are. This asymmetry is intentional — see
+    `Title`'s own docstring — and its failure mode is a loud, immediate
+    `TypeError` from `hash()`, not silent corruption.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    def evolve(self, **changes: object) -> Self:
+        """Return a copy with `changes` applied, re-validated from scratch.
+
+        `model_copy(update=...)` applies changes *without* validation — it
+        can produce an invalid instance (wrong type, out-of-range value)
+        that pydantic will still happily serialize. `evolve()` re-runs
+        every field validator and the model's own `model_validator`s, so an
+        invalid change raises immediately instead of reaching the wire.
+
+        This is a runtime guarantee only, not a static one: `changes` is
+        typed `object`, so `title.evolve(name=123)` still type-checks under
+        mypy and only fails when this method actually runs. That's short of
+        what a dedicated pydantic-aware mypy plugin could give a hand-typed
+        `evolve` per model, which this project doesn't have. It is still
+        strictly better than `model_copy(update=...)`, which validates
+        nothing at either time.
+        """
+        return type(self).model_validate({**self.model_dump(), **changes})
+```
+
+**No dedicated test file.** `DomainModel` itself declares no fields, so
+exercising `frozen`, `extra="forbid"`, and `evolve()` against it directly
+would be close to testing nothing — there's no field to reject a typo for,
+nothing to freeze. Its behavior is proven through the five concrete
+models instead: see `test_domain_title.py`'s `test_extra_fields_are_rejected`,
+`test_evolve_returns_a_changed_validated_copy`, and
+`test_evolve_rejects_what_model_copy_would_silently_accept`, plus the
+frozen-ness and hashability tests repeated across all three
+`test_domain_*.py` files for the other four models.
+
+- [ ] **Commit**
+
+```bash
+git add src/usher/domain/base.py
+git commit -m "feat: add DomainModel base with frozen, extra=forbid, and evolve()"
 ```
 
 ---
@@ -950,7 +1043,7 @@ class WatchState(DomainModel):
 > undocumented; and `hdr_format` was a free string a source's raw
 > vocabulary could reach unchanged. The implementation blocks above are
 > the current, hardened versions, both on the shared `DomainModel` base
-> introduced alongside Task 4 (`src/usher/domain/base.py`).
+> (Task 3 ½, `src/usher/domain/base.py`).
 >
 > A follow-up pass then swept every domain field against the nullability
 > Task 8 declares for its column, specifically to catch more of the same
@@ -1542,7 +1635,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from usher.db.base import Base
-from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.enums import EnrichmentState, ProductionStatus, TitleKind
 
 
 class TitleRow(Base):
@@ -1565,7 +1658,10 @@ class TitleRow(Base):
     overview: Mapped[str | None] = mapped_column(Text)
     tagline: Mapped[str | None] = mapped_column(Text)
     runtime_minutes: Mapped[int | None] = mapped_column(Integer)
-    status: Mapped[str | None] = mapped_column(String(32))
+    # Mapped[ProductionStatus | None], matching how kind/enrichment_state
+    # are typed as their enum despite also being plain String columns
+    # underneath -- not left as a bare str | None by design.
+    status: Mapped[ProductionStatus | None] = mapped_column(String(32))
 
     # ARRAY(Text) accepts a Python tuple on write and always returns a list
     # on read (verified against real Postgres) -- Mapped[list[str]] here is

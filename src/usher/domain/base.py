@@ -39,5 +39,13 @@ class DomainModel(BaseModel):
         that pydantic will still happily serialize. `evolve()` re-runs
         every field validator and the model's own `model_validator`s, so an
         invalid change raises immediately instead of reaching the wire.
+
+        This is a runtime guarantee only, not a static one: `changes` is
+        typed `object`, so `title.evolve(name=123)` still type-checks under
+        mypy and only fails when this method actually runs. That's short of
+        what a dedicated pydantic-aware mypy plugin could give a hand-typed
+        `evolve` per model, which this project doesn't have. It is still
+        strictly better than `model_copy(update=...)`, which validates
+        nothing at either time.
         """
         return type(self).model_validate({**self.model_dump(), **changes})
