@@ -94,6 +94,18 @@ with embedded code fences that must stay byte-identical for other groups to
 transcribe. Without the exclude, an unscoped `ruff format .` silently
 rewrites that prose.
 
+Verified working as of Group D (db engine, models, migrations) — requires a
+live Postgres (e.g. `docker run -d -e POSTGRES_USER=usher -e
+POSTGRES_PASSWORD=usher -e POSTGRES_DB=usher -p 5432:5432
+pgvector/pgvector:pg17`), so not part of the default `uv run pytest` run:
+
+```bash
+export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:5432/usher"
+export USHER_SECRET_KEY="<32+ char secret>"
+uv run alembic upgrade head                       # apply migrations
+uv run alembic downgrade base                     # reverse them (0001 is fully reversible)
+uv run alembic revision --autogenerate -m "..."    # generate a migration from model changes
+```
+
 Not yet available — depend on code later M1 groups haven't written:
-`uv run alembic revision|upgrade` (needs Group D's migrations),
 `docker compose up` (needs Group G's `Dockerfile`/`compose.yml`).
