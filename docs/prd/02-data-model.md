@@ -208,7 +208,8 @@ same film available in more than one place — the append-a-source mechanism.
 `hdr_format` is a closed enum, not a free string: a source's own vocabulary
 (Emby, for instance, emits `"DolbyVision"`) is translated into `HdrFormat`
 by its adapter. No source-specific concept escapes onto this canonical
-field — the rule this file's own opening line states.
+field — the same "only place a backend server is represented" rule this
+section opens with, and that `CLAUDE.md` states project-wide.
 
 **Unmatched items are never dropped.** A `MediaItem` with `title_id IS NULL`
 sits in a review queue exposed over the admin API for manual resolution.

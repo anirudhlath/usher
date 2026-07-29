@@ -18,9 +18,12 @@ Two problems fell out of that shape:
    didn't stop being true because the *next* enrichment attempt failed. A
    retry had no record of which tier to restore on success.
 2. **`StrEnum` ordering is lexicographic, not ladder position.** PRD
-   [03](../03-sources-and-sync.md) describes demand-driven promotion
-   through the tiers, so a "don't downgrade a title's tier" guard is
-   expected in M2–M4. Written the natural way, as
+   [03](../03-sources-and-sync.md) describes demand promoting an
+   unenriched title's enrichment job to top priority, and [09](../09-roadmap.md)
+   places that ("demand promotion") in M5, with the ingest pipeline's
+   own stub-on-sight/enrich steps in M4 — so a "don't downgrade a
+   title's tier" guard is expected well before this ladder sees much
+   use. Written the natural way, as
    `if new_state > title.enrichment_state`, it type-checks, runs, raises
    nothing — and silently inverts the comparison it exists to make.
 
