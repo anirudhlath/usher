@@ -70,20 +70,30 @@ ignore_missing_imports = true
 [tool.importlinter]
 root_packages = ["usher"]
 
-[[tool.importlinter.contracts]]
-name = "domain is pure"
-type = "forbidden"
-source_modules = ["usher.domain"]
-forbidden_modules = ["usher.adapters", "usher.db", "usher.api", "usher.services"]
+# An allowlist, not a denylist: every top-level package's place is defined by
+# where it sits (or that it's named at all), so a new package can't silently
+# escape every contract the way usher.config and usher.api once did under
+# three hand-maintained forbidden_modules lists.
 
 [[tool.importlinter.contracts]]
-name = "ports depend only on domain"
-type = "forbidden"
-source_modules = ["usher.ports"]
-forbidden_modules = ["usher.adapters", "usher.db", "usher.api", "usher.services"]
+name = "hexagonal layering"
+type = "layers"
+layers = ["usher.api", "usher.services", "usher.ports", "usher.domain"]
 
 [[tool.importlinter.contracts]]
-name = "services never import adapters"
+name = "adapters are driven, not driving"
 type = "forbidden"
-source_modules = ["usher.services"]
+source_modules = ["usher.domain", "usher.ports", "usher.services"]
 forbidden_modules = ["usher.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "db is driven, not driving"
+type = "forbidden"
+source_modules = ["usher.domain", "usher.ports", "usher.services"]
+forbidden_modules = ["usher.db"]
+
+[[tool.importlinter.contracts]]
+name = "config stays out of the core"
+type = "forbidden"
+source_modules = ["usher.domain", "usher.ports"]
+forbidden_modules = ["usher.config"]
