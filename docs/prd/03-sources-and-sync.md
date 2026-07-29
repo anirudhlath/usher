@@ -168,9 +168,9 @@ is a pure function of catalog state and can be rebuilt from scratch at any time.
 **Canonical in Usher; sources are event streams and write targets.**
 
 - **Inbound:** `UserDataChanged` (push) and the nightly reconcile write
-  `WatchState` with `updated_by = source`. Progress made in Infuse or Emby's own
+  `WatchState` with `origin = source`. Progress made in Infuse or Emby's own
   apps flows in.
-- **Outbound:** client actions write `WatchState` with `updated_by = api`, then
+- **Outbound:** client actions write `WatchState` with `origin = api`, then
   push to the source best-effort. Failure enqueues a retry and never blocks the
   API response.
 - **Conflicts:** latest `updated_at` wins. With push-based inbound updates the

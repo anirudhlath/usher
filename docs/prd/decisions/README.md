@@ -15,5 +15,6 @@ otherwise be lost and re-litigated in six months.
 | [0005](0005-bulk-bootstrap.md) | Pre-build the catalog from bulk datasets | Accepted |
 | [0006](0006-server-composed-home.md) | Server composes the home screen; REST + OpenAPI | Accepted |
 | [0007](0007-telemetry-architecture.md) | Three datasources; external shared LGTM stack | Accepted |
+| [0008](0008-enrichment-tier-vs-failure.md) | Enrichment tier is orthogonal to enrichment failure | Accepted |
 
 Format: context → decision → consequences → evidence. Short is fine.

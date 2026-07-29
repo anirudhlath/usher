@@ -29,10 +29,20 @@ usable before it is complete (see [03](03-sources-and-sync.md)):
 | `skeleton` | From a bulk dataset. Name, year, runtime, genres, ratings. No overview or artwork. |
 | `stub` | Seen on a source but not yet enriched. Source's own metadata only. |
 | `enriched` | Full provider metadata present. `enriched_at` set. |
-| `failed` | Enrichment attempted and failed. Carries `enrichment_error`. |
 
 Every API response exposes this so clients render deliberately rather than
 guessing from null fields.
+
+Whether the *last enrichment attempt* failed is tracked separately, on
+`Title.enrichment_error: str | None` — a non-null value means the last
+attempt failed, but the tier above is left exactly as it was; failure does
+not consume or reset a rung on the ladder. `failed` was originally a fourth
+tier and was split out — see [ADR-0008](decisions/0008-enrichment-tier-vs-failure.md).
+
+Comparing tiers (e.g. "is this an improvement over what we had") must use
+`usher.domain.enums.ENRICHMENT_RANK`, never the enum members' own ordering —
+`EnrichmentState` is a `StrEnum`, whose ordering is lexicographic, not
+ladder position. Same ADR.
 
 ## Core entities
 
@@ -61,22 +71,31 @@ class Title(BaseModel):
     runtime_minutes: int | None
     status: ProductionStatus | None
 
-    genres: list[str]
-    keywords: list[str]
-    original_language: str | None
-    spoken_languages: list[str]
-    origin_countries: list[str]
+    genres: tuple[str, ...]
+    keywords: tuple[str, ...]
+    original_language: str | None        # ISO 639-1
+    spoken_languages: tuple[str, ...]    # ISO 639-1
+    origin_countries: tuple[str, ...]    # ISO 3166-1 alpha-2
     content_rating: str | None
 
-    community_rating: float | None       # provider aggregate
+    community_rating: float | None       # provider aggregate, TMDb 0-10 scale
     vote_count: int | None
     popularity: float | None
 
     collection_id: UUID | None
     enrichment_state: EnrichmentState
+    enrichment_error: str | None         # non-null => last enrichment attempt failed
     enriched_at: datetime | None
     field_provenance: dict[str, str]     # field -> provider that supplied it
 ```
+
+`genres`/`keywords`/`spoken_languages`/`origin_countries` are tuples, not
+lists: `Title` is frozen, and a `list` field is still mutable in place
+(`title.genres.append(...)` would silently succeed on a "frozen" model). A
+`dict` field has the same problem in principle but a frozen mapping isn't
+worth the ergonomics cost — `field_provenance` stays a plain `dict[str,
+str]`, which is why `Title` is deliberately the one domain model that isn't
+hashable.
 
 `field_provenance` exists so a second metadata provider can be added later
 without ambiguity about which source won a given field.
@@ -174,7 +193,7 @@ class MediaItem(BaseModel):
     container: str | None
     video_codec: str | None; audio_codec: str | None
     width: int | None; height: int | None
-    hdr_format: str | None               # HDR10 | DV | HLG
+    hdr_format: HdrFormat | None          # HDR10 | DV | HLG
     audio_channels: int | None
     file_size_bytes: int | None
     runtime_seconds: int | None
@@ -185,6 +204,11 @@ class MediaItem(BaseModel):
 
 `(source_id, external_id)` is unique. A Title with several MediaItems is the
 same film available in more than one place — the append-a-source mechanism.
+
+`hdr_format` is a closed enum, not a free string: a source's own vocabulary
+(Emby, for instance, emits `"DolbyVision"`) is translated into `HdrFormat`
+by its adapter. No source-specific concept escapes onto this canonical
+field — the rule this file's own opening line states.
 
 **Unmatched items are never dropped.** A `MediaItem` with `title_id IS NULL`
 sits in a review queue exposed over the admin API for manual resolution.
@@ -203,12 +227,24 @@ class WatchState(BaseModel):
     play_count: int
     last_played_at: datetime | None
     updated_at: datetime
-    updated_by: WatchStateOrigin         # source | api
+    origin: WatchStateOrigin             # source | api
 ```
+
+Exactly one of `title_id`/`episode_id` must be set — enforced by the model,
+not just convention. `MediaItem.title_id` is deliberately the opposite:
+permissive, because NULL there means "unmatched, in the review queue", a
+legitimate and common state. An unattached `WatchState` has no equivalent
+legitimate reading, so it is rejected instead.
 
 Unique on `(user_id, title_id)` / `(user_id, episode_id)`. Attached to the
 **canonical** title, not the MediaItem — so it survives a title becoming
 available on a second source, or the first source going away.
+
+Named `origin`, not `updated_by`: in nearly every schema `updated_by` is a
+user FK, and this model has `user_id` sitting right next to it — the
+misreading was close to guaranteed. `origin` never defaults; a write path
+that forgets to set it fails instead of silently mislabeling source-pushed
+state as user-originated.
 
 ### Embedding
 
