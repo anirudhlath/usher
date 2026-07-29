@@ -188,7 +188,7 @@ def test_empty_sort_name_is_rejected() -> None:
 
 
 def test_imdb_id_rejects_person_ids() -> None:
-    """"nm..." identifies a person, not a title — a plausible copy-paste
+    """ "nm..." identifies a person, not a title — a plausible copy-paste
     mistake that must not land on Title.imdb_id."""
     with pytest.raises(ValidationError):
         Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="nm0000190")

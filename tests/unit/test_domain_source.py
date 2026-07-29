@@ -109,9 +109,7 @@ def test_source_created_at_defaults_to_aware_now() -> None:
 )
 def test_media_item_negative_values_are_rejected(field: str, value: object) -> None:
     with pytest.raises(ValidationError):
-        MediaItem.model_validate(
-            {"source_id": new_id(), "external_id": "12345", field: value}
-        )
+        MediaItem.model_validate({"source_id": new_id(), "external_id": "12345", field: value})
 
 
 def test_source_rejects_empty_name() -> None:

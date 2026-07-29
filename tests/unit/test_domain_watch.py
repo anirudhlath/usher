@@ -150,9 +150,7 @@ def test_origin_has_no_default() -> None:
 
 def test_watch_state_rejects_unknown_origin() -> None:
     with pytest.raises(ValidationError):
-        WatchState.model_validate(
-            {"user_id": new_id(), "title_id": new_id(), "origin": "webhook"}
-        )
+        WatchState.model_validate({"user_id": new_id(), "title_id": new_id(), "origin": "webhook"})
 
 
 # --- serialization round-trip (the wire contract from M4 onward) -----------
