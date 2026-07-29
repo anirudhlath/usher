@@ -1,8 +1,8 @@
 """core schema
 
-Revision ID: 4fd67790a956
+Revision ID: a8a0e10ff464
 Revises:
-Create Date: 2026-07-29 12:30:25.616982
+Create Date: 2026-07-29 13:11:04.355484
 
 """
 
@@ -13,7 +13,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "4fd67790a956"
+revision: str = "a8a0e10ff464"
 down_revision: str | Sequence[str] | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -25,13 +25,15 @@ def upgrade() -> None:
     op.create_table(
         "sources",
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("kind", sa.String(length=16), nullable=False),
+        sa.Column(
+            "kind", sa.Enum("emby", name="sourcekind", native_enum=False, length=16), nullable=False
+        ),
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column("base_url", sa.Text(), nullable=False),
         sa.Column("credentials_ref", sa.Text(), nullable=False),
         sa.Column("device_id", sa.Text(), nullable=False),
-        sa.Column("enabled", sa.Boolean(), nullable=False),
-        sa.Column("supports_push", sa.Boolean(), nullable=False),
+        sa.Column("enabled", sa.Boolean(), server_default=sa.text("true"), nullable=False),
+        sa.Column("supports_push", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -45,12 +47,16 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint("name <> ''", name="ck_sources_name_not_empty"),
-        sa.PrimaryKeyConstraint("id"),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_sources")),
     )
     op.create_table(
         "titles",
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("kind", sa.String(length=16), nullable=False),
+        sa.Column(
+            "kind",
+            sa.Enum("movie", "series", name="titlekind", native_enum=False, length=16),
+            nullable=False,
+        ),
         sa.Column("tmdb_id", sa.Integer(), nullable=True),
         sa.Column("imdb_id", sa.String(length=16), nullable=True),
         sa.Column("tvdb_id", sa.Integer(), nullable=True),
@@ -63,21 +69,54 @@ def upgrade() -> None:
         sa.Column("overview", sa.Text(), nullable=True),
         sa.Column("tagline", sa.Text(), nullable=True),
         sa.Column("runtime_minutes", sa.Integer(), nullable=True),
-        sa.Column("status", sa.String(length=32), nullable=True),
-        sa.Column("genres", sa.ARRAY(sa.Text()), nullable=False),
-        sa.Column("keywords", sa.ARRAY(sa.Text()), nullable=False),
+        sa.Column(
+            "status",
+            sa.Enum(
+                "released",
+                "in_production",
+                "post_production",
+                "planned",
+                "canceled",
+                "rumored",
+                "ended",
+                "returning",
+                "pilot",
+                name="productionstatus",
+                native_enum=False,
+                length=32,
+            ),
+            nullable=True,
+        ),
+        sa.Column("genres", sa.ARRAY(sa.Text()), server_default=sa.text("'{}'"), nullable=False),
+        sa.Column("keywords", sa.ARRAY(sa.Text()), server_default=sa.text("'{}'"), nullable=False),
         sa.Column("original_language", sa.String(length=16), nullable=True),
-        sa.Column("spoken_languages", sa.ARRAY(sa.Text()), nullable=False),
-        sa.Column("origin_countries", sa.ARRAY(sa.Text()), nullable=False),
+        sa.Column(
+            "spoken_languages", sa.ARRAY(sa.Text()), server_default=sa.text("'{}'"), nullable=False
+        ),
+        sa.Column(
+            "origin_countries", sa.ARRAY(sa.Text()), server_default=sa.text("'{}'"), nullable=False
+        ),
         sa.Column("content_rating", sa.String(length=32), nullable=True),
         sa.Column("community_rating", sa.Float(), nullable=True),
         sa.Column("vote_count", sa.Integer(), nullable=True),
         sa.Column("popularity", sa.Float(), nullable=True),
         sa.Column("collection_id", sa.UUID(), nullable=True),
-        sa.Column("enrichment_state", sa.String(length=16), nullable=False),
+        sa.Column(
+            "enrichment_state",
+            sa.Enum(
+                "skeleton", "stub", "enriched", name="enrichmentstate", native_enum=False, length=16
+            ),
+            server_default=sa.text("'skeleton'"),
+            nullable=False,
+        ),
         sa.Column("enrichment_error", sa.Text(), nullable=True),
         sa.Column("enriched_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("field_provenance", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column(
+            "field_provenance",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -110,9 +149,15 @@ def upgrade() -> None:
             "vote_count IS NULL OR vote_count >= 0", name="ck_titles_vote_count_non_negative"
         ),
         sa.CheckConstraint("year IS NULL OR year >= 0", name="ck_titles_year_non_negative"),
-        sa.PrimaryKeyConstraint("id"),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_titles")),
     )
-    op.create_index("ix_titles_enrichment_state", "titles", ["enrichment_state"], unique=False)
+    op.create_index(
+        "ix_titles_enrichment_state",
+        "titles",
+        ["enrichment_state"],
+        unique=False,
+        postgresql_where=sa.text("enrichment_state <> 'skeleton'"),
+    )
     op.create_index(
         "ix_titles_imdb_id",
         "titles",
@@ -120,7 +165,19 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("imdb_id IS NOT NULL"),
     )
-    op.create_index("ix_titles_popularity", "titles", ["popularity"], unique=False)
+    op.create_index(
+        "ix_titles_name_lower_year",
+        "titles",
+        [sa.literal_column("lower(name)"), "year"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_titles_popularity",
+        "titles",
+        [sa.literal_column("popularity DESC")],
+        unique=False,
+        postgresql_where=sa.text("popularity IS NOT NULL"),
+    )
     op.create_index("ix_titles_sort_name", "titles", ["sort_name"], unique=False)
     op.create_index(
         "ix_titles_tmdb_id",
@@ -129,11 +186,18 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("tmdb_id IS NOT NULL"),
     )
+    op.create_index(
+        "ix_titles_tvdb_id",
+        "titles",
+        ["tvdb_id"],
+        unique=True,
+        postgresql_where=sa.text("tvdb_id IS NOT NULL"),
+    )
     op.create_table(
         "users",
         sa.Column("id", sa.UUID(), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
-        sa.Column("is_default", sa.Boolean(), nullable=False),
+        sa.Column("is_default", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -141,8 +205,8 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint("name <> ''", name="ck_users_name_not_empty"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("name"),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_users")),
+        sa.UniqueConstraint("name", name=op.f("uq_users_name")),
     )
     op.create_table(
         "media_items",
@@ -156,7 +220,11 @@ def upgrade() -> None:
         sa.Column("audio_codec", sa.String(length=32), nullable=True),
         sa.Column("width", sa.Integer(), nullable=True),
         sa.Column("height", sa.Integer(), nullable=True),
-        sa.Column("hdr_format", sa.String(length=16), nullable=True),
+        sa.Column(
+            "hdr_format",
+            sa.Enum("HDR10", "DV", "HLG", name="hdrformat", native_enum=False, length=16),
+            nullable=True,
+        ),
         sa.Column("audio_channels", sa.Integer(), nullable=True),
         sa.Column("file_size_bytes", sa.BigInteger(), nullable=True),
         sa.Column("runtime_seconds", sa.Integer(), nullable=True),
@@ -167,7 +235,7 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.Column("available", sa.Boolean(), nullable=False),
+        sa.Column("available", sa.Boolean(), server_default=sa.text("true"), nullable=False),
         sa.CheckConstraint(
             "audio_channels IS NULL OR audio_channels >= 0",
             name="ck_media_items_audio_channels_non_negative",
@@ -184,9 +252,19 @@ def upgrade() -> None:
             name="ck_media_items_runtime_seconds_non_negative",
         ),
         sa.CheckConstraint("width IS NULL OR width >= 0", name="ck_media_items_width_non_negative"),
-        sa.ForeignKeyConstraint(["source_id"], ["sources.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["title_id"], ["titles.id"], ondelete="SET NULL"),
-        sa.PrimaryKeyConstraint("id"),
+        sa.ForeignKeyConstraint(
+            ["source_id"],
+            ["sources.id"],
+            name=op.f("fk_media_items_source_id_sources"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["title_id"],
+            ["titles.id"],
+            name=op.f("fk_media_items_title_id_titles"),
+            ondelete="SET NULL",
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_media_items")),
         sa.UniqueConstraint("source_id", "external_id", name="uq_media_items_source_external"),
     )
     op.create_index("ix_media_items_title_id", "media_items", ["title_id"], unique=False)
@@ -203,10 +281,10 @@ def upgrade() -> None:
         sa.Column("user_id", sa.UUID(), nullable=False),
         sa.Column("title_id", sa.UUID(), nullable=True),
         sa.Column("episode_id", sa.UUID(), nullable=True),
-        sa.Column("position_seconds", sa.Integer(), nullable=False),
+        sa.Column("position_seconds", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("runtime_seconds", sa.Integer(), nullable=True),
-        sa.Column("played", sa.Boolean(), nullable=False),
-        sa.Column("play_count", sa.Integer(), nullable=False),
+        sa.Column("played", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column("play_count", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("last_played_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "updated_at",
@@ -214,7 +292,11 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.Column("origin", sa.String(length=16), nullable=False),
+        sa.Column(
+            "origin",
+            sa.Enum("source", "api", name="watchstateorigin", native_enum=False, length=16),
+            nullable=False,
+        ),
         sa.CheckConstraint(
             "num_nonnulls(title_id, episode_id) = 1", name="ck_watch_states_exactly_one_target"
         ),
@@ -226,22 +308,68 @@ def upgrade() -> None:
             "runtime_seconds IS NULL OR runtime_seconds >= 0",
             name="ck_watch_states_runtime_seconds_non_negative",
         ),
-        sa.ForeignKeyConstraint(["title_id"], ["titles.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
+        sa.ForeignKeyConstraint(
+            ["title_id"],
+            ["titles.id"],
+            name=op.f("fk_watch_states_title_id_titles"),
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name=op.f("fk_watch_states_user_id_users"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_watch_states")),
         sa.UniqueConstraint("user_id", "episode_id", name="uq_watch_states_user_episode"),
         sa.UniqueConstraint("user_id", "title_id", name="uq_watch_states_user_title"),
     )
+    op.create_index("ix_watch_states_title_id", "watch_states", ["title_id"], unique=False)
     op.create_index(
         "ix_watch_states_user_played", "watch_states", ["user_id", "played"], unique=False
     )
     # ### end Alembic commands ###
 
+    # Hand-written: autogenerate cannot see triggers/functions, they aren't
+    # part of SQLAlchemy Table metadata. `onupdate=func.now()` on each
+    # model's updated_at column (title.py/source.py/watch.py) is a
+    # SQLAlchemy-Core-only feature -- it has no effect on raw SQL, COPY, or
+    # `ON CONFLICT DO UPDATE`, and M2/M4's bulk ingest is ON CONFLICT DO
+    # UPDATE by definition. A BEFORE UPDATE trigger is what actually
+    # guarantees updated_at reflects every write, regardless of how it was
+    # made. media_items.last_seen_at intentionally has no trigger: it means
+    # "last confirmed present on the source", which must only change when
+    # sync code says so, not on every incidental UPDATE (e.g. one that only
+    # flips `available`).
+    op.execute("""
+        CREATE FUNCTION set_updated_at() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            NEW.updated_at = now();
+            RETURN NEW;
+        END;
+        $$
+    """)
+    for table_name in ("sources", "titles", "watch_states"):
+        op.execute(f"""
+            CREATE TRIGGER trg_{table_name}_set_updated_at
+            BEFORE UPDATE ON {table_name}
+            FOR EACH ROW EXECUTE FUNCTION set_updated_at()
+        """)
+
 
 def downgrade() -> None:
     """Downgrade schema."""
+    # Hand-written (reverses the hand-written block at the end of upgrade()
+    # -- triggers first, since the function can't be dropped while any
+    # trigger still references it).
+    for table_name in ("sources", "titles", "watch_states"):
+        op.execute(f"DROP TRIGGER IF EXISTS trg_{table_name}_set_updated_at ON {table_name}")
+    op.execute("DROP FUNCTION IF EXISTS set_updated_at()")
+
     # ### commands auto generated by Alembic - please adjust! ###
     op.drop_index("ix_watch_states_user_played", table_name="watch_states")
+    op.drop_index("ix_watch_states_title_id", table_name="watch_states")
     op.drop_table("watch_states")
     op.drop_index(
         "ix_media_items_unmatched",
@@ -252,14 +380,26 @@ def downgrade() -> None:
     op.drop_table("media_items")
     op.drop_table("users")
     op.drop_index(
+        "ix_titles_tvdb_id", table_name="titles", postgresql_where=sa.text("tvdb_id IS NOT NULL")
+    )
+    op.drop_index(
         "ix_titles_tmdb_id", table_name="titles", postgresql_where=sa.text("tmdb_id IS NOT NULL")
     )
     op.drop_index("ix_titles_sort_name", table_name="titles")
-    op.drop_index("ix_titles_popularity", table_name="titles")
+    op.drop_index(
+        "ix_titles_popularity",
+        table_name="titles",
+        postgresql_where=sa.text("popularity IS NOT NULL"),
+    )
+    op.drop_index("ix_titles_name_lower_year", table_name="titles")
     op.drop_index(
         "ix_titles_imdb_id", table_name="titles", postgresql_where=sa.text("imdb_id IS NOT NULL")
     )
-    op.drop_index("ix_titles_enrichment_state", table_name="titles")
+    op.drop_index(
+        "ix_titles_enrichment_state",
+        table_name="titles",
+        postgresql_where=sa.text("enrichment_state <> 'skeleton'"),
+    )
     op.drop_table("titles")
     op.drop_table("sources")
     # ### end Alembic commands ###
