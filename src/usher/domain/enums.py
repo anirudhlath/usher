@@ -13,9 +13,9 @@ class EnrichmentState(StrEnum):
     render deliberately rather than inferring from nulls."""
 
     SKELETON = "skeleton"  # from a bulk dataset; no overview or artwork
-    STUB = "stub"          # seen on a source; source metadata only
+    STUB = "stub"  # seen on a source; source metadata only
     ENRICHED = "enriched"  # full provider metadata
-    FAILED = "failed"      # enrichment attempted and failed
+    FAILED = "failed"  # enrichment attempted and failed
 
 
 class SourceKind(StrEnum):
