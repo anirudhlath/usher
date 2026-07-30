@@ -1,37 +1,24 @@
-"""Container entrypoint: `python -m usher`.
+"""Container entrypoint: `python -m usher [command]`.
 
-`Settings.host`/`Settings.port` exist, validate (`port` is bounds-checked),
-and are documented in PRD 08's config table as Environment-layer settings
-("Environment | ... port ... | Deploy time") -- but until this module
-existed, nothing in `src/` ever read them. The only way to start the server
-was the `uvicorn` CLI with hardcoded flags (`--host 0.0.0.0 --port 8000`,
-Task 13's plan text as first written), so the two fields validated
-correctly and then influenced nothing. This module is the fix: it is the
-one thing that actually binds a socket, so it is the one thing that should
-read `Settings` to decide where.
+Delegates to `usher.cli`, which owns argument parsing and the composition
+root for every command. With no arguments this still starts the HTTP server,
+because the container's `CMD` is `alembic upgrade head && exec python -m
+usher` and M2 must not change what that does.
 
-Local development is unaffected -- `uv run uvicorn usher.api.app:create_app
---factory --host 0.0.0.0 --port 8000` (CLAUDE.md's documented dev command)
-still works exactly as before, unrelated to this module. `uvicorn.run` with
-a string target and `factory=True` is the same code path the CLI form uses
-internally, so switching the container's `CMD` to `python -m usher` changes
-*where the host/port values come from*, not how the server is started.
+`Settings.host`/`Settings.port` are read there, not here -- the reason this
+module was created in M1's Task 13 (they validated correctly and then
+influenced nothing while the only entrypoint was the `uvicorn` CLI with
+hardcoded flags).
 """
 
-import uvicorn
+import sys
 
-from usher.config import get_settings
+from usher.cli import main
 
-
-def main() -> None:
-    settings = get_settings()
-    uvicorn.run(
-        "usher.api.app:create_app",
-        factory=True,
-        host=settings.host,
-        port=settings.port,
-    )
-
+# Re-exported so `from usher.__main__ import main` keeps working -- mypy
+# strict rejects an implicit re-export ("does not explicitly export attribute
+# 'main'") without this.
+__all__ = ["main"]
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

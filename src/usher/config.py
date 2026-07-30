@@ -1,6 +1,7 @@
 """Application configuration, read from the environment."""
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
@@ -40,6 +41,26 @@ class Settings(BaseSettings):
     log_json: bool = True
 
     tmdb_api_key: SecretStr | None = None
+
+    # Bulk bootstrap (PRD 04, Phases 0-2). PRD 08 puts knobs like these in a
+    # TOML config layer that does not exist yet; until it does, they live here
+    # as environment settings rather than as constants nothing can tune.
+    # Every one is read by `usher.cli`, the only caller -- none is a field
+    # that validates and then influences nothing.
+    #
+    # Dataset base URLs are deliberately *not* here: they are module constants
+    # in their adapters, because a host moving is a code change, not an
+    # operator knob. `wikidata_endpoint` is the exception because WDQS has
+    # documented mirrors and a self-hosted form.
+    bulk_data_dir: Path = Path("data/bulk")
+    bulk_batch_size: int = Field(default=50_000, ge=1)
+    wikidata_endpoint: str = "https://query.wikidata.org/sparql"
+    # WDQS's user-agent policy requires a descriptive agent naming the tool
+    # and a way to contact its operator; the default names the project, and an
+    # operator running at scale is expected to add their own contact.
+    bulk_user_agent: str = Field(
+        default="Usher/0.1 (+https://github.com/anirudhlath/usher)", min_length=1
+    )
 
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
