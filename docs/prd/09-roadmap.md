@@ -11,7 +11,7 @@ direct Emby access, for both movies and television.
 
 | Milestone | Contents |
 |---|---|
-| **M1 — Foundation** | Repo, uv project, compose, Postgres + migrations, domain models, port ABCs, config, health |
+| **M1 — Foundation** ✅ | Repo, uv project, compose, Postgres + migrations, domain models, port ABCs, config, health, CI with layering checks, telemetry bootstrap |
 | **M2 — Bootstrap** | IMDb skeleton, TMDb ID export, Wikidata crosswalk; resumable importers |
 | **M3 — Emby adapter** | Durable-client auth, item listing, watch-state read/write, stream targets; adapter contract tests |
 | **M4 — Ingest pipeline** | Ingest → match → enrich → index; priority queue; stub-on-sight; unmatched review |
