@@ -137,6 +137,25 @@ async def test_ensure_local_skips_a_second_download_of_the_same_revision(
     assert second.replaced is False
 
 
+async def test_ensure_local_sends_no_range_headers_for_a_fresh_download(cache: Path) -> None:
+    """With nothing on hand (`have == 0`), no `Range`/`If-Range` headers
+    should be sent at all -- not `Range: bytes=0-`, which is a needless,
+    easily-misread way to ask a server for exactly what a bare GET already
+    asks for, and a server is free to interpret an edge-case Range value
+    however it likes."""
+    seen: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        return httpx.Response(200, content=BODY, headers={"etag": '"v1"'})
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        dataset_file = CachedDatasetFile(client, URL, cache)
+        await dataset_file.ensure_local('"v1"')
+    assert "range" not in seen[0]
+    assert "if-range" not in seen[0]
+
+
 async def test_ensure_local_resumes_a_partial_download(cache: Path) -> None:
     """The Range half of the interlock. Simulates a killed process by
     writing a truncated .part file with a matching *in-flight* revision

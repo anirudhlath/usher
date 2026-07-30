@@ -115,6 +115,42 @@ async def test_a_line_that_is_not_json_is_malformed(tmp_path: Path) -> None:
             [row async for batch in dataset.batches() for row in batch.rows]
 
 
+async def test_a_line_missing_a_required_field_is_malformed(tmp_path: Path) -> None:
+    """Valid JSON, but missing `id` -- a different failure shape than
+    invalid JSON syntax (previous test), and one that must also raise
+    through batches(), not just be reachable in the standalone parser."""
+    cache = tmp_path / "bulk"
+    cache.mkdir(parents=True)
+    body = b'{"adult":false,"original_title":"No Id Field","popularity":1.0}\n'
+    (cache / "movie_ids_07_30_2026.json.gz").write_bytes(gzip.compress(body))
+    async with httpx.AsyncClient(
+        transport=_serving(cache, {"movie_ids_07_30_2026.json.gz"})
+    ) as client:
+        dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
+        with pytest.raises(PortDataMalformed):
+            [batch async for batch in dataset.batches()]
+
+
+async def test_rows_seen_accumulates_across_a_normal_resume(tmp_path: Path) -> None:
+    """Distinct from the same-day-republish test: an ordinary resume
+    against a file that has *not* changed must add to the stored
+    rows_seen, not reset or ignore it -- only a `LocalFile.replaced` body
+    change resets it."""
+    cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_30_2026.json.gz")
+    async with httpx.AsyncClient(
+        transport=_serving(cache, {"movie_ids_07_30_2026.json.gz"})
+    ) as client:
+        dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
+        resumed = [
+            batch
+            async for batch in dataset.batches(
+                resume_from=BulkCursor(revision="2026-07-30", position=2, rows_seen=2)
+            )
+        ]
+    # 4 lines in the fixture, none filtered; skipping 2 leaves 2 more kept.
+    assert resumed[0].cursor.rows_seen == 4
+
+
 async def test_dataset_names_are_distinct_per_kind(tmp_path: Path) -> None:
     """Two datasets, two checkpoints. A shared name would make the series
     import resume from the movie import's line offset."""

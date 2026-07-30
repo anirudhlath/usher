@@ -236,6 +236,24 @@ async def test_resuming_skips_completed_units() -> None:
     assert len(calls) == 2
 
 
+async def test_rows_seen_accumulates_across_a_normal_resume() -> None:
+    """Distinct from the empty-tail resume test: an ordinary resume that
+    finds more rows must add them to the stored rows_seen, not reset or
+    ignore it."""
+    transport = _wdqs({("P4835", "tt9"): _bindings(("tt0944947", "121361"))})
+    async with httpx.AsyncClient(transport=transport) as client:
+        dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
+        revision = await dataset.revision()
+        resumed = [
+            batch
+            async for batch in dataset.batches(
+                resume_from=BulkCursor(revision=revision, position=29, rows_seen=50)
+            )
+        ]
+    assert len(resumed) == 1
+    assert resumed[0].cursor.rows_seen == 51  # 50 already seen + 1 more from unit 29
+
+
 async def test_a_cursor_from_another_day_restarts() -> None:
     """`revision` is the UTC date, because a live endpoint has no snapshot
     token. A run resumed the same day continues; the next day starts over
