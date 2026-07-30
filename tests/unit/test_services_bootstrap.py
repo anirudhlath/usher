@@ -236,10 +236,22 @@ class _ConflictingImportRunRepository(FakeImportRunRepository):
     """Wraps the fake so its first `start()` call raises `RepositoryConflict`
     -- standing in for `PostgresImportRunRepository`'s real failure mode
     (`uq_import_runs_dataset`) without needing Postgres: two processes
-    bootstrapping the same dataset at once."""
+    bootstrapping the same dataset at once.
 
-    def __init__(self) -> None:
+    `winner`, when given, seeds the fake's store with a *different*,
+    already-persisted run for the same dataset before the conflict fires --
+    standing in for the real winning process's committed row. Earlier
+    versions of this fake raised the conflict with nothing else in the
+    store at all, which meant a test asserting only "the caller didn't
+    crash" could not have caught `import_dataset`'s except handler
+    overwriting a real winner's row: there was no winner row present to
+    overwrite. See `test_a_conflicting_start_leaves_the_winners_run_untouched`.
+    """
+
+    def __init__(self, winner: ImportRun | None = None) -> None:
         super().__init__()
+        if winner is not None:
+            self._runs[winner.dataset] = winner
         self.armed = True
 
     async def start(self, dataset: str, revision: str) -> ImportRun:
@@ -251,24 +263,73 @@ class _ConflictingImportRunRepository(FakeImportRunRepository):
         return await super().start(dataset, revision)
 
 
-async def test_a_run_start_conflict_is_recorded_not_raised(
+async def test_a_conflicting_start_leaves_the_winners_run_untouched(
     catalog: FakeBulkCatalogRepository,
 ) -> None:
-    """self._runs.start() can fail before self._drain ever runs -- a
-    RepositoryConflict from two processes bootstrapping the same dataset at
-    once -- and it must be recorded the same way a mid-stream failure is,
-    for the same reason `bootstrap --phase all` needs any of this: no
-    `ImportRun` exists yet to attach the failure to, which is exactly why
-    the except handler re-fetches from `self._runs` instead of assuming one
-    is already bound to `run`."""
+    """The bug Group G found after fixing PostgresImportRunRepository's
+    session-poisoning: once self._runs.get() after a RepositoryConflict
+    stopped raising PendingRollbackError and started actually returning a
+    row, import_dataset's except handler re-fetched *by dataset name* --
+    which, for this exact conflict, is always the *other*, winning
+    process's row, never one this process owns (start() never returned one
+    to us). Evolving and saving FAILED onto it would silently corrupt a
+    legitimately RUNNING or already-COMPLETED import with this loser's
+    unrelated error message -- worse than the crash it replaced, because the
+    crash was loud and this would not be: a subsequent resume reads exactly
+    this corrupted record.
+
+    A test that only checks the loser's call didn't raise cannot catch
+    this -- it needs a real competing row present beforehand, and an
+    assertion that it is *exactly* unchanged afterward, which is what makes
+    this different from (and a regression guard beyond) the old
+    `test_a_run_start_conflict_is_recorded_not_raised` this replaces.
+    """
     commit = CommitSpy()
-    runs = _ConflictingImportRunRepository()
+    winner = ImportRun(
+        dataset="scripted",
+        revision="etag-1",
+        position=2,
+        rows_seen=2,
+        rows_written=2,
+        status=ImportRunStatus.RUNNING,
+    )
+    runs = _ConflictingImportRunRepository(winner)
     dataset = ScriptedDataset([[_title(1)]])
-    run = await _service(runs, catalog, commit).import_dataset(
+    result = await _service(runs, catalog, commit).import_dataset(
         dataset, lambda rows: _write(catalog, rows)
     )
-    assert run.status is ImportRunStatus.FAILED
-    assert "already exists" in (run.error or "")
+    stored = await runs.get("scripted")
+    # Byte-for-byte: not re-saved, not evolved, not touched at all.
+    assert stored == winner
+    # The caller sees the real owner's state, not a fabricated failure --
+    # would also have failed if import_dataset had returned something
+    # merely *equivalent* in status rather than the actual stored row.
+    assert result == winner
+    # Nothing was written, so nothing needed committing -- the strongest
+    # possible statement that this path performs no persistence at all.
+    assert commit.count == 0
+
+
+async def test_a_conflicting_start_with_no_discoverable_owner_does_not_persist(
+    catalog: FakeBulkCatalogRepository,
+) -> None:
+    """The pathological twin of the test above: a conflict fires but no row
+    is discoverable by the time we look (e.g. deleted out from under both
+    processes). Still must not fabricate and save a claim over a dataset
+    this process lost the race for -- only the *return value* is allowed to
+    be synthetic, so a caller has something to log."""
+    commit = CommitSpy()
+    runs = _ConflictingImportRunRepository()  # no winner seeded
+    dataset = ScriptedDataset([[_title(1)]])
+    result = await _service(runs, catalog, commit).import_dataset(
+        dataset, lambda rows: _write(catalog, rows)
+    )
+    assert result.status is ImportRunStatus.FAILED
+    assert "already exists" in (result.error or "")
+    # The synthetic report is never persisted -- this is the one thing the
+    # method must never do for a dataset it holds no claim to.
+    assert await runs.get("scripted") is None
+    assert commit.count == 0
 
 
 async def test_a_failed_run_resumes_from_where_it_stopped(

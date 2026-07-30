@@ -135,6 +135,38 @@ see `usher/db/repositories/import_run.py`'s module docstring for why this
 repository's one caller never has independent pending work on the session
 worth a SAVEPOINT protecting.
 
+**Fixing that session-poisoning bug surfaced a second one, one layer up, in
+`BootstrapService.import_dataset` itself: the loser's failure handler
+overwrote the winner's checkpoint.** Once `self._runs.get(dataset.name)`
+after a caught `RepositoryConflict` stopped raising and started actually
+returning a row, it returns the *other*, winning process's row — the loser
+never got one of its own (`start()` never returned it one). The except
+handler used to re-fetch by dataset name unconditionally and evolve+save
+`FAILED` onto whatever it found, which is correct when that row is the
+caller's own (a `_drain` failure, after `start()` succeeded) but silently
+corrupts a legitimately `RUNNING` or already-`COMPLETED` import when it
+belongs to someone else (a `start()` conflict) — worse than the crash it
+replaced, because the crash was loud and this would not have been: a
+subsequent resume reads exactly that corrupted record. `RepositoryConflict`
+can only ever reach `import_dataset` from `start()` itself — once any row
+exists for a dataset, every later `start()`/`save()` call updates that same
+row rather than competing for a new one, so `_drain`'s own `save()` calls
+(which always update the id `start()` already returned) cannot trigger it.
+That made the fix a clean split: a `RepositoryConflict` from `start()`
+specifically now goes to `_concede_to_other_owner`, which touches nothing
+(no `save`, no `commit`) and returns the current owner's row exactly as
+stored; every other `UsherPortError` path is unchanged. Verified against
+real Postgres with a forced two-session race
+(`tests/integration/test_bootstrap_concurrency.py`) — reproduced the
+overwrite on the pre-fix code first (the winner's row read back `FAILED`
+with the loser's unrelated conflict message), then confirmed the fix
+leaves it untouched. The unit-level fakes needed a matching fix to even be
+capable of catching this: the original conflict test double raised
+`RepositoryConflict` with no competing row present at all, so asserting
+only "the caller didn't crash" passed both before and after either bug —
+it needs a real winner row seeded first, and an assertion that it comes
+back byte-for-byte unchanged.
+
 ## Commands
 
 Verified working as of Group A (scaffold + config):
