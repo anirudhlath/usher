@@ -3548,9 +3548,18 @@ async def test_ensure_local_uses_if_range_so_a_body_change_mid_resume_is_detecte
     its `.part` prefix came from, and splice the two together. Simulates
     upstream having already moved from v1 to an unrelated v2 body by the
     time this resume's GET lands, against a server that only honours Range
-    unconditionally -- i.e. exactly when `If-Range` is absent or matches."""
+    unconditionally -- i.e. exactly when `If-Range` is absent or matches.
+
+    The splice point is 20 bytes in, not 5: a gzip stream's first ~10 bytes
+    (magic, method, flags, mtime, extra-flags, OS) are content-independent
+    and, for two bodies compressed moments apart on the same machine, are
+    almost always byte-identical regardless of what either one contains --
+    confirmed directly, `BODY[:5] + v2_body[5:] == v2_body` here. A splice
+    inside that header is not a splice at all; 20 bytes is comfortably past
+    it, into the content-dependent DEFLATE payload, where the two streams
+    provably diverge."""
     cache.mkdir(parents=True)
-    (cache / "slice.tsv.gz.part").write_bytes(BODY[:5])
+    (cache / "slice.tsv.gz.part").write_bytes(BODY[:20])
     (cache / "slice.tsv.gz.part.revision").write_text('"v1"')
 
     v2_body = gzip.compress(b"second\nsnapshot\nentirely\n")
