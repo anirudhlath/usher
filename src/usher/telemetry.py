@@ -4,6 +4,8 @@ Telemetry is optional: with no OTLP endpoint configured the exporters are
 no-ops and Usher runs normally. See PRD 10 and ADR-0007.
 """
 
+import inspect
+import logging
 import sys
 from collections.abc import Mapping
 from typing import Any
@@ -37,6 +39,41 @@ def inject_trace_context(record: Mapping[str, Any]) -> None:
         record["extra"]["span_id"] = format(context.span_id, "016x")
 
 
+class _InterceptHandler(logging.Handler):
+    """Redirects stdlib `logging` records into loguru.
+
+    Without this, only code that calls `usher`'s own `logger` goes through
+    the sink below: uvicorn's access/error logs, SQLAlchemy's warnings, and
+    the OTel SDK's own exporter retry/failure messages (all stdlib
+    `logging` users) print as unstructured plain text, ignore
+    `settings.log_level`/`log_json`, and never get `trace_id`/`span_id`
+    patched in — confirmed directly against a live run: every uvicorn
+    access line printed as plain text (`INFO: 127.0.0.1 - "GET ..."`)
+    alongside the JSON lines `usher`'s own logger produced. PRD 10 says
+    "Every record is patched", not "every loguru record". Recipe is
+    loguru's own documented one for this exact scenario, verbatim (see its
+    README's "Entirely compatible with standard logging" section).
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level: str | int = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+
+        frame, depth = inspect.currentframe(), 0
+        while frame:
+            filename = frame.f_code.co_filename
+            is_logging = filename == logging.__file__
+            is_frozen = "importlib" in filename and "_bootstrap" in filename
+            if depth > 0 and not (is_logging or is_frozen):
+                break
+            frame = frame.f_back
+            depth += 1
+
+        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+
 def configure_logging(settings: Settings) -> None:
     logger.remove()
     logger.configure(patcher=inject_trace_context)
@@ -47,6 +84,17 @@ def configure_logging(settings: Settings) -> None:
         backtrace=False,
         diagnose=False,
     )
+
+    # uvicorn attaches its own handlers directly to the "uvicorn"/
+    # "uvicorn.access"/"uvicorn.error" loggers (and any other library may
+    # do the same) *before* create_app() runs -- clearing them and forcing
+    # propagate=True is what makes redirecting the root logger below
+    # actually catch everything, instead of records printing twice: once
+    # from a library's own handler, once forwarded through root.
+    for name in logging.root.manager.loggerDict:
+        logging.getLogger(name).handlers = []
+        logging.getLogger(name).propagate = True
+    logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
 
 
 def configure_tracing(settings: Settings) -> None:
