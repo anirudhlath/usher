@@ -1,0 +1,341 @@
+"""An in-memory Emby, served through `httpx.MockTransport`.
+
+Every response body is rendered from a committed fixture template
+(tests/fixtures/emby/) with the seeded `SourceItem`'s values substituted
+in, so the *shape* comes from a recording and the *values* come from the
+test. That split is what stops this file from being a restatement of the
+adapter's own assumptions: `tests/unit/test_adapters_emby_mapping.py`
+parses those same fixtures with no server involved, so a wrong field name
+fails there even if this file and the mapper agreed on it.
+
+The residual gap this cannot close is a wrong-but-self-consistent
+*endpoint path*: nothing here knows what the real Emby routes are. That is
+why M3's definition of done requires a live run. Every path below is
+written out independently of the adapter's own constants, deliberately, so
+a typo on one side fails rather than cancelling out.
+
+`_TICKS_PER_SECOND` is defined here rather than imported from
+`usher.adapters.emby.mapping` for the same reason: the fake encodes Emby's
+protocol, and importing the adapter's constant would make a wrong constant
+invisible.
+"""
+
+import json
+import re
+from datetime import UTC, datetime
+from typing import Any
+
+import httpx
+from pydantic import AwareDatetime
+
+from tests.fakes.emby_fixtures import load_emby_fixture
+from usher.domain.enums import HdrFormat
+from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
+
+_TICKS_PER_SECOND = 10_000_000
+SERVER_ID = "0000000000000000000000000000feed"
+USER_ID = "0000000000000000000000000000c0de"
+SERVER_VERSION = "4.9.5.0"
+
+_TEMPLATES = {
+    SourceItemKind.MOVIE: "movie_item",
+    SourceItemKind.SERIES: "series_item",
+    SourceItemKind.EPISODE: "episode_item",
+}
+# Emby's own capitalisation. Rendered back out on purpose: the contract's
+# `test_provider_ids_use_canonical_lowercase_keys` only means something if
+# the server actually speaks the casing the adapter has to normalise away.
+_EMBY_PROVIDER_KEYS = {"tmdb": "Tmdb", "imdb": "Imdb", "tvdb": "Tvdb"}
+_HDR_WIRE: dict[HdrFormat | None, tuple[str, str | None]] = {
+    None: ("SDR", None),
+    HdrFormat.HDR10: ("HDR", "HDR10"),
+    HdrFormat.HLG: ("HDR", "HLG"),
+    HdrFormat.DOLBY_VISION: ("HDR", "DOVI"),
+}
+
+_DEVICE_ID = re.compile(r'DeviceId="([^"]*)"')
+_DEVICE = re.compile(r'Device="([^"]*)"')
+_ITEMS = re.compile(r"^/Users/(?P<user>[^/]+)/Items$")
+_ITEM = re.compile(r"^/Users/(?P<user>[^/]+)/Items/(?P<item>[^/]+)$")
+_PROGRESS = re.compile(r"^/Users/(?P<user>[^/]+)/PlayingItems/(?P<item>[^/]+)/Progress$")
+_PLAYED = re.compile(r"^/Users/(?P<user>[^/]+)/PlayedItems/(?P<item>[^/]+)$")
+
+
+def _stamp(value: datetime) -> str:
+    """The coarse form used for `MinDateLastSaved` comparisons, matching
+    what `usher.adapters.emby.mapping.emby_datetime` produces. Compared as
+    strings, which is chronological for same-format UTC ISO stamps."""
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _emby_stamp(value: datetime) -> str:
+    """The seven-digit-fraction form Emby actually emits in payloads."""
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+
+
+class FakeEmbyServer:
+    def __init__(
+        self,
+        *,
+        page_size: int = 2,
+        username: str = "usher",
+        password: str = "correct-horse-battery",
+    ) -> None:
+        self.page_size = page_size
+        self.username = username
+        self.password = password
+        self.credentials_valid = True
+        self.offline = False
+        self.fail_after: int | None = None
+        self.authentications = 0
+        self.device_ids: list[str] = []
+        self.devices: list[str] = []
+        self.requests: list[str] = []
+        self._items: dict[str, tuple[SourceItem, AwareDatetime]] = {}
+        self._states: dict[str, SourceWatchState] = {}
+        self._sessions = 0
+        self._session_token: str | None = None
+
+    # -- controls ------------------------------------------------------
+
+    def add_item(self, item: SourceItem, changed_at: AwareDatetime) -> None:
+        self._items[item.external_id] = (item, changed_at)
+
+    def remove_item(self, external_id: str) -> None:
+        self._items.pop(external_id, None)
+        self._states.pop(external_id, None)
+
+    def set_watch_state(self, state: SourceWatchState) -> None:
+        self._states[state.external_id] = state
+
+    def recorded_watch_state(self, external_id: str) -> tuple[int, bool] | None:
+        state = self._states.get(external_id)
+        return None if state is None else (state.position_seconds, state.played)
+
+    def expire_session(self) -> None:
+        """The exact Emby failure: the credentials are still right, the
+        session token simply stopped working."""
+        self._session_token = None
+
+    def reject_credentials(self) -> None:
+        self.credentials_valid = False
+        self._session_token = None
+
+    def transport(self) -> httpx.MockTransport:
+        return httpx.MockTransport(self.handle)
+
+    # -- routing -------------------------------------------------------
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        if self.offline:
+            raise httpx.ConnectError("connection refused")
+        self.requests.append(f"{request.method} {request.url.path}")
+        path = request.url.path
+        if path == "/Users/AuthenticateByName":
+            return self._authenticate(request)
+        if path == "/System/Info/Public":
+            return httpx.Response(
+                200,
+                json={"ServerName": "Fake Emby", "Version": SERVER_VERSION, "Id": SERVER_ID},
+            )
+        # Ordering matters: `self._session_token is None` is checked first,
+        # because `request.headers.get(...)` is also None when the header is
+        # absent and `None != None` is False -- so the obvious single
+        # comparison would authorise an unauthenticated request against an
+        # expired session.
+        if self._session_token is None or request.headers.get("X-Emby-Token") != (
+            self._session_token
+        ):
+            return httpx.Response(401, json={"Error": "Access token is invalid or expired."})
+        if path == "/System/Info":
+            return httpx.Response(
+                200,
+                json={
+                    "ServerName": "Fake Emby",
+                    "Version": SERVER_VERSION,
+                    "Id": SERVER_ID,
+                    "OperatingSystem": "Linux",
+                },
+            )
+        if request.method == "GET" and _ITEMS.match(path):
+            return self._list(request)
+        item_match = _ITEM.match(path)
+        if request.method == "GET" and item_match:
+            return self._one(item_match.group("item"))
+        progress_match = _PROGRESS.match(path)
+        if request.method == "POST" and progress_match:
+            return self._progress(request, progress_match.group("item"))
+        played_match = _PLAYED.match(path)
+        if played_match and request.method in {"POST", "DELETE"}:
+            return self._played(played_match.group("item"), request.method == "POST")
+        return httpx.Response(404, json={"Error": f"no route for {request.method} {path}"})
+
+    def _authenticate(self, request: httpx.Request) -> httpx.Response:
+        self.authentications += 1
+        identity = request.headers.get("Authorization", "")
+        device_id = _DEVICE_ID.search(identity)
+        device = _DEVICE.search(identity)
+        if 'Client="Usher"' not in identity or device_id is None or device is None:
+            # Emby derives the session's device from this header. Rejecting a
+            # request without it is what makes the durable-client header a
+            # tested requirement rather than decoration.
+            return httpx.Response(400, json={"Error": "missing MediaBrowser authorization"})
+        self.device_ids.append(device_id.group(1))
+        self.devices.append(device.group(1))
+        body = json.loads(request.content or b"{}")
+        if (
+            not self.credentials_valid
+            or body.get("Username") != self.username
+            or body.get("Pw") != self.password
+        ):
+            return httpx.Response(401, json={"Error": "Invalid username or password"})
+        self._sessions += 1
+        self._session_token = f"session-token-{self._sessions}"
+        return httpx.Response(
+            200,
+            json={
+                "AccessToken": self._session_token,
+                "ServerId": SERVER_ID,
+                "User": {"Id": USER_ID, "Name": self.username},
+            },
+        )
+
+    def _ordered(self, since: str | None) -> list[str]:
+        entries = sorted(self._items.items(), key=lambda entry: (entry[1][1], entry[0]))
+        return [
+            external_id
+            for external_id, (_, changed_at) in entries
+            if since is None or _stamp(changed_at) >= since
+        ]
+
+    def _list(self, request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        start = int(params.get("StartIndex", "0"))
+        limit = int(params.get("Limit", str(self.page_size)))
+        since = params.get("MinDateLastSaved") or params.get("MinDateLastSavedForUser")
+        ordered = self._ordered(since)
+        if self.fail_after is not None and start >= self.fail_after:
+            raise httpx.ReadTimeout("upstream stopped responding")
+        page = ordered[start : start + limit]
+        return httpx.Response(
+            200,
+            json={
+                "Items": [self._payload(external_id) for external_id in page],
+                "TotalRecordCount": len(ordered),
+            },
+        )
+
+    def _one(self, external_id: str) -> httpx.Response:
+        if external_id not in self._items:
+            return httpx.Response(404, json={"Error": "Not Found"})
+        return httpx.Response(200, json=self._payload(external_id))
+
+    def _progress(self, request: httpx.Request, external_id: str) -> httpx.Response:
+        if external_id not in self._items:
+            return httpx.Response(404, json={"Error": "Not Found"})
+        ticks = int(request.url.params.get("PositionTicks", "0"))
+        previous = self._states.get(external_id)
+        self._states[external_id] = SourceWatchState(
+            external_id=external_id,
+            position_seconds=ticks // _TICKS_PER_SECOND,
+            played=False if previous is None else previous.played,
+        )
+        return httpx.Response(204)
+
+    def _played(self, external_id: str, played: bool) -> httpx.Response:
+        if external_id not in self._items:
+            return httpx.Response(404, json={"Error": "Not Found"})
+        previous = self._states.get(external_id)
+        # Marking an item played clears its resume position, the way Emby
+        # does. The adapter writes position first and the played flag last
+        # precisely because of this.
+        self._states[external_id] = SourceWatchState(
+            external_id=external_id,
+            position_seconds=0
+            if played
+            else (0 if previous is None else previous.position_seconds),
+            played=played,
+            play_count=(0 if previous is None else previous.play_count) + (1 if played else 0),
+        )
+        return httpx.Response(200, json={"Played": played, "PlaybackPositionTicks": 0})
+
+    # -- rendering -----------------------------------------------------
+
+    def _payload(self, external_id: str) -> dict[str, Any]:
+        item, _ = self._items[external_id]
+        payload = load_emby_fixture(_TEMPLATES[item.kind])
+        payload["Id"] = item.external_id
+        payload["Name"] = item.name
+        payload["OriginalTitle"] = item.name
+        payload["ProductionYear"] = item.year
+        payload["ProviderIds"] = {
+            _EMBY_PROVIDER_KEYS.get(key, key.title()): value
+            for key, value in item.provider_ids.items()
+        }
+        payload["RunTimeTicks"] = (
+            None if item.runtime_seconds is None else item.runtime_seconds * _TICKS_PER_SECOND
+        )
+        if item.added_at is not None:
+            payload["DateCreated"] = _emby_stamp(item.added_at)
+        else:
+            payload.pop("DateCreated", None)
+        payload["UserData"] = self._user_data(external_id)
+        if item.series_external_id is not None:
+            payload["SeriesId"] = item.series_external_id
+        if item.season_number is not None:
+            payload["ParentIndexNumber"] = item.season_number
+        if item.episode_number is not None:
+            payload["IndexNumber"] = item.episode_number
+        self._render_media(payload, item)
+        return payload
+
+    def _render_media(self, payload: dict[str, Any], item: SourceItem) -> None:
+        if item.container is None:
+            payload.pop("MediaSources", None)
+            return
+        media = payload.setdefault("MediaSources", load_emby_fixture("movie_item")["MediaSources"])[
+            0
+        ]
+        media["Container"] = item.container
+        media["Size"] = item.file_size_bytes
+        media["RunTimeTicks"] = payload["RunTimeTicks"]
+        for stream in media["MediaStreams"]:
+            if stream["Type"] == "Video":
+                stream["Codec"] = item.video_codec
+                stream["Width"] = item.width
+                stream["Height"] = item.height
+                # Rendered purely from VideoRange/VideoRangeType, with the
+                # DV-specific keys dropped: the DvProfile path is covered
+                # directly against the raw fixture in the mapping tests, and
+                # exercising the token path here keeps the two independent.
+                stream.pop("DvProfile", None)
+                stream.pop("DvLevel", None)
+                video_range, range_type = _HDR_WIRE[item.hdr_format]
+                stream["VideoRange"] = video_range
+                if range_type is None:
+                    stream.pop("VideoRangeType", None)
+                else:
+                    stream["VideoRangeType"] = range_type
+            elif stream["Type"] == "Audio" and stream.get("IsDefault"):
+                stream["Codec"] = item.audio_codec
+                stream["Channels"] = item.audio_channels
+                # Cleared so the rendered audio token is a deterministic
+                # function of codec and channel count. The Atmos/DTS-HD
+                # vocabulary is covered against the raw fixtures instead.
+                stream["Profile"] = ""
+
+    def _user_data(self, external_id: str) -> dict[str, Any]:
+        state = self._states.get(external_id)
+        if state is None:
+            return {
+                "PlaybackPositionTicks": 0,
+                "PlayCount": 0,
+                "IsFavorite": False,
+                "Played": False,
+            }
+        return {
+            "PlaybackPositionTicks": state.position_seconds * _TICKS_PER_SECOND,
+            "PlayCount": state.play_count,
+            "IsFavorite": False,
+            "Played": state.played,
+        }
