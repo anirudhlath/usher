@@ -9,13 +9,17 @@ dump cannot reach a commit by accident. Tests never call `ensure_local`
 against a real host -- they drive it through an httpx `MockTransport`.
 """
 
+import datetime as dt
+import email.utils
 import gzip
+import zlib
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
-from usher.ports.errors import PortRateLimited, PortUnavailable
+from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
 
 # 1 MiB: large enough that the per-chunk overhead is irrelevant against a
 # 214 MiB file, small enough that a killed process loses at most a megabyte
@@ -47,12 +51,60 @@ def _revision_from(response: httpx.Response) -> str:
     )
 
 
+def _retry_after_seconds(value: str | None) -> float | None:
+    """Parse a `Retry-After` header value into seconds from now, or `None`
+    if there was no header or it couldn't be parsed at all.
+
+    RFC 9110 permits `Retry-After` to be *either* an integer number of
+    seconds *or* an HTTP-date -- `float(value)` alone raises `ValueError`
+    on the latter (`could not convert string to float: 'Wed, 21 Oct 2026
+    07:28:00 GMT'`), and this is the 429 path: the one moment upstream is
+    explicitly asking for backoff. A caller that only handled the numeric
+    form would raise instead of backing off exactly when backing off
+    matters most. Shared by every M2 adapter's 429 handling rather than
+    duplicated -- the bug this fixes existed in two places for exactly
+    that reason.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    try:
+        target = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=dt.UTC)
+    return max(0.0, (target - dt.datetime.now(dt.UTC)).total_seconds())
+
+
 def _raise_for_status(response: httpx.Response, url: str) -> None:
     if response.status_code == 429:
-        retry_after = response.headers.get("retry-after")
-        raise PortRateLimited(float(retry_after) if retry_after else None)
+        raise PortRateLimited(_retry_after_seconds(response.headers.get("retry-after")))
     if response.status_code >= 400:
         raise PortUnavailable(f"{url} returned HTTP {response.status_code}")
+
+
+@dataclass(frozen=True, slots=True)
+class LocalFile:
+    """Where an `ensure_local` call left the file, and whether that call
+    actually fetched different bytes than were already cached.
+
+    `replaced` exists for a dataset whose own checkpoint revision is
+    coarser than a single file's real identity -- TMDb's is a calendar
+    date, this file's is an ETag -- so such a caller can notice when
+    `ensure_local` silently discovered that upstream republished different
+    content under what the caller's own coarser revision still considers
+    unchanged. `True` on every path except the short-circuit at the very
+    top of `ensure_local`: a first-ever download counts as `replaced` too,
+    deliberately -- there is no prior body a caller's own resume position
+    could safely apply to either.
+    """
+
+    path: Path
+    replaced: bool
 
 
 class CachedDatasetFile:
@@ -84,7 +136,7 @@ class CachedDatasetFile:
         _raise_for_status(response, self._url)
         return _revision_from(response)
 
-    async def ensure_local(self, revision: str) -> Path:
+    async def ensure_local(self, revision: str) -> LocalFile:
         """Download unless a complete local copy of `revision` already exists.
 
         Resumes a partial download with `Range` + `If-Range`. `If-Range` is
@@ -94,14 +146,30 @@ class CachedDatasetFile:
         `datasets.imdbws.com`), which this method detects and restarts from
         zero. Without it, a dump refreshed mid-download would silently
         produce a file that is half one snapshot and half another.
+
+        Two *separate* stamp files, not one: `{name}.revision` names the
+        revision `path` -- the complete file -- actually holds, and is
+        written only after the atomic rename below succeeds. `{name}.part.
+        revision` names the revision the *in-flight* `.part` is being
+        assembled for, and is written as soon as that revision is known, so
+        a killed process can resume it next time. Conflating the two into a
+        single stamp was a real bug: writing the completed-file stamp
+        before the body had actually finished streaming meant a process
+        killed between that write and the rename left `stamp` naming the
+        *new* revision right next to `path` still holding the *old* one --
+        and the short-circuit below can't tell a genuinely-complete file
+        from that state, so it would hand back the stale bytes under the
+        fresh revision's label, forever, with no further `GET` ever issued
+        to notice.
         """
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         stamp = self._cache_dir / f"{self._name}.revision"
         if self.path.exists() and stamp.exists() and stamp.read_text() == revision:
-            return self.path
+            return LocalFile(self.path, replaced=False)
 
         partial = self._cache_dir / f"{self._name}.part"
-        if not (stamp.exists() and stamp.read_text() == revision):
+        partial_stamp = self._cache_dir / f"{self._name}.part.revision"
+        if not (partial_stamp.exists() and partial_stamp.read_text() == revision):
             partial.unlink(missing_ok=True)
         have = partial.stat().st_size if partial.exists() else 0
         headers = {"Range": f"bytes={have}-", "If-Range": revision} if have else {}
@@ -115,18 +183,22 @@ class CachedDatasetFile:
                 # If-Range, or no range support) and is sending everything --
                 # so the partial bytes must be discarded, not appended to.
                 mode = "ab" if response.status_code == 206 else "wb"
-                stamp.write_text(_revision_from(response))
+                actual_revision = _revision_from(response)
+                partial_stamp.write_text(actual_revision)
                 with partial.open(mode) as sink:
                     async for chunk in response.aiter_bytes(_CHUNK_BYTES):
                         sink.write(chunk)
         except httpx.HTTPError as exc:
             raise PortUnavailable(f"GET {self._url} failed: {exc}") from exc
 
-        # Atomic rename last: a `path` that exists is always a complete file,
-        # so a killed process can never leave a truncated dump that parses as
-        # a short one.
+        # Atomic rename first, completed-file stamp only after it succeeds:
+        # a `path` that exists is always a complete file, and now `stamp`
+        # naming a revision is always backed by exactly that file -- never
+        # by whatever happened to be in flight when a process died.
         partial.replace(self.path)
-        return self.path
+        stamp.write_text(actual_revision)
+        partial_stamp.unlink(missing_ok=True)
+        return LocalFile(self.path, replaced=True)
 
     def lines(self, *, skip: int = 0) -> Iterator[str]:
         """Decompressed lines, newline stripped, with the first `skip`
@@ -138,9 +210,22 @@ class CachedDatasetFile:
         UTF-8 with `errors="replace"` -- a single undecodable byte in a
         12.7M-line dump must not abort an import, and a replacement character
         in one title's name is a far better outcome than no catalog.
+
+        A body that isn't valid gzip at all -- realistic whenever a CDN or
+        proxy serves an error page with HTTP status 200 instead of the
+        dataset -- raises `PortDataMalformed`, not the raw `gzip`/`zlib`
+        exception. `gzip.open` is lazy, so that raw exception would
+        otherwise surface for the first time here, deep inside a batching
+        loop, as a type no caller written against `usher.ports.errors` can
+        catch.
         """
-        with gzip.open(self.path, "rt", encoding="utf-8", errors="replace") as stream:
-            for index, line in enumerate(stream):
-                if index < skip:
-                    continue
-                yield line.rstrip("\n")
+        try:
+            with gzip.open(self.path, "rt", encoding="utf-8", errors="replace") as stream:
+                for index, line in enumerate(stream):
+                    if index < skip:
+                        continue
+                    yield line.rstrip("\n")
+        except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
+            raise PortDataMalformed(
+                f"{self.path} is not a valid gzip file", detail=str(self.path)
+            ) from exc
