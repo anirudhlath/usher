@@ -16,3 +16,18 @@
 !alembic.ini
 !src
 !src/**
+
+# Re-exclude, evaluated after the allowlist above: .dockerignore patterns
+# are last-match-wins, so these still win against `!src/**`. Without them,
+# verified directly, host-local __pycache__/*.pyc under src/ (created by
+# any local `uv run pytest`/mypy invocation, gitignored but *not*
+# dockerignored by the allowlist alone) leaked into the built image --
+# 11 stale __pycache__ dirs, compiled against whatever CPython happened
+# to be on this host, copied in via COPY src/ ./src/. Harmless to running
+# the app (uv sync's own UV_COMPILE_BYTECODE=1 regenerates real bytecode
+# for the installed venv separately), but it defeats the point of an
+# allowlist -- two developers building the same commit could ship
+# different image contents depending on what cruft their working tree
+# happened to have lying around.
+**/__pycache__
+**/*.py[cod]
