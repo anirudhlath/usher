@@ -4,7 +4,6 @@ error translation. Driven entirely by httpx.MockTransport -- no network.
 
 import asyncio
 import io
-from collections.abc import Callable
 from datetime import UTC, datetime
 
 import httpx
@@ -17,6 +16,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from pydantic import SecretStr
 
 from tests.fakes.emby_server import FakeEmbyServer
+from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.session import SYSTEM_INFO_PATH, EmbySession
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
@@ -143,44 +143,6 @@ async def test_concurrent_401s_produce_one_authentication() -> None:
     assert server.authentications == 2
 
 
-class _SlowTransport(httpx.AsyncBaseTransport):
-    """Wraps a synchronous handler with a real `asyncio.sleep`, so that N
-    tasks fired via `asyncio.gather` are provably all in-flight at once
-    (see `max_in_flight` below) rather than racing to completion one at a
-    time -- which a bare `httpx.MockTransport` is fast enough to do, since
-    it never actually awaits anything on the way to calling the handler.
-
-    This matters because `test_concurrent_401s_produce_one_authentication`
-    above, using a plain `MockTransport`, does *not* reliably prove the
-    single-flight lock does anything: verified directly while writing this
-    test that deleting `EmbySession._refresh`'s `async with self._lock`
-    entirely does not make that test fail, on this event loop, every time
-    tried. The likely reason (confirmed by instrumenting a throwaway
-    script the same way `max_in_flight` does here): with no real await
-    between "read the stale token" and "send the request", the event loop
-    tends to race a single gathered task all the way through its own
-    request -> 401 -> refresh -> retry -> success before starting the
-    next one, so most of the 8 gathered calls observe an *already
-    refreshed* token from `_session()` and never race into `_refresh` at
-    all -- the mutation is never exercised, regardless of whether the lock
-    exists. A real (if tiny) delay forces genuine overlap.
-    """
-
-    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
-        self._handler = handler
-        self.in_flight = 0
-        self.max_in_flight = 0
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        self.in_flight += 1
-        self.max_in_flight = max(self.max_in_flight, self.in_flight)
-        await asyncio.sleep(0.02)
-        try:
-            return self._handler(request)
-        finally:
-            self.in_flight -= 1
-
-
 async def test_concurrent_401s_are_provably_simultaneous_and_produce_one_authentication() -> None:
     """The stronger version of the test above: forces genuine overlap (see
     `_SlowTransport`) and asserts on `max_in_flight` that the overlap
@@ -188,7 +150,7 @@ async def test_concurrent_401s_are_provably_simultaneous_and_produce_one_authent
     the way its plain-`MockTransport` sibling can. This is the one that
     fails when the single-flight lock is deleted."""
     server = FakeEmbyServer()
-    transport = _SlowTransport(server.handle)
+    transport = SlowTransport(server.handle)
     client = httpx.AsyncClient(transport=transport, base_url="https://emby.invalid")
     session = EmbySession(
         client,
