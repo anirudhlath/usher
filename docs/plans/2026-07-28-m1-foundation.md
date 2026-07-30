@@ -4399,7 +4399,7 @@ curl -sf http://localhost:8000/health/ready
 Expected:
 ```
 {"status":"ok"}
-{"status":"ready","checks":{"database":true}}
+{"status":"ready","checks":{"database":true,"migrations":true}}
 ```
 
 - [ ] **Step 5: Stop the stack**
@@ -4414,6 +4414,118 @@ docker compose down
 git add Dockerfile compose.yml
 git commit -m "feat: container image and compose stack with postgres"
 ```
+
+> **Amended post-implementation — Group G found several of the fences
+> above stale or incomplete once actually built and run.** Documented here
+> rather than rewritten into the TDD steps above, which stay as the
+> literal history of what was first proposed.
+>
+> **The Dockerfile is multi-stage, not the single `FROM ... AS base`
+> shown above** (which named a stage but never used a second `FROM` to
+> benefit from it — as written, it would have shipped `uv` itself, and
+> everything `uv sync` ever touched, into the final image). The real
+> `Dockerfile` has a `builder` stage (uv + the venv build) and a `runtime`
+> stage that copies only `.venv/` and `src/` across, adds a fixed-uid
+> non-root user, and ships a new `.dockerignore` (deny-by-default
+> allowlist — `*` then `!pyproject.toml`/`!uv.lock`/`!README.md`/
+> `!alembic.ini`/`!src`) so nothing beyond what's explicitly `COPY`'d can
+> reach the build context at all. Verified: final image is 332MB, runs as
+> `uid=1000(usher)`, has neither `uv` nor a compiler (`which gcc cc` → not
+> found) — no dependency in `uv.lock` needed one; every one resolved to a
+> prebuilt cp313 wheel.
+>
+> **README.md has to be `COPY`'d before the second `uv sync`, or the
+> build fails.** `pyproject.toml` declares `readme = "README.md"`;
+> hatchling (the configured build backend) reads that file while building
+> `usher`'s own wheel, which is exactly what the second,
+> non-`--no-install-project` `uv sync --frozen --no-dev` does. The fence
+> above only `COPY`'d `alembic.ini`. Exactly the kind of stale fence the
+> task brief warned about — verify rather than assume.
+>
+> **`Settings.host`/`Settings.port` are now load-bearing.** They validated
+> and were read by nothing (the plan's `CMD` hardcoded `--host 0.0.0.0
+> --port 8000`), despite PRD 08 listing `port` as an Environment-layer
+> setting. Fixed with a new `src/usher/__main__.py` (`python -m usher`)
+> that calls `uvicorn.run("usher.api.app:create_app", factory=True,
+> host=settings.host, port=settings.port)` — the same code path the CLI
+> form uses internally, just reading `Settings` instead of a hardcoded
+> flag. `CMD` is now `sh -c "alembic upgrade head && exec python -m
+> usher"` — `exec` so `docker stop`'s SIGTERM reaches uvicorn directly
+> instead of being swallowed by the wrapping shell. Local dev is
+> unaffected: `uv run uvicorn usher.api.app:create_app --factory --host
+> 0.0.0.0 --port 8000` still works exactly as documented.
+>
+> **Host port is `${USHER_HOST_PORT:-8100}:8000`, not a bare
+> `"8000:8000"`.** This host already publishes another container's app on
+> 8000 (`vllm`) — a hardcoded collision was never going to be free of
+> assumptions to begin with, so the port is now a `.env`-overridable
+> variable (documented in `.env.example`) with 8100 as the default,
+> verified free at the time this was written. "Pick free host ports" per
+> the task brief, made durable rather than a one-time check.
+>
+> **Both flags in the amendment above this task are resolved, and the
+> second one is resolved *against* its own stated reasoning, deliberately:**
+>
+> 1. Step 4's expected output above is corrected in place (done, not
+>    deferred) to include `"migrations":true`.
+> 2. **`usher`'s healthcheck targets `/health/ready`, not `/health`** —
+>    the opposite of what the flag above recommended. That flag's concern
+>    was a restart loop ("a Postgres blip is not a reason to restart the
+>    `usher` container"), reasoning that holds for a Kubernetes liveness
+>    probe but not for what a plain `docker compose` (no Swarm) healthcheck
+>    actually does: verified against Docker's documented behaviour, a
+>    failing healthcheck here only ever changes the reported status
+>    (`docker compose ps`, `depends_on: condition: service_healthy`) — it
+>    never itself stops or restarts a container. `restart: unless-stopped`
+>    triggers on the container's *process* exiting, a condition this
+>    healthcheck cannot cause. With no restart-loop risk in this specific
+>    deployment shape, `/health/ready` is strictly more informative for
+>    what a compose healthcheck actually gates — "can this serve a
+>    request", not just "is the process alive", which `/health` would
+>    report even while genuinely degraded. Compose has no separate
+>    liveness/readiness probe pair the way Kubernetes does, so one
+>    healthcheck necessarily conflates the two; readiness is the more
+>    useful of the two to conflate it into, here.
+>
+> **The Postgres healthcheck forces TCP (`-h 127.0.0.1`), not the plan's
+> bare `pg_isready -U usher -d usher`.** Not a style choice — the bare
+> form false-positives. `pgvector/pgvector:pg17` (like the upstream
+> `postgres` image it's built from) runs a *temporary* bootstrap server
+> during `initdb` on a fresh volume, started with `listen_addresses=''`
+> (Unix socket only, confirmed against the running container's own log
+> line) to run init scripts before the real server starts.
+> `pg_isready`/`psql` with no `-h` default to the Unix socket, so an
+> unqualified check reaches that temporary server. Verified directly,
+> twice — once standalone (`docker run`, polled every ~0.1s) and once
+> against the literal container `docker compose up` creates for this
+> task (same tight poll, racing the container's own creation): the
+> Unix-socket form reports "accepting connections" while the *bootstrap*
+> server is up, then "rejecting connections" for roughly a second while it
+> shuts down and the real server starts, before settling "accepting"
+> again — a real, reproducible false-positive window (~1.8s–2.9s
+> standalone; a ~1.1s-wide window at the same relative offset against the
+> compose-managed container). `-h 127.0.0.1 pg_isready` never once
+> false-positived in either run: "no response" solidly until the exact
+> moment the real server started accepting TCP, because the bootstrap
+> server never listens on TCP at all. Docker's own 2s-interval healthcheck
+> did not happen to land inside that narrow window in the compose runs
+> observed here — but that is host-load luck, not a guarantee, which is
+> why "prove it waits" meant tight-polling the mechanism directly rather
+> than trusting a few `docker compose up` runs to have been unlucky in the
+> right way.
+>
+> **Multi-replica migrations, noted rather than solved.** `CMD`'s
+> `alembic upgrade head && ...` has no distributed lock; two `usher`
+> containers starting at once would race to apply the same migration. Not
+> a problem at M1's one-replica scale; a real one the moment this service
+> is ever scaled past one, at which point migrations belong in a separate
+> one-shot step, not every replica's own startup. `/health/ready`'s
+> migration-mismatch check would surface a lost race as a 503, not prevent
+> the race.
+>
+> Full verified bring-up (build, up, both containers healthy, migrations
+> applied, five core tables + three triggers present, both health
+> endpoints, teardown) is in `CLAUDE.md`'s Group G section.
 
 ---
 
@@ -4497,6 +4609,61 @@ Expected: all tests pass (unit tests fast, integration tests start a container)
 git add .github/workflows/ci.yml pyproject.toml
 git commit -m "ci: lint, format, type check, architecture contracts, and tests"
 ```
+
+> **Amended post-implementation.**
+>
+> **Action versions bumped past the plan's fence — `actions/checkout@v4`
+> and `astral-sh/setup-uv@v5` are both several majors behind.** Checked
+> against each action's own GitHub releases at implementation time:
+> `actions/checkout`'s latest is `v7`, `astral-sh/setup-uv`'s is `v9`. Used
+> `@v7`/`@v9`. `setup-uv@v9`'s `action.yml` was fetched directly to confirm
+> `enable-cache: true` is still a valid input before relying on it (it is;
+> the input's default changed to `"auto"` but explicit `true` still works
+> unchanged).
+>
+> **A new `.python-version` file (`3.13`) at the repo root, not shown in
+> any plan fence, turned out to be necessary — this was not anticipated
+> going in, and was found by actually running the install step, not by
+> inspection.** `pyproject.toml`'s `requires-python = ">=3.13"` has no
+> upper bound. Verified directly on a bare `ubuntu:24.04` container (no
+> Python preinstalled at all, as a stand-in for a fresh runner) with `uv`
+> freshly installed: with no `.python-version` file, `uv sync --frozen`
+> silently resolved and installed **Python 3.14.6** — newer than the
+> 3.13.14 every group so far has actually developed and had mypy
+> strict/pytest/ruff verified against. Adding `.python-version` containing
+> `3.13` at the repo root made the identical command resolve `3.13.14`
+> instead, matching local dev exactly. Without this file, CI would test a
+> Python minor version nobody has actually run this codebase against, and
+> that mismatch would silently widen every time a new CPython minor
+> released — the workflow would still pass or fail, just never provably
+> against what was developed. `uv sync --no-dev` in the Dockerfile's
+> builder stage was never at risk of this: it sets `UV_PYTHON_DOWNLOADS=
+> never` and runs inside `python:3.13-slim`, so it can only ever use the
+> interpreter the base image itself pins.
+>
+> **`act` is not installed on this host and was not installed to test
+> this** (no network-independent way to verify that would itself have
+> been trustworthy — installing a GitHub-Actions-runner emulator whose own
+> correctness is unverified doesn't strengthen confidence much over not
+> having it). Verified instead: every `run:` step's literal command, run
+> locally exactly as written, in order —
+> `uv sync --frozen` (confirms `.python-version` fix above), `uv run ruff
+> check .`, `uv run ruff format --check .` (70 files), `uv run mypy`
+> (`Success: no issues found in 67 source files` — the `pyproject.toml`
+> mypy-override contingency in Step 3 above was never needed), `uv run
+> lint-imports` (4 contracts kept), `uv run pytest --cov=usher
+> --cov-report=term-missing` (237 passed, 98% coverage). The one step not
+> reproduced byte-for-byte is `astral-sh/setup-uv`'s own action code
+> (JS/composite steps GitHub executes); its net effect — a working `uv` on
+> `PATH`, obeying `.python-version` — was verified by installing `uv` the
+> same way (astral's own install script) on a bare `ubuntu:24.04`
+> container standing in for a fresh runner, which is a reasonable proxy
+> but not the literal `ubuntu-latest` GitHub-hosted image. Docker-in-CI for
+> `tests/integration/`'s testcontainers is unverified in the same sense —
+> GitHub's own documentation states `ubuntu-latest` ships Docker running
+> by default, and this project's own `uv run pytest` already depends on
+> exactly that locally, but no run happened on an actual GitHub-hosted
+> runner as part of this task.
 
 ---
 
