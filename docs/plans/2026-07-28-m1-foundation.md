@@ -4210,9 +4210,105 @@ git add src/usher/api tests/integration/test_health.py
 git commit -m "feat: FastAPI application factory with liveness and readiness endpoints"
 ```
 
+> **Amended post-implementation — a review pass found the fences above
+> compliant but incomplete, and Group F's follow-up commits closed the
+> gaps.** Documented here rather than rewritten into the TDD steps above,
+> which stay as the literal history of what was first written and run.
+>
+> **Task 11 now also owns**, not deferred to a later milestone:
+>
+> - **OTel auto-instrumentation.** `pyproject.toml` already declared
+>   `opentelemetry-instrumentation-{fastapi,sqlalchemy,httpx}` as runtime
+>   dependencies, but nothing called `instrument()`/`instrument_app()`
+>   anywhere — verified directly that a plain request against the
+>   originally-shipped app left `get_current_span().get_span_context().
+>   is_valid` `False`, so `inject_trace_context` never fired in the
+>   running service, only in tests that construct their own span. Fixed
+>   by wiring `FastAPIInstrumentor.instrument_app(app)` into `create_app`
+>   and `SQLAlchemyInstrumentor`/`HTTPXClientInstrumentor` into
+>   `configure_tracing`. This has to live in the bootstrap, not a later
+>   milestone: M4's pipeline spans need a server span to nest under, or
+>   each becomes its own root trace.
+> - **`configure_tracing` installs a real `TracerProvider`
+>   unconditionally**, not only when `telemetry_enabled` — verified
+>   directly that a bare `TracerProvider()` with zero span processors
+>   still assigns valid random trace/span ids, so log correlation works
+>   even with no OTLP collector configured. Only the OTLP-*exporting*
+>   `BatchSpanProcessor` stays conditional. This made `configure_tracing`
+>   a from-then-on-non-trivial function to call repeatedly (the test
+>   suite alone calls `create_app()` dozens of times), so it gained an
+>   `isinstance(trace.get_tracer_provider(), TracerProvider)` idempotency
+>   guard — verified directly that without it, 5 `create_app()` calls
+>   with telemetry enabled leaked 5 `BatchSpanProcessor` threads.
+> - **A stdlib-`logging`-to-loguru bridge** (`_InterceptHandler`, loguru's
+>   own documented recipe). Without it, uvicorn's access/error logs,
+>   SQLAlchemy warnings, and the OTel exporter's own retry/failure
+>   messages all print as unstructured plain text — confirmed on a live
+>   run — ignoring `log_level`/`log_json` and never getting
+>   `trace_id`/`span_id` patched in. PRD 10 says "Every record is
+>   patched," not "every loguru record."
+> - **`configure_metrics`**, mirroring `configure_tracing`'s shape (real
+>   `MeterProvider` unconditionally, OTLP export conditional, same
+>   idempotency guard). No metrics are registered — PRD 10's ~18 OTel
+>   metrics are each owned by the milestone that emits them — this is
+>   only the bootstrap seam, so *where it lives* was decided once here
+>   instead of independently in each of nine milestones.
+>
+> **Task 12 now also owns:**
+>
+> - **`get_session` (`api/deps.py`) is the request's commit/rollback
+>   boundary** — `ports/repository.py`'s "the caller owns the
+>   session and the transaction" was previously true of nothing in
+>   `src/`: no `commit()` existed anywhere, so `AsyncSession.close()`
+>   (what exiting `async with factory() as session` calls) silently
+>   discarded any write a future endpoint made. `get_session` now commits
+>   once the handler completes without raising, and rolls back +
+>   re-raises otherwise.
+> - **`/health/ready` also reports `checks.migrations`**
+>   (`usher/db/migrations/status.py`), comparing the live
+>   `alembic_version` table against the code's expected head revision —
+>   PRD 08: "the app refuses to serve on a schema mismatch rather than
+>   guessing." `alembic upgrade head && uvicorn ...` (Task 13) runs
+>   migrations on start but was never itself a mismatch check.
+> - **`/health/ready` returns HTTP 503 when degraded, not 200.** No PRD
+>   text pinned a status code, so this was an open call, decided in the
+>   direction a readiness probe's actual consumers (Kubernetes, Docker
+>   `healthcheck`, load balancers) need: they gate on the status code and
+>   never parse the body, so 200-with-a-degraded-body told every one of
+>   them "keep sending traffic here." The degraded path itself
+>   (`tests/unit/test_api_health.py`) was previously untested entirely —
+>   the only shipped test exercised a reachable database.
+> - **Typed response models** (`api/dto/health.py`:
+>   `LivenessResponse`/`ReadinessResponse`/`ReadinessChecks`) replace the
+>   bare `dict[str, object]`/`JSONResponse` return types, so
+>   `/openapi.json` describes real shapes instead of `{"type": "object"}`
+>   — PRD 07's "clients codegen typed models," and the first two of the
+>   ~30 endpoints M9 will add over the same pattern.
+>
+> Test count grew from the 3 in Task 12's own step 6 to 235 across both
+> tasks' combined surface (`usher run pytest`); see `CLAUDE.md`'s Group F
+> section for the up-to-date figure and the verified-commands block.
+
 ---
 
 ## Task 13: Container and compose
+
+> 🔶 **Flag for whoever picks this up — not yet updated, since Task 13
+> itself is still unbuilt as of this amendment.** Two things above affect
+> what's written below before it's implemented:
+>
+> 1. **Step 4's expected `/health/ready` output is now incomplete.** The
+>    real response also includes `"migrations":true` in `checks` — see
+>    Task 12's amendment above. Update the expected curl output when this
+>    task is implemented, not after.
+> 2. **`compose.yml`'s `usher` service has no `healthcheck` of its own**
+>    (only `postgres` does) — meaning nothing in this compose file
+>    actually consumes `/health` or `/health/ready` automatically. If a
+>    healthcheck is added, point it at `/health` (liveness), not
+>    `/health/ready`: readiness now returns a non-2xx status when
+>    degraded, and a Postgres blip is not a reason to restart the `usher`
+>    container — restarting doesn't fix Postgres, which is the entire
+>    point of the liveness/readiness split.
 
 **Files:**
 - Create: `Dockerfile`, `compose.yml`

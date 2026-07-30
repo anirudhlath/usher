@@ -139,9 +139,9 @@ plus an autogenerate diff against the migrated database asserting no
 drift):
 
 ```bash
-uv run pytest                        # full suite — 227 tests, needs Docker for the 43 under tests/integration/
-uv run pytest tests/unit             # 184 tests, no Docker
-uv run pytest tests/integration      # 43 tests, needs Docker
+uv run pytest                        # full suite — 235 tests, needs Docker for the 44 under tests/integration/
+uv run pytest tests/unit             # 191 tests, no Docker
+uv run pytest tests/integration      # 44 tests, needs Docker
 uv run pytest -m "not integration"   # marker equivalent of tests/unit
 uv run pytest -m integration         # marker equivalent of tests/integration
 ```
@@ -164,33 +164,74 @@ pattern PRD 08 calls the "contract suite" for `SourceAdapter`; M3 is
 expected to reuse it.
 
 Verified working as of Group F (telemetry bootstrap, FastAPI app with health
-endpoints) — the app is now a runnable service:
+endpoints, then hardened in a follow-up review pass) — the app is now a
+runnable service:
 
 ```bash
 export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:5432/usher"
 export USHER_SECRET_KEY="<32+ char secret>"
 uv run alembic upgrade head
 uv run uvicorn usher.api.app:create_app --factory --host 0.0.0.0 --port 8000
-curl http://localhost:8000/health          # liveness  -- {"status":"ok"}
-curl http://localhost:8000/health/ready    # readiness -- {"status":"ready","checks":{"database":true}}
+curl http://localhost:8000/health          # liveness  -- {"status":"ok"}, HTTP 200 always
+curl http://localhost:8000/health/ready    # readiness -- {"status":"ready","checks":{"database":true,"migrations":true}}, HTTP 200 or 503
 ```
 
 `/health` and `/health/ready` are deliberately different: liveness must never
 depend on Postgres (a database outage is not a reason to kill and restart
 the process — restarting doesn't fix Postgres), so only readiness executes
-`SELECT 1`. Verified directly against a real container: stopping Postgres
-mid-session leaves `/health` returning `{"status":"ok"}` unchanged while
+`SELECT 1` (and, only if that succeeds, compares the live `alembic_version`
+table against `usher.db.migrations.status.code_head_revision()` — PRD 08:
+"the app refuses to serve on a schema mismatch rather than guessing").
+Readiness returns HTTP 503 (not 200) when any check fails: no PRD text pins
+a status code, but a readiness probe's real consumers — Kubernetes, Docker
+`healthcheck`, load balancers — gate on the code and never parse the body.
+Verified directly against a real container: stopping Postgres mid-session
+leaves `/health` returning `{"status":"ok"}`/200 unchanged while
 `/health/ready` switches to `{"status":"degraded","checks":{"database":
-false}}` — both still HTTP 200, same running process, no restart. Readiness
-self-heals once Postgres comes back, still without restarting Usher.
+false,"migrations":false}}`/503 — same running process, no restart.
+Readiness self-heals once Postgres comes back, still without restarting
+Usher. Corrupting `alembic_version` on an otherwise-healthy database
+produces the same degraded/503 shape with `database: true, migrations:
+false` — a live demonstration is in the "readiness reports migration
+state" commit.
 
-Telemetry is optional: with no `OTEL_EXPORTER_OTLP_ENDPOINT` set,
-`configure_tracing()` returns before constructing anything gRPC-related, so
-the default (unset) config carries zero telemetry-related risk. If an
-endpoint *is* set but nothing is listening there, the OTel SDK's own
-`BatchSpanProcessor`/`OTLPSpanExporter` retry loop logs a warning (via
-stdlib `logging`, not loguru) rather than raising or hanging the app —
-graceful, but worth knowing it isn't perfectly silent in that specific case.
+Every request gets a real server span (`FastAPIInstrumentor`, wired in
+`create_app`) with SQLAlchemy queries and outbound httpx calls nested under
+it (`SQLAlchemyInstrumentor`/`HTTPXClientInstrumentor`, wired in
+`configure_tracing`) — without this, nothing ever called
+`tracer.start_as_current_span()` during request handling, so
+`inject_trace_context` never fired in the running service, only in tests
+that built their own span. `configure_tracing`/`configure_metrics` install a
+real `TracerProvider`/`MeterProvider` *unconditionally* (a bare provider
+with zero processors still assigns valid ids/records instruments, verified
+directly) — only the actual OTLP *export* is conditional on
+`settings.telemetry_enabled`. Both are `isinstance`-guarded against being
+reconfigured on a second `create_app()` call in the same process (verified
+directly: without the guard, 5 calls with telemetry enabled leaked 5
+background export threads; with it, flat at the 2 the first call installs).
+With no `OTEL_EXPORTER_OTLP_ENDPOINT` set, the default (unset) config still
+carries zero *export*-related risk — nothing gRPC-related is ever
+constructed. If an endpoint *is* set but nothing is listening there, the
+OTel SDK's own retry loop logs a warning rather than raising or hanging the
+app — graceful, but not literally silent in that specific case.
+
+Stdlib `logging` (uvicorn's access/error logs, SQLAlchemy warnings, the OTel
+exporter's own retry messages) is bridged into loguru via `_InterceptHandler`
+(loguru's own documented recipe) — without it, confirmed on a live run, only
+`usher`'s own logger calls were structured JSON; everything else printed as
+plain text, ignored `log_level`/`log_json`, and never got
+`trace_id`/`span_id` patched in.
+
+`get_session` (`api/deps.py`) is the request's commit/rollback boundary:
+commits once the handler completes without raising, rolls back and
+re-raises otherwise. Previously nothing in `src/` ever called `commit()` —
+`ports/repository.py`'s "the caller owns the session and the transaction"
+had no concrete caller yet, so a future write endpoint that forgot to
+commit would have lost data silently.
+
+`/health` and `/health/ready` responses are typed (`api/dto/health.py`,
+`LivenessResponse`/`ReadinessResponse`/`ReadinessChecks`), so
+`/openapi.json` describes real shapes instead of `{"type": "object"}`.
 
 `tests/integration/test_health.py`'s async `client` fixture needs
 `asgi_lifespan.LifespanManager` (new dev dependency) wrapping the app:
@@ -199,7 +240,13 @@ graceful, but worth knowing it isn't perfectly silent in that specific case.
 `AsyncClient(transport=ASGITransport(app=app))` never runs `create_app`'s
 lifespan and `app.state.session_factory` is never set. Reproduced directly:
 without the fix, `/health/ready` raises `AttributeError` while the other two
-tests in the file still pass.
+tests in the file still pass. `deps.py`'s `get_session_factory` now raises a
+diagnosable `RuntimeError` for this exact case instead of Starlette's
+generic `AttributeError`.
 
 Not yet available — depend on code later M1 groups haven't written:
-`docker compose up` (needs Group G's `Dockerfile`/`compose.yml`).
+`docker compose up` (needs Group G's `Dockerfile`/`compose.yml`). Group G
+should also know: Task 13's plan text still shows the pre-review expected
+`/health/ready` body (missing `migrations`) and `compose.yml` has no
+`healthcheck` on the `usher` service itself — see the amendment after
+Task 12 in `docs/plans/2026-07-28-m1-foundation.md`.
