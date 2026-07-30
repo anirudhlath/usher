@@ -6,8 +6,12 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Not a credential — the exact placeholder .env.example ships, kept only to
-# detect and reject it. See _reject_placeholder_secret_key below.
+# Not a credential -- a placeholder value kept only to detect and reject it.
+# .env.example itself ships USHER_SECRET_KEY= (blank, not this string) so a
+# fresh copy fails validation for a different, more obvious reason (a missing
+# required field) -- this guards the case where someone instead pastes in a
+# placeholder shown in documentation, an old README, or a setup guide.
+# See _reject_placeholder_secret_key below.
 _PLACEHOLDER_SECRET_KEY = "change-me-to-a-long-random-string"  # noqa: S105
 _ASYNCPG_DRIVER_PREFIX = "postgresql+asyncpg://"
 
@@ -55,8 +59,8 @@ class Settings(BaseSettings):
     def _reject_placeholder_secret_key(cls, value: SecretStr) -> SecretStr:
         if value.get_secret_value() == _PLACEHOLDER_SECRET_KEY:
             raise ValueError(
-                "USHER_SECRET_KEY is still the .env.example placeholder — generate a real "
-                "value, e.g. `openssl rand -hex 32`"
+                "USHER_SECRET_KEY is still the example placeholder value — generate a real "
+                "one, e.g. `openssl rand -hex 32`"
             )
         return value
 

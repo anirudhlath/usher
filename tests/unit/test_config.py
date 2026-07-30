@@ -66,8 +66,12 @@ def test_settings_reject_short_secret_key(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_settings_reject_placeholder_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """.env.example must be unusable as-is: copying its placeholder verbatim
-    would ship a credential-encryption key published in the repo."""
+    """.env.example itself ships USHER_SECRET_KEY= blank, not this string
+    (a fresh copy fails validation for a different reason: a missing
+    required field) -- this guards the case where someone instead pastes
+    in a placeholder shown in documentation, an old README, or a setup
+    guide, which would ship a credential-encryption key published in the
+    repo."""
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "change-me-to-a-long-random-string")
     with pytest.raises(ValidationError):
