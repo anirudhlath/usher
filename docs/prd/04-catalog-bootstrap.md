@@ -19,9 +19,17 @@ All figures below were measured on 2026-07-28.
 |---|---|---|---|
 | [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/) | 12.7M titles, 1.7M ratings, 100M cast/crew rows, 58M localised titles | 1.83 GiB gz | 20–40 min |
 | [TMDb daily ID export](https://developer.themoviedb.org/docs/daily-id-exports) | 1.23M movie + 228k series IDs **with popularity** | 31 MiB gz | < 1 min |
-| Wikidata SPARQL | ~278k verified IMDb↔TMDb ID pairs (CC0) | no download | ~1 h |
+| Wikidata SPARQL | ~386k verified IMDb↔TMDb↔TVDb ID pairs (CC0) | no download | ~18 s of query time |
 | TMDb API (per-id crawl) | Overviews, artwork, keywords, full credits | — | 1.5–2.5 h for the priority tier |
 | [MovieLens tag genome](https://grouplens.org/datasets/movielens/) | 15.6M movie×tag relevance scores | 250 MiB | ~10 min |
+
+> **What Phases 0–2 actually download: ~250 MiB, not 2.2 GiB** (measured
+> 2026-07-30). From IMDb, only `title.basics.tsv.gz` (214.4 MiB) and
+> `title.ratings.tsv.gz` (8.2 MiB) — the other five files carry cast, crew,
+> akas, and episodes, which need entities that do not exist yet (see Phase 0).
+> From TMDb, the two ID exports (`movie_ids` measured at 26.1 MiB, plus the
+> much smaller `tv_series_ids`). Wikidata downloads nothing. The rest of the
+> 2.2 GiB in the Cost table belongs to Phases 3–4.
 
 ### What the bulk data does *not* contain
 
@@ -40,40 +48,86 @@ Each phase is independently runnable, resumable, and checkpointed.
 
 ### Phase 0 — IMDb skeleton (~30 min)
 
-Stream-parse the TSVs into Postgres via `COPY`. Yields 12.7M `skeleton` titles,
-ratings, and cast/crew.
+Stream-parse the TSVs into Postgres via `COPY`. Yields ~1.13M `skeleton`
+titles with ratings, from 12.7M lines read.
 
-Pruning that keeps this sane: retain `movie`, `tvSeries`, `tvMiniSeries`,
-`tvMovie`, and `tvEpisode`; drop video games and adult; cap `title.principals`
-at the top ~15 billed per title; keep only original and English-region akas
-unless configured otherwise.
+Pruning that keeps this sane: retain `movie`, `tvMovie`, `tvSeries`, and
+`tvMiniSeries`; drop shorts, video, video games, and adult titles.
 
 > Useful calibration: of 1,127,975 movies + series in IMDb, only **188,796**
 > have ≥100 votes. That subset is the realistic universe for a home library and
 > defines the enrichment priority tier below.
 
-🔶 **Deferred design question:** `ix_titles_sort_name` is a plain btree over
-essentially-random text (`sort_name` has no normalisation contract —
-[02](02-data-model.md)) — worst case for insert locality, and projected at
-~635 MB at IMDb's full 12.7M titles. Whether Phase 0 should drop this index
-before the `COPY` and rebuild it after (standard practice for bulk-loading
-an indexed table) is not yet decided; this phase's importer should measure
-load time with and without that drop/rebuild before committing to either.
+> **Scope correction, 2026-07-30.** This section previously also named
+> `tvEpisode`, cast/crew (`title.principals` capped at ~15 billed), and
+> localised akas. Those need `Episode`, `Person`, and `Credit` — none of which
+> has a domain model or a table, and `TitleKind` is `movie | series` only, so
+> there is nowhere to put those rows. `title.principals`, `title.crew`,
+> `title.akas`, `title.episode`, and `name.basics` land with the milestone
+> that adds those entities ([09](09-roadmap.md) places the ingest pipeline and
+> its people/episode modelling in M4). Retaining exactly the four `titleType`s
+> above is what yields the 1,127,975 figure this section already cites.
+
+🔶 **Deferred design question, narrowed:** `ix_titles_sort_name` is a plain
+btree over essentially-random text (`sort_name` has no normalisation contract
+— [02](02-data-model.md)) — worst case for insert locality. The ~635 MB
+projection above it was against IMDb's *full* 12.7M titles; at the ~1.13M
+this phase actually writes it is closer to ~56 MB, so the saving from
+dropping and rebuilding it is far smaller than the question assumed. The
+mechanism exists — `BulkCatalogRepository.bulk_load_window` drops it and
+`ix_titles_name_lower_year` and rebuilds them, **but only into an empty
+`titles`**, so a re-import keeps the catalog orderable while it runs. What
+remains open is only whether the saving justifies the mechanism at this row
+count; `scripts/measure_bulk_load.py` answers it against the real dump.
 
 ### Phase 1 — TMDb ID universe (< 1 min)
 
 Load movie and series ID exports. `popularity` becomes the default crawl
 priority, so the queue is ordered by real-world relevance from the start.
 
-### Phase 2 — ID crosswalk (~1 h, no download)
+The export lands in its own `tmdb_ids` table, keyed `(tmdb_id, kind)`, not in
+`titles`. It carries an id, an original name, and popularity — no localised
+title, no year, no overview (verified 2026-07-30) — so there is not enough in
+it to build a catalog entry, and Phase 2 is what connects these ids to the
+skeleton rows IMDb already supplied. Keeping Phase 1 an ID-load rather than a
+match is what stops it from anticipating the ingest pipeline's matcher
+([03](03-sources-and-sync.md)). No API key is needed; the export is
+unauthenticated.
 
-Paged SPARQL against Wikidata for P345/P4947/P4983/P4835 → ~278k verified
-IMDb↔TMDb↔TVDb mappings, CC0 licensed. Gaps fill opportunistically during
-Phase 3 via TMDb `external_ids`.
+### Phase 2 — ID crosswalk (~1 min of query time, no download)
 
-Chunk queries by year or ID prefix to stay under the 60-second WDQS timeout.
-Do not download the Wikidata dump for this — it is 144 GiB for data that
-paged SPARQL returns in an hour.
+Paged SPARQL against Wikidata for P345 × {P4947, P4983, P4835} → ~386k
+verified IMDb↔TMDb↔TVDb mappings, CC0 licensed. Gaps fill opportunistically
+during Phase 3 via TMDb `external_ids`.
+
+Do not download the Wikidata dump for this — it is 144 GiB for data paged
+SPARQL returns in seconds.
+
+**Measured 2026-07-30**, unchunked, against `query.wikidata.org`:
+
+| Property pair | Rows | Time | Payload |
+|---|---|---|---|
+| P345 + P4947 (TMDb movie) | 277,678 | 14.5 s | 48.0 MB |
+| P345 + P4983 (TMDb series) | 57,343 | 2.1 s | 9.9 MB |
+| P345 + P4835 (TheTVDB series) | 51,415 | 1.1 s | 8.9 MB |
+
+The earlier "~1 h" estimate and the "~278k mappings" figure were both off:
+278k is the *movie* join alone, and the whole crosswalk is under twenty
+seconds of query time. The importer still chunks the work into 10 IMDb-id
+prefixes × 3 property pairs = 30 units, for checkpoint granularity and
+timeout headroom rather than speed — exceeding WDQS's limit returns
+`HTTP 504 text/plain "upstream request timeout"` after ~65 s with no
+`Retry-After` (verified), and the largest chunk measured 8.4 s against the
+unbounded movie query's 14.5 s. A live end-to-end run on 2026-07-30 stored
+**336,200 pairs** (277,361 movie / 57,059 series / 51,307 TVDb) after
+skipping values that cannot be a valid mapping.
+
+**TMDb's two id namespaces overlap, and this is the phase where that
+matters.** 26,968 of the 56,975 distinct TMDb series ids Wikidata knows are
+also live TMDb *movie* ids. `titles.tmdb_id`'s unique index is therefore
+`(tmdb_id, kind)`; a single-column one silently blocked 47.3% of television
+from ever being linked. See
+[ADR-0011](decisions/0011-tmdb-id-is-namespaced-by-kind.md).
 
 ### Phase 3 — TMDb enrichment crawl (tiered)
 

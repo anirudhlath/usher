@@ -5,6 +5,16 @@
 **Every entity has a Usher-owned UUIDv7 primary key.** Provider identifiers
 (`tmdb_id`, `imdb_id`, `tvdb_id`) are nullable, unique-indexed *attributes*.
 
+**`tmdb_id` is unique per `kind`, not globally.** TMDb keys movies and TV
+series in two independent integer spaces that both land in `Title.tmdb_id`,
+and they overlap on 26,968 ids (measured 2026-07-30). The unique index is
+`(tmdb_id, kind)`, and `TitleRepository.get_by_tmdb_id` takes a `TitleKind`
+alongside the id — see
+[ADR-0011](decisions/0011-tmdb-id-is-namespaced-by-kind.md). `imdb_id` and
+`tvdb_id` remain single-column unique; the same ADR records why. Any API
+surface that exposes a `tmdb_id` must expose its `kind` beside it, because
+the number alone does not identify a TMDb entity.
+
 This is load-bearing, not ceremony:
 
 - The identifier spaces don't align. TMDb has ~1.23M movies; IMDb lists 12.7M
