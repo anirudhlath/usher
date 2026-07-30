@@ -126,6 +126,35 @@ async def test_ensure_local_resumes_a_partial_download(cache: Path) -> None:
         assert list(dataset_file.lines()) == ["alpha", "bravo", "charlie"]
 
 
+async def test_ensure_local_overwrites_when_the_server_ignores_a_matching_range(
+    cache: Path,
+) -> None:
+    """Neither of the other two partial-download tests actually exercises
+    the append-vs-overwrite branch as a safety net: the different-revision
+    case is already resolved earlier by discarding the stale `.part` file
+    outright (mutation-verified -- forcing `mode` to always be `"ab"` still
+    passed the full suite before this test existed), and the matching-
+    revision case always happens to receive a genuine 206 from `_serve`. A
+    server is never obligated to honour Range/If-Range even when a client
+    sends a correctly matching one; if it answers 200 with the whole body
+    anyway, the *response status* -- not the request headers -- must decide
+    append-vs-overwrite, or the old partial bytes end up prepended onto a
+    second full copy of the body: a leading truncated gzip member in front
+    of a complete one, which raises on decompression rather than merely
+    reading wrong."""
+    cache.mkdir(parents=True)
+    (cache / "slice.tsv.gz.part").write_bytes(BODY[:5])
+    (cache / "slice.tsv.gz.revision").write_text('"v1"')
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=BODY, headers={"etag": '"v1"'})
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        dataset_file = CachedDatasetFile(client, URL, cache)
+        await dataset_file.ensure_local('"v1"')
+        assert list(dataset_file.lines()) == ["alpha", "bravo", "charlie"]
+
+
 async def test_ensure_local_discards_a_partial_from_a_different_revision(
     cache: Path,
 ) -> None:
