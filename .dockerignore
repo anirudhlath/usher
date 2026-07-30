@@ -1,0 +1,18 @@
+# Deny-by-default allowlist, not a denylist: the Dockerfile's COPY
+# instructions only ever name pyproject.toml, uv.lock, README.md,
+# alembic.ini, and src/ explicitly, so nothing else the build context
+# contains should even be *sendable* to the daemon -- not tests/, not
+# docs/ (which holds the PRD and this milestone's own plan), not .git/,
+# not a real .env with real secrets, not any of the local tool caches.
+# Docker uploads the whole context before evaluating COPY, regardless of
+# what COPY actually references, so this is what keeps that upload small
+# and keeps anything unlisted from ever being one stray `COPY . .` away
+# from landing in an image layer.
+*
+
+!pyproject.toml
+!uv.lock
+!README.md
+!alembic.ini
+!src
+!src/**
