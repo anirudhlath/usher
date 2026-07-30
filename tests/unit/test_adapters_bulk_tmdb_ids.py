@@ -245,6 +245,85 @@ async def test_resuming_from_a_real_cursor_reproduces_no_gap_and_no_duplicate(
     assert committed_then_resumed == full_run_ids
 
 
+async def test_a_same_day_republish_does_not_silently_skip_records(tmp_path: Path) -> None:
+    """Critical-bug regression. The dataset revision is the export's date;
+    the file's real identity is its ETag. A same-day republish (a
+    correction, a re-run of TMDb's own export pipeline) changes the ETag
+    while the date-shaped checkpoint revision stays identical -- so a naive
+    resume, computed purely from the date matching a stored checkpoint,
+    would apply the OLD body's skip position to the NEW body and silently
+    drop however many records its opening lines actually contain. Mirrors
+    how BootstrapService really calls this: `resume_from` and `revision`
+    both passed, against a cache dir that persists across the two calls
+    the way a real on-disk cache would across two process runs."""
+    cache = tmp_path / "bulk"
+    cache.mkdir(parents=True)
+    name = "movie_ids_07_30_2026.json.gz"
+    body_a = (
+        b'{"adult":false,"id":1,"original_title":"A-1","popularity":1.0,"video":false}\n'
+        b'{"adult":false,"id":2,"original_title":"A-2","popularity":2.0,"video":false}\n'
+        b'{"adult":false,"id":3,"original_title":"A-3","popularity":3.0,"video":false}\n'
+        b'{"adult":false,"id":4,"original_title":"A-4","popularity":4.0,"video":false}\n'
+    )
+    body_b = (
+        b'{"adult":false,"id":11,"original_title":"B-1","popularity":1.0,"video":false}\n'
+        b'{"adult":false,"id":12,"original_title":"B-2","popularity":2.0,"video":false}\n'
+        b'{"adult":false,"id":13,"original_title":"B-3","popularity":3.0,"video":false}\n'
+        b'{"adult":false,"id":14,"original_title":"B-4","popularity":4.0,"video":false}\n'
+    )
+    # Single-element lists, not a dict: a dict mixing str/bytes values loses
+    # per-key type narrowing under mypy strict.
+    current_etag = ['"etagA"']
+    current_body = [body_a]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).rsplit("/", 1)[-1] != name:
+            return httpx.Response(404)
+        return httpx.Response(
+            200, content=gzip.compress(current_body[0]), headers={"etag": current_etag[0]}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=2, today=_TODAY)
+        first = await anext(dataset.batches())
+    assert [row.original_name for row in first.rows] == ["A-1", "A-2"]
+    assert first.cursor.revision == "2026-07-30"
+    assert first.cursor.position == 2
+
+    # Upstream republishes a completely different body at the same
+    # date-stamped URL: the date-shaped revision is unchanged, the ETag is
+    # not, and ensure_local's own cache key is the ETag.
+    current_etag[0] = '"etagB"'
+    current_body[0] = body_b
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
+        resumed = [
+            batch
+            async for batch in dataset.batches(
+                resume_from=first.cursor, revision=first.cursor.revision
+            )
+        ]
+    resumed_names = [row.original_name for batch in resumed for row in batch.rows]
+    # All four of body B's records, not B-3/B-4 -- the old bug applied body
+    # A's "2 already seen" position to body B and silently lost B-1/B-2.
+    assert resumed_names == ["B-1", "B-2", "B-3", "B-4"]
+
+
+async def test_a_malformed_resume_revision_is_a_port_error(tmp_path: Path) -> None:
+    """`revision` is contractually always a value this dataset's own
+    `revision()` already produced -- a valid ISO date -- but it round-trips
+    through a caller and a stored checkpoint, so a corrupted or hand-edited
+    value must not crash the whole process with an unclassified
+    ValueError. Raises before any I/O, so a real (untouched) AsyncClient is
+    fine here -- no MockTransport needed."""
+    cache = tmp_path / "bulk"
+    async with httpx.AsyncClient() as client:
+        dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
+        with pytest.raises(PortDataMalformed):
+            [batch async for batch in dataset.batches(revision="not-a-date")]
+
+
 async def test_a_cursor_from_a_different_revision_restarts_the_stream(
     tmp_path: Path,
 ) -> None:
