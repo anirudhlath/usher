@@ -6,15 +6,20 @@ bulk_load_window really drops and rebuilds indexes, and that it declines to
 when the catalog is non-empty.
 """
 
+import uuid
+
 import pytest
-from sqlalchemy import text
+from sqlalchemy import delete, insert, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.contract.bulk_catalog_repository_contract import (
     SHAWSHANK,
     BulkCatalogRepositoryContract,
 )
+from usher.db.base import build_engine, build_session_factory
+from usher.db.models.source import SourceRow
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
+from usher.domain.enums import SourceKind
 from usher.ports.repository import BulkCatalogRepository
 
 _SUSPENDED = {"ix_titles_sort_name", "ix_titles_name_lower_year"}
@@ -150,3 +155,94 @@ async def test_bulk_load_window_declines_on_a_populated_catalog(
     await repo.upsert_titles([SHAWSHANK])
     async with repo.bulk_load_window():
         assert await _index_names(session) >= _SUSPENDED
+
+
+async def test_bulk_load_window_commits_the_callers_own_pending_work(
+    postgres_url: str,
+) -> None:
+    """Pins the documented, deliberate exception to "these flush and return
+    counts; they never commit" -- see BulkCatalogRepository.bulk_load_window
+    and PostgresBulkCatalogRepository's own docstrings for the full
+    rationale and the (rejected) alternatives.
+
+    Deliberately does NOT use the shared `session` fixture every other test
+    in this file uses. That fixture binds its session to a connection with
+    an externally-managed outer transaction (`conn.begin()`, see
+    tests/integration/conftest.py), and SQLAlchemy's own
+    `join_transaction_mode` resolves to "rollback_only" for exactly that
+    shape: `session.commit()` there ends the session's *logical* transaction
+    scope, but the real DBAPI transaction stays open until the fixture's own
+    `conn.rollback()` at teardown. That is exactly why this was invisible
+    before -- no test written against `session` can observe a real commit
+    here, no matter how carefully it's written, which is the coordinator's
+    own diagnosis and this test is built to not repeat it. Building a
+    session bound directly to the engine instead (the same shape
+    production's `deps.get_session` uses) makes `commit()` a real commit,
+    the same way tests/integration/test_migrations.py already does when it
+    needs to see real, cross-connection state.
+
+    Because this genuinely commits against the same session-scoped Postgres
+    container every other integration test shares, it cleans up after
+    itself in a `finally` -- the same discipline test_health.py's
+    `test_check_migrations_detects_a_mismatch` docstring calls out for this
+    exact fixture.
+    """
+    engine = build_engine(postgres_url)
+    factory = build_session_factory(engine)
+    source_id = uuid.uuid4()
+    try:
+        async with factory() as session:
+            bulk_repo = PostgresBulkCatalogRepository(session)
+
+            # Unrelated pending work on a table bulk_load_window has no
+            # business touching: a different repository's write, sent to
+            # Postgres (a Core `insert()` takes effect immediately, no ORM
+            # flush needed) but never committed by *this* caller. Stands in
+            # for "some other repository call earlier on the same session"
+            # -- the exact precondition TitleRepository's own docstring
+            # already documents as real, not hypothetical, once a session is
+            # shared across repositories.
+            await session.execute(
+                insert(SourceRow).values(
+                    id=source_id,
+                    kind=SourceKind.EMBY,
+                    name="pending source, never committed by this test",
+                    base_url="http://example.invalid",
+                    credentials_ref="ref",
+                    device_id="device",
+                )
+            )
+
+            # The empty-catalog branch is the one that commits -- assert the
+            # precondition explicitly so a future change elsewhere in the
+            # suite that leaves a stray title behind fails loudly here
+            # rather than silently taking the other branch and passing for
+            # the wrong reason.
+            assert await bulk_repo.count_titles() == 0
+
+            async with bulk_repo.bulk_load_window():
+                pass
+
+            # This test -- the caller -- has still never called
+            # session.commit() itself.
+
+        # A second, independent session: the only way to tell "genuinely
+        # committed" apart from "merely visible within the same still-open
+        # transaction" (read-your-own-writes would pass even if nothing
+        # here actually committed).
+        async with factory() as fresh:
+            result = await fresh.execute(
+                text("SELECT count(*) FROM sources WHERE id = :id"), {"id": source_id}
+            )
+            assert result.scalar_one() == 1, (
+                "bulk_load_window no longer commits the caller's pending work. "
+                "If this is a deliberate fix (e.g. it now uses its own session "
+                "instead of the caller's), update its docstring, the port's "
+                "documented precondition on BulkCatalogRepository.bulk_load_window, "
+                "and this test together -- don't just delete the assertion."
+            )
+    finally:
+        async with factory() as cleanup:
+            await cleanup.execute(delete(SourceRow).where(SourceRow.id == source_id))
+            await cleanup.commit()
+        await engine.dispose()

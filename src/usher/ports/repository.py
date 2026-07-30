@@ -188,6 +188,10 @@ class BulkCatalogRepository(ABC):
     Same session/transaction ownership as `TitleRepository`: these flush and
     return counts; they never commit. The caller commits a batch and its
     checkpoint together, which is the whole mechanism behind "resumable".
+
+    **`bulk_load_window` is the one deliberate exception to "never commit"**
+    — see its own docstring for what it commits and the precondition that
+    places on the caller. Every other method above keeps the rule.
     """
 
     @abstractmethod
@@ -195,6 +199,24 @@ class BulkCatalogRepository(ABC):
         """Scope inside which the implementation may relax storage-level
         optimisations that only pay for themselves on one-row-at-a-time
         writes, restoring them on exit.
+
+        **Precondition: the caller must have no uncommitted work on this
+        session it is not prepared to have committed before entering this
+        context manager.** Unlike every other method on this port, an
+        implementation of `bulk_load_window` may need to commit the session
+        to make schema changes durable and lock-free for the rest of the
+        window — and because it is *the caller's own session*, that commit
+        is not scoped to whatever this call itself changed. It commits
+        everything currently pending, exactly the way calling
+        `session.commit()` directly always does. This is not a hypothetical
+        edge case reachable only by misuse: `PostgresBulkCatalogRepository`
+        exercises it on every first bootstrap (the common case, an empty
+        catalog), and its docstring records why no alternative avoids it
+        (a second connection deadlocks against locks this session already
+        holds; flipping this session to autocommit requires ending its
+        transaction first anyway). A caller that must keep other pending
+        work uncommitted across this call needs its own, separate session
+        for that work.
 
         Named for the role, not the mechanism, because the mechanism is
         Postgres-specific: `PostgresBulkCatalogRepository` drops
@@ -314,6 +336,16 @@ class ImportRunRepository(ABC):
         run's `dataset` — two processes bootstrapping the same dataset at
         once is an operator mistake, and it must surface as a port error
         rather than a raw storage exception (ADR-0009).
+
+        Whether the *session* remains usable for further work after a
+        caught `RepositoryConflict` is deliberately left to the
+        implementation, not promised here — contrast `TitleRepository.add`/
+        `update`, which use a `SAVEPOINT` specifically so it does.
+        `PostgresImportRunRepository` chooses not to (see its own module
+        docstring): this repository's only caller is a single bootstrap
+        process, a conflict here means two importers are racing on the same
+        dataset, and there is no sensible way to continue that transaction
+        regardless.
         """
 
     @abstractmethod

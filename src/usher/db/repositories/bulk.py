@@ -128,6 +128,70 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         concurrent *writes* but not reads for the rebuild. Nothing else
         writes to `titles` during a bootstrap in this milestone; a milestone
         that runs a source sync concurrently must sequence the two.
+
+        **This calls `self._session.commit()` -- on the caller's own shared
+        session, not a private one -- which is the port's one documented
+        exception to "these flush and return counts; they never commit"
+        (`BulkCatalogRepository`'s docstring). That commit is not scoped to
+        the DROP INDEX statements alone: it commits every other change
+        already pending on this session, exactly as any `session.commit()`
+        call would. Confirmed directly, against a real (non-rolled-back)
+        Postgres session: staging an unrelated, unflushed-by-the-caller row
+        on this session and then entering this context manager on an empty
+        catalog leaves that row genuinely committed and visible from a
+        separate connection afterward, even though the caller never called
+        `commit()` itself. There are two call sites below (after the DROP,
+        after the rebuild), both gated by the same empty-catalog condition
+        (`suspended` non-empty) -- mutation-tested individually: removing
+        either one alone still leaks the caller's pending work through the
+        other, so both matter and neither is redundant to remove on its
+        own.**
+
+        Two ways to avoid committing the caller's session were tried and
+        rejected, both verified directly rather than assumed:
+
+        - **A second connection**, so the DDL's own commit never touches the
+          caller's session. Mechanically this works for the DDL itself, but
+          it deadlocks in practice: if the caller's session already holds so
+          much as a read lock on `titles` (e.g. a prior, still-open
+          `SELECT` on the same session -- and `count_titles()` above is
+          itself exactly that kind of read, whichever session runs it), a
+          second connection's `DROP INDEX` blocks waiting for that lock to
+          release, while the caller's session cannot release it because the
+          caller's own coroutine is suspended *awaiting this call to
+          return*. Postgres's deadlock detector never fires -- the caller's
+          session is not waiting on any database lock, so there is no cycle
+          in Postgres's own lock graph, only in the application's control
+          flow above it. Reproduced directly: a second connection's `DROP
+          INDEX` blocked for the full length of a 3-second timeout against a
+          first connection's merely-open, uncommitted `SELECT` on `titles`.
+          A silent, indefinite hang on every bootstrap that happens to run
+          this after any other read of `titles` on the same session is a
+          worse failure mode than the commit this would have avoided.
+        - **`CREATE INDEX CONCURRENTLY`**, so no exclusive lock and no forced
+          commit boundary around the rebuild. Rejected on a harder
+          constraint, not a style preference: Postgres refuses to run it at
+          all inside a transaction block -- confirmed directly,
+          `asyncpg.exceptions.ActiveSQLTransactionError: CREATE INDEX
+          CONCURRENTLY cannot run inside a transaction block` -- so it needs
+          an autocommit connection regardless, which is the second-connection
+          option above with its deadlock risk, plus its own separate hazard
+          if it fails partway (an `INVALID` index left behind, needing
+          manual cleanup on an otherwise-unattended bootstrap).
+
+        Given both alternatives are either no safer or actively worse, the
+        commit stays, and the precondition moved to `bulk_load_window`'s own
+        docstring on the port: **a caller must have no uncommitted work on
+        this session it is not prepared to have committed before entering
+        this context manager.** In practice that means whatever service
+        drives a bulk import should give this repository a session of its
+        own, not one shared with unrelated work -- see
+        `tests/integration/test_bulk_repository.py::
+        test_bulk_load_window_commits_the_callers_own_pending_work` for the
+        regression test that pins this, built against a session bound
+        directly to the engine rather than this suite's usual rolled-back
+        fixture connection, because that fixture's `rollback_only` join mode
+        is exactly what makes a real commit here structurally unobservable.
         """
         suspended: list[str] = []
         if await self.count_titles() == 0:
