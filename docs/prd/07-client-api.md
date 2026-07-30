@@ -70,13 +70,16 @@ be added if a client turns out to need flexible field selection.
 | `POST /admin/rows/regenerate` | Force LLM curation |
 | `GET /admin/bootstrap/status` · `POST /admin/bootstrap/{phase}` | Dataset import |
 
-> 🔶 **Provisional.** `GET /admin/sources/{id}/status` needs to report bad
-> credentials, unreachable, and reachable-but-push-blocked (e.g. a proxy
-> stripping `Upgrade`) as distinct states. `SourceAdapter.verify() -> bool`
-> can't express that split today. The error taxonomy in
-> `usher.ports.errors` (`PortAuthFailed`, `PortUnavailable`) is the
-> prerequisite; settle in **M3**, when the Emby adapter and this endpoint
-> are built together.
+> **Settled in M3.** `SourceAdapter.verify()` returns a `SourceStatus`
+> (`usher.ports.source`), not a bool: `reachable` and `authenticated` are
+> independent booleans (an invariant rejects the contradictory
+> `authenticated=True, reachable=False`), so bad credentials, unreachable,
+> and reachable-but-push-blocked (e.g. a proxy stripping `Upgrade`) render
+> as distinct states instead of collapsing to one failure. `push_available`
+> is `bool | None` — `None` means "not probed", per the health-check
+> caveat above — and `detail` is a short operator-facing string built from
+> the adapter's own translated `usher.ports.errors` exceptions, never a
+> credential. `GET /admin/sources/{id}/status` renders this directly.
 
 ### Meta
 
@@ -201,9 +204,14 @@ The client chooses based on what it can play. Usher supplies complete
 information and never proxies bytes — the deep-link construction currently done
 by hand in the Home Assistant card moves here, where it is testable.
 
-> 🔶 **Provisional.** The `StreamTarget` port DTO (`usher.ports.source`)
-> doesn't yet carry `scheme` or `audio`, both shown above. Settle in
-> **M3**, alongside the Emby adapter that first has to populate this.
+> **Settled in M3.** The `StreamTarget` port DTO (`usher.ports.source`) now
+> carries both fields shown above: `scheme` (set only for `deep_link`
+> targets, e.g. `"infuse"` for `infuse://…`, so a client can check whether
+> it handles the link without parsing the URL) and `audio` (a single
+> lowercase token like `"truehd_atmos_7_1"` — distinct from the raw
+> `audio_codec` a source reports, which alone doesn't tell a client
+> whether it can play the track). `kind` is a `StreamTargetKind` enum, not
+> a bare `str`, for the same reason `SourceItemKind` is one.
 
 ## Authentication seam
 

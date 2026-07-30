@@ -75,6 +75,12 @@ Operational requirements:
 > message already carries the position and played flag. Settle in **M5**,
 > when the push lane is built and the cost of re-walking is measurable
 > against just carrying the payload through.
+>
+> **Reviewed in M3, deliberately left alone.** M3 settled the other two 🔶
+> markers this section and 07 named for it (`SourceAdapter.verify()`,
+> `StreamTarget`) but builds no push lane itself, so the re-walk-cost
+> measurement this marker is waiting for is still not available. Still
+> M5's to settle.
 
 ## Reconciliation is not optional
 

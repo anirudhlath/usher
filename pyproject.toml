@@ -23,6 +23,7 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.49b0",
     "opentelemetry-instrumentation-sqlalchemy>=0.49b0",
     "opentelemetry-instrumentation-httpx>=0.49b0",
+    "cryptography>=49.0.0",
 ]
 
 [dependency-groups]
