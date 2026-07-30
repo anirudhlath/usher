@@ -4,22 +4,22 @@ Readiness is degraded rather than binary, so a dashboard can distinguish
 "down" from "running without a source".
 """
 
-from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Response
 from loguru import logger
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.api.deps import SessionDep
+from usher.api.dto.health import LivenessResponse, ReadinessChecks, ReadinessResponse
 from usher.db.migrations.status import code_head_revision, database_revision
 
 router = APIRouter(tags=["meta"])
 
 
-@router.get("/health")
-async def health() -> dict[str, str]:
+@router.get("/health", response_model=LivenessResponse)
+async def health() -> LivenessResponse:
     """Liveness. Checks nothing external by design."""
-    return {"status": "ok"}
+    return LivenessResponse(status="ok")
 
 
 async def _check_database(session: AsyncSession) -> bool:
@@ -66,26 +66,36 @@ async def _check_migrations(session: AsyncSession) -> bool:
         return False
 
 
-@router.get("/health/ready")
-async def ready(session: SessionDep) -> JSONResponse:
+@router.get("/health/ready", response_model=ReadinessResponse)
+async def ready(session: SessionDep, response: Response) -> ReadinessResponse:
     """Readiness. Reports each dependency separately.
 
-    Returns 503 when degraded rather than 200: no doc pins a status code
-    here, so this is a deliberate call, not a plan default. A readiness
-    probe's entire contract *is* the status code -- Kubernetes, Docker
-    `healthcheck`, and load balancers gate on it and never parse the
-    body, so a 200 "degraded" response tells every one of them "keep
-    sending traffic here," which is exactly wrong.
-    """
-    checks = {"database": await _check_database(session)}
-    checks["migrations"] = await _check_migrations(session) if checks["database"] else False
+    Sets the response status to 503 when degraded rather than leaving the
+    default 200: no doc pins a status code here, so this is a deliberate
+    call, not a plan default. A readiness probe's entire contract *is*
+    the status code -- Kubernetes, Docker `healthcheck`, and load
+    balancers gate on it and never parse the body, so a 200 "degraded"
+    response tells every one of them "keep sending traffic here," which
+    is exactly wrong.
 
-    # `all(checks.values())` on an empty dict is vacuously True -- guard it
-    # now, before M3 adds a conditional per-source check that could leave
-    # checks empty on some deployments and report "ready" having checked
-    # nothing.
-    is_ready = bool(checks) and all(checks.values())
-    return JSONResponse(
-        status_code=200 if is_ready else 503,
-        content={"status": "ready" if is_ready else "degraded", "checks": checks},
-    )
+    Takes the `Response` object as a parameter and mutates its
+    `status_code` rather than constructing a `JSONResponse` directly, so
+    FastAPI still runs this handler's return value through
+    `response_model` normally instead of the caller being responsible for
+    matching that shape by hand (FastAPI's own docs: returning a
+    `Response` directly "bypasses automatic data filtering and
+    serialization").
+    """
+    database_ok = await _check_database(session)
+    migrations_ok = await _check_migrations(session) if database_ok else False
+    checks = ReadinessChecks(database=database_ok, migrations=migrations_ok)
+
+    # all(...) over the model's own fields, not a hand-maintained boolean
+    # expression -- guards the same "reported ready having checked
+    # nothing" risk a bare dict had, but structurally: a checks dict could
+    # accidentally end up empty; a checks *model* can't, since every field
+    # is required, so M3 adding a per-source check is a mypy error at
+    # every construction site if forgotten, not a silent gap.
+    is_ready = all(checks.model_dump().values())
+    response.status_code = 200 if is_ready else 503
+    return ReadinessResponse(status="ready" if is_ready else "degraded", checks=checks)
