@@ -341,11 +341,15 @@ class ImportRunRepository(ABC):
         caught `RepositoryConflict` is deliberately left to the
         implementation, not promised here — contrast `TitleRepository.add`/
         `update`, which use a `SAVEPOINT` specifically so it does.
-        `PostgresImportRunRepository` chooses not to (see its own module
-        docstring): this repository's only caller is a single bootstrap
-        process, a conflict here means two importers are racing on the same
-        dataset, and there is no sensible way to continue that transaction
-        regardless.
+        `PostgresImportRunRepository` rolls back the whole transaction
+        instead of using a SAVEPOINT (see its own module docstring): unlike
+        `TitleRepository`'s general-purpose callers, its one caller,
+        `BootstrapService`, never has other work pending on the session at
+        this point worth a SAVEPOINT's extra round trip to protect. The
+        session *does* stay usable afterward, deliberately —
+        `BootstrapService.import_dataset`'s except handler continues on
+        this same session to record the failure as a durable `ImportRun`,
+        which is exactly why the rollback is there rather than skipped.
         """
 
     @abstractmethod

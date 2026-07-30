@@ -4,6 +4,38 @@ Implements `ImportRunRepository` (`usher.ports.repository`). Unlike
 `usher.db.repositories.bulk`, this one *does* go through the ORM: there is
 exactly one row per dataset and it is written once per batch, so the
 per-statement overhead the bulk path exists to avoid is irrelevant here.
+
+Session-poisoning decision, the opposite of `PostgresTitleRepository`'s:
+`save()` rolls back the *whole* transaction on a caught `IntegrityError`
+rather than confining the damage to a SAVEPOINT (`session.begin_nested()`).
+`PostgresTitleRepository` needs the SAVEPOINT because its callers share one
+session across many unrelated statements in a single transaction (PRD 01:
+"the caller owns the session and the transaction"), so a full rollback
+there would silently discard whichever of those a caller had pending. This
+repository's only caller, `BootstrapService`, doesn't have that shape:
+every transaction boundary on the session it hands this class brackets
+exactly one batch-or-run -- a dataset's `start()` call with nothing else
+yet pending, or a `_drain()` batch's data write plus its cursor save,
+committed together right after (see that module's own docstring on why the
+two must land in the same transaction or not at all). Whatever else is
+unflushed on the session at the moment `save()` raises is, by this
+construction, part of that same unit and *should* go with it, not survive
+it -- so there is never a caller's independent pending work for a SAVEPOINT
+to protect here, unlike `TitleRepository`'s general-purpose callers.
+
+The rollback is required, not optional, despite `save()`'s only caller
+being able to tolerate losing that unit of work: Postgres leaves a
+session's entire transaction aborted after an uncaught statement error
+until an explicit `ROLLBACK`, so *any* further statement on this session --
+not just a retried write -- raises `sqlalchemy.exc.PendingRollbackError`
+instead of whatever it was trying to do. `BootstrapService.import_dataset`'s
+except handler is exactly such a further statement: it calls
+`self._runs.get(dataset.name)` immediately after catching this same
+`RepositoryConflict`, to build the durable `FAILED` record its own
+docstring promises callers ("it does not re-raise"). Verified against real
+Postgres, both the failure without this rollback and the recovery with it:
+`tests/integration/test_import_run_repository.py::
+test_the_session_survives_a_conflict_for_the_callers_next_statement`.
 """
 
 from sqlalchemy import select
@@ -68,6 +100,14 @@ class PostgresImportRunRepository(ImportRunRepository):
             # `dataset` is unique: two processes bootstrapping the same dataset
             # at once is a real operator mistake, and it must surface as a port
             # error rather than a raw sqlalchemy exception (ADR-0009).
+            #
+            # The rollback is not cleanup for its own sake -- without it,
+            # Postgres leaves this session's transaction aborted, and the
+            # *next* statement on it (not this one) raises
+            # sqlalchemy.exc.PendingRollbackError instead of running. See
+            # the module docstring for why a full rollback, rather than a
+            # SAVEPOINT, is correct for this repository's one caller.
+            await self._session.rollback()
             raise RepositoryConflict(
                 f"an import run for {run.dataset} already exists under a different id",
                 constraint="uq_import_runs_dataset",
