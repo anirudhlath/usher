@@ -22,6 +22,36 @@ reasons, neither of them "the unchunked query is too slow":
    movie query at 14.5 s does not have if WDQS is under load.
 
 Total measured chunked cost is a few minutes, not PRD 04's "~1 h" estimate.
+
+**A work unit's own rows are further split into `batch_size`-sized
+sub-batches**, because 30 checkpoints is not the same thing as 30 bounded
+writes: the largest single unit, `tt0`/P4947, is 160,849 rows -- at this
+module's own measured ~173 bytes/row that is roughly 300 MB of `TmdbId`-
+shaped tuples live at once, and downstream it would be a single COPY +
+upsert in one transaction. `batch_size` bounds that without touching the
+fetch itself -- WDQS has no cheap, deterministic way to paginate a single
+query's results, so the JSON response for one unit is still fetched whole.
+
+A unit's sub-batches all carry `position=index` (the unit's own, *not yet
+advanced*, index) except the last, which carries `index + 1`. A crash
+between two sub-batches of the same unit therefore resumes by re-querying
+and re-yielding the whole unit from scratch -- correct, not merely
+tolerated, because `BulkDataset.batches`' own contract is that every write
+downstream is an upsert, so replaying already-committed sub-batches is a
+no-op.
+
+**Every unit yields a batch, even an empty one.** `BulkDataset.batches`
+explicitly allows a row-less batch "solely to advance the cursor... so a
+trailing run of [dropped records] doesn't lose progress on a crash" -- an
+earlier draft of this module read that the other way around and skipped
+the yield for an empty unit instead. Several of these thirty property/
+prefix combinations are genuinely, structurally near-empty (TheTVDB
+crosswalk entries thin out sharply in the higher `tt` prefixes), so a run
+whose *trailing* units are all empty would never advance its checkpoint
+past the last unit that had any rows at all -- stuck there permanently,
+with every same-day resume re-querying all the empty trailing units again
+against a rate-limited endpoint, and never reaching the point where the
+whole run can checkpoint complete.
 """
 
 import datetime as dt
@@ -31,6 +61,7 @@ from typing import Any
 
 import httpx
 
+from usher.adapters.bulk.download import _retry_after_seconds
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, IdCrosswalkPair
 from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
 
@@ -63,7 +94,14 @@ _WORK_UNITS: tuple[tuple[str, str, str], ...] = tuple(
 # over-long value would fail `id_crosswalk.imdb_id`'s String(16) during COPY.
 _IMDB_ID = re.compile(r"^tt\d{7,8}$")
 
+# id_crosswalk's provider-id columns are a plain Postgres Integer (int4).
+# A value outside this range would abort the whole COPY batch on the far
+# side rather than just the one vandalised or malformed row it came from.
+_INT32_MAX = 2_147_483_647
+
 _TIMEOUT_SECONDS = 90.0
+
+_DEFAULT_BATCH_SIZE = 50_000
 
 
 def _query(prop: str, prefix: str) -> str:
@@ -81,14 +119,29 @@ def _pairs(bindings: Iterable[Any], column: str) -> tuple[IdCrosswalkPair, ...]:
     Skipping rather than raising: Wikidata is openly editable, so a single
     vandalised or malformed value must not abort a bootstrap. A *structurally*
     wrong response is different and does raise -- see `_bindings`.
+
+    The numeric side is validated by actually attempting `int(other)` in a
+    `try`/`except`, not by a `str.isdigit()` pre-check: `"²".isdigit()`
+    (superscript two) is `True`, but `int("²")` raises `ValueError` --
+    a real Python gotcha `isdigit()` alone would have let straight through
+    as "looks numeric". The result is also range-checked against Postgres's
+    `Integer` (int4) rather than accepted at any size: `"99999999999999"`
+    also satisfies `isdigit()`/`int()` but would abort the whole COPY batch
+    on the far side rather than just this one row.
     """
     out: list[IdCrosswalkPair] = []
     for binding in bindings:
         imdb = binding.get("imdb", {}).get("value", "")
         other = binding.get("other", {}).get("value", "")
-        if not _IMDB_ID.match(imdb) or not other.isdigit():
+        if not _IMDB_ID.match(imdb):
             continue
-        out.append(IdCrosswalkPair(imdb_id=imdb, **{column: int(other)}))
+        try:
+            other_id = int(other)
+        except ValueError:
+            continue
+        if not 0 <= other_id <= _INT32_MAX:
+            continue
+        out.append(IdCrosswalkPair(imdb_id=imdb, **{column: other_id}))
     return tuple(out)
 
 
@@ -99,9 +152,11 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
         *,
         user_agent: str,
         endpoint: str = WIKIDATA_SPARQL_ENDPOINT,
+        batch_size: int = _DEFAULT_BATCH_SIZE,
     ) -> None:
         self._client = client
         self._endpoint = endpoint
+        self._batch_size = batch_size
         # WDQS's own user-agent policy requires a descriptive agent naming the
         # tool and a contact. A default httpx agent is the documented way to
         # get blocked.
@@ -140,8 +195,7 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
         except httpx.HTTPError as exc:
             raise PortUnavailable(f"WDQS request failed: {exc}") from exc
         if response.status_code == 429:
-            retry_after = response.headers.get("retry-after")
-            raise PortRateLimited(float(retry_after) if retry_after else None)
+            raise PortRateLimited(_retry_after_seconds(response.headers.get("retry-after")))
         if response.status_code >= 400:
             # 504 with a text/plain "upstream request timeout" body is WDQS's
             # own query-timeout shape (verified). Unavailable, not malformed:
@@ -188,19 +242,32 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
         for index in range(start, len(_WORK_UNITS)):
             prop, column, prefix = _WORK_UNITS[index]
             pairs = _pairs(await self._bindings(prop, prefix), column)
-            rows_seen += len(pairs)
-            if not pairs:
-                # No batch is emitted for an empty unit (the port forbids an
-                # empty batch), but the cursor still has to advance past it --
-                # otherwise a resume would re-run every empty unit forever.
-                # Carrying it into the next non-empty batch's cursor, via
-                # `index + 1`, is what keeps "commit rows and cursor
-                # together" true.
-                continue
-            yield BulkBatch(
-                rows=pairs,
-                cursor=BulkCursor(revision=resolved, position=index + 1, rows_seen=rows_seen),
-            )
+            # Split into batch_size-sized sub-batches -- and always at least
+            # one, even when `pairs` is empty, so an empty unit still gets a
+            # batch that advances the cursor past it (see the module
+            # docstring's "every unit yields a batch" section). `[()]` is
+            # exactly that one-empty-chunk case: `range(0, 0, batch_size)`
+            # yields nothing, so the list comprehension below is empty, and
+            # `or [()]` supplies the single empty chunk instead.
+            chunks = [
+                pairs[offset : offset + self._batch_size]
+                for offset in range(0, len(pairs), self._batch_size)
+            ] or [()]
+            last = len(chunks) - 1
+            for chunk_index, chunk in enumerate(chunks):
+                rows_seen += len(chunk)
+                yield BulkBatch(
+                    rows=chunk,
+                    cursor=BulkCursor(
+                        revision=resolved,
+                        position=index + 1 if chunk_index == last else index,
+                        rows_seen=rows_seen,
+                    ),
+                )
 
     async def aclose(self) -> None:
+        # No held resources beyond the shared httpx client, which is owned
+        # by whoever constructed it (the CLI's composition root) and closed
+        # there -- see `usher.adapters.bulk.imdb._ImdbDataset.aclose` for
+        # the same rationale spelled out once.
         return None

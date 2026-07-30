@@ -4,6 +4,9 @@ No live WDQS: the handler answers from a table keyed by the property and
 prefix the query names.
 """
 
+import datetime as dt
+import email.utils
+
 import httpx
 import pytest
 
@@ -81,24 +84,137 @@ async def test_skips_values_that_cannot_be_a_valid_mapping() -> None:
     assert [row.imdb_id for row in rows] == ["tt0111161"]
 
 
-async def test_never_yields_an_empty_batch() -> None:
-    """The port forbids it, and a loader that committed an empty batch would
-    still pay a round trip per empty work unit."""
+async def test_skips_a_digit_that_isdigit_accepts_but_int_cannot_parse() -> None:
+    """`"²".isdigit()` (superscript two) is `True`, but `int("²")`
+    raises `ValueError` -- a real Python gotcha an `isdigit()` pre-check
+    would miss entirely, since it never actually attempts the conversion it
+    is meant to be gatekeeping. Wikidata is openly editable, so this input
+    class is exactly the kind of value a vandalised or malformed statement
+    could contain; skipping it must not raise."""
+    transport = _wdqs({("P4947", "tt0"): _bindings(("tt0111161", "²"))})
+    async with httpx.AsyncClient(transport=transport) as client:
+        dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
+        rows = [row async for batch in dataset.batches() for row in batch.rows]
+    assert rows == []
+
+
+async def test_skips_a_value_too_large_for_the_int4_column() -> None:
+    """`"99999999999999".isdigit()` is `True` and used to be accepted
+    outright, but id_crosswalk's provider-id columns are a plain Postgres
+    Integer (int4, max 2147483647) -- a value past that would abort the
+    whole COPY batch on the far side rather than just this one row."""
+    transport = _wdqs({("P4947", "tt0"): _bindings(("tt0111161", "99999999999999"))})
+    async with httpx.AsyncClient(transport=transport) as client:
+        dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
+        rows = [row async for batch in dataset.batches() for row in batch.rows]
+    assert rows == []
+
+
+async def test_a_large_work_unit_is_split_into_batch_size_chunks() -> None:
+    """Measured up to 160,849 rows (~300MB in practice) for the largest real
+    work unit (tt0/P4947) -- unchunked, that is a single COPY+upsert
+    transaction on the far side. `batch_size` bounds the write side; only
+    the fetch itself is still whole-unit (WDQS has no cheap way to
+    paginate a single query deterministically)."""
+    pairs = tuple((f"tt{n:07d}", str(n)) for n in range(1, 12))  # 11 pairs
+    transport = _wdqs({("P4947", "tt0"): _bindings(*pairs)})
+    async with httpx.AsyncClient(transport=transport) as client:
+        dataset = WikidataCrosswalkDataset(client, user_agent=_UA, batch_size=5)
+        batches = [batch async for batch in dataset.batches()]
+    sized = [batch for batch in batches if batch.rows]
+    assert [len(batch.rows) for batch in sized] == [5, 5, 1]
+    # None of the sub-batches for the oversized unit (index 0) advance past
+    # it except the last -- a crash before that must redo the whole unit,
+    # not resume it partway (WDQS results aren't deterministically
+    # paginable, so "partway" isn't a position this adapter can express).
+    assert [batch.cursor.position for batch in sized] == [0, 0, 1]
+    assert sized[-1].cursor.rows_seen == 11
+
+
+async def test_a_429_with_an_http_date_retry_after_does_not_crash() -> None:
+    """RFC 9110 permits `Retry-After` to be an HTTP-date, not just a plain
+    integer -- `float(retry_after)` alone raises `ValueError` on one, which
+    used to escape uncaught from exactly the code path that fires when
+    upstream is asking for backoff. Uses a relative offset rather than a
+    fixed date so the test is not itself time-bound."""
+    target = email.utils.format_datetime(dt.datetime.now(dt.UTC) + dt.timedelta(seconds=45))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"retry-after": target})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
+        with pytest.raises(PortRateLimited) as exc_info:
+            [row async for batch in dataset.batches() for row in batch.rows]
+    assert exc_info.value.retry_after is not None
+    assert 30 <= exc_info.value.retry_after <= 60
+
+
+async def test_yields_a_row_less_batch_to_advance_past_every_empty_unit() -> None:
+    """`BulkDataset.batches` explicitly allows this -- "an implementation
+    may yield a row-less batch solely to advance the cursor" -- and an
+    earlier draft of this adapter read the contract backwards, skipping the
+    yield for an empty unit instead. All 30 units are empty here, so all 30
+    still yield their own (row-less) batch, each advancing the cursor by
+    exactly one."""
     async with httpx.AsyncClient(transport=_wdqs({})) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
-        assert [batch async for batch in dataset.batches()] == []
+        batches = [batch async for batch in dataset.batches()]
+    assert len(batches) == 30
+    assert all(batch.rows == () for batch in batches)
+    assert [batch.cursor.position for batch in batches] == list(range(1, 31))
 
 
 async def test_the_cursor_advances_past_empty_units() -> None:
-    """An empty unit yields no batch but must still be skipped on resume,
-    or the import re-runs it on every restart forever. The next non-empty
-    batch's cursor is what carries it."""
+    """A mid-stream empty unit still yields its own row-less batch (see
+    `test_yields_a_row_less_batch_to_advance_past_every_empty_unit`); this
+    covers the case where a *later* unit has rows, confirming the row-less
+    batches in between don't disturb `rows_seen`'s running total or the
+    final unit's own position."""
     transport = _wdqs({("P4835", "tt9"): _bindings(("tt0944947", "121361"))})
     async with httpx.AsyncClient(transport=transport) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
         batches = [batch async for batch in dataset.batches()]
-    assert len(batches) == 1
-    assert batches[0].cursor.position == 30  # the last of 10 prefixes x 3 properties
+    assert len(batches) == 30  # one per work unit, empty or not
+    sized = [batch for batch in batches if batch.rows]
+    assert len(sized) == 1
+    assert sized[0].cursor.position == 30  # the last of 10 prefixes x 3 properties
+    assert sized[0].cursor.rows_seen == 1
+
+
+async def test_a_resume_after_a_fully_empty_tail_reissues_no_queries() -> None:
+    """The stall this fixes: if the cursor only ever advanced past
+    *non-empty* units, a trailing run of structurally-empty ones (real for
+    several of these property/prefix combinations) never got checkpointed,
+    so a same-day resume re-queried all of them again -- every time,
+    forever, against a rate-limited endpoint, and the run could never reach
+    a checkpoint reflecting that it was actually done. Resuming from the
+    position a full run actually finished at must issue zero further
+    queries."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params["query"])
+        return httpx.Response(200, json=_bindings())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
+        batches = [batch async for batch in dataset.batches()]
+        revision = batches[-1].cursor.revision
+        final_position = batches[-1].cursor.position
+    assert final_position == 30
+    calls.clear()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
+        resumed = [
+            batch
+            async for batch in dataset.batches(
+                resume_from=BulkCursor(revision=revision, position=final_position, rows_seen=0)
+            )
+        ]
+    assert resumed == []
+    assert calls == []
 
 
 async def test_resuming_skips_completed_units() -> None:

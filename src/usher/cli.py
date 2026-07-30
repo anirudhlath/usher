@@ -95,6 +95,7 @@ async def _bootstrap(settings: Settings, phase: str) -> None:
                         client,
                         user_agent=settings.bulk_user_agent,
                         endpoint=settings.wikidata_endpoint,
+                        batch_size=settings.bulk_batch_size,
                     ),
                     catalog.upsert_crosswalk,
                 )
