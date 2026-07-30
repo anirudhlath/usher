@@ -4,7 +4,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from typing import Any
 
@@ -135,7 +135,28 @@ class SourceEvent:
     external_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
-@dataclass(frozen=True)
+def _redacted(url: str) -> str:
+    """A playback URL cut at its query string, for rendering in a `repr`.
+
+    Everything from the first `?` or `#` onward, gone. Not a search for
+    `api_key=`: the deep-link target hides the whole direct URL, token and
+    all, percent-encoded inside its *own* query string, so a redaction that
+    matched on a parameter name would sail straight past it. Cutting at the
+    query covers both, and covers whatever a second source spells its token
+    parameter — which is the point, since `StreamTarget` is the port's DTO
+    and Jellyfin's `ApiKey` has exactly the same problem as Emby's
+    `api_key`.
+
+    Enough is kept (scheme, host, path) to identify the item in a log line;
+    the query carries no fact a reader needs that the target's own typed
+    fields do not already state.
+    """
+    cut = min((index for index in (url.find("?"), url.find("#")) if index != -1), default=-1)
+    return url if cut < 0 else f"{url[:cut]}<redacted>"
+
+
+# `repr=False` is load-bearing, not stylistic -- see `__repr__` below.
+@dataclass(frozen=True, repr=False)
 class StreamTarget:
     """How to play an item. Clients choose between the returned targets.
 
@@ -152,6 +173,23 @@ class StreamTarget:
     thinks about it (`"truehd_atmos_7_1"`), which is a different thing from
     `SourceItem.audio_codec`'s raw `"truehd"` — the codec alone does not
     tell a client whether it can play the track.
+
+    **`url` carries a source credential, and `repr` therefore does not
+    render it.** A direct-play target has to authenticate itself to the
+    source — Emby's `api_key`, Jellyfin's `ApiKey` — because Usher never
+    proxies the bytes (ADR-0012, `docs/prd/decisions/`).
+    That makes this the one DTO on any port that deliberately holds a
+    secret, and PRD 08's "credentials are never logged, including in error
+    paths and request dumps" cannot then be a rule each caller remembers:
+    `logger.info(targets)`, an f-string in an exception message, a pytest
+    assertion dump, and loguru's `diagnose=True` frame-locals renderer all
+    reach the value through `__repr__` and nothing else. So the guarantee
+    lives here, once.
+
+    Verified directly: with the generated `repr`, the token appears in
+    plain text in all four. `.url` itself is untouched — PRD 07's `/play`
+    response is built from it, and a scrubbed URL would be an unplayable
+    link.
     """
 
     kind: StreamTargetKind
@@ -164,6 +202,23 @@ class StreamTarget:
     resolution: str | None = None
     runtime_seconds: int | None = None
     resume_position_seconds: int | None = None
+
+    def __repr__(self) -> str:
+        """The generated `repr` with `url` redacted — see the class
+        docstring for why this is a security property rather than taste.
+
+        Both halves fail safe. `@dataclass(repr=False)` means deleting this
+        method yields `object.__repr__` (`<StreamTarget object at 0x…>`),
+        which leaks nothing; and `dataclasses` never overwrites a
+        `__repr__` already defined in the class body, so flipping
+        `repr=False` back to `repr=True` does not silently restore the
+        leaking one either. Only deleting *both* re-opens it, which is what
+        `tests/unit/test_ports_source.py` is there to catch.
+        """
+        rendered = {item.name: getattr(self, item.name) for item in fields(self)}
+        rendered["url"] = _redacted(self.url)
+        body = ", ".join(f"{name}={value!r}" for name, value in rendered.items())
+        return f"{type(self).__name__}({body})"
 
 
 @dataclass(frozen=True)

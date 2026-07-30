@@ -8,9 +8,11 @@ code.
 
 import dataclasses
 import inspect
+import io
 from abc import ABC
 
 import pytest
+from loguru import logger
 from pydantic import SecretStr
 
 from usher.domain.enums import HdrFormat
@@ -63,6 +65,77 @@ def test_stream_target_is_frozen() -> None:
     target = StreamTarget(kind=StreamTargetKind.DIRECT, url="https://example.invalid/a.mkv")
     with pytest.raises(dataclasses.FrozenInstanceError):
         target.url = "https://elsewhere.invalid/b.mkv"  # type: ignore[misc]
+
+
+def test_stream_target_repr_redacts_the_url_query() -> None:
+    """ADR-0012: `url` is the one field on any port DTO that deliberately
+    carries a credential, so PRD 08's "credentials are never logged,
+    including in error paths and request dumps" has to hold at the DTO
+    rather than in every caller. `repr` is the single choke point every
+    accidental path goes through.
+
+    The path is kept and the query is dropped, rather than the whole URL:
+    a log line still says which item and which source, and nothing in the
+    query is a fact the target's own typed fields do not already carry.
+    """
+    target = StreamTarget(
+        kind=StreamTargetKind.DIRECT,
+        url="https://e/a.mkv?api_key=SEKRIT",
+        container="mkv",
+    )
+    rendered = repr(target)
+    assert "SEKRIT" not in rendered
+    assert "https://e/a.mkv<redacted>" in rendered
+    # Still a useful repr: the other fields are all there.
+    assert "container='mkv'" in rendered
+    # And the value itself is untouched -- PRD 07's /play response is built
+    # from `.url`, and a scrubbed URL would be an unplayable link.
+    assert target.url == "https://e/a.mkv?api_key=SEKRIT"
+
+
+def test_stream_target_repr_redacts_a_token_wrapped_inside_a_deep_link() -> None:
+    """The case a parameter-name-matching redaction would miss: the deep
+    link carries the whole direct URL, token and all, percent-encoded
+    inside its own query string, so `api_key=` does not appear literally
+    anywhere in it."""
+    deep = StreamTarget(
+        kind=StreamTargetKind.DEEP_LINK,
+        url="infuse://x-callback-url/play?url=https%3A%2F%2Fe%2Fa.mkv%3Fapi_key%3DSEKRIT",
+        scheme="infuse",
+    )
+    assert "SEKRIT" not in repr(deep)
+
+
+def test_stream_target_does_not_leak_a_token_under_diagnose_true() -> None:
+    """The accidental path that motivates the redaction, exercised for
+    real. Modelled on the `diagnose=True` leak Group A found in
+    `usher.telemetry` and on `EmbySession`'s own probe: loguru renders the
+    `repr` of every name referenced on the line an exception came from, and
+    a `StreamTarget` in scope there is exactly such a name.
+
+    The URL is deliberately tiny. loguru truncates a rendered value at
+    ~128 characters, so a realistic Emby URL's `api_key` falls off the end
+    of the dump and a probe built on one would pass whether or not the
+    redaction existed — Group C's "a test that passes against a
+    deliberately-broken implementation is not a test", arrived at in the
+    logging layer. The `<redacted>` assertion is the positive control: it
+    proves this probe really did render the `url` field, so the absence of
+    the token above it means something.
+    """
+    target = StreamTarget(kind=StreamTargetKind.DIRECT, url="https://e/a.mkv?api_key=SEKRIT")
+    sink = io.StringIO()
+    logger.remove()
+    try:
+        logger.add(sink, diagnose=True, backtrace=True, level="ERROR")
+        try:
+            raise RuntimeError(f"cannot serve {target.kind}")
+        except RuntimeError:
+            logger.exception("playback failed")
+    finally:
+        logger.remove()
+    dumped = sink.getvalue()
+    assert "<redacted>" in dumped, f"the probe never rendered the url field: {dumped}"
+    assert "SEKRIT" not in dumped
 
 
 def test_verify_returns_a_status_not_a_bool() -> None:

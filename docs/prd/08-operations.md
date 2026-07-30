@@ -29,6 +29,14 @@ Rules:
   command handles the bulk case.
 - No credential ever reaches a client. This is the failure of the setup Usher
   replaces, where a raw Emby token lived in browser-delivered dashboard config.
+  **One documented exception in v1: a `direct` playback target's URL carries
+  the source's session token**, because Usher never proxies the bytes and the
+  route that serves them authenticates. See
+  [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) for what
+  that grants, why the two halves of the original failure are not equally
+  present, and the M9 playback ticket that closes it. The rest of this list
+  still binds that token without exception — it is minted on demand, never
+  persisted, never logged, and never a span attribute.
 - At the config layer, `database_url`, `secret_key`, and `tmdb_api_key` are
   held as `pydantic.SecretStr` and unwrapped only at the point of use, so the
   rules above are enforced by the type system, not just convention.

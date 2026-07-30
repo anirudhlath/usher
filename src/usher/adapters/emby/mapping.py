@@ -7,9 +7,15 @@ real drift guard. If the fake server and this module got a field name wrong
 in the same way, the contract suite would still pass and
 `tests/unit/test_adapters_emby_mapping.py` would not.
 
-**No Emby field name appears anywhere else in `src/`.** This module is the
-whole of the translation, which is how PRD 01's "raw Emby or TMDb JSON
-never escapes its adapter package" is enforced rather than merely stated.
+**No Emby field name appears outside `usher.adapters.emby`.** That package
+reads Emby's JSON in exactly two modules -- this one, and `playback`, which
+builds direct-play URLs out of the same item payload -- and `playback`
+coerces its values with `as_int`/`as_text`/`as_lower` from here rather than
+redefining them, so "parse an Emby integer" has one meaning in the package
+and cannot drift between an item's `SourceItem` and its `StreamTarget`.
+Nothing above the adapter boundary names an Emby field at all, which is how
+PRD 01's "raw Emby or TMDb JSON never escapes its adapter package" is
+enforced rather than merely stated.
 
 ### On the fixtures
 
@@ -84,7 +90,7 @@ _AUDIO_FEATURES: tuple[tuple[str, str], ...] = (
 _CHANNEL_LAYOUTS: dict[int, str] = {1: "1_0", 2: "2_0", 6: "5_1", 8: "7_1"}
 
 
-def _as_int(value: object) -> int | None:
+def as_int(value: object) -> int | None:
     # `bool` is an `int` subclass, and Emby's JSON is full of booleans in
     # fields adjacent to numeric ones -- without this guard `Played: true`
     # in the wrong slot would become the integer 1.
@@ -97,11 +103,11 @@ def _as_int(value: object) -> int | None:
     return None
 
 
-def _text(value: object) -> str | None:
+def as_text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _lower(value: object) -> str | None:
+def as_lower(value: object) -> str | None:
     return value.lower() if isinstance(value, str) and value else None
 
 
@@ -205,7 +211,7 @@ def audio_token(audio: Mapping[str, Any]) -> str | None:
     9.1.6 track is still described rather than silently reported as
     channel-less.
     """
-    codec = _lower(audio.get("Codec"))
+    codec = as_lower(audio.get("Codec"))
     if codec is None:
         return None
     parts = [codec]
@@ -214,7 +220,7 @@ def audio_token(audio: Mapping[str, Any]) -> str | None:
         if needle in descriptor:
             parts.append(token)
             break
-    channels = _as_int(audio.get("Channels"))
+    channels = as_int(audio.get("Channels"))
     if channels is not None and channels > 0:
         parts.append(_CHANNEL_LAYOUTS.get(channels, f"{channels}ch"))
     return "_".join(parts)
@@ -230,7 +236,7 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
     upserted on `(source_id, external_id)` at all, so skipping it would
     lose a real item with no trace, and it raises `PortDataMalformed`.
     """
-    external_id = _text(payload.get("Id"))
+    external_id = as_text(payload.get("Id"))
     if external_id is None:
         raise PortDataMalformed(
             "Emby item has no Id",
@@ -244,28 +250,28 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
     media_source = primary_media_source(payload) or {}
     video = stream_of(media_source, "Video") or {}
     audio = stream_of(media_source, "Audio") or {}
-    runtime_ticks = _as_int(payload.get("RunTimeTicks"))
+    runtime_ticks = as_int(payload.get("RunTimeTicks"))
     return SourceItem(
         external_id=external_id,
-        name=_text(payload.get("Name")) or external_id,
+        name=as_text(payload.get("Name")) or external_id,
         kind=kind,
-        year=_as_int(payload.get("ProductionYear")),
+        year=as_int(payload.get("ProductionYear")),
         provider_ids=provider_ids(payload.get("ProviderIds")),
-        container=_lower(media_source.get("Container")),
-        video_codec=_lower(video.get("Codec")),
-        audio_codec=_lower(audio.get("Codec")),
+        container=as_lower(media_source.get("Container")),
+        video_codec=as_lower(video.get("Codec")),
+        audio_codec=as_lower(audio.get("Codec")),
         # Item-level Width/Height are the fallback: Emby sets them on the
         # item for some libraries and only on the video stream for others.
-        width=_as_int(video.get("Width")) or _as_int(payload.get("Width")),
-        height=_as_int(video.get("Height")) or _as_int(payload.get("Height")),
+        width=as_int(video.get("Width")) or as_int(payload.get("Width")),
+        height=as_int(video.get("Height")) or as_int(payload.get("Height")),
         hdr_format=hdr_format(video),
-        audio_channels=_as_int(audio.get("Channels")),
-        file_size_bytes=_as_int(media_source.get("Size")),
+        audio_channels=as_int(audio.get("Channels")),
+        file_size_bytes=as_int(media_source.get("Size")),
         runtime_seconds=None if runtime_ticks is None else runtime_ticks // TICKS_PER_SECOND,
         added_at=parse_datetime(payload.get("DateCreated")),
-        series_external_id=_text(payload.get("SeriesId")),
-        season_number=_as_int(payload.get("ParentIndexNumber")),
-        episode_number=_as_int(payload.get("IndexNumber")),
+        series_external_id=as_text(payload.get("SeriesId")),
+        season_number=as_int(payload.get("ParentIndexNumber")),
+        episode_number=as_int(payload.get("IndexNumber")),
         # PRD 03 stores this verbatim in `raw_payloads`. Copied rather than
         # aliased so a caller that mutates the DTO cannot reach back into
         # whatever buffer the response was parsed from.
@@ -285,16 +291,16 @@ def to_watch_state(
     and happens to be all zeros is emitted -- see the port's `watch_state`
     docstring for why filtering those is a correctness bug.
     """
-    external_id = _text(payload.get("Id"))
+    external_id = as_text(payload.get("Id"))
     user_data = payload.get("UserData")
     if external_id is None or not isinstance(user_data, Mapping):
         return None
-    ticks = _as_int(user_data.get("PlaybackPositionTicks")) or 0
+    ticks = as_int(user_data.get("PlaybackPositionTicks")) or 0
     return SourceWatchState(
         external_id=external_id,
         position_seconds=max(ticks, 0) // TICKS_PER_SECOND,
         played=bool(user_data.get("Played", False)),
-        play_count=max(_as_int(user_data.get("PlayCount")) or 0, 0),
+        play_count=max(as_int(user_data.get("PlayCount")) or 0, 0),
         last_played_at=parse_datetime(user_data.get("LastPlayedDate")),
         source_user_id=source_user_id,
     )

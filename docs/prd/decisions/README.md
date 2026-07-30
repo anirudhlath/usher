@@ -19,5 +19,7 @@ otherwise be lost and re-litigated in six months.
 | [0009](0009-repositories-are-ports.md) | Repositories are ports | Accepted |
 | [0010](0010-watch-state-title-fk-restrict.md) | `watch_states.title_id` is `ON DELETE RESTRICT` | Accepted |
 | [0011](0011-tmdb-id-is-namespaced-by-kind.md) | `tmdb_id` is unique per kind, not globally | Accepted — corrects an M1 index |
+| [0012](0012-playback-urls-carry-a-source-token.md) | A playback URL carries a source token, in v1 | Accepted for v1 — successor named in M9 |
+| [0013](0013-contract-suite-drives-a-source-harness.md) | The source contract suite drives a harness, not a cassette | Accepted |
 
 Format: context → decision → consequences → evidence. Short is fine.
