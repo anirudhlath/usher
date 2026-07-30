@@ -144,6 +144,33 @@ async def test_batches_respect_the_batch_size_and_advance_the_cursor(
     assert batches[-1].cursor.rows_seen == 5
 
 
+async def test_a_malformed_row_raises_through_batches_instead_of_truncating(
+    tmp_path: Path,
+) -> None:
+    """The port's non-negotiable contract: a stream that stops because
+    upstream is wrong must not look like one that finished. Only the
+    standalone parser was exercised against this elsewhere -- this proves
+    `_batches` does not catch and swallow the exception on its way past,
+    which would otherwise checkpoint a partial import as complete. TMDb's
+    suite already covers this for its own adapter; this is IMDb's
+    equivalent."""
+    cache = tmp_path / "bulk"
+    cache.mkdir(parents=True)
+    body = (
+        b"tconst\ttitleType\tprimaryTitle\toriginalTitle\tisAdult\tstartYear\tendYear\t"
+        b"runtimeMinutes\tgenres\n"
+        b"tt0111161\tmovie\tThe Shawshank Redemption\tThe Shawshank Redemption\t0\t1994\t"
+        b"\\N\t142\tDrama\n"
+        b"tt0000002\tmovie\tBad Row\tBad Row\t0\tnineteen-ninety\t\\N\t90\tDrama\n"
+    )
+    (cache / "title.basics.tsv.gz").write_bytes(gzip.compress(body))
+    async with httpx.AsyncClient(transport=_local(cache)) as client:
+        dataset = IMDbTitleDataset(client, cache, batch_size=1)
+        with pytest.raises(PortDataMalformed) as exc_info:
+            [batch async for batch in dataset.batches()]
+    assert exc_info.value.detail == "tt0000002.startYear"
+
+
 async def test_resuming_from_a_cursor_skips_what_was_committed(tmp_path: Path) -> None:
     """The property "resumable" reduces to. `position` is a line offset, and
     the file is re-read from the top because a gzip member is not seekable."""

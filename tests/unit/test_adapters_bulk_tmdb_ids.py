@@ -9,6 +9,7 @@ import pytest
 
 from usher.adapters.bulk.tmdb_ids import TMDbIdDataset
 from usher.domain.enums import TitleKind
+from usher.ports.bulk import BulkCursor
 from usher.ports.errors import PortDataMalformed, PortUnavailable
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures" / "bulk"
@@ -177,3 +178,88 @@ async def test_a_pre_resolved_revision_skips_the_backward_scan(tmp_path: Path) -
     # reaching this file.
     assert requests_seen == ["movie_ids_07_28_2026.json.gz"]
     assert len(batches) == 1
+
+
+async def test_position_counts_lines_consumed_not_rows_kept(tmp_path: Path) -> None:
+    """A blank line is filtered (`_parse` returns None for it) but is still
+    a line the file offset has to account for. If `position` counted kept
+    rows instead of raw lines consumed, `skip=` on a resume would
+    desynchronise from what `lines(skip=...)` actually skips -- silently
+    replaying or dropping rows depending on how many filtered lines fall
+    before the resume point. IMDb's suite guards this same invariant with
+    its own titleType filtering; this is TMDb's equivalent, using a blank
+    line since TMDb's parser otherwise keeps everything it doesn't reject
+    outright."""
+    cache = tmp_path / "bulk"
+    cache.mkdir(parents=True)
+    body = (
+        b'{"adult":false,"id":1,"original_title":"A","popularity":1.0,"video":false}\n'
+        b"\n"
+        b'{"adult":false,"id":2,"original_title":"B","popularity":2.0,"video":false}\n'
+    )
+    (cache / "movie_ids_07_30_2026.json.gz").write_bytes(gzip.compress(body))
+    async with httpx.AsyncClient(
+        transport=_serving(cache, {"movie_ids_07_30_2026.json.gz"})
+    ) as client:
+        dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
+        batches = [batch async for batch in dataset.batches()]
+    assert len(batches) == 1
+    assert [row.tmdb_id for row in batches[0].rows] == [1, 2]
+    # 3 raw lines (id=1, blank, id=2); only 2 are kept.
+    assert batches[0].cursor.position == 3
+    assert batches[0].cursor.rows_seen == 2
+
+
+async def test_resuming_from_a_real_cursor_reproduces_no_gap_and_no_duplicate(
+    tmp_path: Path,
+) -> None:
+    """The end-to-end resume guarantee, chained through a real cursor rather
+    than a hand-constructed one: whatever a real first call's cursor claims
+    was consumed, resuming from exactly that cursor must continue without
+    re-yielding an already-committed row or skipping an uncommitted one.
+    Unlike a hardcoded `position=`, this cannot pass by coincidence if the
+    line-counting arithmetic is wrong."""
+    cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_30_2026.json.gz")
+
+    async def _ids(resume_from: BulkCursor | None = None) -> list[int]:
+        async with httpx.AsyncClient(
+            transport=_serving(cache, {"movie_ids_07_30_2026.json.gz"})
+        ) as client:
+            dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=1, today=_TODAY)
+            return [
+                row.tmdb_id
+                async for batch in dataset.batches(resume_from=resume_from)
+                for row in batch.rows
+            ]
+
+    full_run_ids = await _ids()
+
+    async with httpx.AsyncClient(
+        transport=_serving(cache, {"movie_ids_07_30_2026.json.gz"})
+    ) as client:
+        dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=1, today=_TODAY)
+        first_batch = await anext(dataset.batches())
+
+    resumed_ids = await _ids(resume_from=first_batch.cursor)
+    committed_then_resumed = [row.tmdb_id for row in first_batch.rows] + resumed_ids
+    assert committed_then_resumed == full_run_ids
+
+
+async def test_a_cursor_from_a_different_revision_restarts_the_stream(
+    tmp_path: Path,
+) -> None:
+    """Position 2 of yesterday's export is not position 2 of today's --
+    restarting is slow, splicing two snapshots is wrong. IMDb's suite has
+    the equivalent of this test; the plan's TMDb suite omitted it."""
+    cache = _stage(tmp_path, "movie_ids.slice.jsonl", "movie_ids_07_30_2026.json.gz")
+    async with httpx.AsyncClient(
+        transport=_serving(cache, {"movie_ids_07_30_2026.json.gz"})
+    ) as client:
+        dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
+        batches = [
+            batch
+            async for batch in dataset.batches(
+                resume_from=BulkCursor(revision="2020-01-01", position=2, rows_seen=1)
+            )
+        ]
+    assert len(batches[0].rows) == 4
