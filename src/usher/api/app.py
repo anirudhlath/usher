@@ -19,10 +19,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = build_engine(settings.database_url.get_secret_value())
-        app.state.engine = engine
         app.state.session_factory = build_session_factory(engine)
-        yield
-        await engine.dispose()
+        try:
+            yield
+        finally:
+            # Not just hygiene: verified directly that a bare `yield` with
+            # no try/finally skips this call entirely if the task running
+            # the lifespan is cancelled while suspended at yield (as
+            # opposed to __aexit__ being called normally) -- exactly the
+            # shape ASGI shutdown uses. Harmless today (M1 has nothing
+            # else in the lifespan to leak), but M5 onward adds websocket
+            # connections, job workers, and HTTP clients to this same
+            # lifespan, where a skipped cleanup call is a real leak, not a
+            # theoretical one.
+            await engine.dispose()
 
     app = FastAPI(
         title="Usher",
@@ -38,6 +48,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # call on every create_app(): instrument_app marks the app object
     # itself, not a process-global singleton (verified directly).
     FastAPIInstrumentor.instrument_app(app)
-    app.state.settings = settings
     app.include_router(health.router)
     return app
