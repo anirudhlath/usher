@@ -7,12 +7,13 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M1 foundation in progress.** The project scaffold and environment
-config exist (`pyproject.toml`, `src/usher/config.py`, `tests/unit/`); domain
-models, ports, persistence, the API, telemetry, and containerization are not
-yet built. See `docs/plans/2026-07-28-m1-foundation.md` for the task
-breakdown. Do not invent commands for tooling that does not exist yet — check
-the Commands section below before assuming something runs.
+**Status: M1 foundation in progress.** The project scaffold, environment
+config, domain models, port ABCs, persistence (SQLAlchemy schema + Alembic
+migrations + title repository), the telemetry bootstrap, and a FastAPI app
+with liveness/readiness endpoints all exist; containerization is not yet
+built. See `docs/plans/2026-07-28-m1-foundation.md` for the task breakdown.
+Do not invent commands for tooling that does not exist yet — check the
+Commands section below before assuming something runs.
 
 ## Keep the PRD current
 
@@ -138,9 +139,9 @@ plus an autogenerate diff against the migrated database asserting no
 drift):
 
 ```bash
-uv run pytest                        # full suite — 222 tests, needs Docker for the 40 under tests/integration/
-uv run pytest tests/unit             # 182 tests, no Docker
-uv run pytest tests/integration      # 40 tests, needs Docker
+uv run pytest                        # full suite — 227 tests, needs Docker for the 43 under tests/integration/
+uv run pytest tests/unit             # 184 tests, no Docker
+uv run pytest tests/integration      # 43 tests, needs Docker
 uv run pytest -m "not integration"   # marker equivalent of tests/unit
 uv run pytest -m integration         # marker equivalent of tests/integration
 ```
@@ -161,6 +162,44 @@ suite runs against `FakeTitleRepository` (`tests/unit/`, no Docker) and
 are verified to actually agree instead of merely looking alike. This is the
 pattern PRD 08 calls the "contract suite" for `SourceAdapter`; M3 is
 expected to reuse it.
+
+Verified working as of Group F (telemetry bootstrap, FastAPI app with health
+endpoints) — the app is now a runnable service:
+
+```bash
+export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:5432/usher"
+export USHER_SECRET_KEY="<32+ char secret>"
+uv run alembic upgrade head
+uv run uvicorn usher.api.app:create_app --factory --host 0.0.0.0 --port 8000
+curl http://localhost:8000/health          # liveness  -- {"status":"ok"}
+curl http://localhost:8000/health/ready    # readiness -- {"status":"ready","checks":{"database":true}}
+```
+
+`/health` and `/health/ready` are deliberately different: liveness must never
+depend on Postgres (a database outage is not a reason to kill and restart
+the process — restarting doesn't fix Postgres), so only readiness executes
+`SELECT 1`. Verified directly against a real container: stopping Postgres
+mid-session leaves `/health` returning `{"status":"ok"}` unchanged while
+`/health/ready` switches to `{"status":"degraded","checks":{"database":
+false}}` — both still HTTP 200, same running process, no restart. Readiness
+self-heals once Postgres comes back, still without restarting Usher.
+
+Telemetry is optional: with no `OTEL_EXPORTER_OTLP_ENDPOINT` set,
+`configure_tracing()` returns before constructing anything gRPC-related, so
+the default (unset) config carries zero telemetry-related risk. If an
+endpoint *is* set but nothing is listening there, the OTel SDK's own
+`BatchSpanProcessor`/`OTLPSpanExporter` retry loop logs a warning (via
+stdlib `logging`, not loguru) rather than raising or hanging the app —
+graceful, but worth knowing it isn't perfectly silent in that specific case.
+
+`tests/integration/test_health.py`'s async `client` fixture needs
+`asgi_lifespan.LifespanManager` (new dev dependency) wrapping the app:
+`httpx.ASGITransport` only implements the ASGI "http" protocol, not
+"lifespan" (confirmed against its source and FastAPI's own docs), so a bare
+`AsyncClient(transport=ASGITransport(app=app))` never runs `create_app`'s
+lifespan and `app.state.session_factory` is never set. Reproduced directly:
+without the fix, `/health/ready` raises `AttributeError` while the other two
+tests in the file still pass.
 
 Not yet available — depend on code later M1 groups haven't written:
 `docker compose up` (needs Group G's `Dockerfile`/`compose.yml`).
