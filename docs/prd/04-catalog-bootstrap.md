@@ -68,17 +68,26 @@ Pruning that keeps this sane: retain `movie`, `tvMovie`, `tvSeries`, and
 > its people/episode modelling in M4). Retaining exactly the four `titleType`s
 > above is what yields the 1,127,975 figure this section already cites.
 
-🔶 **Deferred design question, narrowed:** `ix_titles_sort_name` is a plain
-btree over essentially-random text (`sort_name` has no normalisation contract
-— [02](02-data-model.md)) — worst case for insert locality. The ~635 MB
-projection above it was against IMDb's *full* 12.7M titles; at the ~1.13M
-this phase actually writes it is closer to ~56 MB, so the saving from
-dropping and rebuilding it is far smaller than the question assumed. The
-mechanism exists — `BulkCatalogRepository.bulk_load_window` drops it and
-`ix_titles_name_lower_year` and rebuilds them, **but only into an empty
-`titles`**, so a re-import keeps the catalog orderable while it runs. What
-remains open is only whether the saving justifies the mechanism at this row
-count; `scripts/measure_bulk_load.py` answers it against the real dump.
+**Index handling during Phase 0 — measured, decided.** `ix_titles_sort_name`
+and `ix_titles_name_lower_year` are dropped before the load and rebuilt
+after, **but only when `titles` is empty** — a first bootstrap has nothing to
+browse, so the drop is free, while a re-import must keep the catalog
+orderable (ADR-0005). Measured 2026-07-30 (`scripts/measure_bulk_load.py`)
+against `pgvector/pgvector:pg17` over the real `title.basics.tsv.gz`:
+**35.8 s suspended vs 40.2 s kept** — an 11.0% (4.4 s) saving — for
+**1,271,138** retained titles (today's live dump; larger than the 1,127,975
+this section measured on 2026-07-28, since IMDb refreshes this file daily).
+The two indexes total **97 MB** freshly rebuilt after a suspended load
+(`ix_titles_sort_name` 44 MB + `ix_titles_name_lower_year` 53 MB) versus
+**127 MB** maintained incrementally through the load (58 MB + 69 MB) — not
+the ~635 MB the earlier projection gave for IMDb's *full* 12.7M rows (this
+milestone retains only movies and series), and consistent with the ~56 MB
+narrowed estimate this section previously gave for `ix_titles_sort_name`
+alone. Suspending stays: the time saving is real and free (it only ever
+applies to an empty catalog), and it also produces a ~24% smaller, less
+fragmented pair of indexes than building them incrementally across 1.27M
+individual upserts. The seam is `BulkCatalogRepository.bulk_load_window`, so
+reversing this is a one-line change to `_SUSPENDABLE_INDEXES`.
 
 ### Phase 1 — TMDb ID universe (< 1 min)
 
