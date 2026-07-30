@@ -29,10 +29,20 @@ usable before it is complete (see [03](03-sources-and-sync.md)):
 | `skeleton` | From a bulk dataset. Name, year, runtime, genres, ratings. No overview or artwork. |
 | `stub` | Seen on a source but not yet enriched. Source's own metadata only. |
 | `enriched` | Full provider metadata present. `enriched_at` set. |
-| `failed` | Enrichment attempted and failed. Carries `enrichment_error`. |
 
 Every API response exposes this so clients render deliberately rather than
 guessing from null fields.
+
+Whether the *last enrichment attempt* failed is tracked separately, on
+`Title.enrichment_error: str | None` — a non-null value means the last
+attempt failed, but the tier above is left exactly as it was; failure does
+not consume or reset a rung on the ladder. `failed` was originally a fourth
+tier and was split out — see [ADR-0008](decisions/0008-enrichment-tier-vs-failure.md).
+
+Comparing tiers (e.g. "is this an improvement over what we had") must use
+`usher.domain.enums.ENRICHMENT_RANK`, never the enum members' own ordering —
+`EnrichmentState` is a `StrEnum`, whose ordering is lexicographic, not
+ladder position. Same ADR.
 
 ## Core entities
 
@@ -61,25 +71,45 @@ class Title(BaseModel):
     runtime_minutes: int | None
     status: ProductionStatus | None
 
-    genres: list[str]
-    keywords: list[str]
-    original_language: str | None
-    spoken_languages: list[str]
-    origin_countries: list[str]
+    genres: tuple[str, ...]
+    keywords: tuple[str, ...]
+    original_language: str | None        # ISO 639-1
+    spoken_languages: tuple[str, ...]    # ISO 639-1
+    origin_countries: tuple[str, ...]    # ISO 3166-1 alpha-2
     content_rating: str | None
 
-    community_rating: float | None       # provider aggregate
+    community_rating: float | None       # provider aggregate, TMDb 0-10 scale
     vote_count: int | None
     popularity: float | None
 
     collection_id: UUID | None
     enrichment_state: EnrichmentState
+    enrichment_error: str | None         # non-null => last enrichment attempt failed
     enriched_at: datetime | None
     field_provenance: dict[str, str]     # field -> provider that supplied it
 ```
 
+`genres`/`keywords`/`spoken_languages`/`origin_countries` are tuples, not
+lists: `Title` is frozen, and a `list` field is still mutable in place
+(`title.genres.append(...)` would silently succeed on a "frozen" model). A
+`dict` field has the same problem in principle but a frozen mapping isn't
+worth the ergonomics cost — `field_provenance` stays a plain `dict[str,
+str]`, which is why `Title` is deliberately the one domain model that isn't
+hashable.
+
 `field_provenance` exists so a second metadata provider can be added later
 without ambiguity about which source won a given field.
+
+🔶 **Deferred to M9:** a GIN index on `genres` for faceted `/browse`
+([07](07-client-api.md)) facet counts at catalog scale. Measured at 300k
+rows: a facet count seq-scans in 78.7 ms, projecting to ~3.3 s at IMDb's
+full 12.7M. Not added in M1 because `CREATE INDEX CONCURRENTLY` can add it
+online with no table rewrite whenever M9 lands — there is no cost to
+waiting and a real cost (write overhead through M2's bulk load, and every
+write after) to adding it before anything queries by facet. The same
+applies to indexes on `media_items.added_at`/`last_seen_at`/`available`
+and `titles.collection_id`: none exist yet, and none are needed while
+`media_items` stays in the tens of thousands of rows.
 
 ### Season / Episode
 
@@ -174,7 +204,7 @@ class MediaItem(BaseModel):
     container: str | None
     video_codec: str | None; audio_codec: str | None
     width: int | None; height: int | None
-    hdr_format: str | None               # HDR10 | DV | HLG
+    hdr_format: HdrFormat | None          # HDR10 | DV | HLG
     audio_channels: int | None
     file_size_bytes: int | None
     runtime_seconds: int | None
@@ -185,6 +215,12 @@ class MediaItem(BaseModel):
 
 `(source_id, external_id)` is unique. A Title with several MediaItems is the
 same film available in more than one place — the append-a-source mechanism.
+
+`hdr_format` is a closed enum, not a free string: a source's own vocabulary
+(Emby, for instance, emits `"DolbyVision"`) is translated into `HdrFormat`
+by its adapter. No source-specific concept escapes onto this canonical
+field — the same "only place a backend server is represented" rule this
+section opens with, and that `CLAUDE.md` states project-wide.
 
 **Unmatched items are never dropped.** A `MediaItem` with `title_id IS NULL`
 sits in a review queue exposed over the admin API for manual resolution.
@@ -203,12 +239,24 @@ class WatchState(BaseModel):
     play_count: int
     last_played_at: datetime | None
     updated_at: datetime
-    updated_by: WatchStateOrigin         # source | api
+    origin: WatchStateOrigin             # source | api
 ```
+
+Exactly one of `title_id`/`episode_id` must be set — enforced by the model,
+not just convention. `MediaItem.title_id` is deliberately the opposite:
+permissive, because NULL there means "unmatched, in the review queue", a
+legitimate and common state. An unattached `WatchState` has no equivalent
+legitimate reading, so it is rejected instead.
 
 Unique on `(user_id, title_id)` / `(user_id, episode_id)`. Attached to the
 **canonical** title, not the MediaItem — so it survives a title becoming
 available on a second source, or the first source going away.
+
+Named `origin`, not `updated_by`: in nearly every schema `updated_by` is a
+user FK, and this model has `user_id` sitting right next to it — the
+misreading was close to guaranteed. `origin` never defaults; a write path
+that forgets to set it fails instead of silently mislabeling source-pushed
+state as user-originated.
 
 ### Embedding
 
@@ -259,3 +307,12 @@ Title      1─1 TitleEmbedding
   possible.
 - **Soft-delete availability, hard-delete nothing.** Items that vanish from a
   source get `available = false`; history and watch state survive.
+- **A `Title` cannot be deleted out from under a `WatchState`.**
+  `watch_states.title_id` is `ON DELETE RESTRICT`, the deliberate opposite of
+  `media_items.title_id`'s `SET NULL` two rules up — an unmatched `MediaItem`
+  is worth keeping (review queue), but a `WatchState` *is* the thing worth
+  keeping. Merging two Titles (the repointing operation the Identity section
+  above describes) must explicitly repoint every `watch_states` row onto the
+  winner before deleting the loser; `RESTRICT` makes skipping that step fail
+  loudly instead of silently discarding watch history. See
+  [ADR-0010](decisions/0010-watch-state-title-fk-restrict.md).

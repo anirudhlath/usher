@@ -25,6 +25,7 @@
 | `src/usher/telemetry.py` | loguru + OTel bootstrap, trace-context injection |
 | `src/usher/domain/enums.py` | Shared enumerations |
 | `src/usher/domain/ids.py` | UUIDv7 generation |
+| `src/usher/domain/base.py` | `DomainModel` — shared frozen/`extra="forbid"` base + `.evolve()` |
 | `src/usher/domain/title.py` | `Title` |
 | `src/usher/domain/source.py` | `Source`, `MediaItem` |
 | `src/usher/domain/watch.py` | `User`, `WatchState` |
@@ -33,14 +34,16 @@
 | `src/usher/ports/search.py` | `SearchIndex` ABC |
 | `src/usher/ports/embedding.py` | `Embedder` ABC |
 | `src/usher/ports/llm.py` | `LLMClient` ABC |
+| `src/usher/ports/repository.py` | `TitleRepository` ABC — added post-planning, see Task 6 |
+| `src/usher/ports/errors.py` | `UsherPortError` taxonomy — added post-planning, see Task 6 |
 | `src/usher/db/base.py` | Declarative base, engine, session factory |
 | `src/usher/db/models/*.py` | SQLAlchemy tables |
-| `src/usher/db/repositories/title.py` | `TitleRepository` |
+| `src/usher/db/repositories/title.py` | `PostgresTitleRepository`, inherits `TitleRepository` |
 | `src/usher/db/migrations/` | Alembic environment + versions |
 | `src/usher/api/app.py` | App factory |
 | `src/usher/api/deps.py` | Request-scoped dependencies |
 | `src/usher/api/routers/health.py` | `/health`, `/health/ready` |
-| `tests/unit/`, `tests/integration/` | Test suites |
+| `tests/unit/`, `tests/integration/`, `tests/fakes/` | Test suites; `fakes/` holds port doubles services are unit-tested against (added post-planning, see Task 6) |
 
 ---
 
@@ -144,6 +147,33 @@ source_modules = ["usher.services"]
 forbidden_modules = ["usher.adapters"]
 ```
 
+> **Amended post-implementation.** The `pyproject.toml` above is Task 1's
+> original scaffold; the shipped file has diverged in six ways since, none
+> reflected here:
+>
+> - The three denylist-style contracts above (`domain is pure`, `ports
+>   depend only on domain`, `services never import adapters`) became four
+>   allowlist-shaped ones (`hexagonal layering`, `adapters are driven, not
+>   driving`, `db is driven, not driving`, `config stays out of the
+>   core`) — every top-level package's place is now defined by where it
+>   sits, not by a hand-maintained forbidden list per package. This is why
+>   later tasks say "4 kept, 0 broken", not "3 kept" as this block would
+>   suggest.
+> - `[tool.ruff.lint] select` gained `"S"` (bandit-derived security lints).
+> - `[tool.ruff]` gained `extend-exclude = ["docs"]`, so `ruff format .`
+>   doesn't rewrite the embedded code fences in this plan and the PRD out
+>   from under whoever runs it.
+> - `[tool.ruff.lint.per-file-ignores]` gained `"tests/**" = ["S101"]` —
+>   `assert` is how pytest tests assert, not a bandit finding there.
+> - `[tool.pytest.ini_options] addopts` gained `--strict-markers
+>   --strict-config`.
+> - `[tool.mypy]` switched from `packages = ["usher"]` to `files = ["src",
+>   "tests"]` — mypy strict covers `tests/` too as of this change, which
+>   is why test functions need `-> None` annotations from Task 2 onward.
+>
+> Read `pyproject.toml` directly rather than trusting this block for
+> anything beyond the shape of the file.
+
 - [ ] **Step 2: Create `.gitignore`**
 
 ```gitignore
@@ -196,7 +226,7 @@ of film and television, treats media servers (Emby first) as interchangeable
 *sources* that answer "where can this be played?", and exposes an API rich
 enough to build a full media browser against.
 
-Design documentation lives in [`docs/prd/`](docs/prd/README.md).
+Design documentation lives in [`docs/prd/`](../prd/README.md).
 
 ## Status
 
@@ -294,7 +324,7 @@ def test_settings_read_from_environment(monkeypatch):
     monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
     monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
     settings = Settings()
-    assert settings.database_url == "postgresql+asyncpg://u:p@db:5432/usher"
+    assert settings.database_url.get_secret_value() == "postgresql+asyncpg://u:p@db:5432/usher"
     assert settings.port == 8000
 
 
@@ -323,7 +353,9 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'usher.config'`
 # src/usher/config.py
 """Application configuration, read from the environment."""
 
-from pydantic import Field
+from functools import lru_cache
+
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -338,8 +370,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str
-    secret_key: str = Field(min_length=32)
+    database_url: SecretStr
+    secret_key: SecretStr = Field(min_length=32)
 
     host: str = "0.0.0.0"
     port: int = 8000
@@ -347,7 +379,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = True
 
-    tmdb_api_key: str | None = None
+    tmdb_api_key: SecretStr | None = None
 
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
@@ -358,14 +390,28 @@ class Settings(BaseSettings):
         return bool(self.otlp_endpoint)
 
 
+@lru_cache
 def get_settings() -> Settings:
-    return Settings()  # type: ignore[call-arg]
+    return Settings()
 ```
+
+Note for whoever next touches this file: the real `src/usher/config.py` has grown
+past this minimal walkthrough — `extra="forbid"`, a placeholder-secret-key
+rejection validator, `Literal[...]` bounds on `log_level`, `Field(ge=1, le=65535)`
+on `port`, an asyncpg-driver validator on `database_url`, and an empty-string→`None`
+coercion for the optional fields. Read the file directly rather than trusting this
+block for anything beyond the two facts that matter to other tasks: `database_url`/
+`secret_key`/`tmdb_api_key` are `SecretStr` (unwrap with `.get_secret_value()` at
+the point of use), and `get_settings()` is cached (tests call `get_settings.cache_clear()`).
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/unit/test_config.py -v`
-Expected: 3 passed
+Expected: 3 passed (at the time Task 2 was implemented; 16 passed after the
+later hardening described in the note above — `SecretStr`, the placeholder-
+secret-key rejection validator, `Literal`/`Field(ge=..., le=...)` bounds,
+and the asyncpg-driver and empty-string-coercion validators each brought
+their own tests)
 
 - [ ] **Step 5: Commit**
 
@@ -459,12 +505,37 @@ class TitleKind(StrEnum):
 
 class EnrichmentState(StrEnum):
     """How complete a Title's metadata is. Always exposed to clients so they
-    render deliberately rather than inferring from nulls."""
+    render deliberately rather than inferring from nulls.
+
+    A three-rung ladder, not a status: `skeleton` and `stub` differ by
+    *provenance* as much as by completeness — `skeleton` comes from a bulk
+    dataset and often already carries genres, ratings, and runtime; `stub`
+    is only whatever a source's own API returned on first sight. Neither is
+    a strict subset of the other's fields.
+
+    Whether the *last enrichment attempt* failed is tracked separately, on
+    `Title.enrichment_error` — a failed attempt does not consume or reset a
+    tier. See ADR-0008.
+
+    `StrEnum` members compare lexicographically ("enriched" < "skeleton" <
+    "stub"), not by ladder position: `EnrichmentState.ENRICHED >
+    EnrichmentState.SKELETON` is `False`. Never compare members directly to
+    decide "is this an improvement" — use `ENRICHMENT_RANK`.
+    """
 
     SKELETON = "skeleton"  # from a bulk dataset; no overview or artwork
-    STUB = "stub"          # seen on a source; source metadata only
+    STUB = "stub"  # seen on a source; source metadata only
     ENRICHED = "enriched"  # full provider metadata
-    FAILED = "failed"      # enrichment attempted and failed
+
+
+# The only valid way to compare EnrichmentState tiers for "is this an
+# improvement" logic — see EnrichmentState's docstring for why comparing
+# members directly is wrong.
+ENRICHMENT_RANK: dict[EnrichmentState, int] = {
+    EnrichmentState.SKELETON: 0,
+    EnrichmentState.STUB: 1,
+    EnrichmentState.ENRICHED: 2,
+}
 
 
 class SourceKind(StrEnum):
@@ -477,14 +548,41 @@ class WatchStateOrigin(StrEnum):
 
 
 class ProductionStatus(StrEnum):
-    RELEASED = "released"
-    IN_PRODUCTION = "in_production"
-    POST_PRODUCTION = "post_production"
-    PLANNED = "planned"
-    CANCELED = "canceled"
-    ENDED = "ended"
-    RETURNING = "returning"
+    """TMDb production status. Movies and series draw from overlapping but
+    not identical vocabularies (grouped per member below); nothing here
+    enforces the pairing — `Title(kind=MOVIE, status=RETURNING)` is still
+    constructible. The grouping documents intent, not a constraint."""
+
+    RELEASED = "released"  # movie
+    IN_PRODUCTION = "in_production"  # movie, series
+    POST_PRODUCTION = "post_production"  # movie
+    PLANNED = "planned"  # movie, series
+    CANCELED = "canceled"  # movie, series
+    RUMORED = "rumored"  # movie
+    ENDED = "ended"  # series
+    RETURNING = "returning"  # series
+    PILOT = "pilot"  # series
+
+
+class HdrFormat(StrEnum):
+    """Canonical HDR formats. A source's own vocabulary (Emby, for
+    instance, emits strings like "DolbyVision") is translated into one of
+    these by its adapter — this enum, never the source's raw string, is
+    what reaches `MediaItem` and the API. See `source.py`'s docstring."""
+
+    HDR10 = "HDR10"
+    DOLBY_VISION = "DV"
+    HLG = "HLG"
 ```
+
+> **Amended post-implementation.** A quality review after Tasks 3–5 first
+> landed found `FAILED` conflated "how complete is this title" with "did
+> the last enrichment attempt fail", found `ProductionStatus` missing
+> TMDb's `pilot`/`rumored` values, and found `hdr_format` (Task 5) was a
+> free string despite the project's own "no source-specific concept
+> escapes its adapter" rule. The block above is the current, hardened
+> version; see [ADR-0008](../prd/decisions/0008-enrichment-tier-vs-failure.md)
+> and `tests/unit/test_enums.py`.
 
 - [ ] **Step 6: Verify enums import**
 
@@ -496,6 +594,98 @@ Expected: `movie`
 ```bash
 git add src/usher/domain/ids.py src/usher/domain/enums.py tests/unit/test_ids.py
 git commit -m "feat: UUIDv7 identifiers and shared domain enums"
+```
+
+---
+
+## Task 3 ½: Shared domain model base
+
+**Added post-implementation — this task did not exist in the original
+plan.** A quality review after Tasks 3–5 first landed found
+`model_config = ConfigDict(frozen=True)` repeated identically five times
+with no shared base, and found that none of the five models rejected an
+unrecognized keyword field — short of the standard `usher.config.Settings`
+(Task 2) already held. `DomainModel` is the fix. It's numbered "3 ½"
+because that's chronologically where it belongs in the read order — after
+the enums Task 3 produces, before `Title` (Task 4), the first model that
+needs it — even though the code was actually written later, in the same
+pass that hardened Tasks 4 and 5. `Title` (Task 4) inherits it first;
+`Source`/`MediaItem`/`User`/`WatchState` (Task 5) were retrofitted onto it
+in the same pass.
+
+**Files:**
+- Create: `src/usher/domain/base.py`
+
+```python
+# src/usher/domain/base.py
+"""Shared base for domain models."""
+
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict
+
+
+class DomainModel(BaseModel):
+    """Base for every Usher domain model.
+
+    ``frozen=True``: instances are immutable once constructed. The write
+    path is `.evolve()`, never `model_copy(update=...)` — the latter skips
+    validation entirely and can hand back an instance with a wrong-typed or
+    out-of-range field that serializes fine and only fails much later, on
+    the way back in. See `evolve` below.
+
+    ``extra="forbid"``: adapters hand-map dozens of provider fields onto
+    these models by keyword. A typo'd field name (`tmbd_id=` for
+    `tmdb_id=`) must fail loudly at construction, not be silently dropped —
+    this is the same standard `usher.config.Settings` already holds.
+
+    Note on hashability: a model with a `dict[...]` field is unhashable
+    even though it is frozen — Python cannot hash a dict, and pydantic's
+    generated `__hash__` hashes every field's value. `Title` carries
+    `field_provenance: dict[str, str]` and is therefore the one domain
+    model in this set that is *not* hashable; the other four carry no dict
+    or list field and are. This asymmetry is intentional — see
+    `Title`'s own docstring — and its failure mode is a loud, immediate
+    `TypeError` from `hash()`, not silent corruption.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    def evolve(self, **changes: object) -> Self:
+        """Return a copy with `changes` applied, re-validated from scratch.
+
+        `model_copy(update=...)` applies changes *without* validation — it
+        can produce an invalid instance (wrong type, out-of-range value)
+        that pydantic will still happily serialize. `evolve()` re-runs
+        every field validator and the model's own `model_validator`s, so an
+        invalid change raises immediately instead of reaching the wire.
+
+        This is a runtime guarantee only, not a static one: `changes` is
+        typed `object`, so `title.evolve(name=123)` still type-checks under
+        mypy and only fails when this method actually runs. That's short of
+        what a dedicated pydantic-aware mypy plugin could give a hand-typed
+        `evolve` per model, which this project doesn't have. It is still
+        strictly better than `model_copy(update=...)`, which validates
+        nothing at either time.
+        """
+        return type(self).model_validate({**self.model_dump(), **changes})
+```
+
+**No dedicated test file.** `DomainModel` itself declares no fields, so
+exercising `frozen`, `extra="forbid"`, and `evolve()` against it directly
+would be close to testing nothing — there's no field to reject a typo for,
+nothing to freeze. Its behavior is proven through the five concrete
+models instead: see `test_domain_title.py`'s `test_extra_fields_are_rejected`,
+`test_evolve_returns_a_changed_validated_copy`, and
+`test_evolve_rejects_what_model_copy_would_silently_accept`, plus the
+frozen-ness and hashability tests repeated across all three
+`test_domain_*.py` files for the other four models.
+
+- [ ] **Commit**
+
+```bash
+git add src/usher/domain/base.py
+git commit -m "feat: add DomainModel base with frozen, extra=forbid, and evolve()"
 ```
 
 ---
@@ -567,67 +757,98 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'usher.domain.title'`
 """The canonical production: one film, or one series."""
 
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, Field
 
+from usher.domain.base import DomainModel
 from usher.domain.enums import EnrichmentState, ProductionStatus, TitleKind
 from usher.domain.ids import new_id
 
 
-class Title(BaseModel):
+class Title(DomainModel):
     """A canonical production.
 
     Identity is Usher's own UUIDv7. Provider identifiers are nullable,
     indexed *attributes* — never identity. See ADR-0003.
-    """
 
-    model_config = ConfigDict(frozen=True)
+    Unhashable by design: `field_provenance` is a `dict[str, str]`, which
+    poisons pydantic's generated `__hash__` even under `frozen=True`.
+    `Source`, `MediaItem`, `User`, and `WatchState` carry no dict or list
+    field and are hashable; `Title` is the one exception in this set. See
+    `DomainModel`'s docstring.
+    """
 
     id: uuid.UUID = Field(default_factory=new_id)
     kind: TitleKind
 
     tmdb_id: int | None = None
-    imdb_id: str | None = None
+    imdb_id: str | None = Field(default=None, pattern=r"^tt\d{7,8}$")
     tvdb_id: int | None = None
 
-    name: str
+    name: str = Field(min_length=1)
     original_name: str | None = None
-    sort_name: str
-    year: int | None = None
+    # No normalization contract yet — stored exactly as given (articles
+    # kept, casing preserved as passed). This column gets a btree index
+    # for catalog ordering (Task 8); if article-stripping or casefolding
+    # turns out to be wanted, it belongs here as an explicit validator, not
+    # as an adapter-side convention some adapters will forget.
+    sort_name: str = Field(min_length=1)
+    year: int | None = Field(default=None, ge=0)
     release_date: date | None = None
-    end_year: int | None = None
+    end_year: int | None = Field(default=None, ge=0)  # series
 
     overview: str | None = None
     tagline: str | None = None
-    runtime_minutes: int | None = None
+    runtime_minutes: int | None = Field(default=None, ge=0)
     status: ProductionStatus | None = None
 
-    genres: list[str] = Field(default_factory=list)
-    keywords: list[str] = Field(default_factory=list)
-    original_language: str | None = None
-    spoken_languages: list[str] = Field(default_factory=list)
-    origin_countries: list[str] = Field(default_factory=list)
+    genres: tuple[str, ...] = Field(default_factory=tuple)
+    keywords: tuple[str, ...] = Field(default_factory=tuple)
+    original_language: str | None = None  # ISO 639-1, e.g. "en"
+    spoken_languages: tuple[str, ...] = Field(default_factory=tuple)  # ISO 639-1
+    origin_countries: tuple[str, ...] = Field(default_factory=tuple)  # ISO 3166-1 alpha-2
     content_rating: str | None = None
 
-    community_rating: float | None = None
-    vote_count: int | None = None
-    popularity: float | None = None
+    community_rating: float | None = Field(default=None, ge=0, le=10)  # TMDb's 0-10 scale
+    vote_count: int | None = Field(default=None, ge=0)
+    popularity: float | None = Field(default=None, ge=0)
 
     collection_id: uuid.UUID | None = None
 
     enrichment_state: EnrichmentState = EnrichmentState.SKELETON
-    enriched_at: datetime | None = None
+    # Non-null means the *last* enrichment attempt failed. enrichment_state
+    # is left exactly as it was — failure does not consume a tier. ADR-0008.
+    enrichment_error: str | None = None
+    enriched_at: AwareDatetime | None = None
+    # field -> provider that supplied it
     field_provenance: dict[str, str] = Field(default_factory=dict)
 
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    created_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
 ```
+
+> **Amended post-implementation.** Step 1's test above is the literal
+> starting point Task 4 was implemented from and is left as-is here as a
+> historical record, but a quality review afterward found nine previously
+> accepted bad values (e.g. `year=-40`, `community_rating=99.0`,
+> `name=""`), a naive/aware datetime hazard given every planned column is
+> `TIMESTAMPTZ`, `title.genres.append(...)` silently succeeding on a
+> "frozen" Title, and no `extra="forbid"` guard against a typo'd keyword
+> argument from an adapter. The implementation block above is the current,
+> hardened version — it now inherits the shared `DomainModel` base (Task 3
+> ½, `src/usher/domain/base.py`, added in the same pass) for
+> `frozen=True`, `extra="forbid"`, and the validated-update helper
+> `.evolve()`. `tests/unit/test_domain_title.py` grew from 5 cases to 30,
+> then to 36 after a later, independent mutation-testing pass (`a7432f8`)
+> closed nine more gaps; read it directly rather than this task's original
+> Step 1 for the current contract.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/unit/test_domain_title.py -v`
-Expected: 5 passed
+Expected: 5 passed (at the time Task 4 was implemented; 36 passed after the
+hardening and mutation-testing passes described above)
 
 - [ ] **Step 5: Commit**
 
@@ -707,55 +928,64 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'usher.domain.source'`
 """Sources and availability — the only place a media server is represented."""
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, Field
 
-from usher.domain.enums import SourceKind
+from usher.domain.base import DomainModel
+from usher.domain.enums import HdrFormat, SourceKind
 from usher.domain.ids import new_id
 
 
-class Source(BaseModel):
+class Source(DomainModel):
     """A configured backend that holds playable media."""
-
-    model_config = ConfigDict(frozen=True)
 
     id: uuid.UUID = Field(default_factory=new_id)
     kind: SourceKind
-    name: str
+    name: str = Field(min_length=1)
     base_url: str
-    credentials_ref: str
-    device_id: str
+    credentials_ref: str  # indirection; never the secret itself
+    device_id: str  # stable; registers us as a durable client
     enabled: bool = True
     supports_push: bool = False
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    created_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class MediaItem(BaseModel):
+class MediaItem(DomainModel):
     """'This title is available on that source', plus the quality facts of
-    that particular copy. A Title may have many, across sources."""
+    that particular copy. A Title may have many, across sources.
 
-    model_config = ConfigDict(frozen=True)
+    Deliberately permissive about `title_id`: NULL means unmatched, sitting
+    in a review queue for manual resolution — a legitimate, expected, and
+    common state, never dropped. Contrast `WatchState`, which enforces the
+    opposite rule (exactly one of `title_id`/`episode_id` must be set)
+    because an unattached watch record has nothing sensible to mean; an
+    unmatched MediaItem has an obvious, useful one.
+    """
 
     id: uuid.UUID = Field(default_factory=new_id)
     source_id: uuid.UUID
-    title_id: uuid.UUID | None = None
+    title_id: uuid.UUID | None = None  # NULL => unmatched, in review queue
     episode_id: uuid.UUID | None = None
     external_id: str
 
     container: str | None = None
     video_codec: str | None = None
     audio_codec: str | None = None
-    width: int | None = None
-    height: int | None = None
-    hdr_format: str | None = None
-    audio_channels: int | None = None
-    file_size_bytes: int | None = None
-    runtime_seconds: int | None = None
+    width: int | None = Field(default=None, ge=0)
+    height: int | None = Field(default=None, ge=0)
+    hdr_format: HdrFormat | None = None
+    audio_channels: int | None = Field(default=None, ge=0)
+    file_size_bytes: int | None = Field(default=None, ge=0)
+    runtime_seconds: int | None = Field(default=None, ge=0)
 
-    added_at: datetime | None = None
-    last_seen_at: datetime | None = None
+    added_at: AwareDatetime | None = None
+    # A MediaItem only exists because it was just observed on a source, so
+    # "seen, but we don't know when" isn't a reachable state -- required,
+    # matching the nullable=False last_seen_at column (Task 8). Contrast
+    # added_at, which stays optional on both sides.
+    last_seen_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     available: bool = True
 ```
 
@@ -770,45 +1000,107 @@ survives adding, changing, or losing a source.
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, Field, model_validator
 
+from usher.domain.base import DomainModel
 from usher.domain.enums import WatchStateOrigin
 from usher.domain.ids import new_id
 
 
-class User(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class User(DomainModel):
+    """An Usher-owned account — not an Emby (or any other source's) user.
+
+    Usher is not multi-tenant; `User` exists so watch state and taste are
+    per-person within a household, not so Usher can be run as a shared
+    service. v1 has no authentication: every request resolves to the
+    singleton default user (`is_default=True`). Adding real auth later
+    replaces that one lookup without moving anything else, because watch
+    state and taste are already keyed by `User.id`.
+    """
 
     id: uuid.UUID = Field(default_factory=new_id)
-    name: str
+    name: str = Field(min_length=1)
     is_default: bool = False
-    created_at: datetime | None = None
+    created_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class WatchState(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class WatchState(DomainModel):
+    """Progress or completion of one user against one Title or Episode.
+
+    Exactly one of `title_id`/`episode_id` must be set — enforced below.
+    Contrast `MediaItem`, which is deliberately permissive about its
+    equivalent `title_id` (there, NULL means "unmatched, review queue", a
+    legitimate and common state). An unattached `WatchState` has no such
+    reading: it would not be progress on anything.
+    """
 
     id: uuid.UUID = Field(default_factory=new_id)
     user_id: uuid.UUID
     title_id: uuid.UUID | None = None
     episode_id: uuid.UUID | None = None
 
-    position_seconds: int = 0
-    runtime_seconds: int | None = None
+    position_seconds: int = Field(default=0, ge=0)
+    runtime_seconds: int | None = Field(default=None, ge=0)
     played: bool = False
-    play_count: int = 0
-    last_played_at: datetime | None = None
+    play_count: int = Field(default=0, ge=0)
+    last_played_at: AwareDatetime | None = None
 
-    updated_at: datetime | None = None
-    updated_by: WatchStateOrigin = WatchStateOrigin.API
+    updated_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
+    # Who last wrote this record: source | api. Not a user reference (that's
+    # user_id, immediately above it in most schemas — which is exactly why
+    # this field is *not* called updated_by; that name reads as a user FK
+    # here). No default: a sync path that forgets to set this must fail
+    # loudly rather than silently mislabel source-pushed state as
+    # user-originated.
+    origin: WatchStateOrigin
+
+    @model_validator(mode="after")
+    def _exactly_one_of_title_or_episode(self) -> Self:
+        if (self.title_id is None) == (self.episode_id is None):
+            raise ValueError("exactly one of title_id or episode_id must be set")
+        return self
 ```
+
+> **Amended post-implementation.** Step 1's tests above are the literal
+> starting point Task 5 was implemented from and are left as-is here as a
+> historical record, but a quality review afterward found: `frozen=True`
+> was deletable from both files with the suite staying green (neither had
+> a mutation-attempt test); `updated_by` read as a user-FK name next to
+> `user_id` for a field that actually holds `source | api` (renamed to
+> `origin`, and its default removed — a forgotten origin must fail loudly,
+> not silently default to `api`); `WatchState` allowed being attached to
+> neither or both of `title_id`/`episode_id`, and `MediaItem`'s
+> intentionally-opposite permissiveness about its own `title_id` was
+> undocumented; and `hdr_format` was a free string a source's raw
+> vocabulary could reach unchanged. The implementation blocks above are
+> the current, hardened versions, both on the shared `DomainModel` base
+> (Task 3 ½, `src/usher/domain/base.py`).
+>
+> A follow-up pass then swept every domain field against the nullability
+> Task 8 declares for its column, specifically to catch more of the same
+> "optional in the model, `NOT NULL` in the schema" bug `created_at`/
+> `updated_at` already had. It found exactly one more instance —
+> `MediaItem.last_seen_at`, now required above (`default_factory`, same
+> pattern as `created_at`/`updated_at`) to match `MediaItemRow`'s
+> `nullable=False`. Two things it checked and did **not** change:
+> `MediaItem.added_at` is optional on both the row and the model (no bug);
+> every field on `Source` is required on both sides already (no bug). See
+> the note after `MediaItemRow` in Task 8 for the reasoning.
+>
+> `tests/unit/test_domain_source.py` and `tests/unit/test_domain_watch.py`
+> grew from 2 and 2 cases to 24 and 21, then to 25 and 23 after the same
+> later mutation-testing pass (`a7432f8`) mentioned in Task 4's note; read
+> them directly rather than this task's original Step 1 for the current
+> contract.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/unit/test_domain_source.py tests/unit/test_domain_watch.py -v`
-Expected: 4 passed
+Expected: 4 passed (at the time Task 5 was implemented; 48 passed after the
+hardening and mutation-testing passes described above)
 
 - [ ] **Step 6: Commit**
 
@@ -825,6 +1117,11 @@ git commit -m "feat: Source, MediaItem, User, and WatchState domain models"
 **Files:**
 - Create: `src/usher/ports/{source,metadata,search,embedding,llm}.py`
 - Test: `tests/unit/test_ports.py`
+- Create (added post-planning — see the amendment after Step 8):
+  `src/usher/ports/repository.py`
+- Create (added during the later hardening pass described in the
+  amendment at the end of this task — see Step 4 ½):
+  `src/usher/ports/errors.py`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -894,7 +1191,22 @@ from collections.abc import Sequence
 
 
 class Embedder(ABC):
-    """Turns text into vectors. Implementations are expected to batch."""
+    """Turns text into vectors. Implementations are expected to batch.
+
+    Contract: vectors are L2-normalised, so downstream cosine similarity
+    can be computed as a plain dot product (PRD 05 promises "brute-force
+    exact cosine", which is only equivalent to a dot product when inputs
+    are unit-normalised). Callers are responsible for any query-side
+    instruction prefix their chosen model needs before calling `embed` —
+    this port has no query/document distinction, so it cannot apply one
+    itself.
+
+    🔶 Provisional — whether that split is the right one (as opposed to,
+    say, separate `embed_query`/`embed_documents` methods) is undecided.
+    BGE-family models (PRD 05 names `bge-small-en-v1.5`) document a
+    query-side instruction prefix that this contract currently pushes
+    entirely onto the caller. Settle in M6.
+    """
 
     @property
     @abstractmethod
@@ -909,6 +1221,10 @@ class Embedder(ABC):
     @abstractmethod
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed a batch, returning one vector per input in order."""
+
+    @abstractmethod
+    async def aclose(self) -> None:
+        """Release held resources (e.g. a GPU-resident model)."""
 ```
 
 ```python
@@ -916,7 +1232,32 @@ class Embedder(ABC):
 """Port for large language model completions."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from decimal import Decimal
+from enum import StrEnum
 from typing import Any
+
+
+class LLMPurpose(StrEnum):
+    """`llm_calls.purpose` (PRD 10) — a closed vocabulary so it stays a
+    usable telemetry dimension instead of a cardinality footgun. PRD 10's
+    own text marks this open-ended ("curation | query_expansion | …"): a
+    new call site adds a member here and to PRD 10 in the same change,
+    never a free-form string."""
+
+    CURATION = "curation"
+    QUERY_EXPANSION = "query_expansion"
+
+
+@dataclass(frozen=True)
+class LLMUsage:
+    """Token counts and cost for a single completion."""
+
+    model: str
+    tokens_in: int
+    tokens_out: int
+    cost_usd: Decimal
+    latency_ms: int
 
 
 class LLMClient(ABC):
@@ -928,28 +1269,14 @@ class LLMClient(ABC):
         prompt: str,
         schema: dict[str, Any],
         *,
-        purpose: str,
-    ) -> tuple[dict[str, Any], "LLMUsage"]:
+        purpose: LLMPurpose,
+    ) -> tuple[dict[str, Any], LLMUsage]:
         """Return a JSON object conforming to `schema`, plus usage for cost
         accounting. `purpose` is recorded against the call."""
 
-
-class LLMUsage:
-    """Token counts and cost for a single completion."""
-
-    def __init__(
-        self,
-        model: str,
-        tokens_in: int,
-        tokens_out: int,
-        cost_usd: float,
-        latency_ms: int,
-    ) -> None:
-        self.model = model
-        self.tokens_in = tokens_in
-        self.tokens_out = tokens_out
-        self.cost_usd = cost_usd
-        self.latency_ms = latency_ms
+    @abstractmethod
+    async def aclose(self) -> None:
+        """Release the underlying HTTP connection pool."""
 ```
 
 - [ ] **Step 4: Write `metadata.py` and `search.py`**
@@ -960,9 +1287,26 @@ class LLMUsage:
 
 import uuid
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
+from usher.domain.enums import TitleKind
 from usher.domain.title import Title
+
+
+@dataclass(frozen=True)
+class MetadataCandidate:
+    """One search result from a `MetadataProvider`, normalised enough that
+    the match stage (PRD 03 Stage 2) never indexes into a provider's own
+    JSON keys — e.g. TMDb's movie/TV divergence (`title`/`name`,
+    `release_date`/`first_air_date`) stops here, not one layer up in M4.
+    """
+
+    provider_id: int
+    name: str
+    year: int | None
+    kind: TitleKind
+    popularity: float
 
 
 class MetadataProvider(ABC):
@@ -974,20 +1318,52 @@ class MetadataProvider(ABC):
         """Provider identifier, recorded in field provenance."""
 
     @abstractmethod
-    async def search(self, name: str, year: int | None) -> list[dict[str, Any]]:
+    async def search(self, name: str, year: int | None) -> list[MetadataCandidate]:
         """Candidate matches for a name and optional year."""
 
     @abstractmethod
-    async def fetch(self, provider_id: int, kind: str) -> dict[str, Any]:
-        """Full raw payload for one item. Stored before normalisation."""
+    async def fetch(self, provider_id: int, kind: TitleKind) -> dict[str, Any]:
+        """Full raw payload for one item. Stored before normalisation,
+        destined for `raw_payloads` and consumed only by `to_title`.
+
+        Returning a raw `dict` here is deliberate and different in kind
+        from `search`'s old raw-dict return (now `MetadataCandidate`):
+        this is an opaque blob by design, not a shortcut that skipped
+        normalisation. Nothing above `to_title` reads it.
+
+        🔶 Provisional — `provider_id: int` bakes in TMDb's integer id
+        scheme; IMDb's own ids (`tt1160419`) don't fit it, which matters
+        the moment a second `MetadataProvider` exists (PRD 01 lists
+        additional metadata providers as an open extension seam; PRD 09
+        names OMDb/TVDb as post-v1 candidates). Settle in M4, when TMDb is
+        still the only implementation and a second provider's real shape
+        isn't guesswork yet.
+        """
 
     @abstractmethod
     def to_title(self, payload: dict[str, Any], title_id: uuid.UUID) -> Title:
-        """Normalise a raw payload into a canonical Title."""
+        """Normalise a raw payload into a canonical Title.
+
+        🔶 Provisional — PRD 03's Enrich stage populates `Season`,
+        `Episode`, `Person`, `Credit`, `Collection`, and `Image` from the
+        same TMDb response alongside `Title`, and sets `field_provenance`.
+        None of those models exist yet, so this signature can only carry
+        the one that does. Designing the real return shape (a `Title`
+        plus an aggregate, an `EnrichmentResult` bundle, or several
+        methods) is guesswork before those models exist. Settle in M4.
+        """
 
     @abstractmethod
     async def changed_since(self, days: int) -> list[int]:
-        """Provider ids mutated in the window, for incremental refresh."""
+        """Provider ids mutated in the window, for incremental refresh.
+
+        🔶 Provisional — TMDb's `/movie/changes` feed is paginated and
+        capped at a 14-day window; `days: int` in, `list[int]` out cannot
+        express a resumable cursor through that pagination, so a caller
+        has no way to pick up where a partial run left off. Settle in M4,
+        alongside the daily re-enrichment job that is this method's only
+        caller (PRD 04, Phase 5).
+        """
 ```
 
 ```python
@@ -997,6 +1373,7 @@ class MetadataProvider(ABC):
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 
@@ -1006,17 +1383,39 @@ class SearchHit:
     score: float
 
 
+class SearchMode(StrEnum):
+    """`SearchRequest.mode`'s three reachable values. Reciprocal Rank
+    Fusion is the design (ADR-0002), not a hypothetical option alongside a
+    bool — which is why this replaced a `semantic: bool` that could not
+    express `FUSED` at all."""
+
+    FULL_TEXT = "full_text"
+    SEMANTIC = "semantic"
+    FUSED = "fused"
+
+
 @dataclass(frozen=True)
 class SearchRequest:
     query: str
     limit: int = 20
-    semantic: bool = False
+    mode: SearchMode = SearchMode.FULL_TEXT
     filters: dict[str, Any] = field(default_factory=dict)
 
 
 class SearchIndex(ABC):
     """Candidate generation. Ranking blends happen in application code, so
-    this returns hits and scores, not final ordering."""
+    this returns hits and scores, not final ordering.
+
+    🔶 Provisional — this shape is closer to Postgres's own operations
+    than a neutral candidate-generation contract: `index(title_id)` forces
+    a Meilisearch implementation to fetch each title back out to build its
+    document (1.3M round-trips on a full rebuild); `SearchRequest.filters`
+    has no key vocabulary, so two backends would invent different ones;
+    there is no `index_many`/`rebuild` for bulk operations; and semantic
+    search needs the query *vector* itself, which ADR-0002 already
+    anticipates supplying to Meilisearch as `userProvided`. Settle if and
+    when the Meilisearch gate in PRD 05 actually trips, in M6.
+    """
 
     @abstractmethod
     async def index(self, title_id: uuid.UUID) -> None:
@@ -1032,7 +1431,104 @@ class SearchIndex(ABC):
 
     @abstractmethod
     async def suggest(self, prefix: str, limit: int = 10) -> list[SearchHit]:
-        """Typo-tolerant type-ahead over names."""
+        """Typo-tolerant type-ahead over names.
+
+        🔶 Provisional — PRD 05 treats autocomplete as "a separate, narrow
+        path" and ADR-0002 gates Meilisearch "for the instant-search box
+        only", which suggests the real swap boundary may be this one
+        method, not the whole `SearchIndex` class. Whether `suggest`
+        should be its own `SuggestIndex` port is undecided; settle in M6.
+        """
+```
+
+- [ ] **Step 4 ½: Write `errors.py`**
+
+`source.py` (next) raises `SourceNotSupported` under this taxonomy, and
+`repository.py`'s `add()`/`update()` (added post-planning, below) document
+`RepositoryConflict` and `RepositoryNotFound` from it — so it's written
+first. This file did not exist when Steps 1–5 were first drafted, or even
+when `repository.py` was first added as a sixth port (the amendment after
+Step 8): it came out of the later quality-review hardening pass described
+in full in the amendment at the end of this task, which found that no
+error taxonomy existed at all — a service could only catch bare
+`Exception` or import `httpx`/SQLAlchemy errors directly, breaking
+"adapters are driven, not driving" (PRD 01) and "db is driven, not
+driving" (ADR-0009). Steps 3–5 and the `repository.py` block below
+already show the result; this step exists so `errors.py` has a place in
+the read order before anything imports it.
+
+```python
+# src/usher/ports/errors.py
+"""Shared error taxonomy for all ports.
+
+Every port implementation — an adapter talking to an upstream service, or a
+repository talking to a backing store — translates whatever it catches
+(httpx exceptions, Emby's own error shapes, TMDb's rate-limit responses,
+`sqlalchemy.exc.IntegrityError`, ...) into one of these before it crosses
+the port boundary. A service that only knows `usher.ports` can then branch
+on failure kind without importing `httpx`, SQLAlchemy, or any other
+adapter- or storage-specific library — importing one would break "adapters
+are driven, not driving" (PRD 01) for adapters, and "db is driven, not
+driving" (ADR-0009) for repositories, the same mechanism serving both
+contracts.
+"""
+
+
+class UsherPortError(Exception):
+    """Base for every error a port implementation may raise."""
+
+
+class PortUnavailable(UsherPortError):
+    """The upstream could not be reached, or did not respond in time.
+
+    Distinct from "the requested thing does not exist" — see e.g.
+    `SourceAdapter.get_item`, which returns `None` for that and never
+    raises it as an error. A caller that sees this degrades rather than
+    fails: PRD 08's "a degraded subsystem narrows functionality; it never
+    fails a request local state can answer."
+    """
+
+
+class PortAuthFailed(UsherPortError):
+    """Credentials were rejected.
+
+    For `SourceAdapter`, PRD 03 requires the caller to treat this as the
+    trigger for silent re-authentication with the stored credentials and
+    the same device id — not as a terminal failure.
+    """
+
+
+class PortRateLimited(UsherPortError):
+    """The upstream asked to be backed off.
+
+    `retry_after` is seconds, when the upstream supplied a hint (e.g.
+    TMDb's 429, an HTTP `Retry-After` header); `None` when it didn't, and
+    the caller should apply its own backoff policy.
+    """
+
+    def __init__(self, retry_after: float | None = None) -> None:
+        super().__init__(f"rate limited, retry_after={retry_after}")
+        self.retry_after = retry_after
+
+
+class RepositoryConflict(UsherPortError):
+    """`add()` was called for an id — or another unique key — that already
+    exists. An implementation translates its backing store's own conflict
+    error (e.g. Postgres's `IntegrityError` on a unique constraint) into
+    this, so callers never need to import a storage-specific exception
+    type to handle it. See `usher.ports.repository.TitleRepository.add`.
+    """
+
+
+class RepositoryNotFound(UsherPortError):
+    """`update()` targeted a row that does not exist.
+
+    The read-side equivalent of "not found" is a plain `None` return (see
+    e.g. `TitleRepository.get`) — this exists specifically for the
+    write-side case, where absence must be an error rather than a value,
+    because there is nothing sensible to update. See
+    `usher.ports.repository.TitleRepository.update`.
+    """
 ```
 
 - [ ] **Step 5: Write `source.py`**
@@ -1046,9 +1542,13 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import StrEnum
 from typing import Any
+
+from pydantic import AwareDatetime
+
+from usher.domain.enums import HdrFormat
+from usher.ports.errors import UsherPortError
 
 
 class SourceEventKind(StrEnum):
@@ -1058,13 +1558,32 @@ class SourceEventKind(StrEnum):
     WATCH_STATE_CHANGED = "watch_state_changed"
 
 
+class SourceItemKind(StrEnum):
+    """A source's own idea of what kind of thing an item is — narrower
+    than `usher.domain.enums.TitleKind` because sources address individual
+    episodes directly, unlike `Title`."""
+
+    MOVIE = "movie"
+    SERIES = "series"
+    EPISODE = "episode"
+
+
 @dataclass(frozen=True)
 class SourceItem:
-    """One playable item as the source describes it, already normalised."""
+    """One playable item as the source describes it, already normalised.
+
+    A plain dataclass, not a `DomainModel` — nothing here is validated at
+    construction. `SourceItemKind`, `HdrFormat`, and `AwareDatetime` below
+    state the contract an adapter must uphold, the same way `MediaItem`
+    and `Title` enforce it on the far side of the ingest boundary;
+    constructing this with a naive `datetime` or a source's raw HDR string
+    (e.g. Emby's `"DolbyVision"`) will not raise here — only later, if and
+    when something re-validates it, which is one layer too late.
+    """
 
     external_id: str
     name: str
-    kind: str
+    kind: SourceItemKind
     year: int | None = None
     provider_ids: dict[str, str] = field(default_factory=dict)
     container: str | None = None
@@ -1072,14 +1591,19 @@ class SourceItem:
     audio_codec: str | None = None
     width: int | None = None
     height: int | None = None
-    hdr_format: str | None = None
+    hdr_format: HdrFormat | None = None
     audio_channels: int | None = None
     file_size_bytes: int | None = None
     runtime_seconds: int | None = None
-    added_at: datetime | None = None
+    added_at: AwareDatetime | None = None
     series_external_id: str | None = None
     season_number: int | None = None
     episode_number: int | None = None
+    # Opaque; stored in raw_payloads (PRD 03) for debugging and future
+    # reprocessing, never interpreted above the adapter boundary. The one
+    # deliberate exception to "nothing source-specific escapes its
+    # adapter" — every other field above exists so this one doesn't have
+    # to be read by anything above the adapter.
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -1089,7 +1613,12 @@ class SourceWatchState:
     position_seconds: int
     played: bool
     play_count: int = 0
-    last_played_at: datetime | None = None
+    last_played_at: AwareDatetime | None = None
+    # Emby is multi-user; None means "the source didn't distinguish", which
+    # today is fine because everything implicitly lands on the singleton
+    # default user (PRD 01's authentication seam). Cheap to carry now —
+    # becomes a breaking DTO change the moment a household has two users.
+    source_user_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1100,25 +1629,39 @@ class WatchStateUpdate:
 
 @dataclass(frozen=True)
 class SourceEvent:
+    """🔶 Provisional — carries no payload, so a `WATCH_STATE_CHANGED`
+    event forces the push lane to re-walk `watch_state(since=...)` to
+    discover what changed, even though Emby's own `UserDataChanged`
+    message already carries the position and played flag. Settle in M5,
+    when the push lane is actually built and the cost of re-walking is
+    measurable against just carrying the payload through.
+    """
+
     kind: SourceEventKind
-    external_ids: list[str] = field(default_factory=list)
+    external_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
 class StreamTarget:
-    """How to play an item. Clients choose between the returned targets."""
+    """How to play an item. Clients choose between the returned targets.
+
+    🔶 Provisional — PRD 07's `/play` response example includes `scheme`
+    (for `kind: "deep_link"` targets like `infuse://...`) and `audio`
+    (e.g. `"truehd_atmos_7_1"`) that this shape doesn't carry yet. Settle
+    in M3, alongside the Emby adapter that first has to populate this.
+    """
 
     kind: str
     url: str
     container: str | None = None
     video_codec: str | None = None
-    hdr_format: str | None = None
+    hdr_format: HdrFormat | None = None
     resolution: str | None = None
     runtime_seconds: int | None = None
     resume_position_seconds: int | None = None
 
 
-class SourceNotSupported(Exception):
+class SourceNotSupported(UsherPortError):
     """Raised by adapters for capabilities they do not have."""
 
 
@@ -1133,49 +1676,115 @@ class SourceAdapter(ABC):
     def source_id(self) -> uuid.UUID:
         """The configured Source this adapter serves."""
 
+    @property
     @abstractmethod
-    async def verify(self) -> bool:
-        """Authenticate and confirm reachability."""
+    def supports_push(self) -> bool:
+        """Whether this adapter has a live push channel right now. PRD 03:
+        when the socket can't be established (or drops and stays down
+        after N reconnect attempts), the adapter reports this `False` and
+        the reconciler's nightly walk covers the gap. Mirrors
+        `usher.domain.source.Source.supports_push`, which this populates.
+        """
 
     @abstractmethod
-    def list_items(self, since: datetime | None = None) -> AsyncIterator[SourceItem]:
-        """Walk the library, optionally limited to changes since a cursor."""
+    async def verify(self) -> bool:
+        """Authenticate and confirm reachability.
+
+        🔶 Provisional — a single bool cannot distinguish "bad
+        credentials" from "unreachable" from "reachable but a proxy
+        stripped `Upgrade`", all of which `GET /admin/sources/{id}/status`
+        (PRD 07) needs to report separately. The error taxonomy in
+        `usher.ports.errors` is the prerequisite for settling this (raise
+        `PortAuthFailed`/`PortUnavailable` instead of returning `False`?)
+        — deferred to M3, when the Emby adapter and the admin status
+        endpoint are built together.
+        """
+
+    @abstractmethod
+    def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
+        """Walk the library, or only items changed since a cursor.
+
+        Contract an implementation must guarantee:
+        - `since` is inclusive: an item changed exactly at `since` is
+          included, never dropped at the boundary.
+        - No ordering is promised across items; callers must not rely on
+          one.
+        - The same item may be yielded more than once in a single walk
+          (e.g. a paginated upstream listing whose pages overlap); callers
+          deduplicate by `external_id`.
+        - **Must raise, never truncate silently.** An iterator that stops
+          because the walk finished is indistinguishable from one that
+          stopped because the adapter swallowed an error — and the
+          reconciler cannot tell the difference; it would mark the rest of
+          the library `available = false`. A partial failure raises (e.g.
+          `PortUnavailable` from `usher.ports.errors`) from the generator;
+          it does not just stop yielding.
+        """
 
     @abstractmethod
     async def get_item(self, external_id: str) -> SourceItem | None:
-        """Fetch one item, or None if it is gone."""
+        """Fetch one item.
+
+        `None` means the item is gone from the source — PRD 03's
+        reconcile marks it `available = false`. A transient failure to
+        reach the source is a different outcome and must raise (e.g.
+        `PortUnavailable` from `usher.ports.errors`), never be reported as
+        `None`; conflating the two would mark a healthy item unavailable
+        because of a flaky network, not because it was actually deleted.
+        """
 
     @abstractmethod
     async def stream_targets(self, external_id: str) -> list[StreamTarget]:
         """Ranked ways to play an item."""
 
     @abstractmethod
-    def watch_state(
-        self, since: datetime | None = None
-    ) -> AsyncIterator[SourceWatchState]:
-        """Watch state from the source, optionally since a cursor."""
+    def watch_state(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceWatchState]:
+        """Watch state from the source, optionally since a cursor.
+
+        Same `since`-inclusivity, no-ordering, possible-duplicates, and
+        must-raise-never-truncate contract as `list_items`.
+        """
 
     @abstractmethod
-    async def push_watch_state(
-        self, external_id: str, state: WatchStateUpdate
-    ) -> None:
-        """Write watch state back. Best-effort; may raise."""
+    async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
+        """Write watch state back to the source.
+
+        Must raise on failure, never swallow it. PRD 03's "best-effort"
+        describes the *caller's* behaviour — the request that triggered
+        this write never blocks or fails on a write-back error, because
+        the caller enqueues a retry instead — not this method's. That
+        guarantee only works if failures are visible: an implementation
+        that swallows an error here means the retry never happens.
+        """
 
     @abstractmethod
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
         """Push channel. Adapters without one raise SourceNotSupported; the
         reconciler covers them."""
+
+    @abstractmethod
+    async def aclose(self) -> None:
+        """Release held resources — connection pools, and (from M5) the
+        push WebSocket. Called when a source is deleted (`DELETE
+        /admin/sources/{id}`, PRD 07) or the process shuts down."""
 ```
 
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `uv run pytest tests/unit/test_ports.py -v`
-Expected: 12 passed
+Expected: 12 passed (before the repository-port amendment below; 20 passed
+after it). Historical counts, from when this step was first carried out —
+Steps 3–5 above have since been updated in place to show each port in its
+final, hardened form rather than the code that originally produced them;
+see the amendment after Step 8 for what changed, why, and the current,
+accurate count (37 passed).
 
 - [ ] **Step 7: Verify layering contracts hold**
 
 Run: `uv run lint-imports`
-Expected: `Contracts: 3 kept, 0 broken.`
+Expected: `Contracts: 4 kept, 0 broken.` (corrected from the plan's original "3
+kept" — stale since Group A's allowlist rewrite added a fourth contract,
+`config stays out of the core`, ahead of this task ever running)
 
 - [ ] **Step 8: Commit**
 
@@ -1184,9 +1793,242 @@ git add src/usher/ports tests/unit/test_ports.py
 git commit -m "feat: port ABCs for sources, metadata, search, embedding, and LLM"
 ```
 
+> **Added post-planning — this was not in the original plan.** Group A's
+> `db is driven, not driving` import-linter contract forbids
+> `usher.domain`, `usher.ports`, and `usher.services` from importing
+> `usher.db` — correctly enforcing [PRD 01](../prd/01-architecture.md)'s
+> "`services/` depends only on `domain/` and `ports/`." But
+> [Task 10](#task-10-title-repository) originally planned `TitleRepository`
+> as a plain class with no ABC, directly in `db/repositories/title.py`.
+> Under the contract, no service could ever import it — nothing in the plan
+> gave a service a path to persistence. A repository is a driven port like
+> any other in hexagonal terms, so this task gains a sixth port,
+> `TitleRepository` — taking the plain name the way `SourceAdapter` and
+> `MetadataProvider` do, which is why Task 10's concrete class is now named
+> `PostgresTitleRepository` instead. Full rationale:
+> [ADR-0009](../prd/decisions/0009-repositories-are-ports.md).
+
+**Files:**
+- Create: `src/usher/ports/repository.py`
+
+```python
+# src/usher/ports/repository.py
+"""Port for title persistence."""
+
+import uuid
+from abc import ABC, abstractmethod
+
+from usher.domain.enums import EnrichmentState
+from usher.domain.title import Title
+
+
+class TitleRepository(ABC):
+    """Persistence for canonical titles, kept behind a port so services
+    depend on this ABC and never on `usher.db` directly — see ADR-0009.
+    `usher.db.repositories.title.PostgresTitleRepository` is the concrete,
+    SQLAlchemy-backed implementation; `api/`, the composition root,
+    constructs it and injects it into services.
+    """
+
+    @abstractmethod
+    async def add(self, title: Title) -> None:
+        """Persist a new title.
+
+        This is an insert, not an upsert: a duplicate `title.id` — or any
+        other unique constraint the backing store enforces — raises
+        `RepositoryConflict` (`usher.ports.errors`). Implementations
+        translate their backing store's own conflict error (e.g.
+        Postgres's `IntegrityError`) into this; callers never import a
+        storage-specific exception to handle it. See `update` for
+        mutating a title that already exists.
+
+        The caller owns the session and the transaction: this flushes, so
+        the row and any conflict are visible immediately, but it never
+        commits. Committing or rolling back is the caller's call.
+        """
+
+    @abstractmethod
+    async def update(self, title: Title) -> None:
+        """Persist a mutated, already-existing title — e.g.
+        `title.evolve(enrichment_state=EnrichmentState.ENRICHED, ...)`
+        after enrichment, which is the read-through design's whole point
+        (PRD 03: stub-on-sight, then enrich in place).
+
+        This is an update, not an upsert: a `title.id` that does not
+        already exist raises `RepositoryNotFound` (`usher.ports.errors`).
+        See `add` for a brand-new title.
+
+        Same session/transaction ownership as `add`: flushes, never
+        commits.
+        """
+
+    @abstractmethod
+    async def get(self, title_id: uuid.UUID) -> Title | None:
+        """Fetch by Usher's own id, or None if it doesn't exist."""
+
+    @abstractmethod
+    async def get_by_tmdb_id(self, tmdb_id: int) -> Title | None:
+        """Fetch by TMDb id, or None if no title carries it."""
+
+    @abstractmethod
+    async def get_by_imdb_id(self, imdb_id: str) -> Title | None:
+        """Fetch by IMDb id, or None if no title carries it."""
+
+    @abstractmethod
+    async def count_by_state(self) -> dict[EnrichmentState, int]:
+        """Catalog size broken down by enrichment tier.
+
+        Always returns all three `EnrichmentState` members as keys, 0 for
+        any tier with no titles — never a sparse dict. A `GROUP BY` only
+        returns tiers with at least one row; an implementation must fill
+        in the rest itself rather than let the query's own sparsity leak
+        through (a bare `counts[EnrichmentState.ENRICHED]` must never
+        raise `KeyError` just because nothing is enriched yet).
+        """
+```
+
+`tests/unit/test_ports.py` gained `TitleRepository` in the
+`ALL_PORTS` parametrization — so it gets the same cannot-instantiate-
+directly and declares-abstract-methods coverage as the other five ports
+for free — plus `FakeTitleRepository`, a small in-memory implementation
+exercised with add/get round-trip, `get_by_tmdb_id`, `get_by_imdb_id`,
+and `count_by_state` tests mirroring Task 10's own integration tests.
+This fake is not a throwaway instantiation check: it is what `services`
+get unit-tested against from M4 onward, per
+`docs/specs/2026-07-28-usher-v1-design.md`'s "Unit — services against
+port fakes; no network."
+
+Run: `uv run pytest tests/unit/test_ports.py -v`
+Expected: 20 passed. Historical, like Step 6 above — the `repository.py`
+fence above has since been updated in place to its final, hardened form
+(including `update()` and the `RepositoryConflict`/`RepositoryNotFound`
+contract), which this original checkpoint predates. See the amendment
+after Step 8 for the current count (37 passed).
+
+```bash
+git add src/usher/ports/repository.py tests/unit/test_ports.py
+git commit -m "feat: add TitleRepository, the repository driven port"
+```
+
+> **Amended post-implementation.** A quality review of all six ports found
+> three categories of problem: signatures that would not survive contact
+> with a real implementation (`TitleRepository` had no write path —
+> `add()` alone cannot express PRD 03's stub-on-sight-then-enrich mutation
+> of an *existing* Title, and the original `FakeTitleRepository` concealed
+> this by silently overwriting on a duplicate id where the real,
+> Postgres-backed repository raises `IntegrityError`); no shared error
+> taxonomy at all, so a service could only catch bare `Exception` or
+> import `httpx`/SQLAlchemy errors directly, breaking "adapters are
+> driven, not driving"; and `SourceItem` typing that let a naive datetime
+> and a raw source string like `"DolbyVision"` through where `MediaItem`
+> rejects both, pushing the failure one layer late. A follow-up fix then
+> finished a gap that review's hardening left open: `errors.py` had no
+> shared exception for an `add()`/`update()` failure yet, so
+> `FakeTitleRepository` and this test file both still used a bare
+> `ValueError` — which does not subclass `UsherPortError`, so a service
+> catching that base class alone would not see it. The follow-up added
+> `RepositoryConflict`/`RepositoryNotFound` to `errors.py`, updated
+> `repository.py`'s docstrings to name them instead of "raises whatever
+> the concrete implementation's backing store raises", and updated
+> `FakeTitleRepository` and this test file to match. Steps 3–5 and the
+> `repository.py` block after Step 8 have been updated in place to their
+> final, hardened form to reflect all of this — what follows is the *why*
+> behind that code, not a substitute for reading it.
+>
+> - **`src/usher/ports/errors.py` (new).** `UsherPortError` →
+>   `PortUnavailable`, `PortAuthFailed`, `PortRateLimited(retry_after)`,
+>   `RepositoryConflict`, `RepositoryNotFound`. `SourceNotSupported`
+>   (`source.py`) is reparented under it.
+> - **`source.py`:** `SourceItem.kind` is now `SourceItemKind`
+>   (movie/series/episode); `hdr_format` (on both `SourceItem` and
+>   `StreamTarget`) is `HdrFormat`, not a raw string; `SourceItem.added_at`
+>   and `SourceWatchState.last_played_at` are `AwareDatetime`, as are the
+>   `since` parameters on `list_items`/`watch_state`. `SourceAdapter`
+>   gained `supports_push` (a property) and `aclose()`. `SourceWatchState`
+>   gained `source_user_id: str | None` (Emby is multi-user).
+>   `SourceEvent.external_ids` is now a `tuple`, matching the domain
+>   layer's tuple convention. The `list_items`/`watch_state`/`get_item`/
+>   `push_watch_state` docstrings now state the contract an implementer
+>   must guarantee — ordering, `since` inclusivity, duplicates, and (the
+>   load-bearing one) *must raise, never truncate silently* — not just
+>   the signature.
+> - **`metadata.py`:** `search()` returns `list[MetadataCandidate]`
+>   (`provider_id, name, year, kind, popularity`), not
+>   `list[dict[str, Any]]` — the match stage no longer indexes into
+>   TMDb's own keys. `fetch()`'s `kind` parameter is `TitleKind`, not
+>   `str`. `fetch()` still returns a raw `dict`, deliberately: it is an
+>   opaque blob for `raw_payloads`, not a shortcut that skipped
+>   normalisation the way `search()`'s old return type was.
+> - **`search.py`:** `SearchRequest.semantic: bool` is now
+>   `mode: SearchMode` (`full_text | semantic | fused`) — the old bool
+>   could not express `fused`, even though RRF fusion is the actual
+>   design (ADR-0002).
+> - **`llm.py`:** `LLMUsage` is a `@dataclass(frozen=True)`, moved above
+>   `LLMClient` (no more forward-ref string), so two calls that recorded
+>   the same numbers compare equal instead of only by identity.
+>   `cost_usd` is `Decimal`. `purpose: str` is `LLMPurpose` (PRD 10's
+>   `curation | query_expansion` vocabulary). `LLMClient` gained
+>   `aclose()`.
+> - **`embedding.py`:** `Embedder` gained `aclose()` and a docstring
+>   contract (vectors are L2-normalised; callers own any query-side
+>   prefix their model needs).
+> - **`repository.py`:** gained `update()` alongside `add()` —
+>   insert-only vs. update-only, matching PRD 03's stub-on-sight-then-
+>   enrich shape. Both document that the caller owns the session and the
+>   transaction (flush, never commit). `add()`'s and `update()`'s
+>   docstrings now name the exceptions an implementation must translate
+>   its backing store's own errors into — `RepositoryConflict` for a
+>   duplicate key, `RepositoryNotFound` for an update against a missing
+>   row — so a caller depends only on `usher.ports.errors`, never on
+>   `sqlalchemy.exc` directly; [Task 10](#task-10-title-repository) covers
+>   the implementation side of that translation. `count_by_state()`'s
+>   docstring now guarantees all three `EnrichmentState` tiers as keys, 0
+>   for any with no titles — never a sparse dict.
+> - **Several fields and methods are marked 🔶 provisional** in their own
+>   docstrings, each naming the milestone that settles it
+>   (`MetadataProvider.to_title`/`fetch`/`changed_since`, `SearchIndex`/
+>   `SearchIndex.suggest`, `Embedder`'s query/document split,
+>   `SourceAdapter.verify`, `StreamTarget`, `SourceEvent`). The
+>   corresponding PRD sections carry the same marker — see PRD 03, 04, 05,
+>   and 07.
+> - **`FakeTitleRepository` moved to `tests/fakes/title_repository.py`**
+>   so M4 can import it without dragging in this module's fixtures and
+>   parametrized tests along with it. It now matches the port's real
+>   add/update split — a duplicate `add()` raises `RepositoryConflict`
+>   instead of silently overwriting, a missing-id `update()` raises
+>   `RepositoryNotFound`, and `count_by_state()` is never sparse.
+>
+> `tests/unit/test_ports.py` grew from 20 cases to 37 covering all of the
+> above (35 right after the signature-hardening pass; 37 once the
+> follow-up fix finished the error taxonomy). Step 1's fence earlier in
+> this task is the file as first written, left as a historical snapshot
+> rather than resynced — read `tests/unit/test_ports.py` directly for the
+> current, 37-case contract.
+>
+> Run: `uv run pytest tests/unit/test_ports.py -v`
+> Expected: 37 passed
+
 ---
 
 ## Task 7: Database engine and session factory
+
+> **Amended post-implementation.** A schema-hardening review (after Tasks
+> 7–9 first shipped, against a real Postgres with 300k synthetic rows and
+> `EXPLAIN ANALYZE`) added two things to `base.py` that Steps 1–5 below
+> predate: a `naming_convention` on `Base.metadata` (so every constraint has
+> a deterministic, migratable name — see [ADR-0010](../prd/decisions/0010-watch-state-title-fk-restrict.md)
+> for the FK change this enables) and an `enum_column()` helper Task 8's row
+> classes now use for every enum-typed column instead of a bare `String(N)`
+> (a plain `String` column has no result processor, so `Mapped[TitleKind]`
+> lied — `isinstance(row.kind, TitleKind)` was `False` on read, verified
+> directly, despite what the annotation told mypy). Step 3's fence below is
+> the current, post-amendment file. Step 1's test fence is what Task 7
+> originally shipped; the actual test file gained a fourth test
+> (`test_session_factory_does_not_expire_on_commit`) and strengthened two
+> assertions that were true of nearly any object (`hasattr(Base,
+> "metadata")`, `hasattr(session, "execute")`) into ones that pin behaviour
+> specific to this module — see `tests/unit/test_db_base.py` for the
+> current version; Step 4's "3 passed" is now 4.
 
 **Files:**
 - Create: `src/usher/db/base.py`
@@ -1226,6 +2068,10 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'usher.db.base'`
 # src/usher/db/base.py
 """Declarative base, engine, and session factory."""
 
+from enum import Enum as PyEnum
+
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -1234,12 +2080,50 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
+# Ten constraints on the M1 schema before this convention had names Postgres
+# generated at CREATE time (titles_pkey, media_items_title_id_fkey, ...)
+# rather than names under our control. Every future migration that alters
+# one of them -- including the episodes FK the dangling episode_id columns
+# are waiting for -- would otherwise have to hardcode a guessed
+# autogenerated string, and autogenerate itself can't reliably diff unnamed
+# constraints.
+#
+# For pk/fk/uq/ix, an explicitly-given `name=` is left alone by the
+# convention -- it only fills in names for constraints that had none, which
+# is exactly what's wanted since this schema's UniqueConstraints and named
+# Indexes are already explicitly and deliberately named.
+#
+# There is deliberately no "ck" key. Unlike the others, SQLAlchemy's naming
+# convention machinery treats `%(constraint_name)s` as *always* applying for
+# CheckConstraint, even when an explicit name was given -- verified directly:
+# with a "ck" key present, this schema's existing, already-fully-formed
+# `CheckConstraint(..., name="ck_titles_year_non_negative")` names got
+# double-prefixed into `ck_titles_ck_titles_year_non_negative` instead of
+# being left alone. Every CheckConstraint in this schema already has an
+# explicit, descriptive name (the standard advice to let a naming
+# convention synthesize one from columns doesn't fit a CHECK anyway, since
+# its condition is an arbitrary SQL expression, not a fixed column list) so
+# omitting "ck" costs nothing here and avoids that trap entirely.
+NAMING_CONVENTION = {
+    "ix": "ix_%(table_name)s_%(column_0_N_name)s",
+    "uq": "uq_%(table_name)s_%(column_0_N_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
 
 class Base(DeclarativeBase):
     """Declarative base for all Usher tables."""
 
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
 
 def build_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
+    # pool_size/max_overflow are hardcoded, not read from usher.config.Settings
+    # -- deferred, not designed away. Nothing in M1 has a reason to run more
+    # than one process against the same database, so there is no real
+    # deployment yet to tune these for. Revisit if/when a milestone adds a
+    # second long-running process (e.g. a worker pool) sharing this pool.
     return create_async_engine(
         database_url,
         echo=echo,
@@ -1251,12 +2135,41 @@ def build_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
 
 def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+
+def enum_column(enum_cls: type[PyEnum], *, length: int) -> SAEnum:
+    """A `String`-backed column type for a domain `StrEnum` that round-trips
+    to real enum members on read instead of plain `str` — plain
+    `mapped_column(String(N))` has no result processor, so `Mapped[SomeEnum]`
+    lies: `isinstance(row.kind, TitleKind)` is `False` even though mypy
+    believes otherwise (verified).
+
+    `native_enum=False` compiles to `VARCHAR(length)`, identical DDL to the
+    `String(length)` it replaces — no native Postgres `CREATE TYPE ... AS
+    ENUM`. `create_constraint` defaults to `False` in SQLAlchemy 2.0
+    (verified), so no membership CHECK is emitted; Pydantic owns membership
+    validation, not the database, matching every other constraint in this
+    schema.
+
+    `values_callable` is not optional here: SQLAlchemy's default binds and
+    reads back a Python `Enum`'s `.name` (`"MOVIE"`), not its `.value`
+    (`"movie"`) — verified directly, including that without this the result
+    processor cannot even parse the lowercase values this schema already
+    stores. `usher.domain.enums`'s docstring states values are "stable wire
+    and storage identifiers"; those identifiers are each member's `.value`.
+    """
+    return SAEnum(
+        enum_cls,
+        native_enum=False,
+        length=length,
+        values_callable=lambda cls: [member.value for member in cls],
+    )
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/unit/test_db_base.py -v`
-Expected: 3 passed
+Expected: 3 passed (4 passed against the current, post-amendment test file)
 
 - [ ] **Step 5: Commit**
 
@@ -1320,6 +2233,100 @@ Expected: FAIL — `ImportError: cannot import name 'MediaItemRow'`
 
 - [ ] **Step 3: Write `title.py`**
 
+> **STANDING RULE for every array column below — read this before writing
+> `genres`, `keywords`, `spoken_languages`, or `origin_countries`:**
+> `ARRAY(Text)` **accepts** a Python `tuple` on write (verified against a
+> real `pgvector/pgvector:pg17` container, both through Core
+> `insert().values()` and through `TitleRow(genres=(...))`), but
+> Postgres/asyncpg always **returns a `list`** on read — never a tuple.
+> `genres`/`keywords`/`spoken_languages`/`origin_countries` on `TitleRow`
+> below are therefore `Mapped[list[str]]`, **deliberately**, even though
+> `usher.domain.title.Title` (the model these rows map to) types the same
+> fields `tuple[str, ...]`. **Do not "fix" these to
+> `Mapped[tuple[str, ...]]`** — that would just be wrong about what the
+> driver actually hands back, and would break on the very next read. The
+> tuple-ness is purely a `Title`-layer concept; `_to_domain` (Task 10)
+> gets the list→tuple conversion for free from pydantic validation on the
+> way back in. This is not a one-time observation from the review that
+> happened to be true when it was written — it is a permanent fact about
+> how `ARRAY(Text)` behaves, and it will still be true whenever Task 8 is
+> actually implemented.
+
+> **Amended post-implementation.** A quality review of the domain models
+> (Tasks 3–5) after they first landed added `enrichment_error`, dropped
+> `EnrichmentState.FAILED`, changed `genres`/`keywords`/`spoken_languages`/
+> `origin_countries` to `tuple[str, ...]` on the domain side (row side
+> covered by the standing rule above), added a `WatchState` invariant
+> (exactly one of `title_id`/`episode_id`), value constraints
+> (`ge=0`/range/`min_length` — see ADR-0008 and the domain-model commits
+> for the full rationale), and — caught in a later sweep that compared
+> every domain field against Task 8's declared column nullability —
+> made `MediaItem.last_seen_at` required (see the note after
+> `MediaItemRow` below). The `TitleRow`/`SourceRow`/`MediaItemRow`/
+> `UserRow`/`WatchStateRow` definitions below already reflect all of it —
+> unlike Tasks 3–5, Task 8 had not been implemented yet when the review
+> landed, so there is no "original vs. amended" split here, just the
+> current version to implement against.
+
+> **Amended again, post-implementation.** A schema-hardening review — after
+> Tasks 7–9 shipped, against a real Postgres loaded with 300k synthetic
+> rows and `EXPLAIN ANALYZE` — changed the three row classes below further.
+> The fences in Steps 3–5 are the current, post-amendment files; every
+> change is:
+>
+> - **`kind`/`status`/`enrichment_state`/`hdr_format`/`origin` use the new
+>   `enum_column()` helper (Task 7) instead of a bare `String(N)`.** A
+>   plain `String` column has no result processor, so `Mapped[TitleKind]`
+>   lied: `isinstance(row.kind, TitleKind)` was `False` on read, verified
+>   directly, despite what the annotation told mypy. `enum_column()`
+>   compiles to identical DDL and stores each member's `.value` (not
+>   `.name` — SQLAlchemy's own default, which would have been a silent,
+>   serious regression here, since `.value` is what `enums.py` already
+>   documents as "stable wire and storage identifiers").
+> - **`watch_states.title_id` is `ON DELETE RESTRICT`, not `CASCADE`.**
+>   See [ADR-0010](../prd/decisions/0010-watch-state-title-fk-restrict.md).
+>   `media_items.title_id` stays `SET NULL` — the asymmetry is deliberate,
+>   not an inconsistency; the ADR explains why.
+> - **New indexes:** `ix_titles_tvdb_id` (PRD 02 lists all three provider
+>   IDs as unique-indexed, `tvdb_id` had none), `ix_titles_name_lower_year`
+>   (expression index on `(lower(name), year)`, serving PRD 03's stage-3
+>   matching), `ix_watch_states_title_id` (the `RESTRICT` FK check above
+>   needs this or it seq-scans `watch_states` on every Title delete).
+> - **`ix_titles_popularity` is now `DESC` and partial** (`WHERE popularity
+>   IS NOT NULL`) — a plain ascending index cannot serve `ORDER BY
+>   popularity DESC NULLS LAST` in either scan direction. **
+>   `ix_titles_enrichment_state` is now partial** (`WHERE enrichment_state
+>   <> 'skeleton'`) — indexing the majority value is pure write cost for a
+>   column Postgres seq-scans for that value regardless.
+> - **`server_default` added to every `NOT NULL` column whose only default
+>   was Python-side (`default=`):** `genres`/`keywords`/`spoken_languages`/
+>   `origin_countries`/`field_provenance`/`enrichment_state` on `TitleRow`;
+>   `enabled`/`supports_push` on `SourceRow`; `available` on
+>   `MediaItemRow`; `is_default` on `UserRow`; `position_seconds`/`played`/
+>   `play_count` on `WatchStateRow`. Without these, any insert that doesn't
+>   go through the ORM — M2's entire `COPY`-based bulk-load path — fails
+>   with a `NotNullViolation`. **`WatchStateRow.origin` deliberately keeps
+>   no default of either kind** — see its inline comment; giving it one
+>   would defeat the reason it has none.
+> - **A `BEFORE UPDATE` trigger** (`set_updated_at()`, applied to
+>   `titles`/`sources`/`watch_states` — not `media_items`, whose
+>   `last_seen_at` means something different) keeps `updated_at` correct
+>   for writes that bypass the ORM. `onupdate=func.now()` in the fences
+>   below is Core-only and has no effect on raw SQL or `ON CONFLICT DO
+>   UPDATE`, which is exactly M2/M4's bulk-ingest shape; see Task 9's
+>   migration for the trigger DDL (autogenerate cannot detect triggers or
+>   functions — hand-written).
+>
+> `Base.metadata`'s new `naming_convention` (Task 7) also means every
+> constraint below that has no explicit `name=` — the five
+> `PrimaryKeyConstraint`s, the four inline `ForeignKey()`-generated
+> `ForeignKeyConstraint`s, and `UserRow.name`'s inline `unique=True` — now
+> gets a deterministic name (`pk_titles`, `fk_media_items_title_id_titles`,
+> `uq_users_name`, ...) instead of a Postgres-generated one. Every
+> explicitly-named `CheckConstraint`/`UniqueConstraint`/`Index` below is
+> unaffected — the convention only fills in names for constraints that had
+> none.
+
 ```python
 # src/usher/db/models/title.py
 """Catalog tables."""
@@ -1329,6 +2336,7 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     ARRAY,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -1339,18 +2347,19 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from usher.db.base import Base
-from usher.domain.enums import EnrichmentState, TitleKind
+from usher.db.base import Base, enum_column
+from usher.domain.enums import EnrichmentState, ProductionStatus, TitleKind
 
 
 class TitleRow(Base):
     __tablename__ = "titles"
 
     id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
-    kind: Mapped[TitleKind] = mapped_column(String(16), nullable=False)
+    kind: Mapped[TitleKind] = mapped_column(enum_column(TitleKind, length=16), nullable=False)
 
     tmdb_id: Mapped[int | None] = mapped_column(Integer)
     imdb_id: Mapped[str | None] = mapped_column(String(16))
@@ -1366,26 +2375,65 @@ class TitleRow(Base):
     overview: Mapped[str | None] = mapped_column(Text)
     tagline: Mapped[str | None] = mapped_column(Text)
     runtime_minutes: Mapped[int | None] = mapped_column(Integer)
-    status: Mapped[str | None] = mapped_column(String(32))
+    # Mapped[ProductionStatus | None], matching how kind/enrichment_state
+    # are typed as their enum despite also being plain String-backed columns
+    # underneath -- not left as a bare str | None by design. See enum_column.
+    status: Mapped[ProductionStatus | None] = mapped_column(
+        enum_column(ProductionStatus, length=32)
+    )
 
-    genres: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
-    keywords: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    # ARRAY(Text) accepts a Python tuple on write and always returns a list
+    # on read (verified against real Postgres) -- Mapped[list[str]] here is
+    # correct for both directions even though the domain model above these
+    # rows uses tuple[str, ...]. See the note above this class.
+    #
+    # server_default (not just the ORM-side default= below) so a raw INSERT
+    # or COPY that never mentions this column -- M2's entire bulk-load path,
+    # by construction -- gets '{}' instead of a NOT NULL violation. Verified:
+    # without it, `INSERT INTO titles (id, kind, name, sort_name) VALUES
+    # (...)` fails on "null value in column \"genres\"".
+    #
+    # No GIN index yet: M9's faceted /browse (07-client-api.md) needs one for
+    # facet counts at scale (measured: 78.7 ms/300k rows seq-scanned, ~3.3 s
+    # projected at 12.7M) but CREATE INDEX CONCURRENTLY can add it online
+    # with no table rewrite whenever M9 lands, so it is deferred, not
+    # designed away.
+    genres: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default=text("'{}'")
+    )
+    keywords: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default=text("'{}'")
+    )
     original_language: Mapped[str | None] = mapped_column(String(16))
-    spoken_languages: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
-    origin_countries: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    spoken_languages: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default=text("'{}'")
+    )
+    origin_countries: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default=text("'{}'")
+    )
     content_rating: Mapped[str | None] = mapped_column(String(32))
 
     community_rating: Mapped[float | None] = mapped_column(Float)
     vote_count: Mapped[int | None] = mapped_column(Integer)
     popularity: Mapped[float | None] = mapped_column(Float)
 
+    # No index yet -- deferred for M9 alongside media_items' added_at/
+    # last_seen_at/available; see the note in db/models/source.py.
     collection_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
 
     enrichment_state: Mapped[EnrichmentState] = mapped_column(
-        String(16), nullable=False, default=EnrichmentState.SKELETON
+        enum_column(EnrichmentState, length=16),
+        nullable=False,
+        default=EnrichmentState.SKELETON,
+        server_default=text("'skeleton'"),
     )
+    # Non-null => the last enrichment attempt failed; enrichment_state is
+    # left untouched either way. ADR-0008.
+    enrichment_error: Mapped[str | None] = mapped_column(Text)
     enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    field_provenance: Mapped[dict[str, str]] = mapped_column(JSONB, default=dict)
+    field_provenance: Mapped[dict[str, str]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -1394,10 +2442,26 @@ class TitleRow(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
+        # Kept as a fallback for plain ORM-session updates and as a signal
+        # of intent, but it is NOT what keeps this column correct for bulk
+        # writes -- SQLAlchemy's onupdate is a Core-side feature with no
+        # effect on raw SQL / COPY / ON CONFLICT DO UPDATE unless every
+        # caller remembers to list it explicitly (M2/M4's bulk ingest is
+        # ON CONFLICT DO UPDATE by definition). A BEFORE UPDATE trigger
+        # (see the initial migration) is what actually guarantees it.
         nullable=False,
     )
 
     __table_args__ = (
+        # Partial unique indexes, not a plain UNIQUE constraint: NULL never
+        # collides with NULL under a normal unique index anyway, but making
+        # the WHERE explicit is what lets Postgres use this index for the
+        # lookup queries that already filter on "IS NOT NULL". It also means
+        # an upsert against this column must repeat the same predicate --
+        # `ON CONFLICT (tmdb_id) WHERE tmdb_id IS NOT NULL DO UPDATE ...` --
+        # or Postgres rejects the upsert with "no unique or exclusion
+        # constraint matching the ON CONFLICT specification". M2/M4's
+        # upsert loaders must do this for tmdb_id/imdb_id/tvdb_id.
         Index(
             "ix_titles_tmdb_id",
             "tmdb_id",
@@ -1410,9 +2474,75 @@ class TitleRow(Base):
             unique=True,
             postgresql_where=text("imdb_id IS NOT NULL"),
         ),
+        # PRD 02 (Identity) lists all three provider IDs as unique-indexed
+        # attributes; tvdb_id had no index at all until this pass. Adding it
+        # before any real tvdb_id data lands matters -- once duplicates
+        # exist, this unique index can't be added without a dedup pass
+        # first.
+        Index(
+            "ix_titles_tvdb_id",
+            "tvdb_id",
+            unique=True,
+            postgresql_where=text("tvdb_id IS NOT NULL"),
+        ),
         Index("ix_titles_sort_name", "sort_name"),
-        Index("ix_titles_enrichment_state", "enrichment_state"),
-        Index("ix_titles_popularity", "popularity"),
+        # Partial: excludes the majority 'skeleton' value. Postgres seq-scans
+        # for a majority value regardless of whether it's indexed, so a full
+        # index over enrichment_state is pure write cost during M2's bulk
+        # load of millions of skeleton rows for zero query benefit (measured
+        # 1,936 kB -> 40 kB at 300k rows, identical query plans either way).
+        Index(
+            "ix_titles_enrichment_state",
+            "enrichment_state",
+            postgresql_where=text("enrichment_state <> 'skeleton'"),
+        ),
+        # Descending and partial, not a plain ascending index: "most popular
+        # first" is ORDER BY popularity DESC NULLS LAST, which a plain
+        # ascending btree cannot serve in either scan direction (forward
+        # gives ASC NULLS LAST, backward gives DESC NULLS FIRST -- neither
+        # matches). Excluding NULLs means there is nothing to place "last"
+        # inside the index at all, so a backward scan is directly usable.
+        # Measured: the plain-ascending version fell back to a 24.8 ms seq
+        # scan at 300k rows for a query a matching index serves in 0.19 ms,
+        # and would cost ~340 MB at 12.7M rows indexing millions of
+        # NULL-popularity skeleton rows no such query ever wants first.
+        Index(
+            "ix_titles_popularity",
+            text("popularity DESC"),
+            postgresql_where=text("popularity IS NOT NULL"),
+        ),
+        # PRD 03 stage 3 matches bulk-imported titles on normalised name +
+        # year and calls this "why matching is fast and mostly offline" --
+        # but sort_name has an explicit no-normalisation contract (Title's
+        # own docstring) and ix_titles_sort_name is a plain btree on the raw
+        # column, so neither can serve that lookup. Measured: a name+year
+        # match seq-scanned at 14.6 ms at 300k rows, ~600 ms/item
+        # extrapolated to 12.7M -- an expression index on the same
+        # normalisation the matcher actually applies (lowercase; no
+        # whitespace/punctuation folding) is what a btree can use.
+        Index("ix_titles_name_lower_year", text("lower(name)"), "year"),
+        # Mirrors the domain model's Field(ge=0) / Field(ge=0, le=10) /
+        # Field(min_length=1) constraints -- see the Title commit.
+        CheckConstraint("year IS NULL OR year >= 0", name="ck_titles_year_non_negative"),
+        CheckConstraint(
+            "end_year IS NULL OR end_year >= 0", name="ck_titles_end_year_non_negative"
+        ),
+        CheckConstraint(
+            "runtime_minutes IS NULL OR runtime_minutes >= 0",
+            name="ck_titles_runtime_minutes_non_negative",
+        ),
+        CheckConstraint(
+            "vote_count IS NULL OR vote_count >= 0", name="ck_titles_vote_count_non_negative"
+        ),
+        CheckConstraint(
+            "popularity IS NULL OR popularity >= 0", name="ck_titles_popularity_non_negative"
+        ),
+        CheckConstraint(
+            "community_rating IS NULL OR community_rating BETWEEN 0 AND 10",
+            name="ck_titles_community_rating_range",
+        ),
+        CheckConstraint("name <> ''", name="ck_titles_name_not_empty"),
+        CheckConstraint("sort_name <> ''", name="ck_titles_sort_name_not_empty"),
     )
 ```
 
@@ -1428,6 +2558,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -1441,21 +2572,33 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from usher.db.base import Base
-from usher.domain.enums import SourceKind
+from usher.db.base import Base, enum_column
+from usher.domain.enums import HdrFormat, SourceKind
 
 
 class SourceRow(Base):
     __tablename__ = "sources"
 
     id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
-    kind: Mapped[SourceKind] = mapped_column(String(16), nullable=False)
+    kind: Mapped[SourceKind] = mapped_column(enum_column(SourceKind, length=16), nullable=False)
+    # Not unique yet: deferred, not designed away. A household is expected
+    # to have very few sources, so a duplicate name is a low-consequence,
+    # easily-noticed mistake rather than a correctness problem worth a
+    # migration for today -- revisit if/when multiple sources of the same
+    # kind become common.
     name: Mapped[str] = mapped_column(Text, nullable=False)
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
     credentials_ref: Mapped[str] = mapped_column(Text, nullable=False)
     device_id: Mapped[str] = mapped_column(Text, nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    supports_push: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # server_default so a raw INSERT that doesn't mention these -- any
+    # loader that isn't the ORM -- gets the same default the ORM applies,
+    # instead of a NOT NULL violation.
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    supports_push: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -1466,6 +2609,8 @@ class SourceRow(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    __table_args__ = (CheckConstraint("name <> ''", name="ck_sources_name_not_empty"),)
 
 
 class MediaItemRow(Base):
@@ -1486,7 +2631,7 @@ class MediaItemRow(Base):
     audio_codec: Mapped[str | None] = mapped_column(String(32))
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
-    hdr_format: Mapped[str | None] = mapped_column(String(16))
+    hdr_format: Mapped[HdrFormat | None] = mapped_column(enum_column(HdrFormat, length=16))
     audio_channels: Mapped[int | None] = mapped_column(Integer)
     file_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     runtime_seconds: Mapped[int | None] = mapped_column(Integer)
@@ -1495,8 +2640,15 @@ class MediaItemRow(Base):
     last_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    available: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
 
+    # Deferred, not designed away: no index on added_at/last_seen_at/
+    # available (or titles.collection_id in title.py). media_items is ~94k
+    # rows at the 300k-title benchmark scale, so a sort or filter on any of
+    # these is a few ms without one -- revisit for M9 if/when catalog size
+    # or query patterns change that.
     __table_args__ = (
         UniqueConstraint("source_id", "external_id", name="uq_media_items_source_external"),
         Index("ix_media_items_title_id", "title_id"),
@@ -1505,8 +2657,39 @@ class MediaItemRow(Base):
             "source_id",
             postgresql_where=text("title_id IS NULL"),
         ),
+        CheckConstraint("width IS NULL OR width >= 0", name="ck_media_items_width_non_negative"),
+        CheckConstraint("height IS NULL OR height >= 0", name="ck_media_items_height_non_negative"),
+        CheckConstraint(
+            "audio_channels IS NULL OR audio_channels >= 0",
+            name="ck_media_items_audio_channels_non_negative",
+        ),
+        CheckConstraint(
+            "file_size_bytes IS NULL OR file_size_bytes >= 0",
+            name="ck_media_items_file_size_bytes_non_negative",
+        ),
+        CheckConstraint(
+            "runtime_seconds IS NULL OR runtime_seconds >= 0",
+            name="ck_media_items_runtime_seconds_non_negative",
+        ),
     )
 ```
+
+**Resolved.** `MediaItemRow.last_seen_at` above is `nullable=False` with a
+`server_default`, matching [02-data-model.md](../prd/02-data-model.md)'s
+`last_seen_at: datetime`. A prior pass here left
+`usher.domain.source.MediaItem.last_seen_at` as `AwareDatetime | None =
+None` — nullable, matching Task 5's original code, not the PRD or this
+column — and flagged the mismatch rather than guess at it. Decision: make
+it required, `default_factory=lambda: datetime.now(UTC)`, the same pattern
+as `created_at`/`updated_at`. Reasoning: a `MediaItem` only exists because
+it was just observed on a source, so "seen, but we don't know when" isn't
+a reachable state; `Title.py`/`source.py` (Task 4/5) already reflect this.
+
+A follow-up sweep compared every other domain field against the column
+nullability declared here and found no further mismatches:
+`MediaItem.added_at` is nullable on both sides (correct — a source may not
+report when an item was added), and every field on `SourceRow`/`Source` is
+`NOT NULL`/required on both sides already.
 
 - [ ] **Step 5: Write `watch.py`**
 
@@ -1519,19 +2702,20 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
     Integer,
-    String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from usher.db.base import Base
+from usher.db.base import Base, enum_column
 from usher.domain.enums import WatchStateOrigin
 
 
@@ -1540,10 +2724,14 @@ class UserRow(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+    __table_args__ = (CheckConstraint("name <> ''", name="ck_users_name_not_empty"),)
 
 
 class WatchStateRow(Base):
@@ -1553,15 +2741,36 @@ class WatchStateRow(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
+    # RESTRICT, not CASCADE -- deliberately the opposite of MediaItem.title_id
+    # (ForeignKey("titles.id", ondelete="SET NULL") in source.py). The two
+    # look parallel but protect opposite things: an unmatched MediaItem row
+    # is worth keeping (review queue), so losing its Title link just clears
+    # it; a WatchState *is* the thing worth keeping, so losing its Title
+    # link must not silently delete it. PRD 02 (Identity) requires merging
+    # two Titles to be "a repointing operation rather than a primary-key
+    # rewrite cascading through watch state" -- UUIDv7 identity exists
+    # specifically so that's possible, and M4's four-tier matcher will
+    # produce duplicate Titles to merge. A merge is "repoint every
+    # watch_states/media_items row from the loser to the winner, then delete
+    # the loser"; under CASCADE, any bug that deletes the loser before (or
+    # instead of) repointing silently destroys watch history with no error.
+    # RESTRICT makes that fail loudly at the DELETE instead. See
+    # ADR-0010.
     title_id: Mapped[uuid.UUID | None] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="CASCADE")
+        PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="RESTRICT")
     )
     episode_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
 
-    position_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    position_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     runtime_seconds: Mapped[int | None] = mapped_column(Integer)
-    played: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    play_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    played: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    play_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     last_played_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     updated_at: Mapped[datetime] = mapped_column(
@@ -1570,12 +2779,42 @@ class WatchStateRow(Base):
         onupdate=func.now(),
         nullable=False,
     )
-    updated_by: Mapped[WatchStateOrigin] = mapped_column(String(16), nullable=False)
+    # Renamed from updated_by: that name reads as a user FK in nearly every
+    # schema, and this table has user_id right next to it. No default -- on
+    # either the ORM or the database side, and deliberately not: a sync path
+    # that forgets to set this must fail loudly rather than silently
+    # mislabel source-pushed state as user-originated. Do not add
+    # server_default here to "match" the other bulk-load-friendly columns
+    # above; that would defeat the entire point. See the domain-model
+    # WatchState commit.
+    origin: Mapped[WatchStateOrigin] = mapped_column(
+        enum_column(WatchStateOrigin, length=16), nullable=False
+    )
 
     __table_args__ = (
         UniqueConstraint("user_id", "title_id", name="uq_watch_states_user_title"),
         UniqueConstraint("user_id", "episode_id", name="uq_watch_states_user_episode"),
         Index("ix_watch_states_user_played", "user_id", "played"),
+        # uq_watch_states_user_title leads with user_id, so it can't serve a
+        # lookup/delete keyed on title_id alone -- and once title_id is
+        # RESTRICT (above), that FK's constraint check runs a lookup on
+        # every attempted title delete, including every Title merge.
+        # Without this index that check is a seq scan of watch_states.
+        Index("ix_watch_states_title_id", "title_id"),
+        # Mirrors WatchState's model_validator: exactly one of
+        # title_id/episode_id, never neither or both.
+        CheckConstraint(
+            "num_nonnulls(title_id, episode_id) = 1",
+            name="ck_watch_states_exactly_one_target",
+        ),
+        CheckConstraint(
+            "position_seconds >= 0", name="ck_watch_states_position_seconds_non_negative"
+        ),
+        CheckConstraint(
+            "runtime_seconds IS NULL OR runtime_seconds >= 0",
+            name="ck_watch_states_runtime_seconds_non_negative",
+        ),
+        CheckConstraint("play_count >= 0", name="ck_watch_states_play_count_non_negative"),
     )
 ```
 
@@ -1597,6 +2836,42 @@ __all__ = ["MediaItemRow", "SourceRow", "TitleRow", "UserRow", "WatchStateRow"]
 Run: `uv run pytest tests/unit/test_db_models.py -v`
 Expected: 5 passed
 
+Step 1's test only covers what Task 8 originally shipped. Follow this
+plan's usual TDD order (failing test, then code) and add cases for what
+changed since: `TitleRow.enrichment_error` exists and `EnrichmentState`
+has no `FAILED` member; `WatchStateRow.origin` (not `updated_by`) is
+`nullable=False`; the CHECK constraints above exist and are named as
+shown — e.g. `{c.name for c in WatchStateRow.__table__.constraints} >=
+{"ck_watch_states_exactly_one_target", ...}`. A CHECK constraint's SQL
+text can't be exercised by SQLAlchemy metadata alone — proving `num_nonnulls(title_id,
+episode_id) = 1` actually rejects bad rows needs a real Postgres, i.e. an
+integration test, not a unit test against `Base.metadata`.
+
+> **Amended.** The schema-hardening review above added a further six test
+> functions (17 total; `uv run pytest tests/unit/test_db_models.py -v`
+> now reports 17 passed), covering: FK `ondelete` semantics for all four
+> title/user foreign keys (`test_foreign_key_ondelete_semantics` — this is
+> the test that would have made `watch_states.title_id`'s original
+> `CASCADE` a design conversation instead of a review finding); that every
+> enum-typed column is a real `sqlalchemy.Enum` bound to its domain class,
+> not a bare `String` (`test_enum_columns_are_real_enums_not_bare_strings`);
+> that `NAMING_CONVENTION` actually named the previously-unnamed PK/FK/
+> inline-unique constraints (`test_naming_convention_named_the_previously_unnamed_constraints`);
+> that omitting `"ck"` from `NAMING_CONVENTION` really does leave explicit
+> `CheckConstraint` names alone rather than double-prefixing them
+> (`test_naming_convention_does_not_touch_explicit_check_constraint_names`
+> — this regression was caught by writing that exact test, before it ever
+> reached a migration); the four new/changed indexes exist
+> (`test_new_indexes_from_the_schema_hardening_review_exist`); and that
+> every column `server_default` was added to is exactly the set that needed
+> one — no more, no less, `origin` explicitly excluded
+> (`test_bulk_load_friendly_columns_have_server_defaults`).
+> `Table.constraints`/`Column.foreign_keys` iteration needs `cast(Table,
+> ...)` under `mypy --strict` (`DeclarativeBase.__table__` types as the
+> broader `FromClause`) and `ForeignKey.name` is `None` — the constraint
+> name naming_convention actually sets lives on `ForeignKey.constraint.name`
+> — see `tests/unit/test_db_models.py` for both.
+
 - [ ] **Step 8: Commit**
 
 ```bash
@@ -1607,6 +2882,48 @@ git commit -m "feat: SQLAlchemy models for titles, sources, media items, and wat
 ---
 
 ## Task 9: Alembic migrations
+
+> **Amended post-implementation — CRITICAL, fixes a real bug.** Step 3's
+> original `env.py` (below, historical) called
+> `config.set_main_option("sqlalchemy.url", get_settings()...)`, then read
+> it back via `config.get_main_option(...)`/`config.get_section(...)` in
+> `run_migrations_offline`/`run_async_migrations`. Both reviewers in a
+> schema-hardening review found the same bug independently: `Config` is
+> backed by `configparser`, which applies `%`-interpolation, and a
+> percent-encoded password — RFC 3986 *mandates* percent-encoding any
+> password containing `@`, `/`, `:`, `#`, or `%` — makes
+> `Config.set_main_option` raise a plain `ValueError` before a single
+> migration runs. Verified directly:
+> `Config().set_main_option("sqlalchemy.url",
+> "postgresql+asyncpg://usher:p%40ss%25word@localhost:5432/usher")` raises
+> `ValueError: invalid interpolation syntax in
+> 'postgresql+asyncpg://usher:p%40ss%25word@localhost:5432/usher' at
+> position 28` — and that message embeds the full DSN, password included,
+> which would violate the credentials-never-logged rule the moment it hit a
+> traceback. This never surfaced against `usher:usher` (no special
+> characters) but would hit any real deployment's generated strong
+> password on its first `alembic upgrade head`. The app itself was never
+> affected — `build_engine`/`create_async_engine` never touch `Config`.
+>
+> The fix, reflected in Step 3's fence below: never round-trip the DSN
+> through `Config` at all. `run_async_migrations` builds the engine
+> directly with `create_async_engine(_database_url(), poolclass=NullPool)`;
+> `run_migrations_offline` passes `_database_url()` straight to
+> `context.configure(url=...)`. `_database_url()` is a one-line helper —
+> `get_settings().database_url.get_secret_value()` — so both paths read the
+> DSN exactly once, from Usher's own settings, and hand it to SQLAlchemy
+> directly. See `tests/unit/test_db_migrations_env.py` for the regression
+> coverage (this must never come back) and `alembic.ini`, which now has no
+> `sqlalchemy.url` line at all rather than a pointless blank one.
+>
+> **Also amended:** every model change from Task 7/8's amendments
+> (`naming_convention`, `enum_column`, the `RESTRICT` FK, the new/changed
+> indexes, the `server_default`s) went into a single autogenerated
+> migration, plus a hand-written `BEFORE UPDATE` trigger autogenerate
+> cannot detect — see the amendment after Step 5. **The migration was
+> regenerated from scratch, not stacked as a second revision** — this
+> schema had never been applied to a real database anywhere at the time of
+> that review, so every change was still free.
 
 **Files:**
 - Create: `alembic.ini`, `src/usher/db/migrations/env.py`, `src/usher/db/migrations/script.py.mako`
@@ -1630,7 +2947,19 @@ script_location = src/usher/db/migrations
 sqlalchemy.url =
 ```
 
+Amended: on Alembic ≥1.13, `alembic init` already generates
+`script_location = %(here)s/src/usher/db/migrations` — the `%(here)s`
+token resolves relative to `alembic.ini` itself regardless of invocation
+cwd, strictly more robust than a bare relative path, and equivalent when
+(as every command in this task does) `alembic` is always run from the repo
+root. Leave it as generated rather than stripping the token. The
+`sqlalchemy.url` line should not exist at all post-amendment (see the note
+above this task) — delete it rather than leaving it blank.
+
 - [ ] **Step 3: Replace `src/usher/db/migrations/env.py`**
+
+Historical (Step 1 as originally shipped — see the CRITICAL amendment
+above this task for why it changed):
 
 ```python
 """Alembic environment. Reads the URL from Usher settings, not alembic.ini."""
@@ -1650,7 +2979,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+config.set_main_option("sqlalchemy.url", get_settings().database_url.get_secret_value())
 target_metadata = Base.metadata
 
 
@@ -1692,6 +3021,94 @@ else:
     run_migrations_online()
 ```
 
+Current (post-amendment — implement against this):
+
+```python
+"""Alembic environment. Reads the URL from Usher settings, not alembic.ini.
+
+The database URL is never round-tripped through `alembic.config.Config`
+(`set_main_option` / `get_main_option` / `get_section`) — those are backed
+by `configparser`, which applies `%`-interpolation. A percent-encoded
+password (RFC 3986 mandates percent-encoding any password containing `@`,
+`/`, `:`, `#`, or `%`) makes `Config.set_main_option` raise
+`configparser.InterpolationSyntaxError` before a single migration runs —
+verified directly, and the raised exception embeds the raw URL, password
+included, which would violate the credentials-never-logged rule the moment
+it hit a traceback. `create_async_engine`/`context.configure(url=...)` take
+the plain string directly and never touch `configparser`, so building the
+engine from `get_settings()` here instead of from `alembic.ini` isn't just
+about keeping the DSN out of a committed file — it avoids this class of
+bug entirely. Do not reintroduce `config.set_main_option("sqlalchemy.url",
+...)` with a real DSN; see `tests/unit/test_db_migrations_env.py`.
+"""
+
+import asyncio
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+
+from usher.config import get_settings
+from usher.db import models  # noqa: F401  — registers all tables
+from usher.db.base import Base
+
+config = context.config
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+target_metadata = Base.metadata
+
+
+def _database_url() -> str:
+    """The literal DSN from settings, unwrapped once, here, and handed
+    straight to SQLAlchemy — never stored in a variable that outlives this
+    call, never logged, and never passed through `alembic.config.Config`."""
+    return get_settings().database_url.get_secret_value()
+
+
+def run_migrations_offline() -> None:
+    context.configure(
+        url=_database_url(),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def do_run_migrations(connection: Connection) -> None:
+    context.configure(connection=connection, target_metadata=target_metadata)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_async_migrations() -> None:
+    connectable = create_async_engine(_database_url(), poolclass=NullPool)
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+    await connectable.dispose()
+
+
+def run_migrations_online() -> None:
+    asyncio.run(run_async_migrations())
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+```
+
+Note: `do_run_migrations(connection)` in the historical fence is missing a
+type annotation on `connection` — `mypy --strict` (which covers this file;
+`pyproject.toml`'s mypy `files` includes all of `src`) requires one. The
+current fence's `connection: Connection` is what this installed Alembic
+version's own `alembic init -t async` scaffold already generates —
+restoring it, not adding something new.
+
 - [ ] **Step 4: Start Postgres for migration generation**
 
 ```bash
@@ -1713,6 +3130,38 @@ uv run alembic revision --autogenerate -m "core schema"
 
 Expected: `Generating .../versions/<hash>_core_schema.py ... done`
 
+> **Amended.** After the schema-hardening review's model changes (Tasks
+> 7–8's amendments), this migration was regenerated from scratch —
+> deleted and re-autogenerated against a fresh container, not stacked as a
+> second revision, since the schema had never been applied to a real
+> database anywhere at that point. Two things `--autogenerate` cannot
+> detect went into the resulting file by hand, after the autogenerated
+> `# ### end Alembic commands ###` marker in `upgrade()` (and mirrored,
+> reversed, before the autogenerated block in `downgrade()`): the
+> `set_updated_at()` trigger function and its three triggers (on
+> `titles`/`sources`/`watch_states` — not `media_items`, whose
+> `last_seen_at` must not be bumped by unrelated updates). Autogenerate is
+> blind to triggers/functions the same way it's blind to CHECK constraint
+> *body* changes (verified: editing a CHECK's bound and re-running
+> `--autogenerate` produces an empty `pass` migration, no warning) — see
+> `CLAUDE.md`'s note next to the `alembic revision --autogenerate` command.
+>
+> After applying (Step 6) with the trigger DDL included, verify it's real,
+> not just present in the file — e.g. `UPDATE titles SET overview = '...'
+> WHERE id = ...` through raw `psql`, with no mention of `updated_at`, must
+> still move `updated_at` forward. And before tearing down (Step 7), two
+> checks the earlier, first-draft version of this task didn't require but
+> this schema-hardening pass added: run `alembic revision --autogenerate`
+> again against the now-migrated database and confirm the result is an
+> empty `pass`/`pass` migration (proves the models and the applied schema
+> agree exactly — delete this throwaway migration afterward, it is not a
+> real revision); and run `alembic downgrade base` then `alembic upgrade
+> head` and confirm a schema-only dump (`pg_dump --schema-only`) taken
+> before and after is byte-identical (ignoring `pg_dump`'s own per-invocation
+> `\restrict`/`\unrestrict` session tokens) — an irreversible or
+> lossy-on-round-trip first migration is a trap worth catching now, for
+> free, rather than after M2 has loaded millions of rows against it.
+
 - [ ] **Step 6: Apply and verify**
 
 ```bash
@@ -1730,6 +3179,13 @@ docker exec usher-pg-tmp psql -U usher -d usher -c '\dt'
 
 Expected: rows for `alembic_version`, `media_items`, `sources`, `titles`, `users`, `watch_states`
 
+Verify the schema in depth with `\d+ <table>` for all five tables — column
+types, nullability, `server_default`s, indexes (including the partial and
+expression ones), CHECK constraints, FK `ondelete` behavior, and the three
+triggers — not just that the tables exist. This is what actually catches a
+mismatch between the models and the applied DDL; `\dt` alone only proves
+the table names matched.
+
 - [ ] **Step 7: Tear down the temporary database**
 
 ```bash
@@ -1746,6 +3202,65 @@ git commit -m "feat: alembic async migrations and initial core schema"
 ---
 
 ## Task 10: Title repository
+
+> **Amended post-planning.** [Task 6](#task-6-port-abcs) grew a sixth port,
+> `TitleRepository` (`src/usher/ports/repository.py`), after the
+> `db is driven, not driving` import-linter contract turned out to leave no
+> service a path to persistence otherwise — see
+> [ADR-0009](../prd/decisions/0009-repositories-are-ports.md). The port
+> takes the plain name, the same way `SourceAdapter`/`EmbyAdapter` and
+> `MetadataProvider`/`TMDbProvider` split port from implementation — so the
+> concrete class below is renamed `PostgresTitleRepository` and must
+> inherit the port: one new import
+> (`from usher.ports.repository import TitleRepository`) and one changed
+> base class (`class PostgresTitleRepository(TitleRepository):`). Its five
+> methods were already planned with the exact names and signatures
+> `TitleRepository` now declares, so this costs Group E nothing beyond
+> those two lines and the class rename — Step 4's code block below already
+> reflects them.
+>
+> This also fixes what would otherwise be a dead end: nothing above `db/`
+> may construct or import `PostgresTitleRepository` directly except `api/`,
+> which is the composition root. `api/` builds the concrete, session-bound
+> `PostgresTitleRepository` and injects it into services through the
+> `TitleRepository` interface — the same shape dependency injection
+> already takes for every other port. Wiring that up is a service-layer
+> concern for a milestone after M1; this task only needs to produce a class
+> that satisfies the port.
+>
+> **A second amendment, same review:** `TitleRepository` gained `update()`
+> alongside `add()` — `add()` alone cannot express PRD 03's read-through
+> design, where enrichment mutates an *existing* stub-on-sight Title
+> rather than creating a new one. Step 4's code block below already
+> includes it: an insert-only `add()` and an update-only `update()`, each
+> raising rather than silently doing the other's job on a mismatched id.
+> Both flush and never commit — the caller owns the session and the
+> transaction. `count_by_state()` also changed: it now always returns all
+> three `EnrichmentState` tiers, 0 for any with no titles, rather than
+> whatever `GROUP BY` happened to return rows for.
+>
+> **A third amendment, after the port's error taxonomy was completed:**
+> "each raising" above was true but underspecified — `TitleRepository.add`
+> and `.update` (Task 6) now name exactly what they raise:
+> `RepositoryConflict` (`usher.ports.errors`) for a duplicate `title.id`
+> on `add`, `RepositoryNotFound` for an `update` against a row that
+> doesn't exist. Step 4's code block below catches the `IntegrityError`
+> Postgres actually raises on the unique-constraint violation and
+> re-raises it as `RepositoryConflict`; `update()` raises
+> `RepositoryNotFound` in place of the plain `ValueError` an earlier draft
+> used.
+>
+> This is not a cosmetic rename. If `IntegrityError` — or any other
+> `sqlalchemy.exc` type — ever escaped `PostgresTitleRepository` uncaught,
+> the only way a service could catch it would be to `import sqlalchemy`
+> itself, which breaks the `db is driven, not driving` import-linter
+> contract [ADR-0009](../prd/decisions/0009-repositories-are-ports.md)
+> rests on: nothing above `db/` may import it, full stop. Translating the
+> backing store's own exception into the port's vocabulary at the adapter
+> boundary — the same job `usher.ports.errors` does for every adapter — is
+> what makes that contract hold in practice rather than just on paper.
+> Step 2's test steps gained two cases covering both translations; see
+> Step 5 for the updated count.
 
 **Files:**
 - Create: `src/usher/db/repositories/title.py`
@@ -1793,18 +3308,23 @@ async def session(postgres_url: str) -> AsyncSession:
 ```python
 # tests/integration/test_title_repository.py
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.db.repositories.title import TitleRepository
+from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.ids import new_id
 from usher.domain.title import Title
+from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 
 
 @pytest.fixture
-def repo(session) -> TitleRepository:
-    return TitleRepository(session)
+def repo(session: AsyncSession) -> PostgresTitleRepository:
+    return PostgresTitleRepository(session)
 
 
-async def test_add_then_get_round_trips_the_domain_model(repo):
+async def test_add_then_get_round_trips_the_domain_model(
+    repo: PostgresTitleRepository,
+) -> None:
     title = Title(
         kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", year=2021, tmdb_id=438631
     )
@@ -1816,30 +3336,54 @@ async def test_add_then_get_round_trips_the_domain_model(repo):
     assert fetched.enrichment_state is EnrichmentState.SKELETON
 
 
-async def test_get_returns_none_for_unknown_id(repo):
-    from usher.domain.ids import new_id
+async def test_add_rejects_a_duplicate_id(repo: PostgresTitleRepository) -> None:
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
+    await repo.add(title)
+    with pytest.raises(RepositoryConflict):
+        await repo.add(title)
 
+
+async def test_get_returns_none_for_unknown_id(repo: PostgresTitleRepository) -> None:
     assert await repo.get(new_id()) is None
 
 
-async def test_get_by_tmdb_id_finds_the_title(repo):
+async def test_get_by_tmdb_id_finds_the_title(repo: PostgresTitleRepository) -> None:
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
     await repo.add(title)
     found = await repo.get_by_tmdb_id(438631)
     assert found is not None and found.id == title.id
 
 
-async def test_titles_without_provider_ids_are_allowed(repo):
+async def test_titles_without_provider_ids_are_allowed(
+    repo: PostgresTitleRepository,
+) -> None:
     title = Title(kind=TitleKind.MOVIE, name="Home Video 1998", sort_name="Home Video 1998")
     await repo.add(title)
     assert (await repo.get(title.id)) is not None
 
 
-async def test_count_by_state_reports_the_catalog(repo):
+async def test_update_mutates_an_existing_title(repo: PostgresTitleRepository) -> None:
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
+    await repo.add(title)
+    enriched = title.evolve(enrichment_state=EnrichmentState.ENRICHED)
+    await repo.update(enriched)
+    fetched = await repo.get(title.id)
+    assert fetched is not None
+    assert fetched.enrichment_state is EnrichmentState.ENRICHED
+
+
+async def test_update_rejects_an_unknown_id(repo: PostgresTitleRepository) -> None:
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
+    with pytest.raises(RepositoryNotFound):
+        await repo.update(title)
+
+
+async def test_count_by_state_reports_the_catalog(repo: PostgresTitleRepository) -> None:
     for i in range(3):
         await repo.add(Title(kind=TitleKind.MOVIE, name=f"Film {i}", sort_name=f"Film {i}"))
     counts = await repo.count_by_state()
     assert counts[EnrichmentState.SKELETON] == 3
+    assert counts[EnrichmentState.ENRICHED] == 0
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
@@ -1854,17 +3398,22 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'usher.db.repositories.
 """Persistence for canonical titles.
 
 Repositories translate between SQLAlchemy rows and domain models. Nothing
-above this layer sees a Row type.
+above this layer sees a Row type. Implements the TitleRepository port
+(usher.ports.repository) so services can depend on the port instead of
+this module directly — see ADR-0009.
 """
 
 import uuid
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.models.title import TitleRow
 from usher.domain.enums import EnrichmentState
 from usher.domain.title import Title
+from usher.ports.errors import RepositoryConflict, RepositoryNotFound
+from usher.ports.repository import TitleRepository
 
 
 def _to_domain(row: TitleRow) -> Title:
@@ -1877,12 +3426,33 @@ def _to_row(title: Title) -> TitleRow:
     return TitleRow(**title.model_dump(exclude={"created_at", "updated_at"}))
 
 
-class TitleRepository:
+class PostgresTitleRepository(TitleRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def add(self, title: Title) -> None:
         self._session.add(_to_row(title))
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            # Postgres's own unique-violation on a duplicate id, translated
+            # so callers depend only on usher.ports.errors -- importing
+            # sqlalchemy.exc here would break "db is driven, not driving".
+            raise RepositoryConflict(f"title {title.id} already exists") from exc
+
+    async def update(self, title: Title) -> None:
+        row = await self._session.get(TitleRow, title.id)
+        if row is None:
+            raise RepositoryNotFound(f"no existing title {title.id} to update")
+        # _to_row(title) raises loudly on any field/column mismatch, the same
+        # way add() does -- a setattr loop straight off title.model_dump()
+        # would not raise, it would just silently skip a would-be column
+        # that no longer has a match, undoing the "loud, not silent" point
+        # made below.
+        fresh = _to_row(title)
+        for column in TitleRow.__table__.columns:
+            if column.name not in {"id", "created_at", "updated_at"}:
+                setattr(row, column.name, getattr(fresh, column.name))
         await self._session.flush()
 
     async def get(self, title_id: uuid.UUID) -> Title | None:
@@ -1909,13 +3479,88 @@ class TitleRepository:
                 TitleRow.enrichment_state
             )
         )
-        return {EnrichmentState(state): count for state, count in result.all()}
+        counts = dict.fromkeys(EnrichmentState, 0)
+        counts.update({EnrichmentState(state): count for state, count in result.all()})
+        return counts
 ```
+
+> **Amended post-implementation — verified, not changed.** The domain-model
+> hardening pass raised two questions about the `_to_domain`/`_to_row`
+> code above; both were checked directly rather than assumed. Point 1 below
+> is a **standing constraint on Tasks 8 and 10 going forward**, not a
+> one-time observation that happened to be true when it was written — read
+> it as a rule, not history. Point 2 is a design rationale that doesn't
+> require a code change.
+>
+> 1. **STANDING CONSTRAINT: `TitleRow`'s column set and `Title`'s field set
+>    must stay in exact 1:1 correspondence by name.** Why this matters:
+>    `extra="forbid"` is set on every domain model, including `Title`
+>    (`DomainModel`, Task 3 ½). `_to_domain`'s
+>    `{c.name: getattr(row, c.name) for c in TitleRow.__table__.columns}`
+>    → `Title.model_validate(...)` pattern hands that dict straight to a
+>    model that rejects any key it doesn't recognise. True today — both
+>    sides list exactly 31 fields (verified: `len(Title.model_fields)`);
+>    Task 8 added `enrichment_error` to `TitleRow` in the same pass `Title`
+>    gained it, specifically to keep
+>    this holding. **The moment a migration adds a column to `titles` with
+>    no matching `Title` field — a DB-only bookkeeping column, say — this
+>    line starts raising `ValidationError` on every read.** That is the
+>    correct, wanted failure mode here (loud and at read time, not a
+>    silently dropped column reaching nobody), so **do not work around it
+>    by loosening `extra` to `"ignore"`**. Instead: if a future column is
+>    legitimately domain-invisible by design, add it to an explicit
+>    `exclude` set in `_to_domain`, mirroring how `_to_row` already
+>    excludes `created_at`/`updated_at` (point 2) — for a different
+>    reason, but the same mechanism. **The constraint is symmetric, not
+>    read-only:** `_to_row` builds `TitleRow(**title.model_dump(...))` in
+>    the opposite direction, and both `add()` and `update()` call it (see
+>    the inline comment on `update()` above), so a broken correspondence
+>    fails just as loudly — as a `TypeError` from the unexpected keyword
+>    argument, right where `add()` or `update()` is called — rather than
+>    only surfacing later on some unrelated read.
+> 2. **`created_at`/`updated_at` are now required, non-`None`, domain-level
+>    fields (`default_factory=lambda: datetime.now(UTC)`) — should
+>    `_to_row` stop excluding them?** No: kept as-is, deliberately.
+>    `created_at`'s default and `updated_at`'s `onupdate=func.now()` mean
+>    the database, not the moment a `Title()` was constructed in Python,
+>    is the authoritative clock for these two columns — passing the
+>    domain-level default through would let a delayed or retried `add()`
+>    write a stale timestamp, and would fight `onupdate` on every update
+>    thereafter. The domain-level default now exists purely so
+>    pre-persistence code never has to carry a `created_at is None`
+>    branch — which is the whole point of making the field required — not
+>    so its value reaches the row.
+
+> **Open question flagged for Group E, not resolved here.** `add()` above
+> catches `IntegrityError` from `flush()` and re-raises `RepositoryConflict`
+> — but neither rolls back nor uses a `SAVEPOINT`. Postgres aborts the
+> *entire* transaction on any statement error until a `ROLLBACK`; a caller
+> that reuses the same `AsyncSession` for a next operation after catching
+> `RepositoryConflict` — e.g. a request-scoped session handling "try to add,
+> fall back to update on conflict" — will find every subsequent statement on
+> that session fails with "current transaction is aborted, commands ignored
+> until end of transaction block", which reads nothing like the
+> `RepositoryConflict` that actually caused it. Two ways to close this, both
+> legitimate: `await self._session.rollback()` in the `except` block (simple,
+> but throws away anything else uncommitted on the session, which may not be
+> only this `add()`'s work if the caller batches several repository calls
+> per session); or wrap the `add()`/`flush()` in `async with
+> self._session.begin_nested():` (a `SAVEPOINT`, so only this operation's
+> work rolls back, the rest of the session's transaction survives) — pricier
+> per call, correct under batching. `update()`'s `flush()` has the same
+> exposure once it can fail (it can't yet — nothing in its current body
+> raises `IntegrityError` — but the moment a future column gets a UNIQUE
+> constraint this stops being true). Group E should decide deliberately,
+> because whichever this repository picks becomes the convention every
+> repository after it copies.
 
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `uv run pytest tests/integration/test_title_repository.py -v`
-Expected: 5 passed (first run pulls the `pgvector/pgvector:pg17` image)
+Expected: 8 passed (first run pulls the `pgvector/pgvector:pg17` image) —
+6 from the original round-trip/lookup/update coverage plus the two error-
+translation cases the amendment above added
+(`test_add_rejects_a_duplicate_id`, `test_update_rejects_an_unknown_id`)
 
 - [ ] **Step 6: Commit**
 
@@ -1923,6 +3568,362 @@ Expected: 5 passed (first run pulls the `pgvector/pgvector:pg17` image)
 git add src/usher/db/repositories tests/integration
 git commit -m "feat: title repository translating between rows and domain models"
 ```
+
+> **Amended post-implementation — resolves the session-poisoning open
+> question, and corrects one of its own claims.** Group E chose the
+> `session.begin_nested()` SAVEPOINT over `session.rollback()`, for the
+> reason the open question already gave: `TitleRepository`'s own docstring
+> says "the caller owns the session and the transaction: ... committing or
+> rolling back is the caller's call," and a full `rollback()` inside `add()`
+> would violate that by discarding whatever else the caller had pending on
+> the same session. `add()` wraps `self._session.add(...)` + `flush()` in
+> `async with self._session.begin_nested():`.
+>
+> **`update()` needs the identical translation — the open question's own
+> "it can't yet [raise IntegrityError]" does not hold against the schema
+> this task actually ships against.** `ix_titles_tmdb_id`/`ix_titles_imdb_id`/
+> `ix_titles_tvdb_id` (unique partial indexes, `db/models/title.py`) shipped
+> in Task 8/9, before Task 10 — not a future column. `update()` sets
+> tmdb_id/imdb_id/tvdb_id from the incoming `Title`, so retargeting one to a
+> value another row already holds raises `IntegrityError` today. Verified by
+> writing `update()` without the catch first and watching a raw
+> `sqlalchemy.exc.IntegrityError` escape it — exactly the "db is driven, not
+> driving" violation ADR-0009 exists to prevent. Fixed the same way as
+> `add()`: `update()`'s mutate-and-flush is wrapped in its own
+> `begin_nested()`.
+>
+> **A non-obvious SQLAlchemy ordering trap, found by watching a fix fail:**
+> wrapping only `flush()` in `begin_nested()` while the `setattr` mutation
+> loop ran *before* entering that block left the session's outer transaction
+> `DEACTIVE` after a caught conflict — a second, unrelated call on the same
+> session then raised `PendingRollbackError` instead of succeeding, the
+> exact failure the SAVEPOINT was supposed to prevent. Moving the mutation
+> loop *inside* the `begin_nested()` block (mutate, then flush, both under
+> the same SAVEPOINT) fixed it. Lesson for every repository after this one:
+> everything that will be flushed under a SAVEPOINT — including plain
+> attribute mutation on an already-persistent object, not just
+> `session.add()` on a new one — must happen inside the `begin_nested()`
+> block, not before it. `session`'s rollback-to-SAVEPOINT only cleanly
+> reverts state changes it watched happen within its own scope.
+>
+> **Both properties are covered by tests, not just documented:**
+> `test_add_leaves_the_session_usable_after_a_caught_conflict` and
+> `test_update_leaves_the_session_usable_after_a_caught_conflict`
+> (`tests/integration/test_title_repository.py`) each catch a
+> `RepositoryConflict` and then perform a second, unrelated `add()` on the
+> same session, asserting it succeeds. Both were run against the naive
+> (pre-SAVEPOINT, and pre-fix-ordering) implementations first and watched
+> fail with exactly the errors described above, before the fix made them
+> pass — this is empirical, not asserted.
+>
+> **`FakeTitleRepository` (Task 6) had a real behavioural divergence from
+> the real repository, found the same way:** it only checked `title.id` for
+> conflicts, never tmdb_id/imdb_id/tvdb_id — so a service unit-tested
+> against the fake could add two rows for the same TMDb title, while the
+> real repository (correctly) rejects the identical call with
+> `RepositoryConflict` via its unique partial indexes. Fixed in
+> `tests/fakes/title_repository.py` (`_provider_id_conflict`), verified by
+> first watching the shared contract's
+> `test_add_rejects_a_duplicate_tmdb_id`/
+> `test_update_rejects_a_conflicting_provider_id` fail against the
+> unfixed fake, then pass after the fix.
+>
+> **Shared contract suite, not two hand-maintained copies:** the fake/real
+> agreement above is proven by
+> `tests/contract/title_repository_contract.py` — one `TitleRepositoryContract`
+> base class with the behavioural assertions, subclassed by
+> `tests/unit/test_title_repository_contract.py` (`FakeTitleRepository`, no
+> Docker) and `tests/integration/test_title_repository.py`'s
+> `TestPostgresTitleRepositoryContract` (real Postgres). This is the pattern
+> PRD 08 already names for `SourceAdapter` ("one parametrised test class
+> every adapter must pass... it either passes the same tests the other
+> adapter passes, or the port was wrong") applied to `TitleRepository`, one
+> milestone before `SourceAdapter` has an implementation to apply it to. The
+> equivalent hand-written suite that used to live in
+> `tests/unit/test_ports.py` (Task 6) was removed in favour of it, to avoid
+> exactly the two-copies drift this suite exists to prevent — what remains
+> there is the one ABC-shape check with no real-repository counterpart.
+>
+> **Final count: 194 tests (168 baseline + 23 integration + 12 unit contract
+> − 9 deduped out of `test_ports.py`).** `tests/integration/` runs 23, not
+> the 8 Step 5 above predicts: 6 original + 2 the second amendment added,
+> plus 3 covering the session-usable-after-conflict property, plus 12 from
+> `TestPostgresTitleRepositoryContract`. `pytest -m integration` and
+> `pytest tests/integration` select the identical 23 (verified via
+> `--collect-only`); `pytest -m "not integration"` and `pytest tests/unit`
+> select the identical 171. The marker is applied by a
+> `pytest_collection_modifyitems` hook in `tests/integration/conftest.py`,
+> and *must* filter on `item.path` — that hook receives every item in the
+> whole session, not just the ones under its own directory (verified: an
+> unguarded version marked all ~194 tests "integration", making
+> `-m "not integration"` select nothing).
+>
+> **Three small fence corrections, mechanical, not design changes:**
+> (1) Step 1's `postgres_url`/`session` fixtures are generator functions
+> annotated `-> str`/`-> AsyncSession`; mypy strict requires
+> `-> Iterator[str]`/`-> AsyncIterator[AsyncSession]` on a function that
+> `yield`s. (2) `PostgresContainer(..., password="usher", ...)` trips ruff's
+> `S106` (hardcoded-password) — a real finding against a throwaway
+> container credential, not a false alarm to broaden `tests/**`'s ignore
+> list for; scoped with an inline `# noqa: S106`. (3) `ruff format` rewraps
+> a few of the plan's hand-wrapped lines (e.g. the `title = Title(...)`
+> call in Step 2) that fit within 100 columns unwrapped — cosmetic only.
+> Also noted, no action taken: the installed `testcontainers` (4.15.0) warns
+> that `testcontainers.postgres` is deprecated in favour of
+> `testcontainers.community.postgres`; Step 1's import still works, so this
+> is left for whichever group next touches this fixture.
+
+> **Amended post-implementation — an independent review pass found two more
+> divergences, both fixed the same way as the ones above: empirically, with
+> a test that fails against the unfixed code first.**
+>
+> **Autoflush was a second, independent way to leak a raw
+> `sqlalchemy.exc.IntegrityError` past this class**, not covered by the
+> SAVEPOINT decision above. `session.get()`/`session.execute()` flush any
+> pending, unflushed state on the *shared* session before running, even for
+> a plain read — verified directly: a pending, invalid row staged elsewhere
+> on the session made `get`, `get_by_tmdb_id`, `get_by_imdb_id`, and
+> `count_by_state` (no translation at all) and `update()`'s own
+> `session.get()` lookup (running outside its try) all raise the raw
+> driver exception. Not reachable through this repository alone today
+> (`add`/`update` always flush before returning), but reachable the moment
+> a second repository shares this session and leaves work pending across a
+> repository boundary — M4's shape, and this file is the template the next
+> five repositories copy. Fixed: the four read methods now run their query
+> inside `self._session.no_autoflush`; `update()`'s lookup moved inside its
+> existing SAVEPOINT + `except IntegrityError`. This is a session-wide
+> precondition, not advice specific to this repository, so it is now
+> stated on `TitleRepository` itself (`ports/repository.py`), not only in
+> this module's docstring.
+>
+> **`FakeTitleRepository` had a second, independent divergence from the
+> real repository, beyond the provider-id one already fixed above: it
+> preserved a `Title`'s `created_at`/`updated_at` verbatim, including
+> letting `update()` overwrite `created_at`.** Postgres is the
+> authoritative clock for both columns — `_to_row` excludes them from every
+> INSERT/UPDATE, so the database's own `server_default`/trigger assigns
+> them, never whatever the caller's `Title` happened to carry. Measured on
+> an identical sequence: `created_at_after_add` differed between the two
+> implementations, and `created_at_is_callers` was `True` for the fake,
+> `False` for the real repository. This is exactly the silent divergence
+> the contract suite exists to catch, and it had missed it, because nothing
+> in the shared contract asserted on either timestamp field before now.
+> Fixed in `tests/fakes/title_repository.py`: both `add()` and `update()`
+> stamp `created_at`/`updated_at` themselves, ignoring whatever the
+> incoming `Title` carries. Two new contract assertions pin this going
+> forward: `test_created_at_is_not_taken_from_the_caller` and
+> `test_created_at_is_stable_across_updates` (the latter deliberately
+> tampers with `created_at` on the incoming `Title` rather than merely
+> leaving it untouched, which would pass even without the fix). This is
+> also why `test_add_then_get_round_trips` has never asserted
+> `fetched == title`: an even earlier version of this suite (in
+> `tests/unit/test_ports.py`, before the contract suite existed) did, and
+> it only worked by accident, against the fake alone, before this fix.
+>
+> Both fixes touched `src/usher/db/repositories/title.py`,
+> `src/usher/ports/repository.py`, `tests/integration/test_title_repository.py`,
+> and `tests/contract/title_repository_contract.py` — none of which are in
+> this task's **Files:** list above (nor, for that matter, are several other
+> files earlier amendments already touched: `pyproject.toml`,
+> `tests/contract/__init__.py`, `tests/fakes/title_repository.py`,
+> `tests/unit/test_ports.py`, `tests/unit/test_title_repository_contract.py`,
+> this plan, and `CLAUDE.md`). The **Files:** list above names three; the
+> work this task actually grew into touched eleven, across the initial
+> implementation and the amendments since. Left as historical record rather
+> than rewritten, in keeping with this plan being a record of what was
+> planned and decided, not a living file list.
+
+> **Amended post-implementation — Step 1's fixture never actually ran the
+> migration it was meant to exercise.** `Base.metadata.create_all` (Step
+> 1's code block above) builds a schema from SQLAlchemy `Table` metadata
+> only — the same blindness CLAUDE.md's Commands section already documents
+> for `--autogenerate` applies here for the same reason: neither one runs
+> the migration's own `op.execute(...)` calls. Verified directly: against
+> the `create_all`-built schema, `SELECT tgname FROM pg_trigger WHERE NOT
+> tgisinternal` returned nothing. The three `set_updated_at` triggers —
+> whose own migration comment calls them "what actually guarantees
+> updated_at reflects every write, regardless of how it was made,"
+> specifically for M2/M4's `ON CONFLICT DO UPDATE` bulk paths — had never
+> once run in this suite, and Task 9's migration chain had never once
+> executed against a live Postgres anywhere in it either.
+>
+> Fixed in `tests/integration/conftest.py`: `postgres_url` now runs
+> `alembic upgrade head` (via `alembic.command.upgrade`, not a subprocess)
+> once per test session, immediately after the container starts, in place
+> of `session`'s old per-test `create_all`/`drop_all`. `env.py` reads the
+> database URL from `usher.config.get_settings()`, not from `alembic.ini`
+> (see `env.py`'s own docstring), so driving it programmatically means
+> setting `USHER_DATABASE_URL`/`USHER_SECRET_KEY` the same way a real CLI
+> invocation would have, then restoring the environment exactly as found.
+>
+> Running a real migration is real DDL — much pricier than `create_all`
+> against a from-scratch schema in an empty database — so it now runs once
+> per session instead of once per test, and `session` isolates each test
+> with a connection-bound transaction that gets rolled back afterward
+> instead of dropping and recreating the schema. Verified directly, since
+> this is exactly the kind of interaction that looks fine in isolation and
+> isn't: `PostgresTitleRepository`'s own `begin_nested()` SAVEPOINTs (the
+> session-poisoning fix earlier in this task) still nest correctly inside
+> the outer, fixture-owned transaction — SQLAlchemy's default
+> `join_transaction_mode` ("conditional_savepoint") resolves to
+> "rollback_only" for a connection with a plain, already-open, non-nested
+> transaction, which is exactly this shape, so the session's flushes and
+> SAVEPOINTs all participate in that one transaction rather than trying to
+> start their own. Two iterations of add/conflict/rollback against the same
+> migrated schema, in two fresh connections, confirmed both full isolation
+> (zero rows visible after rollback) and that conflict handling still
+> works, before this was carried over into the real fixture.
+>
+> Two new tests (`tests/integration/test_migrations.py`) now depend on
+> `postgres_url` doing this: `test_migration_creates_the_updated_at_triggers`
+> (the direct regression test for the gap above) and
+> `test_migration_matches_the_orm_metadata`, which runs Alembic's own
+> autogenerate diff (`alembic.autogenerate.compare_metadata`) against the
+> now-migrated database and asserts it reports no drift — the ongoing check
+> for the two categories of change CLAUDE.md already warns
+> `--autogenerate` alone is blind to (CHECK constraint bodies, and
+> triggers/functions), ordinarily caught only by eye. Both were written
+> and run against the pre-fix fixture first and failed for the right
+> reason (a schema-less database, since schema creation used to live
+> entirely in the `session` fixture these two tests don't request), not a
+> contrived one.
+>
+> Also fixed in the same pass, since it touched the same fixture: the
+> `testcontainers.postgres` deprecation warning (noted, not acted on, in
+> the amendment above) used to fire on every run that so much as collected
+> this directory, including `pytest -m "not integration"` — collection
+> still imports `conftest.py` even though it filters every test back out.
+> The `from testcontainers.postgres import PostgresContainer` import moved
+> from module level into `postgres_url` itself, so it only runs once the
+> fixture is actually instantiated. Verified: `pytest -m "not integration"`
+> no longer shows the warning; `pytest tests/integration` still does,
+> exactly once.
+
+> **Amended post-implementation — `RepositoryConflict` misattributed which
+> row it was blaming, and carried nothing a caller could branch on.**
+> Measured: adding a title whose `tmdb_id` collided with an existing row
+> (but whose own `id` was fine) raised a message reading "title {id}
+> already exists" — false; that id was never the duplicate, the tmdb_id
+> was. This breaks exactly the "try to add, fall back to update on
+> conflict" pattern this task's own tests already name as the motivating
+> M4 use case: a service catching `RepositoryConflict` has no way to tell
+> "retarget this id" (a true id collision) apart from "look up whichever
+> row already holds this tmdb_id" (a provider-id collision), and nothing
+> structured to branch on either way — only prose.
+>
+> Fixed: `RepositoryConflict` (`usher.ports.errors`) gained a `constraint:
+> str | None` attribute. `PostgresTitleRepository` populates it from
+> `IntegrityError.orig.__cause__.constraint_name` — verified directly that
+> `exc.orig` is SQLAlchemy's own DBAPI2-shaped wrapper
+> (`sqlalchemy.dialects.postgresql.asyncpg.AsyncAdapt_asyncpg_dbapi.
+> IntegrityError`), not the asyncpg exception itself, but the dialect
+> chains the original `asyncpg.exceptions.PostgresError` onto it via
+> `raise translated_error from error`, and *that* carries `constraint_name`
+> as a real, structured field from Postgres's own `ErrorResponse` — not
+> parsed out of the message text. `FakeTitleRepository` was changed to
+> report the identical constraint names its own `_provider_id_conflict`
+> check already mirrors from `db/models/title.py`
+> (`ix_titles_tmdb_id`/`ix_titles_imdb_id`/`ix_titles_tvdb_id`, plus
+> `pk_titles` for a plain id collision), so the two agree — proven by the
+> shared contract suite, not merely asserted. The message itself changed
+> from claiming a specific id "already exists" to the accurate "title {id}
+> conflicts with an existing title (constraint: ...)", true whichever way
+> the conflict actually happened.
+>
+> While in the area: the contract suite's provider-id-conflict coverage
+> broadened from tmdb_id alone (`test_add_rejects_a_duplicate_tmdb_id`,
+> `test_update_rejects_a_conflicting_provider_id`) to all three fields,
+> each its own test rather than one parametrized case, so a typo swapping
+> which field `_provider_id_conflict` (the fake) or a Postgres index (the
+> real repository) actually checks can't pass unnoticed. Also added:
+> `test_update_clearing_provider_ids_to_none_is_allowed`, pinning that
+> clearing a field to `None`/`()` — untested before — is a normal update,
+> not a false conflict against another row that also happens to have
+> `None` there.
+
+> **Amended post-implementation — a round of small, independent gaps, each
+> cheap to close, from the same review pass as the amendments above.**
+>
+> 1. **The STANDING CONSTRAINT (point 1, the earlier "verified, not
+>    changed" amendment) had no test of its own.** A break was only ever
+>    caught indirectly, inside the Docker-requiring integration suite, as a
+>    confusing `ValidationError`/`TypeError`. Added
+>    `test_title_and_title_row_have_matching_field_sets`
+>    (`tests/unit/test_db_models.py`) — `set(Title.model_fields) ==
+>    {c.name for c in TitleRow.__table__.columns}` — no Docker needed.
+>    Verified it actually catches a break, not just that it passes today:
+>    added a throwaway field to `Title`, watched the test fail with the
+>    exact extra-field diff, removed it again.
+> 2. **`test_add_then_get_round_trips` asserted 3 of `Title`'s 31 fields.**
+>    Broadened to set 29 (all but `id`, which isn't asserted on directly
+>    either way, and `created_at`/`updated_at`, excluded from the
+>    comparison for the reason given inline and in the amendment above) and
+>    compare `model_dump()` output directly. Passed against both
+>    implementations on the first run, including every `ARRAY(Text)` field
+>    and `field_provenance` (`JSONB`) round-tripping through real Postgres
+>    — a real, if unsurprising, confirmation, not just added coverage.
+> 3. **`update()` could never be a true no-op.** `_to_row` emitted tuples
+>    for the four `ARRAY(Text)` columns (matching `Title`'s own
+>    `tuple[str, ...]` typing) while a loaded row always holds lists for
+>    them (`ARRAY(Text)` always reads back as a list — title.py's module
+>    docstring). `("a",) != ["a"]` in Python regardless of contents, so
+>    SQLAlchemy's attribute-history comparison — what actually decides
+>    whether a column lands in the `UPDATE`'s `SET` clause — saw those four
+>    columns as changed on *every* `update()` call, even one that changes
+>    nothing. Confirmed empirically, not assumed: counted the actual SQL
+>    statements SQLAlchemy issued for a semantically no-op `update()`
+>    (`sqlalchemy.event` on `before_cursor_execute`) — one `UPDATE` touching
+>    all four array columns before the fix, none after.
+>    `updated_at`-before/after was considered and rejected as the signal:
+>    the fixture wraps each test in one Postgres transaction (a separate
+>    amendment above), and Postgres's `now()`/`CURRENT_TIMESTAMP` is
+>    *transaction*-scoped, not statement-scoped, so `updated_at` reads
+>    identically before and after any number of updates within one test
+>    regardless of this bug. Fixed by having `_to_row` emit lists for the
+>    four array fields. Pinned two ways: a no-Docker unit test on `_to_row`
+>    itself (necessary condition — the type it emits) and the integration
+>    test above (sufficient condition — the actual SQL SQLAlchemy sends).
+> 4. **`get_by_tmdb_id(None)`/`get_by_imdb_id(None)` returned an arbitrary
+>    null-provider-id title in both implementations**, because
+>    `TitleRow.tmdb_id == None` compiles to `IS NULL` (Postgres) and
+>    `title.tmdb_id == None` matches the same way in the fake's plain
+>    Python loop — neither "finds nothing", the promised behaviour for an
+>    id that isn't there. `tmdb_id`/`imdb_id` are typed `int`/`str`, not
+>    `int | None`/`str | None`, so mypy strict already catches a real
+>    `int | None` argument at any actual call site — this guard is a
+>    backstop for whenever that gets bypassed (a stray `# type: ignore`,
+>    `cast`, ...), which the port's own contract can't rule out once a
+>    caller starts passing `Title.tmdb_id` itself around. Guarded in both
+>    implementations; pinned by two new contract tests.
+> 5. The `tests/integration/test_title_repository.py` comment reading "The
+>    four tests below" (describing the session-poisoning regression tests)
+>    said four where there were three — corrected in the same commit that
+>    added the autoflush-leak regression tests just below that section, so
+>    the count stayed accurate rather than drifting further.
+
+> **Amended post-implementation — two facts documented, not built,
+> closing out the same review pass.** No behaviour changed; both were
+> already true of the shipped code, just not stated anywhere a future
+> reader (or implementer of the next repository) would find them.
+>
+> `TitleRepository`'s class docstring now states that bulk loading is
+> expected to bypass this port entirely. Measured directly against
+> `PostgresTitleRepository`: ~3 statements and ~1.15 ms per `add()`
+> (`SAVEPOINT` / `INSERT` / `RELEASE`) — at M2's ~12.7M skeleton titles
+> ([04-catalog-bootstrap.md](../prd/04-catalog-bootstrap.md), already
+> designed around a `COPY`-based loader), that is roughly 4 hours of pure
+> repository overhead before a single row of actual bulk-dataset I/O.
+> `TitleRow`'s server-defaults ([Task 8](#task-8-sqlalchemy-models-for-the-core-schema))
+> already exist so a raw `COPY` can omit any column it doesn't have data
+> for — the design already anticipated this path; it just wasn't written
+> down.
+>
+> `update`'s docstring now states plainly that it is unconditional
+> last-write-wins: no version column, no comparison against the row's
+> state as last read. M4's concurrent enrichment (more than one source or
+> worker updating the same title around the same time) will eventually
+> need optimistic concurrency; this task doesn't add it, only names the
+> gap so it isn't rediscovered from scratch.
 
 ---
 
@@ -2180,7 +4181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        engine = build_engine(settings.database_url)
+        engine = build_engine(settings.database_url.get_secret_value())
         app.state.engine = engine
         app.state.session_factory = build_session_factory(engine)
         yield
@@ -2209,9 +4210,105 @@ git add src/usher/api tests/integration/test_health.py
 git commit -m "feat: FastAPI application factory with liveness and readiness endpoints"
 ```
 
+> **Amended post-implementation — a review pass found the fences above
+> compliant but incomplete, and Group F's follow-up commits closed the
+> gaps.** Documented here rather than rewritten into the TDD steps above,
+> which stay as the literal history of what was first written and run.
+>
+> **Task 11 now also owns**, not deferred to a later milestone:
+>
+> - **OTel auto-instrumentation.** `pyproject.toml` already declared
+>   `opentelemetry-instrumentation-{fastapi,sqlalchemy,httpx}` as runtime
+>   dependencies, but nothing called `instrument()`/`instrument_app()`
+>   anywhere — verified directly that a plain request against the
+>   originally-shipped app left `get_current_span().get_span_context().
+>   is_valid` `False`, so `inject_trace_context` never fired in the
+>   running service, only in tests that construct their own span. Fixed
+>   by wiring `FastAPIInstrumentor.instrument_app(app)` into `create_app`
+>   and `SQLAlchemyInstrumentor`/`HTTPXClientInstrumentor` into
+>   `configure_tracing`. This has to live in the bootstrap, not a later
+>   milestone: M4's pipeline spans need a server span to nest under, or
+>   each becomes its own root trace.
+> - **`configure_tracing` installs a real `TracerProvider`
+>   unconditionally**, not only when `telemetry_enabled` — verified
+>   directly that a bare `TracerProvider()` with zero span processors
+>   still assigns valid random trace/span ids, so log correlation works
+>   even with no OTLP collector configured. Only the OTLP-*exporting*
+>   `BatchSpanProcessor` stays conditional. This made `configure_tracing`
+>   a from-then-on-non-trivial function to call repeatedly (the test
+>   suite alone calls `create_app()` dozens of times), so it gained an
+>   `isinstance(trace.get_tracer_provider(), TracerProvider)` idempotency
+>   guard — verified directly that without it, 5 `create_app()` calls
+>   with telemetry enabled leaked 5 `BatchSpanProcessor` threads.
+> - **A stdlib-`logging`-to-loguru bridge** (`_InterceptHandler`, loguru's
+>   own documented recipe). Without it, uvicorn's access/error logs,
+>   SQLAlchemy warnings, and the OTel exporter's own retry/failure
+>   messages all print as unstructured plain text — confirmed on a live
+>   run — ignoring `log_level`/`log_json` and never getting
+>   `trace_id`/`span_id` patched in. PRD 10 says "Every record is
+>   patched," not "every loguru record."
+> - **`configure_metrics`**, mirroring `configure_tracing`'s shape (real
+>   `MeterProvider` unconditionally, OTLP export conditional, same
+>   idempotency guard). No metrics are registered — PRD 10's ~18 OTel
+>   metrics are each owned by the milestone that emits them — this is
+>   only the bootstrap seam, so *where it lives* was decided once here
+>   instead of independently in each of nine milestones.
+>
+> **Task 12 now also owns:**
+>
+> - **`get_session` (`api/deps.py`) is the request's commit/rollback
+>   boundary** — `ports/repository.py`'s "the caller owns the
+>   session and the transaction" was previously true of nothing in
+>   `src/`: no `commit()` existed anywhere, so `AsyncSession.close()`
+>   (what exiting `async with factory() as session` calls) silently
+>   discarded any write a future endpoint made. `get_session` now commits
+>   once the handler completes without raising, and rolls back +
+>   re-raises otherwise.
+> - **`/health/ready` also reports `checks.migrations`**
+>   (`usher/db/migrations/status.py`), comparing the live
+>   `alembic_version` table against the code's expected head revision —
+>   PRD 08: "the app refuses to serve on a schema mismatch rather than
+>   guessing." `alembic upgrade head && uvicorn ...` (Task 13) runs
+>   migrations on start but was never itself a mismatch check.
+> - **`/health/ready` returns HTTP 503 when degraded, not 200.** No PRD
+>   text pinned a status code, so this was an open call, decided in the
+>   direction a readiness probe's actual consumers (Kubernetes, Docker
+>   `healthcheck`, load balancers) need: they gate on the status code and
+>   never parse the body, so 200-with-a-degraded-body told every one of
+>   them "keep sending traffic here." The degraded path itself
+>   (`tests/unit/test_api_health.py`) was previously untested entirely —
+>   the only shipped test exercised a reachable database.
+> - **Typed response models** (`api/dto/health.py`:
+>   `LivenessResponse`/`ReadinessResponse`/`ReadinessChecks`) replace the
+>   bare `dict[str, object]`/`JSONResponse` return types, so
+>   `/openapi.json` describes real shapes instead of `{"type": "object"}`
+>   — PRD 07's "clients codegen typed models," and the first two of the
+>   ~30 endpoints M9 will add over the same pattern.
+>
+> Test count grew from the 3 in Task 12's own step 6 to 235 across both
+> tasks' combined surface (`usher run pytest`); see `CLAUDE.md`'s Group F
+> section for the up-to-date figure and the verified-commands block.
+
 ---
 
 ## Task 13: Container and compose
+
+> 🔶 **Flag for whoever picks this up — not yet updated, since Task 13
+> itself is still unbuilt as of this amendment.** Two things above affect
+> what's written below before it's implemented:
+>
+> 1. **Step 4's expected `/health/ready` output is now incomplete.** The
+>    real response also includes `"migrations":true` in `checks` — see
+>    Task 12's amendment above. Update the expected curl output when this
+>    task is implemented, not after.
+> 2. **`compose.yml`'s `usher` service has no `healthcheck` of its own**
+>    (only `postgres` does) — meaning nothing in this compose file
+>    actually consumes `/health` or `/health/ready` automatically. If a
+>    healthcheck is added, point it at `/health` (liveness), not
+>    `/health/ready`: readiness now returns a non-2xx status when
+>    degraded, and a Postgres blip is not a reason to restart the `usher`
+>    container — restarting doesn't fix Postgres, which is the entire
+>    point of the liveness/readiness split.
 
 **Files:**
 - Create: `Dockerfile`, `compose.yml`
@@ -2302,7 +4399,7 @@ curl -sf http://localhost:8000/health/ready
 Expected:
 ```
 {"status":"ok"}
-{"status":"ready","checks":{"database":true}}
+{"status":"ready","checks":{"database":true,"migrations":true}}
 ```
 
 - [ ] **Step 5: Stop the stack**
@@ -2317,6 +4414,118 @@ docker compose down
 git add Dockerfile compose.yml
 git commit -m "feat: container image and compose stack with postgres"
 ```
+
+> **Amended post-implementation — Group G found several of the fences
+> above stale or incomplete once actually built and run.** Documented here
+> rather than rewritten into the TDD steps above, which stay as the
+> literal history of what was first proposed.
+>
+> **The Dockerfile is multi-stage, not the single `FROM ... AS base`
+> shown above** (which named a stage but never used a second `FROM` to
+> benefit from it — as written, it would have shipped `uv` itself, and
+> everything `uv sync` ever touched, into the final image). The real
+> `Dockerfile` has a `builder` stage (uv + the venv build) and a `runtime`
+> stage that copies only `.venv/` and `src/` across, adds a fixed-uid
+> non-root user, and ships a new `.dockerignore` (deny-by-default
+> allowlist — `*` then `!pyproject.toml`/`!uv.lock`/`!README.md`/
+> `!alembic.ini`/`!src`) so nothing beyond what's explicitly `COPY`'d can
+> reach the build context at all. Verified: final image is 332MB, runs as
+> `uid=1000(usher)`, has neither `uv` nor a compiler (`which gcc cc` → not
+> found) — no dependency in `uv.lock` needed one; every one resolved to a
+> prebuilt cp313 wheel.
+>
+> **README.md has to be `COPY`'d before the second `uv sync`, or the
+> build fails.** `pyproject.toml` declares `readme = "README.md"`;
+> hatchling (the configured build backend) reads that file while building
+> `usher`'s own wheel, which is exactly what the second,
+> non-`--no-install-project` `uv sync --frozen --no-dev` does. The fence
+> above only `COPY`'d `alembic.ini`. Exactly the kind of stale fence the
+> task brief warned about — verify rather than assume.
+>
+> **`Settings.host`/`Settings.port` are now load-bearing.** They validated
+> and were read by nothing (the plan's `CMD` hardcoded `--host 0.0.0.0
+> --port 8000`), despite PRD 08 listing `port` as an Environment-layer
+> setting. Fixed with a new `src/usher/__main__.py` (`python -m usher`)
+> that calls `uvicorn.run("usher.api.app:create_app", factory=True,
+> host=settings.host, port=settings.port)` — the same code path the CLI
+> form uses internally, just reading `Settings` instead of a hardcoded
+> flag. `CMD` is now `sh -c "alembic upgrade head && exec python -m
+> usher"` — `exec` so `docker stop`'s SIGTERM reaches uvicorn directly
+> instead of being swallowed by the wrapping shell. Local dev is
+> unaffected: `uv run uvicorn usher.api.app:create_app --factory --host
+> 0.0.0.0 --port 8000` still works exactly as documented.
+>
+> **Host port is `${USHER_HOST_PORT:-8100}:8000`, not a bare
+> `"8000:8000"`.** This host already publishes another container's app on
+> 8000 (`vllm`) — a hardcoded collision was never going to be free of
+> assumptions to begin with, so the port is now a `.env`-overridable
+> variable (documented in `.env.example`) with 8100 as the default,
+> verified free at the time this was written. "Pick free host ports" per
+> the task brief, made durable rather than a one-time check.
+>
+> **Both flags in the amendment above this task are resolved, and the
+> second one is resolved *against* its own stated reasoning, deliberately:**
+>
+> 1. Step 4's expected output above is corrected in place (done, not
+>    deferred) to include `"migrations":true`.
+> 2. **`usher`'s healthcheck targets `/health/ready`, not `/health`** —
+>    the opposite of what the flag above recommended. That flag's concern
+>    was a restart loop ("a Postgres blip is not a reason to restart the
+>    `usher` container"), reasoning that holds for a Kubernetes liveness
+>    probe but not for what a plain `docker compose` (no Swarm) healthcheck
+>    actually does: verified against Docker's documented behaviour, a
+>    failing healthcheck here only ever changes the reported status
+>    (`docker compose ps`, `depends_on: condition: service_healthy`) — it
+>    never itself stops or restarts a container. `restart: unless-stopped`
+>    triggers on the container's *process* exiting, a condition this
+>    healthcheck cannot cause. With no restart-loop risk in this specific
+>    deployment shape, `/health/ready` is strictly more informative for
+>    what a compose healthcheck actually gates — "can this serve a
+>    request", not just "is the process alive", which `/health` would
+>    report even while genuinely degraded. Compose has no separate
+>    liveness/readiness probe pair the way Kubernetes does, so one
+>    healthcheck necessarily conflates the two; readiness is the more
+>    useful of the two to conflate it into, here.
+>
+> **The Postgres healthcheck forces TCP (`-h 127.0.0.1`), not the plan's
+> bare `pg_isready -U usher -d usher`.** Not a style choice — the bare
+> form false-positives. `pgvector/pgvector:pg17` (like the upstream
+> `postgres` image it's built from) runs a *temporary* bootstrap server
+> during `initdb` on a fresh volume, started with `listen_addresses=''`
+> (Unix socket only, confirmed against the running container's own log
+> line) to run init scripts before the real server starts.
+> `pg_isready`/`psql` with no `-h` default to the Unix socket, so an
+> unqualified check reaches that temporary server. Verified directly,
+> twice — once standalone (`docker run`, polled every ~0.1s) and once
+> against the literal container `docker compose up` creates for this
+> task (same tight poll, racing the container's own creation): the
+> Unix-socket form reports "accepting connections" while the *bootstrap*
+> server is up, then "rejecting connections" for roughly a second while it
+> shuts down and the real server starts, before settling "accepting"
+> again — a real, reproducible false-positive window (~1.8s–2.9s
+> standalone; a ~1.1s-wide window at the same relative offset against the
+> compose-managed container). `-h 127.0.0.1 pg_isready` never once
+> false-positived in either run: "no response" solidly until the exact
+> moment the real server started accepting TCP, because the bootstrap
+> server never listens on TCP at all. Docker's own 2s-interval healthcheck
+> did not happen to land inside that narrow window in the compose runs
+> observed here — but that is host-load luck, not a guarantee, which is
+> why "prove it waits" meant tight-polling the mechanism directly rather
+> than trusting a few `docker compose up` runs to have been unlucky in the
+> right way.
+>
+> **Multi-replica migrations, noted rather than solved.** `CMD`'s
+> `alembic upgrade head && ...` has no distributed lock; two `usher`
+> containers starting at once would race to apply the same migration. Not
+> a problem at M1's one-replica scale; a real one the moment this service
+> is ever scaled past one, at which point migrations belong in a separate
+> one-shot step, not every replica's own startup. `/health/ready`'s
+> migration-mismatch check would surface a lost race as a 503, not prevent
+> the race.
+>
+> Full verified bring-up (build, up, both containers healthy, migrations
+> applied, five core tables + three triggers present, both health
+> endpoints, teardown) is in `CLAUDE.md`'s Group G section.
 
 ---
 
@@ -2370,7 +4579,9 @@ jobs:
 uv run ruff check . && uv run ruff format --check . && uv run lint-imports
 ```
 
-Expected: no lint errors; `Contracts: 3 kept, 0 broken.`
+Expected: no lint errors; `Contracts: 4 kept, 0 broken.` (Group A's
+allowlist rewrite added a fourth contract, `config stays out of the core`,
+ahead of this task ever running — see the same correction in Task 6.)
 
 Fix any formatting differences with `uv run ruff format .` and re-run.
 
@@ -2399,6 +4610,61 @@ git add .github/workflows/ci.yml pyproject.toml
 git commit -m "ci: lint, format, type check, architecture contracts, and tests"
 ```
 
+> **Amended post-implementation.**
+>
+> **Action versions bumped past the plan's fence — `actions/checkout@v4`
+> and `astral-sh/setup-uv@v5` are both several majors behind.** Checked
+> against each action's own GitHub releases at implementation time:
+> `actions/checkout`'s latest is `v7`, `astral-sh/setup-uv`'s is `v9`. Used
+> `@v7`/`@v9`. `setup-uv@v9`'s `action.yml` was fetched directly to confirm
+> `enable-cache: true` is still a valid input before relying on it (it is;
+> the input's default changed to `"auto"` but explicit `true` still works
+> unchanged).
+>
+> **A new `.python-version` file (`3.13`) at the repo root, not shown in
+> any plan fence, turned out to be necessary — this was not anticipated
+> going in, and was found by actually running the install step, not by
+> inspection.** `pyproject.toml`'s `requires-python = ">=3.13"` has no
+> upper bound. Verified directly on a bare `ubuntu:24.04` container (no
+> Python preinstalled at all, as a stand-in for a fresh runner) with `uv`
+> freshly installed: with no `.python-version` file, `uv sync --frozen`
+> silently resolved and installed **Python 3.14.6** — newer than the
+> 3.13.14 every group so far has actually developed and had mypy
+> strict/pytest/ruff verified against. Adding `.python-version` containing
+> `3.13` at the repo root made the identical command resolve `3.13.14`
+> instead, matching local dev exactly. Without this file, CI would test a
+> Python minor version nobody has actually run this codebase against, and
+> that mismatch would silently widen every time a new CPython minor
+> released — the workflow would still pass or fail, just never provably
+> against what was developed. `uv sync --no-dev` in the Dockerfile's
+> builder stage was never at risk of this: it sets `UV_PYTHON_DOWNLOADS=
+> never` and runs inside `python:3.13-slim`, so it can only ever use the
+> interpreter the base image itself pins.
+>
+> **`act` is not installed on this host and was not installed to test
+> this** (no network-independent way to verify that would itself have
+> been trustworthy — installing a GitHub-Actions-runner emulator whose own
+> correctness is unverified doesn't strengthen confidence much over not
+> having it). Verified instead: every `run:` step's literal command, run
+> locally exactly as written, in order —
+> `uv sync --frozen` (confirms `.python-version` fix above), `uv run ruff
+> check .`, `uv run ruff format --check .` (70 files), `uv run mypy`
+> (`Success: no issues found in 67 source files` — the `pyproject.toml`
+> mypy-override contingency in Step 3 above was never needed), `uv run
+> lint-imports` (4 contracts kept), `uv run pytest --cov=usher
+> --cov-report=term-missing` (237 passed, 98% coverage). The one step not
+> reproduced byte-for-byte is `astral-sh/setup-uv`'s own action code
+> (JS/composite steps GitHub executes); its net effect — a working `uv` on
+> `PATH`, obeying `.python-version` — was verified by installing `uv` the
+> same way (astral's own install script) on a bare `ubuntu:24.04`
+> container standing in for a fresh runner, which is a reasonable proxy
+> but not the literal `ubuntu-latest` GitHub-hosted image. Docker-in-CI for
+> `tests/integration/`'s testcontainers is unverified in the same sense —
+> GitHub's own documentation states `ubuntu-latest` ships Docker running
+> by default, and this project's own `uv run pytest` already depends on
+> exactly that locally, but no run happened on an actual GitHub-hosted
+> runner as part of this task.
+
 ---
 
 ## Task 15: Milestone verification
@@ -2412,7 +4678,7 @@ git commit -m "ci: lint, format, type check, architecture contracts, and tests"
 ```bash
 cd ~/code/usher
 uv run pytest -v                      # all tests pass
-uv run lint-imports                   # 3 contracts kept
+uv run lint-imports                   # 4 contracts kept
 uv run mypy                           # no issues
 docker compose up -d --build && sleep 15
 curl -sf http://localhost:8000/health/ready
@@ -2461,7 +4727,7 @@ git commit -m "docs: record M1 completion and real project commands"
 ## Definition of done
 
 - [ ] `uv run pytest` passes, unit and integration
-- [ ] `uv run lint-imports` reports 3 contracts kept — the architecture is enforced, not just documented
+- [ ] `uv run lint-imports` reports 4 contracts kept — the architecture is enforced, not just documented
 - [ ] `uv run mypy` is clean under strict mode
 - [ ] `docker compose up` produces a service whose `/health/ready` reports the database healthy
 - [ ] Migrations create the five core tables from a clean database

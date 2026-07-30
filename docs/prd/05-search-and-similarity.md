@@ -52,6 +52,14 @@ aliases, GiST trigram index, candidates capped at a few thousand, then
 `levenshtein_less_equal` from the core `fuzzystrmatch` module as a re-rank over
 that capped set, ordered by popularity.
 
+> 🔶 **Provisional.** This section already treats autocomplete as its own
+> narrow path, separate from full-text search — but `SearchIndex.suggest`
+> (`usher.ports.search`) is still one method on the same port as
+> `search`/`index`/`remove`. ADR-0002 gates Meilisearch "for the
+> instant-search box only", which suggests the real swap boundary may be
+> `suggest` alone, not the whole class. Whether it should be its own
+> `SuggestIndex` port is undecided; settle in **M6**.
+
 ### Semantic
 
 `halfvec(384)` embeddings from a local sentence-transformers model
@@ -63,6 +71,15 @@ that capped set, ordered by popularity.
 - Owned titles skip ANN entirely; exact brute-force cosine is faster and exact
   at that scale.
 - pgvector pinned ≥ 0.8.5 (CVE-2026-3172, plus HNSW vacuum corruption fixes).
+
+> 🔶 **Provisional.** "Brute-force exact cosine" (above) is only equivalent
+> to a plain dot product if the embeddings are unit-normalised — the
+> `Embedder` port (`usher.ports.embedding`) documents that contract, but
+> has no query/document distinction, even though BGE-family models like
+> `bge-small-en-v1.5` document a query-side instruction prefix that
+> document-side text does not get. Whether the port needs
+> `embed_query`/`embed_documents` instead of one `embed` is undecided;
+> settle in **M6**.
 
 ### Fusion
 
@@ -107,6 +124,17 @@ don't have, clearly marked, because that feeds discovery.
 
 `SearchIndex` is an ABC. Adding Meilisearch means implementing it once; nothing
 above the port changes.
+
+> 🔶 **Provisional.** The port's current shape is closer to Postgres's own
+> operations than a neutral candidate-generation contract:
+> `index(title_id)` forces a Meilisearch implementation to fetch each
+> title back out to build its document (1.3M round-trips on a full
+> rebuild); `SearchRequest.filters` has no key vocabulary, so two backends
+> would invent different ones; there is no `index_many`/`rebuild` for bulk
+> operations; and semantic search needs the query *vector* itself, which
+> the paragraph below already anticipates supplying to Meilisearch as
+> `userProvided`. Settle if and when the gate below actually trips, in
+> **M6**.
 
 **The gate is measurable, not a judgement call.** Build a typo test set from
 real catalog titles, weighted toward short names — `Up`, `Her`, `Dune`, `Alien`

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Reads .python-version at the repo root -- without it, uv sync would
+      # resolve pyproject.toml's unbounded `requires-python = ">=3.13"` to
+      # whatever the newest available interpreter is (verified directly:
+      # on a bare runner with no .python-version file, uv fetched 3.14.6,
+      # not the 3.13.14 every group so far has actually developed and
+      # verified against). enable-cache keys off pyproject.toml/uv.lock by
+      # default -- no cache-dependency-glob override needed for this repo.
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Architecture contracts
+        run: uv run lint-imports
+
+      # tests/integration/ starts its own Postgres via testcontainers, not
+      # a workflow-level `services:` container -- ubuntu-latest ships
+      # Docker already running, which is all that needs. --cov reports
+      # against the src/ layout via pyproject.toml's own [tool.pytest]
+      # rootdir + this package's src/usher import path.
+      - name: Tests
+        run: uv run pytest --cov=usher --cov-report=term-missing

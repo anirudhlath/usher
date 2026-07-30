@@ -20,9 +20,10 @@ services for a household-scale deployment.
 │  domain/      Pydantic models — the canonical language    │
 │  ports/       SourceAdapter · MetadataProvider ·          │
 │               SearchIndex · Embedder · LLMClient ·        │
-│               Row · RowProvider          (all ABCs)       │
-│  adapters/    emby/ · tmdb/ · imdb_dumps/ · postgres/ ·   │
-│               sentence_transformers/ · litellm/           │
+│               TitleRepository · Row · RowProvider         │
+│               (all ABCs)                                  │
+│  adapters/    emby/ · tmdb/ · bulk/ ·                     │
+│               search/ · embedding/ · llm/                 │
 │  jobs/        priority queue · schedulers · workers       │
 │  db/          SQLAlchemy 2.0 async · Alembic · repos      │
 └────────────────────────────┬──────────────────────────────┘
@@ -30,6 +31,18 @@ services for a household-scale deployment.
                        [PostgreSQL]
              canonical catalog · search · vectors · job queue
 ```
+
+**`adapters/` subdirectories are named for the upstream service when a
+port's implementation talks to one nameable external service** (`emby/` →
+`SourceAdapter`, `tmdb/` → `MetadataProvider`) **and for the capability
+otherwise.** That covers two different reasons, not one: a port with more
+than one implementation (`bulk/` → `BulkDataset`'s four dataset importers,
+`search/` → `SearchIndex`'s Postgres/Meilisearch pair) obviously can't be
+named for a single service — but `embedding/` and `llm/` are capability-named
+too, despite one implementation each, because neither implementation is
+itself a single external service to name: `sentence-transformers` runs
+in-process against a local model, and `litellm` is itself a multi-provider
+abstraction, not one upstream.
 
 **Deployment:** `compose.yml` with `usher` + `postgres`. One stateful service.
 An optional `meilisearch` service exists behind a feature gate — see
@@ -42,11 +55,14 @@ These are the invariants that keep Emby out of everything:
 1. **`domain/` imports nothing from `adapters/`, `db/`, or `api/`.** It is pure
    Pydantic models and value objects.
 2. **`services/` depends only on `domain/` and `ports/`.** A service never
-   imports an adapter; it receives one.
+   imports an adapter; it receives one. Repositories are ports too, for the
+   same reason — see [ADR-0009](decisions/0009-repositories-are-ports.md).
 3. **`adapters/` implement `ports/` and may import `domain/`.** They translate
    foreign shapes into canonical ones at the boundary. Raw Emby or TMDb JSON
    never escapes its adapter package.
-4. **`db/` models are separate from `domain/` models.** Repositories translate.
+4. **`db/` models are separate from `domain/` models.** Repositories translate,
+   and implement the repository ports declared in `ports/` (e.g.
+   `TitleRepository` — [ADR-0009](decisions/0009-repositories-are-ports.md)).
    This costs a mapping layer and buys the freedom to shape tables for query
    performance without deforming the domain language.
 5. **`api/` maps domain models to response DTOs.** Wire format is versioned
@@ -68,21 +84,37 @@ adapters both need, instead of each reimplementing it.
 class SourceAdapter(ABC):
     """A backend that holds playable media."""
 
+    @property
     @abstractmethod
-    async def list_items(self, since: datetime | None) -> AsyncIterator[SourceItem]: ...
+    def source_id(self) -> uuid.UUID: ...
+    @property
+    @abstractmethod
+    def supports_push(self) -> bool: ...
+    @abstractmethod
+    async def verify(self) -> bool: ...
+    @abstractmethod
+    def list_items(self, since: datetime | None) -> AsyncIterator[SourceItem]: ...
     @abstractmethod
     async def get_item(self, external_id: str) -> SourceItem | None: ...
     @abstractmethod
-    async def stream_url(self, external_id: str) -> StreamTarget: ...
+    async def stream_targets(self, external_id: str) -> list[StreamTarget]: ...
     @abstractmethod
-    async def watch_state(self, since: datetime | None) -> AsyncIterator[SourceWatchState]: ...
+    def watch_state(self, since: datetime | None) -> AsyncIterator[SourceWatchState]: ...
     @abstractmethod
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None: ...
     @abstractmethod
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
-        """Push channel. Adapters without one raise NotSupported; the
+        """Push channel. Adapters without one raise SourceNotSupported; the
         reconciler covers them."""
+    @abstractmethod
+    async def aclose(self) -> None: ...
 ```
+
+Note `list_items` and `watch_state` are plain `def`, not `async def` — they return an
+`AsyncIterator` directly rather than being coroutines that produce one. The full
+contract each method promises (ordering, `since` inclusivity, duplicates, must-raise
+rather than truncate) lives on the real ABC in `src/usher/ports/source.py`; this sketch
+shows shape, not the whole docstring.
 
 Other ports follow the same pattern:
 
@@ -94,7 +126,22 @@ Other ports follow the same pattern:
 | `SearchIndex` | `PostgresSearchIndex` (`MeilisearchIndex` gated) |
 | `Embedder` | `SentenceTransformerEmbedder` |
 | `LLMClient` | `LiteLLMClient` |
+| `TitleRepository` | `PostgresTitleRepository` ([ADR-0009](decisions/0009-repositories-are-ports.md)) |
 | `Row` / `RowProvider` | see [06](06-rows-and-recommendations.md) |
+
+**`adapters/search/` vs `db/repositories/`.** Both ultimately talk to the
+same PostgreSQL instance, which invites conflating them — they are not the
+same thing and do not hold the same kind of data. `adapters/search/`
+implements the `SearchIndex` port (`postgres.py`, with a gated
+`meilisearch.py` alongside it): weighted full-text, trigram autocomplete,
+and vector search ([ADR-0002](decisions/0002-postgres-first-search.md)).
+Titles, sources, media items, users, and watch state are persisted through
+repositories in `db/repositories/`, which implement repository ports
+declared in `ports/` (`TitleRepository` —
+[ADR-0009](decisions/0009-repositories-are-ports.md)). Repositories are
+never adapters — the "db is driven, not driving" import-linter contract and
+layering rule 4 above both hold precisely because repositories sit under
+`db/`, not `adapters/`.
 
 ## Repository layout
 
@@ -110,9 +157,10 @@ usher/
 │   ├── adapters/    emby/, tmdb/, bulk/, search/, embedding/, llm/
 │   ├── services/
 │   ├── jobs/        queue.py, scheduler.py, tasks/
-│   ├── db/          models/, repositories/, migrations/
+│   ├── db/          models/, repositories/ (implement ports/), migrations/
 │   └── config.py
-├── tests/           unit/, integration/, fixtures/
+├── tests/           unit/, integration/, fixtures/, fakes/ (port doubles
+│                    services are unit-tested against, e.g. FakeTitleRepository)
 ├── compose.yml
 └── pyproject.toml
 ```

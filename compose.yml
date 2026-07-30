@@ -1,0 +1,84 @@
+services:
+  usher:
+    build: .
+    restart: unless-stopped
+    environment:
+      USHER_DATABASE_URL: postgresql+asyncpg://usher:usher@postgres:5432/usher
+      USHER_SECRET_KEY: ${USHER_SECRET_KEY:?set USHER_SECRET_KEY in .env, e.g. openssl rand -hex 32}
+      USHER_TMDB_API_KEY: ${USHER_TMDB_API_KEY:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: usher
+    ports:
+      # Host-side port is overridable (USHER_HOST_PORT in .env) rather than
+      # a bare "8000:8000" -- this host already has another container
+      # publishing 8000, and a hardcoded collision is exactly the kind of
+      # thing an override exists to avoid. Container-side stays 8000: that
+      # is Settings.port's own default (src/usher/config.py) and what
+      # usher's healthcheck below and the Dockerfile's EXPOSE both assume.
+      - "${USHER_HOST_PORT:-8100}:8000"
+    volumes:
+      - ./data/images:/data/images
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # /health/ready, not /health: for `depends_on: condition:
+      # service_healthy` and `docker compose ps` to mean anything useful,
+      # "healthy" has to mean "can actually serve a request", which is
+      # what readiness (database + migration state) reports and liveness
+      # deliberately does not. This does not carry the restart-loop risk
+      # a Kubernetes liveness probe would: plain `docker compose` (no
+      # Swarm) never restarts a container because its healthcheck failed
+      # -- it only ever restarts on the container *process* exiting, which
+      # `restart: unless-stopped` governs independently. An "unhealthy"
+      # status here is purely informational plus a startup-order gate for
+      # any future service that depends on usher, not a trigger for
+      # anything to kill and restart this one -- so a Postgres blip
+      # degrading readiness cannot start a restart loop the way it could
+      # under a liveness-probe-driven orchestrator.
+      #
+      # No curl/wget in python:3.13-slim (and adding either would cut
+      # against keeping the image small), so this shells out to the
+      # interpreter that's already there: urlopen raises on any non-2xx
+      # status or connection failure, which is already a nonzero exit --
+      # no explicit try/except needed for a healthcheck, where any
+      # exception already means "unhealthy".
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health/ready', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: usher
+      POSTGRES_PASSWORD: usher
+      POSTGRES_DB: usher
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 forces a TCP connection instead of pg_isready's
+      # default Unix-socket lookup -- load-bearing, not cosmetic. On a
+      # fresh (empty) volume this image's entrypoint runs initdb, then
+      # brings up a *temporary* bootstrap server to run init scripts
+      # before starting the real one -- and that bootstrap server is
+      # started with listen_addresses='' (Unix socket only, verified
+      # against the image's own entrypoint script), while the real server
+      # listens on TCP. Verified directly against this exact image on
+      # this host: plain `pg_isready -U usher -d usher` (Unix socket)
+      # reports "accepting connections" at t+1.8s -- the bootstrap
+      # server -- then "rejecting connections" from t+2.0s to t+2.9s
+      # while it shuts down and the real one starts, before settling
+      # "accepting" again at t+3.0s. `-h 127.0.0.1` never once
+      # false-positives in the same run: "no response" solidly until
+      # t+2.9s, the same moment the real server actually starts
+      # accepting TCP connections. Without -h, `depends_on: condition:
+      # service_healthy` can let `usher` start against a server that is
+      # about to be torn down and restarted.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U usher -d usher"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 15s

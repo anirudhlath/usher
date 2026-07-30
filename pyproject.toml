@@ -1,0 +1,122 @@
+[project]
+name = "usher"
+version = "0.1.0"
+description = "A self-hosted media catalog backend that abstracts media servers behind a canonical database"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "pgvector>=0.3.6",
+    "uuid6>=2024.7.10",
+    "loguru>=0.7",
+    "httpx[http2]>=0.27",
+    "opentelemetry-api>=1.28",
+    "opentelemetry-sdk>=1.28",
+    "opentelemetry-exporter-otlp>=1.28",
+    "opentelemetry-instrumentation-fastapi>=0.49b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.49b0",
+    "opentelemetry-instrumentation-httpx>=0.49b0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "import-linter>=2.1",
+    "testcontainers[postgres]>=4.9",
+    "asgi-lifespan>=2.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/usher"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
+# Applied automatically to every test under tests/integration/ by that
+# directory's conftest.py (pytest_collection_modifyitems) -- not hand-applied
+# per test. Registered here because --strict-markers rejects unknown markers.
+# Directory placement (tests/unit vs tests/integration) is still the primary
+# way Docker-dependence is organised; this marker is the secondary, explicit
+# selector for tooling that would rather filter by -m than by path, e.g.
+# `pytest -m "not integration"` / `pytest -m integration`. Deliberately not
+# wired into addopts as a default `-m "not integration"` -- that would make
+# `pytest tests/integration/...` (which Task 10's own TDD steps invoke
+# directly, no `-m` override) silently collect zero tests instead of running
+# them, since addopts marker expressions apply even to an explicit path.
+markers = [
+    "integration: needs a live PostgreSQL via Docker (testcontainers); see tests/integration/conftest.py",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+# docs/ holds planning and PRD markdown with embedded Python code fences that
+# other groups transcribe verbatim; ruff 0.16+ formats/lints Markdown-embedded
+# code by default, so without this exclude `ruff format .` silently rewrites
+# plan prose out from under whoever runs it.
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # assert is how pytest tests assert; not a bandit finding here
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src", "tests"]
+mypy_path = "src"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["uuid6", "testcontainers.*"]
+ignore_missing_imports = true
+
+[tool.importlinter]
+root_packages = ["usher"]
+
+# An allowlist, not a denylist: every top-level package's place is defined by
+# where it sits (or that it's named at all), so a new package can't silently
+# escape every contract the way usher.config and usher.api once did under
+# three hand-maintained forbidden_modules lists.
+
+[[tool.importlinter.contracts]]
+name = "hexagonal layering"
+type = "layers"
+layers = ["usher.api", "usher.services", "usher.ports", "usher.domain"]
+
+[[tool.importlinter.contracts]]
+name = "adapters are driven, not driving"
+type = "forbidden"
+source_modules = ["usher.domain", "usher.ports", "usher.services"]
+forbidden_modules = ["usher.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "db is driven, not driving"
+type = "forbidden"
+source_modules = ["usher.domain", "usher.ports", "usher.services"]
+forbidden_modules = ["usher.db"]
+
+[[tool.importlinter.contracts]]
+name = "config stays out of the core"
+type = "forbidden"
+source_modules = ["usher.domain", "usher.ports"]
+forbidden_modules = ["usher.config"]

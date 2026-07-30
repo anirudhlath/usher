@@ -29,6 +29,9 @@ Rules:
   command handles the bulk case.
 - No credential ever reaches a client. This is the failure of the setup Usher
   replaces, where a raw Emby token lived in browser-delivered dashboard config.
+- At the config layer, `database_url`, `secret_key`, and `tmdb_api_key` are
+  held as `pydantic.SecretStr` and unwrapped only at the point of use, so the
+  rules above are enforced by the type system, not just convention.
 
 ## Failure and degradation
 
@@ -100,8 +103,17 @@ services:
   postgres:
     image: pgvector/pgvector:pg17
     volumes: ["./data/postgres:/var/lib/postgresql/data"]
-    healthcheck: { test: ["CMD-SHELL", "pg_isready -U usher"] }
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U usher"] }
 ```
+
+Illustrative and abbreviated, not literal — the real, verified `compose.yml`
+(M1 Task 13) also gives `usher` its own healthcheck and has more to say
+about the `-h 127.0.0.1` above: without it, `pg_isready` defaults to a Unix
+socket, which reaches `pgvector/pgvector:pg17`'s own *temporary* bootstrap
+server on a fresh volume and reports ready roughly a second before the
+real server is (verified directly, including against a false-positive
+window reproduced twice). `./data/models` is not yet mounted by the actual
+M1 `compose.yml` — nothing before M6 (embeddings) writes there.
 
 - Alembic migrations run on startup; the app refuses to serve on a schema
   mismatch rather than guessing.
