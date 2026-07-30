@@ -171,9 +171,19 @@ class BulkCatalogRepository(ABC):
     `TitleRepository`'s own docstring already reserves this path. Nothing
     here goes through the ORM.
 
-    Every method is idempotent: replaying a batch is an upsert, verified to
-    report `inserted=0` on the second pass. That is what makes the resume
-    contract on `BulkDataset.batches` safe.
+    Every method is idempotent in the sense that matters for resume safety
+    -- replaying a batch is an upsert, never a duplicate -- but only
+    `upsert_titles` and `apply_ratings` additionally skip a row that did not
+    change, which is what lets *those two* report zero on a no-op second
+    pass. `upsert_tmdb_ids` and `upsert_crosswalk` have no such guard (see
+    their own docstrings): a replay writes -- and counts -- every row again,
+    because Postgres's `DISTINCT ON` dedup step must pick a deterministic
+    winner regardless of whether anything actually changed, and doing that
+    unconditionally is cheaper than an extra `IS DISTINCT FROM` comparison
+    for a value nothing reads before the next call. Do not assume the
+    stronger claim for those two; nothing about resume-safety requires it,
+    since resuming past a batch only needs "replay never duplicates", not
+    "replay is invisible".
 
     Same session/transaction ownership as `TitleRepository`: these flush and
     return counts; they never commit. The caller commits a batch and its
@@ -248,9 +258,22 @@ class BulkCatalogRepository(ABC):
 
         Only fills a `tmdb_id`/`tvdb_id` that is currently NULL, so a value
         a later, better-informed enrichment wrote is never overwritten by
-        the crosswalk. Copies `popularity` across from the TMDb id universe
+        the crosswalk -- this is a precondition on the *target* row, checked
+        independently of whether the incoming pair agrees with what is
+        already stored: a title that already carries a *different* value
+        does not get overwritten either, and is reported as `conflicted`,
+        not `linked`. Copies `popularity` across from the TMDb id universe
         at the same time, which is what makes `ix_titles_popularity` usable
         and gives M4's enrichment queue a real ordering.
+
+        Both `titles.tmdb_id` (scoped by `kind`, ADR-0011) and
+        `titles.tvdb_id` are globally unique where not NULL
+        (`ix_titles_tmdb_id_kind`/`ix_titles_tvdb_id`), and the crosswalk
+        data itself is not: two different IMDb ids can each name the same
+        TMDb or TVDB id. At most one title may ever hold a given
+        `(tmdb_id, kind)` or `tvdb_id` — an implementation must pick a
+        single, deterministic winner among competing pairs rather than
+        raise or leave the outcome to whichever row a scan reaches first.
 
         Idempotent: a second call over unchanged inputs reports
         `linked == 0`.
