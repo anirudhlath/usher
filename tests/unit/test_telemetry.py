@@ -11,7 +11,12 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from usher.api.app import create_app
 from usher.config import Settings
-from usher.telemetry import configure_logging, configure_tracing, inject_trace_context
+from usher.telemetry import (
+    configure_logging,
+    configure_metrics,
+    configure_tracing,
+    inject_trace_context,
+)
 
 
 def test_no_trace_context_outside_a_span() -> None:
@@ -126,3 +131,24 @@ def test_diagnose_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert captured["diagnose"] is False
     assert captured["backtrace"] is False
+
+
+def test_no_metric_exporter_constructed_when_telemetry_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same invariant as test_no_exporter_constructed_when_telemetry_disabled,
+    for configure_metrics's OTLPMetricExporter -- the two bootstraps
+    mirror each other's shape deliberately (see configure_metrics's
+    docstring), so they get the same regression test.
+    """
+
+    def _fail_if_constructed(*args: object, **kwargs: object) -> None:
+        raise AssertionError(
+            "OTLPMetricExporter must not be constructed when telemetry is disabled"
+        )
+
+    monkeypatch.setattr("usher.telemetry.OTLPMetricExporter", _fail_if_constructed)
+
+    settings = _settings_with_telemetry_disabled()
+    assert settings.telemetry_enabled is False
+    configure_metrics(settings)

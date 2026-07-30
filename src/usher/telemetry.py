@@ -11,10 +11,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from loguru import logger
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -135,6 +138,40 @@ def configure_tracing(settings: Settings) -> None:
     HTTPXClientInstrumentor().instrument()
 
 
+def configure_metrics(settings: Settings) -> None:
+    """Install a real SDK `MeterProvider`, exporting over OTLP only when
+    `settings.telemetry_enabled` -- mirrors `configure_tracing`'s shape for
+    the same two reasons: a real (if unexported) provider lets any
+    instrument a later milestone creates (`usher.http.server.duration`,
+    `usher.jobs.queued`, ... -- PRD 10's metric catalogue) bind to
+    something real from day one instead of the API's no-op default, and
+    the same `isinstance` idempotency guard avoids leaking a
+    `PeriodicExportingMetricReader` background export thread across
+    repeated `create_app()` calls the way an unguarded `configure_tracing`
+    did (see its docstring; verified directly that `set_meter_provider`
+    has the identical silently-refuse-the-second-call behaviour
+    `set_tracer_provider` does).
+
+    No metrics are registered here — PRD 10's OTel metrics are each owned
+    by the milestone that emits them (M5 push, M6 search, ...). This is
+    only the bootstrap they register against, so *where that bootstrap
+    lives* is a decision made once here rather than independently in each
+    of nine milestones.
+    """
+    if not isinstance(metrics.get_meter_provider(), MeterProvider):
+        readers = (
+            [PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=settings.otlp_endpoint))]
+            if settings.telemetry_enabled
+            else []
+        )
+        provider = MeterProvider(
+            resource=Resource.create({"service.name": settings.service_name}),
+            metric_readers=readers,
+        )
+        metrics.set_meter_provider(provider)
+
+
 def configure_telemetry(settings: Settings) -> None:
     configure_logging(settings)
     configure_tracing(settings)
+    configure_metrics(settings)
