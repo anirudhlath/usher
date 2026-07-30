@@ -41,6 +41,16 @@
         {
           "Index": 1,
           "Type": "Audio",
+          "Codec": "aac",
+          "Profile": "LC",
+          "Channels": 2,
+          "Language": "eng",
+          "Title": "Commentary with the director",
+          "IsDefault": false
+        },
+        {
+          "Index": 2,
+          "Type": "Audio",
           "Codec": "truehd",
           "Profile": "TrueHD Atmos",
           "Channels": 8,
@@ -48,7 +58,7 @@
           "IsDefault": true
         },
         {
-          "Index": 2,
+          "Index": 3,
           "Type": "Subtitle",
           "Codec": "subrip",
           "Language": "eng",

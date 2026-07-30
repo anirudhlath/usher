@@ -33,7 +33,14 @@ scrubbed capture locally for anyone who wants to diff shapes.
 1. **Dolby Vision reports itself several ways at once**, and a DV stream
    commonly *also* advertises HDR10, because the HDR10 base layer is
    genuinely present. Checking `VideoRangeType` first would catalogue every
-   DV file as HDR10, so any DV marker wins.
+   DV file as HDR10, so any DV marker wins -- `DvProfile`, a `dvhe`/`Dolby
+   Vision` codec profile, or a `VideoRangeType` naming DV. That last one is
+   matched by *prefix*, because Emby spells the base layer into the same
+   token (`DOVIWithHDR10`, `DOVIWithHLG`, `DOVIWithSDR`, `DOVIWithEL`) and
+   an exact-match table would send every one of those to its base layer
+   instead. Each marker is independently sufficient and independently
+   tested: a file carrying only `DvProfile` is DV, and so is one carrying
+   only `DOVIWithHDR10`.
 2. **Naive datetimes.** Verified on Python 3.13: `fromisoformat` accepts
    Emby's seven-digit fractional seconds and a trailing `Z`, but a value
    with no offset yields a naive datetime -- and `SourceItem` is a plain
@@ -45,6 +52,7 @@ scrubbed capture locally for anyone who wants to diff shapes.
 
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -68,14 +76,22 @@ _NON_ALNUM = re.compile(r"[^A-Za-z0-9]")
 # and HDR10+ genuinely carries an HDR10 base layer, so this is lossy rather
 # than wrong -- and far better than reporting the file as SDR.
 _HDR_BY_TOKEN: dict[str, HdrFormat] = {
-    "DOVI": HdrFormat.DOLBY_VISION,
-    "DOLBYVISION": HdrFormat.DOLBY_VISION,
     "DV": HdrFormat.DOLBY_VISION,
     "HDR10": HdrFormat.HDR10,
     "HDR10PLUS": HdrFormat.HDR10,
     "HDR": HdrFormat.HDR10,
     "HLG": HdrFormat.HLG,
 }
+
+# Matched as prefixes, and checked before the exact table above, because
+# Emby's `VideoRangeType` names the *base layer* alongside the DV marker:
+# `DOVIWithHDR10`, `DOVIWithHLG`, `DOVIWithSDR`, `DOVIWithEL`. An
+# exact-match table gets `DOVI` right and every compound spelling wrong,
+# and gets it wrong *quietly* -- `DOVIWithHDR10` falls through to
+# `VideoRange: "HDR"` and is catalogued as HDR10, `DOVIWithSDR` as SDR.
+# A prefix rule also covers a combination Emby adds after this was
+# written, which an enumerated table by construction cannot.
+_DV_TOKEN_PREFIXES = ("DOVI", "DOLBYVISION")
 
 # Ordered: the first match wins, so "DTS-HD MA" is not also matched by a
 # looser "master audio" rule further down producing a different token.
@@ -125,15 +141,22 @@ def parse_datetime(value: object) -> datetime | None:
 def emby_datetime(value: datetime) -> str:
     """Format a `since` cursor for Emby's date query parameters.
 
-    Normalised to UTC and **widened by one second**, deliberately. The port
-    promises `since` is inclusive; whether Emby's own comparison is `>=` or
-    `>` is not verified against the live server. One second earlier is
-    correct under either -- an inclusive server returns a superset, which
-    the port explicitly permits because callers deduplicate by
-    `external_id`; an exclusive one still returns the boundary item. The
+    Normalised to UTC and **widened by one to two seconds**, deliberately.
+    The port promises `since` is inclusive; whether Emby's own comparison
+    is `>=` or `>` is not verified against the live server. One second
+    earlier is correct under either -- an inclusive server returns a
+    superset, which the port explicitly permits because callers deduplicate
+    by `external_id`; an exclusive one still returns the boundary item. The
     opposite mistake, assuming inclusivity and being wrong, silently drops
     exactly the item the previous walk's cursor was set from, once per
     walk, forever.
+
+    "One to two", not "one": the format Emby's date parameters take carries
+    whole seconds only, so a cursor of `12:00:00.9` is widened by the
+    explicit second *and* by the 0.9 that truncating discards. Both errors
+    point the same way -- wider -- so this is stated rather than corrected.
+    Rounding instead would make the total exactly one second on average and
+    sometimes *less* than one, which is the direction that loses items.
     """
     return (value.astimezone(UTC) - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -193,7 +216,10 @@ def hdr_format(video: Mapping[str, Any]) -> HdrFormat | None:
     if video.get("DvProfile") is not None or "dolby vision" in profile or "dvhe" in profile:
         return HdrFormat.DOLBY_VISION
     for key in ("VideoRangeType", "VideoRange"):
-        mapped = _HDR_BY_TOKEN.get(_NON_ALNUM.sub("", str(video.get(key) or "")).upper())
+        token = _NON_ALNUM.sub("", str(video.get(key) or "")).upper()
+        if token.startswith(_DV_TOKEN_PREFIXES):
+            return HdrFormat.DOLBY_VISION
+        mapped = _HDR_BY_TOKEN.get(token)
         if mapped is not None:
             return mapped
     return None
@@ -272,10 +298,17 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
         series_external_id=as_text(payload.get("SeriesId")),
         season_number=as_int(payload.get("ParentIndexNumber")),
         episode_number=as_int(payload.get("IndexNumber")),
-        # PRD 03 stores this verbatim in `raw_payloads`. Copied rather than
-        # aliased so a caller that mutates the DTO cannot reach back into
-        # whatever buffer the response was parsed from.
-        raw=dict(payload),
+        # PRD 03 stores this verbatim in `raw_payloads`. Deep-copied rather
+        # than aliased so a caller that mutates the DTO cannot reach back
+        # into whatever buffer the response was parsed from -- and
+        # deep-copied rather than `dict(payload)`, because a shallow copy
+        # leaves `raw["UserData"]` and every `raw["MediaSources"]` entry
+        # pointing at the very objects `get_item` is still reading to build
+        # the item's `StreamTarget`s. Measured at 17 us per item against
+        # the movie fixture, i.e. ~1.6 s across the 94,395-item library
+        # this was built for, against an upstream PRD 01 measures at 1-5 s
+        # per *request*.
+        raw=deepcopy(dict(payload)),
     )
 
 
