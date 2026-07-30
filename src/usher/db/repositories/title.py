@@ -41,6 +41,25 @@ someday. Left uncaught, that would violate the same "db is driven, not
 driving" contract `add()`'s translation exists to uphold — confirmed
 directly by first writing this without the fix and watching a raw
 `sqlalchemy.exc.IntegrityError` escape `update()`.
+
+Autoflush is the second way a storage exception can escape this class,
+independent of the SAVEPOINT decision above. `session.get()` and
+`session.execute()` both flush any pending, unflushed session state before
+running — including state this repository never touched, left behind by
+some other call sharing the same `AsyncSession` (see `TitleRepository`'s
+docstring for the session-wide precondition this is about). Verified
+directly: a pending, invalid row staged on the session (not flushed) made
+every one of `get`/`get_by_tmdb_id`/`get_by_imdb_id`/`count_by_state` raise
+a raw `sqlalchemy.exc.IntegrityError`, and made `update()`'s own
+`session.get()` lookup do the same, before the fix below. The four read
+methods now run their query inside `self._session.no_autoflush` — a plain
+read has nothing to flush on its own account, so suppressing autoflush
+entirely is strictly better there than catching and translating an error
+that isn't this call's own conflict to report. `update()`'s lookup instead
+moved inside its existing SAVEPOINT + `except IntegrityError` (the same
+protection its mutate-and-flush already had), because unlike a pure read,
+`update()` already has a conflict-shaped exception to raise if the lookup's
+autoflush fails.
 """
 
 import uuid
@@ -84,9 +103,6 @@ class PostgresTitleRepository(TitleRepository):
             raise RepositoryConflict(f"title {title.id} already exists") from exc
 
     async def update(self, title: Title) -> None:
-        row = await self._session.get(TitleRow, title.id)
-        if row is None:
-            raise RepositoryNotFound(f"no existing title {title.id} to update")
         # _to_row(title) raises loudly on any field/column mismatch, the same
         # way add() does -- a setattr loop straight off title.model_dump()
         # would not raise, it would just silently skip a would-be column
@@ -95,6 +111,23 @@ class PostgresTitleRepository(TitleRepository):
         fresh = _to_row(title)
         try:
             async with self._session.begin_nested():
+                # session.get() lives *inside* the try and the SAVEPOINT,
+                # not just the flush below -- it autoflushes by default
+                # (SQLAlchemy's load_on_pk_identity, no_autoflush=False),
+                # so it can just as easily be the statement that surfaces
+                # some *other*, unrelated pending row's IntegrityError on
+                # this shared session (verified: session.execute()/
+                # session.get() both do). Per the ordering trap already
+                # documented below, that flush must happen inside the
+                # SAVEPOINT or a caught conflict leaves the outer
+                # transaction DEACTIVE for the next unrelated call -- the
+                # same reasoning as the mutation loop, just one statement
+                # earlier. See TitleRepository's docstring for the
+                # session-wide precondition this is a backstop for, not a
+                # substitute for.
+                row = await self._session.get(TitleRow, title.id)
+                if row is None:
+                    raise RepositoryNotFound(f"no existing title {title.id} to update")
                 # The mutation happens *inside* the SAVEPOINT scope, not
                 # before it -- verified directly that mutating `row` first
                 # and only wrapping flush() leaves the session's outer
@@ -115,23 +148,39 @@ class PostgresTitleRepository(TitleRepository):
             raise RepositoryConflict(f"title {title.id} conflicts with an existing title") from exc
 
     async def get(self, title_id: uuid.UUID) -> Title | None:
-        row = await self._session.get(TitleRow, title_id)
+        # no_autoflush: a plain read has no business flushing anything, and
+        # by default it would anyway (session.get() autoflushes) -- so a
+        # pre-existing, unflushed, invalid row left on this *shared* session
+        # by unrelated code could otherwise fail right here, as a raw
+        # sqlalchemy.exc.IntegrityError this method has no way to translate
+        # meaningfully (it isn't this read's conflict to report). See
+        # TitleRepository's docstring for the session-wide precondition
+        # this is a backstop for, not a substitute for.
+        with self._session.no_autoflush:
+            row = await self._session.get(TitleRow, title_id)
         return _to_domain(row) if row else None
 
     async def get_by_tmdb_id(self, tmdb_id: int) -> Title | None:
-        result = await self._session.execute(select(TitleRow).where(TitleRow.tmdb_id == tmdb_id))
+        with self._session.no_autoflush:  # see get()'s comment
+            result = await self._session.execute(
+                select(TitleRow).where(TitleRow.tmdb_id == tmdb_id)
+            )
         row = result.scalar_one_or_none()
         return _to_domain(row) if row else None
 
     async def get_by_imdb_id(self, imdb_id: str) -> Title | None:
-        result = await self._session.execute(select(TitleRow).where(TitleRow.imdb_id == imdb_id))
+        with self._session.no_autoflush:  # see get()'s comment
+            result = await self._session.execute(
+                select(TitleRow).where(TitleRow.imdb_id == imdb_id)
+            )
         row = result.scalar_one_or_none()
         return _to_domain(row) if row else None
 
     async def count_by_state(self) -> dict[EnrichmentState, int]:
-        result = await self._session.execute(
-            select(TitleRow.enrichment_state, func.count()).group_by(TitleRow.enrichment_state)
-        )
+        with self._session.no_autoflush:  # see get()'s comment
+            result = await self._session.execute(
+                select(TitleRow.enrichment_state, func.count()).group_by(TitleRow.enrichment_state)
+            )
         counts = dict.fromkeys(EnrichmentState, 0)
         counts.update({EnrichmentState(state): count for state, count in result.all()})
         return counts

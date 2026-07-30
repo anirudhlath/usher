@@ -13,6 +13,22 @@ class TitleRepository(ABC):
     `usher.db.repositories.title.PostgresTitleRepository` is the concrete,
     SQLAlchemy-backed implementation; `api/`, the composition root,
     constructs it and injects it into services.
+
+    Every method below shares one session-wide precondition, not just
+    advice to whoever implements this port: **the session must carry no
+    unflushed, invalid state when any method here is called.** A
+    SQL-backed implementation's session typically autoflushes by default,
+    so even a pure read can trigger a write — and once more than one
+    repository shares a session (from the milestone that adds
+    `MediaItemRepository`/`WatchStateRepository`), "nothing else pending is
+    broken" stops being a safe assumption to make on this port's behalf.
+    `PostgresTitleRepository`'s reads defensively suppress autoflush for
+    exactly this reason (see its module docstring), but that is a backstop
+    inside one implementation, not a substitute for callers upholding the
+    precondition: a caller that leaves invalid state pending across a
+    repository boundary can still surface a raw storage exception the next
+    time *anything* on that session flushes it, including code this port
+    doesn't own.
     """
 
     @abstractmethod
