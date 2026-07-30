@@ -104,9 +104,25 @@ async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, c
     """ADR-0005 and the spec both promise the catalog is usable during
     bootstrap. With batch_size=2 the first commit lands two titles, and a
     reader sees them before the import finishes -- this asserts the loop
-    really does commit per batch rather than once at the end."""
+    really does commit per batch rather than once at the end.
+
+    `commits` (not just `seen`) is what actually pins that: `upsert_titles`
+    writes via `COPY` straight to the connection, so `seen` alone stays
+    `[2, 4, 5]` even with the per-batch `self._commit()` call deleted
+    entirely -- confirmed directly by deleting it and re-running this test,
+    which still passed. `commits` counts calls to the *injected* commit
+    callable itself, independent of COPY's own within-session visibility,
+    so it is the assertion that actually distinguishes committing per batch
+    from merely writing per batch and committing once at the end."""
     catalog = PostgresBulkCatalogRepository(session)
-    service = BootstrapService(PostgresImportRunRepository(session), catalog, session.flush)
+    commits = 0
+
+    async def counting_flush() -> None:
+        nonlocal commits
+        commits += 1
+        await session.flush()
+
+    service = BootstrapService(PostgresImportRunRepository(session), catalog, counting_flush)
     seen: list[int] = []
 
     async def write_and_peek(rows: Sequence[ImdbTitle]) -> int:
@@ -117,6 +133,10 @@ async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, c
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         await service.import_dataset(IMDbTitleDataset(client, cache, batch_size=2), write_and_peek)
     assert seen == [2, 4, 5]
+    # 3 batches (2, 2, 1) + the final COMPLETED save -- see
+    # test_commits_once_per_batch_plus_once_at_the_end (tests/unit/
+    # test_services_bootstrap.py) for the same shape against a fake.
+    assert commits == 4
 
 
 async def test_a_restart_resumes_from_the_stored_checkpoint(
@@ -148,9 +168,29 @@ async def test_a_restart_resumes_from_the_stored_checkpoint(
         assert checkpoint is not None
         assert checkpoint.rows_seen == 4
 
-        second = IMDbTitleDataset(client, cache, batch_size=2)
-        run = await service.import_dataset(second, lambda rows: _written(catalog, rows))
+        # Every write below is an upsert, so `count_titles() == 5` at the end
+        # would hold even if resumption were silently broken and the second
+        # run restarted from line 0 -- confirmed directly, by disabling
+        # resume_from in BootstrapService._drain and watching this test's
+        # final assertions still pass. `batches_seen` and the imdb_ids
+        # actually written close that gap: a genuine resume calls write()
+        # exactly once, with only the one row (tt9999995) that was never
+        # committed before the crash; a silent restart would call it three
+        # times (batch_size=2 over all five rows again).
+        seen_ids: list[str] = []
+        batches_seen = 0
 
+        async def write_and_record(rows: Sequence[ImdbTitle]) -> int:
+            nonlocal batches_seen
+            batches_seen += 1
+            seen_ids.extend(row.imdb_id for row in rows)
+            return await _written(catalog, rows)
+
+        second = IMDbTitleDataset(client, cache, batch_size=2)
+        run = await service.import_dataset(second, write_and_record)
+
+    assert batches_seen == 1
+    assert seen_ids == ["tt9999995"]
     assert run.status is ImportRunStatus.COMPLETED
     assert await catalog.count_titles() == 5
 
