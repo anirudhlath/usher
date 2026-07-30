@@ -24,6 +24,7 @@ from usher.domain.enums import (
     TitleKind,
     WatchStateOrigin,
 )
+from usher.domain.title import Title
 
 
 def test_all_core_tables_registered() -> None:
@@ -241,3 +242,15 @@ def test_bulk_load_friendly_columns_have_server_defaults() -> None:
     for column in columns_needing_server_default:
         assert column.server_default is not None, f"{column} has no server_default"
     assert WatchStateRow.__table__.c.origin.server_default is None
+
+
+def test_title_and_title_row_have_matching_field_sets() -> None:
+    """STANDING CONSTRAINT (title.py's module docstring, point 1):
+    Title's field set and TitleRow's column set must stay in exact 1:1
+    correspondence by name -- `_to_domain`'s dict-comprehension-into-
+    `model_validate` and `_to_row`'s `TitleRow(**title.model_dump(...))`
+    both rely on it, and `Title`'s `extra="forbid"` makes a break loud
+    only at read/write time, inside the Docker-requiring integration
+    suite, as a ValidationError or TypeError with no obvious cause. This
+    is the same check, running here for free, no Postgres required."""
+    assert set(Title.model_fields) == {c.name for c in TitleRow.__table__.columns}

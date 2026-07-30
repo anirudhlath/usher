@@ -30,11 +30,11 @@ tests/integration/test_title_repository.py's
 concrete subclasses.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
-from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.enums import EnrichmentState, ProductionStatus, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
@@ -53,16 +53,50 @@ class TitleRepositoryContract:
         # the authoritative clock for both columns, and the fake now stamps
         # them itself to match. A full-equality assertion here would fail
         # against both, for a reason that has nothing to do with what this
-        # test checks.
+        # test checks -- excluded from the comparison below, not from the
+        # round trip: both are still set on the constructed Title, just not
+        # compared.
+        #
+        # Every other field of the 31 is set to a non-default value and
+        # compared -- the original version of this test only checked 3
+        # (name, tmdb_id, enrichment_state), which would miss a broken
+        # mapping in any of the other 28.
         title = Title(
-            kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", year=2021, tmdb_id=438631
+            kind=TitleKind.SERIES,
+            tmdb_id=1399,
+            imdb_id="tt0944947",
+            tvdb_id=121361,
+            name="Game of Thrones",
+            original_name="Game of Thrones",
+            sort_name="Game of Thrones",
+            year=2011,
+            release_date=date(2011, 4, 17),
+            end_year=2019,
+            overview="Nine noble families fight for control of the mythical land of Westeros.",
+            tagline="Winter Is Coming",
+            runtime_minutes=57,
+            status=ProductionStatus.ENDED,
+            genres=("Drama", "Fantasy"),
+            keywords=("dragon", "king"),
+            original_language="en",
+            spoken_languages=("en",),
+            origin_countries=("US", "GB"),
+            content_rating="TV-MA",
+            community_rating=8.4,
+            vote_count=22000,
+            popularity=369.5,
+            collection_id=new_id(),
+            enrichment_state=EnrichmentState.ENRICHED,
+            enrichment_error=None,
+            enriched_at=datetime(2024, 1, 1, tzinfo=UTC),
+            field_provenance={"overview": "tmdb"},
         )
         await repo.add(title)
         fetched = await repo.get(title.id)
         assert fetched is not None
-        assert fetched.name == "Dune"
-        assert fetched.tmdb_id == 438631
-        assert fetched.enrichment_state is EnrichmentState.SKELETON
+        assert fetched.model_dump(exclude={"created_at", "updated_at"}) == title.model_dump(
+            exclude={"created_at", "updated_at"}
+        )
 
     async def test_created_at_is_not_taken_from_the_caller(self, repo: TitleRepository) -> None:
         """Postgres is the authoritative clock for created_at: add()'s
@@ -192,6 +226,27 @@ class TitleRepositoryContract:
         found = await repo.get_by_imdb_id("tt1160419")
         assert found is not None
         assert found.id == title.id
+
+    async def test_get_by_tmdb_id_of_none_finds_nothing(self, repo: TitleRepository) -> None:
+        """tmdb_id's own type is `int`, not `int | None` -- but a caller
+        holding a genuinely optional value (e.g. `Title.tmdb_id` itself)
+        can still reach this with `None` if it ever bypasses mypy at the
+        call site (a stray `# type: ignore`, `cast`, ...). Both
+        implementations compile "tmdb_id == None" straight through --
+        Postgres as `IS NULL`, the fake as a plain `==` -- which matches
+        whichever null-provider-id title happens to come first, not "the
+        title with this id": the opposite of what this method promises.
+        Measured without the guard: this returned an arbitrary
+        null-tmdb_id title instead of None, in both implementations.
+        """
+        await repo.add(Title(kind=TitleKind.MOVIE, name="Home Video", sort_name="Home Video"))
+        assert await repo.get_by_tmdb_id(None) is None  # type: ignore[arg-type]
+
+    async def test_get_by_imdb_id_of_none_finds_nothing(self, repo: TitleRepository) -> None:
+        """Same property as test_get_by_tmdb_id_of_none_finds_nothing, for
+        imdb_id."""
+        await repo.add(Title(kind=TitleKind.MOVIE, name="Home Video", sort_name="Home Video"))
+        assert await repo.get_by_imdb_id(None) is None  # type: ignore[arg-type]
 
     async def test_titles_without_provider_ids_are_allowed(self, repo: TitleRepository) -> None:
         title = Title(kind=TitleKind.MOVIE, name="Home Video 1998", sort_name="Home Video 1998")

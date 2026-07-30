@@ -125,12 +125,21 @@ class FakeTitleRepository(TitleRepository):
         return self._titles.get(title_id)
 
     async def get_by_tmdb_id(self, tmdb_id: int) -> Title | None:
+        # Same guard, same reason, as PostgresTitleRepository.get_by_tmdb_id:
+        # `title.tmdb_id == None` would match the first title with a null
+        # tmdb_id instead of finding nothing, mirroring Postgres's own
+        # `IS NULL` behaviour for the same comparison -- see that method's
+        # comment.
+        if tmdb_id is None:
+            return None
         for title in self._titles.values():
             if title.tmdb_id == tmdb_id:
                 return title
         return None
 
     async def get_by_imdb_id(self, imdb_id: str) -> Title | None:
+        if imdb_id is None:
+            return None
         for title in self._titles.values():
             if title.imdb_id == imdb_id:
                 return title

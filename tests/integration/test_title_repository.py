@@ -2,8 +2,8 @@ import uuid
 from typing import cast
 
 import pytest
-from sqlalchemy import Table, insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import Table, event, insert
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from tests.contract.title_repository_contract import TitleRepositoryContract
 from usher.db.models.title import TitleRow
@@ -264,6 +264,72 @@ async def test_update_translates_integrity_error_from_its_own_lookup(
     )
     with pytest.raises(RepositoryConflict):
         await repo.update(incoming)
+
+
+# --- Regression coverage for update() rewriting unchanged ARRAY columns --
+# see tests/unit/test_title_repository.py's
+# test_to_row_emits_lists_not_tuples_for_array_columns for the necessary-
+# but-not-sufficient type-level pin (no Postgres needed); this is the
+# end-to-end proof against real SQLAlchemy unit-of-work.
+#
+# updated_at cannot be used to detect this: the fixture wraps each test in
+# one Postgres transaction (see conftest.py), and Postgres's now() /
+# CURRENT_TIMESTAMP is *transaction*-scoped, not statement-scoped -- every
+# now() call inside one transaction returns the same value, so updated_at
+# looks identical before and after *any* number of updates within a single
+# test regardless of whether this bug is fixed. Counting the actual SQL
+# statements SQLAlchemy sends is the direct, transaction-timing-independent
+# way to prove no UPDATE was issued at all.
+
+
+async def test_update_does_not_rewrite_unchanged_columns(
+    repo: PostgresTitleRepository, session: AsyncSession
+) -> None:
+    """`_to_row` used to emit tuples for the four ARRAY(Text) columns while
+    a loaded row always holds lists on read (see title.py's module
+    docstring) -- `("a",) != ["a"]` in Python regardless of contents, so
+    SQLAlchemy's attribute-history comparison always saw those four columns
+    as changed, and update() rewrote them on *every* call, even a call that
+    changes nothing at all. That would confound any "changed since?" logic
+    M4 builds on updated_at once it reflects real writes (see
+    test_migrations.py).
+    """
+    title = Title(
+        kind=TitleKind.MOVIE,
+        name="Dune",
+        sort_name="Dune",
+        genres=("Sci-Fi", "Adventure"),
+        keywords=("desert",),
+        spoken_languages=("en",),
+        origin_countries=("US",),
+    )
+    await repo.add(title)
+    fetched = await repo.get(title.id)
+    assert fetched is not None
+
+    statements: list[str] = []
+
+    def _capture(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    sync_conn = cast(AsyncConnection, session.bind).sync_connection
+    assert sync_conn is not None
+    event.listen(sync_conn, "before_cursor_execute", _capture)
+    try:
+        await repo.update(fetched)  # same data just read back -- a true no-op
+    finally:
+        event.remove(sync_conn, "before_cursor_execute", _capture)
+
+    assert not any(statement.strip().upper().startswith("UPDATE") for statement in statements), (
+        f"update() issued an UPDATE for a no-op call: {statements}"
+    )
 
 
 class TestPostgresTitleRepositoryContract(TitleRepositoryContract):

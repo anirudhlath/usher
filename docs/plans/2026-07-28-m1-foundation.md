@@ -3841,6 +3841,66 @@ git commit -m "feat: title repository translating between rows and domain models
 > not a false conflict against another row that also happens to have
 > `None` there.
 
+> **Amended post-implementation — a round of small, independent gaps, each
+> cheap to close, from the same review pass as the amendments above.**
+>
+> 1. **The STANDING CONSTRAINT (point 1, the earlier "verified, not
+>    changed" amendment) had no test of its own.** A break was only ever
+>    caught indirectly, inside the Docker-requiring integration suite, as a
+>    confusing `ValidationError`/`TypeError`. Added
+>    `test_title_and_title_row_have_matching_field_sets`
+>    (`tests/unit/test_db_models.py`) — `set(Title.model_fields) ==
+>    {c.name for c in TitleRow.__table__.columns}` — no Docker needed.
+>    Verified it actually catches a break, not just that it passes today:
+>    added a throwaway field to `Title`, watched the test fail with the
+>    exact extra-field diff, removed it again.
+> 2. **`test_add_then_get_round_trips` asserted 3 of `Title`'s 31 fields.**
+>    Broadened to set 29 (all but `id`, which isn't asserted on directly
+>    either way, and `created_at`/`updated_at`, excluded from the
+>    comparison for the reason given inline and in the amendment above) and
+>    compare `model_dump()` output directly. Passed against both
+>    implementations on the first run, including every `ARRAY(Text)` field
+>    and `field_provenance` (`JSONB`) round-tripping through real Postgres
+>    — a real, if unsurprising, confirmation, not just added coverage.
+> 3. **`update()` could never be a true no-op.** `_to_row` emitted tuples
+>    for the four `ARRAY(Text)` columns (matching `Title`'s own
+>    `tuple[str, ...]` typing) while a loaded row always holds lists for
+>    them (`ARRAY(Text)` always reads back as a list — title.py's module
+>    docstring). `("a",) != ["a"]` in Python regardless of contents, so
+>    SQLAlchemy's attribute-history comparison — what actually decides
+>    whether a column lands in the `UPDATE`'s `SET` clause — saw those four
+>    columns as changed on *every* `update()` call, even one that changes
+>    nothing. Confirmed empirically, not assumed: counted the actual SQL
+>    statements SQLAlchemy issued for a semantically no-op `update()`
+>    (`sqlalchemy.event` on `before_cursor_execute`) — one `UPDATE` touching
+>    all four array columns before the fix, none after.
+>    `updated_at`-before/after was considered and rejected as the signal:
+>    the fixture wraps each test in one Postgres transaction (a separate
+>    amendment above), and Postgres's `now()`/`CURRENT_TIMESTAMP` is
+>    *transaction*-scoped, not statement-scoped, so `updated_at` reads
+>    identically before and after any number of updates within one test
+>    regardless of this bug. Fixed by having `_to_row` emit lists for the
+>    four array fields. Pinned two ways: a no-Docker unit test on `_to_row`
+>    itself (necessary condition — the type it emits) and the integration
+>    test above (sufficient condition — the actual SQL SQLAlchemy sends).
+> 4. **`get_by_tmdb_id(None)`/`get_by_imdb_id(None)` returned an arbitrary
+>    null-provider-id title in both implementations**, because
+>    `TitleRow.tmdb_id == None` compiles to `IS NULL` (Postgres) and
+>    `title.tmdb_id == None` matches the same way in the fake's plain
+>    Python loop — neither "finds nothing", the promised behaviour for an
+>    id that isn't there. `tmdb_id`/`imdb_id` are typed `int`/`str`, not
+>    `int | None`/`str | None`, so mypy strict already catches a real
+>    `int | None` argument at any actual call site — this guard is a
+>    backstop for whenever that gets bypassed (a stray `# type: ignore`,
+>    `cast`, ...), which the port's own contract can't rule out once a
+>    caller starts passing `Title.tmdb_id` itself around. Guarded in both
+>    implementations; pinned by two new contract tests.
+> 5. The `tests/integration/test_title_repository.py` comment reading "The
+>    four tests below" (describing the session-poisoning regression tests)
+>    said four where there were three — corrected in the same commit that
+>    added the autoflush-leak regression tests just below that section, so
+>    the count stayed accurate rather than drifting further.
+
 ---
 
 ## Task 11: Telemetry — logging with trace context

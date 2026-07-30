@@ -79,8 +79,28 @@ def _to_domain(row: TitleRow) -> Title:
     return Title.model_validate({c.name: getattr(row, c.name) for c in TitleRow.__table__.columns})
 
 
+# The four ARRAY(Text) columns -- see the module docstring's note on
+# ARRAY(Text) always reading back as a list, never a tuple.
+_ARRAY_FIELDS = ("genres", "keywords", "spoken_languages", "origin_countries")
+
+
 def _to_row(title: Title) -> TitleRow:
-    return TitleRow(**title.model_dump(exclude={"created_at", "updated_at"}))
+    # Emits lists for the four ARRAY columns, not the tuples Title actually
+    # types them as. update()'s mutate loop setattr()s every column from
+    # this onto an already-persistent row loaded from the database, and a
+    # loaded row's ARRAY columns are always lists -- never tuples -- on
+    # read. SQLAlchemy's attribute-history comparison (what decides whether
+    # a column is actually included in the UPDATE's SET clause) uses `==`,
+    # and `("a",) != ["a"]` in Python regardless of contents, so emitting
+    # tuples here made every update() rewrite all four arrays even when
+    # nothing in them changed -- confirmed directly by counting the actual
+    # UPDATE statements SQLAlchemy issued for a semantically no-op update()
+    # call: before this fix, one was issued touching all four columns;
+    # after, none is.
+    data = title.model_dump(exclude={"created_at", "updated_at"})
+    for field in _ARRAY_FIELDS:
+        data[field] = list(data[field])
+    return TitleRow(**data)
 
 
 def _constraint_name(exc: IntegrityError) -> str | None:
@@ -204,6 +224,17 @@ class PostgresTitleRepository(TitleRepository):
         return _to_domain(row) if row else None
 
     async def get_by_tmdb_id(self, tmdb_id: int) -> Title | None:
+        # tmdb_id's own type is `int`, not `int | None` -- but a caller
+        # holding a genuinely optional value (e.g. Title.tmdb_id itself)
+        # can still reach this with None if it ever bypasses mypy at the
+        # call site (a stray `# type: ignore`, `cast`, ...). Guarded
+        # because `TitleRow.tmdb_id == None` compiles to `IS NULL`,
+        # matching whichever null-provider-id title Postgres happens to
+        # return first -- not "the title with this id", the opposite of
+        # what this method promises. Verified: without this,
+        # get_by_tmdb_id(None) returns an arbitrary title instead of None.
+        if tmdb_id is None:
+            return None
         with self._session.no_autoflush:  # see get()'s comment
             result = await self._session.execute(
                 select(TitleRow).where(TitleRow.tmdb_id == tmdb_id)
@@ -212,6 +243,9 @@ class PostgresTitleRepository(TitleRepository):
         return _to_domain(row) if row else None
 
     async def get_by_imdb_id(self, imdb_id: str) -> Title | None:
+        # See get_by_tmdb_id's comment -- same IS NULL hazard, same guard.
+        if imdb_id is None:
+            return None
         with self._session.no_autoflush:  # see get()'s comment
             result = await self._session.execute(
                 select(TitleRow).where(TitleRow.imdb_id == imdb_id)
