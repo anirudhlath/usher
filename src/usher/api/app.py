@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from usher.api.routers import health
 from usher.config import Settings, get_settings
@@ -29,6 +30,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description="A self-hosted media catalog backend.",
         lifespan=lifespan,
     )
+    # Gives every request a real server span (a valid trace/span id, even
+    # with no OTLP collector configured -- see configure_tracing) so
+    # inject_trace_context has something to correlate logs against, and so
+    # later milestones' explicit pipeline spans nest under a request trace
+    # instead of each becoming its own root. Per-app-instance and safe to
+    # call on every create_app(): instrument_app marks the app object
+    # itself, not a process-global singleton (verified directly).
+    FastAPIInstrumentor.instrument_app(app)
     app.state.settings = settings
     app.include_router(health.router)
     return app

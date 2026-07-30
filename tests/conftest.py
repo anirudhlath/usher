@@ -6,6 +6,7 @@ import os
 from collections.abc import Iterator
 
 import pytest
+from opentelemetry import trace
 
 from usher.config import Settings, get_settings
 
@@ -38,3 +39,38 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def reset_otel_tracer_provider() -> Iterator[None]:
+    """Isolate every test from any real SDK `TracerProvider` a previous
+    test (or `usher.telemetry.configure_tracing`, which every `create_app()`
+    call runs) installed.
+
+    `opentelemetry.trace.set_tracer_provider()` is deliberately set-once at
+    the API level — `configure_tracing`'s own idempotency guard relies on
+    exactly that behaviour to avoid leaking a `BatchSpanProcessor` thread
+    across repeated `create_app()` calls in one process (see its
+    docstring). That same set-once behaviour becomes a test-order
+    dependency without this fixture: whichever test in the session
+    installs a real provider first "wins" it for every test after.
+    Verified directly: without this reset, running a test that calls
+    `trace.set_tracer_provider(TracerProvider())` before
+    `test_no_trace_context_outside_a_span` makes the latter fail with
+    `KeyError('trace_id')` — a stale, still-valid span context leaks in
+    from the earlier test's span instead of the "no active span" state
+    the test's name promises.
+
+    There is no public "unset" API — a real deployment is never meant to
+    call `set_tracer_provider` more than once per process. Reaching into
+    the module's private `_TRACER_PROVIDER`/`_TRACER_PROVIDER_SET_ONCE`
+    state is the same trick OpenTelemetry's own test suite uses for this.
+    """
+
+    def _reset() -> None:
+        trace._TRACER_PROVIDER = None
+        trace._TRACER_PROVIDER_SET_ONCE = type(trace._TRACER_PROVIDER_SET_ONCE)()
+
+    _reset()
+    yield
+    _reset()
