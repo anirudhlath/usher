@@ -3733,6 +3733,72 @@ git commit -m "feat: title repository translating between rows and domain models
 > than rewritten, in keeping with this plan being a record of what was
 > planned and decided, not a living file list.
 
+> **Amended post-implementation — Step 1's fixture never actually ran the
+> migration it was meant to exercise.** `Base.metadata.create_all` (Step
+> 1's code block above) builds a schema from SQLAlchemy `Table` metadata
+> only — the same blindness CLAUDE.md's Commands section already documents
+> for `--autogenerate` applies here for the same reason: neither one runs
+> the migration's own `op.execute(...)` calls. Verified directly: against
+> the `create_all`-built schema, `SELECT tgname FROM pg_trigger WHERE NOT
+> tgisinternal` returned nothing. The three `set_updated_at` triggers —
+> whose own migration comment calls them "what actually guarantees
+> updated_at reflects every write, regardless of how it was made,"
+> specifically for M2/M4's `ON CONFLICT DO UPDATE` bulk paths — had never
+> once run in this suite, and Task 9's migration chain had never once
+> executed against a live Postgres anywhere in it either.
+>
+> Fixed in `tests/integration/conftest.py`: `postgres_url` now runs
+> `alembic upgrade head` (via `alembic.command.upgrade`, not a subprocess)
+> once per test session, immediately after the container starts, in place
+> of `session`'s old per-test `create_all`/`drop_all`. `env.py` reads the
+> database URL from `usher.config.get_settings()`, not from `alembic.ini`
+> (see `env.py`'s own docstring), so driving it programmatically means
+> setting `USHER_DATABASE_URL`/`USHER_SECRET_KEY` the same way a real CLI
+> invocation would have, then restoring the environment exactly as found.
+>
+> Running a real migration is real DDL — much pricier than `create_all`
+> against a from-scratch schema in an empty database — so it now runs once
+> per session instead of once per test, and `session` isolates each test
+> with a connection-bound transaction that gets rolled back afterward
+> instead of dropping and recreating the schema. Verified directly, since
+> this is exactly the kind of interaction that looks fine in isolation and
+> isn't: `PostgresTitleRepository`'s own `begin_nested()` SAVEPOINTs (the
+> session-poisoning fix earlier in this task) still nest correctly inside
+> the outer, fixture-owned transaction — SQLAlchemy's default
+> `join_transaction_mode` ("conditional_savepoint") resolves to
+> "rollback_only" for a connection with a plain, already-open, non-nested
+> transaction, which is exactly this shape, so the session's flushes and
+> SAVEPOINTs all participate in that one transaction rather than trying to
+> start their own. Two iterations of add/conflict/rollback against the same
+> migrated schema, in two fresh connections, confirmed both full isolation
+> (zero rows visible after rollback) and that conflict handling still
+> works, before this was carried over into the real fixture.
+>
+> Two new tests (`tests/integration/test_migrations.py`) now depend on
+> `postgres_url` doing this: `test_migration_creates_the_updated_at_triggers`
+> (the direct regression test for the gap above) and
+> `test_migration_matches_the_orm_metadata`, which runs Alembic's own
+> autogenerate diff (`alembic.autogenerate.compare_metadata`) against the
+> now-migrated database and asserts it reports no drift — the ongoing check
+> for the two categories of change CLAUDE.md already warns
+> `--autogenerate` alone is blind to (CHECK constraint bodies, and
+> triggers/functions), ordinarily caught only by eye. Both were written
+> and run against the pre-fix fixture first and failed for the right
+> reason (a schema-less database, since schema creation used to live
+> entirely in the `session` fixture these two tests don't request), not a
+> contrived one.
+>
+> Also fixed in the same pass, since it touched the same fixture: the
+> `testcontainers.postgres` deprecation warning (noted, not acted on, in
+> the amendment above) used to fire on every run that so much as collected
+> this directory, including `pytest -m "not integration"` — collection
+> still imports `conftest.py` even though it filters every test back out.
+> The `from testcontainers.postgres import PostgresContainer` import moved
+> from module level into `postgres_url` itself, so it only runs once the
+> fixture is actually instantiated. Verified: `pytest -m "not integration"`
+> no longer shows the warning; `pytest tests/integration` still does,
+> exactly once.
+
 ---
 
 ## Task 11: Telemetry — logging with trace context
