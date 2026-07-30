@@ -56,7 +56,22 @@ class RepositoryConflict(UsherPortError):
     error (e.g. Postgres's `IntegrityError` on a unique constraint) into
     this, so callers never need to import a storage-specific exception
     type to handle it. See `usher.ports.repository.TitleRepository.add`.
+
+    `constraint` names whichever unique constraint or index actually
+    fired (e.g. `"ix_titles_tmdb_id"`), when the implementation can
+    determine it — `None` if it can't. This is what lets a caller
+    implement "try to add, fall back to update on conflict" correctly:
+    without it, a service has no way to tell "this exact id already
+    exists, retry as an update" apart from "some *other* row already
+    holds one of this title's provider ids, look *that* row up instead" —
+    both raise the identical exception otherwise, and the message alone
+    is prose, not something a service should parse to recover the
+    distinction.
     """
+
+    def __init__(self, message: str, *, constraint: str | None = None) -> None:
+        super().__init__(message)
+        self.constraint = constraint
 
 
 class RepositoryNotFound(UsherPortError):

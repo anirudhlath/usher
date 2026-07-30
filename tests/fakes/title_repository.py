@@ -14,10 +14,23 @@ from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import TitleRepository
 
+# Mirrors db/models/title.py's three partial unique indexes exactly, name
+# for name -- this is what lets RepositoryConflict.constraint agree
+# between this fake and the real, Postgres-backed repository (which reads
+# its constraint name from asyncpg's own structured error fields; see
+# title.py's _constraint_name). Checked in this fixed order so the fake is
+# deterministic when a candidate conflicts on more than one field at once.
+_PROVIDER_ID_CONSTRAINTS = (
+    ("tmdb_id", "ix_titles_tmdb_id"),
+    ("imdb_id", "ix_titles_imdb_id"),
+    ("tvdb_id", "ix_titles_tvdb_id"),
+)
 
-def _provider_id_conflict(candidate: Title, other: Title) -> bool:
-    """True if `candidate` and `other` (a different row) claim the same
-    non-null tmdb_id, imdb_id, or tvdb_id.
+
+def _provider_id_conflict(candidate: Title, other: Title) -> str | None:
+    """The constraint name Postgres's own partial unique index would
+    report for the first non-null tmdb_id, imdb_id, or tvdb_id `candidate`
+    and `other` (a different row) share -- `None` if they don't conflict.
 
     Mirrors `db/models/title.py`'s three partial unique indexes
     (`ix_titles_tmdb_id`/`ix_titles_imdb_id`/`ix_titles_tvdb_id` — unique
@@ -28,10 +41,20 @@ def _provider_id_conflict(candidate: Title, other: Title) -> bool:
     with `RepositoryConflict`. That divergence would only surface in
     production, which is exactly what a fake exists to prevent.
     """
-    return (
-        (candidate.tmdb_id is not None and candidate.tmdb_id == other.tmdb_id)
-        or (candidate.imdb_id is not None and candidate.imdb_id == other.imdb_id)
-        or (candidate.tvdb_id is not None and candidate.tvdb_id == other.tvdb_id)
+    for field, constraint in _PROVIDER_ID_CONSTRAINTS:
+        value = getattr(candidate, field)
+        if value is not None and value == getattr(other, field):
+            return constraint
+    return None
+
+
+def _conflict(title_id: uuid.UUID, constraint: str) -> RepositoryConflict:
+    """Same message shape as the real repository's title.py:_conflict --
+    see that function's docstring for why it never claims `title_id`
+    itself already exists."""
+    return RepositoryConflict(
+        f"title {title_id} conflicts with an existing title (constraint: {constraint})",
+        constraint=constraint,
     )
 
 
@@ -56,9 +79,13 @@ class FakeTitleRepository(TitleRepository):
 
     async def add(self, title: Title) -> None:
         if title.id in self._titles:
-            raise RepositoryConflict(f"title {title.id} already exists")
-        if any(_provider_id_conflict(title, other) for other in self._titles.values()):
-            raise RepositoryConflict(f"title {title.id} conflicts with an existing title")
+            # "pk_titles" -- the real repository's own primary key
+            # constraint name (db/base.py's naming convention: "pk_%(table_name)s").
+            raise _conflict(title.id, "pk_titles")
+        for other in self._titles.values():
+            constraint = _provider_id_conflict(title, other)
+            if constraint is not None:
+                raise _conflict(title.id, constraint)
         # Postgres is the authoritative clock for created_at/updated_at --
         # PostgresTitleRepository._to_row excludes both from the INSERT, so
         # the database's own server_default assigns them, never whatever
@@ -79,8 +106,10 @@ class FakeTitleRepository(TitleRepository):
         if existing is None:
             raise RepositoryNotFound(f"no title {title.id} to update")
         others = (t for tid, t in self._titles.items() if tid != title.id)
-        if any(_provider_id_conflict(title, other) for other in others):
-            raise RepositoryConflict(f"title {title.id} conflicts with an existing title")
+        for other in others:
+            constraint = _provider_id_conflict(title, other)
+            if constraint is not None:
+                raise _conflict(title.id, constraint)
         # created_at is carried over from the persisted row, never taken
         # from the incoming title -- same reasoning as add() above. Real
         # Postgres UPDATEs simply never mention the column (title.py's

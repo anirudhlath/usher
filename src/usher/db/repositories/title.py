@@ -83,6 +83,49 @@ def _to_row(title: Title) -> TitleRow:
     return TitleRow(**title.model_dump(exclude={"created_at", "updated_at"}))
 
 
+def _constraint_name(exc: IntegrityError) -> str | None:
+    """The Postgres constraint name straight from asyncpg's own structured
+    error fields -- not parsed out of the exception message text, which is
+    dialect- and locale-dependent and was never meant to be machine-read.
+
+    SQLAlchemy's asyncpg dialect wraps the driver's own exception in a
+    DBAPI2-shaped one (`exc.orig`), but chains the original asyncpg
+    exception onto it via `raise translated_error from error` (verified
+    directly against `sqlalchemy.dialects.postgresql.asyncpg`'s source) --
+    `exc.orig.__cause__` is that original `asyncpg.exceptions.PostgresError`,
+    which carries `constraint_name` as a real attribute, populated from the
+    `ErrorResponse` protocol field Postgres itself sends. Verified against a
+    real unique-violation on both a plain primary key and a partial unique
+    index: `exc.orig.constraint_name` does not exist (`exc.orig` is
+    SQLAlchemy's wrapper, not the asyncpg exception itself) -- this is not
+    a redundant safety check, it is the accessor that actually works.
+
+    Best-effort: `None` if any layer of that chain isn't what's expected,
+    rather than raising a second exception while already handling the
+    first -- a caller that can't determine which constraint fired still
+    gets a `RepositoryConflict`, just without the structured detail.
+    """
+    return getattr(getattr(exc.orig, "__cause__", None), "constraint_name", None)
+
+
+def _conflict(title_id: uuid.UUID, constraint: str | None) -> RepositoryConflict:
+    """Builds an accurate `RepositoryConflict` for `add()`/`update()`
+    alike. Deliberately never claims `title_id` itself already exists --
+    measured bug this replaced: the message used to read "title {id}
+    already exists" unconditionally, which is false whenever the actual
+    collision was on a *different* row's tmdb_id/imdb_id/tvdb_id (`id`
+    doesn't pre-exist at all in that case; the provider id does). "conflicts
+    with an existing title" is true either way -- `title_id`'s own id
+    collided, or one of its provider ids did -- and `constraint` carries
+    the specific, structured answer for a caller that needs to branch on
+    which.
+    """
+    detail = f" (constraint: {constraint})" if constraint else ""
+    return RepositoryConflict(
+        f"title {title_id} conflicts with an existing title{detail}", constraint=constraint
+    )
+
+
 class PostgresTitleRepository(TitleRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -100,7 +143,7 @@ class PostgresTitleRepository(TitleRepository):
             # inside a SAVEPOINT (begin_nested) specifically so this catch
             # only unwinds this call's own insert, not the caller's whole
             # transaction -- see the module docstring.
-            raise RepositoryConflict(f"title {title.id} already exists") from exc
+            raise _conflict(title.id, _constraint_name(exc)) from exc
 
     async def update(self, title: Title) -> None:
         # _to_row(title) raises loudly on any field/column mismatch, the same
@@ -145,7 +188,7 @@ class PostgresTitleRepository(TitleRepository):
             # the module docstring. Retargeting tmdb_id/imdb_id/tvdb_id to a
             # value another title already holds raises IntegrityError here
             # today (verified), not just in some future schema change.
-            raise RepositoryConflict(f"title {title.id} conflicts with an existing title") from exc
+            raise _conflict(title.id, _constraint_name(exc)) from exc
 
     async def get(self, title_id: uuid.UUID) -> Title | None:
         # no_autoflush: a plain read has no business flushing anything, and

@@ -3799,6 +3799,48 @@ git commit -m "feat: title repository translating between rows and domain models
 > no longer shows the warning; `pytest tests/integration` still does,
 > exactly once.
 
+> **Amended post-implementation — `RepositoryConflict` misattributed which
+> row it was blaming, and carried nothing a caller could branch on.**
+> Measured: adding a title whose `tmdb_id` collided with an existing row
+> (but whose own `id` was fine) raised a message reading "title {id}
+> already exists" — false; that id was never the duplicate, the tmdb_id
+> was. This breaks exactly the "try to add, fall back to update on
+> conflict" pattern this task's own tests already name as the motivating
+> M4 use case: a service catching `RepositoryConflict` has no way to tell
+> "retarget this id" (a true id collision) apart from "look up whichever
+> row already holds this tmdb_id" (a provider-id collision), and nothing
+> structured to branch on either way — only prose.
+>
+> Fixed: `RepositoryConflict` (`usher.ports.errors`) gained a `constraint:
+> str | None` attribute. `PostgresTitleRepository` populates it from
+> `IntegrityError.orig.__cause__.constraint_name` — verified directly that
+> `exc.orig` is SQLAlchemy's own DBAPI2-shaped wrapper
+> (`sqlalchemy.dialects.postgresql.asyncpg.AsyncAdapt_asyncpg_dbapi.
+> IntegrityError`), not the asyncpg exception itself, but the dialect
+> chains the original `asyncpg.exceptions.PostgresError` onto it via
+> `raise translated_error from error`, and *that* carries `constraint_name`
+> as a real, structured field from Postgres's own `ErrorResponse` — not
+> parsed out of the message text. `FakeTitleRepository` was changed to
+> report the identical constraint names its own `_provider_id_conflict`
+> check already mirrors from `db/models/title.py`
+> (`ix_titles_tmdb_id`/`ix_titles_imdb_id`/`ix_titles_tvdb_id`, plus
+> `pk_titles` for a plain id collision), so the two agree — proven by the
+> shared contract suite, not merely asserted. The message itself changed
+> from claiming a specific id "already exists" to the accurate "title {id}
+> conflicts with an existing title (constraint: ...)", true whichever way
+> the conflict actually happened.
+>
+> While in the area: the contract suite's provider-id-conflict coverage
+> broadened from tmdb_id alone (`test_add_rejects_a_duplicate_tmdb_id`,
+> `test_update_rejects_a_conflicting_provider_id`) to all three fields,
+> each its own test rather than one parametrized case, so a typo swapping
+> which field `_provider_id_conflict` (the fake) or a Postgres index (the
+> real repository) actually checks can't pass unnoticed. Also added:
+> `test_update_clearing_provider_ids_to_none_is_allowed`, pinning that
+> clearing a field to `None`/`()` — untested before — is a normal update,
+> not a false conflict against another row that also happens to have
+> `None` there.
+
 ---
 
 ## Task 11: Telemetry — logging with trace context

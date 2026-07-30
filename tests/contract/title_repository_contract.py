@@ -111,8 +111,11 @@ class TitleRepositoryContract:
     async def test_add_rejects_a_duplicate_id(self, repo: TitleRepository) -> None:
         title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
         await repo.add(title)
-        with pytest.raises(RepositoryConflict):
+        with pytest.raises(RepositoryConflict) as exc_info:
             await repo.add(title)
+        # Structured, not just "some conflict happened" -- a service can
+        # branch on which constraint fired without parsing the message.
+        assert exc_info.value.constraint == "pk_titles"
 
     async def test_add_rejects_a_duplicate_tmdb_id(self, repo: TitleRepository) -> None:
         """tmdb_id/imdb_id/tvdb_id are unique-indexed attributes (PRD 02,
@@ -122,14 +125,56 @@ class TitleRepositoryContract:
         that only checked `title.id` would let a service add two rows for
         the same TMDb title in tests while the real repository rejects it
         in production — precisely the divergence Task 10 was warned about.
+
+        Also pins two properties beyond "a conflict was raised": the
+        `.constraint` attribute names the specific index that fired (a
+        service can't otherwise tell "retarget this id" from "look up the
+        row already holding this tmdb_id" apart), and the message never
+        claims `second`'s own id already exists -- it doesn't; the *field*
+        collided, not the id. Measured bug this pins: the message used to
+        read "title {second.id} already exists" unconditionally, which is
+        false here -- that id was never the problem. (The message may
+        still *name* second.id, to say which add() call failed -- that's
+        fine; claiming it already exists is what was wrong.)
         """
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
         second = Title(
             kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", tmdb_id=438631
         )
         await repo.add(first)
-        with pytest.raises(RepositoryConflict):
+        with pytest.raises(RepositoryConflict) as exc_info:
             await repo.add(second)
+        assert exc_info.value.constraint == "ix_titles_tmdb_id"
+        assert "already exists" not in str(exc_info.value)
+
+    async def test_add_rejects_a_duplicate_imdb_id(self, repo: TitleRepository) -> None:
+        """Same property as test_add_rejects_a_duplicate_tmdb_id, for the
+        imdb_id branch -- exercised separately, not folded into a single
+        parametrized case, so a typo swapping which field
+        `_provider_id_conflict` (the fake) or Postgres (the real
+        repository) actually checks can't pass by accident."""
+        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt1160419")
+        second = Title(
+            kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", imdb_id="tt1160419"
+        )
+        await repo.add(first)
+        with pytest.raises(RepositoryConflict) as exc_info:
+            await repo.add(second)
+        assert exc_info.value.constraint == "ix_titles_imdb_id"
+        assert "already exists" not in str(exc_info.value)
+
+    async def test_add_rejects_a_duplicate_tvdb_id(self, repo: TitleRepository) -> None:
+        """Same property, for the tvdb_id branch -- see
+        test_add_rejects_a_duplicate_imdb_id's docstring."""
+        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tvdb_id=121361)
+        second = Title(
+            kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", tvdb_id=121361
+        )
+        await repo.add(first)
+        with pytest.raises(RepositoryConflict) as exc_info:
+            await repo.add(second)
+        assert exc_info.value.constraint == "ix_titles_tvdb_id"
+        assert "already exists" not in str(exc_info.value)
 
     async def test_get_returns_none_for_unknown_id(self, repo: TitleRepository) -> None:
         assert await repo.get(new_id()) is None
@@ -167,13 +212,57 @@ class TitleRepositoryContract:
         with pytest.raises(RepositoryNotFound):
             await repo.update(title)
 
-    async def test_update_rejects_a_conflicting_provider_id(self, repo: TitleRepository) -> None:
+    async def test_update_rejects_a_conflicting_tmdb_id(self, repo: TitleRepository) -> None:
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=1)
         second = Title(kind=TitleKind.MOVIE, name="Arrival", sort_name="Arrival", tmdb_id=2)
         await repo.add(first)
         await repo.add(second)
-        with pytest.raises(RepositoryConflict):
+        with pytest.raises(RepositoryConflict) as exc_info:
             await repo.update(second.evolve(tmdb_id=1))
+        assert exc_info.value.constraint == "ix_titles_tmdb_id"
+
+    async def test_update_rejects_a_conflicting_imdb_id(self, repo: TitleRepository) -> None:
+        """Same property as test_update_rejects_a_conflicting_tmdb_id, for
+        the imdb_id branch -- see test_add_rejects_a_duplicate_imdb_id's
+        docstring for why this is a separate case, not a parametrized one.
+        """
+        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt1160419")
+        second = Title(
+            kind=TitleKind.MOVIE, name="Arrival", sort_name="Arrival", imdb_id="tt0104652"
+        )
+        await repo.add(first)
+        await repo.add(second)
+        with pytest.raises(RepositoryConflict) as exc_info:
+            await repo.update(second.evolve(imdb_id="tt1160419"))
+        assert exc_info.value.constraint == "ix_titles_imdb_id"
+
+    async def test_update_rejects_a_conflicting_tvdb_id(self, repo: TitleRepository) -> None:
+        """Same property, for the tvdb_id branch."""
+        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tvdb_id=1)
+        second = Title(kind=TitleKind.MOVIE, name="Arrival", sort_name="Arrival", tvdb_id=2)
+        await repo.add(first)
+        await repo.add(second)
+        with pytest.raises(RepositoryConflict) as exc_info:
+            await repo.update(second.evolve(tvdb_id=1))
+        assert exc_info.value.constraint == "ix_titles_tvdb_id"
+
+    async def test_update_clearing_provider_ids_to_none_is_allowed(
+        self, repo: TitleRepository
+    ) -> None:
+        """update() clearing a field to None/() was untested -- worth
+        pinning separately from test_update_mutates_an_existing_title,
+        since a naive fix for the conflict-detection tests above could plausibly
+        treat None as just another value to compare, rejecting a clear as
+        a false conflict between two titles that both have tmdb_id=None."""
+        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=1)
+        second = Title(kind=TitleKind.MOVIE, name="Arrival", sort_name="Arrival", tmdb_id=2)
+        await repo.add(first)
+        await repo.add(second)
+        await repo.update(first.evolve(tmdb_id=None, genres=()))
+        fetched = await repo.get(first.id)
+        assert fetched is not None
+        assert fetched.tmdb_id is None
+        assert fetched.genres == ()
 
     async def test_count_by_state_reports_the_catalog(self, repo: TitleRepository) -> None:
         for i in range(3):
