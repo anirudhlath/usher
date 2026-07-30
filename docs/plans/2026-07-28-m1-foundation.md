@@ -3673,6 +3673,66 @@ git commit -m "feat: title repository translating between rows and domain models
 > `testcontainers.community.postgres`; Step 1's import still works, so this
 > is left for whichever group next touches this fixture.
 
+> **Amended post-implementation — an independent review pass found two more
+> divergences, both fixed the same way as the ones above: empirically, with
+> a test that fails against the unfixed code first.**
+>
+> **Autoflush was a second, independent way to leak a raw
+> `sqlalchemy.exc.IntegrityError` past this class**, not covered by the
+> SAVEPOINT decision above. `session.get()`/`session.execute()` flush any
+> pending, unflushed state on the *shared* session before running, even for
+> a plain read — verified directly: a pending, invalid row staged elsewhere
+> on the session made `get`, `get_by_tmdb_id`, `get_by_imdb_id`, and
+> `count_by_state` (no translation at all) and `update()`'s own
+> `session.get()` lookup (running outside its try) all raise the raw
+> driver exception. Not reachable through this repository alone today
+> (`add`/`update` always flush before returning), but reachable the moment
+> a second repository shares this session and leaves work pending across a
+> repository boundary — M4's shape, and this file is the template the next
+> five repositories copy. Fixed: the four read methods now run their query
+> inside `self._session.no_autoflush`; `update()`'s lookup moved inside its
+> existing SAVEPOINT + `except IntegrityError`. This is a session-wide
+> precondition, not advice specific to this repository, so it is now
+> stated on `TitleRepository` itself (`ports/repository.py`), not only in
+> this module's docstring.
+>
+> **`FakeTitleRepository` had a second, independent divergence from the
+> real repository, beyond the provider-id one already fixed above: it
+> preserved a `Title`'s `created_at`/`updated_at` verbatim, including
+> letting `update()` overwrite `created_at`.** Postgres is the
+> authoritative clock for both columns — `_to_row` excludes them from every
+> INSERT/UPDATE, so the database's own `server_default`/trigger assigns
+> them, never whatever the caller's `Title` happened to carry. Measured on
+> an identical sequence: `created_at_after_add` differed between the two
+> implementations, and `created_at_is_callers` was `True` for the fake,
+> `False` for the real repository. This is exactly the silent divergence
+> the contract suite exists to catch, and it had missed it, because nothing
+> in the shared contract asserted on either timestamp field before now.
+> Fixed in `tests/fakes/title_repository.py`: both `add()` and `update()`
+> stamp `created_at`/`updated_at` themselves, ignoring whatever the
+> incoming `Title` carries. Two new contract assertions pin this going
+> forward: `test_created_at_is_not_taken_from_the_caller` and
+> `test_created_at_is_stable_across_updates` (the latter deliberately
+> tampers with `created_at` on the incoming `Title` rather than merely
+> leaving it untouched, which would pass even without the fix). This is
+> also why `test_add_then_get_round_trips` has never asserted
+> `fetched == title`: an even earlier version of this suite (in
+> `tests/unit/test_ports.py`, before the contract suite existed) did, and
+> it only worked by accident, against the fake alone, before this fix.
+>
+> Both fixes touched `src/usher/db/repositories/title.py`,
+> `src/usher/ports/repository.py`, `tests/integration/test_title_repository.py`,
+> and `tests/contract/title_repository_contract.py` — none of which are in
+> this task's **Files:** list above (nor, for that matter, are several other
+> files earlier amendments already touched: `pyproject.toml`,
+> `tests/contract/__init__.py`, `tests/fakes/title_repository.py`,
+> `tests/unit/test_ports.py`, `tests/unit/test_title_repository_contract.py`,
+> this plan, and `CLAUDE.md`). The **Files:** list above names three; the
+> work this task actually grew into touched eleven, across the initial
+> implementation and the amendments since. Left as historical record rather
+> than rewritten, in keeping with this plan being a record of what was
+> planned and decided, not a living file list.
+
 ---
 
 ## Task 11: Telemetry — logging with trace context

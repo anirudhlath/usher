@@ -7,6 +7,7 @@ parametrized tests along with it.
 """
 
 import uuid
+from datetime import UTC, datetime
 
 from usher.domain.enums import EnrichmentState
 from usher.domain.title import Title
@@ -58,15 +59,38 @@ class FakeTitleRepository(TitleRepository):
             raise RepositoryConflict(f"title {title.id} already exists")
         if any(_provider_id_conflict(title, other) for other in self._titles.values()):
             raise RepositoryConflict(f"title {title.id} conflicts with an existing title")
-        self._titles[title.id] = title
+        # Postgres is the authoritative clock for created_at/updated_at --
+        # PostgresTitleRepository._to_row excludes both from the INSERT, so
+        # the database's own server_default assigns them, never whatever
+        # the caller's Title happened to carry (a stale retry, a
+        # deliberately backdated import, ...). Stamping here, ignoring
+        # title.created_at/title.updated_at entirely, is what makes this
+        # fake agree -- verified divergence: before this, the fake
+        # preserved the caller's values verbatim, including letting
+        # update() overwrite created_at, which the real repository can
+        # never do (see tests/contract/title_repository_contract.py's
+        # test_created_at_is_not_taken_from_the_caller and
+        # test_created_at_is_stable_across_updates).
+        now = datetime.now(UTC)
+        self._titles[title.id] = title.evolve(created_at=now, updated_at=now)
 
     async def update(self, title: Title) -> None:
-        if title.id not in self._titles:
+        existing = self._titles.get(title.id)
+        if existing is None:
             raise RepositoryNotFound(f"no title {title.id} to update")
         others = (t for tid, t in self._titles.items() if tid != title.id)
         if any(_provider_id_conflict(title, other) for other in others):
             raise RepositoryConflict(f"title {title.id} conflicts with an existing title")
-        self._titles[title.id] = title
+        # created_at is carried over from the persisted row, never taken
+        # from the incoming title -- same reasoning as add() above. Real
+        # Postgres UPDATEs simply never mention the column (title.py's
+        # update() explicitly excludes it from the copy loop), so it can't
+        # move after insert; updated_at, in contrast, always advances on a
+        # real write (the set_updated_at trigger / onupdate=func.now()),
+        # so it's re-stamped here too rather than copied from `existing`.
+        self._titles[title.id] = title.evolve(
+            created_at=existing.created_at, updated_at=datetime.now(UTC)
+        )
 
     async def get(self, title_id: uuid.UUID) -> Title | None:
         return self._titles.get(title_id)

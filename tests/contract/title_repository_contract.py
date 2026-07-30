@@ -30,6 +30,8 @@ tests/integration/test_title_repository.py's
 concrete subclasses.
 """
 
+from datetime import UTC, datetime
+
 import pytest
 
 from usher.domain.enums import EnrichmentState, TitleKind
@@ -41,6 +43,17 @@ from usher.ports.repository import TitleRepository
 
 class TitleRepositoryContract:
     async def test_add_then_get_round_trips(self, repo: TitleRepository) -> None:
+        # Not `assert fetched == title`: an earlier version of this test (in
+        # tests/unit/test_ports.py, before the contract suite existed) did
+        # exactly that, and it only worked by accident, against the fake
+        # alone -- the fake used to preserve created_at/updated_at verbatim,
+        # so a freshly-constructed Title round-tripped byte-for-byte. Neither
+        # implementation does that (deliberately -- see
+        # test_created_at_is_not_taken_from_the_caller below): Postgres is
+        # the authoritative clock for both columns, and the fake now stamps
+        # them itself to match. A full-equality assertion here would fail
+        # against both, for a reason that has nothing to do with what this
+        # test checks.
         title = Title(
             kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", year=2021, tmdb_id=438631
         )
@@ -50,6 +63,50 @@ class TitleRepositoryContract:
         assert fetched.name == "Dune"
         assert fetched.tmdb_id == 438631
         assert fetched.enrichment_state is EnrichmentState.SKELETON
+
+    async def test_created_at_is_not_taken_from_the_caller(self, repo: TitleRepository) -> None:
+        """Postgres is the authoritative clock for created_at: add()'s
+        _to_row excludes it from the INSERT entirely, so the database's own
+        server_default assigns it, never whatever the caller's Title
+        happened to carry -- a stale retry, a deliberately backdated import,
+        or (as here) a plain constructor call that hardcodes one. Measured
+        divergence this pins: the fake used to honour the caller's value
+        verbatim (`created_at_is_callers: fake=True`), while the real,
+        Postgres-backed repository never did (`real=False`)."""
+        backdated = datetime(2020, 1, 1, tzinfo=UTC)
+        title = Title(
+            kind=TitleKind.MOVIE,
+            name="Dune",
+            sort_name="Dune",
+            created_at=backdated,
+            updated_at=backdated,
+        )
+        await repo.add(title)
+        fetched = await repo.get(title.id)
+        assert fetched is not None
+        assert fetched.created_at != backdated
+
+    async def test_created_at_is_stable_across_updates(self, repo: TitleRepository) -> None:
+        """M4 builds re-enrichment scheduling on updated_at -- which only
+        means anything if created_at never moves once a title exists.
+        Deliberately tampers with created_at on the incoming Title (not
+        just leaves it untouched via evolve(), which would pass this
+        assertion even without the fix, since evolve() alone never changes
+        a field it isn't told to): update() must ignore it regardless,
+        the same way the real repository's update() never even looks at
+        created_at on the incoming row (see title.py's update())."""
+        title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
+        await repo.add(title)
+        first = await repo.get(title.id)
+        assert first is not None
+        tampered = first.evolve(
+            enrichment_state=EnrichmentState.ENRICHED,
+            created_at=datetime(2020, 1, 1, tzinfo=UTC),
+        )
+        await repo.update(tampered)
+        second = await repo.get(title.id)
+        assert second is not None
+        assert second.created_at == first.created_at
 
     async def test_add_rejects_a_duplicate_id(self, repo: TitleRepository) -> None:
         title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
