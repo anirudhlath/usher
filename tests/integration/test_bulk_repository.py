@@ -47,6 +47,33 @@ class TestPostgresBulkCatalogRepositoryContract(BulkCatalogRepositoryContract):
         value = result.scalar_one_or_none()
         return float(value) if value is not None else None
 
+    async def tmdb_id_of(self, repo: BulkCatalogRepository, imdb_id: str) -> int | None:
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        result = await repo._session.execute(
+            text("SELECT tmdb_id FROM titles WHERE imdb_id = :imdb_id"),
+            {"imdb_id": imdb_id},
+        )
+        value = result.scalar_one_or_none()
+        return int(value) if value is not None else None
+
+    async def tvdb_id_of(self, repo: BulkCatalogRepository, imdb_id: str) -> int | None:
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        result = await repo._session.execute(
+            text("SELECT tvdb_id FROM titles WHERE imdb_id = :imdb_id"),
+            {"imdb_id": imdb_id},
+        )
+        value = result.scalar_one_or_none()
+        return int(value) if value is not None else None
+
+    async def name_of(self, repo: BulkCatalogRepository, imdb_id: str) -> str | None:
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        result = await repo._session.execute(
+            text("SELECT name FROM titles WHERE imdb_id = :imdb_id"),
+            {"imdb_id": imdb_id},
+        )
+        value = result.scalar_one_or_none()
+        return str(value) if value is not None else None
+
     async def indexes_intact(self, repo: BulkCatalogRepository) -> bool:
         assert isinstance(repo, PostgresBulkCatalogRepository)
         return await _index_names(repo._session) >= _SUSPENDED

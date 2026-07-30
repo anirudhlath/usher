@@ -1,14 +1,23 @@
 """In-memory BulkCatalogRepository, for unit-testing BootstrapService.
 
 Mirrors the Postgres implementation's *observable* behaviour, not its
-mechanism: the same dedupe-within-a-batch rule, the same skip-if-unchanged
-rule, the same namespace-aware conflict rules. Where the real one gets those
-from `DISTINCT ON`, `IS DISTINCT FROM`, and a composite unique index, this
-one does them in Python — and the shared contract suite is what proves the
-two agree.
+mechanism: the same dedupe-within-a-batch rule (and its specific,
+deterministic winner -- not just "one row survives"), the same
+skip-if-unchanged rule, the same namespace-aware conflict rules, the same
+NULL-only-fills and global-uniqueness guards on `link_crosswalk`. Where the
+real one gets those from `DISTINCT ON`, `IS DISTINCT FROM`, `NOT EXISTS`, and
+composite unique indexes, this one does them in Python — and the shared
+contract suite is what proves the two agree. A prior version of this file
+matched the real implementation's *shape* (dedupe, skip-unchanged, kind
+scoping) without matching several of its *specific rules* -- last-write-wins
+instead of first/highest/smallest, and no NULL guard or cross-title
+uniqueness check on `link_crosswalk` at all -- and 24/24 contract tests
+still passed, because nothing exercised the difference. See the contract
+module's docstring for what a Postgres-vs-fake mutation check found.
 """
 
 import contextlib
+import math
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
@@ -20,6 +29,22 @@ from usher.ports.repository import (
     BulkWriteResult,
     CrosswalkLinkResult,
 )
+
+# Sorts after every real id, mirroring SQL's NULLS LAST (Python's default,
+# None first, is the opposite of what the real ORDER BY does).
+_NULLS_LAST = math.inf
+
+
+def _crosswalk_sort_key(pair: IdCrosswalkPair) -> tuple[float, float, float]:
+    """Mirrors the real implementation's tie-break for two crosswalk rows
+    sharing one `imdb_id` in a single batch: `ORDER BY tmdb_movie_id NULLS
+    LAST, tmdb_series_id NULLS LAST, tvdb_series_id NULLS LAST` -- smallest
+    non-null id wins, column by column."""
+    return (
+        _NULLS_LAST if pair.tmdb_movie_id is None else float(pair.tmdb_movie_id),
+        _NULLS_LAST if pair.tmdb_series_id is None else float(pair.tmdb_series_id),
+        _NULLS_LAST if pair.tvdb_series_id is None else float(pair.tvdb_series_id),
+    )
 
 
 class _StoredTitle:
@@ -57,10 +82,16 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
             self.window_depth -= 1
 
     async def upsert_titles(self, rows: Sequence[ImdbTitle]) -> BulkWriteResult:
-        # Last write wins within a batch, matching the real implementation's
-        # DISTINCT ON, which Postgres requires: one statement may not hit the
-        # same ON CONFLICT target twice.
-        deduped: dict[str, ImdbTitle] = {row.imdb_id: row for row in rows}
+        # First occurrence wins within a batch: the real implementation
+        # assigns each staged row a fresh UUIDv7 in input order and runs
+        # `SELECT DISTINCT ON (imdb_id) * FROM stg_titles ORDER BY imdb_id,
+        # id` -- id ascending means the earliest-generated, i.e. first-seen,
+        # row survives. Postgres requires *some* deterministic winner
+        # regardless: one statement may not hit the same ON CONFLICT target
+        # twice.
+        deduped: dict[str, ImdbTitle] = {}
+        for row in rows:
+            deduped.setdefault(row.imdb_id, row)
         inserted = updated = 0
         for imdb_id, row in deduped.items():
             existing = self._titles.get(imdb_id)
@@ -74,6 +105,11 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
         return BulkWriteResult(inserted=inserted, updated=updated)
 
     async def apply_ratings(self, rows: Sequence[ImdbRating]) -> int:
+        # Unlike upsert_titles, the real implementation's in-batch dedup
+        # (`DISTINCT ON (imdb_id) ... ORDER BY imdb_id`) has no secondary
+        # tie-break column, so which of two same-imdb_id ratings wins is
+        # planner-dependent -- deliberately not pinned here either; only
+        # "exactly one wins" is a real guarantee (see the contract test).
         changed = 0
         for row in {r.imdb_id: r for r in rows}.values():
             stored = self._titles.get(row.imdb_id)
@@ -86,24 +122,61 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
         return changed
 
     async def upsert_tmdb_ids(self, rows: Sequence[TmdbId]) -> int:
+        # Highest popularity wins within a batch, matching `ORDER BY
+        # tmdb_id, kind, popularity DESC`. There is no IS DISTINCT FROM
+        # guard on this upsert (see repository.py's docstring on this
+        # method), so -- unlike upsert_titles/apply_ratings -- this always
+        # counts every distinct key, whether or not the stored row's data
+        # actually changes; a replay reports the same count again, not
+        # zero.
+        winners: dict[tuple[int, TitleKind], TmdbId] = {}
         for row in rows:
-            self._tmdb_ids[(row.tmdb_id, row.kind)] = row
-        return len({(row.tmdb_id, row.kind) for row in rows})
+            key = (row.tmdb_id, row.kind)
+            current = winners.get(key)
+            if current is None or row.popularity > current.popularity:
+                winners[key] = row
+        self._tmdb_ids.update(winners)
+        return len(winners)
 
     async def upsert_crosswalk(self, rows: Sequence[IdCrosswalkPair]) -> int:
+        # Same "no IS DISTINCT FROM guard" absence as upsert_tmdb_ids: a
+        # replay reports the same count again, not zero.
+        winners: dict[str, IdCrosswalkPair] = {}
         for row in rows:
+            current = winners.get(row.imdb_id)
+            if current is None or _crosswalk_sort_key(row) < _crosswalk_sort_key(current):
+                winners[row.imdb_id] = row
+
+        for row in winners.values():
             stored = self._crosswalk.get(row.imdb_id)
             self._crosswalk[row.imdb_id] = (
                 row
                 if stored is None
+                # COALESCE, not `or`: an id of 0 is falsy but not absent,
+                # so `or` would wrongly fall through to `stored`'s value --
+                # unreachable with real TMDb/TVDB ids in practice, but
+                # `is not None` is free. The three SPARQL joins each fill
+                # one column and run as three separate passes, so a later
+                # pass carrying only one column must not blank what an
+                # earlier pass stored in the other two.
                 else replace(
                     stored,
-                    tmdb_movie_id=row.tmdb_movie_id or stored.tmdb_movie_id,
-                    tmdb_series_id=row.tmdb_series_id or stored.tmdb_series_id,
-                    tvdb_series_id=row.tvdb_series_id or stored.tvdb_series_id,
+                    tmdb_movie_id=(
+                        row.tmdb_movie_id if row.tmdb_movie_id is not None else stored.tmdb_movie_id
+                    ),
+                    tmdb_series_id=(
+                        row.tmdb_series_id
+                        if row.tmdb_series_id is not None
+                        else stored.tmdb_series_id
+                    ),
+                    tvdb_series_id=(
+                        row.tvdb_series_id
+                        if row.tvdb_series_id is not None
+                        else stored.tvdb_series_id
+                    ),
                 )
             )
-        return len({row.imdb_id for row in rows})
+        return len(winners)
 
     async def link_crosswalk(self) -> CrosswalkLinkResult:
         linked = unmatched = conflicted = 0
@@ -125,7 +198,15 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
                     continue
                 if stored.tmdb_id == tmdb_id:
                     continue  # already linked; a replay, not a conflict
-                if (tmdb_id, kind) in claimed:
+                # `stored.tmdb_id is not None`: only fills a currently-NULL
+                # tmdb_id (this method's own port docstring). A title that
+                # already carries a *different* id must not be silently
+                # retargeted -- that would overwrite popularity a later,
+                # better-informed enrichment pass already wrote, not merely
+                # misreport a count. Without this guard the fake reports a
+                # *link* here where Postgres reports a *conflict* (measured
+                # directly), and both the id and popularity get overwritten.
+                if stored.tmdb_id is not None or (tmdb_id, kind) in claimed:
                     conflicted += 1
                     continue
                 stored.tmdb_id = tmdb_id
@@ -134,17 +215,58 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
                     stored.popularity = universe.popularity
                 claimed.add((tmdb_id, kind))
                 linked += 1
-            if pair.tvdb_series_id is not None:
-                stored = self._titles.get(imdb_id)
-                if stored is not None and stored.tvdb_id is None:
-                    stored.tvdb_id = pair.tvdb_series_id
+
+        # tvdb_id: same NULL-only-fills guard, plus global uniqueness
+        # (ix_titles_tvdb_id is a unique partial index -- two titles cannot
+        # legitimately hold the same one, the exact "fake ignores
+        # provider-id uniqueness" class documented on
+        # title_repository_contract.py's own duplicate-tvdb-id test).
+        # `tvdb_winner` mirrors the real implementation's own dedup of the
+        # *stored crosswalk data itself* -- `SELECT DISTINCT ON
+        # (tvdb_series_id) ... ORDER BY tvdb_series_id, imdb_id` -- which
+        # runs before any title is even considered, because Wikidata can
+        # associate the same tvdb id with more than one imdb_id.
+        #
+        # Deliberately does not touch linked/unmatched/conflicted: the real
+        # implementation's classification query is scoped to the tmdb-only
+        # _CROSSWALK_PAIRS view, and its tvdb UPDATE's rowcount is never
+        # read, so tvdb linking is invisible to those three counters there
+        # too.
+        tvdb_winner: dict[int, str] = {}
+        for imdb_id, pair in self._crosswalk.items():
+            if pair.tvdb_series_id is None:
+                continue
+            current = tvdb_winner.get(pair.tvdb_series_id)
+            if current is None or imdb_id < current:
+                tvdb_winner[pair.tvdb_series_id] = imdb_id
+        claimed_tvdb = {
+            stored.tvdb_id for stored in self._titles.values() if stored.tvdb_id is not None
+        }
+        for tvdb_id, winner_imdb_id in tvdb_winner.items():
+            stored = self._titles.get(winner_imdb_id)
+            if stored is not None and stored.tvdb_id is None and tvdb_id not in claimed_tvdb:
+                stored.tvdb_id = tvdb_id
+                claimed_tvdb.add(tvdb_id)
+
         return CrosswalkLinkResult(linked=linked, unmatched=unmatched, conflicted=conflicted)
 
     async def count_titles(self) -> int:
         return len(self._titles)
 
-    # --- test-only accessor, mirroring the contract's hook ---------------
+    # --- test-only accessors, mirroring the contract's readback hooks ----
 
     def popularity(self, imdb_id: str) -> float | None:
         stored = self._titles.get(imdb_id)
         return stored.popularity if stored else None
+
+    def tmdb_id(self, imdb_id: str) -> int | None:
+        stored = self._titles.get(imdb_id)
+        return stored.tmdb_id if stored else None
+
+    def tvdb_id(self, imdb_id: str) -> int | None:
+        stored = self._titles.get(imdb_id)
+        return stored.tvdb_id if stored else None
+
+    def name(self, imdb_id: str) -> str | None:
+        stored = self._titles.get(imdb_id)
+        return stored.facts.name if stored else None

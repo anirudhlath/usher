@@ -5,6 +5,8 @@ to: a first run starts from zero, a matching revision resumes, and a changed
 revision restarts.
 """
 
+from datetime import UTC, datetime
+
 from usher.domain.bootstrap import ImportRunStatus
 from usher.ports.repository import ImportRunRepository
 
@@ -72,6 +74,20 @@ class ImportRunRepositoryContract:
             "imdb.title.basics",
             "wikidata.crosswalk",
         }
+
+    async def test_list_runs_orders_most_recent_activity_first(
+        self, runs: ImportRunRepository
+    ) -> None:
+        """The port promises "most recent activity first" (its own
+        docstring, and what `bootstrap-status` prints) -- a set comparison
+        can't tell an implementation that reversed the sort from a correct
+        one, so this checks the actual returned order."""
+        old = await runs.start("imdb.title.basics", "etag-1")
+        await runs.save(old.evolve(heartbeat_at=datetime(2020, 1, 1, tzinfo=UTC)))
+        new = await runs.start("wikidata.crosswalk", "2026-07-30")
+        await runs.save(new.evolve(heartbeat_at=datetime(2026, 7, 30, tzinfo=UTC)))
+        result = await runs.list_runs()
+        assert [run.dataset for run in result] == ["wikidata.crosswalk", "imdb.title.basics"]
 
     async def test_list_runs_is_empty_before_anything_runs(self, runs: ImportRunRepository) -> None:
         assert await runs.list_runs() == []
