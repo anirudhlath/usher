@@ -74,7 +74,7 @@ P4947 and P4983 respectively:
 | IMDb↔TMDb **movie** pairs | 277,678 (277,042 distinct TMDb ids) |
 | IMDb↔TMDb **series** pairs | 57,343 (56,975 distinct TMDb ids) |
 | Integers live in **both** namespaces | **26,968** |
-| Share of TV pairs a single-column unique index blocks | **47.3%** |
+| Share of distinct TV ids a single-column unique index blocks | **47.3%** |
 
 The colliding ids are not exotic: the smallest are 2, 3, 5, 6, 11, 13, 14,
 15, 16, 17.

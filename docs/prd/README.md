@@ -40,7 +40,7 @@ historical once executed; the PRD above stays authoritative when they disagree.
 | Plan | Milestone | Status |
 |---|---|---|
 | [2026-07-28-m1-foundation.md](../plans/2026-07-28-m1-foundation.md) | M1 — Foundation | ✅ complete |
-| [2026-07-30-m2-bootstrap.md](../plans/2026-07-30-m2-bootstrap.md) | M2 — Catalog bootstrap (PRD [04](04-catalog-bootstrap.md) Phases 0–2) | 📋 written, not yet executed |
+| [2026-07-30-m2-bootstrap.md](../plans/2026-07-30-m2-bootstrap.md) | M2 — Catalog bootstrap (PRD [04](04-catalog-bootstrap.md) Phases 0–2) | ✅ complete |
 
 ## Conventions for maintaining this
 

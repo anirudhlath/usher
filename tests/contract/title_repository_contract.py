@@ -151,25 +151,19 @@ class TitleRepositoryContract:
         # branch on which constraint fired without parsing the message.
         assert exc_info.value.constraint == "pk_titles"
 
-    async def test_add_rejects_a_duplicate_tmdb_id(self, repo: TitleRepository) -> None:
-        """tmdb_id/imdb_id/tvdb_id are unique-indexed attributes (PRD 02,
-        db/models/title.py's partial unique indexes) — a *different* id
-        carrying a tmdb_id already in use is still a conflict, the same way
-        the real repository's IntegrityError translation treats it. A fake
-        that only checked `title.id` would let a service add two rows for
-        the same TMDb title in tests while the real repository rejects it
-        in production — precisely the divergence Task 10 was warned about.
+    async def test_add_rejects_a_duplicate_tmdb_id_of_the_same_kind(
+        self, repo: TitleRepository
+    ) -> None:
+        """tmdb_id is unique *per kind* (ADR-0011), so two movies claiming
+        one TMDb movie id is still a conflict — and the constraint that
+        fires is now the composite index.
 
-        Also pins two properties beyond "a conflict was raised": the
-        `.constraint` attribute names the specific index that fired (a
-        service can't otherwise tell "retarget this id" from "look up the
-        row already holding this tmdb_id" apart), and the message never
-        claims `second`'s own id already exists -- it doesn't; the *field*
-        collided, not the id. Measured bug this pins: the message used to
-        read "title {second.id} already exists" unconditionally, which is
-        false here -- that id was never the problem. (The message may
-        still *name* second.id, to say which add() call failed -- that's
-        fine; claiming it already exists is what was wrong.)
+        The final assertion pins a measured bug, not a style preference:
+        the message used to read "title {second.id} already exists"
+        unconditionally, which is false here -- `second`'s own id was
+        never the problem, its tmdb_id collided with a *different* row.
+        The message may still name `second.id` to say which add() call
+        failed; claiming that id already exists is what was wrong.
         """
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
         second = Title(
@@ -178,12 +172,24 @@ class TitleRepositoryContract:
         await repo.add(first)
         with pytest.raises(RepositoryConflict) as exc_info:
             await repo.add(second)
-        assert exc_info.value.constraint == "ix_titles_tmdb_id"
+        assert exc_info.value.constraint == "ix_titles_tmdb_id_kind"
         assert "already exists" not in str(exc_info.value)
 
+    async def test_a_movie_and_a_series_may_share_a_tmdb_id(self, repo: TitleRepository) -> None:
+        """The measurement ADR-0011 rests on: 26,968 TMDb ids are live in
+        both namespaces at once. Under M1's single-column index this call
+        raised RepositoryConflict and 47.3% of TV lost its tmdb_id during
+        Phase 2. Delete the `kind` column from the index and this fails."""
+        movie = Title(kind=TitleKind.MOVIE, name="Pride", sort_name="Pride", tmdb_id=1)
+        series = Title(kind=TitleKind.SERIES, name="Pride", sort_name="Pride", tmdb_id=1)
+        await repo.add(movie)
+        await repo.add(series)
+        assert (await repo.get(movie.id)) is not None
+        assert (await repo.get(series.id)) is not None
+
     async def test_add_rejects_a_duplicate_imdb_id(self, repo: TitleRepository) -> None:
-        """Same property as test_add_rejects_a_duplicate_tmdb_id, for the
-        imdb_id branch -- exercised separately, not folded into a single
+        """Same property as test_add_rejects_a_duplicate_tmdb_id_of_the_same_kind,
+        for the imdb_id branch -- exercised separately, not folded into a single
         parametrized case, so a typo swapping which field
         `_provider_id_conflict` (the fake) or Postgres (the real
         repository) actually checks can't pass by accident."""
@@ -213,10 +219,24 @@ class TitleRepositoryContract:
     async def test_get_returns_none_for_unknown_id(self, repo: TitleRepository) -> None:
         assert await repo.get(new_id()) is None
 
+    async def test_get_by_tmdb_id_disambiguates_by_kind(self, repo: TitleRepository) -> None:
+        """Without the `kind` argument this method has no correct answer
+        when both namespaces hold the id — the Postgres implementation
+        raised a raw sqlalchemy.exc.MultipleResultsFound straight out of the
+        port, which `db is driven, not driving` exists to prevent."""
+        movie = Title(kind=TitleKind.MOVIE, name="Fight Club", sort_name="Fight Club", tmdb_id=550)
+        series = Title(kind=TitleKind.SERIES, name="Bron", sort_name="Bron", tmdb_id=550)
+        await repo.add(movie)
+        await repo.add(series)
+        found_movie = await repo.get_by_tmdb_id(550, TitleKind.MOVIE)
+        found_series = await repo.get_by_tmdb_id(550, TitleKind.SERIES)
+        assert found_movie is not None and found_movie.id == movie.id
+        assert found_series is not None and found_series.id == series.id
+
     async def test_get_by_tmdb_id_finds_the_title(self, repo: TitleRepository) -> None:
         title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
         await repo.add(title)
-        found = await repo.get_by_tmdb_id(438631)
+        found = await repo.get_by_tmdb_id(438631, TitleKind.MOVIE)
         assert found is not None
         assert found.id == title.id
 
@@ -240,7 +260,7 @@ class TitleRepositoryContract:
         null-tmdb_id title instead of None, in both implementations.
         """
         await repo.add(Title(kind=TitleKind.MOVIE, name="Home Video", sort_name="Home Video"))
-        assert await repo.get_by_tmdb_id(None) is None  # type: ignore[arg-type]
+        assert await repo.get_by_tmdb_id(None, TitleKind.MOVIE) is None  # type: ignore[arg-type]
 
     async def test_get_by_imdb_id_of_none_finds_nothing(self, repo: TitleRepository) -> None:
         """Same property as test_get_by_tmdb_id_of_none_finds_nothing, for
@@ -267,18 +287,20 @@ class TitleRepositoryContract:
         with pytest.raises(RepositoryNotFound):
             await repo.update(title)
 
-    async def test_update_rejects_a_conflicting_tmdb_id(self, repo: TitleRepository) -> None:
+    async def test_update_rejects_a_conflicting_tmdb_id_of_the_same_kind(
+        self, repo: TitleRepository
+    ) -> None:
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=1)
         second = Title(kind=TitleKind.MOVIE, name="Arrival", sort_name="Arrival", tmdb_id=2)
         await repo.add(first)
         await repo.add(second)
         with pytest.raises(RepositoryConflict) as exc_info:
             await repo.update(second.evolve(tmdb_id=1))
-        assert exc_info.value.constraint == "ix_titles_tmdb_id"
+        assert exc_info.value.constraint == "ix_titles_tmdb_id_kind"
 
     async def test_update_rejects_a_conflicting_imdb_id(self, repo: TitleRepository) -> None:
-        """Same property as test_update_rejects_a_conflicting_tmdb_id, for
-        the imdb_id branch -- see test_add_rejects_a_duplicate_imdb_id's
+        """Same property as test_update_rejects_a_conflicting_tmdb_id_of_the_same_kind,
+        for the imdb_id branch -- see test_add_rejects_a_duplicate_imdb_id's
         docstring for why this is a separate case, not a parametrized one.
         """
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt1160419")

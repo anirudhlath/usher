@@ -120,3 +120,20 @@ name = "config stays out of the core"
 type = "forbidden"
 source_modules = ["usher.domain", "usher.ports"]
 forbidden_modules = ["usher.config"]
+
+# usher.cli is the second composition root, alongside usher.api. It may import
+# anything; nothing may import it. Without this contract it would sit outside
+# every existing one -- exactly the "silently escape every contract" failure
+# the allowlist comment above exists to prevent.
+[[tool.importlinter.contracts]]
+name = "cli is a composition root, nothing depends on it"
+type = "forbidden"
+source_modules = [
+    "usher.domain",
+    "usher.ports",
+    "usher.services",
+    "usher.adapters",
+    "usher.db",
+    "usher.api",
+]
+forbidden_modules = ["usher.cli"]

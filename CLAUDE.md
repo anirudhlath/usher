@@ -7,14 +7,16 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M1 foundation complete.** The project scaffold, environment
+**Status: M2 catalog bootstrap complete.** The project scaffold, environment
 config, domain models, port ABCs, persistence (SQLAlchemy schema + Alembic
 migrations + title repository), the telemetry bootstrap, a FastAPI app
-with liveness/readiness endpoints, and the container image + compose stack
-+ CI all exist and are verified working — see `docs/plans/
-2026-07-28-m1-foundation.md` for the task breakdown and `docs/prd/
-09-roadmap.md` for what's next (M2). Do not invent commands for tooling
-that does not exist yet — check the Commands section below before
+with liveness/readiness endpoints, the container image + compose stack + CI
+(M1), and the bulk-dataset bootstrap pipeline — IMDb skeleton, TMDb ID
+export, Wikidata crosswalk, all resumable and checkpointed (M2) — all exist
+and are verified working. See `docs/plans/2026-07-28-m1-foundation.md` and
+`docs/plans/2026-07-30-m2-bootstrap.md` for the task breakdowns and
+`docs/prd/09-roadmap.md` for what's next (M3). Do not invent commands for
+tooling that does not exist yet — check the Commands section below before
 assuming something runs.
 
 ## Keep the PRD current
@@ -76,6 +78,95 @@ earlier negative findings were both wrong — see
 Health-check caveat: a handshake against *any* path succeeds, so a successful
 upgrade is not a health signal. Assert on received messages instead.
 
+**Bulk loading bypasses the repository, and the SQL has three traps.**
+Verified against `pgvector/pgvector:pg17` on 2026-07-30, all three of which
+`usher.db.repositories.bulk` is built around:
+
+- `ON CONFLICT` must repeat a partial index's predicate, or Postgres raises
+  `InvalidColumnReferenceError: there is no unique or exclusion constraint
+  matching the ON CONFLICT spec`.
+- One statement may not hit the same conflict target twice —
+  `CardinalityViolationError: ON CONFLICT DO UPDATE command cannot affect row
+  a second time`. Every staging read is `SELECT DISTINCT ON (<target>)`.
+  IMDb's dumps and Wikidata's crosswalk both really contain such duplicates.
+- `xmax = 0` in `RETURNING` is the only way to tell an insert from an update;
+  rowcount reports their sum.
+
+`asyncpg`'s binary `COPY` is strictly typed (a `str` into an `integer` column
+raises `TypeError` client-side) and CHECK constraints fire during `COPY`, so
+one bad row aborts its batch. Reach the driver with
+`(await (await session.connection()).get_raw_connection()).driver_connection`.
+
+**`tmdb_id` is unique per `kind`.** TMDb's movie and series id spaces overlap
+on 26,968 ids (measured against Wikidata, 2026-07-30 — 47.3% of all series
+ids it knows). `ix_titles_tmdb_id_kind`, and `get_by_tmdb_id` takes a
+`TitleKind`. [ADR-0011](docs/prd/decisions/0011-tmdb-id-is-namespaced-by-kind.md).
+
+**IMDb TSVs have no quoting mechanism** and their title fields contain
+literal `"` (21 in the first 553,395 rows of `title.basics.tsv.gz`).
+`csv.reader`'s default `QUOTE_MINIMAL` silently strips them — verified. Parse
+with `line.split("\t")`.
+
+**Wikidata's crosswalk is seconds, not an hour.** The three property joins
+measured 14.5 s / 2.1 s / 1.1 s unchunked. WDQS's timeout surfaces as
+`HTTP 504 text/plain "upstream request timeout"` after ~65 s with no
+`Retry-After`. A live end-to-end run stored 336,200 pairs.
+
+**Suspending `ix_titles_sort_name`/`ix_titles_name_lower_year` during Phase 0
+is a real, if modest, win — kept, not emptied.** Measured 2026-07-30 against
+the live `title.basics.tsv.gz` (1,271,138 retained titles): 35.8 s suspended
+vs 40.2 s kept (11.0% faster), and the rebuilt pair is ~24% smaller (97 MB
+vs 127 MB) than building them incrementally across the same load. Only
+applies to a first bootstrap (`bulk_load_window` declines on a non-empty
+`titles`), so the saving costs nothing when it doesn't apply. See PRD 04's
+Phase 0 section for the full numbers.
+
+**`PostgresImportRunRepository.save()` must roll back on a caught
+`IntegrityError`, not just translate it.** Without the rollback, Postgres
+leaves the *session* — not just the failed call — with an aborted
+transaction, so the very next statement on it raises `sqlalchemy.exc.
+PendingRollbackError` instead of running. `BootstrapService.import_dataset`'s
+except handler is exactly such a next statement, so the missing rollback
+broke its documented "does not re-raise" contract for real, verified against
+real Postgres with two engine-bound sessions racing to bootstrap the same
+dataset (`tests/integration/test_import_run_repository.py`). Deliberately a
+full `session.rollback()`, not a `PostgresTitleRepository`-style SAVEPOINT —
+see `usher/db/repositories/import_run.py`'s module docstring for why this
+repository's one caller never has independent pending work on the session
+worth a SAVEPOINT protecting.
+
+**Fixing that session-poisoning bug surfaced a second one, one layer up, in
+`BootstrapService.import_dataset` itself: the loser's failure handler
+overwrote the winner's checkpoint.** Once `self._runs.get(dataset.name)`
+after a caught `RepositoryConflict` stopped raising and started actually
+returning a row, it returns the *other*, winning process's row — the loser
+never got one of its own (`start()` never returned it one). The except
+handler used to re-fetch by dataset name unconditionally and evolve+save
+`FAILED` onto whatever it found, which is correct when that row is the
+caller's own (a `_drain` failure, after `start()` succeeded) but silently
+corrupts a legitimately `RUNNING` or already-`COMPLETED` import when it
+belongs to someone else (a `start()` conflict) — worse than the crash it
+replaced, because the crash was loud and this would not have been: a
+subsequent resume reads exactly that corrupted record. `RepositoryConflict`
+can only ever reach `import_dataset` from `start()` itself — once any row
+exists for a dataset, every later `start()`/`save()` call updates that same
+row rather than competing for a new one, so `_drain`'s own `save()` calls
+(which always update the id `start()` already returned) cannot trigger it.
+That made the fix a clean split: a `RepositoryConflict` from `start()`
+specifically now goes to `_concede_to_other_owner`, which touches nothing
+(no `save`, no `commit`) and returns the current owner's row exactly as
+stored; every other `UsherPortError` path is unchanged. Verified against
+real Postgres with a forced two-session race
+(`tests/integration/test_bootstrap_concurrency.py`) — reproduced the
+overwrite on the pre-fix code first (the winner's row read back `FAILED`
+with the loser's unrelated conflict message), then confirmed the fix
+leaves it untouched. The unit-level fakes needed a matching fix to even be
+capable of catching this: the original conflict test double raised
+`RepositoryConflict` with no competing row present at all, so asserting
+only "the caller didn't crash" passed both before and after either bug —
+it needs a real winner row seeded first, and an assertion that it comes
+back byte-for-byte unchanged.
+
 ## Commands
 
 Verified working as of Group A (scaffold + config):
@@ -87,7 +178,7 @@ uv run pytest tests/unit         # fast unit tests only, no Docker required
 uv run ruff check .              # lint — clean
 uv run ruff format .             # format — clean
 uv run mypy                      # type check, strict mode — clean
-uv run lint-imports              # enforce architecture contracts — 4 kept, 0 broken
+uv run lint-imports              # enforce architecture contracts — 5 kept, 0 broken
 ```
 
 `[tool.ruff] extend-exclude = ["docs"]` keeps ruff off `docs/plans/*.md` and
@@ -389,3 +480,55 @@ which is a reasonable proxy for a fresh runner but not the literal
 `ubuntu-latest` ships Docker running by default, and this project's `uv
 run pytest` already depends on exactly that locally, but no run happened
 on an actual GitHub-hosted runner).
+
+Verified working as of M2's final group (end-to-end integration, the index
+measurement, and documentation) — the bulk-dataset bootstrap pipeline is
+runnable for real, not just under test:
+
+```bash
+export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:5432/usher"
+export USHER_SECRET_KEY="<32+ char secret>"
+uv run python -m usher bootstrap --phase all       # import IMDb + TMDb ids + crosswalk
+uv run python -m usher bootstrap --phase imdb      # one phase at a time
+uv run python -m usher bootstrap-status            # progress and catalog size
+uv run python scripts/measure_bulk_load.py         # NOT a test -- downloads the real dump
+```
+
+Verified directly against a scratch `pgvector/pgvector:pg17`, 2026-07-30,
+downloading the real IMDb/TMDb dumps and querying live Wikidata — nothing
+mocked. `bootstrap --phase imdb` killed mid-run at 700,000/1,271,138 titles
+committed; re-run logged `resuming imdb.title.basics from position 6033908
+(700000 rows already seen)` and finished at the identical 1,271,138 titles
+an uninterrupted run reaches. A full `bootstrap --phase all` then ran end to
+end: 1,271,138 titles (899,828 movies / 371,310 series), 538,937 with a
+community rating, 291,737 linked to a `tmdb_id` (236,712 movies / 55,025
+series, zero `(tmdb_id, kind)` duplicates — ADR-0011 holds under real data),
+50,793 linked to a `tvdb_id`. Two known titles spot-checked correct end to
+end: `tt0111161` (The Shawshank Redemption) landed with `tmdb_id=278`,
+`community_rating=9.3`; `tt0944947` (Game of Thrones) landed with
+`tmdb_id=1399`, `tvdb_id=121361`, `community_rating=9.2`. `bootstrap-status`'s
+final report:
+
+```text
+titles in catalog: 1271138
+wikidata.crosswalk       completed  position=30 seen=386364 written=385805
+tmdb.ids.series          completed  position=228100 seen=228100 written=228100
+tmdb.ids.movie           completed  position=1226544 seen=1226544 written=1226544
+imdb.title.ratings       completed  position=1700616 seen=1700615 written=538937
+imdb.title.basics        completed  position=12678891 seen=1271138 written=1271138
+```
+
+**Gotcha found running this: `kill -9 "$(cat pidfile)"` on a backgrounded
+`uv run <command> &` does not stop the work.** `uv run` forks a child
+process (the real interpreter) rather than exec-replacing itself — verified
+directly with `ps --forest`, which showed two live PIDs, the `uv` wrapper
+and its `python3` child. Killing only the wrapper PID left the child
+running, orphaned, still committing to the database — the first kill/resume
+attempt against this exact pipeline was contaminated by exactly this before
+it was caught (a `bootstrap-status` read raced an orphaned child still
+writing). A real deployment is unaffected: systemd's `KillMode=control-group`,
+Docker's container-wide signal delivery, and an interactive terminal's
+Ctrl-C all reach the whole process group, not just one PID in it. A
+hand-rolled `nohup ... & echo $!` script does not — kill the child
+(`pgrep -P "$wrapper_pid"`) or the whole process group, never just the
+captured `$!`.

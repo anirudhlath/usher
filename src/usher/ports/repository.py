@@ -1,10 +1,21 @@
-"""Port for title persistence."""
+"""Ports for persistence: one per aggregate, plus the bulk-load path.
+
+Repositories are driven ports, the same as `SourceAdapter` or
+`MetadataProvider` — port named for the role, implementation named for the
+technology (ADR-0009). Everything here is an ABC; `usher.db.repositories.*`
+holds the Postgres implementations.
+"""
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 
-from usher.domain.enums import EnrichmentState
+from usher.domain.bootstrap import ImportRun
+from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
+from usher.ports.bulk import IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
 
 
 class TitleRepository(ABC):
@@ -84,8 +95,22 @@ class TitleRepository(ABC):
         """Fetch by Usher's own id, or None if it doesn't exist."""
 
     @abstractmethod
-    async def get_by_tmdb_id(self, tmdb_id: int) -> Title | None:
-        """Fetch by TMDb id, or None if no title carries it."""
+    async def get_by_tmdb_id(self, tmdb_id: int, kind: TitleKind) -> Title | None:
+        """Fetch by TMDb id *within its namespace*, or None if no title
+        carries it.
+
+        `kind` is not optional, and not a convenience filter. TMDb keys
+        movies and TV series in separate id spaces that both land in this
+        one column, and they overlap heavily: 26,968 of the 56,975 distinct
+        TMDb series ids Wikidata knows are also live TMDb movie ids
+        (measured 2026-07-30). "Which title has tmdb_id 550" has no single
+        answer; "which movie has tmdb_id 550" does. See
+        [ADR-0011](../../../docs/prd/decisions/0011-tmdb-id-is-namespaced-by-kind.md).
+
+        Every real caller already knows the kind — M4's matcher reads it off
+        the source item alongside `ProviderIds.Tmdb` — so this costs nothing
+        it does not already have.
+        """
 
     @abstractmethod
     async def get_by_imdb_id(self, imdb_id: str) -> Title | None:
@@ -102,3 +127,236 @@ class TitleRepository(ABC):
         through (a bare `counts[EnrichmentState.ENRICHED]` must never
         raise `KeyError` just because nothing is enriched yet).
         """
+
+
+@dataclass(frozen=True, slots=True)
+class BulkWriteResult:
+    """What one batch write actually changed, split so a re-import is
+    visibly a no-op (`inserted == 0`) rather than indistinguishable from a
+    first run."""
+
+    inserted: int
+    updated: int
+
+
+@dataclass(frozen=True, slots=True)
+class CrosswalkLinkResult:
+    """Outcome of stamping crosswalk pairs onto catalog titles.
+
+    `conflicted` is not an error condition — it is measured and expected.
+    TMDb's movie and series id spaces overlap: 26,968 of the 56,975 distinct
+    TMDb series ids Wikidata knows are also live TMDb *movie* ids (measured
+    2026-07-30), so `titles.tmdb_id` alone cannot identify a TMDb entity and
+    the unique index over it is `(tmdb_id, kind)` (ADR-0011). Two different
+    IMDb ids also sometimes claim the same TMDb id (569 such ids, same
+    measurement); only one can win, and the loser is counted here instead of
+    raising.
+    """
+
+    linked: int
+    unmatched: int
+    conflicted: int
+
+
+class BulkCatalogRepository(ABC):
+    """Bulk writes into the catalog, deliberately *not* expressed through
+    `TitleRepository`.
+
+    Measured cost of the per-row path: ~3 statements and ~1.15 ms per
+    `PostgresTitleRepository.add()` (SAVEPOINT / INSERT / RELEASE). At the
+    ~1.13M titles IMDb's retained `titleType`s yield, that is ~22 minutes of
+    pure repository overhead; at the full 12.7M rows IMDb lists it is ~4
+    hours. `TitleRow`'s columns carry `server_default`s specifically so a raw
+    `COPY` can omit every column the bulk path has no value for, and
+    `TitleRepository`'s own docstring already reserves this path. Nothing
+    here goes through the ORM.
+
+    Every method is idempotent in the sense that matters for resume safety
+    -- replaying a batch is an upsert, never a duplicate -- but only
+    `upsert_titles` and `apply_ratings` additionally skip a row that did not
+    change, which is what lets *those two* report zero on a no-op second
+    pass. `upsert_tmdb_ids` and `upsert_crosswalk` have no such guard (see
+    their own docstrings): a replay writes -- and counts -- every row again,
+    because Postgres's `DISTINCT ON` dedup step must pick a deterministic
+    winner regardless of whether anything actually changed, and doing that
+    unconditionally is cheaper than an extra `IS DISTINCT FROM` comparison
+    for a value nothing reads before the next call. Do not assume the
+    stronger claim for those two; nothing about resume-safety requires it,
+    since resuming past a batch only needs "replay never duplicates", not
+    "replay is invisible".
+
+    Same session/transaction ownership as `TitleRepository`: these flush and
+    return counts; they never commit. The caller commits a batch and its
+    checkpoint together, which is the whole mechanism behind "resumable".
+
+    **`bulk_load_window` is the one deliberate exception to "never commit"**
+    — see its own docstring for what it commits and the precondition that
+    places on the caller. Every other method above keeps the rule.
+    """
+
+    @abstractmethod
+    def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
+        """Scope inside which the implementation may relax storage-level
+        optimisations that only pay for themselves on one-row-at-a-time
+        writes, restoring them on exit.
+
+        **Precondition: the caller must have no uncommitted work on this
+        session it is not prepared to have committed before entering this
+        context manager.** Unlike every other method on this port, an
+        implementation of `bulk_load_window` may need to commit the session
+        to make schema changes durable and lock-free for the rest of the
+        window — and because it is *the caller's own session*, that commit
+        is not scoped to whatever this call itself changed. It commits
+        everything currently pending, exactly the way calling
+        `session.commit()` directly always does. This is not a hypothetical
+        edge case reachable only by misuse: `PostgresBulkCatalogRepository`
+        exercises it on every first bootstrap (the common case, an empty
+        catalog), and its docstring records why no alternative avoids it
+        (a second connection deadlocks against locks this session already
+        holds; flipping this session to autocommit requires ending its
+        transaction first anyway). A caller that must keep other pending
+        work uncommitted across this call needs its own, separate session
+        for that work.
+
+        Named for the role, not the mechanism, because the mechanism is
+        Postgres-specific: `PostgresBulkCatalogRepository` drops
+        `ix_titles_sort_name` and `ix_titles_name_lower_year` and rebuilds
+        them afterwards. Its own docstring states when it declines to (a
+        non-empty `titles`, so the catalog stays browsable) and why the
+        three *unique* partial indexes are never touched — the upserts
+        below name them in `ON CONFLICT` and would fail without them.
+
+        Exits cleanly on an exception, restoring whatever it suspended: a
+        crashed import must not leave the catalog missing an index. A
+        process killed mid-window can, which is why the restore is
+        idempotent and rerun at the start of the next window.
+        """
+
+    @abstractmethod
+    async def upsert_titles(self, rows: Sequence[ImdbTitle]) -> BulkWriteResult:
+        """Insert or update skeleton titles, keyed on `imdb_id`.
+
+        New rows get a fresh UUIDv7 (`usher.domain.ids.new_id`) and
+        `enrichment_state = skeleton` from the column default. Existing rows
+        keep their id, their `created_at`, and every enrichment-tier field —
+        a re-import refreshes what IMDb actually supplies (name, year,
+        runtime, genres) and must never downgrade an enriched title.
+
+        `updated` counts rows whose IMDb-supplied fields genuinely changed,
+        not rows re-seen: an unchanged replay writes nothing at all, so the
+        `set_updated_at` trigger does not fire across a million untouched
+        rows.
+        """
+
+    @abstractmethod
+    async def apply_ratings(self, rows: Sequence[ImdbRating]) -> int:
+        """Set `community_rating`/`vote_count` on titles that already exist,
+        returning how many rows changed.
+
+        Never creates a title: `title.ratings.tsv.gz` covers `titleType`s
+        this milestone drops, and a rating with no title is not a catalog
+        entry. Rows whose values already match are left alone, for the same
+        trigger reason as `upsert_titles`.
+        """
+
+    @abstractmethod
+    async def upsert_tmdb_ids(self, rows: Sequence[TmdbId]) -> int:
+        """Insert or update the TMDb id universe, keyed on
+        `(tmdb_id, kind)`. Returns rows written."""
+
+    @abstractmethod
+    async def upsert_crosswalk(self, rows: Sequence[IdCrosswalkPair]) -> int:
+        """Insert or update crosswalk pairs, keyed on `imdb_id`.
+
+        A pair carrying only `tmdb_series_id` must not blank a previously
+        stored `tmdb_movie_id` for the same IMDb id — the three SPARQL joins
+        each fill one column, and they run as three separate passes.
+        Returns rows written.
+        """
+
+    @abstractmethod
+    async def link_crosswalk(self) -> CrosswalkLinkResult:
+        """Stamp stored crosswalk pairs onto catalog titles, in one pass.
+
+        Only fills a `tmdb_id`/`tvdb_id` that is currently NULL, so a value
+        a later, better-informed enrichment wrote is never overwritten by
+        the crosswalk -- this is a precondition on the *target* row, checked
+        independently of whether the incoming pair agrees with what is
+        already stored: a title that already carries a *different* value
+        does not get overwritten either, and is reported as `conflicted`,
+        not `linked`. Copies `popularity` across from the TMDb id universe
+        at the same time, which is what makes `ix_titles_popularity` usable
+        and gives M4's enrichment queue a real ordering.
+
+        Both `titles.tmdb_id` (scoped by `kind`, ADR-0011) and
+        `titles.tvdb_id` are globally unique where not NULL
+        (`ix_titles_tmdb_id_kind`/`ix_titles_tvdb_id`), and the crosswalk
+        data itself is not: two different IMDb ids can each name the same
+        TMDb or TVDB id. At most one title may ever hold a given
+        `(tmdb_id, kind)` or `tvdb_id` — an implementation must pick a
+        single, deterministic winner among competing pairs rather than
+        raise or leave the outcome to whichever row a scan reaches first.
+
+        Idempotent: a second call over unchanged inputs reports
+        `linked == 0`.
+        """
+
+    @abstractmethod
+    async def count_titles(self) -> int:
+        """How many titles the catalog holds. Used to decide whether
+        `bulk_load_window` may suspend indexes, and reported by the CLI."""
+
+
+class ImportRunRepository(ABC):
+    """Checkpoint storage for resumable bulk imports.
+
+    One row per dataset, holding the cursor its last committed batch
+    produced. `TitleRepository`'s session/transaction ownership applies here
+    too, and matters more: `save` must be flushed inside the *same*
+    transaction as the batch it describes, or a crash between the two either
+    loses work or claims work that was rolled back.
+    """
+
+    @abstractmethod
+    async def start(self, dataset: str, revision: str) -> ImportRun:
+        """Begin or resume a run for `dataset`.
+
+        Returns the run with its cursor fields preserved when `revision`
+        matches what was stored, and reset to zero when it does not — an
+        upstream snapshot change restarts the import rather than splicing
+        two snapshots. Either way the returned run is `RUNNING` with `error`
+        and `finished_at` cleared, and it has already been persisted.
+        """
+
+    @abstractmethod
+    async def save(self, run: ImportRun) -> None:
+        """Persist a run's progress. Flushes, never commits.
+
+        Raises `RepositoryConflict` if another row already claims this
+        run's `dataset` — two processes bootstrapping the same dataset at
+        once is an operator mistake, and it must surface as a port error
+        rather than a raw storage exception (ADR-0009).
+
+        Whether the *session* remains usable for further work after a
+        caught `RepositoryConflict` is deliberately left to the
+        implementation, not promised here — contrast `TitleRepository.add`/
+        `update`, which use a `SAVEPOINT` specifically so it does.
+        `PostgresImportRunRepository` rolls back the whole transaction
+        instead of using a SAVEPOINT (see its own module docstring): unlike
+        `TitleRepository`'s general-purpose callers, its one caller,
+        `BootstrapService`, never has other work pending on the session at
+        this point worth a SAVEPOINT's extra round trip to protect. The
+        session *does* stay usable afterward, deliberately —
+        `BootstrapService.import_dataset`'s except handler continues on
+        this same session to record the failure as a durable `ImportRun`,
+        which is exactly why the rollback is there rather than skipped.
+        """
+
+    @abstractmethod
+    async def get(self, dataset: str) -> ImportRun | None:
+        """The stored run for `dataset`, or None if it has never run."""
+
+    @abstractmethod
+    async def list_runs(self) -> list[ImportRun]:
+        """Every stored run, most recent activity first — what the CLI's
+        `bootstrap-status` prints."""

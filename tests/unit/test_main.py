@@ -24,7 +24,7 @@ def test_main_starts_uvicorn_with_settings_host_and_port(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(uvicorn, "run", fake_run)
 
-    usher_main.main()
+    usher_main.main([])
 
     assert len(calls) == 1
     app, kwargs = calls[0]
@@ -44,7 +44,7 @@ def test_main_defaults_match_dockerfile_expose(monkeypatch: pytest.MonkeyPatch) 
     calls: list[tuple[str, dict[str, object]]] = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: calls.append((app, kwargs)))
 
-    usher_main.main()
+    usher_main.main([])
 
     _, kwargs = calls[0]
     assert kwargs["host"] == "0.0.0.0"  # noqa: S104  matches Settings' own documented default

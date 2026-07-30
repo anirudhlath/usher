@@ -31,9 +31,10 @@ the SAVEPOINT, a caught `RepositoryConflict` leaves the *session* raising
 `update()` needs the identical translation, not just `add()`: the plan's
 own amendment claiming "nothing in [update's] current body raises
 IntegrityError... it can't yet" no longer holds against the schema this
-task actually ships against — `ix_titles_tmdb_id`/`ix_titles_imdb_id`/
+task actually ships against — `ix_titles_tmdb_id_kind`/`ix_titles_imdb_id`/
 `ix_titles_tvdb_id` (unique partial indexes, `db/models/title.py`, shipped
-in Task 8/9, before this task) are exactly the kind of future column the
+in Task 8/9, before this task; `ix_titles_tmdb_id_kind` widened from a
+single-column index by ADR-0011) are exactly the kind of future column the
 amendment was waiting for, except they already exist. `update()` sets
 tmdb_id/imdb_id/tvdb_id from the incoming `Title`, so retargeting one to a
 value another row already holds raises `IntegrityError` today, not
@@ -69,7 +70,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.models.title import TitleRow
-from usher.domain.enums import EnrichmentState
+from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import TitleRepository
@@ -223,7 +224,7 @@ class PostgresTitleRepository(TitleRepository):
             row = await self._session.get(TitleRow, title_id)
         return _to_domain(row) if row else None
 
-    async def get_by_tmdb_id(self, tmdb_id: int) -> Title | None:
+    async def get_by_tmdb_id(self, tmdb_id: int, kind: TitleKind) -> Title | None:
         # tmdb_id's own type is `int`, not `int | None` -- but a caller
         # holding a genuinely optional value (e.g. Title.tmdb_id itself)
         # can still reach this with None if it ever bypasses mypy at the
@@ -233,11 +234,17 @@ class PostgresTitleRepository(TitleRepository):
         # return first -- not "the title with this id", the opposite of
         # what this method promises. Verified: without this,
         # get_by_tmdb_id(None) returns an arbitrary title instead of None.
+        #
+        # The kind filter is not optional either. Without it this query can
+        # match a movie and a series holding the same tmdb_id, and
+        # scalar_one_or_none() then raises a raw
+        # sqlalchemy.exc.MultipleResultsFound out of the port -- reproduced
+        # directly against tmdb_id=550 in both namespaces. ADR-0011.
         if tmdb_id is None:
             return None
         with self._session.no_autoflush:  # see get()'s comment
             result = await self._session.execute(
-                select(TitleRow).where(TitleRow.tmdb_id == tmdb_id)
+                select(TitleRow).where(TitleRow.tmdb_id == tmdb_id, TitleRow.kind == kind)
             )
         row = result.scalar_one_or_none()
         return _to_domain(row) if row else None

@@ -166,3 +166,35 @@ def test_database_url_rejects_wrong_driver(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_bulk_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every one of these is read by usher.cli. None is a field that
+    validates and then influences nothing -- the failure mode Settings.host
+    and Settings.port had before M1's Task 13."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    settings = Settings()
+    assert settings.bulk_data_dir == Path("data/bulk")
+    assert settings.bulk_batch_size == 50_000
+    assert settings.wikidata_endpoint == "https://query.wikidata.org/sparql"
+    assert settings.bulk_user_agent
+
+
+def test_bulk_batch_size_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch size of 0 would loop forever emitting nothing."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_BULK_BATCH_SIZE", "0")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_bulk_user_agent_cannot_be_blank(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WDQS's user-agent policy blocks default and empty agents; an empty
+    one would fail the crosswalk with an opaque 403."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_BULK_USER_AGENT", "")
+    with pytest.raises(ValidationError):
+        Settings()

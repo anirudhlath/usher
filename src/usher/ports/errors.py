@@ -58,7 +58,7 @@ class RepositoryConflict(UsherPortError):
     type to handle it. See `usher.ports.repository.TitleRepository.add`.
 
     `constraint` names whichever unique constraint or index actually
-    fired (e.g. `"ix_titles_tmdb_id"`), when the implementation can
+    fired (e.g. `"ix_titles_tmdb_id_kind"`), when the implementation can
     determine it — `None` if it can't. This is what lets a caller
     implement "try to add, fall back to update on conflict" correctly:
     without it, a service has no way to tell "this exact id already
@@ -83,3 +83,22 @@ class RepositoryNotFound(UsherPortError):
     because there is nothing sensible to update. See
     `usher.ports.repository.TitleRepository.update`.
     """
+
+
+class PortDataMalformed(UsherPortError):
+    """An upstream payload could not be parsed into the shape this port
+    promises.
+
+    Distinct from `PortUnavailable`: the upstream answered, and the answer
+    was wrong. Retrying does not help, so a caller parks the work rather
+    than backing off — PRD 08's "after N attempts a job is *parked* with its
+    error, not retried forever and not silently dropped."
+
+    `detail` carries enough to find the offending record without dumping
+    it: the dataset's own row identifier and what was expected. It must
+    never carry a credential or a whole payload.
+    """
+
+    def __init__(self, message: str, *, detail: str | None = None) -> None:
+        super().__init__(message if detail is None else f"{message} ({detail})")
+        self.detail = detail

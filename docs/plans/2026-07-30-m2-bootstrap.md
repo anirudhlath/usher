@@ -3366,6 +3366,8 @@ That is the licensing rule, not a convenience -- PRD 04's "never a full
 download in tests".
 """
 
+import datetime as dt
+import email.utils
 import gzip
 from collections.abc import Iterator
 from pathlib import Path
@@ -3374,7 +3376,7 @@ import httpx
 import pytest
 
 from usher.adapters.bulk.download import CachedDatasetFile
-from usher.ports.errors import PortRateLimited, PortUnavailable
+from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
 
 BODY = gzip.compress(b"alpha\nbravo\ncharlie\n")
 URL = "https://example.invalid/slice.tsv.gz"
@@ -3440,6 +3442,24 @@ async def test_revision_translates_a_429(cache: Path) -> None:
     assert exc_info.value.retry_after == 12.0
 
 
+async def test_revision_translates_a_429_with_an_http_date_retry_after(cache: Path) -> None:
+    """RFC 9110 permits `Retry-After` to be an HTTP-date, not just a plain
+    integer -- `float(retry_after)` alone raises `ValueError` on one, which
+    escapes uncaught from exactly the 429 path: the one moment upstream is
+    explicitly asking for backoff. Uses a relative offset rather than a
+    fixed date so the test is not itself time-bound."""
+    target = email.utils.format_datetime(dt.datetime.now(dt.UTC) + dt.timedelta(seconds=45))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"retry-after": target})
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        with pytest.raises(PortRateLimited) as exc_info:
+            await CachedDatasetFile(client, URL, cache).revision()
+    assert exc_info.value.retry_after is not None
+    assert 30 <= exc_info.value.retry_after <= 60
+
+
 async def test_revision_translates_a_transport_error(cache: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no route to host")
@@ -3452,8 +3472,9 @@ async def test_revision_translates_a_transport_error(cache: Path) -> None:
 async def test_ensure_local_downloads_then_reads_lines(cache: Path) -> None:
     async with httpx.AsyncClient(transport=_serve()) as client:
         dataset_file = CachedDatasetFile(client, URL, cache)
-        path = await dataset_file.ensure_local('"v1"')
-        assert path.exists()
+        local = await dataset_file.ensure_local('"v1"')
+        assert local.path.exists()
+        assert local.replaced is True
         assert list(dataset_file.lines()) == ["alpha", "bravo", "charlie"]
 
 
@@ -3469,21 +3490,95 @@ async def test_ensure_local_skips_a_second_download_of_the_same_revision(
 
     async with httpx.AsyncClient(transport=_transport(handler)) as client:
         dataset_file = CachedDatasetFile(client, URL, cache)
-        await dataset_file.ensure_local('"v1"')
-        await dataset_file.ensure_local('"v1"')
+        first = await dataset_file.ensure_local('"v1"')
+        second = await dataset_file.ensure_local('"v1"')
     assert calls.count("GET") == 1
+    assert first.replaced is True
+    assert second.replaced is False
 
 
 async def test_ensure_local_resumes_a_partial_download(cache: Path) -> None:
     """The Range half of the interlock. Simulates a killed process by
-    writing a truncated .part file with a matching revision stamp."""
+    writing a truncated .part file with a matching *in-flight* revision
+    stamp (`.part.revision`, not the completed-file `.revision` -- the two
+    are deliberately separate, see `CachedDatasetFile.ensure_local`)."""
     cache.mkdir(parents=True)
     (cache / "slice.tsv.gz.part").write_bytes(BODY[:5])
-    (cache / "slice.tsv.gz.revision").write_text('"v1"')
+    (cache / "slice.tsv.gz.part.revision").write_text('"v1"')
     async with httpx.AsyncClient(transport=_serve()) as client:
         dataset_file = CachedDatasetFile(client, URL, cache)
         await dataset_file.ensure_local('"v1"')
         assert list(dataset_file.lines()) == ["alpha", "bravo", "charlie"]
+
+
+async def test_ensure_local_overwrites_when_the_server_ignores_a_matching_range(
+    cache: Path,
+) -> None:
+    """Neither of the other two partial-download tests actually exercises
+    the append-vs-overwrite branch as a safety net: the different-revision
+    test is already resolved earlier by discarding the stale `.part` file
+    outright, and the matching-revision test always happens to receive a
+    genuine 206 from `_serve`. A server is never obligated to honour
+    Range/If-Range even when a client sends a correctly matching one; if it
+    answers 200 with the whole body anyway, the *response status* -- not
+    the request headers -- must decide append-vs-overwrite, or the old
+    partial bytes end up prepended onto a second full copy of the body: a
+    leading truncated gzip member in front of a complete one, which raises
+    on decompression rather than merely reading wrong."""
+    cache.mkdir(parents=True)
+    (cache / "slice.tsv.gz.part").write_bytes(BODY[:5])
+    (cache / "slice.tsv.gz.part.revision").write_text('"v1"')
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=BODY, headers={"etag": '"v1"'})
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        dataset_file = CachedDatasetFile(client, URL, cache)
+        await dataset_file.ensure_local('"v1"')
+        assert list(dataset_file.lines()) == ["alpha", "bravo", "charlie"]
+
+
+async def test_ensure_local_uses_if_range_so_a_body_change_mid_resume_is_detected(
+    cache: Path,
+) -> None:
+    """The header itself, not just the append-vs-overwrite fallback it
+    enables: a bare `Range` request with no `If-Range` at all is answered
+    *unconditionally* by a real server, so a resume that omitted `If-Range`
+    could receive a byte-range slice of a *different* snapshot than the one
+    its `.part` prefix came from, and splice the two together. Simulates
+    upstream having already moved from v1 to an unrelated v2 body by the
+    time this resume's GET lands, against a server that only honours Range
+    unconditionally -- i.e. exactly when `If-Range` is absent or matches.
+
+    The splice point is 20 bytes in, not 5: a gzip stream's first ~10 bytes
+    (magic, method, flags, mtime, extra-flags, OS) are content-independent
+    and, for two bodies compressed moments apart on the same machine, are
+    almost always byte-identical regardless of what either one contains --
+    confirmed directly, `BODY[:5] + v2_body[5:] == v2_body` here. A splice
+    inside that header is not a splice at all; 20 bytes is comfortably past
+    it, into the content-dependent DEFLATE payload, where the two streams
+    provably diverge."""
+    cache.mkdir(parents=True)
+    (cache / "slice.tsv.gz.part").write_bytes(BODY[:20])
+    (cache / "slice.tsv.gz.part.revision").write_text('"v1"')
+
+    v2_body = gzip.compress(b"second\nsnapshot\nentirely\n")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        current_etag = '"v2"'
+        range_header = request.headers.get("range")
+        if_range = request.headers.get("if-range")
+        if range_header and (if_range is None or if_range == current_etag):
+            start = int(range_header.removeprefix("bytes=").rstrip("-"))
+            return httpx.Response(206, content=v2_body[start:], headers={"etag": current_etag})
+        return httpx.Response(200, content=v2_body, headers={"etag": current_etag})
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        dataset_file = CachedDatasetFile(client, URL, cache)
+        # Still asking for v1: the caller has no way to know upstream moved
+        # on until the response says so.
+        await dataset_file.ensure_local('"v1"')
+        assert list(dataset_file.lines()) == ["second", "snapshot", "entirely"]
 
 
 async def test_ensure_local_discards_a_partial_from_a_different_revision(
@@ -3494,11 +3589,43 @@ async def test_ensure_local_discards_a_partial_from_a_different_revision(
     decompresses -- silently wrong, which is the worst kind."""
     cache.mkdir(parents=True)
     (cache / "slice.tsv.gz.part").write_bytes(b"garbage from an older dump")
-    (cache / "slice.tsv.gz.revision").write_text('"v0"')
+    (cache / "slice.tsv.gz.part.revision").write_text('"v0"')
     async with httpx.AsyncClient(transport=_serve(etag='"v2"')) as client:
         dataset_file = CachedDatasetFile(client, URL, cache)
         await dataset_file.ensure_local('"v2"')
         assert list(dataset_file.lines()) == ["alpha", "bravo", "charlie"]
+
+
+async def test_ensure_local_recovers_when_a_refresh_is_interrupted_after_the_stamp_write(
+    cache: Path,
+) -> None:
+    """Critical-bug regression: `stamp` (the completed-file marker) must
+    never be readable as naming a revision `path` doesn't actually hold.
+    Seeds exactly the on-disk state a process killed between "wrote the
+    in-flight stamp" and "renamed .part into place" would leave: a complete
+    v1 file at `path` (a prior successful download), plus a v2 refresh's
+    `.part`/`.part.revision` sitting unfinished beside it. The *next* call
+    must re-fetch and serve the new v2 content, not silently keep returning
+    the stale complete v1 file under the v2 label forever."""
+    cache.mkdir(parents=True)
+    old_body = gzip.compress(b"old-alpha\nold-bravo\nold-charlie\n")
+    (cache / "slice.tsv.gz").write_bytes(old_body)
+    (cache / "slice.tsv.gz.revision").write_text('"v1"')
+    (cache / "slice.tsv.gz.part").write_bytes(b"partial garbage from the killed download")
+    (cache / "slice.tsv.gz.part.revision").write_text('"v2"')
+
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(200, content=BODY, headers={"etag": '"v2"'})
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        dataset_file = CachedDatasetFile(client, URL, cache)
+        local = await dataset_file.ensure_local('"v2"')
+        assert list(dataset_file.lines()) == ["alpha", "bravo", "charlie"]
+    assert local.replaced is True
+    assert "GET" in calls
 
 
 async def test_lines_skips_the_requested_prefix(cache: Path) -> None:
@@ -3518,6 +3645,23 @@ async def test_lines_replaces_undecodable_bytes_instead_of_raising(cache: Path) 
         dataset_file = CachedDatasetFile(client, URL, cache)
         await dataset_file.ensure_local('"v1"')
         assert len(list(dataset_file.lines())) == 2
+
+
+async def test_lines_translates_a_non_gzip_body_instead_of_raising_a_raw_error(
+    cache: Path,
+) -> None:
+    """Realistic whenever a CDN or proxy serves an error page with status
+    200 instead of the dataset: `gzip.open` is lazy, so the raw
+    `gzip.BadGzipFile` would otherwise surface for the first time here,
+    deep inside a batching loop, as a type no caller written against
+    `usher.ports.errors` can catch."""
+    async with httpx.AsyncClient(
+        transport=_serve(body=b"<html><body>502 Bad Gateway</body></html>")
+    ) as client:
+        dataset_file = CachedDatasetFile(client, URL, cache)
+        await dataset_file.ensure_local('"v1"')
+        with pytest.raises(PortDataMalformed):
+            list(dataset_file.lines())
 ```
 
 - [ ] **Step 2: Run it and watch it fail**
@@ -3544,13 +3688,17 @@ dump cannot reach a commit by accident. Tests never call `ensure_local`
 against a real host -- they drive it through an httpx `MockTransport`.
 """
 
+import datetime as dt
+import email.utils
 import gzip
+import zlib
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
-from usher.ports.errors import PortRateLimited, PortUnavailable
+from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
 
 # 1 MiB: large enough that the per-chunk overhead is irrelevant against a
 # 214 MiB file, small enough that a killed process loses at most a megabyte
@@ -3582,12 +3730,58 @@ def _revision_from(response: httpx.Response) -> str:
     )
 
 
+def _retry_after_seconds(value: str | None) -> float | None:
+    """Parse a `Retry-After` header value into seconds from now, or `None`
+    if there was no header or it couldn't be parsed at all.
+
+    RFC 9110 permits `Retry-After` to be *either* an integer number of
+    seconds *or* an HTTP-date -- `float(value)` alone raises `ValueError`
+    on the latter, and this is the 429 path: the one moment upstream is
+    explicitly asking for backoff. Shared by every M2 adapter's 429
+    handling (`usher.adapters.bulk.wikidata` imports this) rather than
+    duplicated -- the bug this fixes existed in two places for exactly
+    that reason.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    try:
+        target = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=dt.UTC)
+    return max(0.0, (target - dt.datetime.now(dt.UTC)).total_seconds())
+
+
 def _raise_for_status(response: httpx.Response, url: str) -> None:
     if response.status_code == 429:
-        retry_after = response.headers.get("retry-after")
-        raise PortRateLimited(float(retry_after) if retry_after else None)
+        raise PortRateLimited(_retry_after_seconds(response.headers.get("retry-after")))
     if response.status_code >= 400:
         raise PortUnavailable(f"{url} returned HTTP {response.status_code}")
+
+
+@dataclass(frozen=True, slots=True)
+class LocalFile:
+    """Where an `ensure_local` call left the file, and whether that call
+    actually fetched different bytes than were already cached.
+
+    `replaced` exists for a dataset whose own checkpoint revision is
+    coarser than a single file's real identity -- TMDb's is a calendar
+    date, this file's is an ETag -- so such a caller can notice when
+    `ensure_local` silently discovered that upstream republished different
+    content under what the caller's own coarser revision still considers
+    unchanged. `True` on every path except the short-circuit at the very
+    top of `ensure_local`: a first-ever download counts as `replaced` too,
+    deliberately -- there is no prior body a caller's own resume position
+    could safely apply to either.
+    """
+
+    path: Path
+    replaced: bool
 
 
 class CachedDatasetFile:
@@ -3605,8 +3799,13 @@ class CachedDatasetFile:
         return self._cache_dir / self._name
 
     async def revision(self) -> str:
-        """One `HEAD` request. Raises `PortUnavailable` if unreachable, which
-        is what makes a run fail before it writes anything."""
+        """One `HEAD` request. Raises `PortUnavailable` if unreachable or if
+        upstream answers 4xx/5xx, and `PortRateLimited` if it answers 429 --
+        both via `_raise_for_status` below, so both are real, not theoretical.
+        Naming only the first is what let a `PortRateLimited` escape uncaught
+        from a caller that had only guarded against `PortUnavailable`; every
+        `BulkDataset.revision()` that delegates here inherits both. Either way
+        a run fails before it writes anything."""
         try:
             response = await self._client.head(self._url, follow_redirects=True)
         except httpx.HTTPError as exc:
@@ -3614,7 +3813,7 @@ class CachedDatasetFile:
         _raise_for_status(response, self._url)
         return _revision_from(response)
 
-    async def ensure_local(self, revision: str) -> Path:
+    async def ensure_local(self, revision: str) -> LocalFile:
         """Download unless a complete local copy of `revision` already exists.
 
         Resumes a partial download with `Range` + `If-Range`. `If-Range` is
@@ -3624,14 +3823,30 @@ class CachedDatasetFile:
         `datasets.imdbws.com`), which this method detects and restarts from
         zero. Without it, a dump refreshed mid-download would silently
         produce a file that is half one snapshot and half another.
+
+        Two *separate* stamp files, not one: `{name}.revision` names the
+        revision `path` -- the complete file -- actually holds, and is
+        written only after the atomic rename below succeeds. `{name}.part.
+        revision` names the revision the *in-flight* `.part` is being
+        assembled for, and is written as soon as that revision is known, so
+        a killed process can resume it next time. Conflating the two into a
+        single stamp was a real bug: writing the completed-file stamp
+        before the body had actually finished streaming meant a process
+        killed between that write and the rename left `stamp` naming the
+        *new* revision right next to `path` still holding the *old* one --
+        and the short-circuit below can't tell a genuinely-complete file
+        from that state, so it would hand back the stale bytes under the
+        fresh revision's label, forever, with no further `GET` ever issued
+        to notice.
         """
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         stamp = self._cache_dir / f"{self._name}.revision"
         if self.path.exists() and stamp.exists() and stamp.read_text() == revision:
-            return self.path
+            return LocalFile(self.path, replaced=False)
 
         partial = self._cache_dir / f"{self._name}.part"
-        if not (stamp.exists() and stamp.read_text() == revision):
+        partial_stamp = self._cache_dir / f"{self._name}.part.revision"
+        if not (partial_stamp.exists() and partial_stamp.read_text() == revision):
             partial.unlink(missing_ok=True)
         have = partial.stat().st_size if partial.exists() else 0
         headers = {"Range": f"bytes={have}-", "If-Range": revision} if have else {}
@@ -3645,18 +3860,22 @@ class CachedDatasetFile:
                 # If-Range, or no range support) and is sending everything --
                 # so the partial bytes must be discarded, not appended to.
                 mode = "ab" if response.status_code == 206 else "wb"
-                stamp.write_text(_revision_from(response))
+                actual_revision = _revision_from(response)
+                partial_stamp.write_text(actual_revision)
                 with partial.open(mode) as sink:
                     async for chunk in response.aiter_bytes(_CHUNK_BYTES):
                         sink.write(chunk)
         except httpx.HTTPError as exc:
             raise PortUnavailable(f"GET {self._url} failed: {exc}") from exc
 
-        # Atomic rename last: a `path` that exists is always a complete file,
-        # so a killed process can never leave a truncated dump that parses as
-        # a short one.
+        # Atomic rename first, completed-file stamp only after it succeeds:
+        # a `path` that exists is always a complete file, and now `stamp`
+        # naming a revision is always backed by exactly that file -- never
+        # by whatever happened to be in flight when a process died.
         partial.replace(self.path)
-        return self.path
+        stamp.write_text(actual_revision)
+        partial_stamp.unlink(missing_ok=True)
+        return LocalFile(self.path, replaced=True)
 
     def lines(self, *, skip: int = 0) -> Iterator[str]:
         """Decompressed lines, newline stripped, with the first `skip`
@@ -3668,12 +3887,25 @@ class CachedDatasetFile:
         UTF-8 with `errors="replace"` -- a single undecodable byte in a
         12.7M-line dump must not abort an import, and a replacement character
         in one title's name is a far better outcome than no catalog.
+
+        A body that isn't valid gzip at all -- realistic whenever a CDN or
+        proxy serves an error page with HTTP status 200 instead of the
+        dataset -- raises `PortDataMalformed`, not the raw `gzip`/`zlib`
+        exception. `gzip.open` is lazy, so that raw exception would
+        otherwise surface for the first time here, deep inside a batching
+        loop, as a type no caller written against `usher.ports.errors` can
+        catch.
         """
-        with gzip.open(self.path, "rt", encoding="utf-8", errors="replace") as stream:
-            for index, line in enumerate(stream):
-                if index < skip:
-                    continue
-                yield line.rstrip("\n")
+        try:
+            with gzip.open(self.path, "rt", encoding="utf-8", errors="replace") as stream:
+                for index, line in enumerate(stream):
+                    if index < skip:
+                        continue
+                    yield line.rstrip("\n")
+        except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
+            raise PortDataMalformed(
+                f"{self.path} is not a valid gzip file", detail=str(self.path)
+            ) from exc
 ```
 
 - [ ] **Step 4: Run and watch it pass**
@@ -3683,7 +3915,7 @@ uv run pytest tests/unit/test_adapters_bulk_download.py -q
 uv run mypy && uv run ruff check . && uv run ruff format --check . && uv run lint-imports
 ```
 
-Expected: 11 passed; `adapters are driven, not driving` still kept.
+Expected: 16 passed; `adapters are driven, not driving` still kept.
 
 - [ ] **Step 5: Commit**
 
@@ -3696,6 +3928,25 @@ If-Range is the interlock, not an optimisation: with a stale token the host
 answers 200 with the whole body rather than 206 (verified against
 datasets.imdbws.com), and appending to a stale prefix would produce a gzip
 that still decompresses and is silently half one snapshot.
+
+Two separate stamp files, not one: {name}.revision names the revision the
+complete file at `path` holds, written only after the atomic rename
+succeeds; {name}.part.revision names the revision the in-flight .part is
+for. Conflating them is a real bug, not a hypothetical one -- writing the
+completed-file stamp before the body finished streaming meant a process
+killed between that write and the rename left the stamp naming a revision
+`path` did not yet hold, so ensure_local's own short-circuit would hand
+back the stale file under the new revision's label forever, with zero
+further GET requests ever issued to notice. LocalFile.replaced reports
+whether a call actually fetched different bytes, for a caller (TMDb) whose
+own checkpoint revision is coarser than this file's ETag.
+
+A non-gzip body -- realistic whenever a CDN or proxy serves an error page
+with status 200 -- now raises PortDataMalformed instead of a raw
+gzip.BadGzipFile no caller written against usher.ports.errors can catch.
+The 429 path's Retry-After parsing is its own shared helper
+(_retry_after_seconds) because RFC 9110 permits an HTTP-date there, not
+just a plain integer, and float() alone raises on one.
 
 Downloads land under data/, which .gitignore already excludes, so no dataset
 file can reach a commit by accident.
@@ -4463,7 +4714,10 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'usher.adapters.bulk.tm
 """TMDb's daily ID export -> `TmdbId`. No API key, no auth.
 
 The export is newline-delimited JSON inside a gzip, at date-stamped URLs.
-Verified 2026-07-30 against `files.tmdb.org`:
+Verified 2026-07-30 against `files.tmdb.org` (`https`, not `http` -- the
+plaintext URL an earlier draft of this module used returns a redirect at
+best and, without a checksum anywhere in this pipeline, gives an active
+network intermediary a free hand at worst):
 
     movie_ids_07_29_2026.json.gz      26.1 MiB
       {"adult":false,"id":3924,"original_title":"Blondie",
@@ -4497,7 +4751,7 @@ from usher.domain.enums import TitleKind
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, TmdbId
 from usher.ports.errors import PortDataMalformed, PortUnavailable
 
-TMDB_EXPORTS_BASE_URL = "http://files.tmdb.org/p/exports/"
+TMDB_EXPORTS_BASE_URL = "https://files.tmdb.org/p/exports/"
 
 # TMDb's required attribution wording for non-commercial API/data use.
 TMDB_ATTRIBUTION = (
@@ -5146,10 +5400,10 @@ import pytest
 
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.import_run_repository import FakeImportRunRepository
-from usher.domain.bootstrap import ImportRunStatus
+from usher.domain.bootstrap import ImportRun, ImportRunStatus
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, ImdbTitle
-from usher.ports.errors import PortUnavailable
+from usher.ports.errors import PortUnavailable, RepositoryConflict
 from usher.services.bootstrap import BootstrapService
 
 
@@ -5305,6 +5559,45 @@ async def test_a_failure_is_recorded_not_raised(
     assert run.position == 2  # the two committed batches survive
 
 
+class _ConflictingImportRunRepository(FakeImportRunRepository):
+    """Wraps the fake so its first `start()` call raises `RepositoryConflict`
+    -- standing in for `PostgresImportRunRepository`'s real failure mode
+    (`uq_import_runs_dataset`) without needing Postgres: two processes
+    bootstrapping the same dataset at once."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.armed = True
+
+    async def start(self, dataset: str, revision: str) -> ImportRun:
+        if self.armed:
+            self.armed = False
+            raise RepositoryConflict(
+                f"an import run for {dataset} already exists under a different id"
+            )
+        return await super().start(dataset, revision)
+
+
+async def test_a_run_start_conflict_is_recorded_not_raised(
+    catalog: FakeBulkCatalogRepository,
+) -> None:
+    """self._runs.start() can fail before self._drain ever runs -- a
+    RepositoryConflict from two processes bootstrapping the same dataset at
+    once -- and it must be recorded the same way a mid-stream failure is,
+    for the same reason `bootstrap --phase all` needs any of this: no
+    `ImportRun` exists yet to attach the failure to, which is exactly why
+    the except handler re-fetches from `self._runs` instead of assuming one
+    is already bound to `run`."""
+    commit = CommitSpy()
+    runs = _ConflictingImportRunRepository()
+    dataset = ScriptedDataset([[_title(1)]])
+    run = await _service(runs, catalog, commit).import_dataset(
+        dataset, lambda rows: _write(catalog, rows)
+    )
+    assert run.status is ImportRunStatus.FAILED
+    assert "already exists" in (run.error or "")
+
+
 async def test_a_failed_run_resumes_from_where_it_stopped(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
 ) -> None:
@@ -5446,6 +5739,21 @@ class BootstrapService:
         a failed phase must leave a durable, inspectable record and let the
         caller decide whether to continue with the next phase, which is what
         `bootstrap --phase all` needs to be useful when one upstream is down.
+        That includes a `UsherPortError` from `revision()` or from
+        `self._runs.start()` itself, not just from draining batches -- both
+        run inside the same try as `_drain`, for the same reason: an
+        unreachable, rate-limited, or conflicting dataset must still leave a
+        record, and neither call has an `ImportRun` to attach one to yet.
+
+        The except handler re-fetches whatever `self._runs` currently holds
+        for `dataset.name` rather than reusing this call's own `run`
+        variable. `_drain` checkpoints and commits after every batch it
+        completes, using its *own* local `run` binding -- so when it raises
+        instead of returning, this method's `run` is still whatever
+        `self._runs.start()` returned *before* any of that batch progress,
+        stale by however many batches `_drain` already committed. Evolving
+        that stale value would silently regress the checkpoint backwards on
+        every failure, defeating the resumability this class exists for.
         Anything that is *not* a `UsherPortError` propagates untouched -- a
         bug in this process is not an upstream failure and must not be
         recorded as one.
@@ -5453,24 +5761,36 @@ class BootstrapService:
         started = time.perf_counter()
         with _tracer.start_as_current_span("bootstrap.import") as span:
             span.set_attribute("usher.dataset", dataset.name)
-            revision = await dataset.revision()
-            span.set_attribute("usher.revision", revision)
-            run = await self._runs.start(dataset.name, revision)
-            resume_from = (
-                BulkCursor(revision=revision, position=run.position, rows_seen=run.rows_seen)
-                if run.position
-                else None
-            )
-            if resume_from is not None:
-                logger.info(
-                    "resuming {dataset} from position {position} ({rows} rows already seen)",
-                    dataset=dataset.name,
-                    position=resume_from.position,
-                    rows=resume_from.rows_seen,
-                )
             try:
+                revision = await dataset.revision()
+                span.set_attribute("usher.revision", revision)
+                run = await self._runs.start(dataset.name, revision)
+                resume_from = (
+                    BulkCursor(revision=revision, position=run.position, rows_seen=run.rows_seen)
+                    if run.position
+                    else None
+                )
+                if resume_from is not None:
+                    logger.info(
+                        "resuming {dataset} from position {position} ({rows} rows already seen)",
+                        dataset=dataset.name,
+                        position=resume_from.position,
+                        rows=resume_from.rows_seen,
+                    )
                 run = await self._drain(dataset, write, run, resume_from)
             except UsherPortError as exc:
+                # self._runs.get(), not this call's own `run` binding -- see
+                # the docstring above for why that binding can be either
+                # nonexistent (revision()/start() failed first) or stale
+                # (_drain committed progress under its own local `run`
+                # before raising). Falls back to a freshly-constructed run
+                # only for a dataset that has never once gotten past
+                # revision() -- "unknown" satisfies ImportRun.revision's
+                # min_length=1 and the matching DB CHECK constraint, and
+                # start() overwrites it the moment revision() next succeeds.
+                run = (await self._runs.get(dataset.name)) or ImportRun(
+                    dataset=dataset.name, revision="unknown"
+                )
                 run = run.evolve(
                     status=ImportRunStatus.FAILED,
                     # str(exc), never the exception object and never a
@@ -5567,7 +5887,7 @@ uv run pytest tests/unit/test_services_bootstrap.py -q
 uv run mypy && uv run ruff check . && uv run ruff format --check . && uv run lint-imports
 ```
 
-Expected: 8 passed. `hexagonal layering` still kept — this module imports `usher.domain`, `usher.ports`, loguru, and OpenTelemetry, and nothing from `usher.db` or `usher.adapters`.
+Expected: 9 passed. `hexagonal layering` still kept — this module imports `usher.domain`, `usher.ports`, loguru, and OpenTelemetry, and nothing from `usher.db` or `usher.adapters`.
 
 - [ ] **Step 5: Commit**
 
@@ -5583,7 +5903,12 @@ the cursor first and it silently loses rows.
 A UsherPortError is recorded on the run rather than raised, so
 `bootstrap --phase all` can continue past a down upstream and an operator
 can see why. Anything else propagates: a bug here is not an upstream
-failure.
+failure. revision() and self._runs.start() run inside the same try as
+_drain -- neither has an ImportRun to attach a failure to yet, so a bare
+try around _drain alone let both escape uncaught. The except handler
+re-fetches the run from self._runs rather than reusing this call's own
+binding, which is stale the moment _drain has committed at least one batch
+under its own local run before raising.
 
 Carries its own spans and PRD 10 metrics -- instrumentation is
 cross-cutting, not M10's job.

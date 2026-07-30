@@ -44,7 +44,16 @@ ingest.item
 │   ├── tmdb.fetch · enrich.persist
 └── index.title
     ├── index.fulltext · index.embed
+
+bootstrap.import
+├── bootstrap.batch
+└── bootstrap.link_crosswalk
 ```
+
+`bootstrap.import` spans (one per dataset, per `BootstrapService.import_dataset`
+call) and their child `bootstrap.batch` spans carry `usher.dataset` and
+`usher.revision` as attributes — the same "why was this slow" query the
+ingest pipeline's spans answer, for the M2 bulk importers.
 
 Spans carry `title_id`, `source`, and `trigger` (`demand` vs `background`) as
 attributes, so "why did the title I just opened take 45 seconds" is one query.
@@ -71,6 +80,10 @@ attributes, so "why did the title I just opened take 45 seconds" is one query.
 | `usher.embedding.duration` | histogram | — |
 | `usher.cache.hits` / `.misses` | counter | cache |
 | `usher.sse.connections` | gauge | — |
+| `usher.bootstrap.rows` | counter | dataset |
+| `usher.bootstrap.batch.duration` | histogram | dataset |
+| `usher.bootstrap.phase.duration` | histogram | dataset |
+| `usher.bootstrap.failures` | counter | dataset, kind |
 
 ## Analytics tables
 
@@ -152,6 +165,10 @@ headroom · **oldest `enriched_at` against the 6-month TMDb cache ceiling**, a
 licensing-compliance panel given [ADR-0005](decisions/0005-bulk-bootstrap.md) ·
 data freshness (age of last IMDb import and TMDb changes sync) · Postgres size
 by table with a disk-exhaustion projection.
+
+Data freshness is backed by real data as of M2: `import_runs.heartbeat_at`
+(updated every committed batch) and `finished_at` (set on completion or
+failure) are its source, one row per bulk dataset.
 
 ## Where the stack lives
 

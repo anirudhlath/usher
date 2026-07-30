@@ -45,7 +45,7 @@ async def test_get_returns_none_for_unknown_id(repo: PostgresTitleRepository) ->
 async def test_get_by_tmdb_id_finds_the_title(repo: PostgresTitleRepository) -> None:
     title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
     await repo.add(title)
-    found = await repo.get_by_tmdb_id(438631)
+    found = await repo.get_by_tmdb_id(438631, TitleKind.MOVIE)
     assert found is not None and found.id == title.id
 
 
@@ -116,9 +116,10 @@ async def test_update_translates_a_conflicting_provider_id(
     repo: PostgresTitleRepository,
 ) -> None:
     """update() sets tmdb_id/imdb_id/tvdb_id from the incoming title, and
-    ix_titles_tmdb_id is already a live unique partial index (Task 8/9,
-    shipped before Task 10) -- so update() can violate it today, not just
-    hypothetically. The plan's amendment claim ("nothing in its current
+    ix_titles_tmdb_id_kind is already a live unique partial index (Task 8/9,
+    shipped before Task 10; widened from a single-column index to
+    (tmdb_id, kind) by ADR-0011) -- so update() can violate it today, not
+    just hypothetically. The plan's amendment claim ("nothing in its current
     body raises IntegrityError... it can't yet") does not hold against the
     schema as actually shipped. Left uncaught, that IntegrityError would
     escape PostgresTitleRepository -- the one thing ADR-0009 says must
@@ -190,10 +191,12 @@ async def _insert_bypassing_the_identity_map(session: AsyncSession, **values: ob
 
 def _stage_conflicting_pending_row(session: AsyncSession, tmdb_id: int) -> None:
     """Adds -- without flushing -- a row under its own, unrelated id that
-    will violate ix_titles_tmdb_id whenever it's next flushed. Stands in
-    for a different repository's unrelated pending write sharing this
-    session: the row that eventually fails to flush has nothing to do with
-    the id any method below is asked to look up."""
+    will violate ix_titles_tmdb_id_kind whenever it's next flushed (always
+    kind=MOVIE here, matching every caller's other row, so the composite
+    index still fires). Stands in for a different repository's unrelated
+    pending write sharing this session: the row that eventually fails to
+    flush has nothing to do with the id any method below is asked to look
+    up."""
     session.add(
         TitleRow(
             id=new_id(),
@@ -224,7 +227,7 @@ async def test_get_by_tmdb_id_does_not_leak_integrity_error_from_pending_state(
         session, name="Dune", sort_name="Dune", tmdb_id=102
     )
     _stage_conflicting_pending_row(session, tmdb_id=102)
-    found = await repo.get_by_tmdb_id(102)
+    found = await repo.get_by_tmdb_id(102, TitleKind.MOVIE)
     assert found is not None
     assert found.id == title_id
 
