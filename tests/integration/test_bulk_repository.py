@@ -52,6 +52,21 @@ class TestPostgresBulkCatalogRepositoryContract(BulkCatalogRepositoryContract):
         return await _index_names(repo._session) >= _SUSPENDED
 
 
+async def test_apply_ratings_upsert_tmdb_ids_upsert_crosswalk_accept_empty_batches(
+    session: AsyncSession,
+) -> None:
+    """The shared contract only exercises the empty-batch guard for
+    upsert_titles (test_upsert_titles_accepts_an_empty_batch) -- these three
+    early-return the same way (`if not rows: return 0`), and were otherwise
+    unreached by any test, live or in-memory. Coverage gap found running
+    `pytest --cov` during this task's verification pass, closed here rather
+    than in the shared contract (tests/contract/), which is not this file's
+    to extend."""
+    assert await PostgresBulkCatalogRepository(session).apply_ratings([]) == 0
+    assert await PostgresBulkCatalogRepository(session).upsert_tmdb_ids([]) == 0
+    assert await PostgresBulkCatalogRepository(session).upsert_crosswalk([]) == 0
+
+
 async def test_copy_writes_the_server_default_columns(session: AsyncSession) -> None:
     """The reason TitleRow carries server_defaults at all: the COPY path
     never mentions enrichment_state, field_provenance, keywords,
