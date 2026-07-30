@@ -9,8 +9,6 @@ dump cannot reach a commit by accident. Tests never call `ensure_local`
 against a real host -- they drive it through an httpx `MockTransport`.
 """
 
-import datetime as dt
-import email.utils
 import gzip
 import zlib
 from collections.abc import Iterator
@@ -19,6 +17,7 @@ from pathlib import Path
 
 import httpx
 
+from usher.adapters.http import retry_after_seconds
 from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
 
 # 1 MiB: large enough that the per-chunk overhead is irrelevant against a
@@ -51,38 +50,9 @@ def _revision_from(response: httpx.Response) -> str:
     )
 
 
-def _retry_after_seconds(value: str | None) -> float | None:
-    """Parse a `Retry-After` header value into seconds from now, or `None`
-    if there was no header or it couldn't be parsed at all.
-
-    RFC 9110 permits `Retry-After` to be *either* an integer number of
-    seconds *or* an HTTP-date -- `float(value)` alone raises `ValueError`
-    on the latter (`could not convert string to float: 'Wed, 21 Oct 2026
-    07:28:00 GMT'`), and this is the 429 path: the one moment upstream is
-    explicitly asking for backoff. A caller that only handled the numeric
-    form would raise instead of backing off exactly when backing off
-    matters most. Shared by every M2 adapter's 429 handling rather than
-    duplicated -- the bug this fixes existed in two places for exactly
-    that reason.
-    """
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        pass
-    try:
-        target = email.utils.parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    if target.tzinfo is None:
-        target = target.replace(tzinfo=dt.UTC)
-    return max(0.0, (target - dt.datetime.now(dt.UTC)).total_seconds())
-
-
 def _raise_for_status(response: httpx.Response, url: str) -> None:
     if response.status_code == 429:
-        raise PortRateLimited(_retry_after_seconds(response.headers.get("retry-after")))
+        raise PortRateLimited(retry_after_seconds(response.headers.get("retry-after")))
     if response.status_code >= 400:
         raise PortUnavailable(f"{url} returned HTTP {response.status_code}")
 

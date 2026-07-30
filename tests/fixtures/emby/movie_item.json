@@ -1,0 +1,60 @@
+{
+  "Name": "Example Movie",
+  "OriginalTitle": "Example Movie",
+  "ServerId": "0000000000000000000000000000feed",
+  "Id": "0000000000000000000000000000a001",
+  "DateCreated": "2024-03-01T18:22:11.0000000Z",
+  "PremiereDate": "2021-09-15T00:00:00.0000000Z",
+  "ProductionYear": 2021,
+  "RunTimeTicks": 93600000000,
+  "Type": "Movie",
+  "IsFolder": false,
+  "MediaType": "Video",
+  "ProviderIds": { "Tmdb": "438631", "Imdb": "tt1160419" },
+  "UserData": {
+    "PlaybackPositionTicks": 18400000000,
+    "PlayCount": 1,
+    "IsFavorite": false,
+    "Played": false,
+    "LastPlayedDate": "2026-07-20T21:04:00.0000000Z"
+  },
+  "MediaSources": [
+    {
+      "Id": "0000000000000000000000000000b001",
+      "Name": "Example Movie 2160p",
+      "Container": "mkv",
+      "Size": 68719476736,
+      "RunTimeTicks": 93600000000,
+      "MediaStreams": [
+        {
+          "Index": 0,
+          "Type": "Video",
+          "Codec": "hevc",
+          "Profile": "Main 10",
+          "Width": 3840,
+          "Height": 2160,
+          "VideoRange": "HDR",
+          "VideoRangeType": "DOVI",
+          "DvProfile": 8,
+          "DvLevel": 9
+        },
+        {
+          "Index": 1,
+          "Type": "Audio",
+          "Codec": "truehd",
+          "Profile": "TrueHD Atmos",
+          "Channels": 8,
+          "Language": "eng",
+          "IsDefault": true
+        },
+        {
+          "Index": 2,
+          "Type": "Subtitle",
+          "Codec": "subrip",
+          "Language": "eng",
+          "IsDefault": false
+        }
+      ]
+    }
+  ]
+}

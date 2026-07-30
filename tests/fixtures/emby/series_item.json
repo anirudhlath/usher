@@ -1,0 +1,19 @@
+{
+  "Name": "Example Series",
+  "ServerId": "0000000000000000000000000000feed",
+  "Id": "0000000000000000000000000000a002",
+  "DateCreated": "2024-05-01T09:00:00.0000000Z",
+  "ProductionYear": 2011,
+  "EndDate": "2019-05-19T00:00:00.0000000Z",
+  "RunTimeTicks": null,
+  "Type": "Series",
+  "IsFolder": true,
+  "ProviderIds": { "Tmdb": "1399", "Imdb": "tt0944947", "Tvdb": "121361" },
+  "UserData": {
+    "PlaybackPositionTicks": 0,
+    "PlayCount": 0,
+    "IsFavorite": false,
+    "Played": false,
+    "UnplayedItemCount": 12
+  }
+}
