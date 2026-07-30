@@ -29,7 +29,7 @@ from usher.config import Settings
 def app(postgres_url: str) -> FastAPI:
     settings = Settings(
         database_url=postgres_url,
-        secret_key="0123456789abcdef0123456789abcdef",  # noqa: S106 -- throwaway test value, not a real credential
+        secret_key="0123456789abcdef0123456789abcdef",
     )
     return create_app(settings)
 

@@ -77,7 +77,14 @@ extend-exclude = ["docs"]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]  # assert is how pytest tests assert; not a bandit finding here
+# assert is how pytest tests assert; not a bandit finding here.
+# S105/S106/S107: M3's fixtures and fakes are built around literal
+# usernames, passwords, and session tokens -- a test for "a rejected
+# credential does not produce a request storm" has to name a wrong password
+# somewhere -- and a `# noqa` on every one of them is noise that would
+# eventually get copied into `src/`, where these rules still apply and
+# still matter.
+"tests/**" = ["S101", "S105", "S106", "S107"]
 
 [tool.mypy]
 python_version = "3.13"

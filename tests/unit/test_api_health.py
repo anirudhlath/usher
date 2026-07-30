@@ -25,7 +25,7 @@ from usher.config import Settings
 async def client_against_unreachable_database() -> AsyncIterator[AsyncClient]:
     settings = Settings(
         database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
-        secret_key="0123456789abcdef0123456789abcdef",  # noqa: S106 -- throwaway test value, not a real credential
+        secret_key="0123456789abcdef0123456789abcdef",
     )
     app = create_app(settings)
     async with LifespanManager(app) as manager:
