@@ -34,6 +34,7 @@ dev = [
     "mypy>=1.13",
     "import-linter>=2.1",
     "testcontainers[postgres]>=4.9",
+    "asgi-lifespan>=2.1.0",
 ]
 
 [build-system]
