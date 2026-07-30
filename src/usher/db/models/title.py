@@ -127,13 +127,31 @@ class TitleRow(Base):
         # the WHERE explicit is what lets Postgres use this index for the
         # lookup queries that already filter on "IS NOT NULL". It also means
         # an upsert against this column must repeat the same predicate --
-        # `ON CONFLICT (tmdb_id) WHERE tmdb_id IS NOT NULL DO UPDATE ...` --
-        # or Postgres rejects the upsert with "no unique or exclusion
-        # constraint matching the ON CONFLICT specification". M2/M4's
-        # upsert loaders must do this for tmdb_id/imdb_id/tvdb_id.
+        # `ON CONFLICT (tmdb_id, kind) WHERE tmdb_id IS NOT NULL DO UPDATE
+        # ...` -- or Postgres rejects the upsert with "no unique or
+        # exclusion constraint matching the ON CONFLICT specification".
+        # M2/M4's upsert loaders must do this for tmdb_id/imdb_id/tvdb_id.
+        #
+        # Composite and partial. `tmdb_id` alone is not unique in reality:
+        # TMDb keys movies and series in separate id spaces that both land
+        # in this column, and 26,968 of the 56,975 distinct TMDb series ids
+        # Wikidata knows are also live TMDb movie ids (measured 2026-07-30).
+        # A single-column unique index silently blocked 47.3% of TV from
+        # ever getting a tmdb_id during M2's Phase 2 crosswalk. See
+        # ADR-0011. Column order is (tmdb_id, kind), not (kind, tmdb_id),
+        # so the index also serves a bare `WHERE tmdb_id = ?` diagnostic
+        # scan; verified that `WHERE tmdb_id = 1 AND kind = 'movie'` plans
+        # as `Index Scan using ix_titles_tmdb_id_kind`.
+        #
+        # imdb_id keeps its single-column index: `tt` ids are one global
+        # namespace covering film and television alike. tvdb_id keeps its
+        # own for now -- M2 only ever writes TheTVDB *series* ids (Wikidata
+        # P4835), so the equivalent hazard is theoretical rather than
+        # measured; see ADR-0011's consequences.
         Index(
-            "ix_titles_tmdb_id",
+            "ix_titles_tmdb_id_kind",
             "tmdb_id",
+            "kind",
             unique=True,
             postgresql_where=text("tmdb_id IS NOT NULL"),
         ),

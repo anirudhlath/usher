@@ -3,7 +3,7 @@
 import uuid
 from abc import ABC, abstractmethod
 
-from usher.domain.enums import EnrichmentState
+from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
 
 
@@ -84,8 +84,22 @@ class TitleRepository(ABC):
         """Fetch by Usher's own id, or None if it doesn't exist."""
 
     @abstractmethod
-    async def get_by_tmdb_id(self, tmdb_id: int) -> Title | None:
-        """Fetch by TMDb id, or None if no title carries it."""
+    async def get_by_tmdb_id(self, tmdb_id: int, kind: TitleKind) -> Title | None:
+        """Fetch by TMDb id *within its namespace*, or None if no title
+        carries it.
+
+        `kind` is not optional, and not a convenience filter. TMDb keys
+        movies and TV series in separate id spaces that both land in this
+        one column, and they overlap heavily: 26,968 of the 56,975 distinct
+        TMDb series ids Wikidata knows are also live TMDb movie ids
+        (measured 2026-07-30). "Which title has tmdb_id 550" has no single
+        answer; "which movie has tmdb_id 550" does. See
+        [ADR-0011](../../../docs/prd/decisions/0011-tmdb-id-is-namespaced-by-kind.md).
+
+        Every real caller already knows the kind — M4's matcher reads it off
+        the source item alongside `ProviderIds.Tmdb` — so this costs nothing
+        it does not already have.
+        """
 
     @abstractmethod
     async def get_by_imdb_id(self, imdb_id: str) -> Title | None:

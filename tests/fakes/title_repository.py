@@ -9,7 +9,7 @@ parametrized tests along with it.
 import uuid
 from datetime import UTC, datetime
 
-from usher.domain.enums import EnrichmentState
+from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 from usher.ports.repository import TitleRepository
@@ -20,10 +20,14 @@ from usher.ports.repository import TitleRepository
 # its constraint name from asyncpg's own structured error fields; see
 # title.py's _constraint_name). Checked in this fixed order so the fake is
 # deterministic when a candidate conflicts on more than one field at once.
-_PROVIDER_ID_CONSTRAINTS = (
-    ("tmdb_id", "ix_titles_tmdb_id"),
-    ("imdb_id", "ix_titles_imdb_id"),
-    ("tvdb_id", "ix_titles_tvdb_id"),
+#
+# tmdb_id's entry carries `kind_scoped=True`: its index is composite
+# (tmdb_id, kind), so two rows sharing a tmdb_id across kinds do NOT
+# conflict. ADR-0011.
+_PROVIDER_ID_CONSTRAINTS: tuple[tuple[str, str, bool], ...] = (
+    ("tmdb_id", "ix_titles_tmdb_id_kind", True),
+    ("imdb_id", "ix_titles_imdb_id", False),
+    ("tvdb_id", "ix_titles_tvdb_id", False),
 )
 
 
@@ -33,18 +37,21 @@ def _provider_id_conflict(candidate: Title, other: Title) -> str | None:
     and `other` (a different row) share -- `None` if they don't conflict.
 
     Mirrors `db/models/title.py`'s three partial unique indexes
-    (`ix_titles_tmdb_id`/`ix_titles_imdb_id`/`ix_titles_tvdb_id` — unique
-    only where the column `IS NOT NULL`, so many rows may share a null
-    provider id) — without this, the fake would let a service add or
+    (`ix_titles_tmdb_id_kind`/`ix_titles_imdb_id`/`ix_titles_tvdb_id` —
+    unique only where the column `IS NOT NULL`, so many rows may share a
+    null provider id) — without this, the fake would let a service add or
     update two rows onto the same TMDb/IMDb/TVDB title in a unit test,
     while the real, Postgres-backed repository rejects the identical call
     with `RepositoryConflict`. That divergence would only surface in
     production, which is exactly what a fake exists to prevent.
     """
-    for field, constraint in _PROVIDER_ID_CONSTRAINTS:
+    for field, constraint, kind_scoped in _PROVIDER_ID_CONSTRAINTS:
         value = getattr(candidate, field)
-        if value is not None and value == getattr(other, field):
-            return constraint
+        if value is None or value != getattr(other, field):
+            continue
+        if kind_scoped and candidate.kind is not other.kind:
+            continue
+        return constraint
     return None
 
 
@@ -124,16 +131,16 @@ class FakeTitleRepository(TitleRepository):
     async def get(self, title_id: uuid.UUID) -> Title | None:
         return self._titles.get(title_id)
 
-    async def get_by_tmdb_id(self, tmdb_id: int) -> Title | None:
+    async def get_by_tmdb_id(self, tmdb_id: int, kind: TitleKind) -> Title | None:
         # Same guard, same reason, as PostgresTitleRepository.get_by_tmdb_id:
         # `title.tmdb_id == None` would match the first title with a null
         # tmdb_id instead of finding nothing, mirroring Postgres's own
         # `IS NULL` behaviour for the same comparison -- see that method's
-        # comment.
+        # comment. The `kind` filter mirrors ix_titles_tmdb_id_kind.
         if tmdb_id is None:
             return None
         for title in self._titles.values():
-            if title.tmdb_id == tmdb_id:
+            if title.tmdb_id == tmdb_id and title.kind is kind:
                 return title
         return None
 
