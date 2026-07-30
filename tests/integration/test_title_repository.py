@@ -160,8 +160,10 @@ async def test_update_leaves_the_session_usable_after_a_caught_conflict(
 # own making is ever left pending) -- reachable the moment a second
 # repository (M4's MediaItemRepository/WatchStateRepository) shares this
 # session and leaves work pending across a repository boundary. Written and
-# run against the pre-fix title.py first: all four methods below raised a
-# raw sqlalchemy.exc.IntegrityError.
+# run against the pre-fix title.py first: all five tests below failed --
+# the four pure reads raised the raw sqlalchemy.exc.IntegrityError directly,
+# and the update() case raised it in place of the RepositoryConflict it
+# raises after the fix.
 
 
 async def _insert_bypassing_the_identity_map(session: AsyncSession, **values: object) -> uuid.UUID:
