@@ -3901,6 +3901,30 @@ git commit -m "feat: title repository translating between rows and domain models
 >    added the autoflush-leak regression tests just below that section, so
 >    the count stayed accurate rather than drifting further.
 
+> **Amended post-implementation — two facts documented, not built,
+> closing out the same review pass.** No behaviour changed; both were
+> already true of the shipped code, just not stated anywhere a future
+> reader (or implementer of the next repository) would find them.
+>
+> `TitleRepository`'s class docstring now states that bulk loading is
+> expected to bypass this port entirely. Measured directly against
+> `PostgresTitleRepository`: ~3 statements and ~1.15 ms per `add()`
+> (`SAVEPOINT` / `INSERT` / `RELEASE`) — at M2's ~12.7M skeleton titles
+> ([04-catalog-bootstrap.md](../prd/04-catalog-bootstrap.md), already
+> designed around a `COPY`-based loader), that is roughly 4 hours of pure
+> repository overhead before a single row of actual bulk-dataset I/O.
+> `TitleRow`'s server-defaults ([Task 8](#task-8-sqlalchemy-models-for-the-core-schema))
+> already exist so a raw `COPY` can omit any column it doesn't have data
+> for — the design already anticipated this path; it just wasn't written
+> down.
+>
+> `update`'s docstring now states plainly that it is unconditional
+> last-write-wins: no version column, no comparison against the row's
+> state as last read. M4's concurrent enrichment (more than one source or
+> worker updating the same title around the same time) will eventually
+> need optimistic concurrency; this task doesn't add it, only names the
+> gap so it isn't rediscovered from scratch.
+
 ---
 
 ## Task 11: Telemetry — logging with trace context

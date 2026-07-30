@@ -29,6 +29,14 @@ class TitleRepository(ABC):
     repository boundary can still surface a raw storage exception the next
     time *anything* on that session flushes it, including code this port
     doesn't own.
+
+    Bulk loading deliberately bypasses this port. Measured cost of going
+    through it: ~3 statements and ~1.15 ms per `add()` (SAVEPOINT / INSERT
+    / RELEASE) against `PostgresTitleRepository` — roughly 4 hours of pure
+    repository overhead at M2's ~12.7M skeleton rows, before a single row
+    of actual bulk-dataset I/O. `TitleRow`'s server-defaults already exist
+    so a raw `COPY` can omit any column it doesn't have data for; M2's bulk
+    loader is expected to use that path directly, not this one.
     """
 
     @abstractmethod
@@ -61,6 +69,14 @@ class TitleRepository(ABC):
 
         Same session/transaction ownership as `add`: flushes, never
         commits.
+
+        Unconditional last-write-wins: there is no optimistic concurrency
+        check (no version column, no `WHERE` clause comparing against the
+        row's state as last read) — the incoming `title` simply overwrites
+        whatever is currently stored, even if it was read before some
+        other write landed. M4's concurrent enrichment (multiple sources
+        or workers updating the same title around the same time) will
+        eventually need one; not built here.
         """
 
     @abstractmethod
