@@ -156,7 +156,15 @@ class TitleRepositoryContract:
     ) -> None:
         """tmdb_id is unique *per kind* (ADR-0011), so two movies claiming
         one TMDb movie id is still a conflict — and the constraint that
-        fires is now the composite index."""
+        fires is now the composite index.
+
+        The final assertion pins a measured bug, not a style preference:
+        the message used to read "title {second.id} already exists"
+        unconditionally, which is false here -- `second`'s own id was
+        never the problem, its tmdb_id collided with a *different* row.
+        The message may still name `second.id` to say which add() call
+        failed; claiming that id already exists is what was wrong.
+        """
         first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
         second = Title(
             kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", tmdb_id=438631

@@ -3605,8 +3605,13 @@ class CachedDatasetFile:
         return self._cache_dir / self._name
 
     async def revision(self) -> str:
-        """One `HEAD` request. Raises `PortUnavailable` if unreachable, which
-        is what makes a run fail before it writes anything."""
+        """One `HEAD` request. Raises `PortUnavailable` if unreachable or if
+        upstream answers 4xx/5xx, and `PortRateLimited` if it answers 429 --
+        both via `_raise_for_status` below, so both are real, not theoretical.
+        Naming only the first is what let a `PortRateLimited` escape uncaught
+        from a caller that had only guarded against `PortUnavailable`; every
+        `BulkDataset.revision()` that delegates here inherits both. Either way
+        a run fails before it writes anything."""
         try:
             response = await self._client.head(self._url, follow_redirects=True)
         except httpx.HTTPError as exc:
@@ -5146,10 +5151,10 @@ import pytest
 
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.import_run_repository import FakeImportRunRepository
-from usher.domain.bootstrap import ImportRunStatus
+from usher.domain.bootstrap import ImportRun, ImportRunStatus
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, ImdbTitle
-from usher.ports.errors import PortUnavailable
+from usher.ports.errors import PortUnavailable, RepositoryConflict
 from usher.services.bootstrap import BootstrapService
 
 
@@ -5305,6 +5310,45 @@ async def test_a_failure_is_recorded_not_raised(
     assert run.position == 2  # the two committed batches survive
 
 
+class _ConflictingImportRunRepository(FakeImportRunRepository):
+    """Wraps the fake so its first `start()` call raises `RepositoryConflict`
+    -- standing in for `PostgresImportRunRepository`'s real failure mode
+    (`uq_import_runs_dataset`) without needing Postgres: two processes
+    bootstrapping the same dataset at once."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.armed = True
+
+    async def start(self, dataset: str, revision: str) -> ImportRun:
+        if self.armed:
+            self.armed = False
+            raise RepositoryConflict(
+                f"an import run for {dataset} already exists under a different id"
+            )
+        return await super().start(dataset, revision)
+
+
+async def test_a_run_start_conflict_is_recorded_not_raised(
+    catalog: FakeBulkCatalogRepository,
+) -> None:
+    """self._runs.start() can fail before self._drain ever runs -- a
+    RepositoryConflict from two processes bootstrapping the same dataset at
+    once -- and it must be recorded the same way a mid-stream failure is,
+    for the same reason `bootstrap --phase all` needs any of this: no
+    `ImportRun` exists yet to attach the failure to, which is exactly why
+    the except handler re-fetches from `self._runs` instead of assuming one
+    is already bound to `run`."""
+    commit = CommitSpy()
+    runs = _ConflictingImportRunRepository()
+    dataset = ScriptedDataset([[_title(1)]])
+    run = await _service(runs, catalog, commit).import_dataset(
+        dataset, lambda rows: _write(catalog, rows)
+    )
+    assert run.status is ImportRunStatus.FAILED
+    assert "already exists" in (run.error or "")
+
+
 async def test_a_failed_run_resumes_from_where_it_stopped(
     runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
 ) -> None:
@@ -5446,6 +5490,21 @@ class BootstrapService:
         a failed phase must leave a durable, inspectable record and let the
         caller decide whether to continue with the next phase, which is what
         `bootstrap --phase all` needs to be useful when one upstream is down.
+        That includes a `UsherPortError` from `revision()` or from
+        `self._runs.start()` itself, not just from draining batches -- both
+        run inside the same try as `_drain`, for the same reason: an
+        unreachable, rate-limited, or conflicting dataset must still leave a
+        record, and neither call has an `ImportRun` to attach one to yet.
+
+        The except handler re-fetches whatever `self._runs` currently holds
+        for `dataset.name` rather than reusing this call's own `run`
+        variable. `_drain` checkpoints and commits after every batch it
+        completes, using its *own* local `run` binding -- so when it raises
+        instead of returning, this method's `run` is still whatever
+        `self._runs.start()` returned *before* any of that batch progress,
+        stale by however many batches `_drain` already committed. Evolving
+        that stale value would silently regress the checkpoint backwards on
+        every failure, defeating the resumability this class exists for.
         Anything that is *not* a `UsherPortError` propagates untouched -- a
         bug in this process is not an upstream failure and must not be
         recorded as one.
@@ -5453,24 +5512,36 @@ class BootstrapService:
         started = time.perf_counter()
         with _tracer.start_as_current_span("bootstrap.import") as span:
             span.set_attribute("usher.dataset", dataset.name)
-            revision = await dataset.revision()
-            span.set_attribute("usher.revision", revision)
-            run = await self._runs.start(dataset.name, revision)
-            resume_from = (
-                BulkCursor(revision=revision, position=run.position, rows_seen=run.rows_seen)
-                if run.position
-                else None
-            )
-            if resume_from is not None:
-                logger.info(
-                    "resuming {dataset} from position {position} ({rows} rows already seen)",
-                    dataset=dataset.name,
-                    position=resume_from.position,
-                    rows=resume_from.rows_seen,
-                )
             try:
+                revision = await dataset.revision()
+                span.set_attribute("usher.revision", revision)
+                run = await self._runs.start(dataset.name, revision)
+                resume_from = (
+                    BulkCursor(revision=revision, position=run.position, rows_seen=run.rows_seen)
+                    if run.position
+                    else None
+                )
+                if resume_from is not None:
+                    logger.info(
+                        "resuming {dataset} from position {position} ({rows} rows already seen)",
+                        dataset=dataset.name,
+                        position=resume_from.position,
+                        rows=resume_from.rows_seen,
+                    )
                 run = await self._drain(dataset, write, run, resume_from)
             except UsherPortError as exc:
+                # self._runs.get(), not this call's own `run` binding -- see
+                # the docstring above for why that binding can be either
+                # nonexistent (revision()/start() failed first) or stale
+                # (_drain committed progress under its own local `run`
+                # before raising). Falls back to a freshly-constructed run
+                # only for a dataset that has never once gotten past
+                # revision() -- "unknown" satisfies ImportRun.revision's
+                # min_length=1 and the matching DB CHECK constraint, and
+                # start() overwrites it the moment revision() next succeeds.
+                run = (await self._runs.get(dataset.name)) or ImportRun(
+                    dataset=dataset.name, revision="unknown"
+                )
                 run = run.evolve(
                     status=ImportRunStatus.FAILED,
                     # str(exc), never the exception object and never a
@@ -5567,7 +5638,7 @@ uv run pytest tests/unit/test_services_bootstrap.py -q
 uv run mypy && uv run ruff check . && uv run ruff format --check . && uv run lint-imports
 ```
 
-Expected: 8 passed. `hexagonal layering` still kept — this module imports `usher.domain`, `usher.ports`, loguru, and OpenTelemetry, and nothing from `usher.db` or `usher.adapters`.
+Expected: 9 passed. `hexagonal layering` still kept — this module imports `usher.domain`, `usher.ports`, loguru, and OpenTelemetry, and nothing from `usher.db` or `usher.adapters`.
 
 - [ ] **Step 5: Commit**
 
@@ -5583,7 +5654,12 @@ the cursor first and it silently loses rows.
 A UsherPortError is recorded on the run rather than raised, so
 `bootstrap --phase all` can continue past a down upstream and an operator
 can see why. Anything else propagates: a bug here is not an upstream
-failure.
+failure. revision() and self._runs.start() run inside the same try as
+_drain -- neither has an ImportRun to attach a failure to yet, so a bare
+try around _drain alone let both escape uncaught. The except handler
+re-fetches the run from self._runs rather than reusing this call's own
+binding, which is stale the moment _drain has committed at least one batch
+under its own local run before raising.
 
 Carries its own spans and PRD 10 metrics -- instrumentation is
 cross-cutting, not M10's job.

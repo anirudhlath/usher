@@ -58,7 +58,7 @@ class RepositoryConflict(UsherPortError):
     type to handle it. See `usher.ports.repository.TitleRepository.add`.
 
     `constraint` names whichever unique constraint or index actually
-    fired (e.g. `"ix_titles_tmdb_id"`), when the implementation can
+    fired (e.g. `"ix_titles_tmdb_id_kind"`), when the implementation can
     determine it — `None` if it can't. This is what lets a caller
     implement "try to add, fall back to update on conflict" correctly:
     without it, a service has no way to tell "this exact id already

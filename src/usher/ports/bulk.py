@@ -28,10 +28,22 @@ class BulkCursor:
     overhead. Cheap, and the only reason it is worth mentioning at all.
 
     `revision` is an opaque upstream-snapshot token (an HTTP `ETag`, an
-    export date, a query date). `position` is an opaque, dataset-defined
+    export date, a query date). `position` is a dataset-defined integer
     offset whose only contract is that resuming from it never *misses* a
     record — it may legitimately replay some, because every write on the
-    far side is an upsert.
+    far side is an upsert. Concretely `int`, not "opaque" the way
+    `revision` is: it round-trips through `ImportRun.position` /
+    `ImportRunRow.position` (`usher.domain.bootstrap`,
+    `usher.db.models.bootstrap` — both a plain, non-negative `int`/
+    `Integer`, verified against the schema those already ship), and every
+    M2 dataset's position is already integer-shaped (a line number or a
+    work-unit index). A future dataset whose upstream hands back a
+    non-numeric continuation token instead would need this field widened
+    together with `ImportRun`/`ImportRunRow` in the same change — not
+    something to pre-empt speculatively before a real dataset needs it,
+    since neither an `int | str` union nor a numeric-string convention here
+    actually survives that round trip on its own: the persisted column
+    stays a plain `Integer` either way.
 
     A stored cursor is only usable if its `revision` still matches what the
     dataset reports now. When upstream has moved, the importer restarts from
@@ -159,18 +171,38 @@ class BulkDataset[RowT](ABC):
     async def revision(self) -> str:
         """The current upstream snapshot token, cheaply.
 
-        Raises `PortUnavailable` if upstream cannot be reached — this is the
-        first call a run makes, so an unreachable dataset fails before any
-        write happens.
+        Raises `PortUnavailable` if upstream cannot be reached, or
+        `PortRateLimited` if it answered but asked to be backed off (e.g. an
+        HTTP 429) — both `usher.ports.errors`, and both real: the shared
+        download helper every M2 adapter's `revision()` delegates to routes
+        a 429 through exactly that translation. This is the first call a
+        run makes, so an unreachable or rate-limited dataset fails before
+        any write happens, and a caller must catch both from this call the
+        same way it catches both from `batches()` — a port's docstring
+        naming only one of the errors it actually raises is what let a
+        `PortRateLimited` here escape uncaught in an earlier draft of the
+        caller that drives this port.
         """
 
     @abstractmethod
-    def batches(self, *, resume_from: BulkCursor | None = None) -> AsyncIterator[BulkBatch[RowT]]:
+    def batches(
+        self, *, resume_from: BulkCursor | None = None, revision: str | None = None
+    ) -> AsyncIterator[BulkBatch[RowT]]:
         """Stream batches, optionally continuing from a stored cursor.
 
         Plain `def`, not `async def`: this returns an `AsyncIterator`
         directly rather than a coroutine that produces one — the same shape
         `SourceAdapter.list_items` uses.
+
+        `revision`, when given, is the value the caller's own prior call to
+        `revision()` already returned this run — equivalent to resolving it
+        again internally, never a different value. `None` (the default)
+        means "resolve it yourself", so every existing caller and
+        implementation is unaffected. Exists purely so a caller that has
+        already paid the cost of `revision()` is not forced to pay it again
+        for an implementation whose own `revision()` is itself expensive
+        (e.g. a sequential multi-day HEAD-request scan) — free for any
+        implementation whose `revision()` is already cheap.
 
         Contract an implementation must guarantee:
         - **Must raise, never truncate silently.** A stream that stops
@@ -180,11 +212,15 @@ class BulkDataset[RowT](ABC):
           `PortRateLimited`, or `PortDataMalformed` (`usher.ports.errors`).
         - Each yielded `BulkBatch.cursor` is correct **after** that batch is
           persisted, so the caller can commit rows and cursor together.
-        - `resume_from` whose `revision` differs from `revision()` is
+        - `resume_from` whose `revision` differs from the current one is
           ignored, and the stream restarts from the beginning.
         - Batches may replay rows across a resume; every row is written
           through an upsert, so replay is a no-op rather than a duplicate.
-        - No batch is empty. A dataset with nothing left yields nothing.
+        - A batch's `rows` may be empty — an implementation may yield a
+          row-less batch solely to advance the cursor, e.g. past a run of
+          upstream records its own filtering drops entirely, so a trailing
+          run of those doesn't lose progress on a crash. A dataset with
+          nothing left yields nothing further, not an empty batch.
         """
 
     @abstractmethod

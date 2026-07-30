@@ -31,9 +31,10 @@ the SAVEPOINT, a caught `RepositoryConflict` leaves the *session* raising
 `update()` needs the identical translation, not just `add()`: the plan's
 own amendment claiming "nothing in [update's] current body raises
 IntegrityError... it can't yet" no longer holds against the schema this
-task actually ships against — `ix_titles_tmdb_id`/`ix_titles_imdb_id`/
+task actually ships against — `ix_titles_tmdb_id_kind`/`ix_titles_imdb_id`/
 `ix_titles_tvdb_id` (unique partial indexes, `db/models/title.py`, shipped
-in Task 8/9, before this task) are exactly the kind of future column the
+in Task 8/9, before this task; `ix_titles_tmdb_id_kind` widened from a
+single-column index by ADR-0011) are exactly the kind of future column the
 amendment was waiting for, except they already exist. `update()` sets
 tmdb_id/imdb_id/tvdb_id from the incoming `Title`, so retargeting one to a
 value another row already holds raises `IntegrityError` today, not
