@@ -56,12 +56,24 @@ def build_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
     # than one process against the same database, so there is no real
     # deployment yet to tune these for. Revisit if/when a milestone adds a
     # second long-running process (e.g. a worker pool) sharing this pool.
+    #
+    # connect_args={"timeout": 5} bounds asyncpg's own connection-establishment
+    # attempt, not query execution. Without it, a connection attempt against
+    # an unreachable (not merely refused) host hangs indefinitely -- verified
+    # directly against a blackholed address (192.0.2.1, RFC 5737): still
+    # blocked after an 8s test budget with no timeout, TimeoutError at 3.00s
+    # with connect_args={"timeout": 3}. /health/ready is the one endpoint
+    # whose entire job is answering fast, and pool_pre_ping means every other
+    # request that checks out a connection pays this same cost on a stale one
+    # -- 5s is a generous ceiling for establishing a connection (as opposed to
+    # running a query) against a healthy local Postgres.
     return create_async_engine(
         database_url,
         echo=echo,
         pool_pre_ping=True,
         pool_size=10,
         max_overflow=5,
+        connect_args={"timeout": 5},
     )
 
 
