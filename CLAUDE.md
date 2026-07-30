@@ -123,12 +123,24 @@ just by running it:**
 Verified working as of Group E (title repository, first integration tests) —
 `tests/integration/` runs against a real PostgreSQL, started and torn down
 per test run by `testcontainers` (`pgvector/pgvector:pg17`; first run pulls
-the image, ~625 MB). Docker must be running; nothing else to set up:
+the image, ~625 MB). Docker must be running; nothing else to set up. Its
+schema comes from running the real Alembic migration once per test session
+(`postgres_url`, `tests/integration/conftest.py`), not `Base.metadata.
+create_all` — CHECK constraint bodies and the three `set_updated_at`
+triggers are invisible to `create_all` the same way they're invisible to
+`--autogenerate` (above), so a suite that never runs the migration can't
+catch either drifting from the models. Each test still gets a fully
+isolated database via a connection-bound transaction rolled back
+afterward, not a schema recreate — cheaper than the 23-tests-worth of
+`create_all`/`drop_all` cycles that used to cost, and `tests/integration/
+test_migrations.py` is the ongoing regression check (trigger existence,
+plus an autogenerate diff against the migrated database asserting no
+drift):
 
 ```bash
-uv run pytest                        # full suite — 194 tests, needs Docker for the 23 under tests/integration/
-uv run pytest tests/unit             # 171 tests, no Docker
-uv run pytest tests/integration      # 23 tests, needs Docker
+uv run pytest                        # full suite — 222 tests, needs Docker for the 40 under tests/integration/
+uv run pytest tests/unit             # 182 tests, no Docker
+uv run pytest tests/integration      # 40 tests, needs Docker
 uv run pytest -m "not integration"   # marker equivalent of tests/unit
 uv run pytest -m integration         # marker equivalent of tests/integration
 ```
