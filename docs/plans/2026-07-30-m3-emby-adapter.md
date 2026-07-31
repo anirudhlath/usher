@@ -110,6 +110,7 @@ Every upstream path this milestone uses is a module constant in `src/usher/adapt
 | `POST /Users/{user}/PlayedItems/{item}` marks played, and **clears the resume position** | ✅ **verified** — the load-bearing ordering claim, checked for the first time |
 | `POST /Users/{user}/PlayingItems/{item}/Progress` writes a position | ❌ **contradicted** — **400 on every variant.** Replaced by `POST /Users/{user}/Items/{item}/UserData` |
 | `DELETE /Users/{user}/PlayedItems/{item}` is a safe "mark unplayed" | ❌ **contradicted** — also resets `PlayCount`, clears `LastPlayedDate`, and clears the position. No longer used |
+| A listing's `UserData` is the same block a single-item GET returns | ❌ **contradicted** — a listing reports `PlayCount: 0` and omits `LastPlayedDate`, for an item whose own GET reports `PlayCount: 2` and a real date. No `Fields` value, `EnableUserData`, or `Ids` restriction changes it. So `watch_state()` cannot carry play history; documented, not fixed — see the commit and PRD 03 |
 | `VideoRangeType` / `DvProfile` name the video range | ❌ **contradicted** — never emitted, in 200 movies. `ExtendedVideoType`/`ExtendedVideoSubType` are |
 | `Policy.IsAdministrator` is readable | ✅ **verified** — on `GET /Users/{userId}`; `GET /Users/Me` 500s |
 | A token presented with a *different* `DeviceId` forks or invalidates the session | ✅ **verified false** — sessions byte-identical before and after |
