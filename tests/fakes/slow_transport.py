@@ -38,6 +38,22 @@ class SlowTransport(httpx.AsyncBaseTransport):
 
     Assert on `max_in_flight` as well as on the behaviour under test, or
     the test can silently stop being concurrent and nobody finds out.
+
+    Two ways this diverged from `httpx.MockTransport`, which drives the
+    same fake server, and both are pinned in
+    `tests/unit/test_fakes_slow_transport.py`:
+
+    1. **It has to `aread()` the request**, as `MockTransport` does.
+       `FakeEmbyServer._authenticate` reads `request.content`, which raises
+       `httpx.RequestNotRead` for a streaming body that nobody read. Latent
+       today only because `EmbySession` builds every request with `json=`.
+    2. **The counter has to survive a cancellation.** With the increment
+       before the `try` and the sleep outside it, a cancelled request
+       skipped the `finally` and left `in_flight` permanently high --
+       inflating `max_in_flight` for every later request. That is the
+       instrument lying in the one direction that matters: it would certify
+       a test as concurrent after it had stopped being so, which is exactly
+       what the paragraph above says to use it to rule out.
     """
 
     def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
@@ -46,10 +62,12 @@ class SlowTransport(httpx.AsyncBaseTransport):
         self.max_in_flight = 0
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        # Before the counter, so a cancellation here is not one to unwind.
+        await request.aread()
         self.in_flight += 1
-        self.max_in_flight = max(self.max_in_flight, self.in_flight)
-        await asyncio.sleep(0.02)
         try:
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            await asyncio.sleep(0.02)
             return self._handler(request)
         finally:
             self.in_flight -= 1
