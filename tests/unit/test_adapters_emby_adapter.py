@@ -10,6 +10,7 @@ endpoints a write-back uses and in which order, and how `verify` tells
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -444,6 +445,48 @@ async def test_an_empty_object_for_an_unknown_id_is_a_deletion_not_an_item() -> 
         assert await adapter.stream_targets("never-existed") == []
     finally:
         await adapter.aclose()
+
+
+async def test_an_external_id_stays_inside_one_path_segment() -> None:
+    """An `external_id` is whatever the source last called an item, and it
+    is interpolated straight into a request path. Unquoted, that is a path
+    traversal, and httpx normalises `..` in a path exactly the way a
+    browser does: `get_item("../../System/Info")` really did resolve to
+    `GET /Users/System/Info`, and `push_watch_state` aimed **two writes** at
+    an arbitrary endpoint of the caller's choosing.
+
+    httpx's `params=` already neutralises the same trick in a query string,
+    and `playback.build_stream_targets` already quoted its own copy of this
+    id. Nothing neutralises a path segment; only quoting does.
+    """
+    hostile = "../../System/Info"
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        captured.append(request)
+        return httpx.Response(200, json={})
+
+    adapter = _on(handler)
+    try:
+        await adapter.get_item(hostile)
+        await adapter.stream_targets(hostile)
+        await adapter.push_watch_state(hostile, WatchStateUpdate(position_seconds=1, played=True))
+    finally:
+        await adapter.aclose()
+    # `raw_path`, not `path`: httpx's `URL.path` percent-*decodes*, so it
+    # reports a correctly-escaped segment and a traversal identically.
+    paths = [request.url.raw_path.decode().split("?")[0] for request in captured]
+    escaped = quote(hostile, safe="")
+    assert paths == [
+        f"/Users/{USER_ID}/Items/{escaped}",
+        f"/Users/{USER_ID}/Items/{escaped}",
+        f"/Users/{USER_ID}/PlayingItems/{escaped}/Progress",
+        f"/Users/{USER_ID}/PlayedItems/{escaped}",
+    ]
+    assert "/System/Info" not in "".join(paths)
 
 
 # --- watch state -----------------------------------------------------

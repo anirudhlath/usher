@@ -77,6 +77,7 @@ import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from opentelemetry import trace
@@ -156,6 +157,24 @@ SORT_BY = "DateCreated,SortName"
 # an operator who lowers `page_size` far enough for that headroom to matter
 # raises this alongside it.
 MAX_PAGES = 10_000
+
+
+def _segment(value: str) -> str:
+    """One path segment, percent-encoded.
+
+    An `external_id` is whatever the source last called an item, and a
+    `user_id` is whatever the server said its user was; both are
+    interpolated into a request path here. httpx normalises `..` in a path
+    exactly the way a browser does, so unquoted this is a path traversal --
+    verified: `get_item("../../System/Info")` resolved to `GET
+    /Users/System/Info`, and `push_watch_state("../../../Users/U1/Items",
+    ...)` aimed *two writes* at an arbitrary endpoint of the caller's
+    choosing.
+
+    httpx's `params=` already neutralises the same trick in a query string.
+    Nothing neutralises it in a path; only this does.
+    """
+    return quote(value, safe="")
 
 
 def _version_of(body: Mapping[str, Any]) -> str | None:
@@ -266,7 +285,7 @@ class EmbyAdapter(SourceAdapter):
             if since is not None:
                 params[since_param] = emby_datetime(since)
             body = await self._session.json_body(
-                "GET", f"/Users/{user_id}/Items", params=params, op="list"
+                "GET", f"/Users/{_segment(user_id)}/Items", params=params, op="list"
             )
             items = body.get("Items")
             if not isinstance(items, list):
@@ -304,7 +323,7 @@ class EmbyAdapter(SourceAdapter):
 
     async def _fetch(self, external_id: str) -> dict[str, Any] | None:
         user_id = await self._session.user_id()
-        path = f"/Users/{user_id}/Items/{external_id}"
+        path = f"/Users/{_segment(user_id)}/Items/{_segment(external_id)}"
         # `request`, not `json_body`: a 404 is "gone", which is a value, and
         # every other failure is an error. Conflating them would mark a
         # healthy item unavailable over a flaky network.
@@ -373,9 +392,10 @@ class EmbyAdapter(SourceAdapter):
             span.set_attribute("usher.external_id", external_id)
             span.set_attribute("usher.played", state.played)
             user_id = await self._session.user_id()
+            user, item = _segment(user_id), _segment(external_id)
             await self._session.ok(
                 "POST",
-                f"/Users/{user_id}/PlayingItems/{external_id}/Progress",
+                f"/Users/{user}/PlayingItems/{item}/Progress",
                 params={
                     # Clamped, not trusted: `WatchStateUpdate` is a plain
                     # dataclass with no validation and Emby's PositionTicks
@@ -387,7 +407,7 @@ class EmbyAdapter(SourceAdapter):
             )
             await self._session.ok(
                 "POST" if state.played else "DELETE",
-                f"/Users/{user_id}/PlayedItems/{external_id}",
+                f"/Users/{user}/PlayedItems/{item}",
                 op="push_played",
             )
 
