@@ -97,3 +97,38 @@ closed by pinning the fake against the *measurement* directly, in
 `tests/unit/test_fakes_emby_server.py`, rather than only through the
 adapter. A live run remains the only thing that can catch all three files
 being wrong together, which is why M4's definition of done keeps one.
+
+### Where the rule survives contact with SQL
+
+The port makes the wrong value unspellable; the *merge* is where it could
+still be written anyway, permanently. Measured against
+`pgvector/pgvector:pg17`, 2026-07-31, over a stored row holding
+`play_count = 7`:
+
+- **The natural one-statement spelling zeroes it.**
+  `INSERT … SELECT … ON CONFLICT (user_id, title_id) DO UPDATE SET
+  play_count = COALESCE(excluded.play_count, watch_states.play_count)`, fed
+  a merge carrying `play_count = NULL`, reads back **0**. Because the column
+  is `NOT NULL`, the insert path must write `COALESCE(play_count, 0)`, and
+  that collapse has already happened by the time the conflict clause reads
+  `excluded`.
+- **The raw `NULL` is unreachable from that clause.** `ON CONFLICT DO
+  UPDATE` cannot name a CTE — `missing FROM-clause entry for table "d"`,
+  reproduced directly — so no one-statement form can read the value it needs.
+- **`last_played_at` survives the same statement.** It is nullable, so it is
+  never collapsed, `excluded.last_played_at` is genuinely `NULL`, and the
+  `COALESCE` works. "The natural spelling zeroes history" is therefore true
+  of exactly one of the two columns, and a suite that checked only the
+  timestamp would have ratified the bug. That is why
+  `test_absent_play_history_leaves_a_stored_count_alone` and
+  `test_absent_last_played_at_leaves_a_stored_timestamp_alone` are separate
+  cases, and it is confirmed by running the one-statement form against the
+  suite: the count case fails, the timestamp case passes.
+
+`PostgresWatchStateRepository` is therefore two statements per conflict
+target — `UPDATE … FROM deduped` (where the `NULL` is still `NULL` and still
+in scope), then `INSERT … ON CONFLICT DO NOTHING` — both set-based, four
+statements per batch regardless of size. Fifteen mutations were run against
+it, including the one-statement form itself; every one was caught, and a
+plausible-but-wrong per-row implementation carrying that spelling fails 11
+of the 25 shared contract cases.

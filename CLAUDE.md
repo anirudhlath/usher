@@ -199,9 +199,66 @@ Verified against `pgvector/pgvector:pg17` on 2026-07-30, all three of which
   rowcount reports their sum.
 
 `asyncpg`'s binary `COPY` is strictly typed (a `str` into an `integer` column
-raises `TypeError` client-side) and CHECK constraints fire during `COPY`, so
-one bad row aborts its batch. Reach the driver with
+raises `TypeError` client-side) and CHECK constraints fire during `COPY` into
+a *constrained* table, so one bad row aborts its batch. Reach the driver with
 `(await (await session.connection()).get_raw_connection()).driver_connection`.
+This project's staging tables are deliberately unconstrained, which moves
+that failure one statement later — see the staging note below.
+
+**`ON CONFLICT DO UPDATE` cannot read a CTE, and that is what makes M4's
+watch-state merge two statements.** Verified 2026-07-31 against
+`pgvector/pgvector:pg17`. Three findings, in the order they bite:
+
+- `ON CONFLICT (kind, key) DO UPDATE SET priority = d.a`, where `d` is the
+  statement's own CTE, fails with `missing FROM-clause entry for table "d"`.
+  Only `excluded` and the target table are in scope.
+- **The natural one-statement spelling of the watch-state merge silently
+  zeroes real play history.** `watch_states.play_count` is `NOT NULL`, so
+  the insert path must write `COALESCE(play_count, 0)` — and that collapse
+  happens before the conflict clause runs, so `excluded.play_count` is `0`
+  rather than `NULL` and
+  `COALESCE(excluded.play_count, watch_states.play_count)` always picks the
+  zero. Measured on a row holding `play_count = 7`, fed a merge carrying
+  `NULL`: reads back **0**. This is exactly the failure ADR-0014 exists to
+  prevent, arriving at the one layer where it is permanent.
+- **`last_played_at` survives that same statement**, because it is nullable
+  and therefore never collapsed. So "the natural spelling zeroes history" is
+  true of exactly one of the two columns, and a test suite that checked only
+  the timestamp would have ratified the bug. The two need separate cases.
+
+The working shape is `UPDATE … FROM deduped` (where the `NULL` is still
+`NULL` and still in scope) followed by `INSERT … ON CONFLICT DO NOTHING` —
+two statements per conflict target, four per batch, all set-based.
+`usher/db/repositories/watch_state.py`.
+
+**`watch_states` has a `BEFORE UPDATE` trigger that owns `updated_at`.**
+`trg_watch_states_set_updated_at` assigns `now()` unconditionally (the core
+schema creates it alongside `sources` and `titles`; `media_items` has none
+deliberately). So a merge's own `updated_at = observed_at` lands on the
+*insert* path only, and a merged row's stored `updated_at` is its write
+instant. Benign for the "latest `updated_at` wins" conflict rule — if
+anything the more honest reading — but it means that assignment is not
+observable on the update path, and `FakeWatchStateRepository` stores
+`observed_at` on both paths, so the two diverge there. Pinned by
+`tests/integration/test_watch_state_repository.py::test_the_update_trigger_owns_updated_at`.
+
+**`:param::type` does not work in a SQLAlchemy `text()` statement.** Its
+bind-parameter regex treats a name immediately followed by `::` as a
+Postgres cast and skips the bind entirely, so `:source_id::uuid` reaches the
+driver as that literal string and asyncpg answers
+`PostgresSyntaxError: syntax error at or near ":"`. Verified by compiling
+both spellings against the asyncpg dialect. Use `CAST(:source_id AS uuid)`.
+
+**A staged `COPY` does not fire the destination's CHECK constraints**, on
+this project's path, because `usher.db.staging`'s staging tables are
+declared without constraints. The violation surfaces one statement later, at
+the `INSERT … SELECT`, which goes through SQLAlchemy and is therefore a
+`sqlalchemy.exc.IntegrityError` a repository can translate. Had the
+constraint been on the staging table, `copy_records_to_table` runs on the
+raw asyncpg connection, outside SQLAlchemy's error translation, and would
+raise `asyncpg.exceptions.CheckViolationError` straight past any
+`except IntegrityError`. Do not add constraints to a staging DDL without
+giving its caller a second `except`.
 
 **`tmdb_id` is unique per `kind`.** TMDb's movie and series id spaces overlap
 on 26,968 ids (measured against Wikidata, 2026-07-30 — 47.3% of all series
@@ -644,8 +701,8 @@ and interrogated over HTTP, and the suite is 865 tests (733 unit / 132
 integration), mypy strict clean over `src` and `tests`, 6 import contracts:
 
 ```bash
-uv run pytest                                    # 865 tests, needs Docker for the 132 integration ones
-uv run pytest tests/unit                         # 733 tests, no Docker and no network
+uv run pytest                                    # 1079 tests as of M4 group C1 (873 unit / 206 integration)
+uv run pytest tests/unit                         # 873 tests, no Docker and no network
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .
