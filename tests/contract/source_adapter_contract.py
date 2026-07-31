@@ -38,11 +38,12 @@ transport does. Two consequences:
 - **A failing *status* is not something a harness can arrange.**
   `go_offline` is a transport failure by design, so nothing here
   distinguishes "a 500 is not a deletion" from "a 404 is". Verified by
-  mutation: making `EmbyAdapter._fetch` report every `>= 400` as `None`
-  passes all 40 cases and is caught only by
+  mutation, and re-verified at 43 cases in M4: making `EmbyAdapter._fetch`
+  report every `>= 400` as `None` passes every case here and is caught only
+  by the two per-implementation tests written for it,
   `tests/unit/test_adapters_emby_adapter.py::test_get_item_raises_rather_
-  than_returning_none_on_a_server_error`. Status-level behaviour stays a
-  per-implementation test.
+  than_returning_none_on_a_server_error` and its `get_watch_state`
+  counterpart. Status-level behaviour stays a per-implementation test.
 """
 
 import asyncio

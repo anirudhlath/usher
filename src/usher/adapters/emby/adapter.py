@@ -357,15 +357,24 @@ class EmbyAdapter(SourceAdapter):
             if item is not None:
                 yield item
 
-    async def _fetch(self, external_id: str) -> dict[str, Any] | None:
+    async def _fetch(self, external_id: str, *, op: str = "get_item") -> dict[str, Any] | None:
+        """One item's payload, or `None` for a 404.
+
+        `op` is the telemetry label only -- PRD 10 buckets
+        `usher.source.request.duration` and the `source.request` span by it.
+        It is a parameter because `get_watch_state`'s bounded history
+        backfill is thousands of single-item reads, and folding those into
+        `get_item`'s bucket makes "how slow is `get_item`" answer a
+        different question every night. The route, the 404 handling and the
+        `Fields` set are identical for every caller, which is the part that
+        must not diverge.
+        """
         user_id = await self._session.user_id()
         path = f"/Users/{_segment(user_id)}/Items/{_segment(external_id)}"
         # `request`, not `json_body`: a 404 is "gone", which is a value, and
         # every other failure is an error. Conflating them would mark a
         # healthy item unavailable over a flaky network.
-        response = await self._session.request(
-            "GET", path, params={"Fields": ITEM_FIELDS}, op="get_item"
-        )
+        response = await self._session.request("GET", path, params={"Fields": ITEM_FIELDS}, op=op)
         if response.status_code == 404:
             return None
         if response.status_code >= 400:
@@ -401,40 +410,56 @@ class EmbyAdapter(SourceAdapter):
     def watch_state(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceWatchState]:
         """Walk this user's watch state.
 
-        **`play_count` and `last_played_at` are not trustworthy from this
-        walk, and the reason is the server, not this code.** Verified
-        2026-07-31 against Emby 4.9.5.0: a *listing* reports `PlayCount: 0`
-        and omits `LastPlayedDate` entirely, even for an item whose
-        single-item `GET /Users/{user}/Items/{item}` reports `PlayCount: 2`
-        and a real `LastPlayedDate`. `position_seconds` and `played` are
-        correct in both. Neither `Fields=UserDataPlayState`,
-        `Fields=UserData`, `EnableUserData=true`, nor restricting the
-        listing to specific `Ids` changes it -- the listing route simply
-        does not carry those two fields on this build.
+        **This walk reports `play_count` and `last_played_at` as `None`,
+        always, and that is a property of the server rather than a
+        limitation of this code.** Verified 2026-07-31 against Emby 4.9.5.0:
+        a *listing* reports `PlayCount: 0` and omits `LastPlayedDate`, even
+        for an item whose single-item `GET /Users/{user}/Items/{item}`
+        reports `PlayCount: 2` and a real `LastPlayedDate`.
+        `position_seconds` and `played` are correct in both. Neither
+        `Fields=UserDataPlayState`, `Fields=UserData`, `EnableUserData=true`,
+        nor restricting the listing to specific `Ids` changes it.
 
-        So a consumer that writes `SourceWatchState.play_count` from a walk
-        writes **0 over whatever it already knew**, which is exactly the
-        failure `to_watch_state`'s own docstring names one level up (a zero
-        state is a claim, not an absence). Recovering them costs one
-        single-item request each, and this library is 1,126,674 items, so
-        the walk cannot do it.
-
-        Left as a documented limitation rather than papered over: making
-        those two fields optional on `SourceWatchState` is the honest fix
-        and it is a *port* change, with the contract suite and both its
-        implementations to bring along. M4 is the caller that first has to
-        care, and it should make that call deliberately rather than inherit
-        it from a closing milestone. Until then, treat the pair as
-        best-effort from a walk and authoritative only from `get_item`.
+        Reporting the listing's `0` would write zero over real history at
+        every merge. Reporting `None` says exactly what is true -- this read
+        cannot determine it -- and `WatchStateRepository.merge_from_source`
+        is `COALESCE`-shaped for precisely this value (ADR-0014).
+        `get_watch_state` below is the authoritative read, at one request
+        per item.
         """
         return self._watch_state(since)
 
     async def _watch_state(self, since: AwareDatetime | None) -> AsyncIterator[SourceWatchState]:
         user_id = await self._session.user_id()
         async for payload in self._walk(since_param=USER_DATA_SINCE_PARAM, since=since):
-            state = to_watch_state(payload, source_user_id=user_id)
+            # play_history_is_trustworthy=False: this is the listing route.
+            state = to_watch_state(
+                payload, source_user_id=user_id, play_history_is_trustworthy=False
+            )
             if state is not None:
                 yield state
+
+    async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
+        """Authoritative watch state for one item, from the single-item
+        route that carries the play history the listing route does not.
+
+        Reuses `_fetch`, so a 404 is `None` and every other failure raises,
+        exactly as `get_item` behaves -- the two must not diverge or a
+        caller learns to tell a deletion from an outage by which method it
+        called.
+        """
+        with _tracer.start_as_current_span("source.get_watch_state") as span:
+            span.set_attribute("usher.source", self._source.name)
+            span.set_attribute("usher.external_id", external_id)
+            payload = await self._fetch(external_id, op="get_watch_state")
+            span.set_attribute("usher.found", payload is not None)
+            if payload is None:
+                return None
+            return to_watch_state(
+                payload,
+                source_user_id=await self._session.user_id(),
+                play_history_is_trustworthy=True,
+            )
 
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
         """Write watch state back to Emby: one call, plus a second when the

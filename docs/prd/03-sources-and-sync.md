@@ -315,18 +315,25 @@ is a pure function of catalog state and can be rebuilt from scratch at any time.
   `WatchState` with `origin = source`. Progress made in Infuse or Emby's own
   apps flows in.
 
-  ⚠️ **`play_count` and `last_played_at` are best-effort from a walk, and
-  M4 must not write them from one.** Verified 2026-07-31 against Emby
-  4.9.5.0: a *listing* reports `PlayCount: 0` and omits `LastPlayedDate`
-  entirely, for the same item whose single-item fetch reports `PlayCount: 2`
-  and a real date. Position and played flag are correct in both. No `Fields`
-  value, `EnableUserData`, or `Ids` restriction changes it. Recovering the
-  pair costs one request per item and this library is 1,126,674 items, so
-  the walk cannot. A consumer that writes them from a walk writes zero over
-  real history — the same class of mistake as pushing a zero state over
-  something already known. Making the two fields optional on
-  `SourceWatchState` is the honest fix and is a port change M4 should make
-  deliberately.
+  **`play_count` and `last_played_at` are absent from a walk, not zero**
+  ([ADR-0014](decisions/0014-absence-is-not-zero.md)). Verified 2026-07-31
+  against Emby 4.9.5.0: a *listing* reports `PlayCount: 0` and omits
+  `LastPlayedDate` entirely, for the same item whose single-item fetch
+  reports `PlayCount: 2` and a real date. Position and played flag are
+  correct in both. No `Fields` value, `EnableUserData`, or `Ids` restriction
+  changes it. Recovering the pair costs one request per item and this
+  library is 1,126,674 items, so the walk cannot.
+
+  Both fields are therefore `int | None` / `AwareDatetime | None` on
+  `SourceWatchState`, where `None` means "this read could not determine it"
+  and `0` stays a positive claim — a reset has to remain propagable, which
+  is the same reason an all-zero state is emitted rather than filtered out
+  of a walk. `SourceAdapter.get_watch_state(external_id)` is the
+  authoritative single-item read, and `merge_from_source` is `COALESCE`-
+  shaped, so a walk *cannot* write zero over real history rather than merely
+  being trusted not to. Recovering it is a queued backfill over
+  `played = true AND play_count = 0`, bounded by the household's watched
+  items rather than by the library.
 - **Outbound:** client actions write `WatchState` with `origin = api`, then
   push to the source best-effort. Failure enqueues a retry and never blocks the
   API response. On Emby that push is **one call, plus a second only when the

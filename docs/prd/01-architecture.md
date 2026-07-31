@@ -91,7 +91,7 @@ class SourceAdapter(ABC):
     @abstractmethod
     def supports_push(self) -> bool: ...
     @abstractmethod
-    async def verify(self) -> bool: ...
+    async def verify(self) -> SourceStatus: ...
     @abstractmethod
     def list_items(self, since: datetime | None) -> AsyncIterator[SourceItem]: ...
     @abstractmethod
@@ -100,6 +100,8 @@ class SourceAdapter(ABC):
     async def stream_targets(self, external_id: str) -> list[StreamTarget]: ...
     @abstractmethod
     def watch_state(self, since: datetime | None) -> AsyncIterator[SourceWatchState]: ...
+    @abstractmethod
+    async def get_watch_state(self, external_id: str) -> SourceWatchState | None: ...
     @abstractmethod
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None: ...
     @abstractmethod
@@ -115,6 +117,14 @@ Note `list_items` and `watch_state` are plain `def`, not `async def` — they re
 contract each method promises (ordering, `since` inclusivity, duplicates, must-raise
 rather than truncate) lives on the real ABC in `src/usher/ports/source.py`; this sketch
 shows shape, not the whole docstring.
+
+`watch_state` walks and `get_watch_state` fetches one item, and they are two methods
+rather than one because they are not equally truthful: a listing may be lossier than
+an item route, so the walk is permitted to report play history as absent while
+`get_watch_state` is not ([ADR-0014](decisions/0014-absence-is-not-zero.md)).
+`verify` returns a `SourceStatus` rather than a bool, because
+"reachable but the credentials are wrong" and "unreachable" are different answers
+`GET /admin/sources/{id}/status` has to render.
 
 Other ports follow the same pattern:
 

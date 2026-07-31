@@ -15,6 +15,10 @@ from urllib.parse import quote
 
 import httpx
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import SecretStr
 
 from tests.fakes.emby_server import SERVER_VERSION, USER_ID, FakeEmbyServer
@@ -672,6 +676,144 @@ async def test_watch_state_is_attributed_to_the_authenticated_user() -> None:
     assert states[0].position_seconds == 600
 
 
+async def test_get_watch_state_uses_the_single_item_route() -> None:
+    """One request against `/Users/{u}/Items/{id}`, which is the route the
+    live run measured as carrying `PlayCount`/`LastPlayedDate`. An
+    implementation that walked the listing instead would be wrong *and*
+    would cost 5,634 pages to answer one question.
+
+    The listing route's path is `/Users/{u}/Items` exactly, so a listing is
+    a recorded request that *ends* there -- `server.requests` holds
+    `f"{method} {url.path}"` with no query string, which is why the obvious
+    `"/Items?" in entry` spelling would match nothing and pass against an
+    adapter that walked the whole library.
+    """
+    server = FakeEmbyServer()
+    server.add_item(_movie(0), T0)
+    server.set_watch_state(
+        SourceWatchState(
+            external_id="movie-0",
+            position_seconds=1840,
+            played=True,
+            play_count=7,
+            last_played_at=datetime(2026, 7, 20, 21, 4, tzinfo=UTC),
+        )
+    )
+    adapter = _adapter(server)
+    server.requests.clear()
+    try:
+        state = await adapter.get_watch_state("movie-0")
+    finally:
+        await adapter.aclose()
+    assert state is not None
+    assert state.play_count == 7
+    assert state.last_played_at == datetime(2026, 7, 20, 21, 4, tzinfo=UTC)
+    assert state.position_seconds == 1840
+    assert state.played is True
+    assert state.source_user_id == USER_ID
+    assert [entry for entry in server.requests if entry.endswith("/Items")] == []
+    assert f"GET /Users/{USER_ID}/Items/movie-0" in server.requests
+
+
+async def test_get_watch_state_is_labelled_as_its_own_operation() -> None:
+    """PRD 10 buckets `usher.source.request.duration` and the
+    `source.request` span by `op`. `get_watch_state` shares `_fetch`'s
+    route with `get_item` and must not share its label: the history
+    backfill ADR-0014 describes is thousands of single-item reads, and
+    counting them as `get_item` makes "how slow is `get_item`" answer a
+    different question on the nights the backfill runs."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+
+    server = FakeEmbyServer()
+    server.add_item(_movie(0), T0)
+    adapter = _adapter(server)
+    try:
+        await adapter.get_watch_state("movie-0")
+    finally:
+        await adapter.aclose()
+
+    labels = {
+        span.attributes["usher.op"]
+        for span in exporter.get_finished_spans()
+        if span.name == "source.request" and span.attributes is not None
+    }
+    assert labels == {"get_watch_state"}
+
+
+async def test_get_watch_state_returns_none_rather_than_raising_for_a_missing_item() -> None:
+    """The same 404-is-a-value/anything-else-is-an-error split `get_item`
+    makes, reached through the same `_fetch`. A caller must never learn to
+    tell a deletion from an outage by which method it called."""
+    server = FakeEmbyServer()
+    adapter = _adapter(server)
+    try:
+        assert await adapter.get_watch_state("never-existed") is None
+    finally:
+        await adapter.aclose()
+
+
+async def test_get_watch_state_raises_rather_than_returning_none_on_a_server_error() -> None:
+    """A harness cannot arrange a failing *status* (see the contract
+    suite's own docstring), so the 500-is-not-a-deletion half of
+    `get_watch_state` is pinned here, exactly as it is for `get_item`.
+    Reporting a 500 as `None` would let a struggling server look like an
+    item that was never watched, and the merge downstream would believe it.
+
+    `_authenticated` first, and that is the whole test rather than a
+    detail: a handler that answered 500 to *every* path -- authentication
+    included -- also raises `PortUnavailable`, from the session rather than
+    from `_fetch`, and passes this while proving nothing. Caught by
+    mutation (making `_fetch` report every `>= 400` as `None` left the
+    all-500 version green).
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        return httpx.Response(500, text="boom")
+
+    adapter = _on(handler)
+    try:
+        with pytest.raises(PortUnavailable):
+            await adapter.get_watch_state("movie-0")
+    finally:
+        await adapter.aclose()
+
+
+async def test_the_walk_reports_absent_play_history() -> None:
+    """The finding, end to end through the adapter: the listing route on
+    Emby 4.9.5.0 reports `PlayCount: 0` and no `LastPlayedDate` for an item
+    played seven times, so the walk must report absence rather than passing
+    that zero through as a count. Position and played flag are correct in
+    the listing and are asserted here too, so an adapter that answered
+    `None` to everything does not pass this by giving up."""
+    server = FakeEmbyServer()
+    server.add_item(_movie(0), T0)
+    server.set_watch_state(
+        SourceWatchState(
+            external_id="movie-0",
+            position_seconds=1840,
+            played=True,
+            play_count=7,
+            last_played_at=datetime(2026, 7, 20, 21, 4, tzinfo=UTC),
+        )
+    )
+    adapter = _adapter(server)
+    try:
+        states = [state async for state in adapter.watch_state()]
+    finally:
+        await adapter.aclose()
+    assert len(states) == 1
+    assert states[0].position_seconds == 1840
+    assert states[0].played is True
+    assert states[0].play_count is None
+    assert states[0].last_played_at is None
+
+
 async def test_push_writes_the_position_through_the_route_emby_accepts() -> None:
     """Verified against the live Emby 4.9.5.0 server, 2026-07-31: `POST
     /Users/{user}/PlayingItems/{item}/Progress` answers **400 `"Value cannot
@@ -755,6 +897,13 @@ async def test_reporting_a_position_does_not_reach_the_played_route() -> None:
     unplayed path is therefore one `UserData` write carrying `Played: false`,
     which live Emby applies while leaving `PlayCount` and `LastPlayedDate`
     exactly as the user's own apps recorded them.
+
+    The surviving history is read back through `get_watch_state`, not
+    through the walk. It used to be read from the walk, which stopped
+    meaning anything the moment the walk started reporting absence
+    (ADR-0014) -- and reading it from a source that *always* answers `None`
+    would have turned this into an assertion that passes no matter what the
+    write did.
     """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
@@ -773,11 +922,13 @@ async def test_reporting_a_position_does_not_reach_the_played_route() -> None:
             "movie-0", WatchStateUpdate(position_seconds=600, played=False)
         )
         states = [state async for state in adapter.watch_state()]
+        after = await adapter.get_watch_state("movie-0")
     finally:
         await adapter.aclose()
     assert not any("PlayedItems" in entry for entry in server.requests)
     assert (states[0].position_seconds, states[0].played) == (600, False)
-    assert (states[0].play_count, states[0].last_played_at) == (3, T0)
+    assert after is not None
+    assert (after.play_count, after.last_played_at) == (3, T0)
 
 
 async def test_a_negative_position_is_clamped_rather_than_sent_upstream() -> None:

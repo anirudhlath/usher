@@ -11,7 +11,15 @@ renderer that left its own fixture's `SeriesId`/`ParentIndexNumber`/
 `IndexNumber` showing through for an item seeded without them -- so a
 contract test could assert on an episode number the harness never gave it.
 
-A third divergence this file could never have caught is why M3's live run
+A third is the listing-versus-item `UserData` split M4 added: Emby's
+listing route reports `PlayCount: 0` and omits `LastPlayedDate` for an item
+whose single-item route carries both, and until M4 this fake rendered the
+same block for both routes. Pinned here directly rather than only through
+the adapter, because mutation showed the fake's half of that drift is
+invisible to every other test in the suite -- a correct adapter discards
+those fields whatever the fake supplies, so nothing objects.
+
+A fourth divergence this file could never have caught is why M3's live run
 exists: the *route* itself was wrong. `POST
 /Users/{user}/PlayingItems/{item}/Progress` answers 400 on a real Emby
 4.9.5.0, and a fake that implemented the adapter's own guess agreed with it
@@ -112,6 +120,25 @@ class _Driver:
             params={"PositionTicks": str(position_seconds * TICKS_PER_SECOND)},
             op="push_progress",
         )
+
+    async def listed(self, external_id: str) -> dict[str, Any]:
+        """The same item as the **listing** route renders it.
+
+        A second method rather than a flag on `payload` above, because the
+        two routes are two different observations: Emby 4.9.5.0's listing
+        carries a `UserData` block that is *partially* wrong (correct
+        position and played flag, a `PlayCount` of 0, no `LastPlayedDate`),
+        and a driver that could only ask one of them could not state that.
+        """
+        body = await self.session.json_body(
+            "GET", f"/Users/{USER_ID}/Items", params={"Recursive": "true"}, op="list"
+        )
+        items = body["Items"]
+        assert isinstance(items, list)
+        for item in items:
+            if isinstance(item, dict) and item.get("Id") == external_id:
+                return item
+        raise AssertionError(f"{external_id} was not in the listing")
 
     async def mark_played(self, external_id: str, *, played: bool) -> None:
         await self.session.ok(
@@ -234,12 +261,68 @@ async def test_a_seeded_watch_state_round_trips_all_four_facts(driver: _Driver) 
             last_played_at=LAST_PLAYED,
         )
     )
-    state = to_watch_state(await driver.payload("movie-1"), source_user_id=USER_ID)
+    state = to_watch_state(
+        await driver.payload("movie-1"), source_user_id=USER_ID, play_history_is_trustworthy=True
+    )
     assert state is not None
     assert state.position_seconds == 1840
     assert state.played is False
     assert state.play_count == 7
     assert state.last_played_at == LAST_PLAYED
+
+
+async def test_the_listing_route_omits_the_play_history_the_item_route_carries(
+    driver: _Driver,
+) -> None:
+    """The measurement ADR-0014 rests on, transcribed as an assertion about
+    *this fake* rather than about the adapter.
+
+    Verified 2026-07-31 against the live Emby 4.9.5.0 server: for one and
+    the same item, `GET /Users/{u}/Items` reported `PlayCount: 0` with no
+    `LastPlayedDate` key at all, while `GET /Users/{u}/Items/{id}` reported
+    `PlayCount: 2` and a real date. `PlaybackPositionTicks` and `Played`
+    were correct in both -- which is what makes the listing's block a
+    *partial* lie and therefore dangerous: every field a harness reads back
+    looks right.
+
+    Why this test exists rather than only the adapter-level one: mutation
+    (M4 plan, Task 3 Step 7) showed that making this fake's listing carry
+    real history is **invisible to the whole suite** if the adapter is
+    correct, because a correct adapter discards those fields regardless.
+    That is the M3 write-back failure's exact shape -- a fake drifting away
+    from the measured server with nothing objecting -- and it is only
+    caught by pinning the fake against the measurement directly, which is
+    what this does. The adapter-level `test_the_walk_reports_absent_play_
+    history` catches the *pair* (adapter trusting the listing plus fake
+    supplying history); this catches the fake's half on its own.
+    """
+    driver.server.add_item(MOVIE, T0)
+    driver.server.set_watch_state(
+        SourceWatchState(
+            external_id="movie-1",
+            position_seconds=1840,
+            played=True,
+            play_count=7,
+            last_played_at=LAST_PLAYED,
+        )
+    )
+    listed = (await driver.listed("movie-1"))["UserData"]
+    item = (await driver.payload("movie-1"))["UserData"]
+
+    assert listed["PlayCount"] == 0
+    assert "LastPlayedDate" not in listed
+    assert item["PlayCount"] == 7
+    # The literal seven-digit-fraction form, written out rather than built
+    # with the renderer's own `_emby_stamp`: a test that reused the helper
+    # under test would agree with it however wrong it became.
+    assert item["LastPlayedDate"] == "2026-07-20T21:00:00.6543210Z"
+    # The half the listing gets right, asserted so "the listing is wrong
+    # about everything" is not what this file ends up claiming.
+    position = 1840 * TICKS_PER_SECOND
+    assert listed["PlaybackPositionTicks"] == position
+    assert item["PlaybackPositionTicks"] == position
+    assert listed["Played"] is True
+    assert item["Played"] is True
 
 
 async def test_reporting_progress_changes_the_position_and_nothing_else(
@@ -261,7 +344,9 @@ async def test_reporting_progress_changes_the_position_and_nothing_else(
         )
     )
     await driver.write_user_data("movie-1", 600, played=True)
-    state = to_watch_state(await driver.payload("movie-1"), source_user_id=USER_ID)
+    state = to_watch_state(
+        await driver.payload("movie-1"), source_user_id=USER_ID, play_history_is_trustworthy=True
+    )
     assert state is not None
     assert state.position_seconds == 600
     assert state.played is True
@@ -287,7 +372,9 @@ async def test_a_user_data_write_that_omits_played_clears_it(driver: _Driver) ->
         )
     )
     await driver.write_user_data("movie-1", 600)
-    state = to_watch_state(await driver.payload("movie-1"), source_user_id=USER_ID)
+    state = to_watch_state(
+        await driver.payload("movie-1"), source_user_id=USER_ID, play_history_is_trustworthy=True
+    )
     assert state is not None
     assert state.played is False
     assert (state.play_count, state.last_played_at) == (7, LAST_PLAYED)
@@ -326,7 +413,9 @@ async def test_marking_played_clears_the_position_and_keeps_the_history(
         )
     )
     await driver.mark_played("movie-1", played=True)
-    state = to_watch_state(await driver.payload("movie-1"), source_user_id=USER_ID)
+    state = to_watch_state(
+        await driver.payload("movie-1"), source_user_id=USER_ID, play_history_is_trustworthy=True
+    )
     assert state is not None
     assert state.position_seconds == 0
     assert state.played is True
@@ -352,7 +441,9 @@ async def test_unmarking_played_destroys_the_position_and_the_history(driver: _D
         )
     )
     await driver.mark_played("movie-1", played=False)
-    state = to_watch_state(await driver.payload("movie-1"), source_user_id=USER_ID)
+    state = to_watch_state(
+        await driver.payload("movie-1"), source_user_id=USER_ID, play_history_is_trustworthy=True
+    )
     assert state is not None
     assert state.position_seconds == 0
     assert state.played is False
@@ -370,7 +461,7 @@ async def test_an_untouched_item_reports_a_zero_state_with_no_last_played_date(
     driver.server.add_item(MOVIE, T0)
     payload = await driver.payload("movie-1")
     assert "LastPlayedDate" not in payload["UserData"]
-    state = to_watch_state(payload, source_user_id=USER_ID)
+    state = to_watch_state(payload, source_user_id=USER_ID, play_history_is_trustworthy=True)
     assert state is not None
     assert state.position_seconds == 0
     assert state.played is False

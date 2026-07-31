@@ -36,7 +36,14 @@ any source produces.
 `tests/unit/test_fakes_emby_server.py` pins everything on the other side
 of that line -- this file is the entire basis for running the source
 contract against the real adapter, so a divergence here is a place a
-wrong adapter passes all 40 assertions.
+wrong adapter passes all 43 of its assertions.
+
+**The listing route and the item route render different `UserData`, and
+that asymmetry is a measurement, not a convenience** -- see `_user_data`.
+It is pinned directly by `test_the_listing_route_omits_the_play_history_
+the_item_route_carries`, because mutation showed that this file drifting
+back into agreement with the adapter is otherwise invisible: a correct
+adapter discards those fields whatever they say.
 
 Three routes are covered by that contract run rather than directly:
 `remove_item`, `fail_after`'s mid-walk `ReadTimeout`, and `_one`'s 404 for
@@ -436,7 +443,7 @@ class FakeEmbyServer:
         return httpx.Response(
             200,
             json={
-                "Items": [self._payload(external_id) for external_id in page],
+                "Items": [self._payload(external_id, for_listing=True) for external_id in page],
                 "TotalRecordCount": len(ordered),
             },
         )
@@ -444,15 +451,21 @@ class FakeEmbyServer:
     def _one(self, external_id: str) -> httpx.Response:
         if external_id not in self._items:
             return httpx.Response(404, json={"Error": "Not Found"})
-        return httpx.Response(200, json=self._payload(external_id))
+        return httpx.Response(200, json=self._payload(external_id, for_listing=False))
 
     def _state_of(self, external_id: str) -> SourceWatchState:
         """The item's current state, or the all-zero one Emby reports for an
         item nobody has touched. Never `None`: every write below *evolves*
         this rather than building a replacement, so there has to be
-        something to evolve."""
+        something to evolve.
+
+        `play_count=0` explicitly, rather than the DTO's `None` default: on
+        the port, `None` means "this read could not determine it", and a
+        server reading its own storage always can. An untouched item really
+        has been played zero times, and that zero is a positive claim.
+        """
         return self._states.get(external_id) or SourceWatchState(
-            external_id=external_id, position_seconds=0, played=False
+            external_id=external_id, position_seconds=0, played=False, play_count=0
         )
 
     def _write_user_data(self, request: httpx.Request, external_id: str) -> httpx.Response:
@@ -510,17 +523,26 @@ class FakeEmbyServer:
             previous,
             position_seconds=0,
             played=played,
-            play_count=max(previous.play_count, 1) if played else 0,
+            # `previous.play_count or 0` handles a state seeded with no
+            # count at all: the server is about to know the count either
+            # way, so this is the one place the fake resolves an unknown
+            # into a number rather than carrying it.
+            play_count=max(previous.play_count or 0, 1) if played else 0,
             last_played_at=(
                 previous.last_played_at or datetime(2026, 7, 31, tzinfo=UTC) if played else None
             ),
         )
         self._states[external_id] = state
-        return httpx.Response(200, json=self._user_data(external_id))
+        # The item-route rendering: this is a single-item write, and the
+        # live server answers it with the item's own updated `UserData`.
+        return httpx.Response(200, json=self._user_data(external_id, for_listing=False))
 
     # -- rendering -----------------------------------------------------
 
-    def _payload(self, external_id: str) -> dict[str, Any]:
+    def _payload(self, external_id: str, *, for_listing: bool) -> dict[str, Any]:
+        """One item, as the listing route or as the single-item route
+        renders it. The two differ only in `UserData` -- see `_user_data`,
+        which is the whole reason this parameter exists."""
         item, _ = self._items[external_id]
         payload = load_emby_fixture(_TEMPLATES[item.kind])
         payload["Id"] = item.external_id
@@ -538,7 +560,7 @@ class FakeEmbyServer:
             payload["DateCreated"] = _emby_stamp(item.added_at)
         else:
             payload.pop("DateCreated", None)
-        payload["UserData"] = self._user_data(external_id)
+        payload["UserData"] = self._user_data(external_id, for_listing=for_listing)
         # Written unconditionally, `None` included. Writing them only when
         # the seeded value is set leaves the *template's* values in place
         # for everything else -- an EPISODE seeded with all three as `None`
@@ -597,23 +619,46 @@ class FakeEmbyServer:
         # that breaks a `MediaSources[0]` adapter.
         payload["MediaSources"] = [*alternates, media]
 
-    def _user_data(self, external_id: str) -> dict[str, Any]:
-        state = self._states.get(external_id)
-        if state is None:
-            # An item nobody has touched: Emby reports the zero state and
-            # omits `LastPlayedDate` entirely rather than nulling it.
-            return {
-                "PlaybackPositionTicks": 0,
-                "PlayCount": 0,
-                "IsFavorite": False,
-                "Played": False,
-            }
+    def _user_data(self, external_id: str, *, for_listing: bool) -> dict[str, Any]:
+        """One item's `UserData`, rendered **differently for the two routes
+        that carry it**, because the live server does.
+
+        Until M4 this method took no `for_listing` and both routes got the
+        item-route rendering, which is precisely the fake-agrees-with-the-
+        adapter shape that let M3's write-back ship broken: with the fake
+        supplying a play count the real listing does not, an adapter that
+        read one from a walk looked correct here and wrote zeros in
+        production.
+        """
+        state = self._state_of(external_id)
         user_data: dict[str, Any] = {
             "PlaybackPositionTicks": state.position_seconds * _TICKS_PER_SECOND,
-            "PlayCount": state.play_count,
             "IsFavorite": False,
             "Played": state.played,
         }
+        if for_listing:
+            # Emby 4.9.5.0's listing route reports `PlayCount: 0` and omits
+            # `LastPlayedDate` *entirely* -- not null, absent -- for an item
+            # whose single-item route reports the real values (verified
+            # 2026-07-31 against the live server, with
+            # `Fields=UserDataPlayState`, `Fields=UserData`,
+            # `EnableUserData=true`, and an explicit `Ids` restriction each
+            # tried and each making no difference). `PlaybackPositionTicks`
+            # and `Played` above are correct in both, so this is a *partial*
+            # lie, which is what makes it dangerous: a walk that trusted the
+            # block wholesale would look right in every field a harness
+            # reads back.
+            user_data["PlayCount"] = 0
+            return user_data
+        # The item route. `PlayCount` is omitted rather than rendered as `0`
+        # when the seeded state does not carry one: this fake never states a
+        # number the test did not, so "trusted route, absent key" reaches
+        # the mapper here as well as in the mapping tests. An item nobody
+        # has touched still reports `PlayCount: 0`, because `_state_of`
+        # supplies that zero as a real claim -- a server genuinely knows an
+        # unwatched item has no plays.
+        if state.play_count is not None:
+            user_data["PlayCount"] = state.play_count
         if state.last_played_at is not None:
             # Emitted, not omitted. Without this key `last_played_at` can
             # never round-trip, and an adapter that dropped the field

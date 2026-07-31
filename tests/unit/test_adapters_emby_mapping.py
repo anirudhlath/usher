@@ -328,7 +328,9 @@ def test_an_item_with_no_id_is_malformed() -> None:
 
 
 def test_watch_state_converts_ticks_to_seconds() -> None:
-    state = to_watch_state(load_emby_fixture("movie_item"), source_user_id="user-1")
+    state = to_watch_state(
+        load_emby_fixture("movie_item"), source_user_id="user-1", play_history_is_trustworthy=True
+    )
     assert state is not None
     assert state.position_seconds == 1840
     assert state.played is False
@@ -338,7 +340,9 @@ def test_watch_state_converts_ticks_to_seconds() -> None:
 
 
 def test_watch_state_reads_a_played_flag() -> None:
-    state = to_watch_state(load_emby_fixture("episode_item"), source_user_id="user-1")
+    state = to_watch_state(
+        load_emby_fixture("episode_item"), source_user_id="user-1", play_history_is_trustworthy=True
+    )
     assert state is not None
     assert state.played is True
     assert state.position_seconds == 0
@@ -348,7 +352,12 @@ def test_missing_user_data_is_not_a_zero_state() -> None:
     """A zero state and an absent one are different claims. `UserData` is
     absent when the field was not requested; emitting a zero state for that
     would push "unwatched" over whatever Usher already knows."""
-    assert to_watch_state({"Id": "x", "Type": "Movie"}, source_user_id="user-1") is None
+    assert (
+        to_watch_state(
+            {"Id": "x", "Type": "Movie"}, source_user_id="user-1", play_history_is_trustworthy=True
+        )
+        is None
+    )
 
 
 def test_a_timestamp_without_an_offset_is_still_aware() -> None:
@@ -585,6 +594,7 @@ def test_a_negative_playback_position_and_play_count_are_clamped() -> None:
     state = to_watch_state(
         {"Id": "x", "UserData": {"PlaybackPositionTicks": -10_000_000, "PlayCount": -3}},
         source_user_id=None,
+        play_history_is_trustworthy=True,
     )
     assert state is not None
     assert state.position_seconds == 0
@@ -613,3 +623,98 @@ def test_raw_shares_no_object_with_the_payload_it_was_parsed_from() -> None:
     item.raw["MediaSources"][0]["Container"] = "iso"
     assert payload["UserData"]["Played"] is False
     assert payload["MediaSources"][0]["Container"] == "mkv"
+
+
+def test_a_listing_payload_yields_absent_play_history() -> None:
+    """Emby 4.9.5.0's listing route reports `PlayCount: 0` and omits
+    `LastPlayedDate` for items that have genuinely been played (verified
+    2026-07-31). Passing that `0` through as a number is how M4 would write
+    zero over real history, so the mapper must report absence instead."""
+    payload = {
+        "Id": "movie-1",
+        "Name": "Example Movie",
+        "Type": "Movie",
+        "UserData": {"PlaybackPositionTicks": 18_400_000_000, "Played": True, "PlayCount": 0},
+    }
+    state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=False)
+    assert state is not None
+    assert state.position_seconds == 1840
+    assert state.played is True
+    assert state.play_count is None
+    assert state.last_played_at is None
+
+
+def test_a_listing_payload_discards_play_history_even_when_it_carries_some() -> None:
+    """The untrusted route is untrusted, not merely lossy. A build (or a
+    reverse proxy, or a future Emby) whose listing did carry `PlayCount`
+    would still be read through a caller that cannot tell whether the number
+    is real -- and the measured server hands out a `0` that looks exactly
+    like a count. Discarding is the only rule that is safe for both, and
+    `get_watch_state` is what recovers the truth.
+
+    Without this case the mapper could satisfy the one above by reading the
+    keys and happening to find a zero.
+    """
+    payload = {
+        "Id": "movie-1",
+        "Type": "Movie",
+        "UserData": {
+            "PlaybackPositionTicks": 0,
+            "Played": True,
+            "PlayCount": 9,
+            "LastPlayedDate": "2026-07-20T21:04:00.0000000Z",
+        },
+    }
+    state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=False)
+    assert state is not None
+    assert state.play_count is None
+    assert state.last_played_at is None
+
+
+def test_an_item_payload_yields_real_play_history() -> None:
+    """The single-item route does carry both, and that is the whole reason
+    `get_watch_state` exists."""
+    payload = {
+        "Id": "movie-1",
+        "Name": "Example Movie",
+        "Type": "Movie",
+        "UserData": {
+            "PlaybackPositionTicks": 18_400_000_000,
+            "Played": True,
+            "PlayCount": 2,
+            "LastPlayedDate": "2026-07-20T21:04:00.0000000Z",
+        },
+    }
+    state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True)
+    assert state is not None
+    assert state.play_count == 2
+    assert state.last_played_at == datetime(2026, 7, 20, 21, 4, tzinfo=UTC)
+
+
+def test_a_trusted_payload_that_omits_play_count_still_reports_absence() -> None:
+    """Trusting the route is not the same as inventing a value. A single-item
+    payload with no `PlayCount` key at all has not told us zero."""
+    payload = {
+        "Id": "movie-1",
+        "Name": "Example Movie",
+        "Type": "Movie",
+        "UserData": {"PlaybackPositionTicks": 0, "Played": False},
+    }
+    state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True)
+    assert state is not None
+    assert state.play_count is None
+
+
+def test_a_trusted_payload_that_reports_zero_plays_is_believed() -> None:
+    """The other half of ADR-0014: `0` from a route that can count is a
+    positive claim -- an item whose play history was reset -- and turning it
+    into `None` would make a reset impossible to propagate, which is the
+    same correctness bug as filtering all-zero states out of a walk."""
+    payload = {
+        "Id": "movie-1",
+        "Type": "Movie",
+        "UserData": {"PlaybackPositionTicks": 0, "Played": False, "PlayCount": 0},
+    }
+    state = to_watch_state(payload, source_user_id="u1", play_history_is_trustworthy=True)
+    assert state is not None
+    assert state.play_count == 0
