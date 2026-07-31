@@ -184,6 +184,27 @@ answers 500 on this build.) ADR-0012 assumes a non-admin account and nothing
 enforces it; this is the check that would make it observable, recorded there
 as recommended-not-implemented.
 
+**`SELECT … FOR UPDATE SKIP LOCKED` is the whole of the queue's exclusion,
+and both wrong spellings *hang* rather than answer.** Verified against
+`pgvector/pgvector:pg17` by deleting each in turn from
+`usher.db.repositories.jobs`: a bare `FOR UPDATE` makes the second worker
+block on the first's uncommitted row lock, and removing the locking clause
+entirely makes both workers read the same pending row so the second's
+`UPDATE` blocks on the same lock one statement later. Neither returns a wrong
+answer; both wait forever. So the concurrency cases in
+`tests/integration/test_job_queue.py` bound every claim with
+`asyncio.wait_for` — `pytest-timeout` is deliberately not a dependency, since
+the timeout belongs to the two cases that need it rather than to the runner.
+
+**A concurrency test must assert on *observed overlap*, not on a count.**
+"Exactly one of two claimers got the job" is also what a serialised pair of
+claims produces — the M3 failure verbatim, where a deleted single-flight lock
+let a concurrency test pass five runs in a row. `JobQueueContract`'s harness
+releases N claimers through an `asyncio.Barrier` and records the wall-clock
+interval each claim occupied; `overlapping()` fails unless those intervals
+genuinely intersect. Measured on this host: the two windows share **76.2%** of
+their union.
+
 **Bulk loading bypasses the repository, and the SQL has three traps.**
 Verified against `pgvector/pgvector:pg17` on 2026-07-30, all three of which
 `usher.db.repositories.bulk` is built around:
@@ -248,6 +269,69 @@ Postgres cast and skips the bind entirely, so `:source_id::uuid` reaches the
 driver as that literal string and asyncpg answers
 `PostgresSyntaxError: syntax error at or near ":"`. Verified by compiling
 both spellings against the asyncpg dialect. Use `CAST(:source_id AS uuid)`.
+
+**That same regex scans SQL *comments*, so `:name` inside a `--` line
+declares a real bind parameter.** Same family as the trap above, opposite
+direction: there the bind is silently skipped, here one is silently created.
+A comment reading `-- lower(t.name), not lower(:name) against t.name` made
+every single call to that statement raise
+`sqlalchemy.exc.InvalidRequestError: A value is required for bind parameter
+'name'` — with the offending token visible only in the echoed SQL, inside a
+comment nobody reads when debugging a bind error. Found by running it
+(M4 group C2, `usher/db/repositories/matching.py`). Write a placeholder that
+is not colon-prefixed when a comment needs to quote a parameter spelling.
+
+**`now()` is `transaction_timestamp()` and is frozen for the life of a
+transaction; `clock_timestamp()` is the instant the statement runs.** Both
+appear in this schema and the difference is load-bearing in two places:
+
+- `usher.db.repositories.jobs` uses `clock_timestamp()` in all four of its
+  statements. `requeue_running`'s `updated_at <= clock_timestamp() -
+  interval` cannot match a claim made in the same transaction if both sides
+  read the same frozen `now()`, and a job that failed twenty minutes into a
+  long transaction must back off from *now* rather than from when that
+  transaction opened. The mutation back to `now()` fails three cases.
+- The `set_updated_at()` trigger the core schema installs assigns `now()`,
+  so **two updates to the same row inside one transaction read back the
+  identical `updated_at`**. `tests/integration/`'s per-test fixture is one
+  long transaction, which makes "the second write is later than the first"
+  unobservable there — `tests/integration/test_episode_repository.py::
+  test_the_update_trigger_owns_updated_at` backdates the row with a raw
+  `INSERT` (the trigger is `BEFORE UPDATE`, so an `INSERT` dodges it; a plain
+  `UPDATE` does not) to give the stamp something to move away from.
+
+**`UPDATE … RETURNING` promises no row order, and at real queue depth it is
+not the order you selected.** `PostgresJobQueue`'s claim is a locking,
+`LIMIT`ed `SELECT` in a CTE plus an `UPDATE … FROM` it. Measured on
+`pgvector/pgvector:pg17` at 2,000 / 50,000 / 300,000 pending rows: the
+selection stage is `Index Scan using ix_jobs_claim` at every size, while the
+*update* stage moves from `Hash Join` over a `Seq Scan` (2,000 rows, where a
+seq scan really is cheaper — cost 45) to `Nested Loop` + `Index Scan using
+pk_jobs` from 50,000 up. So `RETURNING` hands rows back in heap order on a
+small table, and an outer `ORDER BY` over the data-modifying CTE is what makes
+a documented claim ordering true rather than incidental. It also means an
+unscoped "no `Seq Scan` anywhere" plan assertion fails on a small fixture for
+a plan that is correct at scale — scope it to the stage that has an ordering
+to serve.
+
+**A second `ORDER BY` key that the chosen index already carries is
+unobservable.** `ix_jobs_claim` is `(priority DESC, created_at) WHERE status =
+'pending'`, so deleting `created_at` from the claim's own `ORDER BY` survives
+every ordinary test: the index supplies it. Forcing `SET LOCAL
+enable_indexscan = off` is what makes it observable, and only in combination
+with two other things — a row re-written by an `UPDATE` (so heap order and
+`created_at` order disagree at all) and a `LIMIT` smaller than the candidate
+set (so the key decides *which* rows are kept, not just how they are
+returned). Worth knowing before writing a plan-independent ordering test.
+
+**A test that commits through `usher.db.staging` leaves its staging table
+behind.** `stage_records` creates the table with DDL, Postgres DDL is
+transactional, and the integration suite's usual isolation is a rolled-back
+transaction — so only a test that *commits* (the job queue's concurrency
+harness, which needs two real backends) leaks one. It surfaces as
+`test_migration_matches_the_orm_metadata` reporting schema drift in a *later*
+file, so the queue suite passes alone and takes the migration test down in
+combination. Such a fixture must `DROP TABLE IF EXISTS stg_*` in its cleanup.
 
 **A staged `COPY` does not fire the destination's CHECK constraints**, on
 this project's path, because `usher.db.staging`'s staging tables are
@@ -701,8 +785,8 @@ and interrogated over HTTP, and the suite is 865 tests (733 unit / 132
 integration), mypy strict clean over `src` and `tests`, 6 import contracts:
 
 ```bash
-uv run pytest                                    # 1079 tests as of M4 group C1 (873 unit / 206 integration)
-uv run pytest tests/unit                         # 873 tests, no Docker and no network
+uv run pytest                                    # 1332 tests as of M4 group C2 (981 unit / 351 integration)
+uv run pytest tests/unit                         # 981 tests, no Docker and no network
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .

@@ -96,9 +96,28 @@ local state can answer.**
 
 Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
 
-- Exponential backoff with jitter; per-job attempt counter.
+- Exponential backoff with jitter; per-job attempt counter. The jitter is
+  **equal jitter** — the delay is a uniform draw from
+  `[base/2, base) × 2^attempts` — not the more commonly cited *full* jitter,
+  which draws from `[0, base) × 2^attempts`. Full jitter's minimum draw is
+  arbitrarily close to zero, so a share of failures against a broken upstream
+  retry effectively immediately: the hot loop the backoff exists to prevent,
+  merely rationed. The spread is what breaks a thundering herd, and a
+  half-interval floor keeps all of it while making "a failed job is not
+  instantly re-claimable" a property rather than a probability. Implemented in
+  `usher.db.repositories.jobs`, one `CASE` inside the failure statement;
+  `job_backoff_seconds` is the base.
+- **Malformed data does not back off at all — it parks on the first attempt.**
+  `PortDataMalformed` means the upstream answered and the answer was wrong, so
+  five identical retries only delay a human seeing it by the whole backoff
+  schedule. `JobQueue.fail(retryable=False)` is that path, and it is distinct
+  from the poison threshold below: this one reports `attempts == 1`.
 - **Poison threshold** — after N attempts a job is *parked* with its error, not
-  retried forever and not silently dropped.
+  retried forever and not silently dropped. `job_max_attempts` is N, and
+  "after N attempts" means exactly N.
+- **Re-enqueueing does not un-park.** Poison a human has not looked at is not
+  fixed by asking for it again, and a parked job's priority is not promoted
+  behind their back either.
 - Parked jobs are listed in the admin API and counted in metrics. Silent failure
   is the thing worth engineering against; visible failure is fine.
 - Jobs are idempotent by construction, so redelivery is always safe.
