@@ -39,7 +39,15 @@ Rules:
   server reply with the plaintext password. `usher.api.errors` strips
   `input` from every validation error, app-wide.
 - Rotating `USHER_SECRET_KEY` re-encrypts on next write; a documented rotation
-  command handles the bulk case.
+  command handles the bulk case. **Until that write happens the old rows are
+  unreadable, and that state is rendered rather than raised**: Fernet's
+  authentication tag makes a wrong key a diagnosable `PortDataMalformed`, and
+  `GET /admin/sources/{id}/status` reports it as an unreachable,
+  unauthenticated source with a re-enter-your-credentials detail — the
+  screen an operator would open to work out what broke must not answer with
+  a `500`. The rendered detail is a fixed string, never the exception's own,
+  because that one names the `credentials_ref` so an operator can find the
+  row: right for a log line, wrong for a response body.
 - No credential ever reaches a client. This is the failure of the setup Usher
   replaces, where a raw Emby token lived in browser-delivered dashboard config.
   **One documented exception in v1: a `direct` playback target's URL carries

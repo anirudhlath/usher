@@ -17,6 +17,7 @@ from tests.fakes.source_repository import FakeSourceRepository
 from usher.domain.enums import SourceKind
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
+from usher.ports.errors import PortDataMalformed
 from usher.ports.source import SourceAdapter, SourceAdapterFactory, SourceStatus
 from usher.services.sources import SourceService
 
@@ -38,6 +39,19 @@ class RecordingFactory(SourceAdapterFactory):
         if self._reject:
             adapter.reject_credentials()
         return adapter
+
+
+class _UndecryptableStore(FakeCredentialStore):
+    """A store whose rows are present and unreadable -- what a rotated
+    `USHER_SECRET_KEY` leaves behind. Deliberately not a capability on
+    `FakeCredentialStore` itself: the contract suite runs against that fake,
+    and a store that can be told to fail its own contract is a fake with a
+    mode nothing in `src/` can produce."""
+
+    async def get(self, ref: str) -> SourceCredentials | None:
+        raise PortDataMalformed(
+            "stored source credentials could not be decrypted", detail=f"credentials_ref={ref}"
+        )
 
 
 class _CountingAdapter(FakeSourceAdapter):
@@ -219,6 +233,42 @@ async def test_status_reports_missing_credentials_rather_than_crashing() -> None
     # No adapter was built for a source there is no credential for: building
     # one would authenticate against the upstream with nothing to send.
     assert factory.built == []
+
+
+async def test_status_reports_an_undecryptable_credential_rather_than_crashing() -> None:
+    """The other half of the same rule, and the likelier half in practice:
+    `USHER_SECRET_KEY` was rotated, or the row was restored from a backup
+    taken under a different key. `CredentialStore.get` raises
+    `PortDataMalformed` for exactly that (it is a diagnosable failure, not
+    an absent row), and `GET /admin/sources/{id}/status` is the one screen
+    an operator would look at to find out. A 500 there tells them nothing
+    and looks like a bug in Usher rather than a key mismatch they can fix.
+    """
+    service, _, _, factory = _service(store=_UndecryptableStore())
+    source = await service.register(
+        kind=SourceKind.EMBY, name="A", base_url="https://a.invalid", credentials=CREDENTIALS
+    )
+    status = await service.status(source.id)
+    assert status is not None
+    assert (status.reachable, status.authenticated) == (False, False)
+    assert status.detail is not None
+    assert factory.built == []
+
+
+async def test_the_undecryptable_detail_does_not_name_the_credentials_ref() -> None:
+    """`PortDataMalformed`'s own `detail` carries `credentials_ref=...` so
+    an operator can find the row -- correct for a log line, wrong for a
+    response body. The ref is sized as unguessable (`usher.services.
+    sources`) precisely so that holding one is a capability; interpolating
+    the store's exception into a rendered status would hand it to any
+    client that can reach the admin API."""
+    service, _, _, _ = _service(store=_UndecryptableStore())
+    source = await service.register(
+        kind=SourceKind.EMBY, name="A", base_url="https://a.invalid", credentials=CREDENTIALS
+    )
+    status = await service.status(source.id)
+    assert status is not None and status.detail is not None
+    assert source.credentials_ref not in status.detail
 
 
 async def test_remove_deletes_the_source_and_its_credentials() -> None:

@@ -327,6 +327,37 @@ async def test_status_never_leaks_the_credential_into_its_detail(
     assert_carries_no_credential(response.text, where="the status detail")
 
 
+async def test_status_renders_an_undecryptable_credential(
+    client: AsyncClient, app: FastAPI
+) -> None:
+    """A rotated `USHER_SECRET_KEY`, or a row restored from a backup taken
+    under a different one, against the real Fernet store rather than a fake
+    that raises on command.
+
+    This route is the screen an operator would open to *find out* why a
+    source stopped working, so it has to answer -- and before the guard in
+    `SourceService.status`, this exact request raised `PortDataMalformed`
+    straight out of the handler and 500ed. The body must also not carry the
+    `credentials_ref`: the store puts it in the exception so an operator can
+    find the row, which is right for a log line and wrong for a response.
+    """
+    created = (await client.post("/admin/sources", json=_payload())).json()
+    factory: async_sessionmaker[AsyncSession] = app.state.session_factory
+    async with factory() as session:
+        row = (await session.execute(select(SourceCredentialRow))).scalars().one()
+        ref = row.ref
+        row.ciphertext = b"not-a-fernet-token"
+        await session.commit()
+
+    response = await client.get(f"/admin/sources/{created['id']}/status")
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["reachable"], body["authenticated"]) == (False, False)
+    assert body["detail"]
+    assert ref not in response.text
+    assert_carries_no_credential(response.text, where="the undecryptable status")
+
+
 async def test_status_of_an_unknown_source_is_404(client: AsyncClient) -> None:
     response = await client.get("/admin/sources/01936f2a-0000-7000-8000-000000000000/status")
     assert response.status_code == 404
@@ -336,7 +367,18 @@ async def test_deleting_a_source_removes_its_credential_row(
     client: AsyncClient, app: FastAPI
 ) -> None:
     """Not just the 204: the encrypted row must be gone, or a deployment
-    accumulates orphaned secrets nothing can attribute."""
+    accumulates orphaned secrets nothing can attribute.
+
+    What this proves is the *deployment* guarantee, not the service's
+    delete call. Two independent mechanisms enforce it and both fire here:
+    `SourceService.remove` deletes the credential explicitly (which is what
+    covers a crash between the two separately-committed writes), and
+    `source_credentials.source_id` is `ON DELETE CASCADE` (which covers the
+    same transaction). Verified by mutation -- deleting the service's
+    explicit `self._credentials.delete(...)` leaves this test green and
+    fails only `tests/unit/test_services_sources.py`, so the ordering
+    guarantee is pinned there, not here.
+    """
     created = (await client.post("/admin/sources", json=_payload())).json()
     assert (await client.delete(f"/admin/sources/{created['id']}")).status_code == 204
     assert (await client.delete(f"/admin/sources/{created['id']}")).status_code == 404

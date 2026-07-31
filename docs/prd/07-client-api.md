@@ -85,11 +85,13 @@ be added if a client turns out to need flexible field selection.
 > /admin/sources` and `GET /admin/sources/{id}/status` are live
 > (`usher.api.routers.sources`). `POST /admin/sources/{id}/sync` is not —
 > it triggers a reconcile, and there is no reconciler until M5. The status
-> route answers **200 for every state a configured source can be in**,
-> including rejected credentials and an unreachable host; those are facts
-> about the source being described, not failures of the request, and an
-> admin screen renders them side by side. `404` is reserved for a source id
-> that does not exist.
+> route answers **200 for every state a configured source can be in** —
+> rejected credentials, an unreachable host, a credential row that has gone
+> missing, and one that no longer decrypts because `USHER_SECRET_KEY` was
+> rotated. Those are facts about the source being described, not failures
+> of the request, and this route is the screen an operator opens to
+> *diagnose* them, so a `500` would answer the question with a stack trace.
+> `404` is reserved for a source id that does not exist.
 > `POST` accepts a username and password and returns neither — see
 > [08](08-operations.md).
 

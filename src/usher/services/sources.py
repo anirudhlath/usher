@@ -23,6 +23,7 @@ from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.ports.credentials import CredentialStore, SourceCredentials
+from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import SourceRepository
 from usher.ports.source import SourceAdapterFactory, SourceStatus
 
@@ -92,15 +93,43 @@ class SourceService:
 
         `None` only when the source itself does not exist -- every other
         outcome is a `SourceStatus`, including a source whose credential row
-        has gone missing. PRD 08: "a degraded subsystem narrows
-        functionality; it never fails a request local state can answer", and
-        "this source is misconfigured" is exactly the answer an admin screen
-        is asking for.
+        has gone missing and one whose credential no longer decrypts. PRD
+        08: "a degraded subsystem narrows functionality; it never fails a
+        request local state can answer", and "this source is misconfigured"
+        is exactly the answer an admin screen is asking for.
         """
         source = await self._sources.get(source_id)
         if source is None:
             return None
-        credentials = await self._credentials.get(source.credentials_ref)
+        try:
+            credentials = await self._credentials.get(source.credentials_ref)
+        except PortDataMalformed as exc:
+            # A rotated `USHER_SECRET_KEY`, or a row restored from a backup
+            # taken under a different one. `CredentialStore.get` raises for
+            # this rather than returning `None` precisely because it is
+            # diagnosable and fixable -- and the screen an operator would
+            # look at to diagnose it is this one, so a 500 here would answer
+            # the question with a stack trace.
+            #
+            # The detail returned is a fixed string, *not* `str(exc)`: the
+            # store builds its message around `credentials_ref=...` so an
+            # operator can find the row, which is right for the log line
+            # below and wrong for a response body. The ref is sized as
+            # unguessable (see `_REF_BYTES`), so handing it to a client
+            # gives away a pointer it was never issued.
+            logger.warning(
+                "source {source_id} has an unreadable credential: {exc}",
+                source_id=source.id,
+                exc=exc,
+            )
+            return SourceStatus(
+                reachable=False,
+                authenticated=False,
+                detail=(
+                    "the stored credentials for this source could not be decrypted; "
+                    "USHER_SECRET_KEY may have been rotated -- re-enter them to reconnect"
+                ),
+            )
         if credentials is None:
             # Answered without building an adapter: there is nothing to
             # authenticate with, so a probe could only spend a 1-5 s upstream
