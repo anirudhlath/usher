@@ -82,7 +82,7 @@ def _movie(external_id: str) -> SourceItem:
         name=f"Movie {external_id}",
         kind=SourceItemKind.MOVIE,
         year=2021,
-        provider_ids={"tmdb": f"7{external_id}0"},
+        provider_ids={"tmdb": f"96500{external_id}"},
     )
 
 
@@ -156,9 +156,19 @@ async def seeded_source(postgres_url: str) -> AsyncIterator[None]:
     """The probe route needs a real `sources` row -- `sync_runs.source_id`
     is a foreign key. Written on its own connection and committed, because
     the route runs in the request's session and cannot see an uncommitted
-    write made in a different one; deleted afterwards, since this file (like
-    `test_cli_pipeline.py`) commits against the session-scoped container
-    rather than rolling back.
+    write made in a different one.
+
+    **Everything the probe writes has to be undone, not just the source.**
+    The route goes through `get_session`, which is the request's
+    commit boundary, so a walk driven from a route *commits for real*
+    against the session-scoped container -- unlike every rolled-back test
+    in this suite. Measured the hard way: leaving the stubbed `titles` and
+    the enqueued `jobs` behind took down four tests in three other files
+    (a duplicate `ix_titles_tmdb_id_kind`, a queue depth of 2 where 0 was
+    expected, a claim that found 3 jobs instead of 1, and a global
+    `count_by_state`), each of which passes in isolation. `media_items`
+    and `sync_runs` go with the source's `ON DELETE CASCADE`; `titles` and
+    `jobs` do not.
     """
     from usher.db.base import build_engine, build_session_factory
 
@@ -183,6 +193,12 @@ async def seeded_source(postgres_url: str) -> AsyncIterator[None]:
             from sqlalchemy import text
 
             await session.execute(text("DELETE FROM sources WHERE id = :id"), {"id": source.id})
+            # Only this file's committed rows are visible from here, so an
+            # unqualified DELETE cannot reach another test's uncommitted work.
+            await session.execute(text("DELETE FROM jobs"))
+            await session.execute(
+                text("DELETE FROM titles WHERE sort_name LIKE 'Movie %' AND tmdb_id >= 965000")
+            )
             await session.execute(text("DROP TABLE IF EXISTS stg_jobs"))
             await session.execute(text("DROP TABLE IF EXISTS stg_media_items"))
             await session.commit()

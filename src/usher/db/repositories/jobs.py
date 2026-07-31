@@ -100,12 +100,36 @@ ON CONFLICT (kind, key) DO UPDATE SET
     -- re-seen behind everything enqueued since, forever, while it stayed
     -- perfectly claimable the whole time.
     updated_at = clock_timestamp()
+-- Two conditions, and the second is a scale fix rather than a tidiness one.
+--
 -- Parked work is not un-parked by asking for it again, and is not counted as
 -- written either. This clause does not change `status` in either direction
 -- (nothing here does), so what it actually buys is that a parked job's
 -- priority is not silently promoted while a human is looking at it, and that
 -- `enqueue`'s return value stays "rows written".
-WHERE jobs.status <> 'parked'
+--
+-- `jobs.priority < excluded.priority` is what stops a nightly walk rewriting
+-- the whole queue for no state change. Every batch of a walk re-enqueues a
+-- job for every item it saw, and without this clause `ON CONFLICT DO UPDATE`
+-- fires for each one: a new row version per job per night -- up to 1,126,674
+-- of them at the one measured deployment -- on a table whose entire purpose
+-- is to stay small, plus the WAL and the vacuum to match. Nothing observable
+-- changes: `priority` is already `GREATEST(...)` of itself, `created_at` is
+-- deliberately untouched (see below), and `updated_at` on a job nobody
+-- claimed means nothing to anybody. With the clause, a re-seen job costs one
+-- index probe and zero writes, and `enqueue` reports 0 rows written, which
+-- is the honest number.
+--
+-- `GREATEST` is kept in the SET clause even though this predicate already
+-- guarantees `excluded.priority` is the larger: the two say different
+-- things (one is "when to write", the other "what to write"), and a future
+-- edit to either must not silently depend on the other.
+--
+-- The cost is that a re-enqueue carrying a *new* `traceparent` at the same
+-- priority no longer repoints the link -- which is the right answer anyway.
+-- A background walk's trace is not the trace anyone wants a link to; a
+-- demand promotion (M5) raises the priority and therefore does write.
+WHERE jobs.status <> 'parked' AND jobs.priority < excluded.priority
 """
 
 # The claimed rows come back ordered by the same key the CTE selected them

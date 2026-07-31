@@ -122,6 +122,26 @@ class MediaItemRow(Base):
             "source_id",
             postgresql_where=text("title_id IS NULL"),
         ),
+        # The availability sweep's `UPDATE`, and the claim is deliberately
+        # that narrow. Measured against pgvector/pgvector:pg17 at 1,126,674
+        # rows on one source with 200 stale -- the realistic nightly shape --
+        # by `scripts/measure_ingest.py --scale 1126674`:
+        #
+        # - `UPDATE ... WHERE source_id = :x AND available AND last_seen_at <
+        #   :since` goes from `Seq Scan` (`Rows Removed by Filter:
+        #   1,126,474`, 173 ms) to `Index Scan using ix_media_items_sweep`
+        #   with an `Index Cond` on all three columns, 102 ms.
+        # - `mark_unseen_unavailable`'s *guard* -- `count(*)` plus a
+        #   `count(*) FILTER (...)` over the source -- is a `Parallel Seq
+        #   Scan` either way (87 ms with, 86 ms without). ADR-0015's ceiling
+        #   is a fraction, so the total is unavoidable and a source that *is*
+        #   the whole table gives `source_id` no selectivity to work with.
+        #   This index does not help that statement and is not claimed to.
+        #
+        # Column order is (equality, equality, range), which is what lets the
+        # `UPDATE` seek straight to the stale tail rather than filter the
+        # whole source.
+        Index("ix_media_items_sweep", "source_id", "available", "last_seen_at"),
         CheckConstraint("width IS NULL OR width >= 0", name="ck_media_items_width_non_negative"),
         CheckConstraint("height IS NULL OR height >= 0", name="ck_media_items_height_non_negative"),
         CheckConstraint(
