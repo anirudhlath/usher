@@ -390,9 +390,28 @@ mostly offline.
 
 ### 3. Enrich
 
-One TMDb request per title using
-`append_to_response=credits,keywords,images,videos,external_ids,release_dates`,
-plus per-season episode fetches for series, and sets `field_provenance`.
+One TMDb request per title, plus per-season episode fetches for series, and
+sets `field_provenance`.
+
+**The `append_to_response` list is not the same for both id spaces**, which
+is a correction to what this section said before M4 built the adapter:
+`release_dates` is a movie-only namespace and `content_ratings` is the TV-only
+equivalent, so one shared list asks half the catalog for an endpoint that does
+not exist. Read from TMDb's published reference, 2026-07-31.
+
+| Kind | Request |
+|---|---|
+| movie | `GET /movie/{id}?append_to_response=credits,keywords,images,videos,external_ids,release_dates` |
+| series | `GET /tv/{id}?append_to_response=credits,keywords,images,videos,external_ids,content_ratings`, then `GET /tv/{id}/season/{n}` per season |
+
+The same divergence runs through the field names (`title`/`name`,
+`release_date`/`first_air_date`, `keywords.keywords`/`keywords.results`, a
+top-level `imdb_id` against `external_ids.imdb_id`, `runtime` against
+`episode_run_time`), the search endpoints (`/search/movie` with
+`primary_release_year` against `/search/tv` with `first_air_date_year`), and
+the change feeds (`/movie/changes` against `/tv/changes`). All of it stops in
+`usher.adapters.tmdb`, whose `mapping.py` tabulates the eight field-level
+rows; nothing above the adapter reads a TMDb key.
 
 **M4 populates `Title`, `Season` and `Episode`, and caches the response
 verbatim.** `Person`, `Credit`, `Collection` and `Image` are populated by the

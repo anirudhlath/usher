@@ -94,6 +94,27 @@ class Settings(BaseSettings):
     # the hot loop the backoff exists to prevent.
     job_backoff_seconds: float = Field(default=30.0, gt=0)
 
+    # The metadata provider (PRD 03's enrich stage). `tmdb_api_key` above is
+    # the credential; these are its tuning. Same reasoning as every block
+    # above: PRD 08's TOML config layer does not exist yet.
+    #
+    # The base URL *is* here, unlike the bulk datasets' hosts, for the reason
+    # `wikidata_endpoint` is: TMDb's API has documented alternate hosts
+    # (`api.tmdb.org`) and a self-hosted proxy in front of it is a normal
+    # deployment for a household behind a restrictive network.
+    tmdb_base_url: str = "https://api.themoviedb.org/3"
+    # PRD 10's dashboard 3 plots "TMDb requests/sec against the ~40 ceiling
+    # with 429 count" -- and TMDb's own documentation puts its limits
+    # "somewhere in the 40 requests per second range" without publishing a
+    # number. 30 leaves headroom for the retry a 429 triggers without the
+    # retry itself becoming the thing that trips the next one.
+    tmdb_requests_per_second: float = Field(default=30.0, gt=0)
+    # Which certification body's rating lands in `Title.content_rating`.
+    # TMDb returns every country's; picking one is configuration, not a
+    # constant, because a household outside the US wants its own -- and
+    # showing them somebody else's rating is worse than showing none.
+    tmdb_region: str = Field(default="US", min_length=2, max_length=2)
+
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
 

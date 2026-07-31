@@ -1,0 +1,46 @@
+{
+  "_id": "5256c89f19c2956ff6046d47",
+  "air_date": "2011-04-17",
+  "episodes": [
+    {
+      "air_date": "2011-04-17",
+      "episode_number": 1,
+      "episode_type": "standard",
+      "id": 63056,
+      "name": "An Invented Pilot",
+      "overview": "The first synthetic episode.",
+      "production_code": "101",
+      "runtime": 62,
+      "season_number": 1,
+      "show_id": 1399,
+      "still_path": "/synthetic-still-1.jpg",
+      "vote_average": 7.9,
+      "vote_count": 320,
+      "crew": [],
+      "guest_stars": []
+    },
+    {
+      "air_date": "2011-04-24",
+      "episode_number": 2,
+      "episode_type": "standard",
+      "id": 63057,
+      "name": "A Second Invented Episode",
+      "overview": "The second synthetic episode.",
+      "production_code": "102",
+      "runtime": 56,
+      "season_number": 1,
+      "show_id": 1399,
+      "still_path": "/synthetic-still-2.jpg",
+      "vote_average": 7.7,
+      "vote_count": 250,
+      "crew": [],
+      "guest_stars": []
+    }
+  ],
+  "name": "Season 1",
+  "overview": "The first invented season.",
+  "id": 3624,
+  "poster_path": "/synthetic-season-1.jpg",
+  "season_number": 1,
+  "vote_average": 8.3
+}

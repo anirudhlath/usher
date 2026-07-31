@@ -245,3 +245,36 @@ def test_sync_max_retract_fraction_is_a_fraction(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("USHER_SYNC_MAX_RETRACT_FRACTION", "1.5")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_metadata_provider_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PRD 03's enrich stage. `tmdb_region` is genuinely configuration rather
+    than a constant: TMDb returns every country's certification and showing a
+    household outside the US somebody else's rating is worse than showing
+    none."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    settings = Settings()
+    assert settings.tmdb_base_url == "https://api.themoviedb.org/3"
+    assert settings.tmdb_requests_per_second == 30.0
+    assert settings.tmdb_region == "US"
+
+
+def test_tmdb_requests_per_second_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero is not "unthrottled", it is a token bucket that never refills --
+    the first request would wait forever."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_TMDB_REQUESTS_PER_SECOND", "0")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_tmdb_region_must_be_a_two_letter_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ISO 3166-1 alpha-2, which is what TMDb keys `iso_3166_1` on. A longer
+    value matches nothing and silently produces no content rating at all."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_TMDB_REGION", "USA")
+    with pytest.raises(ValidationError):
+        Settings()

@@ -1,0 +1,142 @@
+{
+  "adult": false,
+  "backdrop_path": "/synthetic-series-backdrop.jpg",
+  "created_by": [
+    {
+      "id": 9813,
+      "credit_id": "5256c8c219c2956ff604858a",
+      "name": "An Invented Creator",
+      "original_name": "An Invented Creator",
+      "gender": 2,
+      "profile_path": "/synthetic-creator.jpg"
+    }
+  ],
+  "episode_run_time": [57],
+  "first_air_date": "2011-04-17",
+  "genres": [
+    { "id": 10765, "name": "Sci-Fi & Fantasy" },
+    { "id": 18, "name": "Drama" }
+  ],
+  "homepage": "https://example.invalid/a-series",
+  "id": 1399,
+  "in_production": false,
+  "languages": ["en"],
+  "last_air_date": "2019-05-19",
+  "last_episode_to_air": {
+    "id": 1551830,
+    "name": "An Invented Finale",
+    "overview": "The last one.",
+    "vote_average": 4.8,
+    "vote_count": 269,
+    "air_date": "2019-05-19",
+    "episode_number": 6,
+    "episode_type": "finale",
+    "production_code": "",
+    "runtime": 80,
+    "season_number": 8,
+    "show_id": 1399,
+    "still_path": "/synthetic-still.jpg"
+  },
+  "name": "A Series",
+  "next_episode_to_air": null,
+  "networks": [
+    {
+      "id": 49,
+      "logo_path": "/synthetic-network.png",
+      "name": "An Invented Network",
+      "origin_country": "US"
+    }
+  ],
+  "number_of_episodes": 73,
+  "number_of_seasons": 8,
+  "origin_country": ["US"],
+  "original_language": "en",
+  "original_name": "A Series",
+  "overview": "A synthetic overview for a series that does not exist.",
+  "popularity": 346.098,
+  "poster_path": "/synthetic-series-poster.jpg",
+  "production_companies": [
+    {
+      "id": 76043,
+      "logo_path": "/synthetic-company.png",
+      "name": "Another Invented Studio",
+      "origin_country": "US"
+    }
+  ],
+  "production_countries": [{ "iso_3166_1": "US", "name": "United States of America" }],
+  "seasons": [
+    {
+      "air_date": "2010-12-05",
+      "episode_count": 2,
+      "id": 3627,
+      "name": "Specials",
+      "overview": "",
+      "poster_path": "/synthetic-specials.jpg",
+      "season_number": 0,
+      "vote_average": 0.0
+    },
+    {
+      "air_date": "2011-04-17",
+      "episode_count": 2,
+      "id": 3624,
+      "name": "Season 1",
+      "overview": "The first invented season.",
+      "poster_path": "/synthetic-season-1.jpg",
+      "season_number": 1,
+      "vote_average": 8.3
+    }
+  ],
+  "spoken_languages": [{ "english_name": "English", "iso_639_1": "en", "name": "English" }],
+  "status": "Ended",
+  "tagline": "Invented, like everything else here.",
+  "type": "Scripted",
+  "vote_average": 8.456,
+  "vote_count": 22000,
+  "credits": {
+    "cast": [
+      {
+        "adult": false,
+        "gender": 2,
+        "id": 22970,
+        "known_for_department": "Acting",
+        "name": "Someone Else Invented",
+        "original_name": "Someone Else Invented",
+        "popularity": 20.1,
+        "profile_path": "/synthetic-profile-3.jpg",
+        "character": "Nobody Else At All",
+        "credit_id": "5256c8af19c2956ff6046e77",
+        "order": 0
+      }
+    ],
+    "crew": []
+  },
+  "keywords": {
+    "results": [
+      { "id": 6091, "name": "invented tv keyword" },
+      { "id": 4152, "name": "second invented tv keyword" }
+    ]
+  },
+  "images": {
+    "backdrops": [],
+    "logos": [],
+    "posters": []
+  },
+  "videos": { "results": [] },
+  "external_ids": {
+    "imdb_id": "tt0944947",
+    "freebase_mid": null,
+    "freebase_id": null,
+    "tvdb_id": 121361,
+    "tvrage_id": 24493,
+    "wikidata_id": "Q88888888",
+    "facebook_id": null,
+    "instagram_id": null,
+    "twitter_id": null
+  },
+  "content_ratings": {
+    "results": [
+      { "descriptors": [], "iso_3166_1": "GB", "rating": "18" },
+      { "descriptors": [], "iso_3166_1": "US", "rating": "TV-MA" }
+    ]
+  }
+}
