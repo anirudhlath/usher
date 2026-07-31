@@ -6483,7 +6483,9 @@ EOF
 **Files:**
 - Create: `src/usher/adapters/factory.py`
 - Create: `src/usher/services/sources.py`
+- Modify: `pyproject.toml`
 - Test: `tests/unit/test_services_sources.py`
+- Test: `tests/unit/test_adapters_factory.py` — **added while implementing.** As drafted, this task shipped `ConfiguredSourceAdapterFactory` with no test of its own: every assertion below runs against `RecordingFactory`, so a factory that dropped `page_size`, dropped `timeout_seconds`, or collapsed its `if` into an unconditional `return EmbyAdapter(...)` would pass all of it. All four of those are now mutations that fail.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -6790,10 +6792,15 @@ source_modules = [
     "usher.db",
 ]
 forbidden_modules = ["usher.adapters.emby"]
+allow_indirect_imports = true
 ```
+
+> **`allow_indirect_imports` was added while implementing, and it is load-bearing rather than a loosening.** A `forbidden` contract reports *chains* by default, so without this line the contract breaks on the one import the factory exists for: `usher.api.deps -> usher.adapters.factory -> usher.adapters.emby.adapter`. Verified by planting exactly that import — BROKEN without the flag, KEPT with it — which means Task 11's composition root would otherwise have had to choose between wiring the factory and keeping the contract green. Also verified that the flag does not blunt it: a direct `from usher.adapters.emby.adapter import EmbyAdapter` in `usher.api` or in `usher.db` is still BROKEN. That is exactly the line the acceptance criterion draws — nothing outside the registry may *name* a concrete adapter, and everything is free to reach one through the port.
 
 Run: `uv run lint-imports`
 Expected: **6 contracts kept, 0 broken.** If it reports the new one broken, something outside the factory imports `EmbyAdapter` — fix the import, not the contract.
+
+**Verify the contract actually fires rather than assuming it does.** Plant `from usher.adapters.emby.adapter import EmbyAdapter` in `src/usher/api/deps.py` and run `lint-imports` twice, once with the five existing contracts and once with all six. Measured: the five report **KEPT** — none of them constrains `usher.api` or `usher.db` against `usher.adapters` at all — and the sixth reports `usher.api.deps -> usher.adapters.emby.adapter (l.9)`. The same probe in `src/usher/db/repositories/source.py` behaves identically. A contract added without this check is indistinguishable from one that matches nothing.
 
 - [ ] **Step 5: Write `SourceService`**
 
@@ -6932,8 +6939,8 @@ class SourceService:
 
 - [ ] **Step 6: Run and watch it pass**
 
-Run: `uv run pytest tests/unit/test_services_sources.py -q`
-Expected: PASS — 13 tests.
+Run: `uv run pytest tests/unit/test_services_sources.py tests/unit/test_adapters_factory.py -q`
+Expected: PASS — 21 tests (17 service + 4 factory). The plan drafted 13 service cases; four more were added while implementing, each because a mutation survived all thirteen: the credential is stored under the *registering source's* `owner_id` (a wrong id passes everything else), the persisted `device_id` and `credentials_ref` are the ones handed back (a service that returned a freshly-stamped copy satisfies "a device id was generated"), `status()`'s `finally` still closes the adapter when `verify()` raises, and removing one source leaves another's credential alone.
 
 - [ ] **Step 7: Check and commit**
 

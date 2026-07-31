@@ -178,7 +178,7 @@ uv run pytest tests/unit         # fast unit tests only, no Docker required
 uv run ruff check .              # lint — clean
 uv run ruff format .             # format — clean
 uv run mypy                      # type check, strict mode — clean
-uv run lint-imports              # enforce architecture contracts — 5 kept, 0 broken
+uv run lint-imports              # enforce architecture contracts — 6 kept, 0 broken
 ```
 
 `[tool.ruff] extend-exclude = ["docs"]` keeps ruff off `docs/plans/*.md` and
