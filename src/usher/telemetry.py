@@ -21,8 +21,31 @@ from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from usher.config import Settings
+
+
+def current_traceparent() -> str | None:
+    """The active span as a W3C `traceparent`, or `None` outside a span.
+
+    Carried on a job row so a worker's span can `Link` back to whatever
+    enqueued the work — PRD 10's "why did the title I just opened take 45
+    seconds" spans a request and a background execution minutes later, and
+    nothing else joins them. A `Link` rather than a parent, because the
+    request has usually already returned and a child span of a finished
+    parent misstates causality.
+
+    Returns `None` rather than a syntactically-valid all-zero traceparent
+    when no span is active: the propagator declines to inject an invalid
+    context, so an absent key is the SDK's own answer and not a special
+    case invented here. A job enqueued outside a span therefore stores
+    `NULL` and the worker starts an unlinked span, which is honest — the
+    alternative is a link to a trace that never existed.
+    """
+    carrier: dict[str, str] = {}
+    TraceContextTextMapPropagator().inject(carrier)
+    return carrier.get("traceparent")
 
 
 def inject_trace_context(record: Mapping[str, Any]) -> None:

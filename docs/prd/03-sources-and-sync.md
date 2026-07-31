@@ -291,16 +291,52 @@ targets for the first time.
 
 ### 2. Match — resolve to a canonical Title
 
-Ordered by confidence, stopping at the first hit:
+Ordered by confidence, stopping at the first hit. **Every lookup is issued
+once per batch**, not once per item: `MatchService` turns a page of source
+items into one set of provider references and one set of name+year probes,
+and `TitleMatchRepository` answers each in a bounded number of statements.
+At 1,126,674 items a per-item matcher is not slow, it is a design defect.
 
-1. `ProviderIds.Tmdb` from the source → direct `tmdb_id` lookup.
+1. `ProviderIds.Tmdb` from the source → `(tmdb_id, kind)` lookup. The kind is
+   not optional — TMDb's movie and series id spaces overlap on 26,968 ids
+   ([ADR-0011](decisions/0011-tmdb-id-is-namespaced-by-kind.md)).
 2. `ProviderIds.Imdb` → local lookup against the bootstrapped IMDb skeleton
    ([04](04-catalog-bootstrap.md)) — no network call, because the catalog
-   already knows 12.7M titles.
-3. Name + year against the local skeleton, accepted above a confidence bar
-   (normalised title match, year within ±1).
-4. TMDb search API as a last resort.
-5. No confident match → `title_id` stays NULL; the item enters the review queue.
+   already knows 12.7M titles. One global namespace, so no kind participates.
+3. `ProviderIds.Tvdb` → `tvdb_id` lookup. M2's bootstrap linked 50,793 titles
+   this way and Emby series routinely carry a TVDb id and no TMDb one, so a
+   ladder stopping at IMDb pushes most television into the review queue for
+   no reason. Like IMDb, one namespace, no kind.
+4. Name + year against the local skeleton, accepted above a confidence bar
+   (normalised title match, year within ±1) **and only when unambiguous** —
+   several titles sharing a name, kind and year is common (remakes, and
+   IMDb's own duplicates), and picking one attaches watch history to the
+   wrong film.
+5. A trusted provider id the catalog does not hold → **create a stub**
+   ("stub-on-sight"). Deliberately narrower than "create a Title from what
+   the source said": an id from TMDb, IMDb or TVDb is an identity claim
+   strong enough to build a canonical title on; a bare name is not. Only
+   291,737 of the catalog's 1,271,138 titles carry a `tmdb_id`, so this is
+   the common path for anything modern.
+6. No confident match → `title_id` stays NULL; the item enters the review
+   queue, and a `match` job is enqueued at `BACKFILL` priority.
+
+**The TMDb search tier is queued, not inline.** It is one network call per
+unmatched item, and a first full walk against an unbootstrapped catalog
+produces those in the hundreds of thousands — running them inside the walk
+makes the walk's duration a function of TMDb's rate limit rather than of the
+source's. It runs off the priority queue instead, which is what the queue's
+concurrency limit is for.
+
+**Episodes never walk this ladder.** An Emby episode payload carries the
+*episode's* own provider ids (`{"Imdb": "tt2178782", "Tvdb": "4517466"}` on a
+live payload), not its series'. TVDb numbers episodes and series in different
+namespaces that overlap numerically, so tier 3 would resolve an episode to
+whichever unrelated series holds that integer; and no episode's IMDb id is in
+the catalog at all (`tvEpisode` is excluded from the bootstrap by design), so
+tier 5 would mint one junk `Title` per episode — 999,827 of them. An episode
+is resolved by attaching it to its series' `Title` during ingest, and
+enqueued for a re-match only when that series is not yet known.
 
 Bootstrapping first makes stages 2–3 local, which is why matching is fast and
 mostly offline.

@@ -25,6 +25,13 @@ what actually closes:
   there and an explicit `is not None` here.
 - **No session and no autoflush**, so nothing here can surface some other
   caller's pending, invalid state as this read's error.
+
+`calls` and `reset_calls()` are test-double affordances rather than port
+methods: `MatchService`'s scale case asserts that a page of 500 items costs
+a bounded number of *round trips*, and nothing about the answers this fake
+returns can express that. A real query counter against Postgres would need
+an event listener on the engine; the property being pinned is the service's,
+not the store's, so it is counted here.
 """
 
 import uuid
@@ -51,6 +58,10 @@ class _Row:
 class FakeTitleMatchRepository(TitleMatchRepository):
     def __init__(self) -> None:
         self._rows: list[_Row] = []
+        self.calls = 0
+
+    def reset_calls(self) -> None:
+        self.calls = 0
 
     async def given_title(
         self,
@@ -61,9 +72,13 @@ class FakeTitleMatchRepository(TitleMatchRepository):
         tmdb_id: int | None = None,
         imdb_id: str | None = None,
         tvdb_id: int | None = None,
+        title_id: uuid.UUID | None = None,
     ) -> uuid.UUID:
+        # `title_id` lets a case seed this store and `FakeTitleRepository`
+        # with the *same* id -- which is one row in Postgres and two here.
+        # Only a test modelling a race between them needs it.
         row = _Row(
-            id=new_id(),
+            id=title_id or new_id(),
             kind=kind,
             name=name,
             year=year,
@@ -77,6 +92,7 @@ class FakeTitleMatchRepository(TitleMatchRepository):
     async def match_by_provider_ids(
         self, refs: Sequence[ProviderRef]
     ) -> dict[ProviderRef, uuid.UUID]:
+        self.calls += 1
         resolved: dict[ProviderRef, uuid.UUID] = {}
         # `dict.fromkeys` rather than `set`: deduplicates while keeping the
         # caller's order, so a failure reads in the order the batch was given.
@@ -112,6 +128,7 @@ class FakeTitleMatchRepository(TitleMatchRepository):
     async def match_by_name_year(
         self, probes: Sequence[NameYearProbe]
     ) -> dict[NameYearProbe, uuid.UUID]:
+        self.calls += 1
         resolved: dict[NameYearProbe, uuid.UUID] = {}
         for probe in dict.fromkeys(probes):
             # A bare name is not an identity claim at 1,271,138 titles.
