@@ -138,6 +138,15 @@ async def claimers(postgres_url: str) -> AsyncIterator[_PostgresConcurrentClaims
             await one.close()
         async with factory() as cleanup:
             await cleanup.execute(text("DELETE FROM jobs"))
+            # `stg_jobs` too, and this is not tidiness. `stage_records`
+            # creates the staging table with DDL, Postgres DDL is
+            # transactional, and this harness's writer *commits* -- so unlike
+            # every other test in this suite the table survives, and
+            # `test_migration_matches_the_orm_metadata` (rightly) reports it
+            # as schema drift the next time it runs. Found by running the full
+            # suite: the queue file passes alone and takes the migration test
+            # down with it in combination.
+            await cleanup.execute(text("DROP TABLE IF EXISTS stg_jobs"))
             await cleanup.commit()
         await engine.dispose()
 

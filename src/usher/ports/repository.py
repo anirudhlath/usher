@@ -11,16 +11,25 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import AwareDatetime
 
 from usher.domain.bootstrap import ImportRun
 from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.episode import Episode, Season
 from usher.domain.source import MediaItem, Source
+from usher.domain.sync import SyncRun, SyncRunKind
 from usher.domain.title import Title
 from usher.domain.watch import WatchState
 from usher.ports.bulk import IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
-from usher.ports.ingest import MediaItemUpsert, SweepResult, WatchStateMerge
+from usher.ports.ingest import (
+    MediaItemUpsert,
+    NameYearProbe,
+    ProviderRef,
+    SweepResult,
+    WatchStateMerge,
+)
 
 
 class TitleRepository(ABC):
@@ -634,3 +643,251 @@ class WatchStateRepository(ABC):
         SQL. Without it, an implementation whose `COALESCE` is right for
         titles and wrong for episodes has nothing that can tell.
         """
+
+
+class TitleMatchRepository(ABC):
+    """Batch lookups for PRD 03's match stage.
+
+    Separate from `TitleRepository` because the shape is different in the way
+    that matters: `TitleRepository.get_by_tmdb_id` answers one question, and a
+    walk asks 1,126,674 of them. At ~0.1 ms per indexed point lookup that is
+    minutes of pure round trips per sync, and the name+year tier is far worse
+    -- measured at 300k rows, an unindexed name+year match seq-scans in
+    14.6 ms, which extrapolates to ~600 ms per item at the catalog's real
+    1,271,138.
+
+    So every method here takes a batch and returns a mapping. `MatchService`
+    turns one page of source items into three sets, issues a handful of
+    statements, and joins the answers in memory.
+
+    Reads only. Same session-wide precondition as `TitleRepository`: the
+    session must carry no unflushed, invalid state when these are called.
+    """
+
+    @abstractmethod
+    async def match_by_provider_ids(
+        self, refs: Sequence[ProviderRef]
+    ) -> dict[ProviderRef, uuid.UUID]:
+        """Resolve provider references to title ids, in a bounded number of
+        round trips regardless of batch size.
+
+        Keys absent from the result mean "no title carries this", which is a
+        different answer from "not asked" -- so an implementation must never
+        silently drop a ref it found nothing for, and a caller can iterate its
+        own probes rather than the result.
+
+        `ProviderRef.kind` is honoured where it is set and required where the
+        provider is namespaced. TMDb keys movies and series in overlapping
+        integer spaces (26,968 shared ids, measured), so a TMDb ref *without*
+        its kind names nothing and resolves to nothing rather than to whichever
+        of the two a scan reaches first; IMDb's namespace is global, so an IMDb
+        ref carries no kind and one that carries anyway is still answered.
+        ADR-0011.
+
+        A ref whose `value` is not a valid integer for a provider whose column
+        is an integer is skipped, not raised on: a source is free to report
+        `ProviderIds.Tmdb: "unknown"`, and that is a matching failure, not a
+        pipeline failure. Raising would abort a whole batch of 5,000 items over
+        one bad string.
+
+        A provider this implementation does not know is skipped for the same
+        reason -- a source is free to report `ProviderIds.Zap2It`, and the
+        answer to "which title carries it" is honestly "none that I can tell".
+
+        A batch may contain the same ref twice. It is answered once.
+        """
+
+    @abstractmethod
+    async def match_by_name_year(
+        self, probes: Sequence[NameYearProbe]
+    ) -> dict[NameYearProbe, uuid.UUID]:
+        """PRD 03 stage 3: normalised name plus a year within +/-1, scoped by
+        kind.
+
+        Case-insensitive, via the same `lower(name)` the
+        `ix_titles_name_lower_year` expression index is built on -- an
+        implementation that lowercases in Python and compares against the raw
+        column cannot use that index and seq-scans 1,271,138 rows per probe.
+
+        **An ambiguous probe resolves to nothing.** Several titles sharing a
+        name, a kind, and a year within one is common (remakes, and IMDb's own
+        duplicate entries), and PRD 03 stage 5 is explicit that no *confident*
+        match means the review queue. Picking the first row a scan reaches is a
+        coin flip that attaches watch state to the wrong film.
+
+        A probe with `year=None` resolves to nothing rather than matching on
+        name alone -- a bare name is not an identity claim at a catalog of
+        1.27M titles.
+
+        A batch may contain the same probe twice. It is answered once, and a
+        duplicate is emphatically not ambiguity: an implementation that counted
+        candidate rows without deduplicating its own input first would report
+        every repeated probe as ambiguous and send the whole page to the review
+        queue.
+        """
+
+
+class EpisodeRepository(ABC):
+    """Persistence for the season/episode hierarchy under a series `Title`.
+
+    Seasons and episodes are one aggregate here rather than two ports: an
+    episode cannot exist without its season, both arrive from the same
+    provider payload, and every write is a batch over one series.
+
+    Same session/transaction ownership as `TitleRepository`: every method
+    flushes so conflicts surface immediately, none commits.
+    """
+
+    @abstractmethod
+    async def upsert_seasons(self, seasons: Sequence[Season]) -> BulkWriteResult:
+        """Insert or update, keyed on `(title_id, season_number)`.
+
+        Never overwrites a non-null field with a null one, for the same reason
+        `upsert_episodes` does not: ingest can create a season from a source's
+        own number alone and enrichment fills the rest in.
+
+        A `title_id` no title carries raises `RepositoryConflict` rather than a
+        raw storage error, and leaves the session usable for the caller's other
+        pending work.
+
+        A batch may contain the same `(title_id, season_number)` twice -- a
+        walk yields episodes, and a whole season's worth of them name the same
+        season -- so an implementation deduplicates rather than assuming. The
+        last such row wins.
+        """
+
+    @abstractmethod
+    async def upsert_episodes(self, episodes: Sequence[Episode]) -> BulkWriteResult:
+        """Insert or update, keyed on `(title_id, season_number,
+        episode_number)`.
+
+        Never overwrites a non-null field with a null one: ingest creates an
+        episode from a source's own numbers alone (no name, no air date) and
+        enrichment fills the rest in, and the next nightly walk must not blank
+        what enrichment wrote. Same `COALESCE` rule
+        `MediaItemRepository.upsert_many` applies to `title_id`, for the same
+        reason.
+
+        A `title_id` or `season_id` naming a row that does not exist raises
+        `RepositoryConflict`.
+
+        Tolerates a duplicate within one batch, as `upsert_seasons` does.
+        """
+
+    @abstractmethod
+    async def resolve(
+        self, title_id: uuid.UUID, numbers: Sequence[tuple[int, int]]
+    ) -> dict[tuple[int, int], uuid.UUID]:
+        """`(season_number, episode_number)` -> episode id, in one round trip.
+        999,827 episodes means this cannot be a lookup per item.
+
+        Absent keys mean "no such episode under this series", never "not
+        asked", so a caller iterates its own probes.
+        """
+
+    @abstractmethod
+    async def list_for_title(self, title_id: uuid.UUID) -> tuple[list[Season], list[Episode]]:
+        """Everything under one series, seasons then episodes, each ordered by
+        its own numbering. Used by enrichment to decide what changed, and by
+        the CLI's report."""
+
+
+class SyncRunRepository(ABC):
+    """Per-source sync history. Flushes, never commits.
+
+    One row per attempt, not one per source -- contrast `ImportRunRepository`,
+    which is a checkpoint updated in place. PRD 10's dashboard 3 plots run
+    outcomes over time, and ADR-0015's sweep guard rests on being able to say
+    *which* run last finished cleanly.
+    """
+
+    @abstractmethod
+    async def add(self, run: SyncRun) -> None:
+        """Insert. A duplicate id raises `RepositoryConflict`."""
+
+    @abstractmethod
+    async def save(self, run: SyncRun) -> None:
+        """Update an existing run. An unknown id raises `RepositoryNotFound`.
+
+        `started_at` is not mutable through this call in any meaningful sense:
+        it is the sweep's own `seen_since`, so a run that could rewrite it
+        after the fact could retract items it had already seen.
+        """
+
+    @abstractmethod
+    async def get(self, run_id: uuid.UUID) -> SyncRun | None:
+        """Fetch by id, or None."""
+
+    @abstractmethod
+    async def latest_completed_cursor(
+        self, source_id: uuid.UUID, kind: SyncRunKind
+    ) -> AwareDatetime | None:
+        """`started_at` of the newest run of this kind that **completed**, or
+        `None` if none has.
+
+        Deliberately not "the newest run": a delta walk resuming from a run
+        that failed halfway would skip everything that run never reached, and
+        would do it silently. Reading only completed runs means a failure costs
+        a re-walk of a window rather than a hole in the catalog.
+
+        Scoped by kind because the two lanes use different upstream filters
+        (`MinDateLastSaved` vs `MinDateLastSavedForUser`, measured as genuinely
+        different: 28,934 vs 29,005 items over the same 30-day window), so one
+        cursor cannot serve both.
+        """
+
+    @abstractmethod
+    async def list_for_source(self, source_id: uuid.UUID, *, limit: int = 20) -> list[SyncRun]:
+        """Newest first, with `id` as a tiebreak so paging is stable. PRD 10's
+        dashboard 3 ("sync run outcomes and duration") and the CLI's
+        `sync-status`."""
+
+
+class RawPayloadStore(ABC):
+    """The provider response cache (PRD 02's `raw_payloads`).
+
+    **Providers only, never source items.** PRD 03's ingest stage previously
+    said to store every source item's payload here; at 1,126,674 items and
+    ~8 kB apiece that is ~9 GB against a database PRD 08 budgets at 8-12 GB
+    total, to avoid a refetch that costs one request. ADR-0016.
+
+    `fetched_at` is also the TMDb <=6-month cache-term clock (PRD 04's
+    licensing constraint), which is why PRD 02's separate
+    `provider_cache_meta` table is not created.
+
+    Flushes, never commits.
+    """
+
+    @abstractmethod
+    async def get(
+        self, provider: str, kind: str, reference: str
+    ) -> tuple[dict[str, Any], AwareDatetime] | None:
+        """The cached payload and when it was fetched, or None.
+
+        The timestamp is returned rather than kept internal because the
+        caller's question is never just "is it cached" -- it is "is it cached
+        recently enough to use", and TMDb's caching term makes that a
+        compliance question as well as a freshness one.
+        """
+
+    @abstractmethod
+    async def put(self, provider: str, kind: str, reference: str, payload: dict[str, Any]) -> None:
+        """Store or replace, stamping `fetched_at` to now.
+
+        Refreshing an entry **must** move `fetched_at`. A stale timestamp on
+        fresh data is precisely the wrong answer to the one compliance question
+        this column exists to answer, and it is silent: the payload is correct
+        and only the clock lies.
+
+        `provider`, `kind` and `reference` are plain strings rather than a
+        domain model, so nothing validates them before they reach the store.
+        A key the backing store rejects -- an empty `provider` or `reference`
+        -- raises `RepositoryConflict`, not a storage-specific exception, and
+        leaves the session usable for the caller's other pending work.
+        """
+
+    @abstractmethod
+    async def oldest_fetched_at(self, provider: str) -> AwareDatetime | None:
+        """The compliance query: the oldest cache entry for a provider, which
+        is what PRD 10's dashboard-5 panel plots against TMDb's 6-month
+        ceiling. `None` when the provider has no entries at all."""
