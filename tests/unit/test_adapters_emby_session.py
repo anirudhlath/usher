@@ -814,9 +814,15 @@ async def test_every_upstream_request_produces_a_span() -> None:
     this reconcile slow" is one query.
 
     Installs the in-memory exporter before the call, the same way
-    tests/unit/test_telemetry.py does -- the module-level tracer is a
-    ProxyTracer and resolves the global provider per call, so this works
-    despite the module having been imported first.
+    tests/unit/test_telemetry.py does. The module-level tracer is a
+    `ProxyTracer`, resolved lazily rather than at import -- but only
+    *once*: it caches the first real provider it sees and never consults
+    the global again. `tests/conftest.py`'s `reset_otel_tracer_provider`
+    clears that cache around every test, which is what makes installing a
+    provider here work regardless of what ran before. An earlier version
+    of this docstring claimed the resolution happened per call; it does
+    not, and this test failed for real once another test started reaching
+    `EmbySession` under its own provider first.
     """
     exporter = InMemorySpanExporter()
     provider = TracerProvider()

@@ -24,7 +24,20 @@ that needs it.
 Rules:
 
 - Credentials are never returned by any API, including admin. Write-only.
+  Structurally, not by discipline: `POST /admin/sources` parses a username
+  and password into a request DTO, and **no response DTO in `api/dto/` has
+  a field either could be assigned to** — there is nothing to forget to
+  omit. Enforced over the whole package, not per model, so a response type
+  added by a later milestone inherits the rule.
 - Credentials are never logged, including in error paths and request dumps.
+- **A rejected request never echoes the body it rejected.** This one is not
+  free, and it is not covered by `SecretStr`: FastAPI's default `422`
+  answers with pydantic's errors, and a `missing` error carries the whole
+  *unparsed* request dict in its `input` field — every sibling value, as
+  submitted, before any of them became a `SecretStr`. Omitting a single
+  field from an otherwise valid `POST /admin/sources` therefore made the
+  server reply with the plaintext password. `usher.api.errors` strips
+  `input` from every validation error, app-wide.
 - Rotating `USHER_SECRET_KEY` re-encrypts on next write; a documented rotation
   command handles the bulk case.
 - No credential ever reaches a client. This is the failure of the setup Usher

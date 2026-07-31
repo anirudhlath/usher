@@ -80,6 +80,18 @@ be added if a client turns out to need flexible field selection.
 > caveat above — and `detail` is a short operator-facing string built from
 > the adapter's own translated `usher.ports.errors` exceptions, never a
 > credential. `GET /admin/sources/{id}/status` renders this directly.
+>
+> **Built in M3: four of the five rows above.** `GET`/`POST`/`DELETE
+> /admin/sources` and `GET /admin/sources/{id}/status` are live
+> (`usher.api.routers.sources`). `POST /admin/sources/{id}/sync` is not —
+> it triggers a reconcile, and there is no reconciler until M5. The status
+> route answers **200 for every state a configured source can be in**,
+> including rejected credentials and an unreachable host; those are facts
+> about the source being described, not failures of the request, and an
+> admin screen renders them side by side. `404` is reserved for a source id
+> that does not exist.
+> `POST` accepts a username and password and returns neither — see
+> [08](08-operations.md).
 
 ### Meta
 
@@ -147,6 +159,16 @@ RFC 9457 problem details, with a machine-readable `code`:
 
 The principle from [08](08-operations.md) holds at the boundary: a degraded
 subsystem narrows functionality, it never fails a request local state can answer.
+
+> **Not yet built, as of M3.** The admin source routes M3 ships return
+> FastAPI's default shapes — `{"detail": "source not found"}` for a 404 and
+> `{"detail": [ … pydantic errors … ]}` for a 422 — not the envelope above.
+> The envelope is a client contract, and the client-facing surface is
+> [09](09-roadmap.md)'s M9; defining a `code` vocabulary against four admin
+> routes would be guessing at it a milestone early. What M3 *does* enforce
+> is the part of the error path that could not wait: a 422 never echoes the
+> submitted request body, because that body carries a source credential.
+> See [08](08-operations.md)'s secrets rules.
 
 ## Streaming updates (SSE)
 
