@@ -141,8 +141,11 @@ Operational requirements:
 `list_items` and `watch_state` page over the source's own listing, one page in
 flight at a time. Measured against the live deployment on 2026-07-31, a walk of
 it is **1,126,674 items** — 94,438 movies, 32,409 series and 999,827 episodes —
-so materialising one is not an option. Three properties the adapter contract
-enforces, each now checked against that server:
+so materialising one is not an option. (Re-measured at the end of the same
+week: **1,126,789** — 94,448 / 32,414 / 999,927. Every figure derived from a
+live library is a dated snapshot, not a constant; the numbers below keep the
+date they were taken on rather than being refreshed in place.) Three properties
+the adapter contract enforces, each now checked against that server:
 
 - **A stable ascending sort by creation date, with a tiebreak.**
   `SortBy=DateCreated,SortName`. Items added during a walk land at the end, so
@@ -359,12 +362,40 @@ At 1,126,674 items a per-item matcher is not slow, it is a design defect.
    several titles sharing a name, kind and year is common (remakes, and
    IMDb's own duplicates), and picking one attaches watch history to the
    wrong film.
+
+   **Measured on real source names, 2026-07-31**, against the live Emby
+   deployment and a real 1,271,314-title bootstrap: this rule resolves
+   **72.2% of movie names** (433/600, sampled across six windows spanning the
+   whole 94,448-movie collection) and **75.3% of series names** (223/296).
+   It was expected to resolve almost nothing — edition suffixes, years in
+   the name and release-group noise — and it does not. Of the movie misses,
+   **142 are absent from the catalog and only 25 are ambiguous**, so what
+   feeds the review queue is mostly a catalog that does not hold the title,
+   not a bar set too high. A probe carrying **no year resolves nothing at
+   all**, by construction: `year BETWEEN p.year - 1 AND p.year + 1`
+   propagates `NULL`, which is deliberate — any other spelling matches every
+   undated IMDb skeleton sharing the name.
 5. A trusted provider id the catalog does not hold → **create a stub**
    ("stub-on-sight"). Deliberately narrower than "create a Title from what
    the source said": an id from TMDb, IMDb or TVDb is an identity claim
    strong enough to build a canonical title on; a bare name is not. Only
-   291,737 of the catalog's 1,271,138 titles carry a `tmdb_id`, so this is
-   the common path for anything modern.
+   291,772 of the catalog's 1,271,314 titles carry a `tmdb_id`, so this is
+   expected to be the common path for anything modern.
+
+   **It was not, on the one live slice measured.** A real 600-item walk
+   created **zero** stubs: all 22 non-episode items resolved at tier 1 or 2
+   (21 by `tmdb_id`, 1 by `imdb_id`), and the other 578 were episodes, which
+   never walk the ladder. One consequence worth keeping: with no new titles,
+   a first walk and a nightly walk cost *exactly* the same — 40 statements
+   for a 600-item batch either way — because stub creation is the only
+   non-set-based step in the pipeline.
+
+   **A provider id the source reports may not be one.** 11 of 885 real
+   `ProviderIds.Imdb` values in a 900-item sample are bare digits with no
+   `tt` prefix. `Title.imdb_id` is pattern-validated and a pydantic
+   `ValidationError` is not a `UsherPortError`, so an unfiltered value here
+   aborts that source's sync permanently. Every id is filtered to the shape
+   the model accepts before the constructor sees it.
 6. No confident match → `title_id` stays NULL; the item enters the review
    queue, and a `match` job is enqueued at `BACKFILL` priority.
 

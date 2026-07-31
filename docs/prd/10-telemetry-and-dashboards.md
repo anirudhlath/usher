@@ -197,6 +197,17 @@ health signal for the WebSocket risk in
 [ADR-0004](decisions/0004-push-over-polling.md) · Emby request latency · TMDb
 requests/sec against the ~40 ceiling with 429 count.
 
+**Queue depth, parked jobs, sync run outcomes and duration are backed by real
+data as of M4** — `jobs`, `sync_runs` and `usher.sync.run.duration` all exist
+and are written by a live walk. Promotion latency, enrichment throughput and
+push uptime are not: the first two need M5's demand path and a configured TMDb
+key, the third needs M5's socket. Dashboard 1's **unmatched review-queue
+depth** is likewise real — `ix_media_items_unmatched` and
+`list_unmatched` ship in M4 — with the caveat that `list_unmatched` pages by
+`OFFSET`, measured at 43.7 ms at offset 0 against 388.9 ms at offset
+1,126,574, so a panel that drains the whole queue is quadratic and wants a
+keyset cursor first.
+
 ### 4 — Performance
 
 API latency by endpoint · **home composition time broken down per row**, which

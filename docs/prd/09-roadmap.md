@@ -14,9 +14,9 @@ direct Emby access, for both movies and television.
 | **M1 — Foundation** ✅ | Repo, uv project, compose, Postgres + migrations, domain models, port ABCs, config, health, CI with layering checks, telemetry bootstrap |
 | **M2 — Bootstrap** ✅ | IMDb skeleton, TMDb ID export, Wikidata crosswalk; resumable importers |
 | **M3 — Emby adapter** ✅ | Durable-client auth, item listing, watch-state read/write, stream targets; adapter contract tests, run against both a pure in-memory adapter and the real one, plus a live-server verification pass |
-| **M4 — Ingest pipeline** | Ingest → match → enrich → index; priority queue; stub-on-sight; unmatched review |
+| **M4 — Ingest pipeline** ✅ | Ingest → match → enrich; priority queue; stub-on-sight; unmatched review; the availability sweep and its refusal. **The `index` stage is M6's** — see the boundary calls below |
 | **M5 — Push and read-through** | WebSocket events, reconnect/reconcile, demand promotion, SSE to clients |
-| **M6 — Search** | Full-text, autocomplete path, embeddings, RRF fusion, similarity, neighbour precompute |
+| **M6 — Search** | **The `index` stage of [03](03-sources-and-sync.md)'s pipeline**; full-text, autocomplete path, embeddings, RRF fusion, similarity, neighbour precompute |
 | **M7 — Rows** | Row and RowProvider hierarchy, system rows, similarity rows, taste centroid |
 | **M8 — Curation** | LLM row generation, validation, persistence, regeneration job |
 | **M9 — API surface** | Full HTTP surface, image proxy, playback resolution, **the playback ticket that succeeds [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)**, attribution |
@@ -24,6 +24,44 @@ direct Emby access, for both movies and television.
 
 TV is in scope throughout, not deferred — series/season/episode modelling,
 Next Up, and episode-level watch state land with the milestones that own them.
+
+**M4's boundary was ambiguous in four places, and each was decided
+deliberately rather than drifted into.**
+
+1. **The `index` stage is not built; M6 owns it.** [03](03-sources-and-sync.md)
+   stage 4 is "update the search document and compute the embedding", and
+   neither artefact exists before M6 — no search-document column, no
+   `title_embeddings` table, no embedder. M4 therefore ships **no `index` job
+   kind at all**: a job kind whose handler is a stub is a queue that grows
+   forever. M6 adds the kind, the handler and one backfill enqueue over
+   `titles`. PRD 03 itself licenses this — that stage "is a pure function of
+   catalog state and can be rebuilt from scratch at any time".
+2. **Enrichment populates `Title`, `Season` and `Episode` only.**
+   `Person`, `Credit`, `Collection` and `Image` are first *read* by M7 (rows)
+   and M9 (the image proxy), and each is re-derived from the verbatim
+   `raw_payloads` cache with **no second network call** — which is what
+   [ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md) says
+   that table is for. `EnrichmentResult` is a frozen dataclass, so adding
+   `people: tuple[Person, ...]` later is an added field, not a signature
+   change.
+3. **Push, reconnect-delta, demand promotion and SSE are M5.** M4 builds the
+   full-reconcile lane and the cursor-driven delta lane. The queue's promotion
+   *mechanism* (`ON CONFLICT … SET priority = GREATEST(…)`) lands in M4
+   because it is one clause of the enqueue statement, but nothing in M4 calls
+   it with `JobPriority.DEMAND`.
+4. **No HTTP route is added.** `POST /admin/sources/{id}/sync`,
+   `GET /admin/unmatched` and `POST /admin/unmatched/{id}/resolve` are all
+   M9's surface, where [07](07-client-api.md)'s error-envelope vocabulary gets
+   defined. M4 delivers the same capability through `usher.cli` — the
+   project's established second composition root, exactly as M2 did for
+   `bootstrap` — and every service is constructed identically by both roots,
+   so M9 adds routers over finished wiring.
+
+**What M4 leaves M5 to build on:** a queue with a real claim/park/backoff
+contract and a `traceparent` column, an `IngestService` that takes a `since`
+cursor, and a `WatchStateSyncService` whose merge is safe to call with a
+*partial* state — which is exactly what a `UserDataChanged` push event hands
+it.
 
 **M9 owes ADR-0012 a successor.** In v1, `POST /titles/{id}/play` returns a
 target URL carrying the source's session token, because M3 has no HTTP surface
