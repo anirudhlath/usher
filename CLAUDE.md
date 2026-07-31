@@ -486,6 +486,76 @@ and models a read that missed another worker's committed write, which is the
 only deterministic way to produce the race `MatchService`'s conflict handler
 exists for.
 
+**An episode's `MediaItem` carries two ids and its `WatchState` may carry
+one, and the collapse between them is the whole of M4's episode watch
+state.** `IngestService` writes the series' `title_id` *and* the
+`episode_id` on an episode's row (a client browsing a season wants both);
+`watch_states` has a `num_nonnulls(title_id, episode_id) = 1` CHECK. So
+`WatchStateSyncService` collapses the pair with the episode winning
+(`usher.services.watch_sync._watch_target`). Passing both through raises
+`PortDataMalformed` by contract, which aborts a batch of five thousand
+states over 89% of this library; passing the *title* through merges every
+episode of a show onto one row and violates nothing. The same asymmetry
+runs the other way in `MediaItemRepository.resolve_external_ids`, whose
+title branch needs `episode_id IS NULL` or a series' own watch state
+resolves to whichever of its episodes the planner reached first.
+
+**A history backfill must carry its own fresh `observed_at`, and both
+test layers are blind to why.** PRD 03's "latest `updated_at` wins" covers
+the whole record, and `trg_watch_states_set_updated_at` stamps the *write*
+instant — so a backfill carrying the walk's instant is refused by the very
+row it exists to repair, writes nothing, and leaves that row matching
+`played AND play_count = 0` forever. `FakeWatchStateRepository` stores
+`observed_at` as `updated_at`, so it accepts what Postgres refuses; and the
+integration suite cannot reproduce the production form either, because
+`now()` is frozen per transaction and each test *is* one transaction.
+`tests/integration/test_services_watch_sync.py` stages the row with
+`clock_timestamp()` through a raw `INSERT` (the trigger is `BEFORE UPDATE`,
+so an insert is the only way to own the column), which is as close as one
+transaction allows.
+
+**The bounded backfill terminates, measured.** Seven rows matching
+`played AND play_count = 0`, drained three at a time, empty in exactly
+three passes — against the fakes and against real Postgres, with the loop
+bounded so a non-converging predicate fails the case rather than hanging
+the suite. The honest half: convergence is a property of the *source*. A
+source whose single-item route also cannot count leaves rows matching
+forever, bounded at one request per row per pass and rotating rather than
+starving, because `list_needing_history` is oldest-first and a merge moves
+`updated_at`.
+
+**`Job.key` is the source's own `external_id` for `match` and
+`watch_history`, and `(kind, key)` is therefore unique across *sources*.**
+Every enqueue site is inside a walk, which holds the external id and would
+need a round trip per item to turn it into a `MediaItem.id` — 1,126,674 of
+them a walk. The cost is that two servers addressing different items by the
+same string collapse into one job; Emby and Jellyfin both mint per-server
+GUIDs, so it is currently unreachable rather than merely unlikely. Recorded
+on `usher.domain.jobs.Job`.
+
+**`depth()` cannot see a job a worker forgot to complete.** It counts
+`pending`, so a `running` row left behind by a `JobWorker` that ran the
+handler and never called `complete` reads back as an empty queue —
+deleting that call fails nothing in `tests/unit/test_services_jobs.py`
+unless the case asserts through `startup()`/`requeue_running`, which is the
+only thing that can see it.
+
+**Two guards in M4's services are unreachable through their own port's
+contract, and are pinned by direct unit cases rather than deleted.**
+`_watch_target`'s "matched to nothing" branch (`resolve_targets` omits an
+unmatched item rather than answering with an empty pair) and `_links_for`'s
+`is_valid` check (the OTel SDK also drops an invalid `Link` on the way into
+a span, so a worker that built one records the same empty `links` tuple).
+Both mutations survived the whole suite until the direct case existed.
+
+**Mutation sweeps on this host: the shell is zsh, and it does not
+word-split an unquoted `$VAR`.** A selection passed as `$C="path1 path2"`
+reaches pytest as one bogus path, nothing runs, the exit code is non-zero,
+and a naive harness records the mutation as caught having measured nothing.
+Three were, before the harness started requiring that a run actually ran.
+Same family as the venv-shebang trap: the sweep proves nothing and looks
+like it proved something.
+
 **Two `IngestService` defects are invisible to every port fake and only real
 Postgres catches them.** Skipping `resolve_seasons` or `resolve_episodes` and
 trusting the freshly-minted UUIDv7 leaves all 24 unit cases green — a dict has
@@ -868,8 +938,8 @@ and interrogated over HTTP, and the suite is 865 tests (733 unit / 132
 integration), mypy strict clean over `src` and `tests`, 6 import contracts:
 
 ```bash
-uv run pytest                                    # 1434 tests as of M4 group D1 (1063 unit / 371 integration)
-uv run pytest tests/unit                         # 1063 tests, no Docker and no network
+uv run pytest                                    # 1528 tests as of M4 group D2 (1134 unit / 394 integration)
+uv run pytest tests/unit                         # 1134 tests, no Docker and no network
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .

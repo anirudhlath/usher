@@ -440,6 +440,24 @@ is a pure function of catalog state and can be rebuilt from scratch at any time.
   being trusted not to. Recovering it is a queued backfill over
   `played = true AND play_count = 0`, bounded by the household's watched
   items rather than by the library.
+
+  **That backfill's merge is stamped with the instant it read the source,
+  never with the walk's.** "Latest `updated_at` wins" applies to the whole
+  record, and `watch_states` has a `BEFORE UPDATE` trigger that stamps the
+  write instant — so a repair carrying the walk's instant is refused by the
+  very row it exists to repair, and the row keeps matching
+  `played AND play_count = 0` for good. Measured to terminate otherwise:
+  seven rows drained three at a time empty in three passes. A source whose
+  *single-item* route also cannot count leaves rows matching indefinitely,
+  bounded at one request per row per pass and rotating rather than starving
+  (the queue-filling query is oldest-first and a merge moves `updated_at`).
+
+  **An episode's watch state attaches to its `Episode`, never to its
+  series' `Title`.** A `MediaItem` for an episode carries both ids and a
+  `WatchState` may carry exactly one, so the inbound merge collapses the
+  pair with the episode winning. Attaching to the title instead violates no
+  constraint and merges every episode of a show onto one row — 999,827
+  episodes onto 32,409 series.
 - **Outbound:** client actions write `WatchState` with `origin = api`, then
   push to the source best-effort. Failure enqueues a retry and never blocks the
   API response. On Emby that push is **one call, plus a second only when the

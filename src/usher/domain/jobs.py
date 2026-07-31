@@ -72,10 +72,23 @@ class Job(DomainModel):
     """One outstanding unit of work.
 
     `key` is the kind's own identifier for the work -- a `Title.id` for
-    `enrich`, a `MediaItem.id` for `match`, a `MediaItem.id` for
+    `enrich`, and a source's own `external_id` for `match` and
     `watch_history` -- as a string, so one column serves every kind without
     a polymorphic payload. `(kind, key)` is unique; enqueueing the same work
     twice promotes rather than duplicates.
+
+    **The two source-scoped kinds key on the source's id for the item, not
+    on `MediaItem.id`, and that is a deliberate trade with a known cost.**
+    Every enqueue site is inside a walk, which holds the source's own id and
+    would need a round trip per item to turn it into a `MediaItem.id` --
+    1,126,674 of them a walk, which is the shape of defect this whole
+    pipeline is built to avoid. The cost is that `(kind, key)` is unique
+    across *sources*: two servers that address different items by the same
+    string collapse into one job, and the second item's work is skipped
+    until something re-enqueues it. Emby and Jellyfin both mint per-server
+    GUIDs, so this is currently unreachable rather than merely unlikely; the
+    fix when it stops being is a composite key here plus a parse in the
+    handlers, not a per-item lookup at enqueue time.
 
     `priority` is typed `int`, not `JobPriority`: promotion is
     `GREATEST(priority, excluded.priority)` in SQL, so any value on the
