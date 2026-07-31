@@ -399,6 +399,34 @@ class EmbyAdapter(SourceAdapter):
             )
 
     def watch_state(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceWatchState]:
+        """Walk this user's watch state.
+
+        **`play_count` and `last_played_at` are not trustworthy from this
+        walk, and the reason is the server, not this code.** Verified
+        2026-07-31 against Emby 4.9.5.0: a *listing* reports `PlayCount: 0`
+        and omits `LastPlayedDate` entirely, even for an item whose
+        single-item `GET /Users/{user}/Items/{item}` reports `PlayCount: 2`
+        and a real `LastPlayedDate`. `position_seconds` and `played` are
+        correct in both. Neither `Fields=UserDataPlayState`,
+        `Fields=UserData`, `EnableUserData=true`, nor restricting the
+        listing to specific `Ids` changes it -- the listing route simply
+        does not carry those two fields on this build.
+
+        So a consumer that writes `SourceWatchState.play_count` from a walk
+        writes **0 over whatever it already knew**, which is exactly the
+        failure `to_watch_state`'s own docstring names one level up (a zero
+        state is a claim, not an absence). Recovering them costs one
+        single-item request each, and this library is 1,126,674 items, so
+        the walk cannot do it.
+
+        Left as a documented limitation rather than papered over: making
+        those two fields optional on `SourceWatchState` is the honest fix
+        and it is a *port* change, with the contract suite and both its
+        implementations to bring along. M4 is the caller that first has to
+        care, and it should make that call deliberately rather than inherit
+        it from a closing milestone. Until then, treat the pair as
+        best-effort from a walk and authoritative only from `get_item`.
+        """
         return self._watch_state(since)
 
     async def _watch_state(self, since: AwareDatetime | None) -> AsyncIterator[SourceWatchState]:

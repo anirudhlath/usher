@@ -117,6 +117,19 @@ section.
   `DeviceId` → still 206; without `api_key` → 401; without `static` → 400.
   The parameter is no longer sent (ADR-0012).
 
+**A listing's `UserData` is not the same as an item's.** Verified: a
+`GET /Users/{user}/Items` listing reports `PlayCount: 0` and omits
+`LastPlayedDate` entirely, for the very item whose
+`GET /Users/{user}/Items/{item}` reports `PlayCount: 2` and a real
+`LastPlayedDate`. `PlaybackPositionTicks` and `Played` are correct in both.
+Neither `Fields=UserDataPlayState`, `Fields=UserData`,
+`EnableUserData=true`, nor restricting the listing to explicit `Ids`
+changes it. So `watch_state()` — which walks listings — cannot carry play
+history, and M4 must not write `play_count`/`last_played_at` from a walk or
+it writes 0 over real history. Recovering them is one request per item
+against 1,126,674 items. Making both fields optional on `SourceWatchState`
+is the honest fix; it is a port change and is deliberately left to M4.
+
 **Emby 4.9.5.0 emits neither `VideoRangeType` nor `DvProfile`.** Not once
 across every video stream of 200 movies (the newest 100 4K and 100 HD of
 94,438), including all 34 Dolby Vision files. What it emits is `VideoRange`

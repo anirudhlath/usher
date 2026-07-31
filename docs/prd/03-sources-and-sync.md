@@ -314,6 +314,19 @@ is a pure function of catalog state and can be rebuilt from scratch at any time.
 - **Inbound:** `UserDataChanged` (push) and the nightly reconcile write
   `WatchState` with `origin = source`. Progress made in Infuse or Emby's own
   apps flows in.
+
+  ⚠️ **`play_count` and `last_played_at` are best-effort from a walk, and
+  M4 must not write them from one.** Verified 2026-07-31 against Emby
+  4.9.5.0: a *listing* reports `PlayCount: 0` and omits `LastPlayedDate`
+  entirely, for the same item whose single-item fetch reports `PlayCount: 2`
+  and a real date. Position and played flag are correct in both. No `Fields`
+  value, `EnableUserData`, or `Ids` restriction changes it. Recovering the
+  pair costs one request per item and this library is 1,126,674 items, so
+  the walk cannot. A consumer that writes them from a walk writes zero over
+  real history — the same class of mistake as pushing a zero state over
+  something already known. Making the two fields optional on
+  `SourceWatchState` is the honest fix and is a port change M4 should make
+  deliberately.
 - **Outbound:** client actions write `WatchState` with `origin = api`, then
   push to the source best-effort. Failure enqueues a retry and never blocks the
   API response. On Emby that push is **one call, plus a second only when the
