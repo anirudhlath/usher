@@ -16,9 +16,30 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
 from usher.config import Settings
 from usher.db.repositories.credentials import PostgresCredentialStore
+from usher.db.repositories.episode import PostgresEpisodeRepository
+from usher.db.repositories.jobs import PostgresJobQueue
+from usher.db.repositories.matching import PostgresTitleMatchRepository
+from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.source import PostgresSourceRepository
+from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
+from usher.db.repositories.title import PostgresTitleRepository
+from usher.db.repositories.watch_state import PostgresWatchStateRepository
+from usher.ports.jobs import JobQueue
+from usher.ports.repository import (
+    EpisodeRepository,
+    MediaItemRepository,
+    RawPayloadStore,
+    SyncRunRepository,
+    TitleMatchRepository,
+    TitleRepository,
+    WatchStateRepository,
+)
 from usher.ports.source import SourceAdapterFactory
+from usher.services.ingest import IngestService
+from usher.services.matching import MatchService
+from usher.services.reconcile import ReconcileService
 from usher.services.sources import SourceService
+from usher.services.watch_sync import WatchStateSyncService
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -132,3 +153,158 @@ def get_source_service(
 
 
 SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
+
+
+# ---------------------------------------------------------------------------
+# The ingest pipeline (M4).
+#
+# PRD 07's `POST /admin/sources/{id}/sync` and the two `/admin/unmatched`
+# routes are M9's surface, so nothing here is routed over yet. It exists
+# because a composition root is the thing that has to agree with the other
+# one: `usher.cli` wires the identical graph, and a second root that had
+# never been written would let M9 discover at route-writing time that a
+# service needs something a request scope cannot give it. Every provider
+# below is exercised by `tests/integration/test_pipeline_deps.py`, which
+# resolves each one through FastAPI's own dependency machinery rather than
+# by calling the functions -- an unresolvable `Depends` graph is a startup
+# error a plain call cannot produce.
+#
+# Return types are the *ports*, not the `Postgres*` classes, so a route
+# written against one of these annotations cannot reach a method the port
+# does not have.
+# ---------------------------------------------------------------------------
+
+
+def get_title_repository(session: SessionDep) -> TitleRepository:
+    return PostgresTitleRepository(session)
+
+
+def get_title_match_repository(session: SessionDep) -> TitleMatchRepository:
+    return PostgresTitleMatchRepository(session)
+
+
+def get_media_item_repository(session: SessionDep) -> MediaItemRepository:
+    return PostgresMediaItemRepository(session)
+
+
+def get_episode_repository(session: SessionDep) -> EpisodeRepository:
+    return PostgresEpisodeRepository(session)
+
+
+def get_watch_state_repository(session: SessionDep) -> WatchStateRepository:
+    return PostgresWatchStateRepository(session)
+
+
+def get_sync_run_repository(session: SessionDep) -> SyncRunRepository:
+    return PostgresSyncRunRepository(session)
+
+
+def get_raw_payload_store(session: SessionDep) -> RawPayloadStore:
+    return PostgresRawPayloadStore(session)
+
+
+def get_job_queue(session: SessionDep, settings: SettingsDep) -> JobQueue:
+    return PostgresJobQueue(
+        session,
+        max_attempts=settings.job_max_attempts,
+        backoff_seconds=settings.job_backoff_seconds,
+    )
+
+
+MediaItemRepositoryDep = Annotated[MediaItemRepository, Depends(get_media_item_repository)]
+SyncRunRepositoryDep = Annotated[SyncRunRepository, Depends(get_sync_run_repository)]
+JobQueueDep = Annotated[JobQueue, Depends(get_job_queue)]
+
+
+def get_match_service(
+    titles: Annotated[TitleRepository, Depends(get_title_repository)],
+    matching: Annotated[TitleMatchRepository, Depends(get_title_match_repository)],
+    queue: JobQueueDep,
+) -> MatchService:
+    """The five-tier matcher, with **no** metadata provider.
+
+    Not an omission. `MatchService.match` runs inside a walk and its
+    constructor takes the provider as optional precisely so the batch path
+    cannot make a network call per unmatched item; only `match_remote` --
+    the queued `match` handler's entry point, which `usher work` runs --
+    needs one. A request-scoped provider would also give every request its
+    own token bucket, which is a rate limiter that limits nothing: see
+    `usher.cli._work`, where the one client that owns the bucket lives.
+    """
+    return MatchService(titles=titles, matching=matching, queue=queue)
+
+
+def get_ingest_service(
+    matcher: Annotated[MatchService, Depends(get_match_service)],
+    matching: Annotated[TitleMatchRepository, Depends(get_title_match_repository)],
+    media_items: MediaItemRepositoryDep,
+    episodes: Annotated[EpisodeRepository, Depends(get_episode_repository)],
+    queue: JobQueueDep,
+) -> IngestService:
+    return IngestService(
+        matcher=matcher,
+        matching=matching,
+        media_items=media_items,
+        episodes=episodes,
+        queue=queue,
+    )
+
+
+def get_reconcile_service(
+    session: SessionDep,
+    settings: SettingsDep,
+    ingest: Annotated[IngestService, Depends(get_ingest_service)],
+    media_items: MediaItemRepositoryDep,
+    runs: SyncRunRepositoryDep,
+) -> ReconcileService:
+    """`commit` is `session.commit`, the same callable `get_session` calls
+    at the end of a successful request.
+
+    That is deliberate and it is the one place this root differs from the
+    CLI's: a reconcile checkpoints and commits *per batch*, so a route that
+    drove a six-hour walk inside one request would be committing the
+    request's session repeatedly before the handler returned. M9 will run
+    this on a background task rather than inline for exactly that reason --
+    recorded here because the wiring is what makes it look possible.
+    """
+    return ReconcileService(
+        ingest=ingest,
+        media_items=media_items,
+        runs=runs,
+        commit=session.commit,
+        batch_size=settings.sync_batch_size,
+        max_retract_fraction=settings.sync_max_retract_fraction,
+    )
+
+
+def get_watch_state_sync_service(
+    session: SessionDep,
+    settings: SettingsDep,
+    media_items: MediaItemRepositoryDep,
+    watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
+    runs: SyncRunRepositoryDep,
+    queue: JobQueueDep,
+) -> WatchStateSyncService:
+    return WatchStateSyncService(
+        media_items=media_items,
+        watch_states=watch_states,
+        runs=runs,
+        queue=queue,
+        commit=session.commit,
+        batch_size=settings.sync_batch_size,
+    )
+
+
+# `EnrichService` is deliberately absent, and this is the one place the plan
+# was wrong rather than incomplete. It needs a `MetadataProvider`, whose only
+# implementation owns the token bucket that keeps this deployment under
+# TMDb's ~40 rps ceiling -- and a request-scoped `TmdbClient` gives every
+# concurrent request a *fresh* bucket, so N in-flight requests get N x 30
+# rps. The bucket has to outlive a request, which makes it a lifespan
+# resource on `app.state` rather than a `Depends`, and nothing in PRD 07's
+# surface calls enrichment directly (M5's demand promotion enqueues a job;
+# `usher work` runs it). Adding the provider here would be wiring a rate
+# limiter to be bypassed.
+IngestServiceDep = Annotated[IngestService, Depends(get_ingest_service)]
+ReconcileServiceDep = Annotated[ReconcileService, Depends(get_reconcile_service)]
+WatchStateSyncServiceDep = Annotated[WatchStateSyncService, Depends(get_watch_state_sync_service)]

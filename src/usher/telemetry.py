@@ -7,7 +7,8 @@ no-ops and Usher runs normally. See PRD 10 and ADR-0007.
 import inspect
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
@@ -16,6 +17,7 @@ from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExp
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
@@ -192,6 +194,107 @@ def configure_metrics(settings: Settings) -> None:
             metric_readers=readers,
         )
         metrics.set_meter_provider(provider)
+
+
+@dataclass(frozen=True, slots=True)
+class QueueSnapshot:
+    """One reading of the `jobs` table, by kind.
+
+    Both maps are keyed by `JobKind.value` rather than by the enum: this
+    module is imported by `services/` and `adapters/` alike and deliberately
+    knows nothing about the domain, so a gauge label is a string here and
+    the composition root is what turns an enum into one.
+    """
+
+    queued: Mapping[str, int] = field(default_factory=dict)
+    parked: Mapping[str, int] = field(default_factory=dict)
+
+
+QueueReader = Callable[[], QueueSnapshot]
+
+# Set by `register_queue_gauges`, read by the two callbacks below. A module
+# global rather than a closure captured at instrument-creation time, and that
+# is load-bearing: the SDK keeps only the *first* observable gauge registered
+# under a given name (verified directly -- a second
+# `create_observable_gauge("usher.jobs.queued", callbacks=[other])` against
+# the same provider is silently discarded and the first callback keeps
+# reporting). A composition root that registered twice, or a second test in
+# the same process, would otherwise be reading a queue that no longer exists.
+_queue_reader: QueueReader | None = None
+# Which `MeterProvider` the gauges below were created against, so a process
+# that installs a new one (the test suite, once per test) gets new
+# instruments rather than orphaned ones bound to a collected provider.
+_queue_gauge_provider: object | None = None
+
+
+def register_queue_gauges(read: QueueReader) -> None:
+    """PRD 10's `usher.jobs.queued` / `usher.jobs.parked`.
+
+    Observable rather than recorded: the queue's depth is a fact about the
+    `jobs` table, not an event stream, and a counter incremented on enqueue
+    and decremented on complete drifts the moment anything -- a parked job,
+    a requeue, a crash, a `DELETE` from `complete` -- changes a row without
+    going through both.
+
+    **`read` is synchronous and returns the caller's most recent full
+    re-read of the table, not a query.** The plan asked for a callback that
+    "opens its own short-lived session"; that is not implementable here.
+    OTel invokes an observable callback from the metric reader's own
+    *background thread*, and every database call in this project is a
+    coroutine on asyncpg -- so a callback that queried would have to bounce
+    a coroutine onto the application's event loop
+    (`run_coroutine_threadsafe`) and block the exporter thread on it, which
+    deadlocks whenever the loop is itself blocked. What removes the drift
+    the plan was worried about is that `read` returns a *complete* re-read
+    (`SELECT status, kind, count(*) ... GROUP BY`) rather than a running
+    total, so the value is only ever stale, never wrong. `usher work`
+    refreshes it after every pass over the queue.
+
+    Safe to call repeatedly: the reader is replaced, and the instruments are
+    created once per `MeterProvider`.
+    """
+    global _queue_reader, _queue_gauge_provider
+    _queue_reader = read
+    provider = metrics.get_meter_provider()
+    if _queue_gauge_provider is provider:
+        return
+    meter = metrics.get_meter("usher.jobs")
+    meter.create_observable_gauge(
+        "usher.jobs.queued",
+        callbacks=[_observe_queued],
+        unit="1",
+        description="Jobs waiting to be claimed, by kind",
+    )
+    meter.create_observable_gauge(
+        "usher.jobs.parked",
+        callbacks=[_observe_parked],
+        unit="1",
+        description="Jobs parked with an error, by kind",
+    )
+    _queue_gauge_provider = provider
+
+
+def _observe_queued(options: CallbackOptions) -> Iterable[Observation]:
+    return _observations(lambda snapshot: snapshot.queued)
+
+
+def _observe_parked(options: CallbackOptions) -> Iterable[Observation]:
+    return _observations(lambda snapshot: snapshot.parked)
+
+
+def _observations(
+    select: Callable[[QueueSnapshot], Mapping[str, int]],
+) -> Iterable[Observation]:
+    """No reader means no observation, never a zero.
+
+    A gauge that reported 0 before anything had read the table would be
+    indistinguishable from an empty queue, and PRD 10's "ingest stalled"
+    alert fires on depth rising rather than on depth being reported -- so a
+    fabricated zero is the one value that makes the alert quietly wrong.
+    """
+    if _queue_reader is None:
+        return []
+    return [Observation(count, {"kind": kind}) for kind, count in select(_queue_reader()).items()]
 
 
 def configure_telemetry(settings: Settings) -> None:
