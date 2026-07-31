@@ -392,20 +392,33 @@ mostly offline.
 
 One TMDb request per title using
 `append_to_response=credits,keywords,images,videos,external_ids,release_dates`,
-plus per-season episode fetches for series. Populates `Title`, `Season`,
-`Episode`, `Person`, `Credit`, `Collection`, `Image`, and sets
-`field_provenance`.
+plus per-season episode fetches for series, and sets `field_provenance`.
+
+**M4 populates `Title`, `Season` and `Episode`, and caches the response
+verbatim.** `Person`, `Credit`, `Collection` and `Image` are populated by the
+milestone that first *reads* them — `Person`/`Credit` and `Collection` by M7,
+`Image` by M9 — each re-derived from the cached payload in `raw_payloads`
+with **no second network call**, which is what
+[02](02-data-model.md)'s cache is for
+([ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)). So
+`MetadataProvider.to_result()` returns an `EnrichmentResult` carrying the
+title, its season/episode hierarchy, and the raw payload; the four deferred
+entities are added to it as *fields*, not as a signature change
+([ADR-0017](decisions/0017-the-metadata-port-is-an-aggregate-and-a-cursor.md)).
 
 Re-enrichment is driven by TMDb's `/movie/changes` feed rather than blind TTL
 sweeps, with a hard re-fetch ceiling under 6 months to respect TMDb's caching
-term.
+term. The feed is walked through a resumable cursor
+(`changed_since(since, cursor) -> ChangedPage`), and a provider may answer a
+narrower window than it was asked for — TMDb caps it at 14 days — so an
+exhausted feed is not proof that nothing older changed.
 
-> 🔶 **Provisional.** `MetadataProvider.to_title()` returns a single
-> `Title`, but this stage populates `Season`, `Episode`, `Person`,
-> `Credit`, `Collection`, and `Image` too — none of which exist as domain
-> models yet, so the real return shape (a `Title` plus its aggregate, an
-> `EnrichmentResult` bundle, or several methods) would be guesswork today.
-> Settle in **M4**, once those models exist.
+The tier a title lands on is the pipeline's decision, never the provider's:
+`to_result` does not set `enrichment_state`, and `EnrichService` only ever
+raises it through `ENRICHMENT_RANK`
+([ADR-0008](decisions/0008-enrichment-tier-vs-failure.md)). A failed
+enrichment records `Title.enrichment_error` and leaves the tier exactly where
+it was.
 
 ### 4. Index
 

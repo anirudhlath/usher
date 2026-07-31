@@ -24,5 +24,6 @@ otherwise be lost and re-litigated in six months.
 | [0014](0014-absence-is-not-zero.md) | `SourceWatchState` play history may be absent, and absent is not zero | Accepted |
 | [0015](0015-availability-is-retracted-only-by-a-finished-walk.md) | Availability is retracted only by a finished walk, and never wholesale | Accepted |
 | [0016](0016-raw-payloads-cache-providers-not-sources.md) | `raw_payloads` caches providers, not sources; no `provider_cache_meta` | Accepted — corrects PRD 02 and 03 |
+| [0017](0017-the-metadata-port-is-an-aggregate-and-a-cursor.md) | `MetadataProvider` returns an aggregate and a cursor, keyed by `ProviderRef` | Accepted — settles three provisional markers |
 
 Format: context → decision → consequences → evidence. Short is fine.

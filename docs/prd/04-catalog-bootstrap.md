@@ -175,16 +175,16 @@ Then embed all titles that have overviews.
 | Daily | TMDb `/movie/changes` → re-enrich mutated titles (minutes, not hours) |
 | Continuous | Demand-driven enrichment ([03](03-sources-and-sync.md)) |
 
-> 🔶 **Provisional.** `MetadataProvider.changed_since(days: int) ->
-> list[int]` (`usher.ports.metadata`) can't express a resumable cursor
-> through TMDb's paginated, 14-day-capped `/movie/changes` feed — a
-> partial run has no way to pick up where it left off. Relatedly,
-> `fetch`'s `provider_id: int` bakes in TMDb's integer id scheme, which
-> IMDb's own ids (`tt1160419`) don't fit — a problem only once a second
-> `MetadataProvider` exists ([01](01-architecture.md) lists this as an
-> open extension seam; [09](09-roadmap.md) names OMDb/TVDb as post-v1
-> candidates). Settle both in **M4**, when TMDb is still the only
-> implementation and a second provider's real shape isn't guesswork yet.
+Both re-enrichment signatures were settled in M4
+([ADR-0017](decisions/0017-the-metadata-port-is-an-aggregate-and-a-cursor.md)).
+`MetadataProvider.changed_since(since, cursor) -> ChangedPage` walks the
+`/movie/changes` feed through an opaque, resumable cursor, so a partial daily
+run picks up where it stopped instead of restarting the window; and
+`fetch(ref: ProviderRef)` carries a string value plus a kind, so IMDb's
+`tt1160419` fits the same signature TMDb's `550`/`movie` does. The 14-day cap
+is clamped rather than rejected, and a caller may not read an exhausted feed
+as proof that nothing older changed — the full recovery path is a
+re-enrichment sweep over `titles`, not this feed.
 
 ## Licensing — ship importers, never data
 

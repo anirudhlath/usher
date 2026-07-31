@@ -131,7 +131,7 @@ Other ports follow the same pattern:
 | Port | Implementations (v1) |
 |---|---|
 | `SourceAdapter` | `EmbyAdapter` |
-| `MetadataProvider` | `TMDbProvider` |
+| `MetadataProvider` | `TmdbMetadataProvider` |
 | `BulkDataset` | `IMDbDumps`, `TMDbIdExport`, `WikidataCrosswalk`, `MovieLensGenome` |
 | `SearchIndex` | `PostgresSearchIndex` (`MeilisearchIndex` gated) |
 | `Embedder` | `SentenceTransformerEmbedder` |
