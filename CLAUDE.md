@@ -7,7 +7,7 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M3 Emby adapter complete.** The project scaffold, environment
+**Status: M4 ingest pipeline complete bar live verification.** The project scaffold, environment
 config, domain models, port ABCs, persistence (SQLAlchemy schema + Alembic
 migrations + title repository), the telemetry bootstrap, a FastAPI app
 with liveness/readiness endpoints, the container image + compose stack + CI
@@ -644,6 +644,146 @@ bug in a handler is not an upstream failure". So one corrupted `enrich`
 key would take the worker process down instead of parking its own job.
 `usher.services.handlers` converts every key, once.
 
+**`SQLAlchemyInstrumentor` was wired and produced no spans at all, for
+three milestones.** `instrument()` patches the *module attribute*
+`sqlalchemy.ext.asyncio.create_async_engine` with `wrapt`; `usher.db.base`
+did `from sqlalchemy.ext.asyncio import create_async_engine` at module
+scope, which is evaluated long before `configure_tracing` ever runs and
+binds the **original, unwrapped** function into that namespace forever.
+Verified directly: after `instrument()`, `usher.db.base.create_async_engine`
+and `sqlalchemy.ext.asyncio.create_async_engine` are different objects. The
+failure is silent in the worst way — the package is installed, the wiring
+reports success, `connect` spans still appear (`_wrap_connect` patches
+`Engine.connect` on the *class*, so it fires however the engine was built),
+and not one `SELECT`/`INSERT`/`UPDATE` span is ever produced. `build_engine`
+now calls `sa_asyncio.create_async_engine` through the module. A test that
+accepts a `connect` span is not enough; assert on a *statement* span.
+
+**Pipeline spans nest under the request's server span, asserted as
+parentage.** `tests/integration/test_pipeline_spans.py` walks the parent
+chain `match.title → ingest.item → sync.reconcile → GET …` on a real
+`create_app()` through a real request, with SQLAlchemy statement spans
+under the pipeline span that issued them. A pipeline that started its own
+*root* spans passes every other assertion in this repository — valid ids,
+exporting traces, PRD 10's span names all present — and fails only this.
+A worker's `job.*` span is the deliberate exception: a root with a `Link`.
+
+**`set_meter_provider` is set-once and `_ProxyMeter` caches, exactly like
+the tracer.** Every `usher` module calls `metrics.get_meter(...)` at import
+time, so each holds a `_ProxyMeter` whose instruments are `_Proxy*` shells
+that cache the first real instrument they are handed. Without
+`tests/conftest.py::reset_otel_meter_provider`, three rounds of "install a
+`MeterProvider` with an `InMemoryMetricReader`, record through
+`usher.services.jobs._job_duration`, read the reader" print the metric once
+and then raise `AttributeError: 'NoneType' object has no attribute
+'resource_metrics'` — the second `set_meter_provider` is refused and the
+second reader is never registered with any provider.
+
+`SQLAlchemyInstrumentor` needs the same treatment and the shared reset
+cannot give it: it resolves its tracer *once*, eagerly, into a `wrapt`
+closure, so it is a real `Tracer` rather than a `ProxyTracer` and nothing
+in `usher.*` holds it. `tests/integration/test_pipeline_spans.py`'s own
+fixture calls `SQLAlchemyInstrumentor().uninstrument()` before installing
+its provider; without that line its database-span case passes alone and
+finds an empty exporter when it runs third in its own file.
+
+**An observable OTel callback cannot query this database.** OTel invokes it
+from the metric reader's *background thread* and every database call here is
+a coroutine on asyncpg, so a callback that queried would have to bounce a
+coroutine onto the event loop (`run_coroutine_threadsafe`) and block the
+exporter thread on it — a deadlock whenever the loop is itself blocked.
+`usher.telemetry.register_queue_gauges` therefore takes a **synchronous**
+reader returning the caller's most recent *complete* re-read of the `jobs`
+table (`usher work` refreshes it after every pass), which is stale but never
+wrong — unlike the counter-incremented-on-enqueue the plan was guarding
+against. The SDK also keeps only the **first** observable gauge registered
+under a name and silently discards the rest (verified directly), so the
+reader is a module global that is replaced rather than a closure captured at
+instrument-creation time.
+
+**The ingest pipeline's measured cost, 2026-07-31 against
+`pgvector/pgvector:pg17`** (`scripts/measure_ingest.py --items 50000`,
+50,000 items in the measured library's proportions — 88.7% episodes — at
+batch size 1,000):
+
+| | statements | per item | items/s |
+|---|---|---|---|
+| first walk, cold catalog | 17,722 | 0.3544 | 1,933 |
+| the nightly walk | 1,356 | **0.0271** | 2,135 |
+
+**16,950 of the first walk's 17,722 statements are stub-on-sight**, and that
+is the one path in the pipeline that is not set-based:
+`MatchService._create_stub` calls `TitleRepository.add` per item, and that
+add is SAVEPOINT-wrapped, so a new title costs three statements. It is
+bounded by **new titles** (94,438 movies + 32,409 series), never by items —
+an episode never walks the ladder, so the other 999,827 items cost nothing
+there — and a second walk creates none. Batch-level cost is 772 statements,
+0.0154 per item. Throughput is against a local database with no network in
+the way; a real walk is bounded by Emby's 5,634 pages at 1–5 s each.
+
+**Four scale risks, planned against the statement the repository actually
+issued** (`scripts/measure_ingest.py --scale 1126674`; captured off
+`before_cursor_execute`, never transcribed — a hand-copied lookalike drifts
+and then reads like coverage, and two earlier tasks here were replaced for
+exactly that):
+
+- **`merge_from_source` at 1,126,674 `watch_states` with a 1,000-row batch:
+  refuted.** `Nested Loop` + `Index Scan using ix_watch_states_title_id`,
+  1,000 loops, 14.5 ms. No hash join, no seq scan.
+- **The claim scan behind a wall of backed-off jobs: confirmed, unfixed.**
+  216 ms with `Rows Removed by Filter: 1126674`. `ix_jobs_claim` is
+  `(priority DESC, created_at) WHERE status = 'pending'` and a backed-off
+  job is *still* `pending`, so every poll walks past all of them.
+  `run_after <= clock_timestamp()` is not an indexable partial predicate
+  (`clock_timestamp()` is not immutable), and putting `run_after` first
+  destroys the priority ordering — so this is recorded rather than solved.
+  It only bites when a large fraction of the queue is backed off, i.e. when
+  an upstream is broken.
+- **`list_unmatched`'s `OFFSET`: confirmed.** 43.7 ms at offset 0, 388.9 ms
+  at offset 1,126,574 — linear per page, quadratic to drain. Fine for an
+  operator reading the first few pages, wrong for a client paging the whole
+  review queue; a keyset cursor is the fix when something needs one.
+- **The availability sweep: half.** `ix_media_items_sweep`
+  (`source_id, available, last_seen_at`) takes the sweep's `UPDATE` from
+  `Seq Scan` (`Rows Removed by Filter: 1,126,474`, 173 ms) to `Index Scan`
+  with an `Index Cond` on all three columns, 102 ms. It does **not** help
+  the guard's `count(*)`, a `Parallel Seq Scan` with the index (87 ms) and
+  without it (86 ms) — ADR-0015's ceiling is a *fraction*, so the
+  denominator is unavoidable and a source that *is* the whole table gives
+  `source_id` no selectivity. Both numbers are in migration
+  `f1a7d3c9e824`, not the flattering one alone.
+
+**`ON CONFLICT DO UPDATE` with no `WHERE` rewrites every row it touches.**
+`_ENQUEUE`'s update clause fired for every job a nightly walk re-saw —
+1,126,674 dead-weight row versions a night, plus the WAL and the vacuum, on
+a table whose entire purpose is to stay small, for no state change at all
+(`priority` was already `GREATEST` of itself and `created_at` is
+deliberately untouched). `AND jobs.priority < excluded.priority` makes a
+re-seen job cost one index probe and zero writes, and `enqueue` then reports
+0 rows written, which is the honest number. A promotion still writes.
+
+**A statement-count assertion needs the right thing held fixed.** "20
+episodes and 200 cost the same statements" is hollow when they share one
+series: `IngestService._series_titles` only queries for series the page does
+*not* carry, so with the whole library in one batch that list is empty and a
+per-item spelling of it issues zero statements. Measured — the mutation
+survived. Hold the **batch count** fixed and vary the page instead (nine
+batches of 5 against nine batches of 50), across many series and many
+titles, which is also the production shape: at 32,409 series among
+1,126,674 items an episode's series nearly always arrived in an earlier
+page.
+
+**A route-driven test commits for real.** `get_session` is the request's
+commit boundary, so an integration test that drives a walk through a
+*route* writes durably against the session-scoped container — unlike every
+rolled-back test in the suite. Leaving `tests/integration/
+test_pipeline_spans.py`'s stubbed `titles` and enqueued `jobs` behind took
+down four tests in three other files (a duplicate `ix_titles_tmdb_id_kind`,
+a queue depth of 2 where 0 was expected, a claim that found 3 jobs instead
+of 1, and a global `count_by_state`), each of which passed in isolation.
+`media_items` and `sync_runs` go with the source's `ON DELETE CASCADE`;
+`titles` and `jobs` do not.
+
 ## Commands
 
 Verified working as of Group A (scaffold + config):
@@ -1015,8 +1155,8 @@ and interrogated over HTTP, and the suite is 865 tests (733 unit / 132
 integration), mypy strict clean over `src` and `tests`, 6 import contracts:
 
 ```bash
-uv run pytest                                    # 1659 tests as of M4 group E (1265 unit / 394 integration)
-uv run pytest tests/unit                         # 1265 tests, no Docker and no network
+uv run pytest                                    # 1713 tests as of M4 group F1 (1289 unit / 424 integration)
+uv run pytest tests/unit                         # 1289 tests, no Docker and no network
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .
@@ -1033,6 +1173,56 @@ curl -sS http://localhost:8000/admin/sources/<id>/status
 export USHER_EMBY_URL=... USHER_EMBY_USER=... USHER_EMBY_PASSWORD=...
 uv run python scripts/capture_emby_fixture.py --type Episode > /tmp/shape.json
 ```
+
+Verified working as of M4 group F1 (the CLI, telemetry, and the end-to-end
+measurement) — the ingest pipeline is runnable by an operator, not just by a
+test:
+
+```bash
+export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:5432/usher"
+export USHER_SECRET_KEY="<32+ char secret>"
+uv run alembic upgrade head
+uv run python -m usher sync --source "Living Room Emby"   # items, then watch state
+uv run python -m usher sync --kind delta                  # every enabled source
+uv run python -m usher sync --allow-full-retraction       # ADR-0015's ceiling off
+uv run python -m usher sync-status                        # runs, queue depth, parked
+uv run python -m usher unmatched --limit 50               # the review queue
+uv run python -m usher unmatched --resolve <media_item_id> --title <title_id>
+uv run python -m usher work --once                        # one pass over the queue
+uv run python -m usher work                               # a worker daemon
+
+# NOT tests -- they write to a real database. See each module's docstring.
+uv run python scripts/measure_ingest.py --items 50000
+uv run python scripts/measure_ingest.py --scale 1126674
+```
+
+`--source` is optional: omitted, `sync` walks every *enabled* source, and a
+source whose credential row has gone missing is skipped with a message
+rather than taking the other two down. `--kind` offers `full` and `delta`
+only — `watch_state` is a real `SyncRunKind` and is a lane `sync` always
+runs *after* the item walk (it resolves each state against a `MediaItem`),
+never an alternative to it. `--resolve` and `--title` are used together, and
+`parse_args` refuses one without the other: `attach_title` writes what it is
+given, so `--resolve` alone would blank a link instead of creating one.
+
+`usher.db.users.ensure_default_user` creates the row nothing ever had.
+`usher.domain.watch.User` documents a singleton `is_default` user as what
+stands in PRD 01's authentication seam and `watch_states.user_id` is a real
+foreign key, so the watch lane and the `watch_history` handler were both
+unrunnable without it. Deliberately not a repository port — no *service*
+needs it (`WatchStateSyncService` takes a `user_id` per call), and an ABC
+plus a fake plus a contract suite for one `SELECT` is a port with nothing on
+the other side.
+
+`api/deps.py` carries all eight new repositories plus `MatchService`/
+`IngestService`/`ReconcileService`/`WatchStateSyncService`, so M9 adds
+routers over finished wiring. **`EnrichService` is deliberately absent**:
+its provider owns the token bucket that keeps this deployment under TMDb's
+~40 rps ceiling, and a request-scoped `TmdbClient` gives every concurrent
+request a *fresh* bucket — N in-flight requests get N × 30 rps, a rate
+limiter that limits nothing. It belongs on `app.state` at lifespan, and
+nothing in PRD 07's surface calls enrichment directly (M5's demand
+promotion enqueues a job; `usher work` runs it).
 
 **Fixtures under `tests/fixtures/emby/` are shape-recorded and
 value-synthetic, and that is a licensing constraint, not a style.** A real

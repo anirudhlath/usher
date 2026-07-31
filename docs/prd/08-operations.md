@@ -126,6 +126,25 @@ Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
 - **Re-enqueueing does not un-park.** Poison a human has not looked at is not
   fixed by asking for it again, and a parked job's priority is not promoted
   behind their back either.
+- **Re-enqueueing work that has not changed writes nothing.** A nightly walk
+  enqueues a job for every item it saw, so an `ON CONFLICT DO UPDATE` with no
+  `WHERE` rewrites a row per job per night — 1,126,674 dead-weight row
+  versions at the one measured deployment, plus the WAL and the vacuum, on a
+  table whose entire purpose is to stay small — while changing nothing
+  anybody can observe. The update fires only on a genuine promotion
+  (`jobs.priority < excluded.priority`), and `enqueue` reports 0 rows written
+  otherwise, which is the honest number.
+- **A backed-off job is still `pending`, and nothing bounds the claim scan
+  over them.** `ix_jobs_claim` is `(priority DESC, created_at) WHERE status =
+  'pending'`, and `run_after <= clock_timestamp()` cannot be an indexed
+  predicate (`clock_timestamp()` is not immutable) — so a queue whose jobs
+  have all backed off against a broken upstream makes every claim walk past
+  all of them. Measured against `pgvector/pgvector:pg17`: 1,126,674
+  backed-off jobs plus one runnable one is a 216 ms claim with `Rows Removed
+  by Filter: 1126674`. Recorded rather than solved: putting `run_after`
+  first destroys the priority ordering the queue exists for, and the
+  condition only arises when an upstream is broken — at which point a slow
+  claim is not the problem.
 - Parked jobs are listed in the admin API and counted in metrics. Silent failure
   is the thing worth engineering against; visible failure is fine.
 - Jobs are idempotent by construction, so redelivery is always safe.
@@ -190,6 +209,17 @@ M1 `compose.yml` — nothing before M6 (embeddings) writes there.
 - First run detects an empty catalog and offers bootstrap through the admin API
   — it does not start a multi-hour download unprompted.
 - Bootstrap is resumable and checkpointed; a restart mid-import continues.
+- **The operator trigger is `python -m usher`, and it exists before the HTTP
+  surface does.** `bootstrap` / `bootstrap-status` (M2) and `sync` /
+  `sync-status` / `unmatched` / `work` (M4) are the CLI composition root;
+  [07](07-client-api.md)'s `POST /admin/sources/{id}/sync` and the two
+  `/admin/unmatched` routes are M9's and are built over the same services.
+  Every one of them has to work against an *empty* database — a command an
+  operator can only run after a successful sync is no use for diagnosing
+  why the sync did not happen.
+- **`--allow-full-retraction` is the only way past ADR-0015's ceiling**, and
+  it is a flag rather than a configuration default because it is the one
+  input that can mark a whole library unavailable.
 
 ### Backup — the asymmetry is the point
 
