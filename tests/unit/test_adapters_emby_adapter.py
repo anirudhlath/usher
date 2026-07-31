@@ -144,14 +144,26 @@ async def test_the_walk_asks_for_the_types_and_fields_the_mapper_needs() -> None
     assert item.container == "mkv"
 
 
-async def test_the_walk_sorts_ascending_so_an_insertion_cannot_hide_an_item() -> None:
-    """Not cosmetic, and not something `FakeEmbyServer` can demonstrate --
-    it sorts by its own recorded timestamp regardless of what is asked for.
-    Pinned as a parameter because the reasoning is load-bearing and
-    invisible otherwise: under a *stable ascending* sort, an item added
-    mid-walk lands at the end, so it cannot shift an unread item backwards
-    past a page boundary that has already been consumed. Descending does
-    exactly that, and the walk would skip a real item with no error.
+async def test_the_walk_asks_for_a_total_order_ascending() -> None:
+    """Both sort keys, pinned as literal parameters because neither is
+    demonstrable from this side of the wire.
+
+    **The tiebreak is the load-bearing one.** `StartIndex` paging reads a
+    window out of an order the server recomputes per request, so it is only
+    safe over a total order; `DateCreated` ties are the normal case after a
+    bulk import. `test_tied_timestamps_do_not_drop_items_out_of_the_paging_
+    window` is that failure end to end -- this test is only here to pin
+    *which* parameter buys it, since a server may honour any number of
+    tiebreaks and the walk has to name one.
+
+    **Ascending is the narrower claim**, and an earlier version of this
+    docstring stated the wrong reason for it. An insertion under *any* sort
+    order shifts items right, which produces duplicates -- the port permits
+    those -- not skips. What ascending buys is that a newly added item's
+    `DateCreated` puts it past the window entirely, so a mid-walk insertion
+    costs nothing at all, where descending lands it at index 0 and makes
+    every later page re-serve something already read. Skips come from
+    deletions and from tie instability instead.
 
     `EnableTotalRecordCount` rides along here because the walk's early
     termination depends on the count actually being returned; Emby omits it
@@ -172,9 +184,37 @@ async def test_the_walk_sorts_ascending_so_an_insertion_cannot_hide_an_item() ->
     finally:
         await adapter.aclose()
     listing = next(r for r in captured if r.url.path.endswith("/Items"))
-    assert listing.url.params["SortBy"] == "DateCreated"
+    sort_by = listing.url.params["SortBy"].split(",")
+    assert sort_by[0] == "DateCreated"
+    assert len(sort_by) > 1, "DateCreated alone is not a total order; paging over it drops items"
     assert listing.url.params["SortOrder"] == "Ascending"
     assert listing.url.params["EnableTotalRecordCount"] == "true"
+
+
+async def test_tied_timestamps_do_not_drop_items_out_of_the_paging_window() -> None:
+    """`DateCreated` ties are the normal case, not a corner: a bulk import
+    stamps a whole library inside one second, and Emby's own stamp has
+    finite resolution. `StartIndex`/`Limit` paging is only safe over a sort
+    key that is a *total* order -- a server free to break ties differently
+    between two page requests reshuffles the window under the cursor, and
+    items fall through the gap.
+
+    Measured on the pre-fix adapter (one `SortBy` key), with
+    `FakeEmbyServer` no longer supplying a tiebreak nobody asked it for: 10
+    items sharing one `DateCreated` over pages of two yielded 8 distinct
+    ids. `len(seen)` was still 10 -- the duplicates masked the loss exactly,
+    so only comparing *sets* finds it, and the reconciler would have marked
+    the two missing films `available = false`.
+    """
+    server = FakeEmbyServer(page_size=2)
+    for index in range(10):
+        server.add_item(_movie(index), T0)
+    adapter = _adapter(server, page_size=2)
+    try:
+        seen = {item.external_id async for item in adapter.list_items()}
+    finally:
+        await adapter.aclose()
+    assert seen == {f"movie-{index}" for index in range(10)}
 
 
 async def test_a_server_that_reports_no_total_does_not_truncate_the_walk() -> None:

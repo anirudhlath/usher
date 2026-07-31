@@ -138,6 +138,26 @@ def _emby_stamp(value: datetime) -> str:
     return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{moment.microsecond:06d}0Z"
 
 
+def _sort_value(item: SourceItem, field: str) -> str:
+    """One `SortBy` field's value for one item, as a sortable string.
+
+    Rendered rather than compared as native types so the whole sort key is
+    a `tuple[str, ...]`: `DateCreated` is absent for a folder item, and
+    mixing `None` into a comparison key is how a fake acquires an ordering
+    rule nobody wrote down.
+
+    A field this fake does not model contributes nothing -- which is what a
+    server does with a sort field it does not know, and is what makes
+    `SortBy=SomethingWrong` collapse into "no order was requested" here
+    instead of quietly behaving like a correct one.
+    """
+    if field == "DateCreated":
+        return "" if item.added_at is None else _emby_stamp(item.added_at)
+    if field == "SortName":
+        return item.name
+    return ""
+
+
 class FakeEmbyServer:
     def __init__(
         self,
@@ -153,6 +173,10 @@ class FakeEmbyServer:
         self.offline = False
         self.fail_after: int | None = None
         self.authentications = 0
+        # Read by `_ordered` as well as by tests: it is what rotates a group
+        # of items the request supplied no way to distinguish, so successive
+        # pages of one walk see them in different orders.
+        self.listings = 0
         self.device_ids: list[str] = []
         self.devices: list[str] = []
         self.requests: list[str] = []
@@ -293,20 +317,46 @@ class FakeEmbyServer:
             },
         )
 
-    def _ordered(self, since: str | None) -> list[str]:
-        entries = sorted(self._items.items(), key=lambda entry: (entry[1][1], entry[0]))
-        return [
-            external_id
-            for external_id, (_, changed_at) in entries
-            if since is None or _stamp(changed_at) >= since
-        ]
+    def _ordered(self, params: httpx.QueryParams) -> list[str]:
+        """The listing order, honouring exactly the `SortBy` fields asked
+        for and inventing nothing beyond them.
+
+        Deliberately *not* a `sorted(..., key=(changed_at, external_id))`.
+        That supplied a total order the adapter never requested, so a walk
+        paging over a non-total sort key looked perfectly stable here while
+        reshuffling under its own cursor against a real server -- the one
+        failure the port exists to make impossible, hidden by the test
+        double meant to expose it.
+
+        Items this request gave the server no way to tell apart are rotated
+        by the number of listings served so far. That is what "the server
+        may order ties however it likes, and differently on the next
+        request" looks like from the outside: deterministic enough to
+        reproduce a failure, adversarial enough that a missing tiebreak
+        drops items instead of getting away with it.
+        """
+        since = params.get("MinDateLastSaved") or params.get("MinDateLastSavedForUser")
+        fields = [field for field in (params.get("SortBy") or "").split(",") if field]
+        descending = (params.get("SortOrder") or "Ascending").lower().startswith("desc")
+        tied: dict[tuple[str, ...], list[str]] = {}
+        for external_id, (item, changed_at) in self._items.items():
+            if since is not None and _stamp(changed_at) < since:
+                continue
+            key = tuple(_sort_value(item, field) for field in fields)
+            tied.setdefault(key, []).append(external_id)
+        ordered: list[str] = []
+        for key in sorted(tied, reverse=descending):
+            group = tied[key]
+            offset = self.listings % len(group)
+            ordered.extend(group[offset:] + group[:offset])
+        return ordered
 
     def _list(self, request: httpx.Request) -> httpx.Response:
         params = request.url.params
+        self.listings += 1
         start = int(params.get("StartIndex", "0"))
         limit = int(params.get("Limit", str(self.page_size)))
-        since = params.get("MinDateLastSaved") or params.get("MinDateLastSavedForUser")
-        ordered = self._ordered(since)
+        ordered = self._ordered(params)
         if self.fail_after is not None and start >= self.fail_after:
             raise httpx.ReadTimeout("upstream stopped responding")
         page = ordered[start : start + limit]

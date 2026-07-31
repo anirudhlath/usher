@@ -337,6 +337,61 @@ async def test_every_hdr_format_survives_the_wire(
     assert item.hdr_format is hdr_format
 
 
+# --- the ordering it supplies, and the ordering it refuses to supply ------
+
+
+async def test_the_listing_honours_the_sort_fields_it_is_given(driver: _Driver) -> None:
+    """`SortBy=SortName` is obeyed, so the fake is not merely returning
+    insertion order and getting lucky. Seeded out of order on purpose."""
+    for name in ("Charlie", "Alpha", "Bravo"):
+        driver.server.add_item(
+            replace(MOVIE, external_id=name.lower(), name=name), datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    body = await driver.session.json_body(
+        "GET",
+        f"/Users/{USER_ID}/Items",
+        params={"SortBy": "SortName", "SortOrder": "Ascending", "Limit": "10"},
+        op="list",
+    )
+    assert [entry["Name"] for entry in body["Items"]] == ["Alpha", "Bravo", "Charlie"]
+
+
+async def test_the_listing_supplies_no_tiebreak_it_was_not_asked_for(driver: _Driver) -> None:
+    """The divergence that hid a real paging bug for a whole task.
+
+    This fake used to sort by `(changed_at, external_id)` regardless of
+    what the request asked for -- a *total* order the adapter never
+    requested from the real server. Under it, `StartIndex` paging over
+    `SortBy=DateCreated` alone looked perfectly stable, while against a
+    server free to break `DateCreated` ties however it liked it would
+    reshuffle the window under its own cursor and drop items.
+
+    So the rule is now the honest one: items a request gave the server no
+    way to tell apart come back in an order that is allowed to change
+    between requests. Asserted as an inequality between two identical
+    requests, which is the only shape that can catch a tiebreak being
+    quietly reintroduced.
+    """
+    stamp = datetime(2026, 1, 1, tzinfo=UTC)
+    for index in range(4):
+        driver.server.add_item(
+            replace(MOVIE, external_id=f"tied-{index}", name="Same Name", added_at=stamp), stamp
+        )
+
+    async def ids() -> list[str]:
+        body = await driver.session.json_body(
+            "GET",
+            f"/Users/{USER_ID}/Items",
+            params={"SortBy": "DateCreated", "Limit": "10"},
+            op="list",
+        )
+        return [entry["Id"] for entry in body["Items"]]
+
+    first, second = await ids(), await ids()
+    assert sorted(first) == sorted(second) == [f"tied-{index}" for index in range(4)]
+    assert first != second
+
+
 # --- the gates the fake keeps, which are only worth having if they fire ---
 
 

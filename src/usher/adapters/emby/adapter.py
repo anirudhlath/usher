@@ -16,13 +16,31 @@ never to a silently empty result.
 
 ### Paging
 
-`StartIndex`/`Limit` over `SortBy=DateCreated&SortOrder=Ascending`.
-Ascending is not cosmetic: with a stable ascending sort, items added during
-a walk land at the *end*, so an insertion cannot shift an unread item
-backwards past a page boundary already consumed. A deletion mid-walk can
-still shift one item out of view; that is a bounded imprecision the nightly
-full reconcile covers, and it is why the port permits duplicates but
-forbids silent truncation.
+`StartIndex`/`Limit` over `SortBy=DateCreated,SortName&SortOrder=Ascending`.
+
+**Two sort keys, not one.** `StartIndex` paging reads a window out of an
+order the server recomputes per request, so it is only safe when that order
+is *total*. `DateCreated` alone is not: a bulk library import stamps
+thousands of items inside one second, and Emby's own stamp has finite
+resolution -- ties are the normal case, not a corner. A server free to
+break them differently between two requests reshuffles the window under the
+cursor, and items fall through the gap silently, masked one-for-one by
+duplicates elsewhere. `SortName` is the tiebreak. It is not a guaranteed
+total order either (two versions of one film can share both keys), but it
+collapses the realistic case to nothing, and it is one of the sort fields
+Emby's `/Items` documentation lists, so an unknown-field degradation is not
+in play. **Not yet exercised against the live server** -- see the route
+note above; M3's live run is where this is confirmed.
+
+**Ascending, for a narrower reason than it looks.** Any insertion mid-walk
+shifts everything to its right, which produces *duplicates*, and the port
+permits those. Ascending by `DateCreated` puts a newly added item past the
+window entirely, so a mid-walk insertion costs nothing at all, where
+descending puts it at index 0 and makes every later page re-serve an item
+already read. Skips come from the other two directions: a *deletion* shifts
+unread items left past the cursor -- a bounded imprecision the nightly full
+reconcile covers -- and tie instability, which is what the second sort key
+above is for.
 
 The walk terminates on an empty page, and also when `TotalRecordCount` says
 everything has been read. The second condition is guarded on a *positive*
@@ -113,6 +131,11 @@ ITEM_FIELDS = (
 # played -- the entire population that walk exists to find.
 LIBRARY_SINCE_PARAM = "MinDateLastSaved"
 USER_DATA_SINCE_PARAM = "MinDateLastSavedForUser"
+
+# Two keys, because `StartIndex` paging reads a window out of an order the
+# server recomputes for every request and `DateCreated` alone is not a
+# total order -- see the Paging section of this module's docstring.
+SORT_BY = "DateCreated,SortName"
 
 
 def _version_of(body: Mapping[str, Any]) -> str | None:
@@ -209,7 +232,7 @@ class EmbyAdapter(SourceAdapter):
                 "Recursive": "true",
                 "IncludeItemTypes": ITEM_TYPES,
                 "Fields": ITEM_FIELDS,
-                "SortBy": "DateCreated",
+                "SortBy": SORT_BY,
                 "SortOrder": "Ascending",
                 "StartIndex": str(start),
                 "Limit": str(self._page_size),
