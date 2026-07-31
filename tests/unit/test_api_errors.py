@@ -15,12 +15,15 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel, SecretStr
 
+from usher.api.app import create_app
 from usher.api.errors import validation_error_without_the_request_body
+from usher.config import Settings
 
 PASSWORD = "gannet-flint-oleander-42"
 
@@ -73,6 +76,35 @@ async def test_a_wrong_typed_field_does_not_echo_its_own_value(client: AsyncClie
     assert response.status_code == 422
     if PASSWORD in response.text:
         raise AssertionError("the 422 body echoed the submitted password")
+
+
+async def test_create_app_registers_the_handler_on_the_real_admin_route() -> None:
+    """The handler being correct and the handler being *installed* are two
+    facts, and only the second one is a wiring mistake anyone can make.
+
+    Verified by mutation: deleting the `add_exception_handler` line from
+    `create_app` used to be caught only by the integration suite, so a
+    Docker-free run reported green on an app that echoed credentials. This
+    needs no database -- body validation fails before the session
+    dependency is ever used, so an unreachable DSN is fine and keeps the
+    test in `tests/unit/`.
+    """
+    app = create_app(
+        Settings(
+            database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
+            secret_key="0" * 32,
+        )
+    )
+    async with LifespanManager(app) as manager:
+        transport = ASGITransport(app=manager.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/admin/sources",
+                json={"kind": "emby", "name": "n", "username": "u", "password": PASSWORD},
+            )
+    assert response.status_code == 422
+    if PASSWORD in response.text:
+        raise AssertionError("create_app's 422 echoed the submitted password")
 
 
 async def test_an_unexpected_exception_type_degrades_to_an_empty_422() -> None:

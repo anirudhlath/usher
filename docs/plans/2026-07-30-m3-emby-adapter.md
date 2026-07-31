@@ -6984,10 +6984,19 @@ This is also where PRD 08's write-only credential rule stops being a convention 
 
 **Files:**
 - Create: `src/usher/api/dto/source.py`, `src/usher/api/routers/sources.py`
+- Create: `src/usher/api/errors.py` — **added while implementing.** FastAPI's default `422` answers with `jsonable_encoder(exc.errors())`, and a pydantic `missing` error carries the whole *unparsed* request dict in its `input` field. Omitting any one field from an otherwise well-formed `POST /admin/sources` therefore made the server reply with the plaintext password — reproduced against FastAPI 0.140 before this module existed. `SecretStr` does not help: the raw body never became one. See the note under Step 3.
 - Modify: `src/usher/api/deps.py`, `src/usher/api/app.py`
+- Modify: `src/usher/services/sources.py` — **added while implementing.** `GET /admin/sources/{id}/status` raised `PortDataMalformed` straight out of the handler for a credential that no longer decrypts (a rotated `USHER_SECRET_KEY`). See the note under Step 5.
+- Modify: `tests/conftest.py` — **added while implementing.** A `ProxyTracer` caches the first real provider it ever resolves, so the first test to start a span through `usher`'s module-level tracers owned them for the whole session; `reset_otel_tracer_provider` now clears that cache too. Latent until this task's span test reached `EmbySession` earlier in collection order, at which point `tests/unit/test_adapters_emby_session.py::test_every_upstream_request_produces_a_span` failed with an empty span list while still passing in isolation.
 - Test: `tests/integration/test_admin_sources.py`
+- Test: `tests/unit/test_api_errors.py`, `tests/unit/test_api_dto.py` — **added while implementing.** The first pins the 422 guard, and `create_app`'s wiring of it, without Docker: as drafted, deleting the `add_exception_handler` line was caught only by the integration suite, so a Docker-free run reported green on an app that echoed credentials. The second turns "no response model carries a credential" into a property of the whole `api/dto/` package rather than of `SourceResponse` by name, so a response type added in M5 or M9 inherits it.
 
 - [ ] **Step 1: Write the failing test**
+
+> **Two corrections to the test module as drafted, both about its own failure output.**
+>
+> 1. `assert PASSWORD not in response.text` publishes the credential. pytest rewrites it into an explanation rendering *both* operands, so the failure report for a leak puts the secret into the log of the run that caught it — the same class of bug as M1's `Settings` repr in a pytest diff. Every absence check now goes through a helper that raises a hand-built `AssertionError` (an explicit `raise`, so there is nothing to rewrite) carrying a secret-substituted excerpt. Verified by watching the 422 test fail: the report reads `input:{... "password":"<CREDENTIAL>"}`.
+> 2. `_payload`'s `"usher"` / `"correct-horse-battery"` are the fixtures' defaults and appear across the repository, so asserting their absence proves little. Both are now distinctive and alphanumeric-and-hyphen, so JSON escaping and percent-encoding leave them byte-identical and a substring search cannot be defeated by an encoding.
 
 Integration, not unit: these routes write to Postgres, and the cascade and the encryption are the parts worth exercising for real.
 
@@ -7218,6 +7227,8 @@ Expected: FAIL — `ImportError: cannot import name 'get_source_adapter_factory'
 
 - [ ] **Step 3: Write the DTOs**
 
+> **`SecretStr` closes less than the docstring below claims.** It is right about `repr()`/`str()`, and therefore about log lines and traceback frame summaries. It is wrong about "FastAPI's own 422 body for a failed validation": that body is built from pydantic's `errors()`, whose `input` field holds the *raw, unparsed* value — for a `missing` error, the entire submitted dict, before any field became a `SecretStr` at all. So the drafted DTO ships a route that answers a one-field-short request with the plaintext password. `src/usher/api/errors.py` strips `input` app-wide; the DTO docstring shipped says so rather than claiming the type closes it. `SourceResponse` also omits the **username**, not just the password — PRD 08's rule names "the stored username and password".
+
 ```python
 # src/usher/api/dto/source.py
 """Request and response shapes for the admin source routes.
@@ -7306,6 +7317,8 @@ class SourceStatusResponse(BaseModel):
 ```
 
 - [ ] **Step 4: Wire the dependency and the router**
+
+> **`Depends(get_settings)` below is wrong, and was replaced while implementing.** `usher.config.get_settings` reads the *environment*; `create_app(settings)` takes an explicit `Settings` and uses it for the engine and for telemetry. A handler injected with `get_settings` therefore runs on a different configuration than the app it is part of — quietly in production, where both usually agree, and fatally under test, where `tests/conftest.py` strips every `USHER_*` variable and a bare `Settings()` cannot validate at all. Verified directly: with the drafted line, 13 of this task's 15 integration tests fail with `ValidationError: 2 validation errors for Settings — database_url Field required, secret_key Field required`. `create_app` now sets `app.state.settings`, and `deps.get_app_settings` reads it back with the same defensive `cast` `get_session_factory` uses.
 
 Append to `src/usher/api/deps.py`:
 
@@ -7433,7 +7446,14 @@ from usher.api.routers import health, sources
 - [ ] **Step 5: Run and watch it pass**
 
 Run: `uv run pytest tests/integration/test_admin_sources.py -q`
-Expected: PASS — 10 tests.
+Expected: PASS — **15 tests**, not the 10 drafted. Five were added while implementing, each because the drafted ten could not see something this endpoint is responsible for:
+
+- **`test_a_rejected_request_does_not_echo_the_credential_it_carried`** — the leak `src/usher/api/errors.py` exists for. The drafted suite only ever posted *valid* bodies plus one blank name, and a blank name's `input` is `""`, so the one shape that echoes the whole body (a `missing` error) was never sent.
+- **`test_the_credential_is_encrypted_and_stored_outside_sources`** — that the row lands encrypted, in its own table, with `SELECT *` on `sources` carrying nothing, and (as a positive control) that it still decrypts to what was posted.
+- **`test_status_renders_an_undecryptable_credential`** — a rotated `USHER_SECRET_KEY` against the real Fernet store. Before the guard, this request raised `PortDataMalformed` out of the handler and 500ed, on the one screen an operator would open to diagnose exactly that. `SourceService.status`'s docstring already claimed "every other outcome is a `SourceStatus`"; it now is. The rendered detail is a fixed string rather than `str(exc)`, because the store's message names the `credentials_ref` so an operator can find the row — right for a log line, wrong for a response body.
+- **`test_no_route_logs_a_credential`** and **`test_no_span_carries_a_credential`** — PRD 08's "never logged, including in error paths and request dumps" and ADR-0012's "never a span attribute", neither of which the drafted suite checked at all. Both drive every route through every state it can report, and both are proven by mutation: putting the credential in `SourceService.register`'s log line fails the first *and nothing else*, and setting it as a span attribute in `EmbyAdapter.verify` fails the second *and nothing else*.
+
+`test_deleting_a_source_removes_its_credential_row` proves less than it reads: deleting `SourceService.remove`'s explicit `self._credentials.delete(...)` leaves it green, because `source_credentials.source_id` is `ON DELETE CASCADE`. The ordering guarantee is pinned by `tests/unit/test_services_sources.py`; this one proves the deployment-level guarantee by whichever mechanism, which is what an integration test should assert.
 
 Note `SourceCredentials(username=..., password=request.password)` passes the `SecretStr` straight through — the DTO field and the port DTO field are the same type, so no `get_secret_value()` call appears anywhere in `api/`. That is deliberate: the only `get_secret_value()` on this path is inside `PostgresCredentialStore` (to encrypt) and inside `EmbySession` (to authenticate).
 
