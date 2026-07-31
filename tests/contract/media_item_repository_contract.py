@@ -275,6 +275,31 @@ class MediaItemRepositoryContract:
         assert first.retracted == 4
         assert second.retracted == 0
 
+    async def test_a_sweep_after_an_accepted_retraction_is_not_refused_forever(
+        self, repository: MediaItemRepository, source_id: uuid.UUID
+    ) -> None:
+        """The guard counts what *this* run would change, not how much of the
+        source is already unavailable.
+
+        An operator who has looked at a refusal and re-run with the ceiling
+        raised has accepted the retraction; every nightly run after that must
+        go back to succeeding. An implementation whose count omits
+        `available` keeps measuring yesterday's retraction against today's
+        ceiling and refuses forever, which is worse than not having the guard
+        -- it fails the sync run, so the *upsert* half of the next walk never
+        commits either.
+        """
+        await repository.upsert_many(
+            [item(source_id, f"movie-{index}", last_seen_at=EARLIER) for index in range(10)]
+        )
+        await repository.mark_unseen_unavailable(
+            source_id, seen_since=RUN_AT, max_retract_fraction=1.0
+        )
+        result = await repository.mark_unseen_unavailable(
+            source_id, seen_since=RUN_AT, max_retract_fraction=0.25
+        )
+        assert (result.retracted, result.total) == (0, 10)
+
     async def test_upsert_many_never_hard_deletes(
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:

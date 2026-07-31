@@ -209,6 +209,22 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 
 Polling is the backstop, not the design.
 
+**Retraction is a separate step, and it can decline.** Marking unseen items
+unavailable is a distinct call the reconciler makes only after the walk
+returns normally — never a side effect of the upsert — and even then it
+refuses to retract more than `sync_max_retract_fraction` (default `0.25`) of
+a source in one run, raising and changing nothing. `list_items` raising
+rather than truncating already covers a walk that *failed*; this covers a
+walk that *succeeded* and returned far less than the library holds, which an
+unmounted drive, an accidentally-removed library, and a permissions change on
+Usher's own account all produce identically. `1.0` disables the ceiling,
+which is what an operator deliberately removing a library passes. See
+[ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md).
+
+An item that reappears in a walk is available again at that moment: the
+upsert restores it, because appearing in a walk *is* the evidence of
+availability. The sweep only ever sets `false`.
+
 ## Read-through with a priority queue
 
 The catalog is usable immediately and improves under you. Three mechanisms:
