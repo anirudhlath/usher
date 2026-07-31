@@ -111,7 +111,7 @@ The spec calls this "the test that proves the abstraction is real". A suite that
 | `test_hdr_format_is_the_canonical_enum` | The typing drift PRD 02 names explicitly: Emby's `"DolbyVision"` reaching `MediaItem` as a raw string. |
 | `test_added_at_is_timezone_aware` | The verified `fromisoformat` trap — a naive datetime that constructs fine on a plain dataclass and only explodes at the `TIMESTAMPTZ` column. |
 | `test_get_item_returns_none_only_for_a_deletion` + `test_get_item_raises_when_the_source_is_unreachable` | The single most dangerous wrong implementation: reporting a transient network failure as `None`, which marks a healthy item unavailable because of a flaky network. |
-| `test_operations_recover_from_an_expired_credential` | (a) No re-authentication at all — the original Home Assistant failure. (b) A re-auth storm: four concurrent 401s producing four `AuthenticateByName` calls. |
+| `test_operations_recover_from_an_expired_credential` | (a) No re-authentication at all — the original Home Assistant failure. (b) A re-auth storm: four concurrent 401s producing four `AuthenticateByName` calls — **but (b) only against a harness whose transport genuinely overlaps**, which it reports via `SourceHarness.observed_overlap`. `EmbyHarness` does (`SlowTransport`); `FakeSourceHarness` does not and claims only (a). Measured, with the mutations, in Task 9 Step 2. |
 | `test_rejected_credentials_do_not_produce_a_request_storm` | An adapter that retries authentication on every call when the password is simply wrong. |
 | `test_push_watch_state_is_visible_to_the_source` | A no-op `push_watch_state`. The port's docstring warns that swallowing here means the retry never happens; a test that only asserted "it didn't raise" would pass against a `pass` body. |
 | `test_push_watch_state_raises_on_failure` | Swallowing the write-back error, which converts "enqueue a retry" into "lose the write". |
@@ -6266,6 +6266,12 @@ fitting in one.
 The `httpx.AsyncClient` is injected, so `EmbyAdapter.aclose()` leaves it
 open -- the contract closes the adapter itself in two of its cases, and
 this harness's own `aclose()` is what finally disposes of the client.
+
+**The transport really awaits, and that is not a detail.** This runs on
+`tests/fakes/slow_transport.py` rather than the bare `httpx.MockTransport`
+`FakeEmbyServer.transport()` hands out, so `observed_overlap` can return a
+real number and the contract's expired-credential case can mean what it
+looks like it means. See Step 2's correction note for the measurement.
 """
 
 import httpx
@@ -6273,6 +6279,7 @@ from pydantic import AwareDatetime, SecretStr
 
 from tests.contract.source_harness import SourceHarness
 from tests.fakes.emby_server import FakeEmbyServer
+from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
@@ -6280,10 +6287,12 @@ from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
 from usher.ports.source import SourceAdapter, SourceItem, SourceWatchState
 
+PAGE_SIZE = 2
+
 
 class EmbyHarness(SourceHarness):
     def __init__(self) -> None:
-        self._server = FakeEmbyServer(page_size=2)
+        self._server = FakeEmbyServer(page_size=PAGE_SIZE)
         self._source = Source(
             id=new_id(),
             kind=SourceKind.EMBY,
@@ -6292,16 +6301,15 @@ class EmbyHarness(SourceHarness):
             credentials_ref="ref-emby",
             device_id=str(new_id()),
         )
-        self._client = httpx.AsyncClient(
-            transport=self._server.transport(), base_url=self._source.base_url
-        )
+        self._transport = SlowTransport(self._server.handle)
+        self._client = httpx.AsyncClient(transport=self._transport, base_url=self._source.base_url)
         self._adapter = EmbyAdapter(
             self._source,
             SourceCredentials(
                 username=self._server.username, password=SecretStr(self._server.password)
             ),
             client=self._client,
-            page_size=2,
+            page_size=PAGE_SIZE,
         )
 
     @property
@@ -6313,6 +6321,16 @@ class EmbyHarness(SourceHarness):
         return self._adapter
 
     async def given_item(self, item: SourceItem, *, changed_at: AwareDatetime) -> None:
+        """Render `item` into Emby's JSON, held as changed at `changed_at`.
+
+        Takes **both** widenings `SourceHarness.given_item` permits, and
+        says so here because that ABC requires an implementation taking
+        either to declare it: `changed_at` is compared at whole-second
+        resolution (Emby's `MinDateLastSaved` is a whole-second stamp), and
+        an item with no `container` is a folder, which has no `MediaSources`
+        entry to hang a codec, a file size, a channel count, or an HDR
+        format off.
+        """
         self._server.add_item(item, changed_at)
 
     async def given_watch_state(self, state: SourceWatchState) -> None:
@@ -6338,6 +6356,15 @@ class EmbyHarness(SourceHarness):
 
     def authentications(self) -> int:
         return self._server.authentications
+
+    def observed_overlap(self) -> int | None:
+        """The most requests this harness ever saw in flight at once.
+
+        A real number rather than the ABC's `None`, which is what upgrades
+        the contract's expired-credential case from "recovery happened" to
+        "recovery happened under genuine concurrency, once".
+        """
+        return self._transport.max_in_flight
 
     async def aclose(self) -> None:
         await self._adapter.aclose()
@@ -6381,10 +6408,14 @@ class TestEmbyAdapter(SourceAdapterContract):
 Run: `uv run pytest tests/unit/test_adapters_emby_contract.py -q`
 Expected: PASS — 40 tests, the same count as the fake's run.
 
-This is a real, load-bearing run and it may well not pass first time. If a case fails, **fix the adapter, not the assertion** — unless the assertion is wrong for every source, in which case fix it in `tests/contract/` and re-run *both* runners. Two failures are foreseeable and both mean a real bug:
+This is a real, load-bearing run and it may well not pass first time. If a case fails, **fix the adapter, not the assertion** — unless the assertion is wrong for every source, in which case fix it in `tests/contract/` and re-run *both* runners.
 
-- `test_operations_after_aclose_raise_port_unavailable` fails if `EmbySession._raise_if_closed` is not called from `user_id()`. `EmbyAdapter._fetch` calls `user_id()` before `request()`, and the harness *injects* the client so `aclose()` does not close it — so without that check a closed adapter authenticates against a live transport and succeeds.
-- `test_operations_recover_from_an_expired_credential` fails with four authentications if `_refresh` compares the wrong generation, and with zero (`PortAuthFailed`) if the retry does not resend the original request.
+> **Corrected while implementing.** This step used to predict two specific failures, and mutation testing showed both predictions were wrong. Kept here with the measurements, because "the contract catches X" is exactly the kind of claim this milestone is not allowed to assert without evidence.
+>
+> - **Was:** "`test_operations_after_aclose_raise_port_unavailable` fails if `EmbySession._raise_if_closed` is not called from `user_id()`." **It does not.** `EmbyAdapter._fetch` calls `user_id()` first; with the check gone that call authenticates successfully against the still-open injected transport, and `request()`'s *own* `_raise_if_closed` then raises the `PortUnavailable` the case is waiting for. Measured directly: all 41 tests stay green while the closed adapter emits `POST /Users/AuthenticateByName` and mints a live Emby session (`authentications` 0 → 1). The constraint is real but this is not what pins it — `tests/unit/test_adapters_emby_session.py::test_the_other_entry_points_also_refuse_to_run_after_aclose` is, because it asserts the authentication count is zero rather than only that an error surfaced.
+> - **Was:** "`test_operations_recover_from_an_expired_credential` fails with four authentications if `_refresh` compares the wrong generation." **Not over the transport this step originally specified.** With the plan's `httpx.MockTransport` harness, deleting *both* of `EmbySession`'s locks and the generation short-circuit outright leaves all 41 green: nothing in that transport ever awaits on the way to its handler, so the event loop runs one gathered call all the way through its own re-auth before starting the next and `assert authentications() - before <= 1` never discriminates. The fix is in Step 1 above — `EmbyHarness` runs on `tests/fakes/slow_transport.py` and implements `SourceHarness.observed_overlap`, so the contract asserts the four gathered calls really did overlap. Over *that* transport the prediction holds: deleting `_refresh`'s lock raises `PortAuthFailed`, deleting both locks and the short-circuit raises `PortAuthFailed`, and deleting the short-circuit alone trips `<= 1` with four authentications.
+>
+> One further limit found the same way, and left as a limit: making `EmbyAdapter._fetch` report every `>= 400` as `None` — the "a 500 is not a deletion" bug — passes all 40 contract cases, because `SourceHarness.go_offline` is a *transport* failure by design and no hook here can arrange a failing HTTP status. `tests/unit/test_adapters_emby_adapter.py::test_get_item_raises_rather_than_returning_none_on_a_server_error` catches it. Status-level behaviour stays a per-implementation test; both the contract module's docstring and this note say so rather than leaving the gap to be assumed closed.
 
 - [ ] **Step 3: Assert the two runs are the same suite**
 

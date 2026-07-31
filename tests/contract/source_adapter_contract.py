@@ -21,17 +21,28 @@ Subclass and provide a `harness` fixture:
             finally:
                 await harness.aclose()
 
-**What this suite cannot express, stated so a green run is not over-read.**
-Every case here drives the adapter through the harness's own transport, and
-nothing in the suite can make that transport *await*. So no case here is
-evidence about concurrency: `test_operations_recover_from_an_expired_
-credential` looks like a single-flight assertion and is not one, for
-reasons worked through in its own docstring, and `SourceHarness.
-observed_overlap` is the opt-in hook that would make it one. The
-lock-level and race-level guarantees are tested per implementation, over
-a transport that really sleeps -- for Emby, in
-`tests/unit/test_adapters_emby_session.py` and
-`tests/unit/test_adapters_emby_adapter.py`.
+**What this suite can and cannot express, stated so a green run is not
+over-read.** Every case here drives the adapter through the harness's own
+transport, so what a case is evidence *about* depends on what that
+transport does. Two consequences:
+
+- **Concurrency is a per-harness property, not a suite-wide one.**
+  `test_operations_recover_from_an_expired_credential` reads like a
+  single-flight assertion and is only one against a harness whose transport
+  really awaits. `SourceHarness.observed_overlap` is how a harness says it
+  does, and that case then asserts on the overlap too.
+  `FakeSourceHarness` returns `None` there and its run claims nothing about
+  locks; `EmbyHarness` runs on `tests/fakes/slow_transport.py` and returns
+  a real number, so the Emby run does. Measured both ways -- see that
+  case's own docstring.
+- **A failing *status* is not something a harness can arrange.**
+  `go_offline` is a transport failure by design, so nothing here
+  distinguishes "a 500 is not a deletion" from "a 404 is". Verified by
+  mutation: making `EmbyAdapter._fetch` report every `>= 400` as `None`
+  passes all 40 cases and is caught only by
+  `tests/unit/test_adapters_emby_adapter.py::test_get_item_raises_rather_
+  than_returning_none_on_a_server_error`. Status-level behaviour stays a
+  per-implementation test.
 """
 
 import asyncio
@@ -314,36 +325,50 @@ class SourceAdapterContract:
         so a source with no expiring session (whose `expire_credentials` is
         a no-op) is not forced to invent one.
 
-        **What a green run does not prove, despite appearances: single
-        flight.** Firing four calls through `asyncio.gather` and counting
-        authentications reads like a concurrency assertion and is not one
-        unless the harness's transport really overlaps. Measured against a
-        real `EmbyAdapter` over `httpx.MockTransport`: with *both* of
-        `EmbySession`'s locks deleted, four concurrent expired sessions
-        still produce exactly one authentication, so `<= 1` never
-        discriminates. Deleting the generation short-circuit entirely (N
-        authentications for N 401s) also survives all 39 cases, as does
-        removing `_raise_if_closed` from `EmbySession.user_id()`. Nothing
-        here is evidence about any of those.
+        **Whether a green run proves single flight depends on the
+        harness.** Firing four calls through `asyncio.gather` and counting
+        authentications reads like a concurrency assertion, and is only one
+        if the harness's transport really overlaps -- which is what
+        `SourceHarness.observed_overlap` reports and the assertion below
+        checks. A harness answering `None` there claims nothing about locks
+        and this case proves only the two things above for it.
 
-        The reason is that `MockTransport` never actually awaits on the way
-        to its handler, so the event loop tends to run one gathered call
-        all the way through its own re-auth before starting the next; every
-        other call then reads an already-fresh token without racing for it.
-        Over a transport that genuinely sleeps, the same code raises
-        `PortAuthFailed` with the locks gone.
+        Measured against a real `EmbyAdapter`, both ways:
 
-        **Where the single-flight claim is actually tested**, both over
-        `tests/fakes/slow_transport.py` and both asserting on observed
-        overlap so they cannot quietly stop being concurrent:
-        `tests/unit/test_adapters_emby_session.py::test_concurrent_401s_are_
-        provably_simultaneous_and_produce_one_authentication` and
-        `tests/unit/test_adapters_emby_adapter.py::test_concurrent_expired_
-        sessions_produce_one_authentication`.
+        - Over `httpx.MockTransport`, `<= 1` never discriminates. With
+          *both* of `EmbySession`'s locks deleted *and* the generation
+          short-circuit removed, four concurrent expired sessions still
+          produce exactly one authentication and all 41 tests in the Emby
+          run pass. `MockTransport` never actually awaits on the way to its
+          handler, so the event loop tends to run one gathered call all the
+          way through its own re-auth before starting the next; every other
+          call then reads an already-fresh token without racing for it.
+        - Over `tests/fakes/slow_transport.py`, which is what `EmbyHarness`
+          uses, it discriminates. Each of those three mutations fails this
+          case -- deleting `_refresh`'s lock raises `PortAuthFailed`,
+          deleting both locks and the short-circuit raises `PortAuthFailed`,
+          and deleting the short-circuit alone trips the `<= 1` assertion
+          with four authentications.
 
-        A harness that *can* force real overlap says so by implementing
-        `SourceHarness.observed_overlap`, and this case then asserts on it
-        -- which is what would make the contract itself carry the claim.
+        **What this case still does not reach, on any harness:**
+        `EmbySession.user_id()`'s own `_raise_if_closed`. Removing it leaves
+        every case here green -- `EmbyAdapter._fetch` calls `user_id()`
+        first, that call authenticates successfully against the still-open
+        injected transport, and `request()`'s own check then raises the
+        `PortUnavailable` `test_operations_after_aclose_raise_port_
+        unavailable` is waiting for. Verified: the closed adapter emits
+        `POST /Users/AuthenticateByName` and mints a live session before the
+        expected error surfaces. That one is pinned by
+        `tests/unit/test_adapters_emby_session.py::test_the_other_entry_
+        points_also_refuse_to_run_after_aclose`, which asserts the
+        authentication count is zero.
+
+        **The dedicated single-flight tests**, both over `SlowTransport` and
+        both asserting on observed overlap so they cannot quietly stop being
+        concurrent: `tests/unit/test_adapters_emby_session.py::test_
+        concurrent_401s_are_provably_simultaneous_and_produce_one_
+        authentication` and `tests/unit/test_adapters_emby_adapter.py::test_
+        concurrent_expired_sessions_produce_one_authentication`.
         """
         await harness.given_item(MOVIE, changed_at=T0)
         assert await harness.adapter.get_item("movie-1") is not None

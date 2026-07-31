@@ -154,12 +154,14 @@ class SourceHarness(ABC):
 
         A harness that returns a number here is claiming its transport
         genuinely overlaps -- which needs a real `await` in the request
-        path, not a synchronous handler (`tests/fakes/slow_transport.py` is
-        the one this repo already has). The contract then asserts on the
-        overlap as well, and the single-flight claim becomes real for that
-        implementation. Returning `None` is not a failure; it is the
-        honest answer, and it is why the contract states in that test's own
-        docstring what a green run does and does not prove.
+        path, not a synchronous handler. `EmbyHarness`
+        (`tests/fakes/emby_harness.py`) makes that claim and backs it by
+        running on `tests/fakes/slow_transport.py`; over it, each of the
+        three mutations named above does fail that case. `FakeSourceHarness`
+        leaves this at `None`, which is not a failure -- it is the honest
+        answer for an adapter with no transport at all, and it is why the
+        contract states in that test's own docstring what a green run does
+        and does not prove for each.
         """
         return None
 
