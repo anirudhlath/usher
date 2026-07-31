@@ -87,6 +87,26 @@ _EMBY_AUTH_HEADER = "X-Emby-Token"
 
 _UNSAFE_HEADER_CHARS = re.compile(r"[^A-Za-z0-9 ._+-]")
 
+# Everything a send may raise that a caller written against
+# `usher.ports.errors` cannot catch. `httpx.HTTPError` is not the whole
+# surface, verified against httpx's own hierarchy: `StreamError` subclasses
+# `RuntimeError`, and `InvalidURL`/`CookieConflict` subclass `Exception`
+# directly. None of the three is an `httpx.HTTPError`.
+#
+# `RuntimeError` is in here for a fourth case that is not an httpx
+# exception at all: a *closed* `httpx.AsyncClient` raises a bare
+# `builtins.RuntimeError`. `_raise_if_closed` covers the adapter closing
+# itself; it cannot cover an injected client closed by its owner, which is
+# the other half of the configuration `EmbyAdapter` supports. Broad on
+# purpose -- an unreachable transport is exactly what `PortUnavailable`
+# means, and the alternative is a stdlib exception crossing the port.
+_UNTRANSLATED_FAILURES: tuple[type[BaseException], ...] = (
+    httpx.HTTPError,
+    httpx.InvalidURL,
+    httpx.CookieConflict,
+    RuntimeError,
+)
+
 _tracer = trace.get_tracer("usher.source.emby")
 _meter = metrics.get_meter("usher.source.emby")
 # PRD 10's catalogue, M3's one metric. Labels `source` and `op`, exactly as
@@ -186,12 +206,15 @@ class EmbySession:
         `user_id()` and `access_token()` are entry points too -- `EmbyAdapter
         ._fetch` calls `user_id()` *before* it calls `request()` -- so a
         check only on `request` would let a closed adapter authenticate
-        against a live transport and succeed. Verified while planning that
-        a closed `httpx.AsyncClient` raises a bare `RuntimeError` rather
-        than an `httpx.HTTPError`, so translation alone does not cover this
-        even when the client really is closed; and when the client was
-        *injected* it is not closed at all, so nothing but this flag stands
-        between a closed adapter and a working request.
+        against a live transport and succeed.
+
+        Not made redundant by `_UNTRANSLATED_FAILURES` now catching the
+        bare `RuntimeError` a closed `httpx.AsyncClient` raises. That
+        translation governs what crosses the port when a send *fails*; this
+        governs the send never happening at all -- and when the client was
+        *injected* it is not closed, so nothing but this flag stands
+        between a closed adapter and a working request against an upstream
+        PRD 01 measures at 1-5 s per call.
         """
         if self._closed:
             raise PortUnavailable("this source adapter has been closed")
@@ -331,7 +354,7 @@ class EmbySession:
                 method, path, params=params, json=payload, headers=dict(headers)
             )
             return await self._client.send(request)
-        except httpx.HTTPError as exc:
+        except _UNTRANSLATED_FAILURES as exc:
             # `exc` carries a method and a URL, never a header or a body,
             # so this message cannot leak the credential -- and the one
             # request that does carry it is never formatted into a message.

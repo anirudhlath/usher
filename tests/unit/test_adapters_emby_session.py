@@ -485,6 +485,61 @@ async def test_a_transport_error_becomes_port_unavailable() -> None:
         await client.aclose()
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        # Not an `httpx.HTTPError`. `StreamError` subclasses `RuntimeError`
+        # instead, and `InvalidURL`/`CookieConflict` subclass `Exception`
+        # directly -- all three verified against httpx's own hierarchy.
+        httpx.StreamError("the stream went away"),
+        httpx.InvalidURL("that is not a URL"),
+        httpx.CookieConflict("two cookies of that name"),
+    ],
+)
+async def test_a_transport_failure_outside_httpx_httperror_still_becomes_a_port_error(
+    failure: Exception,
+) -> None:
+    """`except httpx.HTTPError` is not the whole surface, and the gap is not
+    theoretical: `usher.ports.source` requires every method on this port to
+    fail through `usher.ports.errors`, because that taxonomy is the only
+    thing a caller can catch. An `httpx.StreamError` escaping as itself
+    reaches PRD 03's reconciler as an exception it has never heard of.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise failure
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://emby.invalid"
+    )
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortUnavailable):
+            await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+    finally:
+        await client.aclose()
+
+
+async def test_an_injected_client_closed_by_its_owner_becomes_a_port_error() -> None:
+    """The exact hazard `usher.ports.source`'s `aclose` docstring records: a
+    closed `httpx.AsyncClient` raises a bare `builtins.RuntimeError`, which
+    is not an `httpx.HTTPError`.
+
+    `EmbySession._raise_if_closed` covers the adapter closing *itself*. It
+    cannot cover this, which is the other half of the configuration
+    `test_aclose_closes_a_client_it_created_and_leaves_an_injected_one`
+    exists to support: the client was injected, its owner closed it, and
+    this session was never told.
+    """
+    server = FakeEmbyServer()
+    session, client = _session(server)
+    await client.aclose()
+    with pytest.raises(PortUnavailable):
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+
+
 async def test_a_429_becomes_port_rate_limited_with_its_hint() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/Users/AuthenticateByName":

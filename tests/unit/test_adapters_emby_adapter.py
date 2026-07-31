@@ -615,6 +615,33 @@ async def test_verify_reports_a_rate_limited_source_as_reachable() -> None:
     assert (status.reachable, status.authenticated) == (True, False)
 
 
+@pytest.mark.parametrize("failure", [httpx.StreamError("gone"), RuntimeError("client is closed")])
+async def test_verify_reports_a_transport_failure_rather_than_raising_it(
+    failure: Exception,
+) -> None:
+    """`usher.ports.source` is explicit that `verify` returns rather than
+    raises for every *expected* failure, "because its one caller (`GET
+    /admin/sources/{id}/status`) exists to render those states, not to
+    handle them" -- and a transport failure is the most expected failure
+    there is.
+
+    Neither of these is an `httpx.HTTPError`, so both used to escape
+    `EmbySession._send`'s translation untouched and then sail straight
+    through `verify`'s `except UsherPortError`. The admin endpoint would
+    have returned 500 instead of rendering "unreachable".
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise failure
+
+    adapter = _on(handler)
+    try:
+        status = await adapter.verify()
+    finally:
+        await adapter.aclose()
+    assert (status.reachable, status.authenticated) == (False, False)
+
+
 async def test_verify_never_leaks_the_password_into_its_detail() -> None:
     """`SourceStatus.detail` is rendered by `GET /admin/sources/{id}/status`
     straight into an admin response body."""
