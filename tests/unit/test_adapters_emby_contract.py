@@ -37,7 +37,7 @@ def test_both_implementations_run_the_same_assertions() -> None:
     from tests.unit.test_source_adapter_contract import TestFakeSourceAdapter
 
     cases = {name for name in dir(SourceAdapterContract) if name.startswith("test_")}
-    assert len(cases) == 40
+    assert len(cases) == 43
     for subclass in (TestEmbyAdapter, TestFakeSourceAdapter):
         overridden = {
             name
