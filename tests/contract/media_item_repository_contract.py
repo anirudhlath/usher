@@ -539,14 +539,60 @@ class MediaItemRepositoryContract:
         """One walk stamps every row it sees with the *run's* start instant,
         so two copies of one film tie on `last_seen_at` in the common case
         rather than the rare one. Without a final tiebreak the winner is
-        insertion order here and the planner there."""
-        await repository.upsert_many(
-            [
-                item(source_id, "copy-b", title_id=title_id),
-                item(source_id, "copy-a", title_id=title_id),
-            ]
-        )
+        insertion order here and the planner there.
+
+        **Two `upsert_many` calls, in this order, and that is what gives the
+        case teeth.** Inside one batch the staged upsert reads
+        `DISTINCT ON (source_id, external_id)`, which orders by
+        `external_id` on the way in -- so a single batch stores `copy-a`
+        first whatever order the list is in, a tie-broken read and an
+        arbitrary one agree, and dropping the tiebreak survives. Measured:
+        it did. Storing `copy-b` first puts heap order and `external_id`
+        order in genuine disagreement, which is what a real library does
+        anyway (two files added on different nights).
+        """
+        await repository.upsert_many([item(source_id, "copy-b", title_id=title_id)])
+        await repository.upsert_many([item(source_id, "copy-a", title_id=title_id)])
         target = MediaItemTarget(title_id=title_id, episode_id=None)
+        assert await repository.resolve_external_ids(source_id, [target]) == {target: "copy-a"}
+
+    async def test_copies_of_one_episode_resolve_to_the_freshest_then_the_lowest_id(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """The same rule on the branch that carries 89% of this library.
+
+        Episodes are re-encoded and re-added exactly as films are, and the
+        episode branch is a *separate statement* with its own `ORDER BY` --
+        so ordering added to the title branch alone leaves the majority case
+        arbitrary. Measured: deleting the episode branch's entire `ORDER BY`
+        survived every other case in this file.
+
+        Three copies and three separate upserts, because both halves of the
+        order have to be observable at once and because a single batch
+        stores its rows in `external_id` order (its own `DISTINCT ON` key),
+        which is exactly the order under test and hides a missing one.
+        """
+        # `aa-stale` sorts *first* deliberately: with a plausible name the
+        # `external_id` key alone would pick the right row for the wrong
+        # reason and `last_seen_at DESC` could be deleted unnoticed.
+        # Measured -- it was.
+        for external_id, seen in (("aa-stale", EARLIER), ("copy-b", RUN_AT), ("copy-a", RUN_AT)):
+            await repository.upsert_many(
+                [
+                    item(
+                        source_id,
+                        external_id,
+                        title_id=title_id,
+                        episode_id=episode_id,
+                        last_seen_at=seen,
+                    )
+                ]
+            )
+        target = MediaItemTarget(title_id=None, episode_id=episode_id)
         assert await repository.resolve_external_ids(source_id, [target]) == {target: "copy-a"}
 
     async def test_a_target_this_source_does_not_have_is_absent(

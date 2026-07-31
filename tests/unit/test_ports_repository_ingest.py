@@ -28,6 +28,8 @@ def test_media_item_repository_surface() -> None:
             "mark_unseen_unavailable",
             "get_by_external_id",
             "resolve_series_titles",
+            "resolve_targets",
+            "resolve_external_ids",
             "list_unmatched",
             "attach_title",
             "count_for_source",
