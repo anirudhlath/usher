@@ -19,11 +19,19 @@ direct Emby access, for both movies and television.
 | **M6 — Search** | Full-text, autocomplete path, embeddings, RRF fusion, similarity, neighbour precompute |
 | **M7 — Rows** | Row and RowProvider hierarchy, system rows, similarity rows, taste centroid |
 | **M8 — Curation** | LLM row generation, validation, persistence, regeneration job |
-| **M9 — API surface** | Full HTTP surface, image proxy, playback resolution, attribution |
+| **M9 — API surface** | Full HTTP surface, image proxy, playback resolution, **the playback ticket that succeeds [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)**, attribution |
 | **M10 — Hardening** | Observability, failure modes, backup/restore, docs, public release |
 
 TV is in scope throughout, not deferred — series/season/episode modelling,
 Next Up, and episode-level watch state land with the milestones that own them.
+
+**M9 owes ADR-0012 a successor.** In v1, `POST /titles/{id}/play` returns a
+target URL carrying the source's session token, because M3 has no HTTP surface
+to redirect from. M9 builds that surface, so M9 is where the opaque,
+short-lived playback ticket lands — a `302` to the real URL, which makes the
+shareable artifact opaque rather than removing the grant. Listed here and not
+only in the ADR that defers it: an obligation recorded only where it was
+postponed is one nobody plans.
 
 ## Post-v1 candidates
 

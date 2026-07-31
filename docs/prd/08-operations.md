@@ -30,13 +30,24 @@ Rules:
 - No credential ever reaches a client. This is the failure of the setup Usher
   replaces, where a raw Emby token lived in browser-delivered dashboard config.
   **One documented exception in v1: a `direct` playback target's URL carries
-  the source's session token**, because Usher never proxies the bytes and the
-  route that serves them authenticates. See
+  the source's session token**, alongside the `DeviceId` Usher registers as,
+  because Usher never proxies the bytes and the route that serves them
+  authenticates. See
   [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) for what
   that grants, why the two halves of the original failure are not equally
-  present, and the M9 playback ticket that closes it. The rest of this list
-  still binds that token without exception — it is minted on demand, never
-  persisted, never logged, and never a span attribute.
+  present, the risks accepted with it, and the M9 playback ticket that narrows
+  it — a `302` moves the token out of the response body and into a `Location`
+  header, which makes the shareable artifact opaque and short-lived rather
+  than removing the grant.
+- **The exception reaches the first rule above, too.** `POST /titles/{id}/play`
+  returns that token, so "never returned by any API" holds for the stored
+  username and password and for every other credential Usher holds, and not
+  for this one. What still binds it without exception: never logged (enforced
+  once, on the DTO that carries it, rather than by each caller), never a span
+  attribute, and never written to a table, a cache, or a file. It is **not**
+  minted per request — the session token is cached in memory for the adapter's
+  lifetime and re-minted only on a 401 ([03](03-sources-and-sync.md)), so
+  there is no rotation and the grant outlives the response that carried it.
 - At the config layer, `database_url`, `secret_key`, and `tmdb_api_key` are
   held as `pydantic.SecretStr` and unwrapped only at the point of use, so the
   rules above are enforced by the type system, not just convention.

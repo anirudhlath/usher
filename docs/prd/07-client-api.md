@@ -213,23 +213,34 @@ by hand in the Home Assistant card moves here, where it is testable.
 > whether it can play the track). `kind` is a `StreamTargetKind` enum, not
 > a bare `str`, for the same reason `SourceItemKind` is one.
 
-**The `url` of a `direct` target carries the source's session token**, and
-in v1 that token is a real capability grant to the client that receives it.
-Emby authenticates its `/Videos/{id}/stream.{container}` route, and neither
-a `<video>` element nor a deep link can set a header, so a URL without one
-is a URL that does not play. This is the single place Usher knowingly bends
-PRD 08's "no credential ever reaches a client";
-[ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) records
-what the token grants, which half of the original Home Assistant failure
-this does and does not fix, the handling rules it is subject to (never
-logged — enforced by `StreamTarget.__repr__`, not by convention — never a
-span attribute, never persisted), and the M9 playback-ticket redirect that
-removes it. The `deep_link` target wraps the direct URL percent-encoded, so
-it carries the same token.
-
-Targets are built per request from a live session token. Nothing caches or
-stores one, which is what keeps a revoked or rotated credential from
-outliving the response it was minted for.
+> **Settled in M3.** **The `url` of a `direct` target carries the source's
+> session token**, and in v1 that token is a real capability grant to the
+> client that receives it. Emby authenticates its
+> `/Videos/{id}/stream.{container}` route, and neither a `<video>` element
+> nor a deep link can set a header, so a URL without one is a URL that does
+> not play. This is the single place Usher knowingly bends PRD 08's "no
+> credential ever reaches a client";
+> [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) records
+> what the token grants, which half of the original Home Assistant failure
+> this does and does not fix, the handling rules it is subject to (never
+> logged — enforced once on the DTO that carries it, not by each caller —
+> never a span attribute, never persisted), and the M9 playback ticket that
+> narrows it.
+>
+> The URL also carries the `DeviceId` Usher registers as, which is the
+> other half of what [03](03-sources-and-sync.md)'s push channel is opened
+> with. The `deep_link` target wraps the whole direct URL percent-encoded,
+> so it carries both exactly as the direct one does.
+>
+> **The grant outlives the response that carried it.** Targets are built
+> per request, and no `StreamTarget` is written to a table, a cache, or a
+> file — but the token inside one is held in memory for the adapter's
+> lifetime and re-minted only on a 401, so two play responses in one
+> process carry the same token and Usher applies no expiry of its own.
+> There is no rotation mechanism. A URL a client has been given keeps
+> working until Emby prunes the session or an operator revokes it. See
+> [03](03-sources-and-sync.md) for the cache and ADR-0012 for the risks
+> accepted with it.
 
 ## Authentication seam
 

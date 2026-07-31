@@ -24,11 +24,22 @@ POST /Users/AuthenticateByName  {"Username": ..., "Pw": ...}
 
 - `DeviceId` is generated once and persisted on the `Source` row. Usher appears
   as one device in Emby's dashboard rather than an accumulating pile of sessions.
-- The token is cached, and **any 401 triggers silent re-authentication** with
-  the stored credentials and the same `DeviceId`. That is the refresh mechanism;
-  no human ever pastes a token.
-- Credentials live behind `credentials_ref` indirection, never in the database
-  as plaintext and never sent to a client.
+- The token **is cached** — in memory, for the lifetime of the adapter, never
+  written to the database — and **any 401 triggers silent re-authentication**
+  with the stored credentials and the same `DeviceId`. That is the refresh
+  mechanism; no human ever pastes a token. It is also the *only* trigger:
+  there is no TTL, no proactive rotation, and no expiry Usher applies of its
+  own, so a minted token stays current until Emby prunes the session or an
+  operator revokes it. That matters beyond this section, because a
+  direct-play URL carries this token
+  ([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)).
+- The username and password live behind `credentials_ref` indirection, never
+  in the database as plaintext and never sent to a client. **The session token
+  minted from them is the one documented exception**: it reaches a client
+  inside a `direct` playback target's URL, because Usher does not proxy the
+  bytes and the route serving them authenticates
+  ([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md); PRD
+  [08](08-operations.md) carries the same qualification).
 
 ### Push events
 
@@ -45,6 +56,22 @@ Verified against Emby 4.9.5.0 binaries (the version this deployment runs):
 no role check in Emby's subscription path. (Note: guidance derived from Jellyfin
 is misleading here; Jellyfin added admin gating after forking, so its docs claim
 restrictions Emby does not have.)
+
+**Not required is not the same as prevented, and nothing prevents it.**
+`POST /admin/sources` ([07](07-client-api.md)) takes whatever account an
+operator supplies, and nothing in the adapter inspects its role, so admin
+credentials work — and put an admin token into every direct-play URL, which
+widens what a captured URL grants from "this user's library and watch state"
+to "everything an Emby administrator can do". Configure a normal user. This is
+an accepted risk, recorded in
+[ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) along with the
+check that would make it observable.
+
+**Both of this socket's parameters are also carried by a direct-play URL.**
+`api_key` and `deviceId` are exactly what a `direct` `StreamTarget`'s query
+holds, so anything holding one of those URLs holds what this channel is opened
+with, under Usher's own registered device id — which is why the "one durable
+device" property buys revocability but not attribution. Same ADR.
 
 Operational requirements:
 
@@ -207,3 +234,9 @@ describing how to play an item — direct URL, container and codec facts, and
 any client-specific deep-link forms the source can produce. Choosing between
 them is the client's business; Usher's job is to hand over complete
 information.
+
+Because Usher never proxies the bytes, a `direct` target's URL carries the
+session token above and the `DeviceId` alongside it — the one documented place
+a credential reaches a client
+([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md), and
+[07](07-client-api.md)'s playback section for the client-facing contract).
