@@ -47,7 +47,25 @@ class SourceHarness(ABC):
         An implementation renders `item` into its own upstream's shape. It
         must round-trip every field it is given -- the point of this hook is
         that `adapter.get_item(item.external_id)` returns something equal to
-        `item` in the fields the port promises.
+        `item` in the fields the port promises. Rendering a field only when
+        it is set is the way this is usually broken: whatever the
+        implementation's own template holds shows through instead, and a
+        contract test then asserts happily on a value it never supplied.
+
+        Two widenings are permitted, and an implementation that takes
+        either must **say so in its own docstring** rather than leave it to
+        be discovered:
+
+        - `changed_at` may be held at a coarser resolution than a datetime
+          carries -- Emby's date filters take whole seconds -- so a `since`
+          window may return a superset. The port already permits that;
+          callers deduplicate by `external_id`.
+        - an item with no `container` is a folder to an upstream that
+          models one, and a folder has no media source to hang codecs, a
+          file size, a channel count, or an HDR format off. Those fields
+          may read back `None` for such an item. Nothing seeds one: a
+          source reporting a codec for something it cannot play is not a
+          shape any source produces.
         """
 
     @abstractmethod

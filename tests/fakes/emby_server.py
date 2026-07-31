@@ -18,10 +18,30 @@ a typo on one side fails rather than cancelling out.
 `usher.adapters.emby.mapping` for the same reason: the fake encodes Emby's
 protocol, and importing the adapter's constant would make a wrong constant
 invisible.
+
+### What `given_item` does not round-trip, and why
+
+`SourceHarness.given_item` requires every field it is given to survive the
+round trip, and one class of field cannot: **an item with no `container`
+is a folder**. Emby describes a folder by omitting `MediaSources`
+entirely, which is the shape `to_source_item` and `build_stream_targets`
+are both written against, so a seeded item with a codec, a file size, a
+channel count, or an HDR format but no container has nowhere to put them
+and reads back with those fields `None`. Width and height are the
+exception and do round-trip, because Emby carries those at item level too.
+Stated here rather than discovered: nothing seeds such an item, because a
+source that reports a codec for something it cannot play is not a shape
+any source produces.
+
+`tests/unit/test_fakes_emby_server.py` pins everything on the other side
+of that line -- this file is the entire basis for running the source
+contract against the real adapter, so a divergence here is a place a
+wrong adapter passes all 40 assertions.
 """
 
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -100,8 +120,16 @@ def _stamp(value: datetime) -> str:
 
 
 def _emby_stamp(value: datetime) -> str:
-    """The seven-digit-fraction form Emby actually emits in payloads."""
-    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+    """The seven-digit-fraction form Emby actually emits in payloads.
+
+    The fraction is the value's own, not a hardcoded `.0000000`: the
+    harness contract is that a seeded item round-trips, and `added_at` and
+    `last_played_at` both carry microseconds. Python's `fromisoformat`
+    truncates the seventh digit rather than rejecting it (verified on
+    3.13), so what is written here parses back exactly equal.
+    """
+    moment = value.astimezone(UTC)
+    return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{moment.microsecond:06d}0Z"
 
 
 class FakeEmbyServer:
@@ -289,32 +317,49 @@ class FakeEmbyServer:
             return httpx.Response(404, json={"Error": "Not Found"})
         return httpx.Response(200, json=self._payload(external_id))
 
+    def _state_of(self, external_id: str) -> SourceWatchState:
+        """The item's current state, or the all-zero one Emby reports for an
+        item nobody has touched. Never `None`: every write below *evolves*
+        this rather than building a replacement, so there has to be
+        something to evolve."""
+        return self._states.get(external_id) or SourceWatchState(
+            external_id=external_id, position_seconds=0, played=False
+        )
+
     def _progress(self, request: httpx.Request, external_id: str) -> httpx.Response:
+        """`POST .../Progress` reports a position. It reports nothing else,
+        and Emby changes nothing else.
+
+        `replace`, not a fresh `SourceWatchState`: rebuilding one from the
+        fields this endpoint carries silently zeroes `PlayCount` and drops
+        `LastPlayedDate`, so an item with a real play history loses it the
+        moment the adapter reports a position -- and the loss is invisible
+        to a harness that reads back only position and played. `replace`
+        rather than `.evolve()` because the port's DTOs are plain frozen
+        dataclasses, not `DomainModel`s.
+        """
         if external_id not in self._items:
             return httpx.Response(404, json={"Error": "Not Found"})
         ticks = int(request.url.params.get("PositionTicks", "0"))
-        previous = self._states.get(external_id)
-        self._states[external_id] = SourceWatchState(
-            external_id=external_id,
-            position_seconds=ticks // _TICKS_PER_SECOND,
-            played=False if previous is None else previous.played,
+        self._states[external_id] = replace(
+            self._state_of(external_id), position_seconds=ticks // _TICKS_PER_SECOND
         )
         return httpx.Response(204)
 
     def _played(self, external_id: str, played: bool) -> httpx.Response:
         if external_id not in self._items:
             return httpx.Response(404, json={"Error": "Not Found"})
-        previous = self._states.get(external_id)
+        previous = self._state_of(external_id)
         # Marking an item played clears its resume position, the way Emby
         # does. The adapter writes position first and the played flag last
-        # precisely because of this.
-        self._states[external_id] = SourceWatchState(
-            external_id=external_id,
-            position_seconds=0
-            if played
-            else (0 if previous is None else previous.position_seconds),
+        # precisely because of this. Everything else carries forward:
+        # neither call is a claim about when the item was last watched, so
+        # neither may erase one.
+        self._states[external_id] = replace(
+            previous,
+            position_seconds=0 if played else previous.position_seconds,
             played=played,
-            play_count=(0 if previous is None else previous.play_count) + (1 if played else 0),
+            play_count=previous.play_count + (1 if played else 0),
         )
         return httpx.Response(200, json={"Played": played, "PlaybackPositionTicks": 0})
 
@@ -339,12 +384,21 @@ class FakeEmbyServer:
         else:
             payload.pop("DateCreated", None)
         payload["UserData"] = self._user_data(external_id)
-        if item.series_external_id is not None:
-            payload["SeriesId"] = item.series_external_id
-        if item.season_number is not None:
-            payload["ParentIndexNumber"] = item.season_number
-        if item.episode_number is not None:
-            payload["IndexNumber"] = item.episode_number
+        # Written unconditionally, `None` included. Writing them only when
+        # the seeded value is set leaves the *template's* values in place
+        # for everything else -- an EPISODE seeded with all three as `None`
+        # read back as the episode fixture's own `…a002 / 2 / 5`, so a
+        # contract test could assert on a series, season, and episode
+        # number the harness was never given.
+        payload["SeriesId"] = item.series_external_id
+        payload["ParentIndexNumber"] = item.season_number
+        payload["IndexNumber"] = item.episode_number
+        # Item-level dimensions, which Emby populates for video items
+        # alongside the stream-level ones. They are also the only place
+        # width and height can live for an item with no media source --
+        # without them, `_render_media`'s early return below drops both.
+        payload["Width"] = item.width
+        payload["Height"] = item.height
         self._render_media(payload, item)
         return payload
 
@@ -386,15 +440,25 @@ class FakeEmbyServer:
     def _user_data(self, external_id: str) -> dict[str, Any]:
         state = self._states.get(external_id)
         if state is None:
+            # An item nobody has touched: Emby reports the zero state and
+            # omits `LastPlayedDate` entirely rather than nulling it.
             return {
                 "PlaybackPositionTicks": 0,
                 "PlayCount": 0,
                 "IsFavorite": False,
                 "Played": False,
             }
-        return {
+        user_data: dict[str, Any] = {
             "PlaybackPositionTicks": state.position_seconds * _TICKS_PER_SECOND,
             "PlayCount": state.play_count,
             "IsFavorite": False,
             "Played": state.played,
         }
+        if state.last_played_at is not None:
+            # Emitted, not omitted. Without this key `last_played_at` can
+            # never round-trip, and an adapter that dropped the field
+            # altogether would satisfy the whole contract suite -- leaving
+            # `watch_states.last_played_at` permanently NULL for every item
+            # in the catalogue, with nothing anywhere reporting it.
+            user_data["LastPlayedDate"] = _emby_stamp(state.last_played_at)
+        return user_data

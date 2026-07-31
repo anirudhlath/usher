@@ -396,6 +396,29 @@ class SourceAdapterContract:
         assert states["movie-1"].position_seconds == 1840
         assert states["movie-1"].played is False
 
+    async def test_watch_state_carries_the_play_history_too(self, harness: SourceHarness) -> None:
+        """`SourceWatchState` carries four facts, and `watch_states` has a
+        column for each: an adapter that reported only position and played
+        would leave `play_count` at 0 and `last_played_at` NULL for every
+        item in the catalogue, forever, with nothing anywhere reporting a
+        failure. The two assertions above are satisfied by exactly such an
+        adapter, which is why this one is separate rather than folded into
+        them."""
+        await harness.given_item(MOVIE, changed_at=T0)
+        last_played = datetime(2026, 7, 20, 21, 4, 0, tzinfo=UTC)
+        await harness.given_watch_state(
+            SourceWatchState(
+                external_id="movie-1",
+                position_seconds=1840,
+                played=False,
+                play_count=7,
+                last_played_at=last_played,
+            )
+        )
+        states = {state.external_id: state async for state in harness.adapter.watch_state()}
+        assert states["movie-1"].play_count == 7
+        assert states["movie-1"].last_played_at == last_played
+
     async def test_watch_state_reports_a_played_item(self, harness: SourceHarness) -> None:
         await harness.given_item(EPISODE, changed_at=T0)
         await harness.given_watch_state(

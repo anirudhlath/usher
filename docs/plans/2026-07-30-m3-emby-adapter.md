@@ -2978,7 +2978,7 @@ class TestFakeSourceAdapter(SourceAdapterContract):
 ```
 
 Run: `uv run pytest tests/unit/test_source_adapter_contract.py -q`
-Expected: PASS — **39** tests (the number of `test_*` methods on `SourceAdapterContract`; count them if the run disagrees, because a mis-indented method silently disappears from the class rather than erroring).
+Expected: PASS — **40** tests (the number of `test_*` methods on `SourceAdapterContract`; count them if the run disagrees, because a mis-indented method silently disappears from the class rather than erroring).
 
 - [ ] **Step 6: Write ADR-0013**
 
@@ -6247,7 +6247,7 @@ EOF
 
 ## Task 9: Run the contract suite against the real adapter
 
-The moment the milestone exists for. The same 39 assertions that passed against an adapter with no wire format must now pass against one that serialises to Emby's JSON and parses it back.
+The moment the milestone exists for. The same 40 assertions that passed against an adapter with no wire format must now pass against one that serialises to Emby's JSON and parses it back.
 
 **Files:**
 - Create: `tests/fakes/emby_harness.py`
@@ -6379,7 +6379,7 @@ class TestEmbyAdapter(SourceAdapterContract):
 - [ ] **Step 2: Run it and fix what it finds**
 
 Run: `uv run pytest tests/unit/test_adapters_emby_contract.py -q`
-Expected: PASS — 39 tests, the same count as the fake's run.
+Expected: PASS — 40 tests, the same count as the fake's run.
 
 This is a real, load-bearing run and it may well not pass first time. If a case fails, **fix the adapter, not the assertion** — unless the assertion is wrong for every source, in which case fix it in `tests/contract/` and re-run *both* runners. Two failures are foreseeable and both mean a real bug:
 
@@ -6400,7 +6400,7 @@ def test_both_implementations_run_the_same_assertions() -> None:
     from tests.unit.test_source_adapter_contract import TestFakeSourceAdapter
 
     cases = {name for name in dir(SourceAdapterContract) if name.startswith("test_")}
-    assert len(cases) == 39
+    assert len(cases) == 40
     for subclass in (TestEmbyAdapter, TestFakeSourceAdapter):
         overridden = {
             name
@@ -6411,9 +6411,9 @@ def test_both_implementations_run_the_same_assertions() -> None:
 ```
 
 Run: `uv run pytest tests/unit/test_adapters_emby_contract.py -q`
-Expected: PASS — 40 tests.
+Expected: PASS — 41 tests.
 
-> If a later milestone adds contract cases, this test's `39` has to move with them. That is the point: a suite whose size can drift silently is a suite nobody notices shrinking.
+> If a later milestone adds contract cases, this test's `40` has to move with them. That is the point: a suite whose size can drift silently is a suite nobody notices shrinking.
 
 - [ ] **Step 4: Check and commit**
 
@@ -6425,15 +6425,15 @@ uv run ruff format . && uv run ruff check . && uv run mypy && uv run lint-import
 git add -A && git commit -F - <<'EOF'
 test: the contract suite passes against the real Emby adapter
 
-The moment M3 exists for. The same 39 assertions that pass against an
+The moment M3 exists for. The same 40 assertions that pass against an
 adapter with no wire format now pass against one that serialises to Emby's
 JSON and parses it back -- including the paging walk (seven items over
 pages of two), the must-raise-never-truncate guarantee, a 404 that means
 "gone" versus a transport failure that must not, and a session that
 expires and is silently re-minted without a storm.
 
-A fortieth test asserts neither subclass overrides a case and that the
-suite is still 39 cases, because a contract suite that can silently shrink
+A forty-first test asserts neither subclass overrides a case and that
+the suite is still 40 cases, because a contract suite that can silently shrink
 is not evidence of anything.
 
 No Docker and no network: the whole run rides on httpx.MockTransport, so
