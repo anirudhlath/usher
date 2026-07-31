@@ -225,6 +225,31 @@ An item that reappears in a walk is available again at that moment: the
 upsert restores it, because appearing in a walk *is* the evidence of
 availability. The sweep only ever sets `false`.
 
+**Only a full walk sweeps, and the ceiling is not a substitute for that.** A
+delta walk returns only what changed, so by construction nearly everything is
+"unseen" — a sweep after one would retract the library. The ceiling fires on
+a *fraction*, so it catches that catastrophe and misses the quiet version: a
+full walk that failed after committing eight of ten batches leaves 20% of the
+source stale, which is under the default ceiling, so a sweep that ran anyway
+would succeed and silently retract those rows. The gate is the success path,
+not the guard.
+
+**A delta walk resumes from the newest run of *either* item lane that
+completed.** Full and delta both walk `list_items` and differ only in whether
+a `since` is passed, so a nightly full run that finished at 03:00 is a valid
+floor for a delta at noon; reading only the delta lane would re-walk a window
+the nightly run already covered. Only *completed* runs count — resuming from
+one that failed halfway skips everything it never reached, silently. A full
+walk ignores every cursor: one that inherited a `since` would return only
+what changed and then sweep, which is exactly the combination ADR-0015 exists
+to make unreachable. (`watch_state` is a third lane with its own cursor: it
+walks a different method under a different upstream filter.)
+
+**Each batch is committed with the run's counters.** 1,126,674 items is
+hours; a crash must cost the batch in flight rather than the walk, and a
+`sync_runs` row an operator can watch has to exist before the walk starts
+rather than after it finishes.
+
 ## Read-through with a priority queue
 
 The catalog is usable immediately and improves under you. Three mechanisms:

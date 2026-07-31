@@ -109,6 +109,13 @@ class FakeSourceAdapter(SourceAdapter):
     def fail_after(self, count: int) -> None:
         self._fail_after = count
 
+    def clear_failure(self) -> None:
+        """Undo `fail_after`. `ReconcileService`'s cursor case needs a run
+        that failed *followed by* one that succeeds, which is the only way to
+        show that a delta walk resumes from the last run that completed
+        rather than from the last run that happened."""
+        self._fail_after = None
+
     def reject_credentials(self) -> None:
         self._credentials_valid = False
         self._token = None

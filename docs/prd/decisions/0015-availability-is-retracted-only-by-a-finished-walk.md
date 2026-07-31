@@ -82,3 +82,29 @@ because of it.
 pins "nothing was retracted" as *the UPDATE never ran*, rather than as
 something the caller's transaction discipline undoes — `deps.get_session`
 commits any handler that does not raise.
+
+**The guard is not a second line of defence for mechanism 1, and a test
+written as though it were proves nothing.** Measured while implementing
+`ReconcileService`: moving the sweep into a `finally:` — the plausible
+refactor, "availability should always be current, so the sweep belongs where
+it always runs" — is caught by a raise-during-walk case only if that case
+leaves a *sub-ceiling* fraction of the source stale. The obvious shape (seed
+seven items, fail the walk immediately, one batch) writes nothing before the
+failure, so the sweep would retract 7 of 7, the ceiling refuses at 100%, and
+`AvailabilitySweepRefused` propagates out of the `finally:` — the case fails
+on an uncaught exception rather than on its own assertion, and it never
+exercises a sweep that *succeeds* after a failed walk. The shape that does is
+a walk that commits eight of ten items and then raises: two stale rows, 20%,
+no refusal, no exception, two available items quietly retracted.
+`tests/unit/test_services_reconcile.py::test_a_walk_that_raises_sweeps_nothing`
+and its real-Postgres twin in `tests/integration/test_services_reconcile.py`
+are both built to that arithmetic, and both fail under the mutation on the
+assertion they were written to make.
+
+**A refusal must leave the session usable**, because `reconcile` writes the
+`FAILED` run row that explains it *afterwards*. It does — the guard is
+evaluated in Python after a successful `SELECT`, not by a statement that
+fails, so Postgres never aborts the transaction. A fake cannot express that
+distinction at all;
+`tests/integration/test_services_reconcile.py::test_a_refused_sweep_still_records_a_failed_run`
+is what checks it.
