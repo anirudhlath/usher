@@ -49,6 +49,7 @@ from usher.adapters.emby.mapping import (
     audio_token,
     hdr_format,
     primary_media_source,
+    runtime_seconds,
     stream_of,
 )
 from usher.ports.source import StreamTarget, StreamTargetKind
@@ -83,7 +84,6 @@ def build_stream_targets(
     audio = stream_of(media_source, "Audio") or {}
     width = as_int(video.get("Width")) or as_int(payload.get("Width"))
     height = as_int(video.get("Height")) or as_int(payload.get("Height"))
-    runtime_ticks = as_int(payload.get("RunTimeTicks")) or as_int(media_source.get("RunTimeTicks"))
     user_data = payload.get("UserData")
     position_ticks = (
         as_int(user_data.get("PlaybackPositionTicks")) if isinstance(user_data, Mapping) else None
@@ -107,7 +107,10 @@ def build_stream_targets(
             audio=audio_token(audio),
             hdr_format=hdr_format(video),
             resolution=(f"{width}x{height}" if width is not None and height is not None else None),
-            runtime_seconds=(None if runtime_ticks is None else runtime_ticks // TICKS_PER_SECOND),
+            # The same derivation `to_source_item` uses, not a second copy
+            # of it: these two fields describe one file and must not be
+            # able to disagree about it.
+            runtime_seconds=runtime_seconds(payload, media_source),
             resume_position_seconds=(
                 None if position_ticks is None else max(position_ticks, 0) // TICKS_PER_SECOND
             ),

@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from _pytest.logging import LogCaptureFixture
 
 from tests.fakes.emby_fixtures import load_emby_fixture
+from usher.adapters.emby.mapping import to_source_item
 from usher.adapters.emby.playback import build_stream_targets
 from usher.domain.enums import HdrFormat
 from usher.ports.source import StreamTarget, StreamTargetKind
@@ -175,6 +176,29 @@ def test_a_capitalised_container_is_lowercased_in_both_places() -> None:
     direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE)[0]
     assert direct.container == "mkv"
     assert urlparse(direct.url).path.endswith("/stream.mkv")
+
+
+def test_an_items_runtime_agrees_with_its_targets_runtime() -> None:
+    """`SourceItem.runtime_seconds` and `StreamTarget.runtime_seconds`
+    describe the same file, and used to be able to disagree about it: the
+    item field alone on one side, the item field *falling back to the media
+    source's own* `RunTimeTicks` on the other. An item carrying its runtime
+    only on the media source -- which Emby does emit -- was catalogued as
+    `None` and played back as `9360`, from the same payload in the same
+    call.
+
+    `mapping`'s module docstring claims the two "cannot drift". That was
+    true of coercion (`as_int` has one definition) and not of derivation,
+    which is a different claim; one shared `runtime_seconds` makes it true
+    of both. Asserted as equality rather than against a literal, because
+    the property is agreement.
+    """
+    payload = load_emby_fixture("movie_item")
+    del payload["RunTimeTicks"]
+    item = to_source_item(payload)
+    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE)[0]
+    assert item is not None
+    assert item.runtime_seconds == direct.runtime_seconds == 9360
 
 
 def test_a_base_url_with_a_trailing_slash_does_not_double_it() -> None:

@@ -157,7 +157,23 @@ def emby_datetime(value: datetime) -> str:
     point the same way -- wider -- so this is stated rather than corrected.
     Rounding instead would make the total exactly one second on average and
     sometimes *less* than one, which is the direction that loses items.
+
+    **A naive `value` raises.** `AwareDatetime` is a bare annotation on
+    `list_items(since=...)`, which pydantic never validates -- it is a
+    plain method, not a model field -- so nothing but this stops a naive
+    datetime arriving. `astimezone` then interprets it in whatever zone the
+    *host* is in: measured on a UTC-5 machine, a naive `12:00` became
+    `MinDateLastSaved=2026-07-20T16:59:59Z`, skipping five hours of
+    changes. That is the direction the widening above exists to avoid, at
+    eighteen thousand times its size, and it reports nothing -- the walk
+    just quietly returns fewer items than it should, every time. Refused
+    rather than assumed-UTC: a caller that meant UTC can say so.
     """
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(
+            "a `since` cursor must be timezone-aware; a naive one shifts the whole "
+            "delta window by the host's UTC offset and silently drops the difference"
+        )
     return (value.astimezone(UTC) - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -248,6 +264,26 @@ def primary_media_source(payload: Mapping[str, Any]) -> Mapping[str, Any] | None
     return max(playable or candidates, key=_playback_rank)
 
 
+def runtime_seconds(payload: Mapping[str, Any], media_source: Mapping[str, Any]) -> int | None:
+    """An item's runtime in whole seconds, or `None` if it has none.
+
+    Item level first, the chosen version's own `RunTimeTicks` second --
+    Emby emits it in both places and not always in both at once.
+
+    Called by `to_source_item` *and* by `build_stream_targets`, which is
+    what makes this module's "cannot drift" claim true of derivation and
+    not only of coercion. It previously held for `as_int` alone: the item
+    field was read on one side and the media-source fallback existed only
+    on the other, so an item carrying its runtime only on the media source
+    was catalogued as `None` and played back as `9360` -- same payload,
+    same call.
+    """
+    ticks = as_int(payload.get("RunTimeTicks"))
+    if ticks is None:
+        ticks = as_int(media_source.get("RunTimeTicks"))
+    return None if ticks is None else ticks // TICKS_PER_SECOND
+
+
 def hdr_format(video: Mapping[str, Any]) -> HdrFormat | None:
     """The canonical `HdrFormat` for a video stream, or `None` for SDR.
 
@@ -317,7 +353,6 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
     media_source = primary_media_source(payload) or {}
     video = stream_of(media_source, "Video") or {}
     audio = stream_of(media_source, "Audio") or {}
-    runtime_ticks = as_int(payload.get("RunTimeTicks"))
     return SourceItem(
         external_id=external_id,
         name=as_text(payload.get("Name")) or external_id,
@@ -334,7 +369,7 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
         hdr_format=hdr_format(video),
         audio_channels=as_int(audio.get("Channels")),
         file_size_bytes=as_int(media_source.get("Size")),
-        runtime_seconds=None if runtime_ticks is None else runtime_ticks // TICKS_PER_SECOND,
+        runtime_seconds=runtime_seconds(payload, media_source),
         added_at=parse_datetime(payload.get("DateCreated")),
         series_external_id=as_text(payload.get("SeriesId")),
         season_number=as_int(payload.get("ParentIndexNumber")),

@@ -307,6 +307,23 @@ def test_a_cursor_is_normalised_to_utc() -> None:
     assert emby_datetime(local) == "2026-07-20T11:59:59Z"
 
 
+def test_a_naive_cursor_is_refused_rather_than_silently_shifted() -> None:
+    """`AwareDatetime` is a bare annotation on a plain function pydantic
+    never validates, so a naive datetime went straight through -- and
+    `astimezone` then reads it in the *host's* local zone. Measured on this
+    machine (UTC-5): a naive `12:00` became
+    `MinDateLastSaved=2026-07-20T16:59:59Z`. Five hours of changes skipped,
+    in exactly the direction the deliberate one-second widening above
+    exists to avoid, and eighteen thousand times its size.
+
+    Refused rather than assumed-UTC: a caller that meant UTC can say so,
+    and one that did not has a bug that a silent five-hour hole in a delta
+    walk would never surface.
+    """
+    with pytest.raises(ValueError, match="timezone-aware"):
+        emby_datetime(datetime(2026, 7, 20, 12, 0, 0))
+
+
 def test_the_default_audio_stream_is_preferred_over_the_first() -> None:
     """A file whose first audio track is a commentary and whose default is
     the feature audio is normal. Taking `[0]` would report the commentary's

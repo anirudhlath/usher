@@ -311,6 +311,24 @@ async def test_a_library_walk_and_a_watch_state_walk_filter_on_different_stamps(
     assert "MinDateLastSavedForUser" not in listings[0].url.params
 
 
+@pytest.mark.parametrize("walk", ["list_items", "watch_state"])
+async def test_a_naive_since_cursor_never_reaches_the_wire(walk: str) -> None:
+    """Both walks, because both take a `since` and both spell it into a
+    different query parameter. A naive cursor is a caller bug that shifts
+    the delta window by the host's UTC offset and reports nothing -- the
+    walk simply returns fewer items than it should, forever."""
+    server = FakeEmbyServer()
+    server.add_item(_movie(0), T0)
+    adapter = _adapter(server)
+    naive = datetime(2026, 7, 20, 12, 0, 0)
+    try:
+        with pytest.raises(ValueError, match="timezone-aware"):
+            _ = [entry async for entry in getattr(adapter, walk)(since=naive)]
+    finally:
+        await adapter.aclose()
+    assert not [entry for entry in server.requests if entry.endswith("/Items")]
+
+
 async def test_an_unmodelled_item_type_in_a_page_is_skipped_not_fatal() -> None:
     """A server that ignores `IncludeItemTypes` returns Seasons and
     BoxSets. Aborting a 94,395-item reconcile over one of them would be
