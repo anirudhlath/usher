@@ -130,9 +130,10 @@ searchable in v1 ([05](05-search-and-similarity.md)).
 ```python
 class Season(BaseModel):
     id: UUID; title_id: UUID
-    season_number: int
+    season_number: int                   # 0 is valid — TMDb numbers specials season 0
     name: str | None; overview: str | None
     air_date: date | None; episode_count: int | None
+    tmdb_id: int | None
 
 class Episode(BaseModel):
     id: UUID; title_id: UUID; season_id: UUID
@@ -142,6 +143,23 @@ class Episode(BaseModel):
     air_date: date | None; runtime_minutes: int | None
     tmdb_id: int | None; imdb_id: str | None
 ```
+
+Both landed in M4 (`usher.domain.episode`, `seasons`/`episodes`). `seasons`
+and `episodes` **CASCADE** from the series `Title` — neither carries user
+state and both are re-derivable from a cached provider payload — while
+`watch_states.episode_id` is **RESTRICT**, the same asymmetry
+[ADR-0010](decisions/0010-watch-state-title-fk-restrict.md) pins for
+`title_id`. The two compose: deleting a series cascades into its episodes,
+and that cascade is refused if any watch history points at one, so a merge
+that forgot to repoint history fails at the `DELETE` rather than destroying
+it. `media_items.episode_id` is `SET NULL`, mirroring its `title_id`.
+
+`episodes.imdb_id` is indexed but **not** unique, unlike `titles.imdb_id`:
+a series ingested twice under different provider ids yields two episode
+trees, and two trees enriched from two TMDb entries for the same show carry
+the same episode IMDb ids. Nothing looks an episode up by IMDb id, so
+uniqueness would buy nothing and cost a batch-aborting `IntegrityError` on
+the staged-upsert path.
 
 ### Person / Credit
 
@@ -289,10 +307,9 @@ rather than silent vector-space corruption.
 |---|---|
 | `curated_rows` | Persisted LLM row output ([06](06-rows-and-recommendations.md)) |
 | `genome_scores` | MovieLens tag-genome relevance vectors, where available |
-| `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats |
-| `jobs` | Priority work queue ([03](03-sources-and-sync.md)) |
-| `raw_payloads` | JSONB cache of provider responses, so reprocessing never refetches |
-| `provider_cache_meta` | Fetch timestamps — enforces TMDb's ≤6-month cache term |
+| `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats. One row per *attempt*, so the availability sweep can say which run last finished cleanly |
+| `jobs` | Priority work queue ([03](03-sources-and-sync.md)). A completed job's row is deleted, so there is no `done` status and the table's size is the outstanding work, not the work ever done |
+| `raw_payloads` | JSONB cache of **provider** responses, so reprocessing never refetches. Its `fetched_at` column is also what enforces TMDb's ≤6-month cache term — see [ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md), which is why there is no separate `provider_cache_meta` table and why source payloads are not stored here |
 
 ## Relationships
 

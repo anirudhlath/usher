@@ -254,17 +254,24 @@ work.
 
 ### 1. Ingest
 
-Normalise the source item; store the raw payload in `raw_payloads`; upsert
-`MediaItem` on `(source_id, external_id)`; create or attach a `Title` stub.
+Normalise the source item; upsert `MediaItem` on `(source_id, external_id)`;
+create or attach a `Title` stub.
+
+**Source payloads are not stored.** This stage used to say to keep each
+item's raw payload in `raw_payloads`; at 1,126,674 items and ~8 kB apiece
+that is ~9 GB against a database [08](08-operations.md) budgets at 8–12 GB
+total, to cache something re-readable from the source in one request.
+`raw_payloads` caches *provider* responses only — see
+[ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md).
 
 The adapter emits movies, series, **and episodes** — Emby addresses episodes
 directly, and `SourceItem` carries `series_external_id`, `season_number`, and
 `episode_number` for exactly this (all three verified present on a live episode
 payload, 2026-07-31). Episodes are also the bulk of the work: 999,827 of this
-deployment's 1,126,674 items. Persisting the series hierarchy waits on
-`Season`/`Episode` domain models and an `episodes` table, both of which land
-with the enrich stage in **M4**; until then episode items are produced and not
-yet stored.
+deployment's 1,126,674 items. `Season`/`Episode` and the `seasons`/`episodes`
+tables landed with **M4**, so the series hierarchy is now storable;
+`media_items.episode_id` and `watch_states.episode_id` have real foreign-key
+targets for the first time.
 
 ### 2. Match — resolve to a canonical Title
 

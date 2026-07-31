@@ -72,7 +72,14 @@ class MediaItemRow(Base):
     title_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="SET NULL")
     )
-    episode_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    # SET NULL, mirroring title_id immediately above and for the identical
+    # reason (ADR-0010): an unmatched MediaItem is worth keeping -- it is
+    # the review queue -- so losing its Episode link just clears it. M4's
+    # migration is what finally gives this column a target; it was a
+    # dangling PGUUID from M1 until the episodes table existed.
+    episode_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("episodes.id", ondelete="SET NULL")
+    )
     external_id: Mapped[str] = mapped_column(Text, nullable=False)
 
     container: Mapped[str | None] = mapped_column(String(32))
@@ -101,6 +108,15 @@ class MediaItemRow(Base):
     __table_args__ = (
         UniqueConstraint("source_id", "external_id", name="uq_media_items_source_external"),
         Index("ix_media_items_title_id", "title_id"),
+        # Same argument as ix_media_items_title_id, for the FK M4 added: an
+        # episode DELETE makes Postgres find every referencing row here to
+        # SET NULL it, and uq_media_items_source_external leads with
+        # source_id so it cannot serve that lookup. Without this index the
+        # check is a seq scan of media_items -- 999,827 episode rows at the
+        # one measured deployment -- once per episode deleted, and
+        # episodes.title_id is ON DELETE CASCADE, so deleting one series
+        # fires it once per episode of that series.
+        Index("ix_media_items_episode_id", "episode_id"),
         Index(
             "ix_media_items_unmatched",
             "source_id",

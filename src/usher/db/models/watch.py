@@ -62,7 +62,20 @@ class WatchStateRow(Base):
     title_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="RESTRICT")
     )
-    episode_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    # RESTRICT, matching title_id immediately above and for the identical
+    # reason (ADR-0010): a WatchState *is* the thing worth keeping. An
+    # episode merge -- which M4's matcher produces, because a series
+    # ingested twice under different provider ids yields two episode trees
+    # -- must repoint every watch_states row before deleting the loser, and
+    # RESTRICT makes skipping that step fail at the DELETE instead of
+    # silently destroying history. It composes with episodes.title_id's
+    # CASCADE rather than fighting it: deleting a Title cascades into
+    # episodes, and this RESTRICT then refuses that cascade if any history
+    # points at one. Proven against real Postgres in
+    # tests/integration/test_migrations.py.
+    episode_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("episodes.id", ondelete="RESTRICT")
+    )
 
     position_seconds: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
@@ -104,6 +117,12 @@ class WatchStateRow(Base):
         # every attempted title delete, including every Title merge.
         # Without this index that check is a seq scan of watch_states.
         Index("ix_watch_states_title_id", "title_id"),
+        # And the identical argument for episode_id, once M4 gave it a
+        # RESTRICT target: uq_watch_states_user_episode leads with user_id,
+        # so it cannot serve the FK's lookup on episode_id alone. 999,827 of
+        # the one measured source's 1,126,674 items are episodes, so this is
+        # the larger of the two populations, not the smaller.
+        Index("ix_watch_states_episode_id", "episode_id"),
         # Mirrors WatchState's model_validator: exactly one of
         # title_id/episode_id, never neither or both.
         CheckConstraint(
