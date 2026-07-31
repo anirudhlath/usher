@@ -567,6 +567,83 @@ also pins "a refused sweep leaves the session usable for the `FAILED` row that
 explains it", which no fake can express (the guard is evaluated in Python
 after a successful `SELECT`, so Postgres never aborts the transaction).
 
+**TMDb's movie/TV divergence runs through three layers of its API, not
+one, and the third is the dangerous one.** Read from TMDb's published
+reference on 2026-07-31 (`developer.themoviedb.org`), not from memory and
+not from a live capture — nothing in this repository has ever made a real
+TMDb API request, which is what Task 26 exists to fix.
+
+- **Field names.** `title`/`name`, `original_title`/`original_name`,
+  `release_date`/`first_air_date`, `runtime` (minutes) against
+  `episode_run_time` (an array), `keywords.keywords` against
+  `keywords.results`, a top-level `imdb_id` against `external_ids.imdb_id`.
+  Tabulated in `usher.adapters.tmdb.mapping`'s docstring.
+- **Endpoints.** `/movie/{id}` against `/tv/{id}`; `/search/movie` with
+  `primary_release_year` against `/search/tv` with `first_air_date_year`;
+  `/movie/changes` against `/tv/changes`; and a series' episodes live
+  behind `/tv/{id}/season/{n}`, which has no movie counterpart at all.
+- **`append_to_response` vocabularies.** `release_dates` is a movie-only
+  namespace and `content_ratings` is the TV-only equivalent. This is the
+  one that does not merely produce a wrong value: a shared append list
+  asks half the catalog for a namespace that does not exist. PRD 03 named
+  one list for both and is corrected.
+
+**A kind-less TMDb reference is `PortDataMalformed`, never a guess.**
+ADR-0011 at the request layer: 26,968 ids are live in both spaces, so
+`GET /movie/{id}` for a ref that meant a series returns a **real payload
+for an unrelated film**, which is then written onto the title as enriched
+metadata with no error anywhere.
+
+**A TMDb 404 is `PortDataMalformed`, not `PortUnavailable`.** The catalog
+holds 291,737 TMDb ids from a bulk export that ages, and TMDb answers 404
+for an id it has merged away. Retrying cannot turn any of them into an
+answer, so this is the branch that makes `JobWorker`'s park-immediately
+path fire in production rather than only in a test.
+
+**A TMDb v3 API key in the query string lands in every trace.**
+`HTTPXClientInstrumentor` (wired in `configure_tracing`) records the full
+URL as a span attribute, and TMDb v3 has no header form for a v3 key. So
+`TmdbClient` sends an `Authorization: Bearer` header whenever the
+configured secret is JWT-shaped (a v4 "API Read Access Token", which
+TMDb's own docs say works on v3 endpoints and gives "the same level of
+access") and falls back to `api_key` otherwise. For the same reason no
+exception message in that module may carry a URL — `EmbySession`
+interpolates the httpx exception into its own message and explains why
+that is safe *there*; it is not safe here.
+
+**`EnrichmentState.ENRICHED > EnrichmentState.STUB` is `False`, and the
+consequence is not the one you would guess.** A tier guard spelled as a
+direct comparison does not "sometimes downgrade" — it never promotes
+anything at all, silently, because `ENRICHED` is lexicographically below
+both other rungs. So a test asserting "an enriched title stays enriched"
+passes against the bug (`ENRICHED` is the top rung, so nothing moves
+either way) and the case that catches it is **promoting a stub**. The M4
+plan's own mutation table pointed at the wrong one.
+
+**A failure handler that resets the tier is invisible to a test seeded at
+that tier.** `enrichment_state=SKELETON` alongside the error is exactly
+what a careless handler reaches for, and a case seeded with a skeleton
+cannot see it — the write is a no-op. Found by mutation on
+`EnrichService`; `tests/unit/test_services_enrich.py` parametrizes over
+all three rungs now. Same family as "a concurrency test must assert on
+observed overlap, not on a count".
+
+**Enrichment must read season ids back before writing episodes.**
+`MetadataProvider.to_result` mints a fresh UUIDv7 per `Season`, and a
+season the catalog already holds keeps the id it was inserted with — so
+an episode carrying the minted id names no row and fails on
+`fk_episodes_season_id_seasons`, on the **second** enrichment rather than
+the first. `IngestService._ensure_seasons` re-reads for exactly this
+reason; `EnrichService._store_hierarchy` now does too, and no port fake
+can see either (a dict has no foreign keys).
+
+**A job key that does not parse must become a `UsherPortError` inside the
+handler.** `uuid.UUID("not-a-uuid")` raises `ValueError`, and `JobWorker`
+deliberately lets anything that is not a `UsherPortError` propagate — "a
+bug in a handler is not an upstream failure". So one corrupted `enrich`
+key would take the worker process down instead of parking its own job.
+`usher.services.handlers` converts every key, once.
+
 ## Commands
 
 Verified working as of Group A (scaffold + config):
@@ -938,8 +1015,8 @@ and interrogated over HTTP, and the suite is 865 tests (733 unit / 132
 integration), mypy strict clean over `src` and `tests`, 6 import contracts:
 
 ```bash
-uv run pytest                                    # 1528 tests as of M4 group D2 (1134 unit / 394 integration)
-uv run pytest tests/unit                         # 1134 tests, no Docker and no network
+uv run pytest                                    # 1659 tests as of M4 group E (1265 unit / 394 integration)
+uv run pytest tests/unit                         # 1265 tests, no Docker and no network
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .
