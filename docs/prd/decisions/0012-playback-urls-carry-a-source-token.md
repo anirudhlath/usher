@@ -25,10 +25,18 @@ looks complete and does not play — worse than either honest option.
 ## Consequences
 
 **What the URL contains.** `build_stream_targets`
-(`usher.adapters.emby.playback`) builds one query, of four parameters:
-`static=true`, `MediaSourceId`, **`DeviceId`**, and **`api_key`**. The
-`deep_link` target wraps that entire URL percent-encoded inside its own, so
-it carries all four the same way.
+(`usher.adapters.emby.playback`) builds one query, of three parameters:
+`static=true`, `MediaSourceId`, and **`api_key`**. The `deep_link` target
+wraps that entire URL percent-encoded inside its own, so it carries all
+three the same way.
+
+It was four. Measured against the live Emby 4.9.5.0 server on 2026-07-31,
+one range request per variant: the URL as built answers **206** with real
+`video/x-matroska` bytes; with **`DeviceId` removed it still answers 206**;
+with `api_key` removed it answers **401**; with `static` removed it answers
+**400**. `DeviceId` was never load-bearing on this route, so it is no longer
+sent — see "`DeviceId` rode along" below for the half of the risk that
+closes.
 
 **What a client can do with it.** Everything Usher's Emby user can: read
 the library, read and write that user's watch state, stream anything. It is
@@ -48,17 +56,25 @@ becomes "everything an Emby administrator can do". **This is an accepted
 risk, not a solved one** — the mitigation today is the operator guidance in
 PRD 03, not code. See "Recommended, not implemented" below.
 
-**`DeviceId` rides along, and it costs the attribution argument.** PRD 03's
-push channel is opened at `/embywebsocket?api_key=<token>&deviceId=<id>` —
-the same two values a direct-play URL carries. Whether Emby *requires* the
-two to match on that route is not verified here, and it does not need to
-be for the consequence to hold: the token alone is already the capability
-grant, and `DeviceId` is the value Emby attributes traffic to. So a
-captured playback URL is used *as Usher's own registered device*, and
-Emby's dashboard cannot separate it from Usher's own traffic. The "one
-durable device" property below buys revocability; it does not buy
-attribution, and this ADR previously implied that it did. **Also an
-accepted risk.**
+**`DeviceId` rode along, and it cost the attribution argument. It no longer
+does.** PRD 03's push channel is opened at
+`/embywebsocket?api_key=<token>&deviceId=<id>` — the same two values a
+direct-play URL used to carry. Whether Emby *requires* the two to match on
+that route was never verified, and did not need to be for the consequence
+to hold: the token alone is already the capability grant, and `DeviceId` is
+the value Emby attributes traffic to, so a captured playback URL was usable
+*as Usher's own registered device*.
+
+This was recorded as an accepted risk purely because nobody had checked
+whether the stream route needed the parameter. It does not (see above), so
+the parameter is gone. What that buys is narrow and worth stating exactly:
+a captured URL no longer hands over Usher's device id, so it is no longer a
+*drop-in* for the push channel's parameters. It is not a fix for the
+capability grant — a holder of the token can supply any `deviceId` they
+like on `/embywebsocket`, and the token is still the whole grant. The
+residual risk is that Emby cannot distinguish traffic made with a leaked
+token from Usher's own, which remains true and remains accepted; only the
+"and it arrives pre-labelled as us" part is closed.
 
 **How it differs from the failure being replaced — and where it does not.**
 The Home Assistant failure had two halves: a token in browser-delivered
@@ -178,16 +194,24 @@ build, recorded here so the choice is visible rather than forgotten:
   `Policy.IsAdministrator` alongside it. Reading it would let Usher warn at
   source registration, or surface it on `SourceStatus`, turning PRD 03's
   "no admin privileges are required" from a permission into something
-  observable. **Unverified against the live server** — the presence of
-  `Policy` on this specific response is read from Emby's schema, not from a
-  captured payload, so it needs the same live run M3's other unverified
-  routes need.
-- **Stop sending Usher's own `DeviceId` in a playback URL**, if Emby does
-  not require it there. That would keep a captured URL from being a
-  drop-in for the push channel's parameters and from being attributed to
-  Usher's device. Also unverified: whether `/Videos/{id}/stream` needs
-  `DeviceId` at all, and whether `/embywebsocket` requires the `deviceId`
-  to match the token's session, are both live-server questions.
+  observable.
+
+  **The readability half is now verified** (2026-07-31): `GET
+  /Users/{userId}` answers 200 to the user's own non-admin token and
+  carries a 45-key `Policy` object with `IsAdministrator` on it — `false`
+  for the account used, which is the configuration this ADR assumes and
+  nothing enforces. `GET /Users/Me` answers **500** on this build and is
+  not a usable shortcut. Still not implemented: whether the same `Policy`
+  rides on `AuthenticateByName`'s own response was not checked (the run
+  held a token, not a password), so a first implementation should either
+  read it there or spend one extra request on `GET /Users/{userId}` during
+  `verify()`.
+- ~~**Stop sending Usher's own `DeviceId` in a playback URL**~~ —
+  **done**, 2026-07-31. The question that blocked it (does
+  `/Videos/{id}/stream` need it?) was answered by measurement: it does not.
+  Whether `/embywebsocket` requires the `deviceId` to match the token's
+  session is still unverified and no longer load-bearing here, since the
+  parameter is not published either way.
 
 ## Why not now
 

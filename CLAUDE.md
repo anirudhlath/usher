@@ -7,15 +7,20 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M2 catalog bootstrap complete.** The project scaffold, environment
+**Status: M3 Emby adapter complete.** The project scaffold, environment
 config, domain models, port ABCs, persistence (SQLAlchemy schema + Alembic
 migrations + title repository), the telemetry bootstrap, a FastAPI app
 with liveness/readiness endpoints, the container image + compose stack + CI
-(M1), and the bulk-dataset bootstrap pipeline — IMDb skeleton, TMDb ID
-export, Wikidata crosswalk, all resumable and checkpointed (M2) — all exist
-and are verified working. See `docs/plans/2026-07-28-m1-foundation.md` and
-`docs/plans/2026-07-30-m2-bootstrap.md` for the task breakdowns and
-`docs/prd/09-roadmap.md` for what's next (M3). Do not invent commands for
+(M1), the bulk-dataset bootstrap pipeline — IMDb skeleton, TMDb ID export,
+Wikidata crosswalk, all resumable and checkpointed (M2) — and the Emby
+`SourceAdapter` with encrypted source credentials, a source repository, the
+admin source routes, and a source-agnostic contract suite that runs against
+both a pure in-memory adapter and the real one (M3) — all exist and are
+verified working, M3 including against a live Emby 4.9.5.0 server. See
+`docs/plans/2026-07-28-m1-foundation.md`,
+`docs/plans/2026-07-30-m2-bootstrap.md` and
+`docs/plans/2026-07-30-m3-emby-adapter.md` for the task breakdowns and
+`docs/prd/09-roadmap.md` for what's next (M4). Do not invent commands for
 tooling that does not exist yet — check the Commands section below before
 assuming something runs.
 
@@ -77,6 +82,94 @@ earlier negative findings were both wrong — see
 
 Health-check caveat: a handshake against *any* path succeeds, so a successful
 upgrade is not a health signal. Assert on received messages instead.
+
+**M3's live verification found the write-back route was simply wrong, and
+three other things worth not re-deriving.** Run 2026-07-31 against the live
+Emby **4.9.5.0** server, driving the real `EmbyAdapter`/`EmbySession` with
+`_authenticate_locked` swapped for one that installs a known token. Full
+route-by-route table in the M3 plan's "Which Emby routes are guessed"
+section.
+
+- **`POST /Users/{user}/PlayingItems/{item}/Progress` answers 400** —
+  `"Value cannot be null. (Parameter 'key')"` — bodyless, with an empty JSON
+  body, with an `{ItemId, PositionTicks}` body, and with `MediaSourceId` and
+  `IsPaused` added. So does `POST /Sessions/Playing/Progress`. Both are
+  *session-scoped playback reporting*, keyed off a play session Usher never
+  has. **Use `POST /Users/{user}/Items/{item}/UserData`** with a JSON body;
+  it answers 204. `FakeEmbyServer` could not have caught this: it
+  implemented the adapter's own guess, so 40 contract assertions passed
+  against a write-back that had never worked once. This is the whole
+  argument for a live run in one bug.
+- **That `UserData` body must name `Played` even when it is not changing.**
+  It deserialises into a DTO whose unset fields take their defaults, so a
+  body carrying only `PlaybackPositionTicks` flips a played item to
+  unplayed. `PlayCount` and `LastPlayedDate` survive the same omission.
+- **`DELETE /Users/{user}/PlayedItems/{item}` is destructive beyond its
+  name:** it resets `PlayCount` to 0, clears `LastPlayedDate`, *and* clears
+  a non-zero resume position. Never use it to report an item unplayed while
+  writing a position. `POST` to the same route *is* how you mark played —
+  it advances `PlayCount` (to 1, idempotently, not `+1`), stamps
+  `LastPlayedDate`, and clears the resume position. That last part is PRD
+  03's load-bearing "position first, played last" ordering, verified for the
+  first time.
+- **`/Videos/{id}/stream` does not need `DeviceId`.** Measured one parameter
+  at a time with a `Range` header: as built → 206 with real bytes; without
+  `DeviceId` → still 206; without `api_key` → 401; without `static` → 400.
+  The parameter is no longer sent (ADR-0012).
+
+**Emby 4.9.5.0 emits neither `VideoRangeType` nor `DvProfile`.** Not once
+across every video stream of 200 movies (the newest 100 4K and 100 HD of
+94,438), including all 34 Dolby Vision files. What it emits is `VideoRange`
+∈ {`SDR`, `DolbyVision`, `HDR 10`} — with a space — plus
+`ExtendedVideoType`/`ExtendedVideoSubType` ∈ {`None`/`None`,
+`Hdr10`/`Hdr10`, `DolbyVision`/`DoviProfile81`|`DoviProfile50`}. The
+`Extended*` pair carries the **literal string `"None"`**, not JSON null, so
+it is always truthy and any check on it must be a token lookup that falls
+through. The `DOVIWith*` family the mapper also handles is Jellyfin's
+vocabulary, not this server's; both are kept, since reading a field a server
+omits costs nothing.
+
+**Emby honours a secondary sort key, so `SortBy=DateCreated,SortName` is a
+real request.** Shown on a tie-heavy primary key rather than hoped for:
+`ProductionYear,SortName` returns the tied block in `SortName` order,
+`ProductionYear` alone returns it in a different, insertion-shaped one. Tie
+*instability* was **not** reproducible here — repeated pages came back
+identical and overlapping `StartIndex` windows agreed exactly, with and
+without the tiebreak — so the second key is a cheap guarantee rather than a
+demonstrated-necessary fix. `MinDateLastSaved` and `MinDateLastSavedForUser`
+are both honoured and are genuinely different filters (28,934 vs 29,005
+items over the same 30-day window). An *invented* parameter name is ignored
+outright and returns the full unfiltered count, which is the "degrades to a
+full walk" safety property, measured.
+
+**The library is 1,126,674 items, not 94,395.** 94,438 movies, 32,409
+series, 999,827 episodes. The movie figure the adapter was designed around
+was one third of the walk. At the default page size that is 5,634 pages —
+**56% of `MAX_PAGES`**, so the headroom is 1.8x, not the ~21x the constant's
+comment claimed.
+
+**A token presented with a different `DeviceId` neither forks nor
+invalidates its session.** `GET /Sessions` was byte-identical before and
+after, and the token still worked. Emby binds a session to the token's own
+authentication record, made at `AuthenticateByName` time; the header's
+`DeviceId` on later requests does not register a device. So "one durable
+device" comes from authenticating once with a stable id, not from repeating
+it.
+
+**Not verified, and the docs say so rather than implying coverage:** `POST
+/Users/AuthenticateByName` itself (that run held a token, not a password —
+it is verified separately by ADR-0004's session), silent re-authentication
+on a 401 end to end, durable-device registration across restarts, and
+`multi_version_movie.json`'s shape — no item with more than one
+`MediaSource` exists in the newest 800 movies of this deployment, so
+`primary_media_source`'s selection rule has never met a real multi-version
+payload.
+
+**`Policy.IsAdministrator` is readable**, on `GET /Users/{userId}`, with the
+user's own non-admin token — a 45-key `Policy` object. (`GET /Users/Me`
+answers 500 on this build.) ADR-0012 assumes a non-admin account and nothing
+enforces it; this is the check that would make it observable, recorded there
+as recommended-not-implemented.
 
 **Bulk loading bypasses the repository, and the SQL has three traps.**
 Verified against `pgvector/pgvector:pg17` on 2026-07-30, all three of which
@@ -532,3 +625,42 @@ Ctrl-C all reach the whole process group, not just one PID in it. A
 hand-rolled `nohup ... & echo $!` script does not — kill the child
 (`pgrep -P "$wrapper_pid"`) or the whole process group, never just the
 captured `$!`.
+
+Verified working as of M3 (the Emby adapter) — a source can be registered
+and interrogated over HTTP, and the suite is 865 tests (733 unit / 132
+integration), mypy strict clean over `src` and `tests`, 6 import contracts:
+
+```bash
+uv run pytest                                    # 865 tests, needs Docker for the 132 integration ones
+uv run pytest tests/unit                         # 733 tests, no Docker and no network
+uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
+uv run mypy src tests                            # strict, including tests/
+uv run ruff check --no-cache . && uv run ruff format --check .
+uv run lint-imports                              # 6 kept, 0 broken
+
+# Register a source and read its health, against a running app:
+curl -sS -X POST http://localhost:8000/admin/sources \
+  -H 'content-type: application/json' \
+  -d '{"kind":"emby","name":"Living Room Emby","base_url":"https://emby.example","username":"...","password":"..."}'
+curl -sS http://localhost:8000/admin/sources/<id>/status
+
+# Diff a live server's *shape* against the committed fixtures. NOT a test,
+# and its output is deliberately never committed -- see the module docstring.
+export USHER_EMBY_URL=... USHER_EMBY_USER=... USHER_EMBY_PASSWORD=...
+uv run python scripts/capture_emby_fixture.py --type Episode > /tmp/shape.json
+```
+
+**Fixtures under `tests/fixtures/emby/` are shape-recorded and
+value-synthetic, and that is a licensing constraint, not a style.** A real
+Emby response embeds TMDb-sourced metadata, which TMDb's terms forbid
+redistributing and which "ship importers, never data" above already
+forbids committing; it also identifies a real library and carries real
+server and user ids. Regenerate a scrubbed *shape* with the script above
+and diff that; never paste a capture in.
+
+**Live-verification runs must not write a credential, a token, a user id or
+a host into the repo.** M3's run was driven from a throwaway script outside
+the working tree, reading the operator's own secrets file, redacting every
+one of those four values from anything it printed. Its one write to a real
+account recorded the item's complete `UserData` first and restored it
+exactly afterwards, confirmed by reading it back.

@@ -51,9 +51,11 @@ Rules:
 - No credential ever reaches a client. This is the failure of the setup Usher
   replaces, where a raw Emby token lived in browser-delivered dashboard config.
   **One documented exception in v1: a `direct` playback target's URL carries
-  the source's session token**, alongside the `DeviceId` Usher registers as,
-  because Usher never proxies the bytes and the route that serves them
-  authenticates. See
+  the source's session token**, because Usher never proxies the bytes and the
+  route that serves them authenticates — verified: strip the token from that
+  URL and Emby answers 401. It no longer carries Usher's own `DeviceId`
+  alongside it; the same route answers 206 without one, so that parameter is
+  simply not sent (2026-07-31). See
   [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) for what
   that grants, why the two halves of the original failure are not equally
   present, the risks accepted with it, and the M9 playback ticket that narrows
@@ -81,6 +83,7 @@ local state can answer.**
 | Failure | Behaviour |
 |---|---|
 | Source unreachable | Catalog fully browsable. Playback → 503 `source_unavailable`. Availability goes stale, not wrong. |
+| Source credentials rejected | `GET /admin/sources/{id}/status` reports `authenticated: false`; re-authentication is retried after a cooldown rather than on every call. Catalog unaffected. |
 | Push socket drops | Backoff reconnect; delta reconcile on reconnect; after N failures mark `supports_push = false` and lean on the nightly walk. |
 | TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs; every other subsystem is unaffected. |
 | TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades. |

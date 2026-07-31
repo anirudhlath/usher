@@ -13,7 +13,7 @@ direct Emby access, for both movies and television.
 |---|---|
 | **M1 — Foundation** ✅ | Repo, uv project, compose, Postgres + migrations, domain models, port ABCs, config, health, CI with layering checks, telemetry bootstrap |
 | **M2 — Bootstrap** ✅ | IMDb skeleton, TMDb ID export, Wikidata crosswalk; resumable importers |
-| **M3 — Emby adapter** | Durable-client auth, item listing, watch-state read/write, stream targets; adapter contract tests |
+| **M3 — Emby adapter** ✅ | Durable-client auth, item listing, watch-state read/write, stream targets; adapter contract tests, run against both a pure in-memory adapter and the real one, plus a live-server verification pass |
 | **M4 — Ingest pipeline** | Ingest → match → enrich → index; priority queue; stub-on-sight; unmatched review |
 | **M5 — Push and read-through** | WebSocket events, reconnect/reconcile, demand promotion, SSE to clients |
 | **M6 — Search** | Full-text, autocomplete path, embeddings, RRF fusion, similarity, neighbour precompute |

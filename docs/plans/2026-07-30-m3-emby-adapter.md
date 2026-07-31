@@ -85,20 +85,53 @@ Six smaller facts were checked directly rather than remembered, because a fence 
 
 ---
 
-## Which Emby routes are guessed, and how the plan makes that safe
+## Which Emby routes are guessed — and what the live run settled
 
-Every upstream path this milestone uses is a module constant in `src/usher/adapters/emby/adapter.py` or `session.py`, annotated with whether it has been exercised against the live server. Two are load-bearing and confirmed by ADR-0004's own verification session (`POST /Users/AuthenticateByName`, and a REST played/unplayed toggle). The rest are the well-established Emby 4.9 routes, and **the definition of done requires running the real adapter against the real server before M3 is called complete** — the fake server cannot catch a wrong-but-self-consistent path, and nothing in this plan pretends it can.
+> **Executed 2026-07-31 against the live server, Emby 4.9.5.0.** The table
+> below replaces this section's original prediction. It found one route
+> simply wrong, one query parameter unnecessary, and two field names that
+> this build does not emit at all. Everything else held.
 
-Two design choices bound the damage from a wrong guess:
+Every upstream path this milestone uses is a module constant in `src/usher/adapters/emby/adapter.py` or `session.py`. The run drove the real `EmbyAdapter`/`EmbySession`, not a reimplementation, with `_authenticate_locked` replaced so the session installed a known access token instead of exchanging a password.
 
-- **`list_items` sends its delta filter as a query parameter, and Emby ignores unknown query parameters.** A wrong parameter name therefore degrades to a *full walk* — a safe superset — not to a silently empty result. The nightly full reconcile (PRD 03) is the same walk with no filter, so the worst case is the behaviour the design already budgets for.
+| Route / behaviour | Status |
+|---|---|
+| `GET /System/Info/Public` answers with **no** credential, and carries `Version` | ✅ **verified** — 200, `Version: "4.9.5.0"` |
+| `GET /System/Info` requires a token, and carries `Version` | ✅ **verified** — 401 without, 200 with |
+| `verify()` end to end | ✅ **verified** — `reachable`/`authenticated` true, `push_available` null, `server_version` real |
+| `GET /Users/{user}/Items` — `Recursive`, `IncludeItemTypes`, `Fields`, `SortOrder`, `Limit`, `EnableTotalRecordCount` | ✅ **verified** |
+| `StartIndex` is honoured, and windows are stable | ✅ **verified** — repeated pages identical, overlapping windows agree |
+| `SortBy=DateCreated,SortName` — is the **secondary key** applied? | ✅ **verified** — shown on a tie-heavy primary key; tie *instability* was not reproducible here, so the tiebreak is a cheap guarantee rather than a demonstrated-necessary fix |
+| `MinDateLastSaved` / `MinDateLastSavedForUser` | ✅ **verified**, and genuinely different filters — 28,934 vs 29,005 items over the same 30-day window |
+| An unknown query parameter degrades to a full walk | ✅ **verified** — ignored outright, full `TotalRecordCount` returned |
+| `GET /Users/{user}/Items/{item}` → item, and `None` for an id the server never had | ✅ **verified** |
+| `/Videos/{item}/stream.{container}?static=true&MediaSourceId=…&api_key=…` | ✅ **verified** — 206, real `video/x-matroska` bytes |
+| …and its `DeviceId` parameter | ❌ **contradicted** — not needed (206 without it). Removed; ADR-0012 updated |
+| `POST /Users/{user}/PlayedItems/{item}` marks played, and **clears the resume position** | ✅ **verified** — the load-bearing ordering claim, checked for the first time |
+| `POST /Users/{user}/PlayingItems/{item}/Progress` writes a position | ❌ **contradicted** — **400 on every variant.** Replaced by `POST /Users/{user}/Items/{item}/UserData` |
+| `DELETE /Users/{user}/PlayedItems/{item}` is a safe "mark unplayed" | ❌ **contradicted** — also resets `PlayCount`, clears `LastPlayedDate`, and clears the position. No longer used |
+| `VideoRangeType` / `DvProfile` name the video range | ❌ **contradicted** — never emitted, in 200 movies. `ExtendedVideoType`/`ExtendedVideoSubType` are |
+| `Policy.IsAdministrator` is readable | ✅ **verified** — on `GET /Users/{userId}`; `GET /Users/Me` 500s |
+| A token presented with a *different* `DeviceId` forks or invalidates the session | ✅ **verified false** — sessions byte-identical before and after |
+| `POST /Users/AuthenticateByName` | ⚪ **not re-run.** Verified by ADR-0004's own session; the live run held a token, not a password |
+| Silent re-authentication on 401 | ⚪ **still unverified** end to end. Only `FakeEmbyServer` exercises it |
+| Durable-device registration across restarts | ⚪ **still unverified.** Requires authenticating, which this run did not do |
+| `multi_version_movie.json`'s shape, and `primary_media_source`'s rule | ⚪ **still unverified.** No item with more than one `MediaSource` exists in the newest 800 movies here |
+
+Two design choices bounded the damage from a wrong guess, and both paid out:
+
+- **`list_items` sends its delta filter as a query parameter, and Emby ignores unknown query parameters** — now measured, not assumed. A wrong parameter name degrades to a *full walk*, a safe superset, not to a silently empty result. The nightly full reconcile (PRD 03) is the same walk with no filter, so the worst case is the behaviour the design already budgets for.
 - **`stream_targets` does not call `/Items/{id}/PlaybackInfo`.** That endpoint exists for transcode negotiation, which Usher explicitly does not do (PRD 07: Usher never proxies bytes and never chooses a stream). Everything the direct-play URL needs — container, `MediaSourceId`, resume position — is already on the item, so this is one fewer guessed endpoint *and* one fewer request against an upstream measured at 1–5 s per request.
+
+**What the safety argument did *not* cover, and this is the lesson.** Both bounds protect *query parameters*. The route that was actually wrong was a **path**, and a wrong path is not benign: it 400s every call, forever, and PRD 03's write-back caller responds by enqueuing a retry that can never succeed. `FakeEmbyServer` implemented the same guess the adapter did, so the two agreed perfectly and 40 contract assertions passed against a write-back that had never worked. That is precisely the residual the plan said only a live run could close — and it was the *only* thing that closed it.
 
 ---
 
 ## What the contract suite rules out
 
 The spec calls this "the test that proves the abstraction is real". A suite that only pins method signatures proves nothing — M2 shipped a contract suite that passed against a repository carrying four injected defects before it was tightened. So each case below is written against a specific wrong implementation, and the plan states which.
+
+**This table is a curated subset of the suite, not a map of it.** The shipped suite is 40 cases; the rows below are the ones whose failing implementation is worth naming in prose. Three that were missing are added, because their absence read as "these behaviours are not pinned" rather than "these were left out of a summary" — and one row named a test that does not exist under that name.
 
 | Contract case | The wrong implementation it fails |
 |---|---|
@@ -108,9 +141,12 @@ The spec calls this "the test that proves the abstraction is real". A suite that
 | `test_list_items_since_is_inclusive` | An exclusive `>` filter that drops the item that changed exactly at the cursor. |
 | `test_list_items_since_does_not_invert_the_window` | A filter sent with the comparison reversed, returning only items *older* than the cursor. |
 | `test_provider_ids_use_canonical_lowercase_keys` | An adapter that passes Emby's `"Tmdb"` straight through, so M4's matcher has to know each source's casing. |
+| `test_an_episode_carries_its_place_in_the_series` | **The only case that catches lost series/season/episode metadata**, and it was missing from this table entirely. An adapter that maps an episode as a bare item — right name, right id, no `series_external_id`, no `season_number`, no `episode_number` — passes every other row here, and 999,827 of this deployment's 1,126,674 items are episodes. M4 has nothing to hang a season on. |
+| `test_watch_state_carries_the_play_history_too` | An adapter that reports position and played and drops `play_count`/`last_played_at`. Both are real fields on `SourceWatchState`, and nothing else in the suite reads them, so a mapper that never populated them looked correct. |
+| `test_watch_state_emits_a_zero_state_rather_than_skipping_it` | An adapter that treats an all-zero `UserData` block as "no data" and filters it out. That is a correctness bug, not a tidiness one: "this item is at 0:00 and unplayed" is a *fact* the reconcile must be able to state, and swallowing it means Usher can never learn that something was un-watched. Distinct from `UserData` being absent entirely, which legitimately yields `None`. |
 | `test_hdr_format_is_the_canonical_enum` | The typing drift PRD 02 names explicitly: Emby's `"DolbyVision"` reaching `MediaItem` as a raw string. |
 | `test_added_at_is_timezone_aware` | The verified `fromisoformat` trap — a naive datetime that constructs fine on a plain dataclass and only explodes at the `TIMESTAMPTZ` column. |
-| `test_get_item_returns_none_only_for_a_deletion` + `test_get_item_raises_when_the_source_is_unreachable` | The single most dangerous wrong implementation: reporting a transient network failure as `None`, which marks a healthy item unavailable because of a flaky network. |
+| `test_get_item_returns_none_after_a_deletion` + `test_get_item_raises_when_the_source_is_unreachable` | The single most dangerous wrong implementation: reporting a transient network failure as `None`, which marks a healthy item unavailable because of a flaky network. (Drafted here as `…_returns_none_only_for_a_deletion`; the shipped name is the one above. `test_get_item_returns_none_for_an_id_the_source_never_had` is the third of the trio — a deletion and an id that never existed must answer alike, or a caller learns to tell them apart and the port's one promise is gone.) |
 | `test_operations_recover_from_an_expired_credential` | (a) No re-authentication at all — the original Home Assistant failure. (b) A re-auth storm: four concurrent 401s producing four `AuthenticateByName` calls — **but (b) only against a harness whose transport genuinely overlaps**, which it reports via `SourceHarness.observed_overlap`. `EmbyHarness` does (`SlowTransport`); `FakeSourceHarness` does not and claims only (a). Measured, with the mutations, in Task 9 Step 2. |
 | `test_rejected_credentials_do_not_produce_a_request_storm` | An adapter that retries authentication on every call when the password is simply wrong. |
 | `test_push_watch_state_is_visible_to_the_source` | A no-op `push_watch_state`. The port's docstring warns that swallowing here means the retry never happens; a test that only asserted "it didn't raise" would pass against a `pass` body. |

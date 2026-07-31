@@ -22,6 +22,11 @@ POST /Users/AuthenticateByName  {"Username": ..., "Pw": ...}
 → AccessToken, User.Id
 ```
 
+Authenticated requests carry the **same** identity header — that is what makes
+every request attributable to one device rather than only to the login — plus
+the session token in `X-Emby-Token`. Emby has no OAuth2 and therefore no
+refresh-token flow; this pattern *is* the refresh mechanism.
+
 - `DeviceId` is generated once and persisted on the `Source` row. Usher appears
   as one device in Emby's dashboard rather than an accumulating pile of sessions.
 - The token **is cached** — in memory, for the lifetime of the adapter, never
@@ -30,16 +35,38 @@ POST /Users/AuthenticateByName  {"Username": ..., "Pw": ...}
   mechanism; no human ever pastes a token. It is also the *only* trigger:
   there is no TTL, no proactive rotation, and no expiry Usher applies of its
   own, so a minted token stays current until Emby prunes the session or an
-  operator revokes it. That matters beyond this section, because a
-  direct-play URL carries this token
+  operator revokes it. Re-authentication is **single-flight** — concurrent 401s
+  collapse into one `AuthenticateByName` — and exactly one retry is attempted
+  per request. A credential that is genuinely *wrong* is remembered for a
+  cooldown, so a bad password cannot turn every call into two requests against
+  a source measured at 1–5 s per request. That matters beyond this section,
+  because a direct-play URL carries this token
   ([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)).
-- The username and password live behind `credentials_ref` indirection, never
-  in the database as plaintext and never sent to a client. **The session token
-  minted from them is the one documented exception**: it reaches a client
-  inside a `direct` playback target's URL, because Usher does not proxy the
-  bytes and the route serving them authenticates
+- Credentials live behind `credentials_ref` indirection: an opaque, random
+  token addressing a row in `source_credentials`, encrypted at rest under a key
+  derived from `USHER_SECRET_KEY` ([08](08-operations.md)). The plaintext
+  exists only in memory in the adapter, and neither the username nor the
+  password nor the ref is ever returned by any endpoint, including admin. The
+  ref is random rather than derived from the source id so that rotation — write
+  the new secret under a new ref, flip the pointer, delete the old row — is
+  expressible at all. **The session token minted from them is the one
+  documented exception**: it reaches a client inside a `direct` playback
+  target's URL, because Usher does not proxy the bytes and the route serving
+  them authenticates
   ([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md); PRD
   [08](08-operations.md) carries the same qualification).
+
+> **The identity header was exercised against the live server on 2026-07-31,
+> and one thing it does *not* do is worth recording.** Presenting an existing
+> token alongside a *different* `DeviceId` in the `Authorization` header
+> neither invalidated that token nor created a second session — `GET /Sessions`
+> was byte-identical before and after. Emby binds a session to the token's own
+> authentication record, made at `AuthenticateByName` time; the header's
+> `DeviceId` on later requests is not what registers a device. So the "one
+> durable device" property comes from authenticating once with a stable
+> `DeviceId`, not from repeating it — which is what the adapter does, and is
+> also why the live run could borrow a token without disturbing the client that
+> minted it.
 
 ### Push events
 
@@ -109,6 +136,66 @@ Operational requirements:
 > measurement this marker is waiting for is still not available. Still
 > M5's to settle.
 
+### Walking the library
+
+`list_items` and `watch_state` page over the source's own listing, one page in
+flight at a time. Measured against the live deployment on 2026-07-31, a walk of
+it is **1,126,674 items** — 94,438 movies, 32,409 series and 999,827 episodes —
+so materialising one is not an option. Three properties the adapter contract
+enforces, each now checked against that server:
+
+- **A stable ascending sort by creation date, with a tiebreak.**
+  `SortBy=DateCreated,SortName`. Items added during a walk land at the end, so
+  an insertion cannot shift an unread item backwards past a page boundary
+  already consumed. A *deletion* mid-walk can still shift one item out of view;
+  that is a bounded imprecision the nightly full reconcile covers, and it is why
+  the contract permits duplicates but forbids silent truncation.
+
+  **Emby honours the secondary key** — demonstrated on a tie-heavy primary key,
+  where `ProductionYear,SortName` returns the tied block in `SortName` order and
+  `ProductionYear` alone returns it in a different, insertion-shaped one. Tie
+  *instability* was not reproducible here: repeated identical pages came back
+  identical, and overlapping `StartIndex` windows agreed exactly, with and
+  without the tiebreak. The tiebreak stays anyway — it costs one word in a query
+  string, the failure it prevents is silent, and "this server's query plan was
+  stable across three requests" is a much weaker claim than "the order is
+  total".
+- **The delta cursor is widened by one second.** `since` is contractually
+  inclusive; whether the upstream's own comparison is `>=` or `>` is not
+  something Usher should have to be right about. Sending one second early is
+  correct either way, and a superset is explicitly allowed because callers
+  deduplicate by `external_id`.
+- **An unrecognised filter degrades to a full walk, never to an empty result.**
+  Measured: an invented parameter name was ignored outright and the request
+  returned the full unfiltered `TotalRecordCount`. So the worst case of a wrong
+  delta-filter name is the nightly reconcile's own behaviour.
+
+Two different filters are sent, because a library edit and a watch-state change
+do not touch the same timestamp: `MinDateLastSaved` for `list_items`,
+`MinDateLastSavedForUser` for `watch_state`. Both are honoured, and they are
+genuinely different filters rather than aliases — against those 1,126,674
+items, a cursor ten years ahead returned 0 for each, and a 30-day cursor
+returned 28,934 and 29,005 respectively.
+
+### Health and status
+
+`verify()` returns a `SourceStatus`, not a bool: `GET /admin/sources/{id}/status`
+([07](07-client-api.md)) has to report bad credentials, unreachable, and
+reachable-but-push-blocked as separate states. The unauthenticated
+`/System/Info/Public` probe is what separates the first two — a failure there is
+a reachability failure and cannot be anything else.
+
+That split holds against the real server, checked 2026-07-31:
+`/System/Info/Public` answers **200 with no credential of any kind** and carries
+the `Version` that becomes `server_version`, while `/System/Info` answers
+**401** without a token. A live `verify()` returned `reachable: true`,
+`authenticated: true`, `push_available: null`, `server_version: "4.9.5.0"`.
+
+`push_available` is deliberately three-valued, and `null` ("not probed") is what
+every adapter reports until M5. See the health-check caveat above: a handshake
+against a nonexistent path also upgrades, so an upgrade is not evidence and only
+received messages are.
+
 ## Reconciliation is not optional
 
 Push is the fast path, never the only path. Sockets drop, events are missed, and
@@ -169,6 +256,15 @@ work.
 
 Normalise the source item; store the raw payload in `raw_payloads`; upsert
 `MediaItem` on `(source_id, external_id)`; create or attach a `Title` stub.
+
+The adapter emits movies, series, **and episodes** — Emby addresses episodes
+directly, and `SourceItem` carries `series_external_id`, `season_number`, and
+`episode_number` for exactly this (all three verified present on a live episode
+payload, 2026-07-31). Episodes are also the bulk of the work: 999,827 of this
+deployment's 1,126,674 items. Persisting the series hierarchy waits on
+`Season`/`Episode` domain models and an `episodes` table, both of which land
+with the enrich stage in **M4**; until then episode items are produced and not
+yet stored.
 
 ### 2. Match — resolve to a canonical Title
 
@@ -261,7 +357,17 @@ them is the client's business; Usher's job is to hand over complete
 information.
 
 Because Usher never proxies the bytes, a `direct` target's URL carries the
-session token above and the `DeviceId` alongside it — the one documented place
-a credential reaches a client
+session token above — the one documented place a credential reaches a client
 ([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md), and
 [07](07-client-api.md)'s playback section for the client-facing contract).
+
+It carries **three** query parameters, and each was measured against the live
+server on 2026-07-31 by removing it and re-requesting: `static=true` (removed →
+400), `MediaSourceId`, and `api_key` (removed → 401). It used to carry a fourth,
+Usher's own `DeviceId` — removed, because the route answers 206 with real bytes
+without it, and sending it made a captured playback URL a drop-in for the push
+channel's `api_key`/`deviceId` pair above.
+
+`StreamTarget` also carries `scheme` (for deep links) and `audio` (a single
+composite token such as `truehd_atmos_7_1`, which is a different thing from the
+raw codec) — the 🔶 that named M3, settled.
