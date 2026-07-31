@@ -62,6 +62,19 @@ class Settings(BaseSettings):
         default="Usher/0.1 (+https://github.com/anirudhlath/usher)", min_length=1
     )
 
+    # Source adapters (PRD 03). Same reasoning as the bulk settings above:
+    # PRD 08 puts knobs like these in a TOML config layer that does not
+    # exist yet. Deliberately named `source_*`, not `emby_*` -- config.py is
+    # not an adapter, and a setting named for one media server would be the
+    # first source-specific concept to escape `adapters/`.
+    source_page_size: int = Field(default=200, ge=1, le=1000)
+    source_timeout_seconds: float = Field(default=30.0, gt=0)
+    # How long a rejected credential is remembered before another
+    # authentication is attempted. Without this, a source configured with a
+    # wrong password turns every request into two (the call, then a doomed
+    # re-authentication) for as long as it stays wrong.
+    source_reauth_cooldown_seconds: float = Field(default=60.0, ge=0)
+
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
 

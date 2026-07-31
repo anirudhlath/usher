@@ -22,13 +22,51 @@ POST /Users/AuthenticateByName  {"Username": ..., "Pw": ...}
 → AccessToken, User.Id
 ```
 
+Authenticated requests carry the **same** identity header — that is what makes
+every request attributable to one device rather than only to the login — plus
+the session token in `X-Emby-Token`. Emby has no OAuth2 and therefore no
+refresh-token flow; this pattern *is* the refresh mechanism.
+
 - `DeviceId` is generated once and persisted on the `Source` row. Usher appears
   as one device in Emby's dashboard rather than an accumulating pile of sessions.
-- The token is cached, and **any 401 triggers silent re-authentication** with
-  the stored credentials and the same `DeviceId`. That is the refresh mechanism;
-  no human ever pastes a token.
-- Credentials live behind `credentials_ref` indirection, never in the database
-  as plaintext and never sent to a client.
+- The token **is cached** — in memory, for the lifetime of the adapter, never
+  written to the database — and **any 401 triggers silent re-authentication**
+  with the stored credentials and the same `DeviceId`. That is the refresh
+  mechanism; no human ever pastes a token. It is also the *only* trigger:
+  there is no TTL, no proactive rotation, and no expiry Usher applies of its
+  own, so a minted token stays current until Emby prunes the session or an
+  operator revokes it. Re-authentication is **single-flight** — concurrent 401s
+  collapse into one `AuthenticateByName` — and exactly one retry is attempted
+  per request. A credential that is genuinely *wrong* is remembered for a
+  cooldown, so a bad password cannot turn every call into two requests against
+  a source measured at 1–5 s per request. That matters beyond this section,
+  because a direct-play URL carries this token
+  ([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)).
+- Credentials live behind `credentials_ref` indirection: an opaque, random
+  token addressing a row in `source_credentials`, encrypted at rest under a key
+  derived from `USHER_SECRET_KEY` ([08](08-operations.md)). The plaintext
+  exists only in memory in the adapter, and neither the username nor the
+  password nor the ref is ever returned by any endpoint, including admin. The
+  ref is random rather than derived from the source id so that rotation — write
+  the new secret under a new ref, flip the pointer, delete the old row — is
+  expressible at all. **The session token minted from them is the one
+  documented exception**: it reaches a client inside a `direct` playback
+  target's URL, because Usher does not proxy the bytes and the route serving
+  them authenticates
+  ([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md); PRD
+  [08](08-operations.md) carries the same qualification).
+
+> **The identity header was exercised against the live server on 2026-07-31,
+> and one thing it does *not* do is worth recording.** Presenting an existing
+> token alongside a *different* `DeviceId` in the `Authorization` header
+> neither invalidated that token nor created a second session — `GET /Sessions`
+> was byte-identical before and after. Emby binds a session to the token's own
+> authentication record, made at `AuthenticateByName` time; the header's
+> `DeviceId` on later requests is not what registers a device. So the "one
+> durable device" property comes from authenticating once with a stable
+> `DeviceId`, not from repeating it — which is what the adapter does, and is
+> also why the live run could borrow a token without disturbing the client that
+> minted it.
 
 ### Push events
 
@@ -45,6 +83,22 @@ Verified against Emby 4.9.5.0 binaries (the version this deployment runs):
 no role check in Emby's subscription path. (Note: guidance derived from Jellyfin
 is misleading here; Jellyfin added admin gating after forking, so its docs claim
 restrictions Emby does not have.)
+
+**Not required is not the same as prevented, and nothing prevents it.**
+`POST /admin/sources` ([07](07-client-api.md)) takes whatever account an
+operator supplies, and nothing in the adapter inspects its role, so admin
+credentials work — and put an admin token into every direct-play URL, which
+widens what a captured URL grants from "this user's library and watch state"
+to "everything an Emby administrator can do". Configure a normal user. This is
+an accepted risk, recorded in
+[ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) along with the
+check that would make it observable.
+
+**Both of this socket's parameters are also carried by a direct-play URL.**
+`api_key` and `deviceId` are exactly what a `direct` `StreamTarget`'s query
+holds, so anything holding one of those URLs holds what this channel is opened
+with, under Usher's own registered device id — which is why the "one durable
+device" property buys revocability but not attribution. Same ADR.
 
 Operational requirements:
 
@@ -75,6 +129,72 @@ Operational requirements:
 > message already carries the position and played flag. Settle in **M5**,
 > when the push lane is built and the cost of re-walking is measurable
 > against just carrying the payload through.
+>
+> **Reviewed in M3, deliberately left alone.** M3 settled the other two 🔶
+> markers this section and 07 named for it (`SourceAdapter.verify()`,
+> `StreamTarget`) but builds no push lane itself, so the re-walk-cost
+> measurement this marker is waiting for is still not available. Still
+> M5's to settle.
+
+### Walking the library
+
+`list_items` and `watch_state` page over the source's own listing, one page in
+flight at a time. Measured against the live deployment on 2026-07-31, a walk of
+it is **1,126,674 items** — 94,438 movies, 32,409 series and 999,827 episodes —
+so materialising one is not an option. Three properties the adapter contract
+enforces, each now checked against that server:
+
+- **A stable ascending sort by creation date, with a tiebreak.**
+  `SortBy=DateCreated,SortName`. Items added during a walk land at the end, so
+  an insertion cannot shift an unread item backwards past a page boundary
+  already consumed. A *deletion* mid-walk can still shift one item out of view;
+  that is a bounded imprecision the nightly full reconcile covers, and it is why
+  the contract permits duplicates but forbids silent truncation.
+
+  **Emby honours the secondary key** — demonstrated on a tie-heavy primary key,
+  where `ProductionYear,SortName` returns the tied block in `SortName` order and
+  `ProductionYear` alone returns it in a different, insertion-shaped one. Tie
+  *instability* was not reproducible here: repeated identical pages came back
+  identical, and overlapping `StartIndex` windows agreed exactly, with and
+  without the tiebreak. The tiebreak stays anyway — it costs one word in a query
+  string, the failure it prevents is silent, and "this server's query plan was
+  stable across three requests" is a much weaker claim than "the order is
+  total".
+- **The delta cursor is widened by one second.** `since` is contractually
+  inclusive; whether the upstream's own comparison is `>=` or `>` is not
+  something Usher should have to be right about. Sending one second early is
+  correct either way, and a superset is explicitly allowed because callers
+  deduplicate by `external_id`.
+- **An unrecognised filter degrades to a full walk, never to an empty result.**
+  Measured: an invented parameter name was ignored outright and the request
+  returned the full unfiltered `TotalRecordCount`. So the worst case of a wrong
+  delta-filter name is the nightly reconcile's own behaviour.
+
+Two different filters are sent, because a library edit and a watch-state change
+do not touch the same timestamp: `MinDateLastSaved` for `list_items`,
+`MinDateLastSavedForUser` for `watch_state`. Both are honoured, and they are
+genuinely different filters rather than aliases — against those 1,126,674
+items, a cursor ten years ahead returned 0 for each, and a 30-day cursor
+returned 28,934 and 29,005 respectively.
+
+### Health and status
+
+`verify()` returns a `SourceStatus`, not a bool: `GET /admin/sources/{id}/status`
+([07](07-client-api.md)) has to report bad credentials, unreachable, and
+reachable-but-push-blocked as separate states. The unauthenticated
+`/System/Info/Public` probe is what separates the first two — a failure there is
+a reachability failure and cannot be anything else.
+
+That split holds against the real server, checked 2026-07-31:
+`/System/Info/Public` answers **200 with no credential of any kind** and carries
+the `Version` that becomes `server_version`, while `/System/Info` answers
+**401** without a token. A live `verify()` returned `reachable: true`,
+`authenticated: true`, `push_available: null`, `server_version: "4.9.5.0"`.
+
+`push_available` is deliberately three-valued, and `null` ("not probed") is what
+every adapter reports until M5. See the health-check caveat above: a handshake
+against a nonexistent path also upgrades, so an upgrade is not evidence and only
+received messages are.
 
 ## Reconciliation is not optional
 
@@ -137,6 +257,15 @@ work.
 Normalise the source item; store the raw payload in `raw_payloads`; upsert
 `MediaItem` on `(source_id, external_id)`; create or attach a `Title` stub.
 
+The adapter emits movies, series, **and episodes** — Emby addresses episodes
+directly, and `SourceItem` carries `series_external_id`, `season_number`, and
+`episode_number` for exactly this (all three verified present on a live episode
+payload, 2026-07-31). Episodes are also the bulk of the work: 999,827 of this
+deployment's 1,126,674 items. Persisting the series hierarchy waits on
+`Season`/`Episode` domain models and an `episodes` table, both of which land
+with the enrich stage in **M4**; until then episode items are produced and not
+yet stored.
+
 ### 2. Match — resolve to a canonical Title
 
 Ordered by confidence, stopping at the first hit:
@@ -185,9 +314,47 @@ is a pure function of catalog state and can be rebuilt from scratch at any time.
 - **Inbound:** `UserDataChanged` (push) and the nightly reconcile write
   `WatchState` with `origin = source`. Progress made in Infuse or Emby's own
   apps flows in.
+
+  ⚠️ **`play_count` and `last_played_at` are best-effort from a walk, and
+  M4 must not write them from one.** Verified 2026-07-31 against Emby
+  4.9.5.0: a *listing* reports `PlayCount: 0` and omits `LastPlayedDate`
+  entirely, for the same item whose single-item fetch reports `PlayCount: 2`
+  and a real date. Position and played flag are correct in both. No `Fields`
+  value, `EnableUserData`, or `Ids` restriction changes it. Recovering the
+  pair costs one request per item and this library is 1,126,674 items, so
+  the walk cannot. A consumer that writes them from a walk writes zero over
+  real history — the same class of mistake as pushing a zero state over
+  something already known. Making the two fields optional on
+  `SourceWatchState` is the honest fix and is a port change M4 should make
+  deliberately.
 - **Outbound:** client actions write `WatchState` with `origin = api`, then
   push to the source best-effort. Failure enqueues a retry and never blocks the
-  API response.
+  API response. On Emby that push is **one call, plus a second only when the
+  item is being marked played** — and every part of that sentence was settled
+  by running it against the live server (Emby 4.9.5.0, 2026-07-31) rather than
+  by reading the API:
+  - The position goes to `POST /Users/{userId}/Items/{itemId}/UserData` as a
+    JSON body. The obvious `POST /Users/{userId}/PlayingItems/{itemId}/Progress`
+    answers **400** for every body and parameter set tried, as does
+    `POST /Sessions/Playing/Progress`: both are *session-scoped playback
+    reporting*, and Usher never plays anything.
+  - `Played` is named in that body even when it is not changing, because the
+    route deserialises into a DTO whose unset fields take their defaults — a
+    body carrying only a position silently flips a played item to unplayed.
+  - Marking played is the second call, `POST /Users/{userId}/PlayedItems/{itemId}`,
+    and it goes **last**: it is the only route that advances `PlayCount` and
+    stamps `LastPlayedDate`, and it clears the resume position as it does so.
+    The reverse order leaves a just-finished film resumable at the last
+    reported second, which is how it reappears in Continue Watching.
+  - Reporting an item *unplayed* does **not** use `DELETE .../PlayedItems`.
+    That route resets `PlayCount` to 0, clears `LastPlayedDate`, and clears a
+    non-zero resume position — so using it to write a resume position would
+    erase the household's play history *and* then discard the position it was
+    called to write.
+
+  Both writes are idempotent — marking an already-counted item played leaves
+  `PlayCount` where it is rather than incrementing — so the retry after a
+  partial failure is safe.
 - **Conflicts:** latest `updated_at` wins. With push-based inbound updates the
   window where this matters is seconds.
 
@@ -201,3 +368,19 @@ describing how to play an item — direct URL, container and codec facts, and
 any client-specific deep-link forms the source can produce. Choosing between
 them is the client's business; Usher's job is to hand over complete
 information.
+
+Because Usher never proxies the bytes, a `direct` target's URL carries the
+session token above — the one documented place a credential reaches a client
+([ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md), and
+[07](07-client-api.md)'s playback section for the client-facing contract).
+
+It carries **three** query parameters, and each was measured against the live
+server on 2026-07-31 by removing it and re-requesting: `static=true` (removed →
+400), `MediaSourceId`, and `api_key` (removed → 401). It used to carry a fourth,
+Usher's own `DeviceId` — removed, because the route answers 206 with real bytes
+without it, and sending it made a captured playback URL a drop-in for the push
+channel's `api_key`/`deviceId` pair above.
+
+`StreamTarget` also carries `scheme` (for deep links) and `audio` (a single
+composite token such as `truehd_atmos_7_1`, which is a different thing from the
+raw codec) — the 🔶 that named M3, settled.

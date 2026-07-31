@@ -1,0 +1,54 @@
+{
+  "Name": "Example Episode",
+  "ServerId": "0000000000000000000000000000feed",
+  "Id": "0000000000000000000000000000a003",
+  "SeriesId": "0000000000000000000000000000a002",
+  "SeriesName": "Example Series",
+  "SeasonId": "0000000000000000000000000000a004",
+  "ParentIndexNumber": 2,
+  "IndexNumber": 5,
+  "DateCreated": "2024-05-04T09:00:00.0000000Z",
+  "ProductionYear": 2013,
+  "RunTimeTicks": 33000000000,
+  "Type": "Episode",
+  "IsFolder": false,
+  "MediaType": "Video",
+  "ProviderIds": { "Imdb": "tt2178782", "Tvdb": "4517466" },
+  "UserData": {
+    "PlaybackPositionTicks": 0,
+    "PlayCount": 1,
+    "IsFavorite": false,
+    "Played": true
+  },
+  "MediaSources": [
+    {
+      "Id": "0000000000000000000000000000b003",
+      "Name": "Example Episode 1080p",
+      "Container": "mkv",
+      "Size": 3221225472,
+      "RunTimeTicks": 33000000000,
+      "MediaStreams": [
+        {
+          "Index": 0,
+          "Type": "Video",
+          "Codec": "h264",
+          "Profile": "High",
+          "Width": 1920,
+          "Height": 1080,
+          "VideoRange": "SDR",
+          "ExtendedVideoType": "None",
+          "ExtendedVideoSubType": "None"
+        },
+        {
+          "Index": 1,
+          "Type": "Audio",
+          "Codec": "eac3",
+          "Profile": "Dolby Digital+",
+          "Channels": 6,
+          "Language": "eng",
+          "IsDefault": true
+        }
+      ]
+    }
+  ]
+}

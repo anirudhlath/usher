@@ -61,7 +61,7 @@ from typing import Any
 
 import httpx
 
-from usher.adapters.bulk.download import _retry_after_seconds
+from usher.adapters.http import retry_after_seconds
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, IdCrosswalkPair
 from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
 
@@ -195,7 +195,7 @@ class WikidataCrosswalkDataset(BulkDataset[IdCrosswalkPair]):
         except httpx.HTTPError as exc:
             raise PortUnavailable(f"WDQS request failed: {exc}") from exc
         if response.status_code == 429:
-            raise PortRateLimited(_retry_after_seconds(response.headers.get("retry-after")))
+            raise PortRateLimited(retry_after_seconds(response.headers.get("retry-after")))
         if response.status_code >= 400:
             # 504 with a text/plain "upstream request timeout" body is WDQS's
             # own query-timeout shape (verified). Unavailable, not malformed:

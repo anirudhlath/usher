@@ -23,6 +23,7 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.49b0",
     "opentelemetry-instrumentation-sqlalchemy>=0.49b0",
     "opentelemetry-instrumentation-httpx>=0.49b0",
+    "cryptography>=49.0.0",
 ]
 
 [dependency-groups]
@@ -77,7 +78,14 @@ extend-exclude = ["docs"]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]  # assert is how pytest tests assert; not a bandit finding here
+# assert is how pytest tests assert; not a bandit finding here.
+# S105/S106/S107: M3's fixtures and fakes are built around literal
+# usernames, passwords, and session tokens -- a test for "a rejected
+# credential does not produce a request storm" has to name a wrong password
+# somewhere -- and a `# noqa` on every one of them is noise that would
+# eventually get copied into `src/`, where these rules still apply and
+# still matter.
+"tests/**" = ["S101", "S105", "S106", "S107"]
 
 [tool.mypy]
 python_version = "3.13"
@@ -137,3 +145,42 @@ source_modules = [
     "usher.api",
 ]
 forbidden_modules = ["usher.cli"]
+
+# The spec's "zero source-specific concepts outside adapters/emby/"
+# acceptance criterion, enforced rather than asserted. With
+# usher.adapters.factory now the single place in src/ that names EmbyAdapter,
+# that criterion is finally expressible as a contract rather than a hope:
+# without this, `api/routers/sources.py` importing EmbyAdapter directly would
+# type-check, pass every test, and quietly make the abstraction decorative.
+# Verified by planting exactly that import -- all five contracts above
+# reported KEPT, because none of them constrains usher.api or usher.db
+# against usher.adapters at all.
+#
+# `allow_indirect_imports` is load-bearing, not a loosening. Without it this
+# contract breaks on the one import the factory exists for: usher.api.deps ->
+# usher.adapters.factory -> usher.adapters.emby.adapter is an indirect chain,
+# and a forbidden contract reports those by default. Verified both ways --
+# with it, that chain is KEPT and a direct `from usher.adapters.emby.adapter
+# import EmbyAdapter` in usher.api or usher.db is still BROKEN, which is
+# exactly the line the criterion draws: nothing outside the registry may
+# *name* a concrete adapter, and everything is free to reach one through the
+# port.
+#
+# usher.cli and usher.adapters are absent from the source list deliberately:
+# the former is a composition root (the contract above isolates it), and the
+# latter contains the registry itself. Like every contract here this one
+# enumerates its sources, so a new top-level package added later is outside
+# it until someone adds it -- the same weakness the allowlist comment at the
+# top of this section names, unfixable in a `forbidden` contract.
+[[tool.importlinter.contracts]]
+name = "no concrete source adapter escapes its package"
+type = "forbidden"
+source_modules = [
+    "usher.domain",
+    "usher.ports",
+    "usher.services",
+    "usher.api",
+    "usher.db",
+]
+forbidden_modules = ["usher.adapters.emby"]
+allow_indirect_imports = true

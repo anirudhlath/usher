@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -119,4 +120,48 @@ class MediaItemRow(Base):
             "runtime_seconds IS NULL OR runtime_seconds >= 0",
             name="ck_media_items_runtime_seconds_non_negative",
         ),
+    )
+
+
+class SourceCredentialRow(Base):
+    """Encrypted source credentials, addressed by the opaque
+    `Source.credentials_ref`.
+
+    A separate table rather than two more columns on `sources`, so a plain
+    `SELECT * FROM sources` -- what every admin read, every debugging
+    session, and every glance at a `pg_dump` does -- cannot return a
+    ciphertext at all. PRD 08's "credentials are never returned by any API,
+    including admin" becomes a property of the schema rather than of
+    whoever wrote the serializer.
+
+    `source_id` is a foreign key with `ON DELETE CASCADE` even though the
+    primary key is `ref`: deleting a source is two writes (drop the
+    credential, drop the source), and a crash between them would otherwise
+    leave an encrypted orphan with nothing left to attribute it to.
+
+    No `set_updated_at` trigger, unlike titles/sources/media_items: this
+    table has exactly one writer (`PostgresCredentialStore`), which sets
+    `updated_at` on both branches of its upsert. The three existing
+    triggers exist because their tables are also written by bulk `COPY` and
+    raw SQL paths that bypass the ORM; nothing bulk-loads credentials.
+    """
+
+    __tablename__ = "source_credentials"
+
+    ref: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("sources.id", ondelete="CASCADE"), nullable=False
+    )
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_source_credentials_source_id", "source_id"),
+        CheckConstraint("ref <> ''", name="ck_source_credentials_ref_not_empty"),
     )

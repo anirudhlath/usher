@@ -9,13 +9,34 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 
 ## Status
 
-Pre-release. Milestone M1 (foundation) in progress — see
-[`docs/plans/`](docs/plans/).
+Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap) and M3 (Emby
+adapter) are complete — see [`docs/plans/`](docs/plans/) for the task
+breakdowns and [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's
+next.
 
 ## Requirements
 
 - Docker and Docker Compose
 - A [TMDb API key](https://www.themoviedb.org/settings/api) (free, non-commercial)
+
+## Running it
+
+```bash
+cp .env.example .env
+echo "USHER_SECRET_KEY=$(openssl rand -hex 32)" >> .env
+docker compose up -d --build
+
+curl -sf http://localhost:8100/health        # {"status":"ok"}
+curl -sf http://localhost:8100/health/ready  # adds database + migration state
+```
+
+`USHER_SECRET_KEY` is required and has no default — compose refuses to start
+without it. It encrypts stored source credentials, so changing it later makes
+existing ones unreadable (the admin status endpoint reports that state rather
+than failing). `USHER_HOST_PORT` defaults to `8100`.
+
+Migrations run automatically on container start. To populate the catalog from
+the public datasets, see [`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md).
 
 ## Attribution
 

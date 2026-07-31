@@ -9,6 +9,7 @@ import pytest
 
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.enums import TitleKind
+from usher.ports.credentials import CredentialStore
 from usher.ports.embedding import Embedder
 from usher.ports.errors import (
     PortAuthFailed,
@@ -22,10 +23,12 @@ from usher.ports.llm import LLMClient, LLMPurpose, LLMUsage
 from usher.ports.metadata import MetadataCandidate, MetadataProvider
 from usher.ports.repository import TitleRepository
 from usher.ports.search import SearchIndex, SearchMode, SearchRequest
-from usher.ports.source import SourceAdapter, SourceNotSupported
+from usher.ports.source import SourceAdapter, SourceAdapterFactory, SourceNotSupported
 
 ALL_PORTS: list[type[ABC]] = [
     SourceAdapter,
+    SourceAdapterFactory,
+    CredentialStore,
     MetadataProvider,
     SearchIndex,
     Embedder,

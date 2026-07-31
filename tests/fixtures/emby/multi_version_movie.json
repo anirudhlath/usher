@@ -1,0 +1,120 @@
+{
+  "Name": "Example Multi-Version Movie",
+  "OriginalTitle": "Example Multi-Version Movie",
+  "ServerId": "0000000000000000000000000000feed",
+  "Id": "0000000000000000000000000000a004",
+  "DateCreated": "2024-06-11T08:05:00.0000000Z",
+  "PremiereDate": "2019-05-24T00:00:00.0000000Z",
+  "ProductionYear": 2019,
+  "RunTimeTicks": 74400000000,
+  "Type": "Movie",
+  "IsFolder": false,
+  "MediaType": "Video",
+  "ProviderIds": { "Tmdb": "301528", "Imdb": "tt7286456" },
+  "UserData": {
+    "PlaybackPositionTicks": 0,
+    "PlayCount": 0,
+    "IsFavorite": false,
+    "Played": false
+  },
+  "MediaSources": [
+    {
+      "Id": "0000000000000000000000000000b0f0",
+      "Name": "Example Multi-Version Movie (transcode)",
+      "Container": null,
+      "Protocol": "Http",
+      "SupportsDirectPlay": false,
+      "SupportsDirectStream": false,
+      "SupportsTranscoding": true,
+      "Size": 0,
+      "RunTimeTicks": 74400000000,
+      "MediaStreams": [
+        {
+          "Index": 0,
+          "Type": "Video",
+          "Codec": "hevc",
+          "Profile": "Main 10",
+          "Width": 3840,
+          "Height": 2160,
+          "VideoRange": "SDR",
+          "ExtendedVideoType": "None",
+          "ExtendedVideoSubType": "None"
+        },
+        {
+          "Index": 1,
+          "Type": "Audio",
+          "Codec": "aac",
+          "Profile": "LC",
+          "Channels": 2,
+          "Language": "eng",
+          "IsDefault": true
+        }
+      ]
+    },
+    {
+      "Id": "0000000000000000000000000000b0f1",
+      "Name": "Example Multi-Version Movie 2160p",
+      "Container": "mkv",
+      "Protocol": "File",
+      "SupportsDirectPlay": true,
+      "SupportsDirectStream": true,
+      "Size": 61847529062,
+      "RunTimeTicks": 74400000000,
+      "MediaStreams": [
+        {
+          "Index": 0,
+          "Type": "Video",
+          "Codec": "hevc",
+          "Profile": "Main 10",
+          "Width": 3840,
+          "Height": 2160,
+          "BitDepth": 10,
+          "VideoRange": "HDR 10",
+          "ExtendedVideoType": "Hdr10",
+          "ExtendedVideoSubType": "Hdr10"
+        },
+        {
+          "Index": 1,
+          "Type": "Audio",
+          "Codec": "truehd",
+          "Profile": "TrueHD Atmos",
+          "Channels": 8,
+          "Language": "eng",
+          "IsDefault": true
+        }
+      ]
+    },
+    {
+      "Id": "0000000000000000000000000000b0f2",
+      "Name": "Example Multi-Version Movie 1080p",
+      "Container": "mp4",
+      "Protocol": "File",
+      "SupportsDirectPlay": true,
+      "SupportsDirectStream": true,
+      "Size": 8589934592,
+      "RunTimeTicks": 74400000000,
+      "MediaStreams": [
+        {
+          "Index": 0,
+          "Type": "Video",
+          "Codec": "h264",
+          "Profile": "High",
+          "Width": 1920,
+          "Height": 1080,
+          "VideoRange": "SDR",
+          "ExtendedVideoType": "None",
+          "ExtendedVideoSubType": "None"
+        },
+        {
+          "Index": 1,
+          "Type": "Audio",
+          "Codec": "aac",
+          "Profile": "LC",
+          "Channels": 6,
+          "Language": "eng",
+          "IsDefault": true
+        }
+      ]
+    }
+  ]
+}

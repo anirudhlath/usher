@@ -24,11 +24,53 @@ that needs it.
 Rules:
 
 - Credentials are never returned by any API, including admin. Write-only.
+  Structurally, not by discipline: `POST /admin/sources` parses a username
+  and password into a request DTO, and **no response DTO in `api/dto/` has
+  a field either could be assigned to** — there is nothing to forget to
+  omit. Enforced over the whole package, not per model, so a response type
+  added by a later milestone inherits the rule.
 - Credentials are never logged, including in error paths and request dumps.
+- **A rejected request never echoes the body it rejected.** This one is not
+  free, and it is not covered by `SecretStr`: FastAPI's default `422`
+  answers with pydantic's errors, and a `missing` error carries the whole
+  *unparsed* request dict in its `input` field — every sibling value, as
+  submitted, before any of them became a `SecretStr`. Omitting a single
+  field from an otherwise valid `POST /admin/sources` therefore made the
+  server reply with the plaintext password. `usher.api.errors` strips
+  `input` from every validation error, app-wide.
 - Rotating `USHER_SECRET_KEY` re-encrypts on next write; a documented rotation
-  command handles the bulk case.
+  command handles the bulk case. **Until that write happens the old rows are
+  unreadable, and that state is rendered rather than raised**: Fernet's
+  authentication tag makes a wrong key a diagnosable `PortDataMalformed`, and
+  `GET /admin/sources/{id}/status` reports it as an unreachable,
+  unauthenticated source with a re-enter-your-credentials detail — the
+  screen an operator would open to work out what broke must not answer with
+  a `500`. The rendered detail is a fixed string, never the exception's own,
+  because that one names the `credentials_ref` so an operator can find the
+  row: right for a log line, wrong for a response body.
 - No credential ever reaches a client. This is the failure of the setup Usher
   replaces, where a raw Emby token lived in browser-delivered dashboard config.
+  **One documented exception in v1: a `direct` playback target's URL carries
+  the source's session token**, because Usher never proxies the bytes and the
+  route that serves them authenticates — verified: strip the token from that
+  URL and Emby answers 401. It no longer carries Usher's own `DeviceId`
+  alongside it; the same route answers 206 without one, so that parameter is
+  simply not sent (2026-07-31). See
+  [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) for what
+  that grants, why the two halves of the original failure are not equally
+  present, the risks accepted with it, and the M9 playback ticket that narrows
+  it — a `302` moves the token out of the response body and into a `Location`
+  header, which makes the shareable artifact opaque and short-lived rather
+  than removing the grant.
+- **The exception reaches the first rule above, too.** `POST /titles/{id}/play`
+  returns that token, so "never returned by any API" holds for the stored
+  username and password and for every other credential Usher holds, and not
+  for this one. What still binds it without exception: never logged (enforced
+  once, on the DTO that carries it, rather than by each caller), never a span
+  attribute, and never written to a table, a cache, or a file. It is **not**
+  minted per request — the session token is cached in memory for the adapter's
+  lifetime and re-minted only on a 401 ([03](03-sources-and-sync.md)), so
+  there is no rotation and the grant outlives the response that carried it.
 - At the config layer, `database_url`, `secret_key`, and `tmdb_api_key` are
   held as `pydantic.SecretStr` and unwrapped only at the point of use, so the
   rules above are enforced by the type system, not just convention.
@@ -41,6 +83,7 @@ local state can answer.**
 | Failure | Behaviour |
 |---|---|
 | Source unreachable | Catalog fully browsable. Playback → 503 `source_unavailable`. Availability goes stale, not wrong. |
+| Source credentials rejected | `GET /admin/sources/{id}/status` reports `authenticated: false`; re-authentication is retried after a cooldown rather than on every call. Catalog unaffected. |
 | Push socket drops | Backoff reconnect; delta reconcile on reconnect; after N failures mark `supports_push = false` and lean on the nightly walk. |
 | TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs; every other subsystem is unaffected. |
 | TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades. |

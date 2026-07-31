@@ -120,7 +120,7 @@ def postgres_url() -> Iterator[str]:
     with PostgresContainer(
         "pgvector/pgvector:pg17",
         username="usher",
-        password="usher",  # noqa: S106 -- throwaway container credential, torn down with the container
+        password="usher",
         dbname="usher",
     ) as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")

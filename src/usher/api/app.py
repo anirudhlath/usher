@@ -4,9 +4,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-from usher.api.routers import health
+from usher.api.errors import validation_error_without_the_request_body
+from usher.api.routers import health, sources
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.telemetry import configure_telemetry
@@ -48,5 +50,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # call on every create_app(): instrument_app marks the app object
     # itself, not a process-global singleton (verified directly).
     FastAPIInstrumentor.instrument_app(app)
+    # The configuration handlers read, via `deps.get_app_settings`. Set here
+    # rather than in the lifespan because it is not a resource with a
+    # lifetime -- and because `create_app(settings)`'s whole point is that
+    # the app runs on the settings it was handed, not on whatever the
+    # environment says at the moment a request arrives.
+    app.state.settings = settings
+    # Replaces FastAPI's default 422 body, which echoes the submitted
+    # request -- and `POST /admin/sources` submits a source credential. See
+    # usher.api.errors; this is a security control, not a response-shape
+    # preference, and it is registered here so it covers every route rather
+    # than only the one that made it necessary.
+    app.add_exception_handler(RequestValidationError, validation_error_without_the_request_body)
     app.include_router(health.router)
+    app.include_router(sources.router)
     return app

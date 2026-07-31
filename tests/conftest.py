@@ -3,6 +3,7 @@ every test in the suite gets for free — this is the first conftest in the
 project, and the pattern set here is what later milestones inherit."""
 
 import os
+import sys
 from collections.abc import Iterator
 
 import pytest
@@ -65,11 +66,35 @@ def reset_otel_tracer_provider() -> Iterator[None]:
     call `set_tracer_provider` more than once per process. Reaching into
     the module's private `_TRACER_PROVIDER`/`_TRACER_PROVIDER_SET_ONCE`
     state is the same trick OpenTelemetry's own test suite uses for this.
+
+    **Clearing the global provider is not enough on its own**, which is
+    what the second half below is for. `usher.adapters.emby.session` and
+    friends call `trace.get_tracer(...)` at *import* time, when no real
+    provider exists yet, so each holds a `ProxyTracer` — and a `ProxyTracer`
+    caches the first real provider it ever resolves in `_real_tracer` and
+    never looks at the global again (verified against the installed SDK's
+    own source; an in-code comment in
+    `tests/unit/test_adapters_emby_session.py` previously claimed it
+    resolved per call, which is wrong). Whichever test first starts a span
+    through one of those tracers while a real provider is installed
+    therefore owns that tracer for the rest of the session, and every later
+    test's in-memory exporter silently receives nothing. Reproduced
+    directly: adding a span-capturing integration test for the admin
+    routes — which reaches `EmbySession` through the real adapter, earlier
+    in collection order — made
+    `test_every_upstream_request_produces_a_span` fail with an empty span
+    list while it still passed in isolation.
     """
 
     def _reset() -> None:
         trace._TRACER_PROVIDER = None
         trace._TRACER_PROVIDER_SET_ONCE = type(trace._TRACER_PROVIDER_SET_ONCE)()
+        for name, module in list(sys.modules.items()):
+            if not name.startswith("usher"):
+                continue
+            for value in vars(module).values():
+                if isinstance(value, trace.ProxyTracer):
+                    value._real_tracer = None
 
     _reset()
     yield

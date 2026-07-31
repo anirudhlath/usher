@@ -70,13 +70,30 @@ be added if a client turns out to need flexible field selection.
 | `POST /admin/rows/regenerate` | Force LLM curation |
 | `GET /admin/bootstrap/status` · `POST /admin/bootstrap/{phase}` | Dataset import |
 
-> 🔶 **Provisional.** `GET /admin/sources/{id}/status` needs to report bad
-> credentials, unreachable, and reachable-but-push-blocked (e.g. a proxy
-> stripping `Upgrade`) as distinct states. `SourceAdapter.verify() -> bool`
-> can't express that split today. The error taxonomy in
-> `usher.ports.errors` (`PortAuthFailed`, `PortUnavailable`) is the
-> prerequisite; settle in **M3**, when the Emby adapter and this endpoint
-> are built together.
+> **Settled in M3.** `SourceAdapter.verify()` returns a `SourceStatus`
+> (`usher.ports.source`), not a bool: `reachable` and `authenticated` are
+> independent booleans (an invariant rejects the contradictory
+> `authenticated=True, reachable=False`), so bad credentials, unreachable,
+> and reachable-but-push-blocked (e.g. a proxy stripping `Upgrade`) render
+> as distinct states instead of collapsing to one failure. `push_available`
+> is `bool | None` — `None` means "not probed", per the health-check
+> caveat above — and `detail` is a short operator-facing string built from
+> the adapter's own translated `usher.ports.errors` exceptions, never a
+> credential. `GET /admin/sources/{id}/status` renders this directly.
+>
+> **Built in M3: four of the five rows above.** `GET`/`POST`/`DELETE
+> /admin/sources` and `GET /admin/sources/{id}/status` are live
+> (`usher.api.routers.sources`). `POST /admin/sources/{id}/sync` is not —
+> it triggers a reconcile, and there is no reconciler until M5. The status
+> route answers **200 for every state a configured source can be in** —
+> rejected credentials, an unreachable host, a credential row that has gone
+> missing, and one that no longer decrypts because `USHER_SECRET_KEY` was
+> rotated. Those are facts about the source being described, not failures
+> of the request, and this route is the screen an operator opens to
+> *diagnose* them, so a `500` would answer the question with a stack trace.
+> `404` is reserved for a source id that does not exist.
+> `POST` accepts a username and password and returns neither — see
+> [08](08-operations.md).
 
 ### Meta
 
@@ -145,6 +162,16 @@ RFC 9457 problem details, with a machine-readable `code`:
 The principle from [08](08-operations.md) holds at the boundary: a degraded
 subsystem narrows functionality, it never fails a request local state can answer.
 
+> **Not yet built, as of M3.** The admin source routes M3 ships return
+> FastAPI's default shapes — `{"detail": "source not found"}` for a 404 and
+> `{"detail": [ … pydantic errors … ]}` for a 422 — not the envelope above.
+> The envelope is a client contract, and the client-facing surface is
+> [09](09-roadmap.md)'s M9; defining a `code` vocabulary against four admin
+> routes would be guessing at it a milestone early. What M3 *does* enforce
+> is the part of the error path that could not wait: a 422 never echoes the
+> submitted request body, because that body carries a source credential.
+> See [08](08-operations.md)'s secrets rules.
+
 ## Streaming updates (SSE)
 
 `GET /events` — the channel that makes read-through visible to clients.
@@ -201,9 +228,43 @@ The client chooses based on what it can play. Usher supplies complete
 information and never proxies bytes — the deep-link construction currently done
 by hand in the Home Assistant card moves here, where it is testable.
 
-> 🔶 **Provisional.** The `StreamTarget` port DTO (`usher.ports.source`)
-> doesn't yet carry `scheme` or `audio`, both shown above. Settle in
-> **M3**, alongside the Emby adapter that first has to populate this.
+> **Settled in M3.** The `StreamTarget` port DTO (`usher.ports.source`) now
+> carries both fields shown above: `scheme` (set only for `deep_link`
+> targets, e.g. `"infuse"` for `infuse://…`, so a client can check whether
+> it handles the link without parsing the URL) and `audio` (a single
+> lowercase token like `"truehd_atmos_7_1"` — distinct from the raw
+> `audio_codec` a source reports, which alone doesn't tell a client
+> whether it can play the track). `kind` is a `StreamTargetKind` enum, not
+> a bare `str`, for the same reason `SourceItemKind` is one.
+
+> **Settled in M3.** **The `url` of a `direct` target carries the source's
+> session token**, and in v1 that token is a real capability grant to the
+> client that receives it. Emby authenticates its
+> `/Videos/{id}/stream.{container}` route, and neither a `<video>` element
+> nor a deep link can set a header, so a URL without one is a URL that does
+> not play. This is the single place Usher knowingly bends PRD 08's "no
+> credential ever reaches a client";
+> [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) records
+> what the token grants, which half of the original Home Assistant failure
+> this does and does not fix, the handling rules it is subject to (never
+> logged — enforced once on the DTO that carries it, not by each caller —
+> never a span attribute, never persisted), and the M9 playback ticket that
+> narrows it.
+>
+> The URL also carries the `DeviceId` Usher registers as, which is the
+> other half of what [03](03-sources-and-sync.md)'s push channel is opened
+> with. The `deep_link` target wraps the whole direct URL percent-encoded,
+> so it carries both exactly as the direct one does.
+>
+> **The grant outlives the response that carried it.** Targets are built
+> per request, and no `StreamTarget` is written to a table, a cache, or a
+> file — but the token inside one is held in memory for the adapter's
+> lifetime and re-minted only on a 401, so two play responses in one
+> process carry the same token and Usher applies no expiry of its own.
+> There is no rotation mechanism. A URL a client has been given keeps
+> working until Emby prunes the session or an operator revokes it. See
+> [03](03-sources-and-sync.md) for the cache and ADR-0012 for the risks
+> accepted with it.
 
 ## Authentication seam
 
