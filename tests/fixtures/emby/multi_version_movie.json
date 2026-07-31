@@ -36,7 +36,9 @@
           "Profile": "Main 10",
           "Width": 3840,
           "Height": 2160,
-          "VideoRange": "SDR"
+          "VideoRange": "SDR",
+          "ExtendedVideoType": "None",
+          "ExtendedVideoSubType": "None"
         },
         {
           "Index": 1,
@@ -66,8 +68,10 @@
           "Profile": "Main 10",
           "Width": 3840,
           "Height": 2160,
-          "VideoRange": "HDR",
-          "VideoRangeType": "HDR10"
+          "BitDepth": 10,
+          "VideoRange": "HDR 10",
+          "ExtendedVideoType": "Hdr10",
+          "ExtendedVideoSubType": "Hdr10"
         },
         {
           "Index": 1,
@@ -97,7 +101,9 @@
           "Profile": "High",
           "Width": 1920,
           "Height": 1080,
-          "VideoRange": "SDR"
+          "VideoRange": "SDR",
+          "ExtendedVideoType": "None",
+          "ExtendedVideoSubType": "None"
         },
         {
           "Index": 1,

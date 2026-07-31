@@ -68,10 +68,19 @@ def test_provider_id_keys_are_lowercased() -> None:
 
 
 def test_dolby_vision_wins_over_the_hdr10_fallback_layer() -> None:
-    """The movie fixture carries `VideoRange: "HDR"`, `VideoRangeType:
-    "DOVI"`, and a `DvProfile` all at once, which is what a real DV file
-    looks like -- the HDR10 base layer is genuinely there. Ordering the
-    checks the other way round catalogues every DV file as HDR10."""
+    """The movie fixture carries the shape a real Dolby Vision file has on
+    Emby 4.9.5.0, transcribed from the live server on 2026-07-31:
+    `VideoRange: "DolbyVision"`, `ExtendedVideoType: "DolbyVision"`, and
+    `ExtendedVideoSubType: "DoviProfile81"` -- Profile 8.1, whose HDR10 base
+    layer is genuinely there and genuinely not what the file is. Ordering
+    the checks the other way round catalogues every DV file as HDR10.
+
+    It used to carry `VideoRangeType: "DOVI"` and `DvProfile: 8`, which the
+    live run showed this server emits nowhere at all. Those spellings are
+    still supported -- older Emby builds and Jellyfin do send them -- and
+    are still covered, by hand-built streams rather than by a fixture
+    claiming to be a recording of something it is not.
+    """
     item = to_source_item(load_emby_fixture("movie_item"))
     assert item is not None
     assert item.hdr_format is HdrFormat.DOLBY_VISION
@@ -130,6 +139,86 @@ def test_every_dolby_vision_spelling_maps_to_dolby_vision(video_range_type: str)
         hdr_format({"VideoRange": video_range, "VideoRangeType": video_range_type})
         is HdrFormat.DOLBY_VISION
     )
+
+
+@pytest.mark.parametrize(
+    ("stream", "expected"),
+    [
+        (
+            {"VideoRange": "SDR", "ExtendedVideoType": "None", "ExtendedVideoSubType": "None"},
+            None,
+        ),
+        (
+            {"VideoRange": "HDR 10", "ExtendedVideoType": "Hdr10", "ExtendedVideoSubType": "Hdr10"},
+            HdrFormat.HDR10,
+        ),
+        (
+            {
+                "VideoRange": "DolbyVision",
+                "ExtendedVideoType": "DolbyVision",
+                "ExtendedVideoSubType": "DoviProfile81",
+            },
+            HdrFormat.DOLBY_VISION,
+        ),
+        (
+            {
+                "VideoRange": "DolbyVision",
+                "ExtendedVideoType": "DolbyVision",
+                "ExtendedVideoSubType": "DoviProfile50",
+            },
+            HdrFormat.DOLBY_VISION,
+        ),
+    ],
+)
+def test_the_four_shapes_emby_495_actually_emits(
+    stream: dict[str, object], expected: HdrFormat | None
+) -> None:
+    """Transcribed from the live server on 2026-07-31, and these four are
+    the *whole* vocabulary it produced: every video stream of 200 movies
+    (the newest 100 4K and the newest 100 HD, out of 94,438) fell into one
+    of them. Note `"HDR 10"` with a space -- the `_NON_ALNUM` strip is what
+    makes that reach the `HDR10` entry rather than falling through to SDR,
+    and nothing else in this file exercises a range token with a space in
+    it.
+    """
+    assert hdr_format(stream) is expected
+
+
+def test_a_dolby_vision_marker_in_the_extended_fields_wins_over_the_base_layer() -> None:
+    """**Emby 4.9.5.0 emits neither `VideoRangeType` nor `DvProfile`** --
+    not once across those 200 movies, including all 34 Dolby Vision files.
+    What it emits is `ExtendedVideoType`/`ExtendedVideoSubType`, and neither
+    was read here at all: the two fields the server actually populates were
+    not in the vote.
+
+    Nothing was mis-catalogued in practice, because every DV file observed
+    also carried `VideoRange: "DolbyVision"`. But a single field carrying
+    the whole signal is precisely the fragility this function was written
+    against -- its rule is that *any* DV marker wins outright over a base
+    layer named elsewhere, and a rule that only consults fields the server
+    never sends is not a rule.
+    """
+    assert (
+        hdr_format(
+            {
+                "VideoRange": "HDR 10",
+                "ExtendedVideoType": "DolbyVision",
+                "ExtendedVideoSubType": "DoviProfile81",
+            }
+        )
+        is HdrFormat.DOLBY_VISION
+    )
+
+
+def test_the_literal_string_none_is_not_a_video_range() -> None:
+    """`ExtendedVideoType` and `ExtendedVideoSubType` carry the **string**
+    `"None"` for an SDR file, not JSON `null` -- verified live. So they are
+    always truthy, and a check written as `if video.get("ExtendedVideoType")`
+    would treat every SDR file in the library as carrying an HDR marker.
+    Falling through a token table is what makes the string harmless.
+    """
+    assert hdr_format({"ExtendedVideoType": "None", "ExtendedVideoSubType": "None"}) is None
+    assert hdr_format({"ExtendedVideoSubType": "Hdr10"}) is HdrFormat.HDR10
 
 
 def test_a_dv_profile_wins_even_when_the_range_tokens_say_hdr10() -> None:

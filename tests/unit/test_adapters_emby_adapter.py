@@ -645,7 +645,7 @@ async def test_an_external_id_stays_inside_one_path_segment() -> None:
     assert paths == [
         f"/Users/{USER_ID}/Items/{escaped}",
         f"/Users/{USER_ID}/Items/{escaped}",
-        f"/Users/{USER_ID}/PlayingItems/{escaped}/Progress",
+        f"/Users/{USER_ID}/Items/{escaped}/UserData",
         f"/Users/{USER_ID}/PlayedItems/{escaped}",
     ]
     assert "/System/Info" not in "".join(paths)
@@ -672,31 +672,19 @@ async def test_watch_state_is_attributed_to_the_authenticated_user() -> None:
     assert states[0].position_seconds == 600
 
 
-async def test_push_writes_the_position_before_the_played_flag() -> None:
-    """Load-bearing order, asserted two ways. Emby clears an item's resume
-    position when it is marked played, so the reverse order leaves a
-    just-finished film resumable at the last reported second -- which is how
-    it reappears in Continue Watching. The request order pins the mechanism;
-    the resulting state pins the consequence."""
-    server = FakeEmbyServer()
-    server.add_item(_movie(0), T0)
-    adapter = _adapter(server)
-    try:
-        await adapter.push_watch_state(
-            "movie-0", WatchStateUpdate(position_seconds=600, played=True)
-        )
-    finally:
-        await adapter.aclose()
-    writes = [
-        entry for entry in server.requests if "PlayingItems" in entry or "PlayedItems" in entry
-    ]
-    assert len(writes) == 2
-    assert "PlayingItems" in writes[0]
-    assert "PlayedItems" in writes[1]
-    assert server.recorded_watch_state("movie-0") == (0, True)
+async def test_push_writes_the_position_through_the_route_emby_accepts() -> None:
+    """Verified against the live Emby 4.9.5.0 server, 2026-07-31: `POST
+    /Users/{user}/PlayingItems/{item}/Progress` answers **400 `"Value cannot
+    be null. (Parameter 'key')"`** -- for a bodyless request, an empty JSON
+    body, an `{ItemId, PositionTicks}` body, and with `MediaSourceId` and
+    `IsPaused` added. So does `POST /Sessions/Playing/Progress`. Both are
+    *session-scoped playback reporting*, and Usher is not playing anything,
+    so there is no play session for them to key off.
 
-
-async def test_push_deletes_the_played_flag_when_unplaying() -> None:
+    `POST /Users/{user}/Items/{item}/UserData` is the route that writes a
+    resume position without a play session: 204, and the position is
+    readable back immediately. The body is JSON, not query parameters.
+    """
     server = FakeEmbyServer()
     server.add_item(_movie(0), T0)
     adapter = _adapter(server)
@@ -706,8 +694,90 @@ async def test_push_deletes_the_played_flag_when_unplaying() -> None:
         )
     finally:
         await adapter.aclose()
-    assert any(entry.startswith("DELETE ") and "PlayedItems" in entry for entry in server.requests)
-    assert server.recorded_watch_state("movie-0") == (600, False)
+    assert f"POST /Users/{USER_ID}/Items/movie-0/UserData" in server.requests
+    assert not any("PlayingItems" in entry for entry in server.requests)
+    assert server.user_data_writes == [{"PlaybackPositionTicks": 6_000_000_000, "Played": False}]
+
+
+async def test_push_names_played_explicitly_rather_than_omitting_it() -> None:
+    """Verified live: `POST /Users/{user}/Items/{item}/UserData` deserialises
+    its body into a DTO whose *unset* fields take C# defaults, so a body
+    carrying only `PlaybackPositionTicks` silently flipped an item's `Played`
+    from `true` to `false`. `PlayCount` and `LastPlayedDate` survived the
+    same omission; `Played` did not. Naming it is the whole guard.
+    """
+    server = FakeEmbyServer()
+    server.add_item(_movie(0), T0)
+    adapter = _adapter(server)
+    try:
+        await adapter.push_watch_state(
+            "movie-0", WatchStateUpdate(position_seconds=600, played=True)
+        )
+    finally:
+        await adapter.aclose()
+    assert "Played" in server.user_data_writes[0]
+
+
+async def test_push_writes_the_position_before_the_played_flag() -> None:
+    """Load-bearing order, asserted two ways -- and now verified rather than
+    assumed. Live, `POST /Users/{user}/PlayedItems/{item}` really does clear
+    the item's resume position (3,000,000,000 ticks -> 0) while setting
+    `Played`, bumping `PlayCount` and stamping `LastPlayedDate`. The reverse
+    order leaves a just-finished film resumable at the last reported second,
+    which is how it reappears in Continue Watching. The request order pins
+    the mechanism; the resulting state pins the consequence.
+    """
+    server = FakeEmbyServer()
+    server.add_item(_movie(0), T0)
+    adapter = _adapter(server)
+    try:
+        await adapter.push_watch_state(
+            "movie-0", WatchStateUpdate(position_seconds=600, played=True)
+        )
+    finally:
+        await adapter.aclose()
+    writes = [entry for entry in server.requests if "UserData" in entry or "PlayedItems" in entry]
+    assert len(writes) == 2
+    assert "UserData" in writes[0]
+    assert "PlayedItems" in writes[1]
+    assert server.recorded_watch_state("movie-0") == (0, True)
+
+
+async def test_reporting_a_position_does_not_reach_the_played_route() -> None:
+    """`DELETE /Users/{user}/PlayedItems/{item}` is destructive well beyond
+    its name -- verified live: it resets `PlayCount` to 0, clears
+    `LastPlayedDate`, **and clears a non-zero resume position**, so a walk
+    that reported "resumable at 20 minutes, not played" through it would
+    both erase the household's play history and then throw away the very
+    position it was called to write.
+
+    Reporting a position is not a claim that the item was never watched. The
+    unplayed path is therefore one `UserData` write carrying `Played: false`,
+    which live Emby applies while leaving `PlayCount` and `LastPlayedDate`
+    exactly as the user's own apps recorded them.
+    """
+    server = FakeEmbyServer()
+    server.add_item(_movie(0), T0)
+    server.set_watch_state(
+        SourceWatchState(
+            external_id="movie-0",
+            position_seconds=0,
+            played=True,
+            play_count=3,
+            last_played_at=T0,
+        )
+    )
+    adapter = _adapter(server)
+    try:
+        await adapter.push_watch_state(
+            "movie-0", WatchStateUpdate(position_seconds=600, played=False)
+        )
+        states = [state async for state in adapter.watch_state()]
+    finally:
+        await adapter.aclose()
+    assert not any("PlayedItems" in entry for entry in server.requests)
+    assert (states[0].position_seconds, states[0].played) == (600, False)
+    assert (states[0].play_count, states[0].last_played_at) == (3, T0)
 
 
 async def test_a_negative_position_is_clamped_rather_than_sent_upstream() -> None:

@@ -72,11 +72,33 @@ _TEMPLATES = {
 # `test_provider_ids_use_canonical_lowercase_keys` only means something if
 # the server actually speaks the casing the adapter has to normalise away.
 _EMBY_PROVIDER_KEYS = {"tmdb": "Tmdb", "imdb": "Imdb", "tvdb": "Tvdb"}
-_HDR_WIRE: dict[HdrFormat | None, tuple[str, str | None]] = {
-    None: ("SDR", None),
-    HdrFormat.HDR10: ("HDR", "HDR10"),
-    HdrFormat.HLG: ("HDR", "HLG"),
-    HdrFormat.DOLBY_VISION: ("HDR", "DOVI"),
+# The vocabulary Emby 4.9.5.0 actually emits, transcribed from the live
+# server on 2026-07-31: `VideoRange` plus `ExtendedVideoType`/
+# `ExtendedVideoSubType`, and **no `VideoRangeType` and no `DvProfile`** --
+# neither appeared once across 200 movies, all 34 Dolby Vision files
+# included. Note `"HDR 10"`, with a space, and the literal string `"None"`
+# rather than JSON null.
+#
+# HLG is the one row not observed (this library holds none), so its
+# `Extended*` pair is left at `"None"` rather than invented: `VideoRange`
+# alone is what the mapper reads it from either way.
+_HDR_WIRE: dict[HdrFormat | None, dict[str, str]] = {
+    None: {"VideoRange": "SDR", "ExtendedVideoType": "None", "ExtendedVideoSubType": "None"},
+    HdrFormat.HDR10: {
+        "VideoRange": "HDR 10",
+        "ExtendedVideoType": "Hdr10",
+        "ExtendedVideoSubType": "Hdr10",
+    },
+    HdrFormat.HLG: {
+        "VideoRange": "HLG",
+        "ExtendedVideoType": "None",
+        "ExtendedVideoSubType": "None",
+    },
+    HdrFormat.DOLBY_VISION: {
+        "VideoRange": "DolbyVision",
+        "ExtendedVideoType": "DolbyVision",
+        "ExtendedVideoSubType": "DoviProfile81",
+    },
 }
 
 _DEVICE_ID = re.compile(r'DeviceId="([^"]*)"')
@@ -87,6 +109,7 @@ _CLIENT = re.compile(r'Client="([^"]*)"')
 _VERSION = re.compile(r'Version="([^"]*)"')
 _ITEMS = re.compile(r"^/Users/(?P<user>[^/]+)/Items$")
 _ITEM = re.compile(r"^/Users/(?P<user>[^/]+)/Items/(?P<item>[^/]+)$")
+_USER_DATA = re.compile(r"^/Users/(?P<user>[^/]+)/Items/(?P<item>[^/]+)/UserData$")
 _PROGRESS = re.compile(r"^/Users/(?P<user>[^/]+)/PlayingItems/(?P<item>[^/]+)/Progress$")
 _PLAYED = re.compile(r"^/Users/(?P<user>[^/]+)/PlayedItems/(?P<item>[^/]+)$")
 
@@ -186,6 +209,11 @@ class FakeEmbyServer:
         # on whether the call was allowed through.
         self.identities: list[str | None] = []
         self.tokens: list[str | None] = []
+        # The decoded body of every `POST .../Items/{item}/UserData`. Which
+        # *keys* a write carries is load-bearing on the live server -- an
+        # omitted `Played` is read as `false`, not as "unchanged" -- so a
+        # test has to be able to assert on the body, not only on its effect.
+        self.user_data_writes: list[dict[str, Any]] = []
         self._items: dict[str, tuple[SourceItem, AwareDatetime]] = {}
         self._alternates: dict[str, list[dict[str, Any]]] = {}
         self._states: dict[str, SourceWatchState] = {}
@@ -316,9 +344,18 @@ class FakeEmbyServer:
         item_match = _ITEM.match(path)
         if request.method == "GET" and item_match:
             return self._one(item_match.group("item"))
-        progress_match = _PROGRESS.match(path)
-        if request.method == "POST" and progress_match:
-            return self._progress(request, progress_match.group("item"))
+        user_data_match = _USER_DATA.match(path)
+        if request.method == "POST" and user_data_match:
+            return self._write_user_data(request, user_data_match.group("item"))
+        if request.method == "POST" and _PROGRESS.match(path):
+            # Modelled as the live server's own rejection rather than left
+            # unrouted, so an adapter that regressed to this route fails with
+            # the error Emby actually returns instead of a generic 404 that
+            # reads like a gap in this fake. Verified 2026-07-31 against Emby
+            # 4.9.5.0 for a bodyless request, an empty JSON body, an
+            # `{ItemId, PositionTicks}` body, and one carrying MediaSourceId
+            # and IsPaused: all 400, all with this message.
+            return httpx.Response(400, json={"Error": "Value cannot be null. (Parameter 'key')"})
         played_match = _PLAYED.match(path)
         if played_match and request.method in {"POST", "DELETE"}:
             return self._played(played_match.group("item"), request.method == "POST")
@@ -418,42 +455,68 @@ class FakeEmbyServer:
             external_id=external_id, position_seconds=0, played=False
         )
 
-    def _progress(self, request: httpx.Request, external_id: str) -> httpx.Response:
-        """`POST .../Progress` reports a position. It reports nothing else,
-        and Emby changes nothing else.
+    def _write_user_data(self, request: httpx.Request, external_id: str) -> httpx.Response:
+        """`POST /Users/{user}/Items/{item}/UserData`, the route that writes
+        a resume position without a play session. 204, no body.
 
-        `replace`, not a fresh `SourceWatchState`: rebuilding one from the
-        fields this endpoint carries silently zeroes `PlayCount` and drops
-        `LastPlayedDate`, so an item with a real play history loses it the
-        moment the adapter reports a position -- and the loss is invisible
-        to a harness that reads back only position and played. `replace`
-        rather than `.evolve()` because the port's DTOs are plain frozen
-        dataclasses, not `DomainModel`s.
+        Two behaviours transcribed from the live server on 2026-07-31, both
+        of which a more forgiving fake would hide:
+
+        - **An omitted `Played` is not "leave it alone", it is `false`.** The
+          body deserialises into a DTO whose unset fields take their C#
+          defaults, so a body carrying only `PlaybackPositionTicks` really
+          did flip a played item to unplayed. Modelled with
+          `body.get("Played", False)` rather than a `if "Played" in body`
+          merge, because the merge is the mistake.
+        - **`PlayCount` and `LastPlayedDate` survive that same omission.**
+          `replace`, not a fresh `SourceWatchState`: rebuilding one from the
+          fields this route carries would zero the play history, and the
+          loss is invisible to a harness that reads back only position and
+          played. (`replace` rather than `.evolve()` because the port's DTOs
+          are plain frozen dataclasses, not `DomainModel`s.)
         """
         if external_id not in self._items:
             return httpx.Response(404, json={"Error": "Not Found"})
-        ticks = int(request.url.params.get("PositionTicks", "0"))
+        body = json.loads(request.content or b"{}")
+        self.user_data_writes.append(dict(body))
+        ticks = int(body.get("PlaybackPositionTicks", 0))
         self._states[external_id] = replace(
-            self._state_of(external_id), position_seconds=ticks // _TICKS_PER_SECOND
+            self._state_of(external_id),
+            position_seconds=ticks // _TICKS_PER_SECOND,
+            played=bool(body.get("Played", False)),
         )
         return httpx.Response(204)
 
     def _played(self, external_id: str, played: bool) -> httpx.Response:
+        """`POST`/`DELETE /Users/{user}/PlayedItems/{item}` -- 200, with the
+        updated `UserData` as the body, which is how the live server answers.
+
+        **Both directions clear the resume position**, verified live: the
+        POST is why the adapter writes the position first and the played
+        flag last, and the DELETE is why the adapter does not use this route
+        to report an item unplayed at all. The DELETE also resets
+        `PlayCount` to 0 and clears `LastPlayedDate` -- destruction worth
+        modelling, because it is the reason the unplayed path is a
+        `UserData` write instead.
+
+        `max(previous, 1)` rather than `+ 1`: marking an already-counted item
+        played left `PlayCount` at 1 on the live server rather than
+        incrementing it, which is what makes the adapter's retry idempotent.
+        """
         if external_id not in self._items:
             return httpx.Response(404, json={"Error": "Not Found"})
         previous = self._state_of(external_id)
-        # Marking an item played clears its resume position, the way Emby
-        # does. The adapter writes position first and the played flag last
-        # precisely because of this. Everything else carries forward:
-        # neither call is a claim about when the item was last watched, so
-        # neither may erase one.
-        self._states[external_id] = replace(
+        state = replace(
             previous,
-            position_seconds=0 if played else previous.position_seconds,
+            position_seconds=0,
             played=played,
-            play_count=previous.play_count + (1 if played else 0),
+            play_count=max(previous.play_count, 1) if played else 0,
+            last_played_at=(
+                previous.last_played_at or datetime(2026, 7, 31, tzinfo=UTC) if played else None
+            ),
         )
-        return httpx.Response(200, json={"Played": played, "PlaybackPositionTicks": 0})
+        self._states[external_id] = state
+        return httpx.Response(200, json=self._user_data(external_id))
 
     # -- rendering -----------------------------------------------------
 
@@ -513,18 +576,16 @@ class FakeEmbyServer:
                 stream["Codec"] = item.video_codec
                 stream["Width"] = item.width
                 stream["Height"] = item.height
-                # Rendered purely from VideoRange/VideoRangeType, with the
-                # DV-specific keys dropped: the DvProfile path is covered
-                # directly against the raw fixture in the mapping tests, and
-                # exercising the token path here keeps the two independent.
-                stream.pop("DvProfile", None)
-                stream.pop("DvLevel", None)
-                video_range, range_type = _HDR_WIRE[item.hdr_format]
-                stream["VideoRange"] = video_range
-                if range_type is None:
-                    stream.pop("VideoRangeType", None)
-                else:
-                    stream["VideoRangeType"] = range_type
+                # Rendered purely from the range tokens, with every
+                # DV-specific key dropped first: the `DvProfile` path is
+                # covered directly against hand-built streams in the mapping
+                # tests, and exercising the token path here keeps the two
+                # independent. `VideoRangeType` is dropped too rather than
+                # rewritten -- Emby 4.9.5.0 does not send it, so a fake that
+                # did would be modelling a server nobody runs.
+                for key in ("DvProfile", "DvLevel", "VideoRangeType"):
+                    stream.pop(key, None)
+                stream.update(_HDR_WIRE[item.hdr_format])
             elif stream["Type"] == "Audio" and stream.get("IsDefault"):
                 stream["Codec"] = item.audio_codec
                 stream["Channels"] = item.audio_channels

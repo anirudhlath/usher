@@ -35,7 +35,9 @@
           "Profile": "High",
           "Width": 1920,
           "Height": 1080,
-          "VideoRange": "SDR"
+          "VideoRange": "SDR",
+          "ExtendedVideoType": "None",
+          "ExtendedVideoSubType": "None"
         },
         {
           "Index": 1,

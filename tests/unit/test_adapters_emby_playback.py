@@ -26,13 +26,10 @@ from usher.ports.source import StreamTarget, StreamTargetKind
 
 BASE = "https://emby.invalid"
 TOKEN = "session-token-1"
-DEVICE = "9d1f0b6c-0000-7000-8000-000000000001"
 
 
 def _targets(fixture: str, base_url: str = BASE) -> list[StreamTarget]:
-    return build_stream_targets(
-        load_emby_fixture(fixture), base_url=base_url, access_token=TOKEN, device_id=DEVICE
-    )
+    return build_stream_targets(load_emby_fixture(fixture), base_url=base_url, access_token=TOKEN)
 
 
 def test_the_direct_target_is_ranked_first() -> None:
@@ -53,8 +50,24 @@ def test_the_direct_url_is_a_static_stream_with_everything_emby_needs() -> None:
     query = parse_qs(parsed.query)
     assert query["static"] == ["true"]
     assert query["MediaSourceId"] == ["0000000000000000000000000000b001"]
-    assert query["DeviceId"] == [DEVICE]
     assert query["api_key"] == [TOKEN]
+
+
+def test_the_direct_url_does_not_carry_ushers_device_id() -> None:
+    """Verified against the live Emby 4.9.5.0 server on 2026-07-31: the same
+    URL with `DeviceId` stripped still answers **206 Partial Content** with
+    real `video/x-matroska` bytes, so the parameter was never load-bearing.
+    Strip `api_key` instead and the route answers 401; strip `static` and it
+    answers 400. Only the two that matter are sent.
+
+    ADR-0012 accepted, as an unverified risk, that a captured playback URL
+    is a drop-in for `/embywebsocket?api_key=…&deviceId=…` and is therefore
+    attributed to Usher's own registered device. Half of that is now simply
+    gone: a captured URL no longer hands over the device id.
+    """
+    query = parse_qs(urlparse(_targets("movie_item")[0].url).query)
+    assert "DeviceId" not in query
+    assert sorted(query) == ["MediaSourceId", "api_key", "static"]
 
 
 def test_the_direct_target_carries_the_quality_facts() -> None:
@@ -81,9 +94,9 @@ def test_the_deep_link_wraps_the_direct_url_intact() -> None:
     that was never quoted is that same string, so the assertion held while
     testing nothing. Verified by mutation. It matters because the direct
     URL's own `&` separators, left raw, terminate the `url` parameter --
-    a client would get `…/stream.mkv?static=true` and lose `MediaSourceId`,
-    `DeviceId` and `api_key`, which is exactly the 401 this docstring
-    claims to rule out.
+    a client would get `…/stream.mkv?static=true` and lose `MediaSourceId`
+    and `api_key`, which is exactly the 401 this docstring claims to rule
+    out.
     """
     direct, deep = _targets("movie_item")
     assert deep.scheme == "infuse"
@@ -126,7 +139,7 @@ def test_a_media_source_with_no_container_has_no_targets() -> None:
     nothing."""
     payload = load_emby_fixture("movie_item")
     del payload["MediaSources"][0]["Container"]
-    assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE) == []
+    assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN) == []
 
 
 def test_a_multi_version_item_is_played_at_its_best_playable_version() -> None:
@@ -173,7 +186,7 @@ def test_a_capitalised_container_is_lowercased_in_both_places() -> None:
     """
     payload = load_emby_fixture("movie_item")
     payload["MediaSources"][0]["Container"] = "MKV"
-    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE)[0]
+    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN)[0]
     assert direct.container == "mkv"
     assert urlparse(direct.url).path.endswith("/stream.mkv")
 
@@ -196,7 +209,7 @@ def test_an_items_runtime_agrees_with_its_targets_runtime() -> None:
     payload = load_emby_fixture("movie_item")
     del payload["RunTimeTicks"]
     item = to_source_item(payload)
-    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE)[0]
+    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN)[0]
     assert item is not None
     assert item.runtime_seconds == direct.runtime_seconds == 9360
 
@@ -220,7 +233,7 @@ def test_a_negative_resume_position_is_clamped_on_the_read_side_too() -> None:
     """
     payload = load_emby_fixture("movie_item")
     payload["UserData"]["PlaybackPositionTicks"] = -5_000_000
-    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE)[0]
+    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN)[0]
     assert direct.resume_position_seconds == 0
 
 
@@ -236,7 +249,7 @@ def test_item_level_dimensions_are_the_fallback_for_a_target_too() -> None:
     del video["Width"]
     del video["Height"]
     payload["Width"], payload["Height"] = 1280, 720
-    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE)[0]
+    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN)[0]
     assert direct.resolution == "1280x720"
 
 
@@ -247,7 +260,7 @@ def test_an_item_id_stays_inside_its_own_url_path_segment() -> None:
     the source entirely -- with a valid session token attached."""
     payload = load_emby_fixture("movie_item")
     payload["Id"] = "a/../b"
-    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE)[0]
+    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN)[0]
     # `urlparse` does not decode, so this is the escaping as it goes out.
     assert urlparse(direct.url).path == "/Videos/a%2F..%2Fb/stream.mkv"
 
@@ -261,7 +274,7 @@ def test_an_item_with_no_id_has_no_targets() -> None:
     link the client follows and Emby refuses."""
     payload = load_emby_fixture("movie_item")
     del payload["Id"]
-    assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE) == []
+    assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN) == []
 
 
 # --- ADR-0012's handling rules ---------------------------------------

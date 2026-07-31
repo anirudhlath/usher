@@ -4,15 +4,28 @@ Everything Emby-specific above the wire lives here and in this package's
 `mapping`, `playback`, and `session` modules; nothing outside
 `usher.adapters.emby` names an Emby field, route, or concept.
 
-**Which routes are verified against the live server.** `POST
-/Users/AuthenticateByName` is -- ADR-0004's own end-to-end session used it,
-and it used the played/unplayed toggle below too. The rest are the standard
-Emby 4.9 routes and have not been exercised from this code; M3's definition
-of done requires a live run before the milestone closes. The failure mode
-of a wrong *query parameter* is deliberately benign: Emby ignores
-parameters it does not know, so a wrong delta filter degrades to a full
-walk -- a safe superset, and exactly what the nightly reconcile does -- and
-never to a silently empty result.
+**Which routes are verified against the live server.** All of them below,
+against Emby **4.9.5.0** on 2026-07-31, driving this class: `GET
+/Users/{user}/Items` (listing, delta filters, paging), `GET
+/Users/{user}/Items/{item}`, `GET /System/Info`, `GET /System/Info/Public`,
+`POST /Users/{user}/Items/{item}/UserData`, `POST
+/Users/{user}/PlayedItems/{item}`, and `/Videos/{item}/stream.{container}`.
+`POST /Users/AuthenticateByName` is verified separately -- ADR-0004's own
+end-to-end session used it -- and was *not* re-exercised here, because the
+live run held a token rather than a password. Silent re-authentication on
+401 is therefore still unverified end to end against the real server.
+
+That run found one route simply wrong: `push_watch_state` reported
+positions to `POST /Users/{user}/PlayingItems/{item}/Progress`, which
+answers **400** on this server for every body and parameter set tried. See
+that method's docstring.
+
+The failure mode of a wrong *query parameter* is benign, and this is now
+measured rather than assumed: an invented parameter name was ignored
+outright and the request returned the full unfiltered `TotalRecordCount`.
+A wrong delta filter therefore degrades to a full walk -- a safe superset,
+and exactly what the nightly reconcile does -- never to a silently empty
+result.
 
 ### Paging
 
@@ -25,12 +38,22 @@ thousands of items inside one second, and Emby's own stamp has finite
 resolution -- ties are the normal case, not a corner. A server free to
 break them differently between two requests reshuffles the window under the
 cursor, and items fall through the gap silently, masked one-for-one by
-duplicates elsewhere. `SortName` is the tiebreak. It is not a guaranteed
-total order either (two versions of one film can share both keys), but it
-collapses the realistic case to nothing, and it is one of the sort fields
-Emby's `/Items` documentation lists, so an unknown-field degradation is not
-in play. **Not yet exercised against the live server** -- see the route
-note above; M3's live run is where this is confirmed.
+duplicates elsewhere. `SortName` is the tiebreak.
+
+**Emby honours it -- verified 2026-07-31.** Demonstrated on a tie-heavy
+primary key rather than hoped for: `SortBy=ProductionYear,SortName` returns
+the block of items sharing a year in `SortName` order, and
+`SortBy=ProductionYear` alone returns that same block in a different,
+insertion-shaped order. The secondary key is applied, so asking for a total
+order is a real request and not a no-op.
+
+Tie *instability* was not reproducible on this server -- repeated
+`StartIndex=0` pages came back identical, and overlapping `StartIndex=0`/
+`StartIndex=5` windows agreed exactly, with and without the tiebreak. So
+the second key is a cheap guarantee rather than a demonstrated-necessary
+fix here. It stays: it costs one word in a query string, the failure it
+prevents is silent, and "this server's query plan happened to be stable
+across three requests" is not the same claim as "the order is total".
 
 **Ascending, for a narrower reason than it looks.** Any insertion mid-walk
 shifts everything to its right, which produces *duplicates*, and the port
@@ -54,9 +77,11 @@ failing it.
 ### Memory
 
 One page in flight, always. `_walk` yields each payload as it parses it and
-never accumulates. The deployment this was built for holds 94,395 movies
-across 17 libraries; at the default page size that is one page of JSON
-resident, not a library.
+never accumulates. Measured against the live deployment on 2026-07-31, a
+walk of it is **1,126,674 items** -- 94,438 movies, 32,409 series and
+999,827 episodes -- so at the default page size that is one page of JSON
+resident rather than a library. The 94,395-movie figure this was built
+against was only the movie third of it.
 
 ### Spans
 
@@ -133,12 +158,19 @@ ITEM_FIELDS = (
 # change do not touch the same timestamp. Sending the library one for a
 # watch-state walk would miss every item whose only change was being marked
 # played -- the entire population that walk exists to find.
+#
+# Both verified honoured on 2026-07-31, and verified to be genuinely
+# different filters rather than aliases: against 1,126,674 items, a cursor
+# ten years in the future returned 0 for each, and a 30-day cursor returned
+# 28,934 for `MinDateLastSaved` and 29,005 for `MinDateLastSavedForUser`.
 LIBRARY_SINCE_PARAM = "MinDateLastSaved"
 USER_DATA_SINCE_PARAM = "MinDateLastSavedForUser"
 
 # Two keys, because `StartIndex` paging reads a window out of an order the
 # server recomputes for every request and `DateCreated` alone is not a
-# total order -- see the Paging section of this module's docstring.
+# total order. Emby applies the second key -- verified 2026-07-31; see the
+# Paging section of this module's docstring for how, and for what that run
+# could and could not demonstrate.
 SORT_BY = "DateCreated,SortName"
 
 # The walk's dead-man's switch. Neither of its two termination conditions
@@ -152,10 +184,14 @@ SORT_BY = "DateCreated,SortName"
 # reconciler, it *hangs* it -- and the same property makes the failure
 # untestable, since the test that would catch it never returns either.
 #
-# 10,000 pages is 2,000,000 items at the default page size, ~21x the
-# 94,395-item deployment this was built for. Both are constructor knobs, so
-# an operator who lowers `page_size` far enough for that headroom to matter
-# raises this alongside it.
+# 10,000 pages is 2,000,000 items at the default page size. The headroom
+# that leaves is **1.8x, not the ~21x this comment used to claim**: a full
+# walk of the live deployment is 1,126,674 items (measured 2026-07-31, all
+# three item types, not the 94,438 movies alone), i.e. 5,634 pages -- 56% of
+# the bound. Still never reached legitimately, and still a bound worth
+# having, but it is one library doubling away from mattering rather than
+# twenty. Both are constructor knobs, so an operator who lowers `page_size`
+# -- or whose library grows past ~2M items -- raises this alongside it.
 MAX_PAGES = 10_000
 
 
@@ -360,7 +396,6 @@ class EmbyAdapter(SourceAdapter):
                 payload,
                 base_url=self._source.base_url,
                 access_token=await self._session.access_token(),
-                device_id=self._source.device_id,
             )
 
     def watch_state(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceWatchState]:
@@ -374,18 +409,48 @@ class EmbyAdapter(SourceAdapter):
                 yield state
 
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
-        """Write watch state back to Emby, in two calls.
+        """Write watch state back to Emby: one call, plus a second when the
+        item is being marked played.
 
-        Emby has no endpoint that sets position and played together, so this
-        is not atomic -- and the order is load-bearing. **Position first,
-        played flag last:** marking an item played clears its resume
-        position server-side, so writing the position afterwards leaves a
-        just-finished film resumable at whatever second the client last
-        reported, which is how it reappears in Continue Watching.
+        Every claim below was verified against the live Emby 4.9.5.0 server
+        on 2026-07-31, and the first of them replaced a route that never
+        worked at all.
+
+        **The position goes to `POST /Users/{user}/Items/{item}/UserData`,
+        as JSON.** The obvious-looking `POST
+        /Users/{user}/PlayingItems/{item}/Progress` answers **400 `"Value
+        cannot be null. (Parameter 'key')"`** on every body and parameter
+        set tried, and so does `POST /Sessions/Playing/Progress`: both are
+        *session-scoped playback reporting*, keyed off a play session, and
+        Usher never plays anything. The `UserData` route answers 204 and the
+        position reads back immediately.
+
+        **`Played` is named in that body even when it is not changing.** The
+        route deserialises into a DTO whose unset fields take their C#
+        defaults, so a body carrying only `PlaybackPositionTicks` flips a
+        played item to unplayed -- observed directly. `PlayCount` and
+        `LastPlayedDate` survive the same omission; `Played` does not.
+
+        **Marking played is a second call, and it goes last.** `POST
+        /Users/{user}/PlayedItems/{item}` is the only route that advances
+        `PlayCount` and stamps `LastPlayedDate`, and it clears the resume
+        position as it does so -- so the order is load-bearing exactly as
+        PRD 03 says: position first, played last, or a just-finished film
+        stays resumable at the last reported second and reappears in
+        Continue Watching.
+
+        **Unplaying does *not* use `DELETE /PlayedItems`.** That route is
+        destructive well beyond its name: it resets `PlayCount` to 0, clears
+        `LastPlayedDate`, *and* clears a non-zero resume position. Reporting
+        a position is not a claim that the item was never watched, so the
+        unplayed path is the single `UserData` write above, which live Emby
+        applies while leaving the household's play history alone.
 
         A partial failure (position written, played not) raises, exactly as
         the port requires, and PRD 03's caller enqueues a retry. Both writes
-        are idempotent, so the retry is safe.
+        are idempotent -- `POST /PlayedItems` on an already-counted item
+        leaves `PlayCount` at 1 rather than incrementing -- so the retry is
+        safe.
         """
         with _tracer.start_as_current_span("source.push_watch_state") as span:
             span.set_attribute("usher.source", self._source.name)
@@ -395,21 +460,21 @@ class EmbyAdapter(SourceAdapter):
             user, item = _segment(user_id), _segment(external_id)
             await self._session.ok(
                 "POST",
-                f"/Users/{user}/PlayingItems/{item}/Progress",
-                params={
+                f"/Users/{user}/Items/{item}/UserData",
+                payload={
                     # Clamped, not trusted: `WatchStateUpdate` is a plain
-                    # dataclass with no validation and Emby's PositionTicks
-                    # is unsigned, so a negative would be a 400 on a
-                    # write-back PRD 03 then retries forever.
-                    "PositionTicks": str(max(state.position_seconds, 0) * TICKS_PER_SECOND)
+                    # dataclass with no validation and Emby's tick fields are
+                    # unsigned, so a negative would be a 400 on a write-back
+                    # PRD 03 then retries forever.
+                    "PlaybackPositionTicks": max(state.position_seconds, 0) * TICKS_PER_SECOND,
+                    "Played": state.played,
                 },
                 op="push_progress",
             )
-            await self._session.ok(
-                "POST" if state.played else "DELETE",
-                f"/Users/{user}/PlayedItems/{item}",
-                op="push_played",
-            )
+            if state.played:
+                await self._session.ok(
+                    "POST", f"/Users/{user}/PlayedItems/{item}", op="push_played"
+                )
 
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
         raise SourceNotSupported(

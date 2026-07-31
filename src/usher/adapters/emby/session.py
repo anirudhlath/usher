@@ -45,13 +45,32 @@ wrong password becomes an infinite storm.
 
 **Which paths below are verified.** `POST /Users/AuthenticateByName` is
 verified -- it is the call ADR-0004's own end-to-end session used to mint
-its token. `/System/Info/Public` and `/System/Info` are the standard Emby
-4.9 routes and are not yet verified against the live server; M3's
-definition of done requires a live run before the milestone is closed.
-`/System/Info/Public` is load-bearing for `verify()`: because it answers
-*without* authentication, a failure there is a reachability failure and
-nothing else, which is what lets `SourceStatus` separate "unreachable"
-from "bad credentials".
+its token. `/System/Info` and `/System/Info/Public` were both exercised
+against the live Emby 4.9.5.0 server on 2026-07-31, and the split
+`verify()` depends on holds exactly as designed:
+
+- `/System/Info/Public` answers **200 with no credential of any kind**,
+  carrying `ServerName`, `Version`, and `Id`. So a failure there is a
+  reachability failure and nothing else, which is what lets `SourceStatus`
+  separate "unreachable" from "bad credentials".
+- `/System/Info` answers **401 without a token** and 200 with one, and
+  carries the same `Version`. So the second probe really does test the
+  credential rather than the host.
+
+One divergence from `FakeEmbyServer`, recorded rather than smoothed over:
+the real `/System/Info/Public` **tolerates a session token** (it answers
+200, and in fact returns two extra fields, `LocalAddress` and
+`WanAddress`). The fake rejects one with a 400. That is deliberate
+over-strictness on the fake's part -- an adapter that reached this path
+through its *authenticated* helper would authenticate first, and against a
+bad credential the reachable/unauthenticated distinction would silently
+collapse. The real server would not catch that; the fake does.
+
+**Not verified, and not verifiable from that run:** silent
+re-authentication on a 401. The live run held an access token rather than a
+password, so nothing exercised the refresh path end to end against the real
+server -- only against `FakeEmbyServer`, which does model an expiring
+token.
 """
 
 import asyncio

@@ -220,7 +220,32 @@ is a pure function of catalog state and can be rebuilt from scratch at any time.
   apps flows in.
 - **Outbound:** client actions write `WatchState` with `origin = api`, then
   push to the source best-effort. Failure enqueues a retry and never blocks the
-  API response.
+  API response. On Emby that push is **one call, plus a second only when the
+  item is being marked played** — and every part of that sentence was settled
+  by running it against the live server (Emby 4.9.5.0, 2026-07-31) rather than
+  by reading the API:
+  - The position goes to `POST /Users/{userId}/Items/{itemId}/UserData` as a
+    JSON body. The obvious `POST /Users/{userId}/PlayingItems/{itemId}/Progress`
+    answers **400** for every body and parameter set tried, as does
+    `POST /Sessions/Playing/Progress`: both are *session-scoped playback
+    reporting*, and Usher never plays anything.
+  - `Played` is named in that body even when it is not changing, because the
+    route deserialises into a DTO whose unset fields take their defaults — a
+    body carrying only a position silently flips a played item to unplayed.
+  - Marking played is the second call, `POST /Users/{userId}/PlayedItems/{itemId}`,
+    and it goes **last**: it is the only route that advances `PlayCount` and
+    stamps `LastPlayedDate`, and it clears the resume position as it does so.
+    The reverse order leaves a just-finished film resumable at the last
+    reported second, which is how it reappears in Continue Watching.
+  - Reporting an item *unplayed* does **not** use `DELETE .../PlayedItems`.
+    That route resets `PlayCount` to 0, clears `LastPlayedDate`, and clears a
+    non-zero resume position — so using it to write a resume position would
+    erase the household's play history *and* then discard the position it was
+    called to write.
+
+  Both writes are idempotent — marking an already-counted item played leaves
+  `PlayCount` where it is rather than incrementing — so the retry after a
+  partial failure is safe.
 - **Conflicts:** latest `updated_at` wins. With push-based inbound updates the
   window where this matters is seconds.
 

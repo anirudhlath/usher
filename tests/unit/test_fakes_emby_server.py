@@ -5,11 +5,18 @@ A test double with tests of its own, deliberately. The source-adapter
 contract runs against the real `EmbyAdapter` through this file, so every
 place it quietly diverges from Emby is a place a *wrong adapter* passes
 forty assertions. Two such divergences shipped and are pinned here: a
-`POST .../Progress` that rebuilt the watch state from scratch and silently
+position write that rebuilt the watch state from scratch and silently
 discarded the play count and last-played date Emby preserves, and a
 renderer that left its own fixture's `SeriesId`/`ParentIndexNumber`/
 `IndexNumber` showing through for an item seeded without them -- so a
 contract test could assert on an episode number the harness never gave it.
+
+A third divergence this file could never have caught is why M3's live run
+exists: the *route* itself was wrong. `POST
+/Users/{user}/PlayingItems/{item}/Progress` answers 400 on a real Emby
+4.9.5.0, and a fake that implemented the adapter's own guess agreed with it
+perfectly. The write routes below are now transcribed from that server, 400
+included.
 
 Driven through `EmbySession` rather than by calling the fake's private
 renderers: that is the path the adapter takes, so these assertions cover
@@ -83,7 +90,22 @@ class _Driver:
             "GET", f"/Users/{USER_ID}/Items/{external_id}", op="get_item"
         )
 
+    async def write_user_data(
+        self, external_id: str, position_seconds: int, *, played: bool | None = None
+    ) -> None:
+        payload: dict[str, object] = {"PlaybackPositionTicks": position_seconds * TICKS_PER_SECOND}
+        if played is not None:
+            payload["Played"] = played
+        await self.session.ok(
+            "POST",
+            f"/Users/{USER_ID}/Items/{external_id}/UserData",
+            payload=payload,
+            op="push_progress",
+        )
+
     async def report_progress(self, external_id: str, position_seconds: int) -> None:
+        """The route the adapter used to use, kept only so a test can pin
+        that the fake rejects it the way the live server does."""
         await self.session.ok(
             "POST",
             f"/Users/{USER_ID}/PlayingItems/{external_id}/Progress",
@@ -223,10 +245,10 @@ async def test_a_seeded_watch_state_round_trips_all_four_facts(driver: _Driver) 
 async def test_reporting_progress_changes_the_position_and_nothing_else(
     driver: _Driver,
 ) -> None:
-    """`POST .../Progress` reports a position. Emby does not zero
-    `PlayCount` or clear `LastPlayedDate` when it receives one, and a fake
-    that did would let an adapter that destroyed a user's play history on
-    every resume look correct -- `recorded_watch_state` reads back only
+    """`POST .../Items/{item}/UserData` writes a position. Emby does not
+    zero `PlayCount` or clear `LastPlayedDate` when it receives one, and a
+    fake that did would let an adapter that destroyed a user's play history
+    on every resume look correct -- `recorded_watch_state` reads back only
     position and played, so nothing else in the suite can see it."""
     driver.server.add_item(MOVIE, T0)
     driver.server.set_watch_state(
@@ -238,7 +260,7 @@ async def test_reporting_progress_changes_the_position_and_nothing_else(
             last_played_at=LAST_PLAYED,
         )
     )
-    await driver.report_progress("movie-1", 600)
+    await driver.write_user_data("movie-1", 600, played=True)
     state = to_watch_state(await driver.payload("movie-1"), source_user_id=USER_ID)
     assert state is not None
     assert state.position_seconds == 600
@@ -247,13 +269,52 @@ async def test_reporting_progress_changes_the_position_and_nothing_else(
     assert state.last_played_at == LAST_PLAYED
 
 
+async def test_a_user_data_write_that_omits_played_clears_it(driver: _Driver) -> None:
+    """Transcribed from the live server, 2026-07-31: the body deserialises
+    into a DTO whose unset fields take their C# defaults, so a write
+    carrying only `PlaybackPositionTicks` flipped a played item to unplayed
+    -- while leaving `PlayCount` and `LastPlayedDate` intact. The adapter
+    names `Played` on every write because of this; the fake models it so
+    that dropping the field from the adapter fails somewhere."""
+    driver.server.add_item(MOVIE, T0)
+    driver.server.set_watch_state(
+        SourceWatchState(
+            external_id="movie-1",
+            position_seconds=100,
+            played=True,
+            play_count=7,
+            last_played_at=LAST_PLAYED,
+        )
+    )
+    await driver.write_user_data("movie-1", 600)
+    state = to_watch_state(await driver.payload("movie-1"), source_user_id=USER_ID)
+    assert state is not None
+    assert state.played is False
+    assert (state.play_count, state.last_played_at) == (7, LAST_PLAYED)
+
+
+async def test_the_playing_items_progress_route_is_rejected(driver: _Driver) -> None:
+    """`POST /Users/{user}/PlayingItems/{item}/Progress` is session-scoped
+    playback reporting and answers 400 `"Value cannot be null. (Parameter
+    'key')"` on the live server for every body and parameter set tried.
+    Modelled rather than left unrouted so an adapter regressing to it fails
+    with Emby's own rejection instead of a 404 that reads like a gap here."""
+    driver.server.add_item(MOVIE, T0)
+    with pytest.raises(PortUnavailable, match="400"):
+        await driver.report_progress("movie-1", 600)
+
+
 async def test_marking_played_clears_the_position_and_keeps_the_history(
     driver: _Driver,
 ) -> None:
     """Emby clears the resume position when an item is marked played --
     which is why the adapter writes the position first and the played flag
-    last -- and increments the play count. It does not forget when the item
-    was last watched."""
+    last -- and it does not forget when the item was last watched. Verified
+    live: a 300-second position really did read back as 0 after this call.
+
+    `PlayCount` stays where it is rather than incrementing, also verified:
+    an already-counted item marked played again came back at 1, not 2. That
+    is what makes the adapter's retry after a partial failure idempotent."""
     driver.server.add_item(MOVIE, T0)
     driver.server.set_watch_state(
         SourceWatchState(
@@ -269,11 +330,17 @@ async def test_marking_played_clears_the_position_and_keeps_the_history(
     assert state is not None
     assert state.position_seconds == 0
     assert state.played is True
-    assert state.play_count == 8
+    assert state.play_count == 7
     assert state.last_played_at == LAST_PLAYED
 
 
-async def test_unmarking_played_keeps_the_position_and_the_history(driver: _Driver) -> None:
+async def test_unmarking_played_destroys_the_position_and_the_history(driver: _Driver) -> None:
+    """`DELETE /Users/{user}/PlayedItems/{item}` is destructive well beyond
+    its name -- verified live on 2026-07-31: `PlayCount` reset to 0,
+    `LastPlayedDate` gone, and a non-zero resume position cleared along with
+    them. That is exactly why the adapter reports an item unplayed through a
+    `UserData` write instead, and why this fake models the destruction
+    rather than the polite behaviour the route's name suggests."""
     driver.server.add_item(MOVIE, T0)
     driver.server.set_watch_state(
         SourceWatchState(
@@ -287,10 +354,10 @@ async def test_unmarking_played_keeps_the_position_and_the_history(driver: _Driv
     await driver.mark_played("movie-1", played=False)
     state = to_watch_state(await driver.payload("movie-1"), source_user_id=USER_ID)
     assert state is not None
-    assert state.position_seconds == 1840
+    assert state.position_seconds == 0
     assert state.played is False
-    assert state.play_count == 7
-    assert state.last_played_at == LAST_PLAYED
+    assert state.play_count == 0
+    assert state.last_played_at is None
 
 
 async def test_an_untouched_item_reports_a_zero_state_with_no_last_played_date(
@@ -316,7 +383,7 @@ async def test_writes_to_an_unknown_item_are_not_found(driver: _Driver) -> None:
     an id the server has never seen would let a write-back to the wrong id
     look successful forever."""
     with pytest.raises(PortUnavailable, match="404"):
-        await driver.report_progress("never-existed", 600)
+        await driver.write_user_data("never-existed", 600, played=False)
     with pytest.raises(PortUnavailable, match="404"):
         await driver.mark_played("never-existed", played=True)
 

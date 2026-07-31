@@ -28,19 +28,49 @@ forbids committing), it identifies a real library, and it carries real
 server and user ids. `scripts/capture_emby_fixture.py` regenerates a
 scrubbed capture locally for anyone who wants to diff shapes.
 
+Diffed against the live server on 2026-07-31, movie, series and episode
+each. Two shapes they get right that are worth not re-deriving: an episode
+really does carry `SeriesId`, `SeriesName`, `ParentIndexNumber` and
+`IndexNumber` on the item, and a `Series` item really does carry no
+`MediaSources` at all. Two they get wrong in ways nothing depends on: this
+server's item ids are short numeric strings rather than 32-hex GUIDs, and
+its `MediaSourceId` is `mediasource_<item id>` -- both are opaque strings
+everywhere here. **`multi_version_movie.json` remains unverified**: no item
+with more than one `MediaSource` exists in the newest 800 movies of this
+deployment, so `primary_media_source`'s selection rule has still never met
+a real multi-version payload.
+
 ### Three traps this module exists to close
 
 1. **Dolby Vision reports itself several ways at once**, and a DV stream
    commonly *also* advertises HDR10, because the HDR10 base layer is
-   genuinely present. Checking `VideoRangeType` first would catalogue every
-   DV file as HDR10, so any DV marker wins -- `DvProfile`, a `dvhe`/`Dolby
-   Vision` codec profile, or a `VideoRangeType` naming DV. That last one is
-   matched by *prefix*, because Emby spells the base layer into the same
-   token (`DOVIWithHDR10`, `DOVIWithHLG`, `DOVIWithSDR`, `DOVIWithEL`) and
-   an exact-match table would send every one of those to its base layer
-   instead. Each marker is independently sufficient and independently
-   tested: a file carrying only `DvProfile` is DV, and so is one carrying
-   only `DOVIWithHDR10`.
+   genuinely present. Checking one field first would catalogue every DV
+   file as HDR10, so any DV marker wins -- swept across *every* range field
+   before any of them is mapped: `DvProfile`, a `dvhe`/`Dolby Vision` codec
+   profile, or a range token naming DV. Tokens are matched by *prefix*,
+   because both vendors spell the base layer or the profile into the same
+   token (`DOVIWithHDR10`, `DOVIWithHLG`, `DOVIWithSDR`, `DOVIWithEL`;
+   `DoviProfile81`, `DoviProfile50`) and an exact-match table would send
+   every one of those somewhere else. Each marker is independently
+   sufficient and independently tested.
+
+   **What Emby 4.9.5.0 actually sends, measured 2026-07-31** across every
+   video stream of 200 movies (the newest 100 4K and the newest 100 HD, out
+   of 94,438): `VideoRange` is one of `SDR`, `DolbyVision`, `HDR 10` --
+   with a space, which only reaches the right entry because
+   non-alphanumerics are stripped first -- and
+   `ExtendedVideoType`/`ExtendedVideoSubType` are one of `None`/`None`,
+   `Hdr10`/`Hdr10`, or `DolbyVision`/`DoviProfile81`|`DoviProfile50`.
+   **`VideoRangeType` and `DvProfile` never appeared once**, in any stream,
+   including all 34 Dolby Vision files. Both are still read -- older Emby
+   builds and Jellyfin do send them, and reading a field a server omits
+   costs nothing -- but until that run the two fields this server actually
+   populates were not read at all, which left the whole DV decision resting
+   on a single one.
+
+   `ExtendedVideoType` and `ExtendedVideoSubType` carry the literal string
+   `"None"`, not JSON `null`, so they are always truthy: any check on them
+   has to be a token lookup that falls through, never a truthiness test.
 2. **Naive datetimes.** Verified on Python 3.13: `fromisoformat` accepts
    Emby's seven-digit fractional seconds and a trailing `Z`, but a value
    with no offset yields a naive datetime -- and `SourceItem` is a plain
@@ -92,6 +122,19 @@ _HDR_BY_TOKEN: dict[str, HdrFormat] = {
 # A prefix rule also covers a combination Emby adds after this was
 # written, which an enumerated table by construction cannot.
 _DV_TOKEN_PREFIXES = ("DOVI", "DOLBYVISION")
+
+# Every field that can name a video range, most specific first. The two
+# `Extended*` ones are what Emby 4.9.5.0 actually populates -- verified
+# 2026-07-31 against 200 movies, which emitted `VideoRangeType` and
+# `DvProfile` exactly zero times between them. `VideoRangeType` is kept
+# because older Emby builds and Jellyfin do emit it, and reading a field a
+# server does not send costs nothing.
+#
+# `ExtendedVideoType`/`ExtendedVideoSubType` carry the literal string
+# `"None"` for an SDR file, not JSON `null`, so they are always truthy and
+# any check on them has to be a token lookup that falls through rather than
+# a truthiness test.
+_RANGE_KEYS = ("ExtendedVideoType", "ExtendedVideoSubType", "VideoRangeType", "VideoRange")
 
 # Ordered: the first match wins, so "DTS-HD MA" is not also matched by a
 # looser "master audio" rule further down producing a different token.
@@ -290,12 +333,21 @@ def hdr_format(video: Mapping[str, Any]) -> HdrFormat | None:
     Any Dolby Vision marker wins outright -- see the module docstring.
     """
     profile = str(video.get("Profile") or "").lower()
-    if video.get("DvProfile") is not None or "dolby vision" in profile or "dvhe" in profile:
+    tokens = [_NON_ALNUM.sub("", str(video.get(key) or "")).upper() for key in _RANGE_KEYS]
+    # Every DV marker is swept before any base-layer token is mapped, rather
+    # than field by field. Field-by-field made "any DV marker wins" true only
+    # of the *first* field that said anything: a file whose `VideoRange`
+    # names its HDR10 base layer while `ExtendedVideoType` says DolbyVision
+    # would have been catalogued HDR10, which is the exact failure this
+    # function exists to prevent.
+    if (
+        video.get("DvProfile") is not None
+        or "dolby vision" in profile
+        or "dvhe" in profile
+        or any(token.startswith(_DV_TOKEN_PREFIXES) for token in tokens)
+    ):
         return HdrFormat.DOLBY_VISION
-    for key in ("VideoRangeType", "VideoRange"):
-        token = _NON_ALNUM.sub("", str(video.get(key) or "")).upper()
-        if token.startswith(_DV_TOKEN_PREFIXES):
-            return HdrFormat.DOLBY_VISION
+    for token in tokens:
         mapped = _HDR_BY_TOKEN.get(token)
         if mapped is not None:
             return mapped

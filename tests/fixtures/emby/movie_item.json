@@ -31,12 +31,13 @@
           "Type": "Video",
           "Codec": "hevc",
           "Profile": "Main 10",
+          "BitDepth": 10,
           "Width": 3840,
           "Height": 2160,
-          "VideoRange": "HDR",
-          "VideoRangeType": "DOVI",
-          "DvProfile": 8,
-          "DvLevel": 9
+          "VideoRange": "DolbyVision",
+          "ExtendedVideoType": "DolbyVision",
+          "ExtendedVideoSubType": "DoviProfile81",
+          "ExtendedVideoSubTypeDescription": "Profile 8.1 (HDR10 compatible)"
         },
         {
           "Index": 1,
