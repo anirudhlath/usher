@@ -12,11 +12,14 @@ from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 
+from pydantic import AwareDatetime
+
 from usher.domain.bootstrap import ImportRun
 from usher.domain.enums import EnrichmentState, TitleKind
-from usher.domain.source import Source
+from usher.domain.source import MediaItem, Source
 from usher.domain.title import Title
 from usher.ports.bulk import IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
+from usher.ports.ingest import MediaItemUpsert, SweepResult
 
 
 class TitleRepository(ABC):
@@ -403,3 +406,143 @@ class SourceRepository(ABC):
         """Remove a source. Returns whether a row was actually removed, so
         `DELETE /admin/sources/{id}` can answer 404 rather than claiming to
         have deleted something that never existed. Idempotent."""
+
+
+class MediaItemRepository(ABC):
+    """Persistence for "this title is available on that source".
+
+    Same session/transaction ownership as `TitleRepository`: every method
+    flushes so conflicts surface immediately, none commits.
+
+    **Availability is retracted by exactly one method, and only after a walk
+    has provably finished.** `SourceAdapter.list_items`' contract guarantees
+    a walk raises rather than truncating, precisely so a caller can tell
+    "the library ended" from "the adapter gave up"; that guarantee is worth
+    nothing if the sweep runs either way. `mark_unseen_unavailable` is
+    therefore a separate call the reconciler makes *after* the walk returns
+    normally, never a side effect of `upsert_many`. See ADR-0015.
+    """
+
+    @abstractmethod
+    async def upsert_many(self, rows: Sequence[MediaItemUpsert]) -> BulkWriteResult:
+        """Insert or update media items, keyed on `(source_id, external_id)`.
+
+        Flushes, never commits. Returns inserts and updates separately, so a
+        re-sync is visibly a re-sync (`inserted == 0`) rather than
+        indistinguishable from a first one -- which is what makes PRD 10's
+        "library growth per week" panel a real measurement instead of a
+        straight line.
+
+        **A batch may contain the same `(source_id, external_id)` twice.**
+        `SourceAdapter.list_items` explicitly permits duplicates within one
+        walk, so an implementation must deduplicate rather than assume;
+        against Postgres, not doing so raises `CardinalityViolationError`.
+        The last such row in `rows` wins, matching a resumed walk's "the
+        later page is the fresher read".
+
+        **Never downgrades a matched item to unmatched.** A row already
+        carrying a `title_id` (from an earlier match, or from a human
+        resolving it in the review queue) keeps it when this is called with
+        `title_id=None`. The reverse -- a newly-resolved `title_id` landing
+        on a row that had none -- does apply. Without this rule the nightly
+        walk erases every manual resolution, silently, the same night it was
+        made.
+
+        **Never hard-deletes.** PRD 02: "Soft-delete availability,
+        hard-delete nothing." Rows absent from `rows` are not touched by
+        this call at all.
+
+        An item that appears in `rows` is `available = true` when this
+        returns, because appearing in a walk *is* the evidence of
+        availability -- which is how an item that came back comes back.
+
+        A `title_id` or `episode_id` naming a row that does not exist raises
+        `RepositoryConflict`, and leaves the session usable for the caller's
+        other pending work.
+        """
+
+    @abstractmethod
+    async def mark_unseen_unavailable(
+        self, source_id: uuid.UUID, *, seen_since: AwareDatetime, max_retract_fraction: float
+    ) -> SweepResult:
+        """Retract availability for everything this source did not show us.
+
+        Sets `available = false` on every row for `source_id` whose
+        `last_seen_at` is older than `seen_since` and which is currently
+        available. Returns how many were retracted and how many rows the
+        source has in total -- the guard's own denominator, reported because
+        "3 retracted" and "3 of 4 retracted" want different responses.
+
+        This only ever sets `false`. Restoring an item that came back is
+        `upsert_many`'s doing, because appearing in a walk *is* the evidence
+        of availability.
+
+        **Raises `AvailabilitySweepRefused` and changes nothing** when the
+        retraction would exceed `max_retract_fraction` of the source's
+        items. `list_items` raising rather than truncating covers a walk
+        that failed; this covers a walk that *succeeded* and returned far
+        less than the library holds -- an unmounted drive, a library removed
+        by accident, a permissions change on the source's own account.
+        Neither the adapter nor Usher can distinguish that from a genuine
+        mass deletion, and only one of the two is reversible, so the sweep
+        declines.
+
+        `max_retract_fraction` of `1.0` disables the guard, which is what an
+        operator deliberately removing a library passes.
+
+        Never deletes. A retracted item keeps its row, its `title_id`, and
+        every watch state attached to its title.
+        """
+
+    @abstractmethod
+    async def get_by_external_id(self, source_id: uuid.UUID, external_id: str) -> MediaItem | None:
+        """One item as this source addresses it, or None."""
+
+    @abstractmethod
+    async def resolve_series_titles(
+        self, source_id: uuid.UUID, external_ids: Sequence[str]
+    ) -> dict[str, uuid.UUID]:
+        """Map series `external_id` -> `title_id` for those already matched.
+
+        Exists because an episode's canonical parent is its series' `Title`,
+        and a walk sorted by creation date offers no guarantee that a series
+        is seen before its episodes. Batched rather than per-episode: this
+        deployment holds 999,827 episodes, so a per-item lookup here is the
+        difference between one query per batch and one per episode.
+
+        Absent keys mean "not matched yet", not "no such series" -- the
+        caller leaves those episodes unmatched and enqueues a re-match,
+        which the next batch or the next run resolves.
+        """
+
+    @abstractmethod
+    async def list_unmatched(
+        self, source_id: uuid.UUID | None = None, *, limit: int = 100, offset: int = 0
+    ) -> list[MediaItem]:
+        """The review queue (PRD 02: "Unmatched items are never dropped").
+
+        Ordered by `added_at` descending with `id` as a tiebreak, so paging
+        is stable across calls -- an unstable order silently shows an
+        operator the same item twice and hides another. `added_at` is
+        nullable and sorts last, because an item a source cannot date is
+        less interesting than one it dated yesterday, not more.
+        """
+
+    @abstractmethod
+    async def attach_title(
+        self, media_item_id: uuid.UUID, *, title_id: uuid.UUID, episode_id: uuid.UUID | None
+    ) -> bool:
+        """Resolve one item to a title, by hand or by a later match pass.
+
+        Returns whether a row changed, so a caller can answer 404 rather
+        than claim to have resolved something that does not exist.
+
+        Unlike `upsert_many` this *does* write what it is given, including a
+        `None` `episode_id`: it is the deliberate act of a human or of a
+        re-match, not a walk's incidental "I did not look".
+        """
+
+    @abstractmethod
+    async def count_for_source(self, source_id: uuid.UUID) -> int:
+        """How many items this source has, available or not. The sweep's
+        denominator, and the CLI's report."""
