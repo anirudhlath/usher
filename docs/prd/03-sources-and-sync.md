@@ -289,6 +289,28 @@ tables landed with **M4**, so the series hierarchy is now storable;
 `media_items.episode_id` and `watch_states.episode_id` have real foreign-key
 targets for the first time.
 
+**An episode is attached to its series' `Title`, and the attachment spans
+pages.** A walk is sorted by creation date, which guarantees nothing about a
+series preceding its own episodes — Emby genuinely interleaves them — so the
+series map is built from the whole page *and* from a batched read of what
+earlier pages already stored. An episode whose series is not yet known is
+stored unmatched and enqueued for a re-match; it is never dropped and never
+attached to a guess. An episode with no season or episode number is left
+unmatched for the same reason: defaulting the numbers to zero collapses every
+such episode of a series into one row.
+
+**Enrichment is enqueued only for the titles that need it.** A nightly walk
+sees all 1,126,674 items every night; enqueueing an `enrich` job for each
+makes the queue permanently the size of the library. One batched read of the
+titles' enrichment tiers per page decides, compared through `ENRICHMENT_RANK`
+([ADR-0008](decisions/0008-enrichment-tier-vs-failure.md)) rather than by
+comparing `EnrichmentState` members, which are `StrEnum` and order
+lexicographically.
+
+**Every repository call in this stage is once per batch**, including the
+season and episode writes: at 999,827 episodes, three round trips apiece is
+the difference between a walk that finishes and one that does not.
+
 ### 2. Match — resolve to a canonical Title
 
 Ordered by confidence, stopping at the first hit. **Every lookup is issued

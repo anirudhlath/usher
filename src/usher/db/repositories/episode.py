@@ -155,16 +155,26 @@ SELECT count(*) FILTER (WHERE inserted) AS inserted,
 FROM upserted
 """
 
-# `uq_episodes_title_season_episode` leads with `title_id`, so this is one
-# index scan rather than a scan per pair. 999,827 episodes means a lookup per
-# item is the design defect one port over.
-_RESOLVE = """
-SELECT e.season_number AS season_number, e.episode_number AS episode_number, e.id AS id
-FROM unnest(CAST(:seasons AS integer[]), CAST(:episodes AS integer[])) AS p(s, n)
-JOIN episodes e
-  ON e.title_id = CAST(:title_id AS uuid)
- AND e.season_number = p.s
- AND e.episode_number = p.n
+# Both resolves unnest the *whole* batch, `title_id` included, rather than
+# taking one title and a list of numbers. A page of 1,000 episodes off a walk
+# sorted by creation date spans hundreds of series -- an episode arrives the
+# week it airs, not with its siblings -- so a per-title signature is one round
+# trip per series, which is the same defect batching exists to remove.
+# `uq_seasons_title_season_number` / `uq_episodes_title_season_episode` both
+# lead with `title_id`, so each is a single index scan over the join.
+_RESOLVE_SEASONS = """
+SELECT sn.title_id AS title_id, sn.season_number AS season_number, sn.id AS id
+FROM unnest(CAST(:titles AS uuid[]), CAST(:seasons AS integer[])) AS p(pt, ps)
+JOIN seasons sn ON sn.title_id = p.pt AND sn.season_number = p.ps
+"""
+
+_RESOLVE_EPISODES = """
+SELECT e.title_id AS title_id, e.season_number AS season_number,
+       e.episode_number AS episode_number, e.id AS id
+FROM unnest(
+    CAST(:titles AS uuid[]), CAST(:seasons AS integer[]), CAST(:episodes AS integer[])
+) AS p(pt, ps, pn)
+JOIN episodes e ON e.title_id = p.pt AND e.season_number = p.ps AND e.episode_number = p.pn
 """
 
 
@@ -263,24 +273,42 @@ class PostgresEpisodeRepository(EpisodeRepository):
             ) from exc
         return BulkWriteResult(inserted=int(inserted), updated=int(updated))
 
-    async def resolve(
-        self, title_id: uuid.UUID, numbers: Sequence[tuple[int, int]]
-    ) -> dict[tuple[int, int], uuid.UUID]:
-        if not numbers:
+    async def resolve_seasons(
+        self, keys: Sequence[tuple[uuid.UUID, int]]
+    ) -> dict[tuple[uuid.UUID, int], uuid.UUID]:
+        if not keys:
             return {}
-        unique = list(dict.fromkeys(numbers))
+        unique = list(dict.fromkeys(keys))
         with self._session.no_autoflush:
             rows = (
                 await self._session.execute(
-                    text(_RESOLVE),
+                    text(_RESOLVE_SEASONS),
                     {
-                        "title_id": title_id,
-                        "seasons": [pair[0] for pair in unique],
-                        "episodes": [pair[1] for pair in unique],
+                        "titles": [key[0] for key in unique],
+                        "seasons": [key[1] for key in unique],
                     },
                 )
             ).all()
-        return {(row.season_number, row.episode_number): row.id for row in rows}
+        return {(row.title_id, row.season_number): row.id for row in rows}
+
+    async def resolve_episodes(
+        self, keys: Sequence[tuple[uuid.UUID, int, int]]
+    ) -> dict[tuple[uuid.UUID, int, int], uuid.UUID]:
+        if not keys:
+            return {}
+        unique = list(dict.fromkeys(keys))
+        with self._session.no_autoflush:
+            rows = (
+                await self._session.execute(
+                    text(_RESOLVE_EPISODES),
+                    {
+                        "titles": [key[0] for key in unique],
+                        "seasons": [key[1] for key in unique],
+                        "episodes": [key[2] for key in unique],
+                    },
+                )
+            ).all()
+        return {(row.title_id, row.season_number, row.episode_number): row.id for row in rows}
 
     async def list_for_title(self, title_id: uuid.UUID) -> tuple[list[Season], list[Episode]]:
         with self._session.no_autoflush:

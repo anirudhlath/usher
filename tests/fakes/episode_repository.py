@@ -26,6 +26,12 @@ what actually closes:
   type.
 - **No transaction**, so a batch that raises part-way cannot leave a session
   poisoned and nothing here exercises the SAVEPOINT.
+
+`calls` and `reset_calls()` are test-double affordances rather than port
+methods: `IngestService`'s scale case asserts that a page of 500 episodes
+costs a bounded number of *round trips*, and nothing about the answers this
+fake returns can express that. The paired integration case counts real
+statements instead.
 """
 
 import uuid
@@ -57,8 +63,13 @@ class FakeEpisodeRepository(EpisodeRepository):
     def __init__(self) -> None:
         self._seasons: dict[_SeasonKey, Season] = {}
         self._episodes: dict[_EpisodeKey, Episode] = {}
+        self.calls = 0
+
+    def reset_calls(self) -> None:
+        self.calls = 0
 
     async def upsert_seasons(self, seasons: Sequence[Season]) -> BulkWriteResult:
+        self.calls += 1
         inserted = updated = 0
         # Last-wins deduplication, matching the real one's
         # `SELECT DISTINCT ON (title_id, season_number) ... ORDER BY ...,
@@ -79,6 +90,7 @@ class FakeEpisodeRepository(EpisodeRepository):
         return BulkWriteResult(inserted=inserted, updated=updated)
 
     async def upsert_episodes(self, episodes: Sequence[Episode]) -> BulkWriteResult:
+        self.calls += 1
         inserted = updated = 0
         deduped = {(one.title_id, one.season_number, one.episode_number): one for one in episodes}
         for key, incoming in deduped.items():
@@ -95,14 +107,26 @@ class FakeEpisodeRepository(EpisodeRepository):
             updated += 1
         return BulkWriteResult(inserted=inserted, updated=updated)
 
-    async def resolve(
-        self, title_id: uuid.UUID, numbers: Sequence[tuple[int, int]]
-    ) -> dict[tuple[int, int], uuid.UUID]:
+    async def resolve_seasons(
+        self, keys: Sequence[tuple[uuid.UUID, int]]
+    ) -> dict[tuple[uuid.UUID, int], uuid.UUID]:
+        self.calls += 1
         found = {}
-        for pair in numbers:
-            stored = self._episodes.get((title_id, pair[0], pair[1]))
+        for key in keys:
+            stored = self._seasons.get(key)
             if stored is not None:
-                found[pair] = stored.id
+                found[key] = stored.id
+        return found
+
+    async def resolve_episodes(
+        self, keys: Sequence[tuple[uuid.UUID, int, int]]
+    ) -> dict[tuple[uuid.UUID, int, int], uuid.UUID]:
+        self.calls += 1
+        found = {}
+        for key in keys:
+            stored = self._episodes.get(key)
+            if stored is not None:
+                found[key] = stored.id
         return found
 
     async def list_for_title(self, title_id: uuid.UUID) -> tuple[list[Season], list[Episode]]:

@@ -220,7 +220,53 @@ class EpisodeRepositoryContract:
         result = await repository.upsert_episodes([])
         assert (result.inserted, result.updated) == (0, 0)
 
-    async def test_resolve_answers_a_batch(
+    async def test_resolve_seasons_answers_a_batch(
+        self, repository: EpisodeRepository, title_id: uuid.UUID
+    ) -> None:
+        """`upsert_seasons` reports counts, not ids, and it cannot report the
+        caller's: ingest mints a fresh UUIDv7 per sighting and a season the
+        catalog already holds keeps the id it was inserted with. Reading them
+        back is the only way an episode's `season_id` can be right on the
+        second walk."""
+        await repository.upsert_seasons([season(title_id, 1), season(title_id, 2)])
+        seasons, _ = await repository.list_for_title(title_id)
+        by_number = {one.season_number: one.id for one in seasons}
+        assert await repository.resolve_seasons([(title_id, 1), (title_id, 2)]) == {
+            (title_id, 1): by_number[1],
+            (title_id, 2): by_number[2],
+        }
+
+    async def test_resolve_seasons_spans_titles_in_one_batch(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """The reason the key carries `title_id` rather than the signature
+        taking one. A page of 1,000 episodes off a walk sorted by creation
+        date spans hundreds of series -- an episode arrives the week it airs,
+        not with its siblings -- so a per-title resolve is one round trip per
+        series and 999,827 episodes makes that the design defect batching
+        exists to remove."""
+        await repository.upsert_seasons([season(title_id, 1), season(other_title_id, 1)])
+        resolved = await repository.resolve_seasons([(title_id, 1), (other_title_id, 1)])
+        assert set(resolved) == {(title_id, 1), (other_title_id, 1)}
+        assert resolved[(title_id, 1)] != resolved[(other_title_id, 1)]
+
+    async def test_resolve_seasons_omits_what_it_does_not_have(
+        self, repository: EpisodeRepository, title_id: uuid.UUID
+    ) -> None:
+        await repository.upsert_seasons([season(title_id, 1)])
+        assert (title_id, 99) not in await repository.resolve_seasons(
+            [(title_id, 1), (title_id, 99)]
+        )
+
+    async def test_resolve_seasons_of_nothing_is_a_no_op(
+        self, repository: EpisodeRepository
+    ) -> None:
+        assert await repository.resolve_seasons([]) == {}
+
+    async def test_resolve_episodes_answers_a_batch(
         self, repository: EpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
     ) -> None:
         await repository.upsert_episodes(
@@ -228,21 +274,23 @@ class EpisodeRepositoryContract:
         )
         _, episodes = await repository.list_for_title(title_id)
         by_number = {one.episode_number: one.id for one in episodes}
-        assert await repository.resolve(title_id, [(1, 1), (1, 2)]) == {
-            (1, 1): by_number[1],
-            (1, 2): by_number[2],
+        assert await repository.resolve_episodes([(title_id, 1, 1), (title_id, 1, 2)]) == {
+            (title_id, 1, 1): by_number[1],
+            (title_id, 1, 2): by_number[2],
         }
 
-    async def test_resolve_omits_numbers_it_does_not_have(
+    async def test_resolve_episodes_omits_numbers_it_does_not_have(
         self, repository: EpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID
     ) -> None:
         """Absent means "no such episode", not "not asked" -- a caller that
         cannot tell the two apart leaves an item silently unmatched instead of
         enqueuing a re-match."""
         await repository.upsert_episodes([episode(title_id, season_id, 1)])
-        assert (1, 99) not in await repository.resolve(title_id, [(1, 1), (1, 99)])
+        assert (title_id, 1, 99) not in await repository.resolve_episodes(
+            [(title_id, 1, 1), (title_id, 1, 99)]
+        )
 
-    async def test_resolve_is_scoped_to_its_title(
+    async def test_resolve_episodes_is_scoped_to_its_title(
         self,
         repository: EpisodeRepository,
         title_id: uuid.UUID,
@@ -253,12 +301,30 @@ class EpisodeRepositoryContract:
         one show's episodes off another's, and 32,409 series makes that a
         certainty rather than a risk."""
         await repository.upsert_episodes([episode(title_id, season_id, 1)])
-        assert await repository.resolve(other_title_id, [(1, 1)]) == {}
+        assert await repository.resolve_episodes([(other_title_id, 1, 1)]) == {}
 
-    async def test_resolve_of_nothing_is_a_no_op(
-        self, repository: EpisodeRepository, title_id: uuid.UUID
+    async def test_resolve_episodes_spans_titles_in_one_batch(
+        self,
+        repository: EpisodeRepository,
+        title_id: uuid.UUID,
+        season_id: uuid.UUID,
+        other_season_id: uuid.UUID,
+        other_title_id: uuid.UUID,
     ) -> None:
-        assert await repository.resolve(title_id, []) == {}
+        """Two series' S01E01 in one batch, both answered and not confused.
+        The single-title form cannot express this at all, and it is what every
+        real page of a walk looks like."""
+        await repository.upsert_episodes(
+            [episode(title_id, season_id, 1), episode(other_title_id, other_season_id, 1)]
+        )
+        resolved = await repository.resolve_episodes([(title_id, 1, 1), (other_title_id, 1, 1)])
+        assert set(resolved) == {(title_id, 1, 1), (other_title_id, 1, 1)}
+        assert resolved[(title_id, 1, 1)] != resolved[(other_title_id, 1, 1)]
+
+    async def test_resolve_episodes_of_nothing_is_a_no_op(
+        self, repository: EpisodeRepository
+    ) -> None:
+        assert await repository.resolve_episodes([]) == {}
 
     async def test_list_for_title_orders_by_number(
         self, repository: EpisodeRepository, title_id: uuid.UUID, season_id: uuid.UUID

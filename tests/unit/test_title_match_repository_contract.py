@@ -16,7 +16,7 @@ from tests.contract.title_match_repository_contract import (
     TitleMatchRepositoryContract,
 )
 from tests.fakes.title_match_repository import FakeTitleMatchRepository
-from usher.domain.enums import TitleKind
+from usher.domain.enums import EnrichmentState, TitleKind
 
 
 class _FakeCatalog(TitleCatalog):
@@ -36,9 +36,16 @@ class _FakeCatalog(TitleCatalog):
         tmdb_id: int | None = None,
         imdb_id: str | None = None,
         tvdb_id: int | None = None,
+        enrichment_state: EnrichmentState = EnrichmentState.SKELETON,
     ) -> uuid.UUID:
         return await self._repository.given_title(
-            kind=kind, name=name, year=year, tmdb_id=tmdb_id, imdb_id=imdb_id, tvdb_id=tvdb_id
+            kind=kind,
+            name=name,
+            year=year,
+            tmdb_id=tmdb_id,
+            imdb_id=imdb_id,
+            tvdb_id=tvdb_id,
+            enrichment_state=enrichment_state,
         )
 
 

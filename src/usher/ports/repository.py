@@ -646,7 +646,11 @@ class WatchStateRepository(ABC):
 
 
 class TitleMatchRepository(ABC):
-    """Batch lookups for PRD 03's match stage.
+    """Batch lookups over `titles`, for the ingest pipeline.
+
+    Mostly PRD 03's match stage, plus the one triage read stage 1 needs
+    (`enrichment_states`) -- which belongs here rather than on
+    `TitleRepository` for exactly the reason the rest of this port does.
 
     Separate from `TitleRepository` because the shape is different in the way
     that matters: `TitleRepository.get_by_tmdb_id` answers one question, and a
@@ -726,6 +730,24 @@ class TitleMatchRepository(ABC):
         queue.
         """
 
+    @abstractmethod
+    async def enrichment_states(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, EnrichmentState]:
+        """`title_id` -> its tier, for a whole batch.
+
+        Ingest enqueues an `enrich` job for every title a walk touched that is
+        not already enriched, and skips the ones that are. Answering that with
+        `TitleRepository.get` is one round trip per distinct title per batch --
+        the same per-item defect this port exists to remove, arriving in stage
+        1 instead of stage 2. It reads one column, so it stays a state map
+        rather than a `Title` map: the caller compares through
+        `ENRICHMENT_RANK` (ADR-0008) and needs nothing else.
+
+        Absent keys mean "no such title", never "not asked". A batch may name
+        the same id twice; it is answered once.
+        """
+
 
 class EpisodeRepository(ABC):
     """Persistence for the season/episode hierarchy under a series `Title`.
@@ -775,11 +797,38 @@ class EpisodeRepository(ABC):
         """
 
     @abstractmethod
-    async def resolve(
-        self, title_id: uuid.UUID, numbers: Sequence[tuple[int, int]]
-    ) -> dict[tuple[int, int], uuid.UUID]:
-        """`(season_number, episode_number)` -> episode id, in one round trip.
-        999,827 episodes means this cannot be a lookup per item.
+    async def resolve_seasons(
+        self, keys: Sequence[tuple[uuid.UUID, int]]
+    ) -> dict[tuple[uuid.UUID, int], uuid.UUID]:
+        """`(title_id, season_number)` -> season id, in one round trip.
+
+        Exists because `upsert_seasons` reports counts rather than ids, and it
+        cannot report the caller's: ingest mints a fresh UUIDv7 per sighting,
+        and a season the catalog already holds keeps the id it was inserted
+        with. So the id an episode's `season_id` must carry is knowable only by
+        reading it back.
+
+        **Keyed across titles, not scoped to one.** A batch of 1,000 episodes
+        off a walk sorted by creation date routinely spans hundreds of series
+        -- an episode arrives the week it airs, not with its siblings -- so a
+        per-title signature is one round trip per series in the batch, which at
+        999,827 episodes is the same design defect batching exists to avoid.
+
+        Absent keys mean "no such season", never "not asked".
+        """
+
+    @abstractmethod
+    async def resolve_episodes(
+        self, keys: Sequence[tuple[uuid.UUID, int, int]]
+    ) -> dict[tuple[uuid.UUID, int, int], uuid.UUID]:
+        """`(title_id, season_number, episode_number)` -> episode id, in one
+        round trip. 999,827 episodes means this cannot be a lookup per item,
+        and -- for the reason `resolve_seasons` states -- not a lookup per
+        series either.
+
+        `title_id` is part of the key rather than a separate argument because
+        every series has an S01E01: a resolve that dropped it hangs one show's
+        episodes off another's, and 32,409 series makes that a certainty.
 
         Absent keys mean "no such episode under this series", never "not
         asked", so a caller iterates its own probes.

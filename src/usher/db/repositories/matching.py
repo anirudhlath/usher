@@ -44,6 +44,7 @@ from collections.abc import Sequence
 from sqlalchemy import RowMapping, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from usher.domain.enums import EnrichmentState
 from usher.ports.ingest import NameYearProbe, ProviderRef
 from usher.ports.repository import TitleMatchRepository
 
@@ -93,6 +94,12 @@ WITH probe AS (
 -- the wrong film, silently.
 SELECT name, year, kind, id FROM candidate WHERE matches = 1
 """
+
+# `id = ANY(...)` over the primary key, so one index scan for the whole batch.
+# One column, not the row: the caller compares tiers through `ENRICHMENT_RANK`
+# and hydrating 500 `Title`s a batch to read one enum would be the expensive
+# way to answer a cheap question.
+_ENRICHMENT_STATES = "SELECT id, enrichment_state FROM titles WHERE id = ANY(:ids)"
 
 
 class PostgresTitleMatchRepository(TitleMatchRepository):
@@ -171,6 +178,15 @@ class PostgresTitleMatchRepository(TitleMatchRepository):
             },
         )
         return {by_key[(row["name"], row["year"], row["kind"])]: row["id"] for row in rows}
+
+    async def enrichment_states(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, EnrichmentState]:
+        unique = list(dict.fromkeys(title_ids))
+        if not unique:
+            return {}
+        rows = await self._fetch(_ENRICHMENT_STATES, {"ids": unique})
+        return {row["id"]: EnrichmentState(row["enrichment_state"]) for row in rows}
 
     async def _fetch(self, statement: str, parameters: dict[str, object]) -> Sequence[RowMapping]:
         # `.mappings()` rather than attribute access on `Row`: SQLAlchemy

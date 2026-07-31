@@ -40,6 +40,7 @@ def test_match_method_names_every_tier_including_failure() -> None:
         MatchMethod.NAME_YEAR,
         MatchMethod.PROVIDER_SEARCH,
         MatchMethod.CREATED_STUB,
+        MatchMethod.SERIES_PARENT,
         MatchMethod.UNMATCHED,
     }
     # Not `MatchMethod.TMDB_ID == "tmdb_id"`: true at runtime, but mypy
@@ -62,5 +63,6 @@ def test_match_method_values_are_the_wire_identifiers() -> None:
         "name_year",
         "provider_search",
         "created_stub",
+        "series_parent",
         "unmatched",
     }

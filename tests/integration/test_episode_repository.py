@@ -58,6 +58,19 @@ async def season_id(session: AsyncSession, title_id: uuid.UUID) -> uuid.UUID:
     return identifier
 
 
+@pytest_asyncio.fixture
+async def other_season_id(session: AsyncSession, other_title_id: uuid.UUID) -> uuid.UUID:
+    """A second series' season 1, so a batch can carry two shows' S01E01 --
+    which is what every page of a real walk carries and what the old
+    single-title `resolve` could not express."""
+    identifier = new_id()
+    await session.execute(
+        text("INSERT INTO seasons (id, title_id, season_number) VALUES (:id, :title_id, 1)"),
+        {"id": identifier, "title_id": other_title_id},
+    )
+    return identifier
+
+
 class TestPostgresEpisodeRepository(EpisodeRepositoryContract):
     """Every case in `EpisodeRepositoryContract`, against real Postgres."""
 
@@ -235,12 +248,41 @@ async def test_resolve_costs_one_statement_for_a_whole_page(
     repository: PostgresEpisodeRepository,
     title_id: uuid.UUID,
     season_id: uuid.UUID,
+    other_title_id: uuid.UUID,
+    other_season_id: uuid.UUID,
     statement_counter: list[str],
 ) -> None:
+    """Two series in the batch, deliberately: the property is one statement
+    for the whole *page*, not one per series. `FakeEpisodeRepository` counts
+    calls and so can pin the service's side of this; only here can the
+    statement count be real."""
     await repository.upsert_episodes(
         [episode(title_id, season_id, index) for index in range(1, 201)]
+        + [episode(other_title_id, other_season_id, index) for index in range(1, 201)]
     )
     statement_counter.clear()
-    resolved = await repository.resolve(title_id, [(1, index) for index in range(1, 201)])
-    assert len(resolved) == 200
-    assert len(statement_counter) == 1, f"200 lookups cost {len(statement_counter)} statements"
+    resolved = await repository.resolve_episodes(
+        [(title_id, 1, index) for index in range(1, 201)]
+        + [(other_title_id, 1, index) for index in range(1, 201)]
+    )
+    assert len(resolved) == 400
+    assert len(statement_counter) == 1, f"400 lookups cost {len(statement_counter)} statements"
+
+
+async def test_resolve_seasons_costs_one_statement_for_a_whole_page(
+    repository: PostgresEpisodeRepository,
+    title_id: uuid.UUID,
+    other_title_id: uuid.UUID,
+    statement_counter: list[str],
+) -> None:
+    await repository.upsert_seasons(
+        [season(title_id, index) for index in range(1, 21)]
+        + [season(other_title_id, index) for index in range(1, 21)]
+    )
+    statement_counter.clear()
+    resolved = await repository.resolve_seasons(
+        [(title_id, index) for index in range(1, 21)]
+        + [(other_title_id, index) for index in range(1, 21)]
+    )
+    assert len(resolved) == 40
+    assert len(statement_counter) == 1, f"40 lookups cost {len(statement_counter)} statements"

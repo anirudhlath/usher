@@ -108,6 +108,37 @@ class MediaItemUpsert:
 
 
 @dataclass(frozen=True, slots=True)
+class IngestResult:
+    """What one batch of a walk did, from `IngestService.ingest_batch`.
+
+    `inserted`/`updated` are `BulkWriteResult`'s two counts, restated rather
+    than nested so the common read (`result.inserted`) stays one attribute
+    deep. `matched`/`unmatched` are the *outcome* counts, and they are here
+    because `SyncRun` carries `items_matched`/`items_unmatched` and the
+    alternative was a `list_unmatched` query per batch to recover a number
+    the batch already knew.
+
+    They do not have to sum to `inserted + updated`: a batch may legitimately
+    contain the same `(source_id, external_id)` twice (`list_items`' own
+    contract permits it), which is two outcomes and one row.
+
+    `outcomes` is one per item, in the order they were given, *after* episode
+    attachment -- so an episode's outcome here carries the title and episode
+    ids it was hung off, which the match stage on its own never knows. It is
+    returned rather than kept internal because it is the only place the
+    per-item resolution is expressible: the counters above are sums, and the
+    method label on PRD 10's `usher.ingest.items` counter is not something a
+    caller can recover from them.
+    """
+
+    inserted: int
+    updated: int
+    matched: int
+    unmatched: int
+    outcomes: tuple[MatchOutcome, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class WatchStateMerge:
     """One inbound watch record, on its way to `merge_from_source`.
 

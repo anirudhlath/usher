@@ -23,7 +23,7 @@ from tests.contract.title_match_repository_contract import (
 )
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.title import PostgresTitleRepository
-from usher.domain.enums import TitleKind
+from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
 from usher.ports.ingest import NameYearProbe, ProviderRef
 
@@ -48,6 +48,7 @@ class _PostgresCatalog(TitleCatalog):
         tmdb_id: int | None = None,
         imdb_id: str | None = None,
         tvdb_id: int | None = None,
+        enrichment_state: EnrichmentState = EnrichmentState.SKELETON,
     ) -> uuid.UUID:
         title = Title(
             kind=kind,
@@ -57,6 +58,7 @@ class _PostgresCatalog(TitleCatalog):
             tmdb_id=tmdb_id,
             imdb_id=imdb_id,
             tvdb_id=tvdb_id,
+            enrichment_state=enrichment_state,
         )
         await self._titles.add(title)
         return title.id

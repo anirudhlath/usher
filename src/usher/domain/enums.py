@@ -88,6 +88,15 @@ class MatchMethod(StrEnum):
     NAME_YEAR = "name_year"
     PROVIDER_SEARCH = "provider_search"
     CREATED_STUB = "created_stub"
+    # An episode, attached to the Title its series resolved to. Episodes
+    # never walk the ladder above: a source addresses them directly and the
+    # ids it reports are the *episode's* (TVDb numbers episodes and series
+    # in different, numerically overlapping namespaces; no episode's IMDb id
+    # is in the catalog at all), so running one through the ladder resolves
+    # it to an unrelated series or mints a junk Title. 999,827 of one
+    # measured source's 1,126,674 items are episodes, so this is the single
+    # most common value on the counter.
+    SERIES_PARENT = "series_parent"
     UNMATCHED = "unmatched"
 
 

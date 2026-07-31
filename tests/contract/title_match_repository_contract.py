@@ -13,7 +13,8 @@ Subclass and provide `repository` and `catalog`.
 import uuid
 from abc import ABC, abstractmethod
 
-from usher.domain.enums import TitleKind
+from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.ids import new_id
 from usher.ports.ingest import NameYearProbe, ProviderRef
 from usher.ports.repository import TitleMatchRepository
 
@@ -34,6 +35,7 @@ class TitleCatalog(ABC):
         tmdb_id: int | None = None,
         imdb_id: str | None = None,
         tvdb_id: int | None = None,
+        enrichment_state: EnrichmentState = EnrichmentState.SKELETON,
     ) -> uuid.UUID: ...
 
 
@@ -319,3 +321,46 @@ class TitleMatchRepositoryContract:
         self, repository: TitleMatchRepository
     ) -> None:
         assert await repository.match_by_name_year([]) == {}
+
+    async def test_enrichment_states_answers_a_batch(
+        self, repository: TitleMatchRepository, catalog: TitleCatalog
+    ) -> None:
+        """Ingest's triage read. Answering it with `TitleRepository.get` is one
+        round trip per distinct title per batch -- the same per-item defect
+        this port exists to remove, arriving one stage earlier."""
+        skeleton = await catalog.given_title(kind=TitleKind.MOVIE, name="From IMDb")
+        enriched = await catalog.given_title(
+            kind=TitleKind.MOVIE, name="From TMDb", enrichment_state=EnrichmentState.ENRICHED
+        )
+        assert await repository.enrichment_states([skeleton, enriched]) == {
+            skeleton: EnrichmentState.SKELETON,
+            enriched: EnrichmentState.ENRICHED,
+        }
+
+    async def test_enrichment_states_omits_a_title_it_does_not_have(
+        self, repository: TitleMatchRepository, catalog: TitleCatalog
+    ) -> None:
+        """Absent means "no such title", never "not asked". A caller that
+        cannot tell them apart either skips enrichment for a title that needs
+        it or enqueues one for a row that does not exist."""
+        known = await catalog.given_title(kind=TitleKind.MOVIE, name="Known")
+        unknown = new_id()
+        assert await repository.enrichment_states([known, unknown]) == {
+            known: EnrichmentState.SKELETON
+        }
+
+    async def test_enrichment_states_answers_a_repeated_id_once(
+        self, repository: TitleMatchRepository, catalog: TitleCatalog
+    ) -> None:
+        """A page carrying a film and its two alternate cuts names one title
+        three times, and `list_items`' contract permits the same item twice on
+        top of that."""
+        known = await catalog.given_title(kind=TitleKind.MOVIE, name="Known")
+        assert await repository.enrichment_states([known, known, known]) == {
+            known: EnrichmentState.SKELETON
+        }
+
+    async def test_an_empty_enrichment_state_batch_is_a_no_op(
+        self, repository: TitleMatchRepository
+    ) -> None:
+        assert await repository.enrichment_states([]) == {}

@@ -55,8 +55,16 @@ _UNDATED = datetime.min.replace(tzinfo=UTC)
 class FakeMediaItemRepository(MediaItemRepository):
     def __init__(self) -> None:
         self._items: dict[tuple[uuid.UUID, str], MediaItem] = {}
+        self.calls = 0
+
+    def reset_calls(self) -> None:
+        """A test-double affordance, not a port method -- see
+        `tests/fakes/title_match_repository.py` for why the round-trip count
+        is a service property that only a counter can express."""
+        self.calls = 0
 
     async def upsert_many(self, rows: Sequence[MediaItemUpsert]) -> BulkWriteResult:
+        self.calls += 1
         inserted = updated = 0
         # `{(row.source_id, row.external_id): row for row in rows}` rather
         # than iterating: last-wins deduplication, matching the real one's
@@ -135,6 +143,7 @@ class FakeMediaItemRepository(MediaItemRepository):
     async def resolve_series_titles(
         self, source_id: uuid.UUID, external_ids: Sequence[str]
     ) -> dict[str, uuid.UUID]:
+        self.calls += 1
         wanted = set(external_ids)
         resolved: dict[str, uuid.UUID] = {}
         for entry in self._items.values():

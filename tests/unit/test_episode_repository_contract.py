@@ -29,5 +29,9 @@ class TestFakeEpisodeRepository(EpisodeRepositoryContract):
         return new_id()
 
     @pytest.fixture
+    def other_season_id(self) -> uuid.UUID:
+        return new_id()
+
+    @pytest.fixture
     def other_title_id(self) -> uuid.UUID:
         return new_id()
