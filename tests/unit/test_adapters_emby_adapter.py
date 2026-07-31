@@ -9,6 +9,7 @@ endpoints a write-back uses and in which order, and how `verify` tells
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
@@ -445,6 +446,43 @@ async def test_an_empty_object_for_an_unknown_id_is_a_deletion_not_an_item() -> 
         assert await adapter.stream_targets("never-existed") == []
     finally:
         await adapter.aclose()
+
+
+@pytest.mark.parametrize(
+    ("container", "width", "height"),
+    [
+        # A lesser version listed first. Under `MediaSources[0]` the 4K
+        # file is unreachable and `/play` hands back a 1080p target.
+        ("mp4", 1920, 1080),
+        # A transcode-only version listed first: no container, so under
+        # `MediaSources[0]` the whole item reports "not playable here".
+        (None, 3840, 2160),
+    ],
+)
+async def test_a_version_listed_first_does_not_win_by_being_first(
+    container: str | None, width: int, height: int
+) -> None:
+    """The end-to-end half of the media-source selection, through a real
+    walk and a real `get_item` rather than against a fixture. Until
+    `FakeEmbyServer` could render more than one `MediaSources` entry,
+    nothing on this side of the wire could reach the choice at all -- every
+    fixture has exactly one entry and `_render_media` only ever wrote index
+    `[0]`.
+    """
+    server = FakeEmbyServer()
+    best = replace(_movie(0), width=3840, height=2160)
+    server.add_item(best, T0)
+    server.add_alternate_version(best.external_id, container=container, width=width, height=height)
+    adapter = _adapter(server)
+    try:
+        item = await adapter.get_item(best.external_id)
+        targets = await adapter.stream_targets(best.external_id)
+    finally:
+        await adapter.aclose()
+    assert item is not None
+    assert (item.container, item.width, item.height) == ("mkv", 3840, 2160)
+    assert targets, "an item with a direct-playable version reported no way to play it"
+    assert (targets[0].container, targets[0].resolution) == ("mkv", "3840x2160")
 
 
 async def test_an_external_id_stays_inside_one_path_segment() -> None:

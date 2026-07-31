@@ -128,6 +128,37 @@ def test_a_media_source_with_no_container_has_no_targets() -> None:
     assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE) == []
 
 
+def test_a_multi_version_item_is_played_at_its_best_playable_version() -> None:
+    """Emby lists one `MediaSources` entry per *version*, and taking index
+    `[0]` picks whichever the server happened to list first. Two failures
+    followed, both on plausible payloads:
+
+    - a 1080p entry listed before the 4K one made the 4K version
+      unreachable -- `/play` handed back `1920x1080` for a library that
+      holds both;
+    - a transcode-only first entry (no `Container`, `SupportsDirectPlay:
+      false`) followed by a perfectly good direct-play entry returned `[]`,
+      so PRD 07's `/play` reported "not playable here" for an item that
+      plays fine.
+
+    `multi_version_movie.json` orders its three entries transcode-only,
+    2160p, 1080p on purpose: "first wins" returns `[]`, "last wins" returns
+    the 1080p version, and only "the best entry that has a container" gets
+    it right.
+    """
+    direct = _targets("multi_version_movie")[0]
+    assert direct.container == "mkv"
+    assert direct.resolution == "3840x2160"
+    assert direct.video_codec == "hevc"
+    assert direct.audio == "truehd_atmos_7_1"
+    assert direct.hdr_format is HdrFormat.HDR10
+    # The URL has to name the *same* version it just described, or the
+    # facts belong to one file and the bytes to another.
+    query = parse_qs(urlparse(direct.url).query)
+    assert query["MediaSourceId"] == ["0000000000000000000000000000b0f1"]
+    assert urlparse(direct.url).path.endswith("/stream.mkv")
+
+
 def test_a_capitalised_container_is_lowercased_in_both_places() -> None:
     """The container is not just a reported fact here, it is the URL's file
     extension, so it reaches the wire twice. Emby's own `Container` casing

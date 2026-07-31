@@ -187,6 +187,7 @@ class FakeEmbyServer:
         self.identities: list[str | None] = []
         self.tokens: list[str | None] = []
         self._items: dict[str, tuple[SourceItem, AwareDatetime]] = {}
+        self._alternates: dict[str, list[dict[str, Any]]] = {}
         self._states: dict[str, SourceWatchState] = {}
         self._sessions = 0
         self._session_token: str | None = None
@@ -196,9 +197,44 @@ class FakeEmbyServer:
     def add_item(self, item: SourceItem, changed_at: AwareDatetime) -> None:
         self._items[item.external_id] = (item, changed_at)
 
+    def add_alternate_version(
+        self,
+        external_id: str,
+        *,
+        container: str | None,
+        width: int,
+        height: int,
+        size_bytes: int = 0,
+    ) -> None:
+        """Give an item a second `MediaSources` entry, listed **first**.
+
+        Emby holds one entry per version -- the same film at 4K and at
+        1080p is two of them, and a version it can only transcode is an
+        entry with `Container: null` -- and until this existed the fake
+        could only ever render one, so no test here could reach the code
+        that chooses between them. Seeding this way rather than through
+        `given_item` keeps `SourceHarness`'s round-trip contract intact:
+        the seeded item stays the *best* version, so it still reads back
+        as itself, and what the alternate tests is that a worse or
+        unplayable entry listed ahead of it cannot win.
+        """
+        media = load_emby_fixture("movie_item")["MediaSources"][0]
+        media["Id"] = f"{external_id}-alt-{len(self._alternates.get(external_id, ()))}"
+        media["Container"] = container
+        media["Size"] = size_bytes
+        if container is None:
+            media["Protocol"] = "Http"
+            media["SupportsDirectPlay"] = False
+        for stream in media["MediaStreams"]:
+            if stream["Type"] == "Video":
+                stream["Width"] = width
+                stream["Height"] = height
+        self._alternates.setdefault(external_id, []).append(media)
+
     def remove_item(self, external_id: str) -> None:
         self._items.pop(external_id, None)
         self._states.pop(external_id, None)
+        self._alternates.pop(external_id, None)
 
     def set_watch_state(self, state: SourceWatchState) -> None:
         self._states[state.external_id] = state
@@ -459,8 +495,12 @@ class FakeEmbyServer:
         return payload
 
     def _render_media(self, payload: dict[str, Any], item: SourceItem) -> None:
+        alternates = self._alternates.get(item.external_id, [])
         if item.container is None:
-            payload.pop("MediaSources", None)
+            if alternates:
+                payload["MediaSources"] = list(alternates)
+            else:
+                payload.pop("MediaSources", None)
             return
         media = payload.setdefault("MediaSources", load_emby_fixture("movie_item")["MediaSources"])[
             0
@@ -492,6 +532,9 @@ class FakeEmbyServer:
                 # function of codec and channel count. The Atmos/DTS-HD
                 # vocabulary is covered against the raw fixtures instead.
                 stream["Profile"] = ""
+        # Listed ahead of the seeded item's own entry, which is the order
+        # that breaks a `MediaSources[0]` adapter.
+        payload["MediaSources"] = [*alternates, media]
 
     def _user_data(self, external_id: str) -> dict[str, Any]:
         state = self._states.get(external_id)

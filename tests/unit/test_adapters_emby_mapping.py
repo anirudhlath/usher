@@ -413,6 +413,42 @@ def test_a_malformed_item_reports_a_truncated_name_not_a_payload_dump() -> None:
     assert len(exc_info.value.detail) == 60
 
 
+def test_a_multi_version_item_is_catalogued_at_its_best_playable_version() -> None:
+    """`multi_version_movie.json` lists transcode-only, 2160p, 1080p, in
+    that order: "first wins" catalogues a version with no container at all,
+    "last wins" catalogues the 1080p one.
+
+    The same rule as `build_stream_targets` uses, because it is literally
+    the same call -- an item whose catalogued facts and whose playback URL
+    were chosen separately would advertise one version's codecs and stream
+    another's bytes.
+    """
+    item = to_source_item(load_emby_fixture("multi_version_movie"))
+    assert item is not None
+    assert item.container == "mkv"
+    assert (item.width, item.height) == (3840, 2160)
+    assert item.video_codec == "hevc"
+    assert item.audio_codec == "truehd"
+    assert item.audio_channels == 8
+    assert item.file_size_bytes == 61_847_529_062
+    assert item.hdr_format is HdrFormat.HDR10
+
+
+def test_a_transcode_only_item_is_still_catalogued() -> None:
+    """The fallback half of the rule. An item Emby can only transcode has
+    no container, so there is no direct URL to build for it -- but it still
+    has a real codec, resolution and runtime, and reporting `None` for all
+    of them would put a hole in the catalogue over a playback limitation.
+    """
+    payload = load_emby_fixture("multi_version_movie")
+    payload["MediaSources"] = payload["MediaSources"][:1]
+    item = to_source_item(payload)
+    assert item is not None
+    assert item.container is None
+    assert item.video_codec == "hevc"
+    assert (item.width, item.height) == (3840, 2160)
+
+
 def test_a_media_sources_entry_that_is_not_an_object_is_skipped() -> None:
     """`MediaSources` is a list of objects, until a server answers with a
     list of something else. Indexing `[0]` blindly hands a string to code

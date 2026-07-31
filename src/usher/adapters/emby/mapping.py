@@ -172,17 +172,6 @@ def provider_ids(raw: object) -> dict[str, str]:
     }
 
 
-def primary_media_source(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """The first `MediaSources` entry, or `None` for a folder item."""
-    sources = payload.get("MediaSources")
-    if not isinstance(sources, list):
-        return None
-    for source in sources:
-        if isinstance(source, Mapping):
-            return source
-    return None
-
-
 def stream_of(media_source: Mapping[str, Any], stream_type: str) -> Mapping[str, Any] | None:
     """The default stream of `stream_type`, falling back to the first.
 
@@ -205,6 +194,58 @@ def stream_of(media_source: Mapping[str, Any], stream_type: str) -> Mapping[str,
         if stream.get("IsDefault"):
             return stream
     return candidates[0]
+
+
+def _playback_rank(media_source: Mapping[str, Any]) -> tuple[int, int]:
+    """How good a version is: pixels first, bytes as the tiebreak.
+
+    Bytes second rather than first because a bigger file is not a better
+    one -- a bloated 1080p remux outweighs an efficient 4K encode -- but
+    between two versions of the same resolution it is the only signal on
+    the payload that distinguishes them at all.
+    """
+    video = stream_of(media_source, "Video") or {}
+    width = as_int(video.get("Width")) or 0
+    height = as_int(video.get("Height")) or 0
+    return width * height, as_int(media_source.get("Size")) or 0
+
+
+def primary_media_source(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The version Usher describes and plays, or `None` for a folder item.
+
+    **Not `MediaSources[0]`.** Emby lists one entry per *version*: the same
+    film held at 4K and at 1080p is two entries, and a version Emby can
+    only transcode is an entry with no `Container` at all. Taking the first
+    entry takes whichever the server happened to list first, and both
+    orderings occur:
+
+    - 1080p listed before 4K makes the 4K version unreachable -- PRD 07's
+      `/play` hands back a `1920x1080` target for a library holding both;
+    - a transcode-only entry listed first has no container, and the
+      container *is* the direct URL's file extension, so
+      `build_stream_targets` returned `[]` -- "not playable here" for an
+      item that plays fine.
+
+    So: the highest-resolution entry that has a container, falling back to
+    the first entry of any kind when none does (a genuinely transcode-only
+    item still has a real codec, size and runtime to catalogue, even though
+    there is no direct URL to build for it). `max` returns the first
+    maximal element, so a single-source item and a set of equally-ranked
+    versions both still resolve to `MediaSources[0]`.
+
+    Both `to_source_item` and `build_stream_targets` call this, so an
+    item's catalogued facts and its playback URL always describe the same
+    file. Choosing separately is how a `/play` response comes to advertise
+    one version's codecs and stream another's bytes.
+    """
+    sources = payload.get("MediaSources")
+    if not isinstance(sources, list):
+        return None
+    candidates = [source for source in sources if isinstance(source, Mapping)]
+    if not candidates:
+        return None
+    playable = [source for source in candidates if as_lower(source.get("Container"))]
+    return max(playable or candidates, key=_playback_rank)
 
 
 def hdr_format(video: Mapping[str, Any]) -> HdrFormat | None:
