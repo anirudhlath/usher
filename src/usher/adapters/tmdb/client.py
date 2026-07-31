@@ -67,9 +67,20 @@ TMDB_ATTRIBUTION = (
 _tracer = trace.get_tracer("usher.metadata.tmdb")
 _meter = metrics.get_meter("usher.metadata.tmdb")
 # PRD 10's dashboard 3: "TMDb requests/sec against the ~40 ceiling with 429
-# count". One histogram with a `status` label answers both halves.
+# count". Two instruments, not one, and the histogram alone was not enough:
+# a rate is a `rate(counter[1m])` and a 429 count is a counter increment,
+# while a histogram's `_count` series is a *sampled* aggregation whose
+# temporality and reset semantics differ from a counter's. PRD 10 names
+# `usher.provider.requests` for exactly this and it had no emitter.
 _request_duration = _meter.create_histogram(
     "usher.metadata.request.duration", unit="s", description="Wall time per TMDb request"
+)
+# `provider` as a label rather than baked into the name: PRD 10 lists this
+# metric once for every metadata provider, and a second one (M7's, if it
+# arrives) has to land in the same series or the "provider degraded" alert
+# needs rewriting per provider.
+_requests = _meter.create_counter(
+    "usher.provider.requests", unit="1", description="Metadata provider requests, by status"
 )
 
 # Everything a send may raise that a caller written against
@@ -180,7 +191,19 @@ class TmdbClient:
                 status = str(response.status_code)
                 return self._decode(response, path)
         finally:
+            # Both in the `finally`, so a transport failure -- which never
+            # reaches a status line at all and is labelled `error` -- is
+            # counted rather than silently absent. PRD 10's "provider
+            # degraded" alert fires on a 429-or-5xx *rate*, and a denominator
+            # that omits the failures makes that rate read low exactly when
+            # the upstream is worst.
             _request_duration.record(self._clock() - started, {"status": status})
+            # The literal, not `provider.PROVIDER_NAME`: `provider.py`
+            # imports this module, so reaching back for its constant is a
+            # cycle. Same literal the span attribute two lines up already
+            # uses, and `test_the_provider_metric_names_this_provider` pins
+            # the two together.
+            _requests.add(1, {"provider": "tmdb", "status": status})
 
     async def _send(
         self, path: str, params: Mapping[str, str], headers: Mapping[str, str]

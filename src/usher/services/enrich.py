@@ -54,8 +54,17 @@ from usher.ports.repository import EpisodeRepository, RawPayloadStore, TitleRepo
 
 _tracer = trace.get_tracer("usher.enrich")
 _meter = metrics.get_meter("usher.enrich")
+# PRD 10's name, not a shortened one: its dashboard 3 panel ("enrichment
+# throughput and p50/p99") and its "enrichment SLA missed" alert both query
+# `usher.enrichment.latency`, and a metric emitted under a near-miss name is
+# a permanently empty panel that nothing distinguishes from a healthy zero.
+# Labelled `outcome` rather than PRD 10's original `trigger`: nothing in M4
+# enriches on demand (`JobPriority.DEMAND` is defined and unused until M5),
+# so a `trigger` label would carry one constant value, while a failure's
+# latency and a success's are genuinely different populations. PRD 10 is
+# corrected rather than approximated.
 _enrich_duration = _meter.create_histogram(
-    "usher.enrich.duration", unit="s", description="Wall time per title enrichment"
+    "usher.enrichment.latency", unit="s", description="Wall time per title enrichment"
 )
 _enriched = _meter.create_counter(
     "usher.enrich.result", unit="1", description="Enrichment attempts, by outcome"

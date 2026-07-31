@@ -2,13 +2,13 @@
 
 from enum import Enum as PyEnum
 
+import sqlalchemy.ext.asyncio as sa_asyncio
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -67,7 +67,23 @@ def build_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
     # request that checks out a connection pays this same cost on a stale one
     # -- 5s is a generous ceiling for establishing a connection (as opposed to
     # running a query) against a healthy local Postgres.
-    return create_async_engine(
+    #
+    # **`sa_asyncio.create_async_engine`, not a `from ... import`ed name, and
+    # that is the whole of whether this application has database spans.**
+    # `SQLAlchemyInstrumentor().instrument()` (wired in `configure_tracing`)
+    # patches the *module attribute* `sqlalchemy.ext.asyncio.
+    # create_async_engine` with `wrapt`. This module is imported long before
+    # `configure_tracing` ever runs -- `usher.api.app` and `usher.cli` both
+    # import it at module scope -- so a `from sqlalchemy.ext.asyncio import
+    # create_async_engine` binds the *original* function here permanently and
+    # every engine this project builds is uninstrumented. Verified directly:
+    # after `instrument()`, the module's attribute and this module's binding
+    # are different objects. The failure is silent in the worst way -- the
+    # instrumentation package is installed, wired, and reports success, and
+    # not one database span is ever produced. Pinned by
+    # `tests/integration/test_pipeline_spans.py::
+    # test_the_databases_own_spans_nest_under_the_pipeline`.
+    return sa_asyncio.create_async_engine(
         database_url,
         echo=echo,
         pool_pre_ping=True,

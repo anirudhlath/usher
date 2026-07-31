@@ -221,10 +221,6 @@ QueueReader = Callable[[], QueueSnapshot]
 # reporting). A composition root that registered twice, or a second test in
 # the same process, would otherwise be reading a queue that no longer exists.
 _queue_reader: QueueReader | None = None
-# Which `MeterProvider` the gauges below were created against, so a process
-# that installs a new one (the test suite, once per test) gets new
-# instruments rather than orphaned ones bound to a collected provider.
-_queue_gauge_provider: object | None = None
 
 
 def register_queue_gauges(read: QueueReader) -> None:
@@ -250,14 +246,18 @@ def register_queue_gauges(read: QueueReader) -> None:
     total, so the value is only ever stale, never wrong. `usher work`
     refreshes it after every pass over the queue.
 
-    Safe to call repeatedly: the reader is replaced, and the instruments are
-    created once per `MeterProvider`.
+    Safe to call repeatedly, and the *reader* is what makes it so rather
+    than a guard on the instruments: a duplicate
+    `create_observable_gauge(...)` against a provider that already has one
+    is silently discarded by the SDK (verified directly), so a
+    re-registration that only created a second instrument would leave the
+    first, now-dead reader reporting forever. Creating them unconditionally
+    is what lets a *new* `MeterProvider` -- one per test in this suite --
+    get instruments of its own instead of orphans bound to a provider that
+    has been thrown away.
     """
-    global _queue_reader, _queue_gauge_provider
+    global _queue_reader
     _queue_reader = read
-    provider = metrics.get_meter_provider()
-    if _queue_gauge_provider is provider:
-        return
     meter = metrics.get_meter("usher.jobs")
     meter.create_observable_gauge(
         "usher.jobs.queued",
@@ -271,7 +271,6 @@ def register_queue_gauges(read: QueueReader) -> None:
         unit="1",
         description="Jobs parked with an error, by kind",
     )
-    _queue_gauge_provider = provider
 
 
 def _observe_queued(options: CallbackOptions) -> Iterable[Observation]:
