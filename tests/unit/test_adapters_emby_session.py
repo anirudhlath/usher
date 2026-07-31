@@ -5,6 +5,7 @@ error translation. Driven entirely by httpx.MockTransport -- no network.
 import asyncio
 import io
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 import pytest
@@ -15,9 +16,10 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import SecretStr
 
-from tests.fakes.emby_server import FakeEmbyServer
+from tests.fakes.emby_server import SERVER_VERSION, USER_ID, FakeEmbyServer
 from tests.fakes.slow_transport import SlowTransport
-from usher.adapters.emby.session import SYSTEM_INFO_PATH, EmbySession
+from usher.adapters.emby import session as session_module
+from usher.adapters.emby.session import PUBLIC_INFO_PATH, SYSTEM_INFO_PATH, EmbySession
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
     PortAuthFailed,
@@ -37,7 +39,14 @@ ITEM = SourceItem(
 
 class _Clock:
     """An injected monotonic clock, so the re-auth cooldown's *expiry* is
-    testable without a real sleep."""
+    testable without a real sleep.
+
+    Frozen: `now` only moves when a test moves it. The same clock also
+    times `usher.source.request.duration`, deliberately -- one time source
+    per session rather than two constructor knobs that can disagree -- so
+    every duration recorded under *this* clock is exactly `0.0`. The one
+    test that asserts on a duration uses `_TickingClock` below instead.
+    """
 
     def __init__(self) -> None:
         self.now = 1000.0
@@ -46,12 +55,42 @@ class _Clock:
         return self.now
 
 
+class _TickingClock:
+    """A monotonic clock that advances by `step` on every read, so the
+    elapsed time `_send` measures is a known non-zero value."""
+
+    def __init__(self, step: float = 0.25) -> None:
+        self.now = 1000.0
+        self.step = step
+
+    def __call__(self) -> float:
+        value = self.now
+        self.now += self.step
+        return value
+
+
+class _RecordingHistogram:
+    """Stands in for the module's `usher.source.request.duration` histogram.
+
+    A real `MeterProvider` is not usable here: OpenTelemetry permits
+    `set_meter_provider` exactly once per process and warns-and-ignores
+    every later call, so a metrics assertion built on one is decided by
+    whichever test in the session happened to run first.
+    """
+
+    def __init__(self) -> None:
+        self.records: list[tuple[float, dict[str, Any]]] = []
+
+    def record(self, amount: float, attributes: dict[str, Any] | None = None) -> None:
+        self.records.append((amount, dict(attributes or {})))
+
+
 def _session(
     server: FakeEmbyServer,
     *,
     source_name: str = "Living Room Emby",
     credentials: SourceCredentials = CREDENTIALS,
-    clock: _Clock | None = None,
+    clock: _Clock | _TickingClock | None = None,
 ) -> tuple[EmbySession, httpx.AsyncClient]:
     client = httpx.AsyncClient(transport=server.transport(), base_url="https://emby.invalid")
     session = EmbySession(
@@ -78,6 +117,35 @@ async def test_the_durable_client_header_names_usher_and_the_device() -> None:
         await client.aclose()
     assert server.device_ids == [DEVICE_ID]
     assert server.devices == ["Living Room Emby"]
+
+
+async def test_the_identity_header_rides_on_every_request_not_just_authentication() -> None:
+    """The defining property of the durable client, and the half the fake
+    used to model in only one place. Emby attributes traffic to a device
+    per *request*: an `Authorization` header sent only to
+    `AuthenticateByName` mints one correctly-named session and then files
+    every subsequent call under an anonymous client, which is the
+    accumulating-pile-of-sessions failure arrived at from a third
+    direction.
+
+    The fake now rejects any request without it, on every route, so
+    dropping `Authorization` from `_headers()` fails loudly here instead
+    of passing all eighteen of this file's other cases.
+    """
+    server = FakeEmbyServer()
+    session, client = _session(server)
+    try:
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+    finally:
+        await client.aclose()
+    assert server.requests == ["POST /Users/AuthenticateByName", "GET /System/Info"]
+    assert len(server.identities) == len(server.requests)
+    for identity in server.identities:
+        assert identity is not None
+        assert identity.startswith("MediaBrowser ")
+        assert 'Client="Usher"' in identity
+        assert f'DeviceId="{DEVICE_ID}"' in identity
+        assert 'Version="0.1.0"' in identity
 
 
 async def test_the_same_device_id_is_reused_across_reauthentication() -> None:
@@ -216,6 +284,161 @@ async def test_the_cooldown_expires_and_authentication_is_retried() -> None:
     assert server.authentications == 2
 
 
+async def test_a_rejected_credential_discards_the_dead_session_token() -> None:
+    """`_authenticate_locked` clears `self._token` when Emby rejects the
+    credentials, and the cost of not doing so only shows up *after* the
+    cooldown expires: `_session()` would hand back a token minted before
+    the password changed, so the first call of the recovered session is
+    spent on a request that is already known to be doomed.
+
+    Asserted as the exact request sequence, because the outcome is the
+    same either way -- a retry does eventually recover. What differs is
+    whether the fifth request is the re-authentication or another 401.
+    """
+    server = FakeEmbyServer()
+    clock = _Clock()
+    session, client = _session(server, clock=clock)
+    try:
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+        server.reject_credentials()
+        with pytest.raises(PortAuthFailed):
+            await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+        clock.now += 61.0
+        server.credentials_valid = True
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+    finally:
+        await client.aclose()
+    assert server.requests == [
+        "POST /Users/AuthenticateByName",  # the first session
+        "GET /System/Info",
+        "GET /System/Info",  # 401: the session was invalidated
+        "POST /Users/AuthenticateByName",  # 401: the password is wrong now
+        # No fifth `GET /System/Info` with the dead token in front of it.
+        "POST /Users/AuthenticateByName",
+        "GET /System/Info",
+    ]
+
+
+async def test_the_anonymous_probe_carries_the_identity_but_no_session_token() -> None:
+    """ "The whole reason `verify()` can separate 'unreachable' from 'bad
+    credentials'". `/System/Info/Public` answers without authentication,
+    so a failure there is a reachability failure and cannot be anything
+    else -- which stops being true the moment this call authenticates
+    first, because then a wrong password reports the source as
+    *unreachable* rather than as reachable-with-bad-credentials, and the
+    `SourceStatus` an operator reads names the wrong problem.
+
+    The fake refuses a session token on this route for that reason, so
+    routing this call through the authenticated helper fails here rather
+    than passing.
+    """
+    server = FakeEmbyServer()
+    session, client = _session(server)
+    try:
+        body = await session.anonymous_json(PUBLIC_INFO_PATH, op="verify_public")
+    finally:
+        await client.aclose()
+    assert body["Version"] == SERVER_VERSION
+    assert server.requests == ["GET /System/Info/Public"]
+    assert server.authentications == 0
+    assert server.tokens == [None]
+    assert server.identities[0] is not None
+    assert f'DeviceId="{DEVICE_ID}"' in server.identities[0]
+
+
+async def test_the_anonymous_probe_reports_an_unreachable_server() -> None:
+    """The failure this call exists to be able to report."""
+    server = FakeEmbyServer()
+    server.offline = True
+    session, client = _session(server)
+    try:
+        with pytest.raises(PortUnavailable):
+            await session.anonymous_json(PUBLIC_INFO_PATH, op="verify_public")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [(429, PortRateLimited), (503, PortUnavailable), (200, PortDataMalformed)],
+)
+async def test_the_anonymous_probe_translates_every_failure_shape(
+    status: int, expected: type[Exception]
+) -> None:
+    """Same taxonomy as an authenticated call, minus the 401 handling it
+    has no session to recover. The 200 case is a reverse proxy's HTML
+    maintenance page, which is the realistic way this route lies."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if status == 200:
+            return httpx.Response(200, text="<html>maintenance</html>")
+        return httpx.Response(status, headers={"retry-after": "12"})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://emby.invalid"
+    )
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(expected):
+            await session.anonymous_json(PUBLIC_INFO_PATH, op="verify_public")
+    finally:
+        await client.aclose()
+
+
+async def test_user_id_authenticates_once_and_then_answers_from_the_session() -> None:
+    """Emby's item and user-data routes all live under `/Users/{userId}/`,
+    so `EmbyAdapter` asks for this before every walk, every `get_item`, and
+    every write-back. An implementation that re-authenticated per call
+    would turn one nightly reconcile into 94,395 authentications."""
+    server = FakeEmbyServer()
+    session, client = _session(server)
+    try:
+        first = await session.user_id()
+        second = await session.user_id()
+    finally:
+        await client.aclose()
+    assert first == USER_ID
+    assert second == USER_ID
+    assert server.authentications == 1
+
+
+async def test_access_token_is_the_token_the_server_actually_accepts() -> None:
+    """Used only to build direct-play URLs (ADR-0012). A token that is not
+    the live session's is a playback link that 401s in the client's
+    player, long after anything here could report it."""
+    server = FakeEmbyServer()
+    session, client = _session(server)
+    try:
+        token = await session.access_token()
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+    finally:
+        await client.aclose()
+    assert token
+    assert server.authentications == 1
+    assert server.tokens[-1] == token
+
+
+@pytest.mark.parametrize("call", ["user_id", "access_token"])
+async def test_the_other_entry_points_also_refuse_to_run_after_aclose(call: str) -> None:
+    """`_raise_if_closed` is on all three entry points, not just
+    `request`: `EmbyAdapter._fetch` calls `user_id()` *before* it calls
+    `request()`, so a check only on the latter lets a closed adapter
+    authenticate against a live transport and succeed. The transport here
+    is deliberately still open, which is the case an `httpx`-level check
+    cannot cover."""
+    server = FakeEmbyServer()
+    session, client = _session(server)
+    await session.aclose()
+    try:
+        with pytest.raises(PortUnavailable):
+            await (session.user_id() if call == "user_id" else session.access_token())
+    finally:
+        await client.aclose()
+    assert server.authentications == 0
+
+
 async def test_a_transport_error_becomes_port_unavailable() -> None:
     server = FakeEmbyServer()
     server.offline = True
@@ -337,6 +560,30 @@ async def test_a_non_json_body_becomes_port_data_malformed() -> None:
         await client.aclose()
 
 
+async def test_a_json_body_that_is_not_an_object_is_malformed() -> None:
+    """`decode_json` promises a `dict`, and every caller indexes what it
+    returns. A JSON array parses fine and then fails on the first `.get`
+    with a `TypeError`, which is not an error any caller written against
+    `usher.ports.errors` can catch."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/Users/AuthenticateByName":
+            return httpx.Response(200, json={"AccessToken": "t", "User": {"Id": "u"}})
+        return httpx.Response(200, json=[{"Id": "not-an-object"}])
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://emby.invalid"
+    )
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortDataMalformed):
+            await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+    finally:
+        await client.aclose()
+
+
 async def test_an_authentication_response_without_a_token_is_malformed() -> None:
     """Distinguished from a 401 on purpose: a 200 with no AccessToken means
     something answered that is not Emby -- a captive portal, a proxy's
@@ -353,6 +600,46 @@ async def test_an_authentication_response_without_a_token_is_malformed() -> None
     )
     try:
         with pytest.raises(PortDataMalformed):
+            await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("body", "missing"),
+    [
+        ({"User": {"Id": "u"}}, "no AccessToken"),
+        ({"AccessToken": "t"}, "no User.Id"),
+        ({"AccessToken": "t", "User": {"Id": ""}}, "no User.Id"),
+        ({"AccessToken": "", "User": {"Id": "u"}}, "no AccessToken"),
+    ],
+)
+async def test_each_half_of_the_authentication_response_is_validated_separately(
+    body: dict[str, object], missing: str
+) -> None:
+    """The captive-portal case above is answered by *whichever* of the two
+    checks runs first, so it holds with either one deleted -- each masks
+    the other. These payloads are each valid but for one half, so each
+    check has a case only it can answer.
+
+    A 200 carrying a real token and no `User.Id` is the one that would
+    otherwise go unguarded, and it is not hypothetical: every item route
+    Emby offers is under `/Users/{userId}/`, so an empty user id builds
+    `/Users//Items` and walks a library that is always empty -- a source
+    that reports itself healthy and catalogues nothing.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://emby.invalid"
+    )
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortDataMalformed, match=missing):
             await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
     finally:
         await client.aclose()
@@ -459,3 +746,54 @@ async def test_every_upstream_request_produces_a_span() -> None:
     assert spans[0].attributes is not None
     assert spans[0].attributes["usher.op"] == "info"
     assert spans[0].attributes["usher.source"] == "Living Room Emby"
+
+
+async def test_every_upstream_request_records_its_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`usher.source.request.duration` is PRD 10's catalogue entry for M3
+    -- the milestone's one metric -- with the `source` and `op` labels
+    that table specifies. Untested, replacing the `record` call with
+    `pass` is invisible: nothing else in the suite observes it.
+
+    Recorded in `_send`'s `finally`, so a request that fails at the
+    transport is timed too. That is the case the metric is most wanted
+    for: a source that has become slow enough to time out contributes
+    nothing to a metric that only records successes.
+
+    The clock advances here (see `_TickingClock`). Everywhere else in this
+    file the injected clock is frozen, which makes every recorded duration
+    exactly `0.0` -- an accepted consequence of one time source per
+    session rather than a separate one for the cooldown and the metric,
+    which could disagree in production and would be one more constructor
+    knob to get wrong for a value only tests read.
+    """
+    recorder = _RecordingHistogram()
+    monkeypatch.setattr(session_module, "_request_duration", recorder)
+    server = FakeEmbyServer()
+    session, client = _session(server, clock=_TickingClock(step=0.25))
+    try:
+        await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+    finally:
+        await client.aclose()
+    assert [attributes["op"] for _, attributes in recorder.records] == ["authenticate", "info"]
+    assert all(attributes["source"] == "Living Room Emby" for _, attributes in recorder.records)
+    assert all(duration == pytest.approx(0.25) for duration, _ in recorder.records)
+
+
+async def test_a_failed_request_is_timed_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `finally`, specifically. A source that has started timing out
+    is exactly the source an operator opens this metric to look at, and a
+    `record` on the success path only would show it as having stopped
+    making requests at all."""
+    recorder = _RecordingHistogram()
+    monkeypatch.setattr(session_module, "_request_duration", recorder)
+    server = FakeEmbyServer()
+    server.offline = True
+    session, client = _session(server, clock=_TickingClock(step=0.25))
+    try:
+        with pytest.raises(PortUnavailable):
+            await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+    finally:
+        await client.aclose()
+    assert [attributes["op"] for _, attributes in recorder.records] == ["authenticate"]

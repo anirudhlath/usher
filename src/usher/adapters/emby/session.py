@@ -73,7 +73,10 @@ SYSTEM_INFO_PATH = "/System/Info"
 
 # Named `_EMBY_AUTH_HEADER`, not `_TOKEN_HEADER`: ruff's S105 flags any
 # module constant whose *name* contains "token" and whose value is a string
-# literal, and a `# noqa` on a header name is worse than a clear name.
+# literal, and a suppression comment on a header name is worse than a clear
+# name. (Spelled out rather than naming the directive: ruff parses the
+# directive's own spelling out of any comment, prose or not, and warns
+# about it on every run.)
 _EMBY_AUTH_HEADER = "X-Emby-Token"
 
 _UNSAFE_HEADER_CHARS = re.compile(r"[^A-Za-z0-9 ._+-]")
@@ -188,6 +191,17 @@ class EmbySession:
             raise PortUnavailable("this source adapter has been closed")
 
     def _raise_if_blocked(self) -> None:
+        """The negative cache's read side.
+
+        The deadline is never cleared once it passes, and does not need to
+        be: `self._clock` is monotonic, so a deadline in the past stays in
+        the past, and the next rejection overwrites it with a fresh one. An
+        `else: self._blocked_until = None` after a successful
+        authentication looks like the missing half of this and is not --
+        every path to `_authenticate_locked` runs this method first, so it
+        could only ever run with an *expired* deadline, and clearing an
+        expired deadline changes nothing any caller can observe.
+        """
         if self._blocked_until is not None and self._clock() < self._blocked_until:
             raise PortAuthFailed(
                 "Emby rejected the stored credentials for this source; not retrying yet"
@@ -208,6 +222,11 @@ class EmbySession:
         )
         if response.status_code == 401:
             self._blocked_until = self._clock() + self._reauth_cooldown
+            # Discarded, not kept: whatever session this token named, Emby
+            # has just said these credentials are not the ones that own it.
+            # Left in place, `_session()` hands it back the moment the
+            # cooldown expires and spends the recovered session's first
+            # call on a request already known to 401.
             self._token = None
             raise PortAuthFailed("Emby rejected the stored credentials for this source")
         if response.status_code == 429:
@@ -229,7 +248,6 @@ class EmbySession:
         self._token = token
         self._user_id = user_id
         self._generation += 1
-        self._blocked_until = None
         return token, user_id
 
     async def _session(self) -> tuple[str, int]:

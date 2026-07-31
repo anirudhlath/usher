@@ -54,11 +54,42 @@ _HDR_WIRE: dict[HdrFormat | None, tuple[str, str | None]] = {
 }
 
 _DEVICE_ID = re.compile(r'DeviceId="([^"]*)"')
+# `Device="..."` also matches inside `DeviceId="..."`; `search` returns the
+# leftmost match, and the header PRD 03 specifies puts `Device` first.
 _DEVICE = re.compile(r'Device="([^"]*)"')
+_CLIENT = re.compile(r'Client="([^"]*)"')
+_VERSION = re.compile(r'Version="([^"]*)"')
 _ITEMS = re.compile(r"^/Users/(?P<user>[^/]+)/Items$")
 _ITEM = re.compile(r"^/Users/(?P<user>[^/]+)/Items/(?P<item>[^/]+)$")
 _PROGRESS = re.compile(r"^/Users/(?P<user>[^/]+)/PlayingItems/(?P<item>[^/]+)/Progress$")
 _PLAYED = re.compile(r"^/Users/(?P<user>[^/]+)/PlayedItems/(?P<item>[^/]+)$")
+
+
+def _identity_of(request: httpx.Request) -> tuple[str, str] | None:
+    """`(Device, DeviceId)` from the MediaBrowser header, or `None` if the
+    header is missing or malformed.
+
+    Emby derives a session's device from this header, so a request without
+    it is attributed to an anonymous client -- which is precisely the
+    accumulating-pile-of-sessions failure PRD 03's durable-client identity
+    exists to prevent. Every field is required, not just the two returned:
+    an empty `DeviceId` is not a durable identity, and a `Client` that is
+    not `Usher` is some other application's traffic.
+    """
+    identity = request.headers.get("Authorization", "")
+    if not identity.startswith("MediaBrowser "):
+        return None
+    client = _CLIENT.search(identity)
+    device = _DEVICE.search(identity)
+    device_id = _DEVICE_ID.search(identity)
+    version = _VERSION.search(identity)
+    if client is None or device is None or device_id is None or version is None:
+        return None
+    if client.group(1) != "Usher" or not device.group(1) or not device_id.group(1):
+        return None
+    if not version.group(1):
+        return None
+    return device.group(1), device_id.group(1)
 
 
 def _stamp(value: datetime) -> str:
@@ -91,6 +122,12 @@ class FakeEmbyServer:
         self.device_ids: list[str] = []
         self.devices: list[str] = []
         self.requests: list[str] = []
+        # One entry per request, in step with `requests`: the raw
+        # `Authorization` and `X-Emby-Token` headers as they arrived, so a
+        # test can assert on what rode along with a call rather than only
+        # on whether the call was allowed through.
+        self.identities: list[str | None] = []
+        self.tokens: list[str | None] = []
         self._items: dict[str, tuple[SourceItem, AwareDatetime]] = {}
         self._states: dict[str, SourceWatchState] = {}
         self._sessions = 0
@@ -130,10 +167,33 @@ class FakeEmbyServer:
         if self.offline:
             raise httpx.ConnectError("connection refused")
         self.requests.append(f"{request.method} {request.url.path}")
+        self.identities.append(request.headers.get("Authorization"))
+        self.tokens.append(request.headers.get("X-Emby-Token"))
         path = request.url.path
+        # Checked before routing, for *every* path. The durable-client
+        # identity is documented as riding on every request, not just the
+        # authentication one, and a gate that only guards
+        # `AuthenticateByName` tests exactly half of that -- the half a
+        # `_headers()` that dropped `Authorization` from every other
+        # request would sail straight through.
+        if _identity_of(request) is None:
+            return httpx.Response(400, json={"Error": "missing MediaBrowser authorization"})
         if path == "/Users/AuthenticateByName":
             return self._authenticate(request)
         if path == "/System/Info/Public":
+            # Stricter than the real server, deliberately. Emby would
+            # happily accept a token here; this route exists precisely
+            # because it answers *without* one, which is what lets
+            # `verify()` report "reachable but unauthenticated" instead of
+            # "unreachable" for a source with a wrong password. An adapter
+            # that reached this path through its authenticated helper would
+            # authenticate first and fail here on a bad credential, and the
+            # distinction would be silently gone -- so the fake refuses the
+            # token rather than tolerating it.
+            if request.headers.get("X-Emby-Token") is not None:
+                return httpx.Response(
+                    400, json={"Error": "the public info route takes no session token"}
+                )
             return httpx.Response(
                 200,
                 json={"ServerName": "Fake Emby", "Version": SERVER_VERSION, "Id": SERVER_ID},
@@ -172,16 +232,15 @@ class FakeEmbyServer:
 
     def _authenticate(self, request: httpx.Request) -> httpx.Response:
         self.authentications += 1
-        identity = request.headers.get("Authorization", "")
-        device_id = _DEVICE_ID.search(identity)
-        device = _DEVICE.search(identity)
-        if 'Client="Usher"' not in identity or device_id is None or device is None:
-            # Emby derives the session's device from this header. Rejecting a
-            # request without it is what makes the durable-client header a
-            # tested requirement rather than decoration.
-            return httpx.Response(400, json={"Error": "missing MediaBrowser authorization"})
-        self.device_ids.append(device_id.group(1))
-        self.devices.append(device.group(1))
+        # Well-formedness was already checked in `handle`, for every route.
+        # What is recorded here is narrower and is what the durable-client
+        # assertions read: the device identity Emby would bind *this
+        # session* to, once per authentication rather than once per request.
+        identity = _identity_of(request)
+        assert identity is not None
+        device, device_id = identity
+        self.device_ids.append(device_id)
+        self.devices.append(device)
         body = json.loads(request.content or b"{}")
         if (
             not self.credentials_valid
