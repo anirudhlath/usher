@@ -22,6 +22,7 @@ from usher.ports.source import (
     SourceAdapter,
     SourceAdapterFactory,
     SourceStatus,
+    SourceWatchState,
     StreamTarget,
     StreamTargetKind,
 )
@@ -252,3 +253,45 @@ def test_source_adapter_still_declares_supports_push() -> None:
     whose socket cannot be established reports `False` and the reconciler
     covers the gap."""
     assert "supports_push" in SourceAdapter.__abstractmethods__
+
+
+def test_source_watch_state_defaults_play_history_to_absent_not_zero() -> None:
+    """The finding this milestone exists to resolve, in DTO form.
+
+    Verified 2026-07-31 against Emby 4.9.5.0: a *listing* reports
+    `PlayCount: 0` and omits `LastPlayedDate`, for an item whose single-item
+    fetch reports `PlayCount: 2` and a real date. A walk therefore cannot
+    say, and `0` is a claim rather than an absence — so the default must be
+    `None`. If this default is `0`, every merge in M4 writes zero over real
+    history and nothing anywhere reports a failure.
+    """
+    state = SourceWatchState(external_id="movie-1", position_seconds=90, played=False)
+    assert state.play_count is None
+    assert state.last_played_at is None
+
+
+def test_source_watch_state_still_carries_a_reported_zero() -> None:
+    """Over-correcting into "play_count is never reported" would make a
+    reset impossible to propagate — the same correctness bug as filtering
+    all-zero states out of a walk. A source that *can* count and says zero
+    must be able to say so."""
+    state = SourceWatchState(external_id="movie-1", position_seconds=0, played=False, play_count=0)
+    assert state.play_count == 0
+
+
+def test_get_watch_state_is_on_the_port() -> None:
+    """The authoritative read. Emby's single-item route carries the real
+    `PlayCount`/`LastPlayedDate` its listing does not; without a port method
+    for it, play history is unrecoverable at any price.
+
+    `eval_str=True` rather than a comparison against the literal string
+    `"SourceWatchState | None"`: the point is that the method can answer
+    "gone" as well as a state, and that claim should hold whether the
+    annotation is written quoted (as `verify` is) or bare (as `get_item`
+    is). Comparing strings would make an inconsequential unquoting fail
+    this, and would pass for a quoted name that no longer resolves.
+    """
+    assert "get_watch_state" in SourceAdapter.__abstractmethods__
+    signature = inspect.signature(SourceAdapter.get_watch_state, eval_str=True)
+    assert list(signature.parameters) == ["self", "external_id"]
+    assert signature.return_annotation == SourceWatchState | None

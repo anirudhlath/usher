@@ -100,10 +100,35 @@ class SourceItem:
 
 @dataclass(frozen=True)
 class SourceWatchState:
+    """One item's watch state as a source reports it.
+
+    **`play_count` and `last_played_at` are three-valued, and `None` is not
+    zero.** `None` means "this read could not determine it"; `0` and a real
+    datetime are positive claims a caller must honour, including the claim
+    that something has been reset to unplayed.
+
+    That distinction is not fastidiousness. Verified 2026-07-31 against Emby
+    4.9.5.0: a `GET /Users/{user}/Items` *listing* reports `PlayCount: 0`
+    and omits `LastPlayedDate` entirely, for the very item whose
+    `GET /Users/{user}/Items/{item}` reports `PlayCount: 2` and a real
+    `LastPlayedDate`. `PlaybackPositionTicks` and `Played` are correct in
+    both. No `Fields` value, no `EnableUserData`, and no `Ids` restriction
+    changes it. So `watch_state()` — which walks listings — cannot carry
+    play history, and if these two fields could only say "0" then every
+    delta walk would overwrite the household's real history with zeros,
+    silently, forever.
+
+    An implementation whose listing *does* carry history is free to report
+    it from the walk; the contract requires only that a reported number be
+    true, never that it be present. `get_watch_state` is where a caller goes
+    when it needs the answer rather than whatever the cheap read happened to
+    know. See [ADR-0014](../../../docs/prd/decisions/0014-absence-is-not-zero.md).
+    """
+
     external_id: str
     position_seconds: int
     played: bool
-    play_count: int = 0
+    play_count: int | None = None
     last_played_at: AwareDatetime | None = None
     # Emby is multi-user; None means "the source didn't distinguish", which
     # today is fine because everything implicitly lands on the singleton
@@ -367,6 +392,35 @@ class SourceAdapter(ABC):
         all-zero state, so an implementation that skipped them could never
         propagate a reset — the delta walk would find the changed item and
         then discard exactly the record describing the change.
+
+        May report `play_count`/`last_played_at` as `None` — "this read
+        cannot say" — and must, rather than reporting a zero, whenever the
+        listing it walks does not carry them. See `SourceWatchState`.
+        """
+
+    @abstractmethod
+    async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
+        """Authoritative watch state for one item, including play history.
+
+        The expensive, exact counterpart to `watch_state`'s cheap walk.
+        Where the walk is permitted to report `play_count`/`last_played_at`
+        as `None` ("this read cannot say"), this method must report the real
+        values whenever the source holds them — an implementation that
+        delegates to the walk is wrong on any source whose listing is
+        lossier than its item route, which is the measured behaviour of the
+        one source that exists.
+
+        `None` means the item is gone from the source, exactly as
+        `get_item` does, and for the same reason: a caller must never learn
+        to tell a deletion from a 404. A transient failure to reach the
+        source raises (e.g. `PortUnavailable`) and is never reported as
+        `None` — conflating them would let a flaky network merge an
+        all-zero state over a real one.
+
+        Costed deliberately: one request per item, against a library
+        measured at 1,126,674 items. No walk may call this. Its caller is a
+        queued, bounded backfill over the items a walk has flagged as
+        played-but-history-unknown.
         """
 
     @abstractmethod
