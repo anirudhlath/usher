@@ -414,6 +414,89 @@ only "the caller didn't crash" passed both before and after either bug —
 it needs a real winner row seeded first, and an assertion that it comes
 back byte-for-byte unchanged.
 
+**An episode must never walk the match ladder, and the reason is in the
+payload.** A live Emby episode carries the *episode's* own provider ids —
+`{"Imdb": "tt2178782", "Tvdb": "4517466"}` on `tests/fixtures/emby/
+episode_item.json` — not its series'. Two consequences, both catastrophic at
+999,827 episodes. TVDb numbers episodes and series in different, numerically
+overlapping namespaces and `usher.db.repositories.matching`'s TVDb statement
+deliberately does not filter on kind, so an episode run through the provider
+tiers resolves to whichever unrelated series holds that integer. And no
+episode's IMDb id is in the catalog at all (`tvEpisode` is excluded from M2's
+bootstrap by design), so the stub tier mints one junk `Title` per episode —
+a catalog of rubbish roughly the size of the real one. `MatchService` returns
+`UNMATCHED` for an episode with no lookups and **no remote-search job** (one
+per episode is a queue the size of the library, and a TMDb title search for
+an episode name is not a resolution path); `IngestService` attaches it to its
+series' `Title`, labelled `MatchMethod.SERIES_PARENT`.
+
+**Nothing a source can put in a payload may abort a walk.** `Title.imdb_id`
+is pattern-validated (`^tt\d{7,8}$`) and `year` is `ge=0`, and a pydantic
+`ValidationError` is **not** a `UsherPortError` — so `ReconcileService`, which
+re-raises anything that is not one, would let a single stray
+`ProviderIds.Imdb` in 1,126,674 items abort that source's sync permanently.
+Filter every value to the shape the model accepts *before* the constructor;
+`usher.services.matching._usable_ids` is where.
+
+**`sorted()` over a set of `ProviderRef`/`NameYearProbe` raises.** Both are
+`@dataclass(frozen=True, slots=True)` without `order=True`, so there is no
+`__lt__` — `TypeError: '<' not supported`. `dict.fromkeys` is the idiom used
+throughout: it deduplicates *and* keeps the batch's own order, which is what
+makes a failure read in the order the page arrived.
+
+**A service that saves a frozen checkpoint per batch must not evolve its own
+stale copy in the failure handler.** `ReconcileService._flush` saves an
+evolved `SyncRun` after each batch, so when the walk raises, `reconcile`'s
+binding is the pre-walk value — and `run.evolve(status=FAILED)` on it writes
+`items_seen = 0` over a checkpoint that recorded eight. Same trap
+`BootstrapService.import_dataset` documents; here there is no re-fetch to
+recover from (`SyncRunRepository` is a history, not a per-source checkpoint),
+so a small mutable holder carries the latest run across the `try`.
+
+**Moving the availability sweep into a `finally:` really does retract a
+healthy library, and the obvious test shape hides why.** Measured. Seed seven
+items, fail the walk immediately, one batch: nothing is written before the
+failure, so the sweep would retract 7 of 7 — 100%, refused by ADR-0015's
+ceiling, and `AvailabilitySweepRefused` then escapes the `finally:` and
+propagates out of `reconcile`. The case fails, but on an uncaught exception
+rather than on its own assertion, and it never exercises a sweep that
+*succeeds* after a failed walk. The shape that does is a walk that commits
+eight of ten items and then raises: two stale rows, 20%, under the ceiling,
+no refusal, two available items silently retracted. **The ceiling is not a
+second line of defence for the success-path gate** — it fires on a fraction,
+so it catches the catastrophe and misses the quiet one. Reproduced against
+real Postgres as well as the fakes.
+
+**`observed_at=now()` instead of the run's start instant is a *semantic*
+break, not a race.** A per-row write instant is always later than
+`run.started_at`, so the sweep's `last_seen_at < seen_since` still spares
+everything the run saw and no retraction test fails. What breaks is the
+meaning of the column. Assert `stored.last_seen_at == run.started_at`
+directly; no frozen clock is needed.
+
+**`FakeTitleRepository` and `FakeTitleMatchRepository` are one table and are
+now wired together.** `TitleRepository.add` flushes, so a stub the match
+stage just wrote is visible to the very next `TitleMatchRepository` read.
+Keeping two independent dicts made a *correct* service fail rather than a
+wrong one pass: `IngestService`'s second walk of a series it had itself
+stubbed missed the ladder, re-created the stub, conflicted on
+`ix_titles_tvdb_id`, and had nothing left to look the winner up with. Pass a
+`FakeTitleRepository` to the constructor; leaving it out is still meaningful
+and models a read that missed another worker's committed write, which is the
+only deterministic way to produce the race `MatchService`'s conflict handler
+exists for.
+
+**Two `IngestService` defects are invisible to every port fake and only real
+Postgres catches them.** Skipping `resolve_seasons` or `resolve_episodes` and
+trusting the freshly-minted UUIDv7 leaves all 24 unit cases green — a dict has
+no foreign keys — and fails on `fk_episodes_season_id_seasons` /
+`fk_media_items_episode_id_episodes` on the *second* walk, when that id names
+no row. `tests/integration/test_services_ingest.py` and
+`tests/integration/test_services_reconcile.py` are the paired runs; the latter
+also pins "a refused sweep leaves the session usable for the `FAILED` row that
+explains it", which no fake can express (the guard is evaluated in Python
+after a successful `SELECT`, so Postgres never aborts the transaction).
+
 ## Commands
 
 Verified working as of Group A (scaffold + config):
@@ -785,8 +868,8 @@ and interrogated over HTTP, and the suite is 865 tests (733 unit / 132
 integration), mypy strict clean over `src` and `tests`, 6 import contracts:
 
 ```bash
-uv run pytest                                    # 1332 tests as of M4 group C2 (981 unit / 351 integration)
-uv run pytest tests/unit                         # 981 tests, no Docker and no network
+uv run pytest                                    # 1434 tests as of M4 group D1 (1063 unit / 371 integration)
+uv run pytest tests/unit                         # 1063 tests, no Docker and no network
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .
