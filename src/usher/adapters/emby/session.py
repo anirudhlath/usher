@@ -34,6 +34,12 @@ tested:
    1-5 s per call. The clock is injected so the *expiry* is testable
    without sleeping.
 
+The injected clock also times `usher.source.request.duration` (PRD 10's
+catalogue entry for M3). Deliberately the same one: two clocks would be a
+second constructor knob, able to disagree, for a value only a test reads.
+The visible cost is that a test freezing the clock records every duration
+as `0.0` -- so the test that asserts on a duration advances it instead.
+
 And exactly one retry per call, never a loop. A loop is how a genuinely
 wrong password becomes an infinite storm.
 
