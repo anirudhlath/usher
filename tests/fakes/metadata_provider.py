@@ -249,7 +249,20 @@ class FakeMetadataProvider(MetadataProvider):
                 for raw_episode in raw_season.get("episodes", [])
             )
         return EnrichmentResult(
-            title=title, seasons=tuple(seasons), episodes=tuple(episodes), payload=payload
+            title=title.evolve(
+                # `field -> provider` for what this payload actually carried.
+                # Present because `EnrichService` *merges* provenance rather
+                # than assigning it, and a fake producing an empty map would
+                # let a service that dropped the stored map entirely pass.
+                field_provenance={
+                    field: self._name
+                    for field in ("name", "overview", "genres", "tmdb_id", "release_date")
+                    if getattr(title, field) not in (None, ())
+                }
+            ),
+            seasons=tuple(seasons),
+            episodes=tuple(episodes),
+            payload=payload,
         )
 
     async def changed_since(self, since: AwareDatetime, cursor: str | None = None) -> ChangedPage:

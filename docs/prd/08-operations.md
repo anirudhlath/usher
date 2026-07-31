@@ -115,6 +115,14 @@ Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
 - **Poison threshold** — after N attempts a job is *parked* with its error, not
   retried forever and not silently dropped. `job_max_attempts` is N, and
   "after N attempts" means exactly N.
+- **Work that has become impossible *completes*, and does not park.** A job
+  naming an item its source has since deleted, or one no configured source
+  addresses, is not poison — parking it fills the review list with things that
+  are simply gone, and a parked job needs a human to release it. Parking is
+  reserved for work a human has to look at. The three handlers
+  (`usher.services.handlers`) are where this is decided; a job whose *key* is
+  unparseable is the opposite case and does park, because that is a real
+  defect somebody has to see.
 - **Re-enqueueing does not un-park.** Poison a human has not looked at is not
   fixed by asking for it again, and a parked job's priority is not promoted
   behind their back either.

@@ -78,6 +78,7 @@ from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
 from usher.ports.ingest import MatchOutcome, NameYearProbe, ProviderRef
 from usher.ports.jobs import JobQueue, JobRequest
+from usher.ports.metadata import MetadataCandidate, MetadataProvider
 from usher.ports.repository import TitleMatchRepository, TitleRepository
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.telemetry import current_traceparent
@@ -122,10 +123,78 @@ class MatchService:
         titles: TitleRepository,
         matching: TitleMatchRepository,
         queue: JobQueue,
+        provider: MetadataProvider | None = None,
     ) -> None:
         self._titles = titles
         self._matching = matching
         self._queue = queue
+        # Optional because the *batch* path must never use it: `match()` runs
+        # inside a walk and a network call per unmatched item would make the
+        # walk's duration a function of TMDb's rate limit. Only
+        # `match_remote` -- the `match` job handler's entry point -- touches
+        # it, and a deployment with no TMDb key configured simply has no
+        # tier 4 (PRD 08's "TMDb key missing" degradation).
+        self._provider = provider
+
+    async def match_remote(self, item: SourceItem) -> MatchOutcome:
+        """PRD 03's tier 4, one item at a time, off the queue.
+
+        The tier the batch path deliberately skips. It is one network call
+        per unmatched item and a first walk against an unbootstrapped catalog
+        produces those in the hundreds of thousands, so it runs at background
+        priority behind the walk rather than inside it.
+
+        **Confident or nothing.** A search for "The Office" returns twenty
+        results and picking the most popular is a coin flip that attaches a
+        household's watch history to the wrong show. The rule is the same one
+        tier 3 applies locally: the candidate's name must match once
+        case-insensitively, and -- when the source dated the item -- its year
+        must be within +/-1. Anything ambiguous stays in the review queue,
+        which PRD 03 stage 5 requires.
+
+        **Episodes never reach here**, for the reason the module docstring
+        gives: a TMDb title search for "Kissed by Fire" is not a resolution
+        path, and `MatchService` never enqueues a `match` job for one.
+        `IngestService` does enqueue them for episodes whose *series* it
+        could not resolve, and those are answered by the series arriving,
+        not by a search.
+        """
+        kind = _TITLE_KIND.get(item.kind)
+        if self._provider is None or kind is None:
+            return MatchOutcome(
+                external_id=item.external_id, title_id=None, method=MatchMethod.UNMATCHED
+            )
+        candidate = _confident(await self._provider.search(item.name, item.year, kind), item)
+        if candidate is None:
+            _result_counter.add(1, {"method": "provider_search", "confident": "false"})
+            return MatchOutcome(
+                external_id=item.external_id, title_id=None, method=MatchMethod.UNMATCHED
+            )
+        ref = ProviderRef(
+            # The provider's own name, never a literal: it is the same string
+            # `TitleMatchRepository` matches on, and the provider is the only
+            # thing that knows it.
+            provider=self._provider.name,
+            value=str(candidate.provider_id),
+            kind=candidate.kind,
+        )
+        found = (await self._lookup_refs([ref])).get(ref)
+        if found is None:
+            # The catalog holds 1,271,138 titles and only 291,737 carry a
+            # `tmdb_id`, so a confident search result the catalog does not
+            # hold is the common case rather than the exception -- the same
+            # reasoning that makes tier 5 load-bearing.
+            found = await self._create_stub(item, {ref.provider: candidate.provider_id})
+        _result_counter.add(1, {"method": "provider_search", "confident": "true"})
+        return MatchOutcome(
+            external_id=item.external_id,
+            title_id=found,
+            # `PROVIDER_SEARCH` whether the search *found* a title or minted
+            # one, because the label answers "how was this resolved" and the
+            # answer is the search either way -- which is what makes PRD 10's
+            # "is the TMDb-search tier earning its rate limit" answerable.
+            method=MatchMethod.PROVIDER_SEARCH,
+        )
 
     async def match(self, items: Sequence[SourceItem]) -> list[MatchOutcome]:
         """Resolve a batch. Returns one outcome per item, in order."""
@@ -361,6 +430,34 @@ class MatchService:
         ]
         if unmatched:
             await self._queue.enqueue(unmatched)
+
+
+def _confident(
+    candidates: Sequence[MetadataCandidate], item: SourceItem
+) -> MetadataCandidate | None:
+    """The one candidate a remote search resolved to, or `None`.
+
+    Deliberately the same rule tier 3 applies locally, rather than a looser
+    one: an exact normalised name, a year within +/-1 when the source dated
+    the item, and **exactly one** survivor. A provider's relevance ordering
+    is not evidence -- `search` returns whatever the upstream thought was
+    relevant, and "the first result" is how a household's watch history ends
+    up on a documentary about the film it wanted.
+
+    An item with no year is matched on the name alone, which is why the
+    uniqueness requirement is not optional: "Dune" alone matches three films.
+    """
+    wanted = item.name.strip().casefold()
+    matches = [
+        candidate
+        for candidate in candidates
+        if candidate.name.strip().casefold() == wanted
+        and (
+            item.year is None
+            or (candidate.year is not None and abs(candidate.year - item.year) <= 1)
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _usable_ids(refs: Sequence[tuple[ProviderRef, MatchMethod]]) -> dict[str, int | str]:

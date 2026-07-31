@@ -114,6 +114,13 @@ class Settings(BaseSettings):
     # constant, because a household outside the US wants its own -- and
     # showing them somebody else's rating is worse than showing none.
     tmdb_region: str = Field(default="US", min_length=2, max_length=2)
+    # How long a cached provider payload is reused before the enrich stage
+    # refetches. TMDb's licensing term is a *ceiling* of six months rather
+    # than a target, so `le=180` is the compliance bound expressed as a type
+    # -- a value above it would put the deployment out of terms silently.
+    # `ge=1` because zero means "refetch on every attempt", which turns a
+    # retry storm into the rate limit it is meant to avoid.
+    enrich_cache_max_age_days: int = Field(default=30, ge=1, le=180)
 
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")

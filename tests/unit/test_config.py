@@ -278,3 +278,18 @@ def test_tmdb_region_must_be_a_two_letter_code(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("USHER_TMDB_REGION", "USA")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_the_enrichment_cache_window_stays_inside_tmdbs_term(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TMDb's caching term is a six-month ceiling, so the bound is a
+    compliance constraint expressed as a type rather than a tuning range --
+    and zero is not "always fresh", it is "refetch on every retry"."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    assert Settings().enrich_cache_max_age_days == 30
+    for bad in ("0", "365"):
+        monkeypatch.setenv("USHER_ENRICH_CACHE_MAX_AGE_DAYS", bad)
+        with pytest.raises(ValidationError):
+            Settings()
