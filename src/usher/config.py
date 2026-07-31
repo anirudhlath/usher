@@ -75,6 +75,25 @@ class Settings(BaseSettings):
     # re-authentication) for as long as it stays wrong.
     source_reauth_cooldown_seconds: float = Field(default=60.0, ge=0)
 
+    # The ingest pipeline (PRD 03). Same reasoning as the bulk and source
+    # settings above: PRD 08's TOML config layer does not exist yet.
+    sync_batch_size: int = Field(default=1_000, ge=1, le=50_000)
+    # The fraction of a source's items one reconcile may mark unavailable
+    # before it refuses and changes nothing (ADR-0015). 1.0 disables the
+    # guard, which is what an operator deliberately removing a library
+    # passes on the command line.
+    sync_max_retract_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
+    job_batch_size: int = Field(default=20, ge=1, le=500)
+    # PRD 08's "after N attempts a job is parked with its error". `ge=1`
+    # rather than `ge=0`: a ceiling of zero would park every job on its first
+    # failure, which is `retryable=False` applied indiscriminately and takes
+    # the retry out of a retry queue.
+    job_max_attempts: int = Field(default=5, ge=1)
+    # The base of the exponential backoff, before jitter. `gt=0` because a
+    # zero base collapses the whole schedule to "retry immediately", which is
+    # the hot loop the backoff exists to prevent.
+    job_backoff_seconds: float = Field(default=30.0, gt=0)
+
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
 

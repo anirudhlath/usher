@@ -91,6 +91,13 @@ def overlapping(windows: Sequence[ClaimWindow]) -> bool:
 
 class JobQueueContract:
     requires_concurrency: bool = False
+    # What both subclasses construct their queue with. Named here so the
+    # ceiling case can assert on the exact attempt count at park time rather
+    # than only on "it parked eventually" -- an off-by-one in the ceiling
+    # (`>` where `>=` belongs) parks on the sixth attempt instead of the
+    # fifth, which a loop that keeps failing until something parks cannot
+    # see at all.
+    max_attempts: int = 5
 
     @pytest.fixture
     def concurrent_claims(self) -> ConcurrentClaimHarness | None:
@@ -267,6 +274,7 @@ class JobQueueContract:
             job = await queue.fail(claimed[0].id, error="upstream said no", retryable=True)
         assert job is not None
         assert job.status is JobStatus.PARKED
+        assert job.attempts == self.max_attempts, "'after N attempts' means exactly N"
         assert job.last_error == "upstream said no"
         assert job.run_after is None, "a parked job is not also waiting on a backoff"
         assert [parked.key for parked in await queue.parked()] == ["t1"]
@@ -321,6 +329,19 @@ class JobQueueContract:
             await queue.fail(claimed.id, error="bad", retryable=False)
         assert len(await queue.parked(limit=2)) == 2
         assert len(await queue.parked()) == 3
+
+    async def test_parked_jobs_are_listed_newest_first(self, queue: JobQueue) -> None:
+        """The admin listing is bounded, so its order decides what an operator
+        ever sees: oldest-first shows the same three ancient failures forever
+        while today's poison sits on page nine. Asserted because the ordering
+        mutation survived every other case in this suite."""
+        for index in range(3):
+            await queue.enqueue(
+                [JobRequest(kind=JobKind.ENRICH, key=f"t{index}", priority=JobPriority.NEW)]
+            )
+            claimed = await queue.claim([JobKind.ENRICH])
+            await queue.fail(claimed[0].id, error="bad", retryable=False)
+        assert [job.key for job in await queue.parked()] == ["t2", "t1", "t0"]
 
     async def test_nothing_is_parked_before_anything_fails(self, queue: JobQueue) -> None:
         await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
