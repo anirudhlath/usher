@@ -20,6 +20,18 @@ Subclass and provide a `harness` fixture:
                 yield harness
             finally:
                 await harness.aclose()
+
+**What this suite cannot express, stated so a green run is not over-read.**
+Every case here drives the adapter through the harness's own transport, and
+nothing in the suite can make that transport *await*. So no case here is
+evidence about concurrency: `test_operations_recover_from_an_expired_
+credential` looks like a single-flight assertion and is not one, for
+reasons worked through in its own docstring, and `SourceHarness.
+observed_overlap` is the opt-in hook that would make it one. The
+lock-level and race-level guarantees are tested per implementation, over
+a transport that really sleeps -- for Emby, in
+`tests/unit/test_adapters_emby_session.py` and
+`tests/unit/test_adapters_emby_adapter.py`.
 """
 
 import asyncio
@@ -296,11 +308,42 @@ class SourceAdapterContract:
         session that silently dies is re-minted from stored credentials with
         no human pasting a token.
 
-        Four concurrent calls, and at most one authentication between them.
-        Both halves fail a real wrong implementation: no re-authentication
-        at all raises, and a re-authentication per in-flight request counts
-        four. `<= 1` rather than `== 1` so a source with no expiring session
-        (whose `expire_credentials` is a no-op) is not forced to invent one.
+        **What a green run proves.** Recovery happens -- an adapter that
+        does not re-authenticate at all raises here -- and one expiry does
+        not become one authentication per call. `<= 1` rather than `== 1`
+        so a source with no expiring session (whose `expire_credentials` is
+        a no-op) is not forced to invent one.
+
+        **What a green run does not prove, despite appearances: single
+        flight.** Firing four calls through `asyncio.gather` and counting
+        authentications reads like a concurrency assertion and is not one
+        unless the harness's transport really overlaps. Measured against a
+        real `EmbyAdapter` over `httpx.MockTransport`: with *both* of
+        `EmbySession`'s locks deleted, four concurrent expired sessions
+        still produce exactly one authentication, so `<= 1` never
+        discriminates. Deleting the generation short-circuit entirely (N
+        authentications for N 401s) also survives all 39 cases, as does
+        removing `_raise_if_closed` from `EmbySession.user_id()`. Nothing
+        here is evidence about any of those.
+
+        The reason is that `MockTransport` never actually awaits on the way
+        to its handler, so the event loop tends to run one gathered call
+        all the way through its own re-auth before starting the next; every
+        other call then reads an already-fresh token without racing for it.
+        Over a transport that genuinely sleeps, the same code raises
+        `PortAuthFailed` with the locks gone.
+
+        **Where the single-flight claim is actually tested**, both over
+        `tests/fakes/slow_transport.py` and both asserting on observed
+        overlap so they cannot quietly stop being concurrent:
+        `tests/unit/test_adapters_emby_session.py::test_concurrent_401s_are_
+        provably_simultaneous_and_produce_one_authentication` and
+        `tests/unit/test_adapters_emby_adapter.py::test_concurrent_expired_
+        sessions_produce_one_authentication`.
+
+        A harness that *can* force real overlap says so by implementing
+        `SourceHarness.observed_overlap`, and this case then asserts on it
+        -- which is what would make the contract itself carry the claim.
         """
         await harness.given_item(MOVIE, changed_at=T0)
         assert await harness.adapter.get_item("movie-1") is not None
@@ -309,6 +352,13 @@ class SourceAdapterContract:
         results = await asyncio.gather(*(harness.adapter.get_item("movie-1") for _ in range(4)))
         assert all(result is not None for result in results)
         assert harness.authentications() - before <= 1
+        overlap = harness.observed_overlap()
+        if overlap is not None:
+            assert overlap >= 2, (
+                f"this harness claims it can observe overlap and saw {overlap}; the four "
+                "gathered calls never actually raced, so the authentication count above is "
+                "not evidence of single flight"
+            )
 
     async def test_rejected_credentials_do_not_produce_a_request_storm(
         self, harness: SourceHarness

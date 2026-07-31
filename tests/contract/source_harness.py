@@ -134,6 +134,35 @@ class SourceHarness(ABC):
         the harness was created. `0` for a source with no authentication
         step."""
 
+    def observed_overlap(self) -> int | None:
+        """The greatest number of upstream requests this harness saw in
+        flight at once, or `None` if it cannot tell. Optional: the default
+        is `None`, and a harness with no transport to instrument leaves it
+        there.
+
+        This exists because `test_operations_recover_from_an_expired_
+        credential` cannot otherwise mean what it looks like it means. It
+        fires four `asyncio.gather`-ed calls and asserts at most one
+        authentication follows, which reads as a single-flight assertion --
+        and is not one. Measured directly: over `httpx.MockTransport`, with
+        *both* of `EmbySession`'s locks deleted, four concurrent expired
+        sessions still produce exactly one authentication. Nothing in that
+        transport ever really awaits on the way to its handler, so the
+        event loop tends to run one gathered call all the way through its
+        own re-auth before starting the next, and every other call then
+        observes an already-fresh token without ever racing for it.
+
+        A harness that returns a number here is claiming its transport
+        genuinely overlaps -- which needs a real `await` in the request
+        path, not a synchronous handler (`tests/fakes/slow_transport.py` is
+        the one this repo already has). The contract then asserts on the
+        overlap as well, and the single-flight claim becomes real for that
+        implementation. Returning `None` is not a failure; it is the
+        honest answer, and it is why the contract states in that test's own
+        docstring what a green run does and does not prove.
+        """
+        return None
+
     @abstractmethod
     async def aclose(self) -> None:
         """Tear the harness down. Not the same as `adapter.aclose()` -- the
