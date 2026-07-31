@@ -468,9 +468,19 @@ async def test_the_openapi_schema_has_no_password_in_a_response(
 ) -> None:
     """A generated client is built from this document. A response schema
     that declared a password field would put one in every generated model,
-    whether or not the server ever populates it."""
+    whether or not the server ever populates it.
+
+    The positive half matters as much as the three absences: `SecretStr`
+    makes pydantic emit `"writeOnly": true` on the request schema, which is
+    the machine-readable form of PRD 08's rule -- a generated client marks
+    the field send-only rather than inferring it from the fact that no
+    response happens to carry one.
+    """
     schema = (await client.get("/openapi.json")).json()
     properties: dict[str, Any] = schema["components"]["schemas"]["SourceResponse"]["properties"]
     assert "password" not in properties
     assert "username" not in properties
     assert "credentials_ref" not in properties
+
+    request_schema = schema["components"]["schemas"]["SourceCreateRequest"]["properties"]
+    assert request_schema["password"]["writeOnly"] is True
