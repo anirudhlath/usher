@@ -138,6 +138,47 @@ def test_stream_target_does_not_leak_a_token_under_diagnose_true() -> None:
     assert "SEKRIT" not in dumped
 
 
+def test_the_redaction_cuts_at_a_fragment_as_well_as_a_query() -> None:
+    """`_redacted` cuts at the *first* of `?` and `#`, and both halves of
+    that survived mutation.
+
+    The `#` branch: a source whose deep link carries its target after a
+    fragment rather than a query is a shape no committed fixture has, and
+    dropping `url.find("#")` from the `min(...)` failed nothing -- while
+    leaving a whole wrapped URL, token included, rendered in a log line.
+
+    The *first*, not the last: `min` over both positions rather than
+    `rfind`. A deep link is a URL whose query holds another URL, so it
+    routinely has more than one `?` -- cutting at the last one keeps
+    everything up to the inner query, which is the wrapper's entire payload.
+    """
+    fragment = StreamTarget(
+        kind=StreamTargetKind.DEEP_LINK,
+        url="player://open#url=https%3A%2F%2Fe%2Fa.mkv%3Fapi_key%3DSEKRIT",
+        scheme="player",
+    )
+    assert "SEKRIT" not in repr(fragment)
+    assert "player://open<redacted>" in repr(fragment)
+
+    nested = StreamTarget(
+        kind=StreamTargetKind.DEEP_LINK,
+        url="infuse://x-callback-url/play?url=https://e/a.mkv?api_key=SEKRIT",
+        scheme="infuse",
+    )
+    assert "SEKRIT" not in repr(nested)
+    assert "infuse://x-callback-url/play<redacted>" in repr(nested)
+
+
+def test_a_url_with_neither_a_query_nor_a_fragment_is_rendered_whole() -> None:
+    """The other side of the cut: redaction that fired unconditionally
+    would render every direct URL as `<redacted>` and take the item id out
+    of the log line with it, which is the only thing the redaction
+    deliberately keeps."""
+    target = StreamTarget(kind=StreamTargetKind.DIRECT, url="https://e/Videos/a001/stream.mkv")
+    assert "url='https://e/Videos/a001/stream.mkv'" in repr(target)
+    assert "<redacted>" not in repr(target)
+
+
 def test_verify_returns_a_status_not_a_bool() -> None:
     """The 🔶 this settles: `GET /admin/sources/{id}/status` (PRD 07) has to
     report bad credentials, unreachable, and reachable-but-push-blocked as

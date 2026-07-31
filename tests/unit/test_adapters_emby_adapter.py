@@ -406,6 +406,90 @@ async def test_a_server_that_ignores_start_index_ends_the_walk_rather_than_runni
     assert len(served) == 3
 
 
+async def test_the_walk_advances_by_what_it_was_served_not_by_what_it_asked_for() -> None:
+    """A server may return fewer items than `Limit`: a page thinned by a
+    filter, a per-library cap, the last page of a library. `start +=
+    self._page_size` then jumps past exactly the difference on the next
+    request -- silently, with no error and no empty page -- and the
+    reconciler marks every skipped item `available = false`.
+
+    Three items served one at a time against a `Limit` of 200: advancing by
+    the page size yields one of them and stops.
+    """
+    library = [{"Id": f"movie-{index}", "Type": "Movie", "Name": f"M{index}"} for index in range(3)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        start = int(request.url.params["StartIndex"])
+        return httpx.Response(
+            200,
+            json={"Items": library[start : start + 1], "TotalRecordCount": len(library)},
+        )
+
+    adapter = _on(handler)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert seen == ["movie-0", "movie-1", "movie-2"]
+
+
+async def test_the_default_page_size_is_what_goes_out_as_the_limit() -> None:
+    """Nothing outside this class sets `page_size`, and every other test in
+    this file passes an explicit one -- so the default could have been 1 and
+    failed nothing, while turning one 94,395-item reconcile into 94,395
+    requests against an upstream PRD 01 measures at 1-5 s per call."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        captured.append(request)
+        return httpx.Response(200, json={"Items": [], "TotalRecordCount": 0})
+
+    adapter = _on(handler)
+    try:
+        _ = [item async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert captured[0].url.params["Limit"] == "200"
+
+
+async def test_a_page_entry_that_is_not_an_object_is_skipped_not_fatal() -> None:
+    """`Items` is a list of objects until a server answers with a list of
+    something else. `to_source_item` calls `.get` on whatever it is handed,
+    and an `AttributeError` is not an error any caller written against
+    `usher.ports.errors` can catch -- so one junk entry would abort a
+    94,395-item reconcile, which is the same trade already made for an
+    unmodelled item type one test above."""
+    served: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        served.append(1)
+        if len(served) > 1:
+            return httpx.Response(200, json={"Items": [], "TotalRecordCount": 2})
+        return httpx.Response(
+            200,
+            json={
+                "Items": ["not-an-object", {"Id": "movie-9", "Type": "Movie", "Name": "Kept"}],
+                "TotalRecordCount": 2,
+            },
+        )
+
+    adapter = _on(handler)
+    try:
+        seen = [item.external_id async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert seen == ["movie-9"]
+
+
 async def test_a_listing_with_no_items_array_is_malformed() -> None:
     """Not a truncation: a caller has to be able to tell "the library ended"
     from "the response was not a listing at all"."""
@@ -442,6 +526,28 @@ async def test_get_item_raises_rather_than_returning_none_on_a_server_error() ->
     try:
         with pytest.raises(PortUnavailable):
             await adapter.get_item("movie-0")
+    finally:
+        await adapter.aclose()
+
+
+async def test_get_item_returns_none_for_a_404() -> None:
+    """The port's headline invariant, and it had no unit-level pin: the
+    contract suite covers it, but only through `FakeEmbyServer`, so the
+    literal `response.status_code == 404` branch could be deleted (letting
+    a 404 fall into the `>= 400` raise) and everything in this file still
+    passed. `None` means "gone, mark it unavailable"; raising for the same
+    response means the reconciler never learns the file was deleted."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        return httpx.Response(404, json={"Error": "Not Found"})
+
+    adapter = _on(handler)
+    try:
+        assert await adapter.get_item("movie-0") is None
+        assert await adapter.stream_targets("movie-0") == []
     finally:
         await adapter.aclose()
 
@@ -637,6 +743,39 @@ async def test_verify_reports_the_server_version() -> None:
     assert status.push_available is None
 
 
+async def test_verify_prefers_the_authenticated_version_and_falls_back_to_the_public_one() -> None:
+    """`_version_of(info) or version` is an `or` for a reason, and neither
+    side of it was pinned -- the fake answers both probes with the same
+    string, so returning either one unconditionally passed.
+
+    The authenticated `/System/Info` is the better source and wins when it
+    has a version; some builds answer it without one, and the fallback is
+    the difference between an admin panel showing the version and showing
+    nothing for exactly those builds.
+    """
+
+    def serving(public: dict[str, str], info: dict[str, str]) -> EmbyAdapter:
+        def handler(request: httpx.Request) -> httpx.Response:
+            authenticated = _authenticated(request)
+            if authenticated is not None:
+                return authenticated
+            return httpx.Response(200, json=public if "Public" in request.url.path else info)
+
+        return _on(handler)
+
+    adapter = serving({"Version": "4.0.0.0"}, {"Version": "4.9.5.0"})
+    try:
+        assert (await adapter.verify()).server_version == "4.9.5.0"
+    finally:
+        await adapter.aclose()
+
+    adapter = serving({"Version": "4.0.0.0"}, {"ServerName": "no version here"})
+    try:
+        assert (await adapter.verify()).server_version == "4.0.0.0"
+    finally:
+        await adapter.aclose()
+
+
 async def test_verify_separates_unreachable_from_bad_credentials() -> None:
     """The whole reason the public info endpoint is probed first. With one
     authenticated call there is no way to tell a dead host from a wrong
@@ -744,6 +883,34 @@ async def test_aclose_closes_a_client_it_created_and_leaves_an_injected_one() ->
     adapter = EmbyAdapter(SOURCE, CREDENTIALS, client=injected)
     await adapter.aclose()
     assert injected.is_closed is False
+    await injected.aclose()
+
+
+async def test_aclose_is_idempotent_for_both_ownership_shapes() -> None:
+    """The port requires it in as many words -- "a shutdown path and a
+    delete path can both reach it" -- and `DELETE /admin/sources/{id}`
+    racing process shutdown is exactly that.
+
+    Honest about its own strength: no mutation of the *current* `aclose`
+    fails this. `httpx.AsyncClient.aclose()` is itself idempotent, so
+    deleting the `if self._closed: return` guard changes nothing
+    observable today. It is a regression guard for what comes next --
+    M5 closes a WebSocket here too, and that is the kind of teardown a
+    second call breaks.
+    """
+    owned = EmbyAdapter(SOURCE, CREDENTIALS)
+    await owned.aclose()
+    await owned.aclose()
+    assert owned._client.is_closed is True
+
+    server = FakeEmbyServer()
+    injected = httpx.AsyncClient(transport=server.transport(), base_url=SOURCE.base_url)
+    adapter = EmbyAdapter(SOURCE, CREDENTIALS, client=injected)
+    await adapter.aclose()
+    await adapter.aclose()
+    assert injected.is_closed is False
+    with pytest.raises(PortUnavailable):
+        await adapter.get_item("movie-0")
     await injected.aclose()
 
 

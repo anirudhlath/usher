@@ -209,6 +209,61 @@ def test_a_base_url_with_a_trailing_slash_does_not_double_it() -> None:
     assert direct.url.startswith("https://emby.invalid/Videos/")
 
 
+def test_a_negative_resume_position_is_clamped_on_the_read_side_too() -> None:
+    """The write side clamps and is tested (`EmbyAdapter.push_watch_state`);
+    this is the read, and it had nothing pinning it.
+
+    Floor division rounds towards negative infinity, so an unclamped
+    `-5_000_000 // 10_000_000` is `-1`, not `0` -- a stray negative tick
+    becomes a negative resume position, which PRD 07's `/play` hands to a
+    client to seek to.
+    """
+    payload = load_emby_fixture("movie_item")
+    payload["UserData"]["PlaybackPositionTicks"] = -5_000_000
+    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE)[0]
+    assert direct.resume_position_seconds == 0
+
+
+def test_item_level_dimensions_are_the_fallback_for_a_target_too() -> None:
+    """Emby populates `Width`/`Height` on the item for some libraries and
+    only on the video stream for others. `to_source_item` has this fallback
+    and it is tested there; the target's `resolution` is built from the same
+    two fields and nothing pinned it, so it could have been dropped in
+    silence -- leaving `/play` reporting no resolution at all for exactly
+    the libraries that carry the dimensions at item level."""
+    payload = load_emby_fixture("movie_item")
+    video = payload["MediaSources"][0]["MediaStreams"][0]
+    del video["Width"]
+    del video["Height"]
+    payload["Width"], payload["Height"] = 1280, 720
+    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE)[0]
+    assert direct.resolution == "1280x720"
+
+
+def test_an_item_id_stays_inside_its_own_url_path_segment() -> None:
+    """The same property `EmbyAdapter` needs for its request paths, needed
+    here for a different reason: this URL is *handed to a client*, so an id
+    that broke out of its segment would send that client somewhere else on
+    the source entirely -- with a valid session token attached."""
+    payload = load_emby_fixture("movie_item")
+    payload["Id"] = "a/../b"
+    direct = build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE)[0]
+    # `urlparse` does not decode, so this is the escaping as it goes out.
+    assert urlparse(direct.url).path == "/Videos/a%2F..%2Fb/stream.mkv"
+
+
+def test_an_item_with_no_id_has_no_targets() -> None:
+    """`stream_targets` hands this whatever `_fetch` returned, and `_fetch`
+    only screens for an *absent* item -- an id it cannot read is a different
+    thing from a 404. `to_source_item` raises `PortDataMalformed` for the
+    same payload; here `[]` is right, because the port documents `[]` as
+    "no way to play this" and a URL built around the missing id would be a
+    link the client follows and Emby refuses."""
+    payload = load_emby_fixture("movie_item")
+    del payload["Id"]
+    assert build_stream_targets(payload, base_url=BASE, access_token=TOKEN, device_id=DEVICE) == []
+
+
 # --- ADR-0012's handling rules ---------------------------------------
 
 
