@@ -9,9 +9,10 @@ thing that catches an implementation missing its `DISTINCT ON`.
 
 Not a test module itself: `MediaItemRepositoryContract` deliberately does
 not start with `Test`, so pytest's default collection never instantiates it
-directly. Subclass it and provide three fixtures -- `repository`,
-`source_id`, and `title_id` -- where the latter two must name rows that
-actually exist for an implementation with foreign keys.
+directly. Subclass it and provide five fixtures -- `repository`,
+`source_id`, `other_source_id`, `title_id`, and `episode_id` -- where all
+but the first must name rows that actually exist for an implementation with
+foreign keys.
 """
 
 import uuid
@@ -21,7 +22,7 @@ import pytest
 
 from usher.domain.enums import HdrFormat
 from usher.domain.ids import new_id
-from usher.ports.ingest import AvailabilitySweepRefused, MediaItemUpsert
+from usher.ports.ingest import AvailabilitySweepRefused, MediaItemTarget, MediaItemUpsert
 from usher.ports.repository import MediaItemRepository
 
 RUN_AT = datetime(2026, 7, 31, 3, 0, tzinfo=UTC)
@@ -33,6 +34,7 @@ def item(
     external_id: str,
     *,
     title_id: uuid.UUID | None = None,
+    episode_id: uuid.UUID | None = None,
     last_seen_at: datetime = RUN_AT,
     added_at: datetime | None = datetime(2024, 3, 1, 18, 22, 11, tzinfo=UTC),
 ) -> MediaItemUpsert:
@@ -40,7 +42,7 @@ def item(
         source_id=source_id,
         external_id=external_id,
         title_id=title_id,
-        episode_id=None,
+        episode_id=episode_id,
         container="mkv",
         video_codec="hevc",
         audio_codec="truehd",
@@ -426,3 +428,140 @@ class MediaItemRepositoryContract:
         """A batch of movies has no series to resolve, which is most
         batches."""
         assert await repository.resolve_series_titles(source_id, []) == {}
+
+    # -- what a watch-state walk resolves against, and back ----------------
+
+    async def test_targets_are_resolved_in_one_batch(
+        self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """The read a watch-state walk makes once per batch rather than once
+        per state -- `watch_state()` yields one record per item and this
+        deployment has 1,126,674 of them."""
+        await repository.upsert_many([item(source_id, "movie-1", title_id=title_id)])
+        resolved = await repository.resolve_targets(source_id, ["movie-1", "movie-2"])
+        assert resolved == {"movie-1": MediaItemTarget(title_id=title_id, episode_id=None)}
+
+    async def test_an_episodes_target_carries_both_its_title_and_its_episode(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """An episode's row holds its series' title *and* its episode, and
+        this must report both. A resolver that answered with the title alone
+        would merge every episode of a show into one watch state on the
+        series -- 999,827 episodes collapsing onto 32,409 rows."""
+        await repository.upsert_many(
+            [item(source_id, "episode-1", title_id=title_id, episode_id=episode_id)]
+        )
+        resolved = await repository.resolve_targets(source_id, ["episode-1"])
+        assert resolved == {"episode-1": MediaItemTarget(title_id=title_id, episode_id=episode_id)}
+
+    async def test_resolving_targets_skips_the_unmatched(
+        self, repository: MediaItemRepository, source_id: uuid.UUID
+    ) -> None:
+        """An item in the review queue has nothing to attach a watch state
+        to. Absent, not a pair of `None`s, for the same reason
+        `resolve_series_titles` leaves an unmatched series out."""
+        await repository.upsert_many([item(source_id, "movie-1")])
+        assert await repository.resolve_targets(source_id, ["movie-1"]) == {}
+
+    async def test_resolving_targets_is_scoped_to_its_source(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        other_source_id: uuid.UUID,
+        title_id: uuid.UUID,
+    ) -> None:
+        """Two Emby servers can address different films by the same
+        `external_id`, and merging one household's watch state against the
+        other's film is unrecoverable."""
+        await repository.upsert_many([item(other_source_id, "movie-1", title_id=title_id)])
+        assert await repository.resolve_targets(source_id, ["movie-1"]) == {}
+
+    async def test_resolving_no_targets_asks_nothing(
+        self, repository: MediaItemRepository, source_id: uuid.UUID
+    ) -> None:
+        assert await repository.resolve_targets(source_id, []) == {}
+
+    async def test_a_target_resolves_back_to_the_id_its_source_uses(
+        self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """`list_needing_history` answers in canonical ids and
+        `get_watch_state` asks in the source's own. Without this the
+        backfill has no way across."""
+        await repository.upsert_many([item(source_id, "movie-1", title_id=title_id)])
+        target = MediaItemTarget(title_id=title_id, episode_id=None)
+        assert await repository.resolve_external_ids(source_id, [target]) == {target: "movie-1"}
+
+    async def test_a_title_target_never_resolves_to_one_of_its_episodes(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """An episode's row carries its series' `title_id`, so a reverse
+        lookup that matched on that column alone would answer a series'
+        own watch state with an episode's file -- and then backfill the
+        series' history from one episode's play count."""
+        await repository.upsert_many(
+            [
+                item(source_id, "series-1", title_id=title_id),
+                item(source_id, "episode-1", title_id=title_id, episode_id=episode_id),
+            ]
+        )
+        by_title = MediaItemTarget(title_id=title_id, episode_id=None)
+        by_episode = MediaItemTarget(title_id=None, episode_id=episode_id)
+        resolved = await repository.resolve_external_ids(source_id, [by_title, by_episode])
+        assert resolved == {by_title: "series-1", by_episode: "episode-1"}
+
+    async def test_two_copies_of_one_title_resolve_to_the_freshest(
+        self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """A 4K and an HD file of one film is ordinary. Both would answer,
+        so the choice has to be deterministic rather than whichever row the
+        planner reached first -- otherwise the same backfill asks about a
+        different file on every run."""
+        await repository.upsert_many(
+            [
+                item(source_id, "hd-copy", title_id=title_id, last_seen_at=EARLIER),
+                item(source_id, "uhd-copy", title_id=title_id, last_seen_at=RUN_AT),
+            ]
+        )
+        target = MediaItemTarget(title_id=title_id, episode_id=None)
+        assert await repository.resolve_external_ids(source_id, [target]) == {target: "uhd-copy"}
+
+    async def test_two_copies_seen_in_the_same_walk_break_their_tie_on_the_external_id(
+        self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """One walk stamps every row it sees with the *run's* start instant,
+        so two copies of one film tie on `last_seen_at` in the common case
+        rather than the rare one. Without a final tiebreak the winner is
+        insertion order here and the planner there."""
+        await repository.upsert_many(
+            [
+                item(source_id, "copy-b", title_id=title_id),
+                item(source_id, "copy-a", title_id=title_id),
+            ]
+        )
+        target = MediaItemTarget(title_id=title_id, episode_id=None)
+        assert await repository.resolve_external_ids(source_id, [target]) == {target: "copy-a"}
+
+    async def test_a_target_this_source_does_not_have_is_absent(
+        self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """The normal state of a household with two sources: a title one
+        server holds and the other does not."""
+        assert (
+            await repository.resolve_external_ids(
+                source_id, [MediaItemTarget(title_id=title_id, episode_id=None)]
+            )
+            == {}
+        )
+
+    async def test_resolving_no_external_ids_asks_nothing(
+        self, repository: MediaItemRepository, source_id: uuid.UUID
+    ) -> None:
+        assert await repository.resolve_external_ids(source_id, []) == {}

@@ -62,7 +62,12 @@ from usher.db.staging import stage_records
 from usher.domain.ids import new_id
 from usher.domain.source import MediaItem
 from usher.ports.errors import RepositoryConflict
-from usher.ports.ingest import AvailabilitySweepRefused, MediaItemUpsert, SweepResult
+from usher.ports.ingest import (
+    AvailabilitySweepRefused,
+    MediaItemTarget,
+    MediaItemUpsert,
+    SweepResult,
+)
 from usher.ports.repository import BulkWriteResult, MediaItemRepository
 
 # `ordinal` is the row's index within the batch, and it is what makes
@@ -151,6 +156,31 @@ FROM media_items WHERE source_id = :source_id
 _SWEEP = """
 UPDATE media_items SET available = false
 WHERE source_id = :source_id AND available AND last_seen_at < :seen_since
+"""
+
+_RESOLVE_TARGETS = """
+SELECT external_id, title_id, episode_id FROM media_items
+WHERE source_id = :source_id
+  AND external_id = ANY(:external_ids)
+  AND (title_id IS NOT NULL OR episode_id IS NOT NULL)
+"""
+
+# One row per target, chosen rather than stumbled on. `DISTINCT ON` needs the
+# ORDER BY to lead with its own key; everything after it is the tiebreak an
+# ordinary household actually hits -- two files of one film on one server.
+# `episode_id IS NULL` in the title branch is not tidiness: an episode's row
+# carries its series' `title_id` too, so without it a series' own watch state
+# resolves to whichever of its episodes the planner reached first.
+_EXTERNAL_IDS_FOR_TITLES = """
+SELECT DISTINCT ON (title_id) title_id, external_id FROM media_items
+WHERE source_id = :source_id AND title_id = ANY(:title_ids) AND episode_id IS NULL
+ORDER BY title_id, last_seen_at DESC, external_id
+"""
+
+_EXTERNAL_IDS_FOR_EPISODES = """
+SELECT DISTINCT ON (episode_id) episode_id, external_id FROM media_items
+WHERE source_id = :source_id AND episode_id = ANY(:episode_ids)
+ORDER BY episode_id, last_seen_at DESC, external_id
 """
 
 
@@ -284,6 +314,58 @@ class PostgresMediaItemRepository(MediaItemRepository):
                 )
             ).all()
         return {row.external_id: row.title_id for row in rows}
+
+    async def resolve_targets(
+        self, source_id: uuid.UUID, external_ids: Sequence[str]
+    ) -> dict[str, MediaItemTarget]:
+        if not external_ids:
+            return {}
+        with self._session.no_autoflush:
+            rows = (
+                await self._session.execute(
+                    text(_RESOLVE_TARGETS),
+                    # `set(...)`: one walk may yield the same item twice
+                    # (`list_items`' own contract), and the array is a
+                    # lookup key rather than a result shape, so collapsing
+                    # duplicates costs nothing and saves the planner work.
+                    {"source_id": source_id, "external_ids": list(set(external_ids))},
+                )
+            ).all()
+        return {
+            row.external_id: MediaItemTarget(title_id=row.title_id, episode_id=row.episode_id)
+            for row in rows
+        }
+
+    async def resolve_external_ids(
+        self, source_id: uuid.UUID, targets: Sequence[MediaItemTarget]
+    ) -> dict[MediaItemTarget, str]:
+        # Two statements, not one per target: the backfill this serves is
+        # bounded by the household's watched items, which is thousands.
+        title_ids = list({t.title_id for t in targets if t.episode_id is None and t.title_id})
+        episode_ids = list({t.episode_id for t in targets if t.episode_id is not None})
+        resolved: dict[MediaItemTarget, str] = {}
+        with self._session.no_autoflush:
+            if title_ids:
+                for row in (
+                    await self._session.execute(
+                        text(_EXTERNAL_IDS_FOR_TITLES),
+                        {"source_id": source_id, "title_ids": title_ids},
+                    )
+                ).all():
+                    resolved[MediaItemTarget(title_id=row.title_id, episode_id=None)] = (
+                        row.external_id
+                    )
+            if episode_ids:
+                for row in (
+                    await self._session.execute(
+                        text(_EXTERNAL_IDS_FOR_EPISODES),
+                        {"source_id": source_id, "episode_ids": episode_ids},
+                    )
+                ).all():
+                    resolved[MediaItemTarget(title_id=None, episode_id=row.episode_id)] = (
+                        row.external_id
+                    )
+        return resolved
 
     async def list_unmatched(
         self, source_id: uuid.UUID | None = None, *, limit: int = 100, offset: int = 0

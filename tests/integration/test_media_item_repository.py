@@ -9,7 +9,7 @@ from collections.abc import Iterator
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import Connection, Engine, event
+from sqlalchemy import Connection, Engine, event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.contract.media_item_repository_contract import (
@@ -56,6 +56,29 @@ async def title_id(session: AsyncSession) -> uuid.UUID:
     title = Title(kind=TitleKind.MOVIE, name="Contract Title", sort_name="Contract Title")
     await PostgresTitleRepository(session).add(title)
     return title.id
+
+
+@pytest_asyncio.fixture
+async def episode_id(session: AsyncSession) -> uuid.UUID:
+    """A real episode, which needs a real series and a real season: both FKs
+    are `NOT NULL`, and `media_items.episode_id` is itself a foreign key --
+    the whole reason the contract's episode cases mean something here and
+    are dict entries in the unit half."""
+    series = Title(kind=TitleKind.SERIES, name="Contract Series", sort_name="Contract Series")
+    await PostgresTitleRepository(session).add(series)
+    season, episode = new_id(), new_id()
+    await session.execute(
+        text("INSERT INTO seasons (id, title_id, season_number) VALUES (:id, :title_id, 1)"),
+        {"id": season, "title_id": series.id},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO episodes (id, title_id, season_id, season_number, episode_number) "
+            "VALUES (:id, :title_id, :season_id, 1, 1)"
+        ),
+        {"id": episode, "title_id": series.id, "season_id": season},
+    )
+    return episode
 
 
 @pytest.fixture

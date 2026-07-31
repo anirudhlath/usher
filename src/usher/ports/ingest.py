@@ -74,6 +74,35 @@ class MatchOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaItemTarget:
+    """What one stored `MediaItem` is matched to.
+
+    Read in two directions, and the asymmetry between them is the point.
+    Coming *out* of `MediaItemRepository.resolve_targets` this is what the
+    row holds, and an episode's row holds **both** ids: `IngestService`
+    writes `title_id` (the series' canonical title) and `episode_id`
+    together, because a client browsing a season wants both. Going *in* to
+    `resolve_external_ids` it is a watch-state target, where
+    `watch_states`' own `num_nonnulls(title_id, episode_id) = 1` CHECK means
+    exactly one is set.
+
+    So the two are not interchangeable, and the collapse from the first to
+    the second (`episode_id` wins; a title-only target must not match an
+    episode row) belongs to whoever is merging watch state --
+    `usher.services.watch_sync`, which is the only caller and states the
+    rule where it is legible. Handing `merge_from_source` a pair with both
+    ids set raises `PortDataMalformed` by contract, which at 999,827
+    episodes would abort a batch of five thousand states over 89% of the
+    library.
+
+    Hashable (frozen) because it is a dict key in both directions.
+    """
+
+    title_id: uuid.UUID | None
+    episode_id: uuid.UUID | None
+
+
+@dataclass(frozen=True, slots=True)
 class MediaItemUpsert:
     """One row for the staged `media_items` upsert.
 

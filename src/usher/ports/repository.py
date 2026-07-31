@@ -24,6 +24,7 @@ from usher.domain.title import Title
 from usher.domain.watch import WatchState
 from usher.ports.bulk import IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
 from usher.ports.ingest import (
+    MediaItemTarget,
     MediaItemUpsert,
     NameYearProbe,
     ProviderRef,
@@ -523,6 +524,61 @@ class MediaItemRepository(ABC):
         Absent keys mean "not matched yet", not "no such series" -- the
         caller leaves those episodes unmatched and enqueues a re-match,
         which the next batch or the next run resolves.
+        """
+
+    @abstractmethod
+    async def resolve_targets(
+        self, source_id: uuid.UUID, external_ids: Sequence[str]
+    ) -> dict[str, MediaItemTarget]:
+        """Map each `external_id` to what its row is matched to.
+
+        The read a watch-state walk needs, and the reason it is batched is
+        the reason every other read here is: a walk of `watch_state()`
+        yields one record per item, and this deployment has 1,126,674 of
+        them. One statement per batch, never one per state.
+
+        Absent keys mean "not stored, or stored and not matched to
+        anything" -- the same convention `resolve_series_titles` uses, and
+        the same response either way (the caller counts the state
+        unmatched and moves on, because a watch record with no target is
+        exactly what `merge_from_source` raises `PortDataMalformed` for).
+
+        Unlike `resolve_series_titles` this answers for *any* item, and it
+        answers with both ids: an episode's row carries its series' title
+        **and** its episode, and a caller that saw only the first would
+        merge 40 episodes of a show into one watch state on the series.
+        """
+
+    @abstractmethod
+    async def resolve_external_ids(
+        self, source_id: uuid.UUID, targets: Sequence[MediaItemTarget]
+    ) -> dict[MediaItemTarget, str]:
+        """The inverse: how this source addresses the items behind these
+        canonical targets.
+
+        `WatchStateRepository.list_needing_history` answers in canonical
+        ids, and `SourceAdapter.get_watch_state` asks in the source's own --
+        so without this the history backfill has no way from one to the
+        other, and would be a per-row lookup even if it did.
+
+        A `MediaItemTarget` here is watch-state shaped: exactly one of the
+        two ids is set. A title-only target matches only a row with **no**
+        `episode_id`, or a series' own state would resolve to whichever of
+        its episodes the planner reached first.
+
+        A target with two copies on the same source -- a 4K and an HD file
+        of one film, which is ordinary -- resolves to one of them
+        deterministically: the most recently seen, then the lowest
+        `external_id`. Any of them would answer, and picking arbitrarily
+        would make a backfill's upstream request depend on the planner.
+        Deliberately *not* also keyed on `available`: only a walk sets an
+        item available and only the sweep retracts one, so the freshest
+        `last_seen_at` is already the available copy in every state
+        reachable through this port -- an `available DESC` ahead of it
+        would be an ordering key no case could ever fail.
+
+        Absent keys mean this source has no item for that target, which is
+        the normal state of a household with two sources.
         """
 
     @abstractmethod

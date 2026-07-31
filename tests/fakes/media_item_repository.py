@@ -30,6 +30,9 @@ run is what actually closes:
   Postgres, which makes no such promise. That is why
   `test_the_review_queue_breaks_ties_on_id` asserts the ordering property
   directly instead of paging a large set and hoping the planner reorders.
+  `resolve_external_ids` picks a winner among two copies of one film the
+  same way and inherits the same caveat -- a `DISTINCT ON` whose `ORDER BY`
+  ran out of keys returns an arbitrary row there and insertion order here.
 - No transaction, so nothing here can leave a session poisoned and
   `test_a_caught_conflict_leaves_the_session_usable` is a Postgres-only
   case. A fake cannot express `PendingRollbackError` and pretending
@@ -44,12 +47,34 @@ from pydantic import AwareDatetime
 
 from usher.domain.ids import new_id
 from usher.domain.source import MediaItem
-from usher.ports.ingest import AvailabilitySweepRefused, MediaItemUpsert, SweepResult
+from usher.ports.ingest import (
+    AvailabilitySweepRefused,
+    MediaItemTarget,
+    MediaItemUpsert,
+    SweepResult,
+)
 from usher.ports.repository import BulkWriteResult, MediaItemRepository
 
 # Sorts before every real timestamp, so an undated item lands at the end of
 # a descending review queue -- Postgres's `NULLS LAST`, spelled for Python.
 _UNDATED = datetime.min.replace(tzinfo=UTC)
+
+
+def _answers(entry: MediaItem, target: MediaItemTarget) -> bool:
+    """Whether this row is the item behind a watch-state target.
+
+    An episode target matches on `episode_id` alone -- the row also carries
+    the series' `title_id`, deliberately. A title target additionally
+    requires `episode_id IS NULL`, or a series' own watch state would
+    resolve to one of its episodes' files.
+    """
+    if target.episode_id is not None:
+        return entry.episode_id == target.episode_id
+    return (
+        target.title_id is not None
+        and entry.title_id == target.title_id
+        and entry.episode_id is None
+    )
 
 
 class FakeMediaItemRepository(MediaItemRepository):
@@ -156,6 +181,47 @@ class FakeMediaItemRepository(MediaItemRepository):
                 and entry.title_id is not None
             ):
                 resolved[entry.external_id] = entry.title_id
+        return resolved
+
+    async def resolve_targets(
+        self, source_id: uuid.UUID, external_ids: Sequence[str]
+    ) -> dict[str, MediaItemTarget]:
+        self.calls += 1
+        wanted = set(external_ids)
+        return {
+            entry.external_id: MediaItemTarget(title_id=entry.title_id, episode_id=entry.episode_id)
+            for entry in self._items.values()
+            if entry.source_id == source_id
+            and entry.external_id in wanted
+            # Same convention as `resolve_series_titles`: absent means "not
+            # matched", because a key mapped to a pair of `None`s says the
+            # same thing at the cost of a branch in every caller.
+            and (entry.title_id is not None or entry.episode_id is not None)
+        }
+
+    async def resolve_external_ids(
+        self, source_id: uuid.UUID, targets: Sequence[MediaItemTarget]
+    ) -> dict[MediaItemTarget, str]:
+        self.calls += 1
+        resolved: dict[MediaItemTarget, str] = {}
+        for target in targets:
+            candidates = [
+                entry
+                for entry in self._items.values()
+                if entry.source_id == source_id and _answers(entry, target)
+            ]
+            if not candidates:
+                continue
+            # The freshest sighting, then the id -- a total order, spelled
+            # the same way the real one spells its `DISTINCT ON (...) ORDER
+            # BY ..., last_seen_at DESC, external_id`. Two copies of one
+            # film on one source is ordinary, and picking between them by
+            # insertion order would make a backfill's upstream request
+            # depend on which walk happened to see which file first.
+            # `list.sort` is stable, so the `external_id` tiebreak is what
+            # makes a tie deterministic here as well as there.
+            candidates.sort(key=lambda entry: (-entry.last_seen_at.timestamp(), entry.external_id))
+            resolved[target] = candidates[0].external_id
         return resolved
 
     async def list_unmatched(

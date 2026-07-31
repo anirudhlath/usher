@@ -32,3 +32,10 @@ class TestFakeMediaItemRepository(MediaItemRepositoryContract):
     @pytest.fixture
     def title_id(self) -> uuid.UUID:
         return new_id()
+
+    @pytest.fixture
+    def episode_id(self) -> uuid.UUID:
+        """A bare id: this fake has no foreign keys, which is the fifth
+        divergence its own docstring lists. The Postgres subclass has to
+        create a real series, season and episode to say the same thing."""
+        return new_id()
