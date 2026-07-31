@@ -35,6 +35,12 @@ malformed record is `PortDataMalformed` rather than a `TypeError` surfacing
 from inside a `COPY`. CHECK constraints also fire during `COPY`
 (`CheckViolationError`, verified), so a bad value aborts its whole batch
 rather than being quietly stored.
+
+The `COPY` mechanics themselves now live in `usher.db.staging`, so M4's
+`media_items` and `watch_states` writes take the identical path rather than
+re-deriving the three traps above per repository -- which is how one of them
+gets missed. This module docstring stays the canonical statement of them;
+`staging.py` points back here.
 """
 
 from collections.abc import AsyncIterator, Sequence
@@ -44,6 +50,7 @@ from typing import Any, cast
 from sqlalchemy import CursorResult, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from usher.db.staging import stage_records
 from usher.domain.ids import new_id
 from usher.ports.bulk import IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
 from usher.ports.repository import (
@@ -81,25 +88,6 @@ _CROSSWALK_PAIRS = """
     SELECT imdb_id, tmdb_series_id, 'series'
     FROM id_crosswalk WHERE tmdb_series_id IS NOT NULL
 """
-
-
-async def _raw(session: AsyncSession) -> Any:
-    """The live `asyncpg.Connection` under this session.
-
-    `AsyncSession.connection()` gives SQLAlchemy's `AsyncConnection`;
-    `get_raw_connection().driver_connection` unwraps two more layers to the
-    real driver object (verified: `asyncpg.connection.Connection`, carrying
-    `copy_records_to_table`). Typed `Any` because asyncpg ships no stubs for
-    it and SQLAlchemy types `driver_connection` as `Any` itself, so a
-    narrower annotation here would be a fiction mypy could not check.
-
-    Runs `session.connection()` under `no_autoflush` for the same reason
-    every read in `PostgresTitleRepository` does: it flushes by default, and
-    a shared session may be carrying someone else's pending, invalid state.
-    """
-    with session.no_autoflush:
-        connection = await session.connection()
-    return (await connection.get_raw_connection()).driver_connection
 
 
 class PostgresBulkCatalogRepository(BulkCatalogRepository):
@@ -214,19 +202,16 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             if suspended:
                 await self._session.commit()
 
-    async def _stage(self, ddl: str, table: str, columns: Sequence[str], records: Any) -> None:
-        """Create a per-batch `UNLOGGED` staging table and `COPY` into it.
+    async def _stage(
+        self, ddl: str, table: str, columns: Sequence[str], records: Sequence[tuple[Any, ...]]
+    ) -> None:
+        """Thin positional wrapper over `usher.db.staging.stage_records`.
 
-        `UNLOGGED` skips WAL for the staging write entirely -- the data is
-        re-derivable from the dataset, and a crash mid-batch rolls the batch
-        back anyway. `DROP ... IF EXISTS` first rather than reusing the table
-        across batches: the caller commits between batches, so a leftover
-        table from a crashed batch would otherwise merge into the next one.
+        Kept so the four call sites below read as one line each; the
+        mechanics, and the three Postgres traps they are built around, live
+        in `usher.db.staging` because M4's repositories take the same path.
         """
-        await self._session.execute(text(f"DROP TABLE IF EXISTS {table}"))
-        await self._session.execute(text(ddl))
-        driver = await _raw(self._session)
-        await driver.copy_records_to_table(table, records=records, columns=list(columns))
+        await stage_records(self._session, ddl=ddl, table=table, columns=columns, records=records)
 
     async def _rowcount(self, sql: str) -> int:
         """`rowcount` lives on `CursorResult`, not the `Result[Any]`
