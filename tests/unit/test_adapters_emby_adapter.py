@@ -17,7 +17,7 @@ from pydantic import SecretStr
 
 from tests.fakes.emby_server import SERVER_VERSION, USER_ID, FakeEmbyServer
 from tests.fakes.slow_transport import SlowTransport
-from usher.adapters.emby.adapter import EmbyAdapter
+from usher.adapters.emby.adapter import MAX_PAGES, EmbyAdapter
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
@@ -71,13 +71,16 @@ def _adapter(server: FakeEmbyServer, *, page_size: int = 2) -> EmbyAdapter:
     )
 
 
-def _on(handler: Callable[[httpx.Request], httpx.Response]) -> EmbyAdapter:
+def _on(
+    handler: Callable[[httpx.Request], httpx.Response], *, max_pages: int = MAX_PAGES
+) -> EmbyAdapter:
     """An adapter over a hand-written handler, for the shapes `FakeEmbyServer`
     is deliberately too well-behaved to produce."""
     return EmbyAdapter(
         SOURCE,
         CREDENTIALS,
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=SOURCE.base_url),
+        max_pages=max_pages,
     )
 
 
@@ -341,6 +344,46 @@ async def test_an_unmodelled_item_type_in_a_page_is_skipped_not_fatal() -> None:
     finally:
         await adapter.aclose()
     assert seen == ["movie-9"]
+
+
+async def test_a_server_that_ignores_start_index_ends_the_walk_rather_than_running_forever() -> (
+    None
+):
+    """A proxy that strips a query parameter it does not know, or a build
+    that spells `StartIndex` differently, makes the walk immortal: every
+    page comes back full, so the empty-page check never fires, and `start`
+    never passes a `TotalRecordCount` that never arrives. Measured against
+    exactly that handler on the unbounded walk: 501 requests, 500 items,
+    still going.
+
+    The handler here relents after far more pages than the bound allows, so
+    this **fails rather than hangs** when the bound is removed. That is the
+    whole point: the last test that could have caught this was rewritten to
+    serve an empty second page precisely because an unbounded walk hangs
+    the suite, which removed the only case that could have found it.
+    """
+    served: list[int] = []
+    page = {"Items": [{"Id": "movie-0", "Type": "Movie", "Name": "A"}]}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        served.append(1)
+        # The escape hatch. Without it, deleting the bound hangs this test
+        # instead of failing it, and a suite that hangs is worse than one
+        # that fails.
+        if len(served) > 20:
+            return httpx.Response(200, json={"Items": []})
+        return httpx.Response(200, json=page)
+
+    adapter = _on(handler, max_pages=3)
+    try:
+        with pytest.raises(PortDataMalformed, match="StartIndex"):
+            _ = [item async for item in adapter.list_items()]
+    finally:
+        await adapter.aclose()
+    assert len(served) == 3
 
 
 async def test_a_listing_with_no_items_array_is_malformed() -> None:

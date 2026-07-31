@@ -46,7 +46,10 @@ The walk terminates on an empty page, and also when `TotalRecordCount` says
 everything has been read. The second condition is guarded on a *positive*
 count, because a server that omits or zeroes the count would otherwise stop
 the walk at page one -- a silent truncation, which is the one failure this
-port exists to make impossible.
+port exists to make impossible. A third bound, `MAX_PAGES`, covers the
+opposite failure: neither of the first two fires against a server that
+ignores `StartIndex`, and an immortal walk hangs the reconciler rather than
+failing it.
 
 ### Memory
 
@@ -137,6 +140,23 @@ USER_DATA_SINCE_PARAM = "MinDateLastSavedForUser"
 # total order -- see the Paging section of this module's docstring.
 SORT_BY = "DateCreated,SortName"
 
+# The walk's dead-man's switch. Neither of its two termination conditions
+# fires against a server that ignores `StartIndex` -- a reverse proxy
+# stripping a parameter it does not know, a build that spells it
+# differently: every page comes back full, so there is never an empty one,
+# and `start` never passes a `TotalRecordCount` that never arrives.
+# Measured against exactly that: 501 requests, 500 items, still going.
+#
+# Bounded rather than trusted, because an unbounded walk does not fail the
+# reconciler, it *hangs* it -- and the same property makes the failure
+# untestable, since the test that would catch it never returns either.
+#
+# 10,000 pages is 2,000,000 items at the default page size, ~21x the
+# 94,395-item deployment this was built for. Both are constructor knobs, so
+# an operator who lowers `page_size` far enough for that headroom to matter
+# raises this alongside it.
+MAX_PAGES = 10_000
+
 
 def _version_of(body: Mapping[str, Any]) -> str | None:
     version = body.get("Version")
@@ -151,11 +171,13 @@ class EmbyAdapter(SourceAdapter):
         *,
         client: httpx.AsyncClient | None = None,
         page_size: int = 200,
+        max_pages: int = MAX_PAGES,
         timeout_seconds: float = 30.0,
         reauth_cooldown_seconds: float = 60.0,
     ) -> None:
         self._source = source
         self._page_size = page_size
+        self._max_pages = max_pages
         # Ownership is tracked, not assumed: `aclose()` closes a client this
         # adapter created and leaves an injected one alone. Closing someone
         # else's client is the mistake the bulk adapters' no-op `aclose`
@@ -227,7 +249,10 @@ class EmbyAdapter(SourceAdapter):
     ) -> AsyncIterator[dict[str, Any]]:
         user_id = await self._session.user_id()
         start = 0
-        while True:
+        # `for`, not `while True`: the bound is then part of the loop rather
+        # than a counter alongside it, and the raise below cannot be reached
+        # by any path that should have returned.
+        for _ in range(self._max_pages):
             params = {
                 "Recursive": "true",
                 "IncludeItemTypes": ITEM_TYPES,
@@ -263,6 +288,10 @@ class EmbyAdapter(SourceAdapter):
             # at page one.
             if isinstance(total, int) and total > 0 and start >= total:
                 return
+        raise PortDataMalformed(
+            "Emby's item listing never ended; the server appears to ignore StartIndex",
+            detail=f"gave up after {self._max_pages} pages at StartIndex={start}",
+        )
 
     def list_items(self, since: AwareDatetime | None = None) -> AsyncIterator[SourceItem]:
         return self._list_items(since)
