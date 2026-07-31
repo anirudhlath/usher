@@ -8,6 +8,7 @@ dependency here is either a domain object or a port fake.
 
 import uuid
 
+import pytest
 from pydantic import SecretStr
 
 from tests.fakes.credential_store import FakeCredentialStore
@@ -16,7 +17,7 @@ from tests.fakes.source_repository import FakeSourceRepository
 from usher.domain.enums import SourceKind
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
-from usher.ports.source import SourceAdapter, SourceAdapterFactory
+from usher.ports.source import SourceAdapter, SourceAdapterFactory, SourceStatus
 from usher.services.sources import SourceService
 
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
@@ -177,7 +178,7 @@ async def test_status_closes_the_adapter_even_when_verify_raises() -> None:
     bug in `verify` from also being a connection-pool leak."""
 
     class _Exploding(_CountingAdapter):
-        async def verify(self) -> None:  # type: ignore[override]
+        async def verify(self) -> SourceStatus:
             raise RuntimeError("verify is broken")
 
     class _ExplodingFactory(RecordingFactory):
@@ -190,12 +191,10 @@ async def test_status_closes_the_adapter_even_when_verify_raises() -> None:
     source = await service.register(
         kind=SourceKind.EMBY, name="A", base_url="https://a.invalid", credentials=CREDENTIALS
     )
-    try:
+    # Not caught and turned into a status: a service that swallowed this
+    # would report a healthy source built on a broken `verify`.
+    with pytest.raises(RuntimeError, match="verify is broken"):
         await service.status(source.id)
-    except RuntimeError:
-        pass
-    else:  # pragma: no cover - the service must not swallow this
-        raise AssertionError("the service swallowed a bug in verify()")
     assert factory.closed == 1
 
 
