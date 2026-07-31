@@ -19,6 +19,7 @@ fake look like correct behaviour.
 """
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,6 +31,7 @@ from pydantic import SecretStr
 from tests.fakes.emby_server import USER_ID, FakeEmbyServer
 from usher.adapters.emby.mapping import TICKS_PER_SECOND, to_source_item, to_watch_state
 from usher.adapters.emby.session import EmbySession
+from usher.domain.enums import HdrFormat
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortUnavailable
 from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
@@ -317,3 +319,75 @@ async def test_writes_to_an_unknown_item_are_not_found(driver: _Driver) -> None:
         await driver.report_progress("never-existed", 600)
     with pytest.raises(PortUnavailable, match="404"):
         await driver.mark_played("never-existed", played=True)
+
+
+@pytest.mark.parametrize("hdr_format", [None, *HdrFormat])
+async def test_every_hdr_format_survives_the_wire(
+    driver: _Driver, hdr_format: HdrFormat | None
+) -> None:
+    """`_HDR_WIRE` renders each canonical format back into the
+    `VideoRange`/`VideoRangeType` pair a real file of that kind carries, so
+    the contract's HDR assertion is answered by a token the mapper has to
+    translate rather than by a value handed straight back. Parametrised
+    over the whole enum: only Dolby Vision is exercised by the contract
+    suite, so a wrong rendering for HLG or HDR10 would sit here unseen."""
+    driver.server.add_item(replace(MOVIE, hdr_format=hdr_format), T0)
+    item = to_source_item(await driver.payload("movie-1"))
+    assert item is not None
+    assert item.hdr_format is hdr_format
+
+
+# --- the gates the fake keeps, which are only worth having if they fire ---
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        None,
+        "",
+        "Bearer some-token",
+        'MediaBrowser Client="SomethingElse", Device="d", DeviceId="i", Version="1"',
+        'MediaBrowser Client="Usher", DeviceId="i", Version="1"',
+        'MediaBrowser Client="Usher", Device="d", DeviceId="", Version="1"',
+        'MediaBrowser Client="Usher", Device="", DeviceId="i", Version="1"',
+        'MediaBrowser Client="Usher", Device="d", DeviceId="i", Version=""',
+        'MediaBrowser Client="Usher", Device="d", DeviceId="i"',
+    ],
+)
+def test_a_request_without_a_well_formed_identity_is_refused(authorization: str | None) -> None:
+    """The gate itself, on a route that is not the authentication one --
+    the whole point being that the identity rides on *every* request.
+    Checked directly rather than through a session, because a correct
+    `EmbySession` cannot produce any of these headers."""
+    server = FakeEmbyServer()
+    headers = {} if authorization is None else {"Authorization": authorization}
+    response = server.handle(
+        httpx.Request("GET", "https://emby.invalid/System/Info/Public", headers=headers)
+    )
+    assert response.status_code == 400
+
+
+def test_the_public_route_refuses_a_session_token() -> None:
+    """Stricter than the real Emby, on purpose, and therefore worth a test
+    of its own: this is the guard that makes `verify()`'s
+    unreachable-versus-bad-credentials split checkable at all. Without a
+    token the same request is a 200."""
+    server = FakeEmbyServer()
+    identity = 'MediaBrowser Client="Usher", Device="d", DeviceId="i", Version="1"'
+    url = "https://emby.invalid/System/Info/Public"
+    with_token = server.handle(
+        httpx.Request("GET", url, headers={"Authorization": identity, "X-Emby-Token": "t"})
+    )
+    without = server.handle(httpx.Request("GET", url, headers={"Authorization": identity}))
+    assert with_token.status_code == 400
+    assert without.status_code == 200
+
+
+async def test_an_unrouted_path_is_a_404_not_a_cheerful_200(driver: _Driver) -> None:
+    """A fake that answered every unknown path with a 200 would let an
+    adapter calling a route this server has never heard of look correct --
+    which is the residual risk the fake carries anyway (nothing here knows
+    Emby's real routes), so it must at least not be widened by the
+    catch-all."""
+    with pytest.raises(PortUnavailable, match="404"):
+        await driver.session.json_body("GET", "/Users/x/NoSuchThing", op="probe")

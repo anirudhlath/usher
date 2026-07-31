@@ -322,6 +322,24 @@ def test_the_default_audio_stream_is_preferred_over_the_first() -> None:
     assert chosen["Codec"] == "truehd"
 
 
+def test_with_no_default_flag_anywhere_the_first_stream_is_used() -> None:
+    """Plenty of files flag no stream as default at all -- a remux whose
+    muxer never wrote the disposition bit. Returning `None` there would
+    report a perfectly ordinary file as having no audio; the first stream
+    is the same choice every player makes."""
+    media_source = {
+        "MediaStreams": [
+            {"Type": "Audio", "Codec": "eac3", "Channels": 6},
+            {"Type": "Audio", "Codec": "aac", "Channels": 2},
+        ]
+    }
+    chosen = stream_of(media_source, "Audio")
+    assert chosen is not None
+    assert chosen["Codec"] == "eac3"
+    assert stream_of(media_source, "Video") is None
+    assert stream_of({"MediaStreams": "not-a-list"}, "Audio") is None
+
+
 # --- the coercions, and the defensive edges of each ----------------------
 
 

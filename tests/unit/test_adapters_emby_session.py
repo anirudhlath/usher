@@ -439,6 +439,41 @@ async def test_the_other_entry_points_also_refuse_to_run_after_aclose(call: str)
     assert server.authentications == 0
 
 
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [(429, PortRateLimited), (500, PortUnavailable), (503, PortUnavailable)],
+)
+async def test_a_failing_authentication_endpoint_is_not_a_credential_failure(
+    status: int, expected: type[Exception]
+) -> None:
+    """A 429 or a 5xx from `AuthenticateByName` says nothing about the
+    password, so neither may become `PortAuthFailed` -- that is the one
+    translation with a lasting side effect, since it arms the negative
+    cache and refuses to try again for a minute. An Emby restarting behind
+    a reverse proxy answers 502 to authentication for a few seconds;
+    treating that as a wrong password would lock the source out of the
+    reconcile that follows."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, headers={"retry-after": "12"})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://emby.invalid"
+    )
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(expected):
+            await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+        # Not remembered: the next call tries again rather than being
+        # refused from the negative cache.
+        with pytest.raises(expected):
+            await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+    finally:
+        await client.aclose()
+
+
 async def test_a_transport_error_becomes_port_unavailable() -> None:
     server = FakeEmbyServer()
     server.offline = True

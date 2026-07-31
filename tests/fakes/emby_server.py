@@ -37,6 +37,12 @@ any source produces.
 of that line -- this file is the entire basis for running the source
 contract against the real adapter, so a divergence here is a place a
 wrong adapter passes all 40 assertions.
+
+Three routes are covered by that contract run rather than directly:
+`remove_item`, `fail_after`'s mid-walk `ReadTimeout`, and `_one`'s 404 for
+a deleted item. Each exists *for* a contract case (deletion, streaming
+failure, `get_item` -> `None`), so covering them here as well would only
+restate the case that drives them.
 """
 
 import json
