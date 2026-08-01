@@ -298,6 +298,11 @@ async def test_status_reports_a_healthy_source(client: AsyncClient) -> None:
     assert body["reachable"] is True
     assert body["authenticated"] is True
     assert body["push_available"] is None
+    # ADR-0012's accepted risk, made observable rather than assumed. `false`
+    # is the configuration the ADR assumes and nothing enforces; `null` would
+    # mean the probe never ran, and rendering that as `false` would show an
+    # unperformed check as a performed one.
+    assert body["is_administrator"] is False
     assert body["server_version"] == SERVER_VERSION
 
 

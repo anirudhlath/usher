@@ -280,6 +280,39 @@ def test_push_available_defaults_to_unknown_not_false() -> None:
     assert SourceStatus(reachable=True, authenticated=True).push_available is None
 
 
+def test_a_status_may_report_an_administrator_account() -> None:
+    """ADR-0012 assumes a non-admin Emby account and nothing enforces one, so
+    admin credentials pasted into `POST /admin/sources` put an admin token
+    into every playback URL — and, from M5, into a long-lived push socket
+    too. The ADR's recorded mitigation was operator guidance; this field is
+    what makes the configuration observable instead."""
+    status = SourceStatus(reachable=True, authenticated=True, is_administrator=True)
+    assert status.is_administrator is True
+
+
+def test_a_status_reports_none_when_the_role_was_not_determined() -> None:
+    """Three-valued for the same reason `push_available` is: "not
+    determined" is a real answer and rendering it as `false` would claim a
+    check that never ran. ADR-0012's whole point is that the risk is
+    accepted and *unobservable*; a fabricated `false` would make it look
+    observed."""
+    assert SourceStatus(reachable=True, authenticated=True).is_administrator is None
+
+
+def test_an_administrator_account_is_reportable_not_refusable() -> None:
+    """The deliberate non-invariant, pinned so nobody "tightens" it into one.
+
+    `__post_init__` refuses authenticated-but-unreachable and
+    push-without-authentication because neither describes any real upstream.
+    An administrator account describes a very real one, and the screen that
+    exists to report it must be able to construct a status for it — an
+    operator whose only working account is an admin account still needs a
+    catalog.
+    """
+    status = SourceStatus(reachable=True, authenticated=True, is_administrator=True)
+    assert (status.reachable, status.authenticated) == (True, True)
+
+
 def test_canonical_provider_ids_are_lowercase() -> None:
     """Cross-source normalisation, not cosmetics: M4's matcher reads
     `provider_ids["tmdb"]` and must not have to know that Emby spells it

@@ -8,6 +8,7 @@ endpoints a write-back uses and in which order, and how `verify` tells
 """
 
 import asyncio
+import io
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from urllib.parse import quote
 
 import httpx
 import pytest
+from loguru import logger
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -1070,6 +1072,162 @@ async def test_verify_never_leaks_the_password_into_its_detail() -> None:
         await adapter.aclose()
     assert status.detail is not None
     assert "correct-horse-battery" not in status.detail
+
+
+# --- verify: the administrator check ---------------------------------
+
+
+async def test_verify_reports_a_non_admin_account() -> None:
+    server = FakeEmbyServer()
+    server.is_administrator = False
+    adapter = _adapter(server)
+    try:
+        status = await adapter.verify()
+    finally:
+        await adapter.aclose()
+    assert status.authenticated is True
+    assert status.is_administrator is False
+
+
+async def test_verify_reports_an_admin_account() -> None:
+    """PRD 03: "no admin privileges are required" is a statement about what
+    the push channel needs -- a permission, not a constraint. Nothing stops
+    an operator pasting admin credentials into `POST /admin/sources`, and
+    from M5 that token opens a long-lived socket as well as riding in every
+    playback URL. This is the check that makes it visible."""
+    server = FakeEmbyServer()
+    server.is_administrator = True
+    adapter = _adapter(server)
+    try:
+        status = await adapter.verify()
+    finally:
+        await adapter.aclose()
+    assert status.is_administrator is True
+
+
+async def test_verify_leaves_the_role_undetermined_when_the_user_route_fails() -> None:
+    """A status screen must render what it knows. `GET /Users/Me` answers
+    500 on the measured build, and a future build could do the same for
+    `GET /Users/{id}` -- so a failure here narrows the answer rather than
+    failing the request, exactly as every other branch of `verify()` does.
+    """
+    server = FakeEmbyServer()
+    server.user_route_fails = True
+    adapter = _adapter(server)
+    try:
+        status = await adapter.verify()
+    finally:
+        await adapter.aclose()
+    assert status.reachable is True
+    assert status.authenticated is True
+    assert status.is_administrator is None
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        pytest.param({}, id="no-IsAdministrator-key"),
+        pytest.param({"IsAdministrator": "true"}, id="a-string-rather-than-a-bool"),
+        pytest.param({"IsAdministrator": None}, id="an-explicit-null"),
+        pytest.param("not-an-object", id="Policy-is-not-a-mapping"),
+        pytest.param(None, id="no-Policy-at-all"),
+    ],
+)
+async def test_a_policy_that_does_not_say_leaves_the_role_undetermined(policy: object) -> None:
+    """The branch the plan's mutation table attributed to the 500 case, which
+    cannot reach it: a 500 raises inside `json_body` and returns `None` from
+    the `except` long before any key is read.
+
+    So `bool(policy.get("IsAdministrator"))` -- the obvious spelling -- is
+    only observable on a **200** whose `Policy` does not answer the question,
+    and that is exactly the shape a different Emby build, a Jellyfin server,
+    or a reverse proxy rewriting a body would produce. `bool(None)` is
+    `False`, which renders an unperformed check as a performed one and is the
+    single failure this field's three-valuedness exists to prevent.
+
+    Only two `Policy` keys were ever recorded off the live server, so what a
+    build that omits `IsAdministrator` sends is genuinely unknown -- which is
+    the argument for `None` rather than a guess.
+    """
+    user: dict[str, object] = {"Id": USER_ID, "Name": "usher"}
+    if policy is not None:
+        user["Policy"] = policy
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        authenticated = _authenticated(request)
+        if authenticated is not None:
+            return authenticated
+        if request.url.path == f"/Users/{USER_ID}":
+            return httpx.Response(200, json=user)
+        return httpx.Response(200, json={"Version": SERVER_VERSION})
+
+    adapter = _on(handler)
+    try:
+        status = await adapter.verify()
+    finally:
+        await adapter.aclose()
+    assert status.authenticated is True
+    assert status.is_administrator is None
+
+
+async def test_verify_warns_about_an_administrator_account_and_serves_it_anyway() -> None:
+    """A log line, not a refusal -- and the log line is the whole of the
+    mitigation, so it needs a case of its own.
+
+    Refusing would be worse than saying so: an operator whose only working
+    account is an administrator account still needs a catalog, and a
+    `verify()` that raised would take `GET /admin/sources/{id}/status` from
+    "renders every state a source can be in" to "500s on the one state an
+    operator most needs to see". The status still comes back authenticated.
+    """
+    server = FakeEmbyServer()
+    server.is_administrator = True
+    adapter = _adapter(server)
+    sink = io.StringIO()
+    logger.remove()
+    try:
+        logger.add(sink, level="WARNING")
+        status = await adapter.verify()
+    finally:
+        logger.remove()
+        await adapter.aclose()
+    logged = sink.getvalue()
+    assert "administrator" in logged
+    assert SOURCE.name in logged
+    assert "correct-horse-battery" not in logged
+    assert (status.reachable, status.authenticated) == (True, True)
+
+
+async def test_verify_says_nothing_about_an_ordinary_account() -> None:
+    """The other half: a warning every operator sees on every poll of a
+    correctly-configured source is a warning nobody reads."""
+    server = FakeEmbyServer()
+    server.is_administrator = False
+    adapter = _adapter(server)
+    sink = io.StringIO()
+    logger.remove()
+    try:
+        logger.add(sink, level="WARNING")
+        await adapter.verify()
+    finally:
+        logger.remove()
+        await adapter.aclose()
+    assert sink.getvalue() == ""
+
+
+async def test_the_role_probe_reads_the_users_route_for_the_authenticated_user() -> None:
+    """`GET /Users/Me` answers **500** on Emby 4.9.5.0 (verified 2026-07-31),
+    so the id is interpolated -- and it is the id the session authenticated
+    as, not a guess. Pinned as the request the adapter actually made, since
+    a probe aimed at the wrong path returns `None` and reads exactly like a
+    build that does not carry `Policy`."""
+    server = FakeEmbyServer()
+    adapter = _adapter(server)
+    try:
+        await adapter.verify()
+    finally:
+        await adapter.aclose()
+    assert f"GET /Users/{USER_ID}" in server.requests
 
 
 # --- push, lifecycle, concurrency ------------------------------------

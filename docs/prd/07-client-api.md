@@ -81,6 +81,14 @@ be added if a client turns out to need flexible field selection.
 > the adapter's own translated `usher.ports.errors` exceptions, never a
 > credential. `GET /admin/sources/{id}/status` renders this directly.
 >
+> **M5 adds `is_administrator`**, `bool | None` on the same three-valued
+> pattern, where `null` means the check did not run. It reports whether the
+> configured account is an Emby administrator — the risk
+> [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) accepts and
+> whose recorded mitigation was operator guidance rather than code.
+> [03](03-sources-and-sync.md)'s "configure a normal user" is guidance an
+> operator can only follow if they can see which they did.
+>
 > **Built in M3: four of the five rows above.** `GET`/`POST`/`DELETE
 > /admin/sources` and `GET /admin/sources/{id}/status` are live
 > (`usher.api.routers.sources`). `POST /admin/sources/{id}/sync` is not —

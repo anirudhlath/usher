@@ -75,6 +75,14 @@ class SourceStatusResponse(BaseModel):
     `SourceStatus`. An admin UI renders that as "unknown", which is the
     honest answer until M5's probe asserts on received messages.
 
+    `is_administrator` is `bool | None` on the same three-valued pattern and
+    for a sharper reason -- see `SourceStatus`. ADR-0012 accepts the risk
+    that a source is configured with an Emby administrator account, whose
+    token then rides in every playback URL and (from M5) opens a long-lived
+    push socket; the recorded mitigation is PRD 03's "configure a normal
+    user", which is guidance an operator can only follow if they can see
+    which they did.
+
     `detail` is the adapter's own operator-facing status line, built from
     translated `usher.ports.errors` exceptions. Those carry a method, a
     path, and a transport error -- never a credential, never a
@@ -85,6 +93,7 @@ class SourceStatusResponse(BaseModel):
     reachable: bool
     authenticated: bool
     push_available: bool | None
+    is_administrator: bool | None
     server_version: str | None
     detail: str | None
 
@@ -94,6 +103,7 @@ class SourceStatusResponse(BaseModel):
             reachable=status.reachable,
             authenticated=status.authenticated,
             push_available=status.push_available,
+            is_administrator=status.is_administrator,
             server_version=status.server_version,
             detail=status.detail,
         )

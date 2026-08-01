@@ -15,6 +15,13 @@ end-to-end session used it -- and was *not* re-exercised here, because the
 live run held a token rather than a password. Silent re-authentication on
 401 is therefore still unverified end to end against the real server.
 
+`GET /Users/{userId}` (added in M5 for `_is_administrator`) is verified
+against that same server and date, but by a throwaway probe rather than by
+driving this class -- the method did not exist then. What the probe
+established: 200 to the user's *own* non-admin token, carrying a 45-key
+`Policy` object with `IsAdministrator` on it. `GET /Users/Me` answers **500**
+on this build, so the id is interpolated rather than shortcut.
+
 That run found one route simply wrong: `push_watch_state` reported
 positions to `POST /Users/{user}/PlayingItems/{item}/Progress`, which
 answers **400** on this server for every body and parameter set tried. See
@@ -105,6 +112,7 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+from loguru import logger
 from opentelemetry import trace
 from pydantic import AwareDatetime
 
@@ -172,6 +180,12 @@ USER_DATA_SINCE_PARAM = "MinDateLastSavedForUser"
 # Paging section of this module's docstring for how, and for what that run
 # could and could not demonstrate.
 SORT_BY = "DateCreated,SortName"
+
+# `GET /Users/{userId}` carries the account's `Policy`, which is where
+# `IsAdministrator` lives. Verified 2026-07-31: it answers 200 to the user's
+# *own* non-admin token, so this needs no elevated rights. `GET /Users/Me`
+# answers 500 on that build and is not a usable shortcut.
+USER_PATH = "/Users"
 
 # The walk's dead-man's switch. Neither of its two termination conditions
 # fires against a server that ignores `StartIndex` -- a reverse proxy
@@ -287,6 +301,19 @@ class EmbyAdapter(SourceAdapter):
                     detail=str(exc),
                 )
             span.set_attribute("usher.authenticated", True)
+            is_administrator = await self._is_administrator()
+            if is_administrator:
+                # A log line, not a refusal. PRD 03's "no admin privileges
+                # are required" is a permission; nothing enforces it, and
+                # ADR-0012 records why refusing here would be worse than
+                # saying so (an operator whose only working account is an
+                # admin account still needs a catalog).
+                logger.warning(
+                    "source {source} is configured with an Emby administrator account; "
+                    "a captured playback URL or push socket then grants administrator "
+                    "access -- configure a normal user (ADR-0012)",
+                    source=self._source.name,
+                )
             return SourceStatus(
                 reachable=True,
                 authenticated=True,
@@ -296,8 +323,48 @@ class EmbyAdapter(SourceAdapter):
                 # anything. Only received messages are, and M5 builds the
                 # probe that asserts on them.
                 push_available=None,
+                is_administrator=is_administrator,
                 server_version=_version_of(info) or version,
             )
+
+    async def _is_administrator(self) -> bool | None:
+        """`Policy.IsAdministrator` for the authenticated account, or `None`.
+
+        `GET /Users/{userId}` answers 200 to the user's own non-admin token
+        and carries a 45-key `Policy` object -- verified 2026-07-31 against
+        Emby 4.9.5.0. `GET /Users/Me` answers **500** on that build and is
+        not a usable shortcut, so the id is interpolated.
+
+        Never raises. This is one extra request on a status screen, and a
+        failure to read a role is not a failure to reach or authenticate
+        against a source -- reporting it as one would take
+        `GET /admin/sources/{id}/status` from "renders every state a source
+        can be in" to "500s on a build that spells this route differently".
+
+        `user_id()` is inside the `try` rather than passed in by the caller,
+        which is where the plan put it: it is a `UsherPortError`-raising call
+        on the same session, and `verify()` returns rather than raises for
+        every expected failure. Unreachable today (the `/System/Info` probe
+        above has already authenticated by the time this runs, so the id is
+        cached) and one refactor away from not being.
+
+        Three-valued all the way down. A build with no `Policy`, or one whose
+        `IsAdministrator` is not a bool, is "not determined" -- `bool(...)`
+        of a missing key is `False`, which would render an unperformed check
+        as a performed one.
+        """
+        try:
+            user_id = await self._session.user_id()
+            body = await self._session.json_body(
+                "GET", f"{USER_PATH}/{_segment(user_id)}", op="verify_policy"
+            )
+        except UsherPortError:
+            return None
+        policy = body.get("Policy")
+        if not isinstance(policy, Mapping):
+            return None
+        value = policy.get("IsAdministrator")
+        return value if isinstance(value, bool) else None
 
     async def _walk(
         self, *, since_param: str, since: AwareDatetime | None

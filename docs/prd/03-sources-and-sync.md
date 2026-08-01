@@ -87,12 +87,22 @@ restrictions Emby does not have.)
 **Not required is not the same as prevented, and nothing prevents it.**
 `POST /admin/sources` ([07](07-client-api.md)) takes whatever account an
 operator supplies, and nothing in the adapter inspects its role, so admin
-credentials work — and put an admin token into every direct-play URL, which
-widens what a captured URL grants from "this user's library and watch state"
-to "everything an Emby administrator can do". Configure a normal user. This is
-an accepted risk, recorded in
-[ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) along with the
-check that would make it observable.
+credentials work — and put an admin token into every direct-play URL, and
+(from M5) into a long-lived push socket, which widens what a captured URL or
+socket grants from "this user's library and watch state" to "everything an
+Emby administrator can do". Configure a normal user. This is an accepted
+risk, recorded in
+[ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md).
+
+**It is now observable, and still not refused.** `verify()` reads
+`Policy.IsAdministrator` off `GET /Users/{userId}` — which answers 200 to the
+user's own non-admin token; `GET /Users/Me` answers 500 on Emby 4.9.5.0 and is
+not a shortcut — and `GET /admin/sources/{id}/status`
+([07](07-client-api.md)) reports `is_administrator`. Three-valued, like
+`push_available`: `null` means the check did not run, and a failure to read
+the role narrows the answer rather than failing the status request. An
+administrator account logs a warning and is served anyway, because an operator
+whose only working account is an administrator account still needs a catalog.
 
 **Both of this socket's parameters are also carried by a direct-play URL.**
 `api_key` and `deviceId` are exactly what a `direct` `StreamTarget`'s query
@@ -199,6 +209,14 @@ That split holds against the real server, checked 2026-07-31:
 the `Version` that becomes `server_version`, while `/System/Info` answers
 **401** without a token. A live `verify()` returned `reachable: true`,
 `authenticated: true`, `push_available: null`, `server_version: "4.9.5.0"`.
+
+**`verify()` also spends one request on the account's own role.** `GET
+/Users/{userId}` carries `Policy.IsAdministrator` and answers 200 to the
+user's own non-admin token, so `is_administrator` reports the configuration
+this section calls "not required but not prevented". It is a warning and a
+field, never a refusal, and `null` means the check did not run — see the
+paragraph above and
+[ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md).
 
 `push_available` is deliberately three-valued, and `null` ("not probed") is what
 every adapter reports until M5. See the health-check caveat above: a handshake

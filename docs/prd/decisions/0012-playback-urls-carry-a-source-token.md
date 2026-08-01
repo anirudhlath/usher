@@ -1,7 +1,11 @@
 # ADR-0012 — A playback URL carries a source token, in v1
 
 **Status:** Accepted for v1, with a named successor in M9. Implemented in M3
-([plan](../../plans/2026-07-30-m3-emby-adapter.md), Task 7).
+([plan](../../plans/2026-07-30-m3-emby-adapter.md), Task 7). Both of the
+mitigations recorded below as "recommended, not implemented" have since
+shipped — dropping `DeviceId` from a playback URL in M3, and the
+administrator check in M5 — so the accepted risk is now *observable* rather
+than merely documented. It is still accepted.
 
 ## Context
 
@@ -53,8 +57,12 @@ out of `AuthenticateByName`'s response. `POST /admin/sources` (PRD 07, M9)
 is specified with no role constraint either. Admin credentials pasted into
 it therefore put an admin token into every playback URL, and the list above
 becomes "everything an Emby administrator can do". **This is an accepted
-risk, not a solved one** — the mitigation today is the operator guidance in
-PRD 03, not code. See "Recommended, not implemented" below.
+risk, not a solved one** — nothing refuses such an account, because an
+operator whose only working account is an administrator account still needs
+a catalog. What changed in M5 is that it is no longer *unobservable*:
+`verify()` reads `Policy.IsAdministrator` and `GET /admin/sources/{id}/status`
+reports it, so PRD 03's "configure a normal user" is guidance an operator can
+check they followed. See "Recommended, not implemented" below.
 
 **`DeviceId` rode along, and it cost the attribution argument. It no longer
 does.** PRD 03's push channel is opened at
@@ -185,27 +193,45 @@ named only inside the document that defers it is not a plan.
 
 ## Recommended, not implemented
 
-Two of the accepted risks above have a cheap code answer that M3 does not
-build, recorded here so the choice is visible rather than forgotten:
+Two of the accepted risks above had a cheap code answer that M3 did not
+build, recorded here so the choice stayed visible rather than forgotten.
+**Both have since shipped** — the second in M3's own live-verification pass,
+the first in M5 — and both are kept here with their reasoning rather than
+deleted, because the reasoning is what says why the residual risk is still
+accepted:
 
-- **Detect an administrator account and say so.**
+- ~~**Detect an administrator account and say so.**~~ — **done, M5.**
   `_authenticate_locked` already parses the `User` object out of
   `AuthenticateByName`'s response for `User.Id`; Emby's `UserDto` carries
-  `Policy.IsAdministrator` alongside it. Reading it would let Usher warn at
-  source registration, or surface it on `SourceStatus`, turning PRD 03's
-  "no admin privileges are required" from a permission into something
-  observable.
+  `Policy.IsAdministrator` alongside it. Reading it turns PRD 03's "no admin
+  privileges are required" from a permission into something observable.
 
-  **The readability half is now verified** (2026-07-31): `GET
+  **The readability half was verified first** (2026-07-31): `GET
   /Users/{userId}` answers 200 to the user's own non-admin token and
   carries a 45-key `Policy` object with `IsAdministrator` on it — `false`
   for the account used, which is the configuration this ADR assumes and
   nothing enforces. `GET /Users/Me` answers **500** on this build and is
-  not a usable shortcut. Still not implemented: whether the same `Policy`
-  rides on `AuthenticateByName`'s own response was not checked (the run
-  held a token, not a password), so a first implementation should either
-  read it there or spend one extra request on `GET /Users/{userId}` during
-  `verify()`.
+  not a usable shortcut.
+
+  **The reason it stopped being optional is worth stating:** until M5 the
+  token reached exactly one place a third party could hold it, a direct-play
+  URL. From M5 it is also what a long-lived push socket is opened with,
+  rebuilt on every reconnect and held in memory for the life of the lane.
+  The grant did not change — the token was always the whole of it — but the
+  number of places it is materialised did, and the mitigation recorded here
+  was guidance rather than code.
+
+  `EmbyAdapter.verify()` now spends one request on `GET /Users/{userId}`,
+  reports `SourceStatus.is_administrator` (three-valued; `None` means the
+  check did not run), logs a warning, and **refuses nothing** — an operator
+  whose only working account is an administrator account still needs a
+  catalog. A failure to read the role narrows the answer to `None` rather
+  than failing `verify()`, which must render every state a source can be in
+  rather than 500 on a build that spells this route differently. A
+  fabricated `false` would be worse than the unknown it replaced: it would
+  make an unperformed check look performed. Whether the same `Policy` rides
+  on `AuthenticateByName`'s own response is **still unverified** (the run
+  held a token, not a password) and would save the request.
 - ~~**Stop sending Usher's own `DeviceId` in a playback URL**~~ —
   **done**, 2026-07-31. The question that blocked it (does
   `/Videos/{id}/stream` need it?) was answered by measurement: it does not.

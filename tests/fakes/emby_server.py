@@ -114,6 +114,10 @@ _DEVICE_ID = re.compile(r'DeviceId="([^"]*)"')
 _DEVICE = re.compile(r'Device="([^"]*)"')
 _CLIENT = re.compile(r'Client="([^"]*)"')
 _VERSION = re.compile(r'Version="([^"]*)"')
+# One segment only, so it cannot swallow `/Users/{user}/Items` or any of the
+# write routes below -- each of those needs a second segment. Matched after
+# `/Users/AuthenticateByName`, which `handle` answers before the token gate.
+_USER = re.compile(r"^/Users/(?P<user>[^/]+)$")
 _ITEMS = re.compile(r"^/Users/(?P<user>[^/]+)/Items$")
 _ITEM = re.compile(r"^/Users/(?P<user>[^/]+)/Items/(?P<item>[^/]+)$")
 _USER_DATA = re.compile(r"^/Users/(?P<user>[^/]+)/Items/(?P<item>[^/]+)/UserData$")
@@ -201,6 +205,14 @@ class FakeEmbyServer:
         self.password = password
         self.credentials_valid = True
         self.offline = False
+        # `Policy.IsAdministrator` for the seeded account. `False` is the
+        # configuration ADR-0012 assumes and the live 2026-07-31 probe
+        # observed; `True` is the one nothing enforces and M5 reports.
+        self.is_administrator = False
+        # `GET /Users/Me` answers 500 on Emby 4.9.5.0. This models a build
+        # that did the same for `GET /Users/{id}`, which must narrow the
+        # answer rather than fail `verify()`.
+        self.user_route_fails = False
         self.fail_after: int | None = None
         self.authentications = 0
         # Read by `_ordered` as well as by tests: it is what rotates a group
@@ -346,6 +358,9 @@ class FakeEmbyServer:
                     "OperatingSystem": "Linux",
                 },
             )
+        user_match = _USER.match(path)
+        if request.method == "GET" and user_match:
+            return self._user(user_match.group("user"))
         if request.method == "GET" and _ITEMS.match(path):
             return self._list(request)
         item_match = _ITEM.match(path)
@@ -394,6 +409,39 @@ class FakeEmbyServer:
                 "AccessToken": self._session_token,
                 "ServerId": SERVER_ID,
                 "User": {"Id": USER_ID, "Name": self.username},
+            },
+        )
+
+    def _user(self, user: str) -> httpx.Response:
+        """`GET /Users/{userId}` -- the account's own `UserDto`.
+
+        Verified 2026-07-31 against Emby 4.9.5.0: this answers **200 to the
+        user's own non-admin token** and carries a 45-key `Policy` object
+        with `IsAdministrator` on it.
+
+        **`Me` is a 500, not a shortcut**, on that same build -- modelled
+        here rather than left to this regex's `[^/]+`, which would otherwise
+        make `GET /Users/Me` work perfectly against a server on which it
+        does not. That is the wrong-but-self-consistent-endpoint gap this
+        module's docstring names, and it is the one an adapter reaching for
+        the obvious shortcut would fall straight into.
+
+        `user_route_fails` models a build that answers 500 for the *real*
+        route as well, which must narrow the reported role rather than fail
+        `verify()`.
+
+        Two `Policy` keys, not 45. The other 43 were not recorded, and
+        rendering invented ones would be this fake stating a shape nobody
+        measured -- the failure mode its own module docstring is about.
+        """
+        if self.user_route_fails or user == "Me":
+            return httpx.Response(500, json={"Error": "Internal Server Error"})
+        return httpx.Response(
+            200,
+            json={
+                "Id": USER_ID,
+                "Name": self.username,
+                "Policy": {"IsAdministrator": self.is_administrator, "IsDisabled": False},
             },
         )
 

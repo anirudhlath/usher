@@ -326,9 +326,22 @@ class SourceStatus:
     authenticated: bool
     push_available: bool | None = None
     server_version: str | None = None
+    # `None` means "not determined", exactly as `push_available` does, and
+    # for a stronger reason: ADR-0012 accepts the risk that an operator
+    # configures an administrator account, and its recorded mitigation is
+    # guidance rather than code. A fabricated `False` here would make an
+    # unperformed check look like a performed one, which is worse than the
+    # unknown it replaces. From M5 the same token also opens a long-lived
+    # push socket, which is why the check ships now rather than staying a
+    # recommendation.
+    is_administrator: bool | None = None
     detail: str | None = None
 
     def __post_init__(self) -> None:
+        # Deliberately no clause for `is_administrator`. The two above refuse
+        # states no upstream produces; an administrator account is a state a
+        # real deployment is in right now, and the screen that exists to
+        # report it must be able to construct a status for it.
         if self.authenticated and not self.reachable:
             raise ValueError("a source cannot be authenticated without being reachable")
         if self.push_available and not self.authenticated:
