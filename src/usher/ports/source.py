@@ -160,8 +160,8 @@ class SourceEvent:
     external_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
-def _redacted(url: str) -> str:
-    """A playback URL cut at its query string, for rendering in a `repr`.
+def redact_query(url: str) -> str:
+    """A URL cut at its query string, for rendering in a `repr` or a log line.
 
     Everything from the first `?` or `#` onward, gone. Not a search for
     `api_key=`: the deep-link target hides the whole direct URL, token and
@@ -175,6 +175,14 @@ def _redacted(url: str) -> str:
     Enough is kept (scheme, host, path) to identify the item in a log line;
     the query carries no fact a reader needs that the target's own typed
     fields do not already state.
+
+    **Public, and it has two callers.** `StreamTarget.__repr__` below, and
+    `usher.adapters.emby.push`, whose socket URL is
+    `/embywebsocket?api_key=<token>&deviceId=<id>` — the same token, in the
+    same shape, one milestone later. One rule rather than two that can
+    disagree; ADR-0012 records why it is spelled this way. It stays in this
+    module rather than moving to a utility package because it is a property
+    of this port's DTOs, and adapters may import `ports`.
     """
     cut = min((index for index in (url.find("?"), url.find("#")) if index != -1), default=-1)
     return url if cut < 0 else f"{url[:cut]}<redacted>"
@@ -239,9 +247,14 @@ class StreamTarget:
         `repr=False` back to `repr=True` does not silently restore the
         leaking one either. Only deleting *both* re-opens it, which is what
         `tests/unit/test_ports_source.py` is there to catch.
+
+        The cut itself is `redact_query` above and is deliberately *not*
+        inlined here: from M5 the push channel's socket URL carries the same
+        token in the same shape, and two copies of one rule is how the two
+        come to disagree.
         """
         rendered = {item.name: getattr(self, item.name) for item in fields(self)}
-        rendered["url"] = _redacted(self.url)
+        rendered["url"] = redact_query(self.url)
         body = ", ".join(f"{name}={value!r}" for name, value in rendered.items())
         return f"{type(self).__name__}({body})"
 

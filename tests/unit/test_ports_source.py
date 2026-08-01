@@ -15,6 +15,7 @@ import pytest
 from loguru import logger
 from pydantic import SecretStr
 
+import usher.ports.source
 from usher.domain.enums import HdrFormat
 from usher.ports.credentials import CredentialStore, SourceCredentials
 from usher.ports.source import (
@@ -25,6 +26,7 @@ from usher.ports.source import (
     SourceWatchState,
     StreamTarget,
     StreamTargetKind,
+    redact_query,
 )
 
 
@@ -140,7 +142,7 @@ def test_stream_target_does_not_leak_a_token_under_diagnose_true() -> None:
 
 
 def test_the_redaction_cuts_at_a_fragment_as_well_as_a_query() -> None:
-    """`_redacted` cuts at the *first* of `?` and `#`, and both halves of
+    """`redact_query` cuts at the *first* of `?` and `#`, and both halves of
     that survived mutation.
 
     The `#` branch: a source whose deep link carries its target after a
@@ -168,6 +170,67 @@ def test_the_redaction_cuts_at_a_fragment_as_well_as_a_query() -> None:
     )
     assert "SEKRIT" not in repr(nested)
     assert "infuse://x-callback-url/play<redacted>" in repr(nested)
+
+
+def test_redact_query_is_public_and_cuts_at_the_query() -> None:
+    """M5's push channel imports this to keep a socket URL out of every log
+    line and error message it builds. A private `_redacted` would be
+    imported anyway, or -- worse -- reimplemented slightly differently in
+    `adapters/emby/push.py`, which is how one rule becomes two that
+    disagree. ADR-0012 is explicit that the rule is "cut at the query",
+    never "match on `api_key=`", because the deep-link target percent-
+    encodes the whole direct URL inside its own query string.
+    """
+    assert redact_query("https://emby.invalid/embywebsocket?api_key=abc&deviceId=d") == (
+        "https://emby.invalid/embywebsocket<redacted>"
+    )
+    assert redact_query("wss://emby.invalid/embywebsocket") == "wss://emby.invalid/embywebsocket"
+    assert redact_query("https://emby.invalid/x#api_key=abc") == "https://emby.invalid/x<redacted>"
+
+
+def test_a_stream_target_still_redacts_through_the_shared_rule() -> None:
+    """The regression this refactor could introduce: `StreamTarget.__repr__`
+    stops calling the helper and starts rendering the raw URL. ADR-0012's
+    own evidence section records that with the dataclass-generated `repr`
+    the token appears in plain text in `repr()`, `str()`, an f-string,
+    `"%s" %`, `pprint.pformat`, and loguru's `diagnose=True` renderer.
+    """
+    target = StreamTarget(
+        kind=StreamTargetKind.DIRECT,
+        url="https://e.invalid/v?api_key=tok",
+    )
+    assert "tok" not in repr(target)
+    assert "<redacted>" in repr(target)
+
+
+def test_the_repr_calls_the_shared_rule_rather_than_carrying_a_copy_of_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure the test above cannot see, and the only one this task is
+    actually about.
+
+    "One rule rather than two that can drift" is a claim about *where the
+    code is*, not about what it returns today. A `__repr__` that inlined
+    its own `min(url.find("?"), url.find("#"))` satisfies every
+    output-level assertion in this file — token absent, `<redacted>`
+    present, fragment cut, deep link cut — while being precisely the second
+    copy the refactor exists to prevent. Replacing the module-level rule and
+    demanding the `repr` show the replacement is what makes the call edge
+    itself the thing under test.
+
+    Same shape as ADR-0012's own lesson about a guard that held by
+    accident: a safety property that is true because two implementations
+    happen to agree is not a safety property, it is a coincidence with a
+    maintenance schedule.
+    """
+
+    def replacement(url: str) -> str:
+        return "<through-the-shared-rule>"
+
+    target = StreamTarget(kind=StreamTargetKind.DIRECT, url="https://e.invalid/v?api_key=tok")
+    monkeypatch.setattr(usher.ports.source, "redact_query", replacement)
+    assert "<through-the-shared-rule>" in repr(target)
+    assert "tok" not in repr(target)
 
 
 def test_a_url_with_neither_a_query_nor_a_fragment_is_rendered_whole() -> None:
