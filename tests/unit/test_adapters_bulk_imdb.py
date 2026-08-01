@@ -41,38 +41,41 @@ def test_retains_only_the_four_titletypes_that_map_to_titlekind() -> None:
     short, videoGame, and isAdult=1 are dropped as PRD 04 specifies."""
     kept = [row for row in map(parse_basics_row, _basics_lines()) if row is not None]
     assert [row.imdb_id for row in kept] == [
-        "tt0073045",
-        "tt0111161",
-        "tt0944947",
-        "tt9999994",
-        "tt9999995",
+        "tt99000010",
+        "tt99000020",
+        "tt99000030",
+        "tt99000040",
+        "tt99000050",
     ]
 
 
 def test_preserves_embedded_double_quotes() -> None:
     """The finding that rules out the csv module: IMDb's TSVs have no
-    quoting mechanism, and csv.reader's default QUOTE_MINIMAL turns
-    `"Giliap"` into `Giliap` -- verified against the real dump. Delete the
-    split-based parser for a csv.reader and this fails."""
+    quoting mechanism, so a title field may open *and* close with a literal
+    `"` -- and `csv.reader`'s default QUOTE_MINIMAL then strips both,
+    silently. Measured against the real dump: 21 such titles in the first
+    553,395 rows (CLAUDE.md records the specimen; the fixture's row is
+    invented, per tests/fixtures/README.md). Delete the split-based parser
+    for a csv.reader and this fails."""
     row = parse_basics_row(_basics_lines()[2])
     assert row is not None
-    assert row.name == '"Giliap"'
-    assert row.original_name == '"Giliap"'
+    assert row.name == '"A Quoted Synthetic Title"'
+    assert row.original_name == '"A Quoted Synthetic Title"'
 
 
 def test_maps_titletype_onto_titlekind() -> None:
     rows = {r.imdb_id: r for r in map(parse_basics_row, _basics_lines()) if r is not None}
-    assert rows["tt0111161"].kind is TitleKind.MOVIE
-    assert rows["tt9999995"].kind is TitleKind.MOVIE  # tvMovie
-    assert rows["tt0944947"].kind is TitleKind.SERIES
-    assert rows["tt9999994"].kind is TitleKind.SERIES  # tvMiniSeries
+    assert rows["tt99000020"].kind is TitleKind.MOVIE
+    assert rows["tt99000050"].kind is TitleKind.MOVIE  # tvMovie
+    assert rows["tt99000030"].kind is TitleKind.SERIES
+    assert rows["tt99000040"].kind is TitleKind.SERIES  # tvMiniSeries
 
 
 def test_backslash_n_becomes_none_not_a_literal() -> None:
     r"""IMDb's documented null sentinel is the two characters `\N`. Storing
     it verbatim would put a literal backslash-N in the catalog."""
     rows = {r.imdb_id: r for r in map(parse_basics_row, _basics_lines()) if r is not None}
-    empty = rows["tt9999995"]
+    empty = rows["tt99000050"]
     assert empty.original_name is None
     assert empty.year is None
     assert empty.end_year is None
@@ -82,12 +85,12 @@ def test_backslash_n_becomes_none_not_a_literal() -> None:
 
 def test_splits_the_comma_separated_genres_field() -> None:
     rows = {r.imdb_id: r for r in map(parse_basics_row, _basics_lines()) if r is not None}
-    assert rows["tt0944947"].genres == ("Action", "Adventure", "Drama")
+    assert rows["tt99000030"].genres == ("Action", "Adventure", "Drama")
 
 
 def test_end_year_is_kept_for_series() -> None:
     rows = {r.imdb_id: r for r in map(parse_basics_row, _basics_lines()) if r is not None}
-    assert rows["tt0944947"].end_year == 2019
+    assert rows["tt99000030"].end_year == 2009
 
 
 def test_the_header_line_is_filtered_not_parsed() -> None:
@@ -100,35 +103,35 @@ def test_a_wrong_column_count_is_malformed() -> None:
     change that silently skipped rows would import a partial catalog and
     checkpoint it as complete."""
     with pytest.raises(PortDataMalformed) as exc_info:
-        parse_basics_row("tt0000001\tmovie\tonly three columns")
-    assert exc_info.value.detail == "tt0000001"
+        parse_basics_row("tt99000001\tmovie\tonly three columns")
+    assert exc_info.value.detail == "tt99000001"
 
 
 def test_a_non_integer_year_is_malformed_and_names_the_column() -> None:
     with pytest.raises(PortDataMalformed) as exc_info:
-        parse_basics_row("tt0000001\tmovie\tX\tX\t0\tnineteen\t\\N\t1\tDrama")
-    assert exc_info.value.detail == "tt0000001.startYear"
+        parse_basics_row("tt99000001\tmovie\tX\tX\t0\tnineteen\t\\N\t1\tDrama")
+    assert exc_info.value.detail == "tt99000001.startYear"
 
 
 def test_a_title_with_no_primary_title_is_dropped() -> None:
     r"""Title.name is Field(min_length=1). A placeholder would be
     searchable, which is worse than absent."""
-    assert parse_basics_row("tt0000001\tmovie\t\\N\t\\N\t0\t1990\t\\N\t90\tDrama") is None
+    assert parse_basics_row("tt99000001\tmovie\t\\N\t\\N\t0\t1990\t\\N\t90\tDrama") is None
 
 
 def test_ratings_parse_on_imdbs_own_scale() -> None:
     lines = (_FIXTURES / "title.ratings.slice.tsv").read_text().splitlines()
     rows = [row for row in map(parse_ratings_row, lines) if row is not None]
-    assert rows[0].imdb_id == "tt0111161"
-    assert rows[0].community_rating == 9.3
-    assert rows[0].vote_count == 2_900_000
+    assert rows[0].imdb_id == "tt99000020"
+    assert rows[0].community_rating == 7.4
+    assert rows[0].vote_count == 12_345
 
 
 def test_a_rating_outside_zero_to_ten_is_malformed() -> None:
     """Title.community_rating is Field(ge=0, le=10) and the matching CHECK
     would reject it during COPY anyway -- failing here names the row."""
     with pytest.raises(PortDataMalformed):
-        parse_ratings_row("tt0000001\t11.5\t100")
+        parse_ratings_row("tt99000001\t11.5\t100")
 
 
 async def test_batches_respect_the_batch_size_and_advance_the_cursor(
@@ -159,16 +162,16 @@ async def test_a_malformed_row_raises_through_batches_instead_of_truncating(
     body = (
         b"tconst\ttitleType\tprimaryTitle\toriginalTitle\tisAdult\tstartYear\tendYear\t"
         b"runtimeMinutes\tgenres\n"
-        b"tt0111161\tmovie\tThe Shawshank Redemption\tThe Shawshank Redemption\t0\t1994\t"
+        b"tt99000020\tmovie\tA Synthetic Feature\tA Synthetic Feature\t0\t1994\t"
         b"\\N\t142\tDrama\n"
-        b"tt0000002\tmovie\tBad Row\tBad Row\t0\tnineteen-ninety\t\\N\t90\tDrama\n"
+        b"tt99000002\tmovie\tBad Row\tBad Row\t0\tnineteen-ninety\t\\N\t90\tDrama\n"
     )
     (cache / "title.basics.tsv.gz").write_bytes(gzip.compress(body))
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         dataset = IMDbTitleDataset(client, cache, batch_size=1)
         with pytest.raises(PortDataMalformed) as exc_info:
             [batch async for batch in dataset.batches()]
-    assert exc_info.value.detail == "tt0000002.startYear"
+    assert exc_info.value.detail == "tt99000002.startYear"
 
 
 async def test_resuming_from_a_cursor_skips_what_was_committed(tmp_path: Path) -> None:
@@ -184,7 +187,7 @@ async def test_resuming_from_a_cursor_skips_what_was_committed(tmp_path: Path) -
                 resume_from=BulkCursor(revision=first.cursor.revision, position=5, rows_seen=2)
             )
         ]
-    assert [row.imdb_id for row in resumed[0].rows] == ["tt9999994", "tt9999995"]
+    assert [row.imdb_id for row in resumed[0].rows] == ["tt99000040", "tt99000050"]
     assert resumed[0].cursor.rows_seen == 4
 
 
@@ -266,7 +269,7 @@ async def test_batches_accepts_both_a_resume_cursor_and_a_pre_resolved_revision(
                 revision=first.cursor.revision,
             )
         ]
-    assert [row.imdb_id for row in resumed[0].rows] == ["tt9999994", "tt9999995"]
+    assert [row.imdb_id for row in resumed[0].rows] == ["tt99000040", "tt99000050"]
 
 
 def _local(cache: Path) -> httpx.MockTransport:

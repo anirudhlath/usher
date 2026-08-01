@@ -34,7 +34,7 @@ class ProviderRef:
     kind would be claiming a distinction that does not exist. ADR-0011.
 
     `value` is a string, not an int, so the same type serves TMDb's
-    `550` and IMDb's `tt0111161`. The repository casts at the boundary,
+    `90000550` and IMDb's `tt99000020`. The repository casts at the boundary,
     where it knows the column type.
     """
 

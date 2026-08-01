@@ -158,7 +158,7 @@ def test_metadata_candidate_uses_the_canonical_kind_vocabulary() -> None:
     divergence. MetadataCandidate normalises that away before it ever
     reaches M4."""
     candidate = MetadataCandidate(
-        provider_id=438631, name="Dune", year=2021, kind=TitleKind.MOVIE, popularity=95.2
+        provider_id=90000100, name="Dune", year=2021, kind=TitleKind.MOVIE, popularity=95.2
     )
     assert candidate.kind is TitleKind.MOVIE
 

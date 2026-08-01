@@ -13,9 +13,9 @@ obvious spelling joins one `unnest` of the whole batch against `titles` with
 an `OR` over the three providers and casts `p.value::integer` for the two
 integer columns. It does not work: the cast is applied to *every* row the
 planner evaluates, including the IMDb ones, and Postgres does not guarantee
-to short-circuit the `OR` first. A batch carrying `('imdb', 'tt0111161')`
+to short-circuit the `OR` first. A batch carrying `('imdb', 'tt99000020')`
 alongside any TMDb ref answers `invalid input syntax for type integer:
-"tt0111161"` -- so one bad-shaped ref takes down the whole page. Split by
+"tt99000020"` -- so one bad-shaped ref takes down the whole page. Split by
 provider, each against its own index (`ix_titles_tmdb_id_kind`,
 `ix_titles_imdb_id`, `ix_titles_tvdb_id`), and filter non-numeric values in
 Python before they reach a bind parameter. That is also what

@@ -31,19 +31,19 @@ from usher.ports.bulk import IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
 from usher.ports.repository import BulkCatalogRepository, BulkWriteResult
 
 SHAWSHANK = ImdbTitle(
-    imdb_id="tt0111161",
+    imdb_id="tt99000020",
     kind=TitleKind.MOVIE,
-    name='The "Shawshank" Redemption',
-    original_name="Rita Hayworth and Shawshank Redemption",
+    name='A "Quoted" Synthetic Feature',
+    original_name="A Synthetic Feature (original title)",
     year=1994,
     end_year=None,
     runtime_minutes=142,
     genres=("Drama",),
 )
 THRONES = ImdbTitle(
-    imdb_id="tt0944947",
+    imdb_id="tt99000030",
     kind=TitleKind.SERIES,
-    name="Game of Thrones",
+    name="A Synthetic Series",
     original_name=None,
     year=2011,
     end_year=2019,
@@ -51,7 +51,7 @@ THRONES = ImdbTitle(
     genres=("Drama", "Fantasy"),
 )
 TOP_GEAR = ImdbTitle(
-    imdb_id="tt1628033",
+    imdb_id="tt99000130",
     kind=TitleKind.SERIES,
     name="Top Gear",
     original_name=None,
@@ -61,7 +61,7 @@ TOP_GEAR = ImdbTitle(
     genres=(),
 )
 SLEEPER = ImdbTitle(
-    imdb_id="tt0070328",
+    imdb_id="tt99000140",
     kind=TitleKind.MOVIE,
     name="Sleeper",
     original_name=None,
@@ -110,16 +110,16 @@ class BulkCatalogRepositoryContract:
         port itself can read back."""
         await repo.upsert_titles([SHAWSHANK])
         await repo.upsert_tmdb_ids(
-            [TmdbId(tmdb_id=278, kind=TitleKind.MOVIE, original_name="x", popularity=45.5)]
+            [TmdbId(tmdb_id=90000020, kind=TitleKind.MOVIE, original_name="x", popularity=12.5)]
         )
-        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=278)])
+        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=90000020)])
         assert (await repo.link_crosswalk()).linked == 1
 
         changed = dataclasses.replace(SHAWSHANK, runtime_minutes=143)
         result = await repo.upsert_titles([changed])
         assert (result.inserted, result.updated) == (0, 1)
-        assert await self.tmdb_id_of(repo, "tt0111161") == 278
-        assert await self.popularity_of(repo, "tt0111161") == 45.5
+        assert await self.tmdb_id_of(repo, "tt99000020") == 90000020
+        assert await self.popularity_of(repo, "tt99000020") == 12.5
 
     async def test_upsert_titles_deduplicates_within_one_batch(
         self, repo: BulkCatalogRepository
@@ -142,7 +142,7 @@ class BulkCatalogRepositoryContract:
         result = await repo.upsert_titles([first_seen, duplicate])
         assert (result.inserted, result.updated) == (1, 0)
         assert await repo.count_titles() == 1
-        assert await self.name_of(repo, "tt0111161") == "First seen"
+        assert await self.name_of(repo, "tt99000020") == "First seen"
 
     async def test_upsert_titles_accepts_an_empty_batch(self, repo: BulkCatalogRepository) -> None:
         assert await repo.upsert_titles([]) == BulkWriteResult(0, 0)
@@ -156,8 +156,8 @@ class BulkCatalogRepositoryContract:
         await repo.upsert_titles([SHAWSHANK])
         applied = await repo.apply_ratings(
             [
-                ImdbRating(imdb_id="tt0111161", community_rating=9.3, vote_count=2_900_000),
-                ImdbRating(imdb_id="tt9999999", community_rating=1.0, vote_count=3),
+                ImdbRating(imdb_id="tt99000020", community_rating=7.4, vote_count=12_345),
+                ImdbRating(imdb_id="tt99000090", community_rating=1.0, vote_count=3),
             ]
         )
         assert applied == 1
@@ -167,7 +167,7 @@ class BulkCatalogRepositoryContract:
         self, repo: BulkCatalogRepository
     ) -> None:
         await repo.upsert_titles([SHAWSHANK])
-        rating = ImdbRating(imdb_id="tt0111161", community_rating=9.3, vote_count=2_900_000)
+        rating = ImdbRating(imdb_id="tt99000020", community_rating=7.4, vote_count=12_345)
         assert await repo.apply_ratings([rating]) == 1
         assert await repo.apply_ratings([rating]) == 0
 
@@ -184,8 +184,8 @@ class BulkCatalogRepositoryContract:
         await repo.upsert_titles([SHAWSHANK])
         applied = await repo.apply_ratings(
             [
-                ImdbRating(imdb_id="tt0111161", community_rating=1.0, vote_count=1),
-                ImdbRating(imdb_id="tt0111161", community_rating=9.0, vote_count=999),
+                ImdbRating(imdb_id="tt99000020", community_rating=1.0, vote_count=1),
+                ImdbRating(imdb_id="tt99000020", community_rating=9.0, vote_count=999),
             ]
         )
         assert applied == 1
@@ -214,9 +214,9 @@ class BulkCatalogRepositoryContract:
         )
         assert written == 1
         await repo.upsert_titles([SHAWSHANK])
-        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=1)])
+        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=1)])
         await repo.link_crosswalk()
-        assert await self.popularity_of(repo, "tt0111161") == 99.0
+        assert await self.popularity_of(repo, "tt99000020") == 99.0
 
     async def test_upsert_tmdb_ids_reports_rows_written_not_rows_changed(
         self, repo: BulkCatalogRepository
@@ -238,11 +238,11 @@ class BulkCatalogRepositoryContract:
         """The three SPARQL joins run as three separate passes, each
         carrying one column. Without COALESCE on the stored side, the
         P4983 pass would wipe every tmdb_movie_id the P4947 pass wrote."""
-        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=278)])
-        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt0111161", tvdb_series_id=999)])
+        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=90000020)])
+        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tvdb_series_id=999)])
         await repo.upsert_titles([SHAWSHANK])
         await repo.upsert_tmdb_ids(
-            [TmdbId(tmdb_id=278, kind=TitleKind.MOVIE, original_name="x", popularity=45.5)]
+            [TmdbId(tmdb_id=90000020, kind=TitleKind.MOVIE, original_name="x", popularity=12.5)]
         )
         result = await repo.link_crosswalk()
         assert result.linked == 1
@@ -260,19 +260,19 @@ class BulkCatalogRepositoryContract:
         await repo.upsert_titles([SHAWSHANK])
         await repo.upsert_crosswalk(
             [
-                IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=100),
-                IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=900),
+                IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=100),
+                IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=900),
             ]
         )
         await repo.link_crosswalk()
-        assert await self.tmdb_id_of(repo, "tt0111161") == 100
+        assert await self.tmdb_id_of(repo, "tt99000020") == 100
 
     async def test_upsert_crosswalk_reports_rows_written_not_rows_changed(
         self, repo: BulkCatalogRepository
     ) -> None:
         """Same absence of an IS DISTINCT FROM guard as upsert_tmdb_ids --
         a replay reports the same count again, not zero."""
-        pair = IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=278)
+        pair = IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=90000020)
         assert await repo.upsert_crosswalk([pair]) == 1
         assert await repo.upsert_crosswalk([pair]) == 1
 
@@ -286,8 +286,8 @@ class BulkCatalogRepositoryContract:
         await repo.upsert_titles([SLEEPER, TOP_GEAR])
         await repo.upsert_crosswalk(
             [
-                IdCrosswalkPair(imdb_id="tt0070328", tmdb_movie_id=45),
-                IdCrosswalkPair(imdb_id="tt1628033", tmdb_series_id=45),
+                IdCrosswalkPair(imdb_id="tt99000140", tmdb_movie_id=45),
+                IdCrosswalkPair(imdb_id="tt99000130", tmdb_series_id=45),
             ]
         )
         result = await repo.link_crosswalk()
@@ -302,7 +302,7 @@ class BulkCatalogRepositoryContract:
         `CrosswalkLinkResult` documents as a real data-quality signal an
         operator watches, on every idempotent re-run."""
         await repo.upsert_titles([SHAWSHANK])
-        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=278)])
+        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=90000020)])
         first = await repo.link_crosswalk()
         assert (first.linked, first.unmatched, first.conflicted) == (1, 0, 0)
         second = await repo.link_crosswalk()
@@ -329,17 +329,17 @@ class BulkCatalogRepositoryContract:
                 TmdbId(tmdb_id=200, kind=TitleKind.MOVIE, original_name="revised", popularity=99.0),
             ]
         )
-        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=100)])
+        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=100)])
         first = await repo.link_crosswalk()
         assert (first.linked, first.unmatched, first.conflicted) == (1, 0, 0)
 
         # Wikidata revises its mind: a later pass claims a different id for
         # the same IMDb id.
-        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=200)])
+        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=200)])
         second = await repo.link_crosswalk()
         assert (second.linked, second.unmatched, second.conflicted) == (0, 0, 1)
-        assert await self.tmdb_id_of(repo, "tt0111161") == 100
-        assert await self.popularity_of(repo, "tt0111161") == 1.0
+        assert await self.tmdb_id_of(repo, "tt99000020") == 100
+        assert await self.popularity_of(repo, "tt99000020") == 1.0
 
     async def test_link_crosswalk_counts_pairs_with_no_catalog_title(
         self, repo: BulkCatalogRepository
@@ -347,7 +347,7 @@ class BulkCatalogRepositoryContract:
         """Most crosswalk pairs point at IMDb ids this milestone does not
         retain. Reporting them beats discarding them silently — an operator
         seeing `unmatched` near zero knows the crosswalk is stale."""
-        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt5555555", tmdb_movie_id=1)])
+        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000160", tmdb_movie_id=1)])
         result = await repo.link_crosswalk()
         assert result.linked == 0
         assert result.unmatched == 1
@@ -366,10 +366,10 @@ class BulkCatalogRepositoryContract:
         accident and passes anyway -- verified directly against exactly
         such an implementation."""
         await repo.upsert_titles([SHAWSHANK])  # MOVIE
-        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt0111161", tmdb_series_id=999)])
+        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tmdb_series_id=999)])
         result = await repo.link_crosswalk()
         assert (result.linked, result.unmatched, result.conflicted) == (0, 1, 0)
-        assert await self.tmdb_id_of(repo, "tt0111161") is None
+        assert await self.tmdb_id_of(repo, "tt99000020") is None
 
     async def test_link_crosswalk_counts_a_tmdb_id_another_title_already_holds(
         self, repo: BulkCatalogRepository
@@ -380,8 +380,8 @@ class BulkCatalogRepositoryContract:
         await repo.upsert_titles([SHAWSHANK, SLEEPER])
         await repo.upsert_crosswalk(
             [
-                IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=278),
-                IdCrosswalkPair(imdb_id="tt0070328", tmdb_movie_id=278),
+                IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=90000020),
+                IdCrosswalkPair(imdb_id="tt99000140", tmdb_movie_id=90000020),
             ]
         )
         result = await repo.link_crosswalk()
@@ -395,11 +395,11 @@ class BulkCatalogRepositoryContract:
         queue an ordering derived from real-world relevance."""
         await repo.upsert_titles([SHAWSHANK])
         await repo.upsert_tmdb_ids(
-            [TmdbId(tmdb_id=278, kind=TitleKind.MOVIE, original_name="x", popularity=45.5)]
+            [TmdbId(tmdb_id=90000020, kind=TitleKind.MOVIE, original_name="x", popularity=12.5)]
         )
-        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=278)])
+        await repo.upsert_crosswalk([IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=90000020)])
         assert (await repo.link_crosswalk()).linked == 1
-        assert await self.popularity_of(repo, "tt0111161") == 45.5
+        assert await self.popularity_of(repo, "tt99000020") == 12.5
 
     async def test_link_crosswalk_enforces_a_global_unique_tvdb_id(
         self, repo: BulkCatalogRepository
@@ -417,13 +417,13 @@ class BulkCatalogRepositoryContract:
         await repo.upsert_titles([THRONES, TOP_GEAR])  # both SERIES
         await repo.upsert_crosswalk(
             [
-                IdCrosswalkPair(imdb_id="tt1628033", tvdb_series_id=777),
-                IdCrosswalkPair(imdb_id="tt0944947", tvdb_series_id=777),
+                IdCrosswalkPair(imdb_id="tt99000130", tvdb_series_id=777),
+                IdCrosswalkPair(imdb_id="tt99000030", tvdb_series_id=777),
             ]
         )
         await repo.link_crosswalk()
-        assert await self.tvdb_id_of(repo, "tt0944947") == 777  # "tt0944947" < "tt1628033"
-        assert await self.tvdb_id_of(repo, "tt1628033") is None
+        assert await self.tvdb_id_of(repo, "tt99000030") == 777  # "tt99000030" < "tt99000130"
+        assert await self.tvdb_id_of(repo, "tt99000130") is None
 
     async def test_bulk_load_window_is_reentrant_and_transparent(
         self, repo: BulkCatalogRepository

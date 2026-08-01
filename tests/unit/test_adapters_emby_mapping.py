@@ -45,7 +45,7 @@ def test_a_movie_maps_every_field_the_port_promises() -> None:
     assert item.name == "Example Movie"
     assert item.kind is SourceItemKind.MOVIE
     assert item.year == 2021
-    assert item.provider_ids == {"tmdb": "438631", "imdb": "tt1160419"}
+    assert item.provider_ids == {"tmdb": "90000100", "imdb": "tt99000100"}
     assert item.container == "mkv"
     assert item.video_codec == "hevc"
     assert item.audio_codec == "truehd"
@@ -64,7 +64,7 @@ def test_provider_id_keys_are_lowercased() -> None:
     `provider_ids["tmdb"]` and must not know that."""
     item = to_source_item(load_emby_fixture("series_item"))
     assert item is not None
-    assert item.provider_ids == {"tmdb": "1399", "imdb": "tt0944947", "tvdb": "121361"}
+    assert item.provider_ids == {"tmdb": "90001399", "imdb": "tt99000030", "tvdb": "91000030"}
 
 
 def test_dolby_vision_wins_over_the_hdr10_fallback_layer() -> None:
@@ -581,7 +581,7 @@ def test_provider_ids_drops_entries_with_nothing_in_them() -> None:
     string" -- and M4's matcher looks titles up by `provider_ids["tmdb"]`,
     so an empty value that survives here becomes a lookup for the empty
     id rather than a fallback to name matching."""
-    assert provider_ids({"Tmdb": "438631", "Imdb": "", "Tvdb": None}) == {"tmdb": "438631"}
+    assert provider_ids({"Tmdb": "90000100", "Imdb": "", "Tvdb": None}) == {"tmdb": "90000100"}
     assert provider_ids("not-a-mapping") == {}
 
 

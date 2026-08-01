@@ -71,7 +71,7 @@ async def test_a_v3_key_is_sent_as_the_api_key_query_parameter() -> None:
     transport = _transport()
     client, http = _client(transport)
     async with http:
-        await client.get("/movie/550")
+        await client.get("/movie/90000550")
     request = transport.seen[0]  # type: ignore[attr-defined]
     assert request.url.params["api_key"] == _KEY.get_secret_value()
     assert "authorization" not in request.headers
@@ -86,7 +86,7 @@ async def test_a_v4_read_access_token_is_sent_as_a_bearer_header_instead() -> No
     transport = _transport()
     client, http = _client(transport, api_key=_V4_TOKEN)
     async with http:
-        await client.get("/movie/550")
+        await client.get("/movie/90000550")
     request = transport.seen[0]  # type: ignore[attr-defined]
     assert request.headers["authorization"] == f"Bearer {_V4_TOKEN.get_secret_value()}"
     assert "api_key" not in request.url.params
@@ -104,9 +104,9 @@ async def test_the_key_never_reaches_a_transport_failure_message() -> None:
     client, http = _client(_transport(refuse))
     async with http:
         with pytest.raises(PortUnavailable) as caught:
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
     assert _KEY.get_secret_value() not in str(caught.value)
-    assert "/movie/550" in str(caught.value)
+    assert "/movie/90000550" in str(caught.value)
 
 
 # -- status translation ----------------------------------------------------
@@ -131,14 +131,14 @@ async def test_a_rejected_key_is_an_auth_failure(status: int) -> None:
     client, http = _client(_transport(status=status))
     async with http:
         with pytest.raises(PortAuthFailed):
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
 
 
 async def test_a_429_carries_the_retry_after_hint() -> None:
     client, http = _client(_transport(status=429, headers={"retry-after": "17"}))
     async with http:
         with pytest.raises(PortRateLimited) as caught:
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
     assert caught.value.retry_after == 17.0
 
 
@@ -151,7 +151,7 @@ async def test_a_429_with_an_http_date_retry_after_is_still_a_hint() -> None:
     )
     async with http:
         with pytest.raises(PortRateLimited) as caught:
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
     assert caught.value.retry_after is not None
 
 
@@ -159,7 +159,7 @@ async def test_a_429_without_a_hint_is_still_a_rate_limit() -> None:
     client, http = _client(_transport(status=429))
     async with http:
         with pytest.raises(PortRateLimited) as caught:
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
     assert caught.value.retry_after is None
 
 
@@ -167,7 +167,7 @@ async def test_a_server_error_is_an_outage() -> None:
     client, http = _client(_transport(status=503))
     async with http:
         with pytest.raises(PortUnavailable):
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
 
 
 @pytest.mark.parametrize(
@@ -210,7 +210,7 @@ async def test_a_rejected_request_is_malformed_data_not_an_outage(status: int, b
     client, http = _client(_transport(status=status, body=body))
     async with http:
         with pytest.raises(PortDataMalformed):
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
 
 
 async def test_a_request_timeout_is_still_an_outage() -> None:
@@ -222,7 +222,7 @@ async def test_a_request_timeout_is_still_an_outage() -> None:
     client, http = _client(_transport(status=408))
     async with http:
         with pytest.raises(PortUnavailable):
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
 
 
 async def test_a_non_json_body_is_malformed() -> None:
@@ -236,7 +236,7 @@ async def test_a_non_json_body_is_malformed() -> None:
     client, http = _client(_transport(html))
     async with http:
         with pytest.raises(PortDataMalformed):
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
 
 
 async def test_a_json_array_body_is_malformed() -> None:
@@ -246,7 +246,7 @@ async def test_a_json_array_body_is_malformed() -> None:
     client, http = _client(_transport(array))
     async with http:
         with pytest.raises(PortDataMalformed):
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
 
 
 # -- the throttle ----------------------------------------------------------
@@ -265,7 +265,7 @@ async def test_the_throttle_holds_requests_to_the_configured_rate() -> None:
     client, http = _client(_transport(), requests_per_second=2.0, clock=clock, sleep=clock.sleep)
     async with http:
         for _ in range(6):
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
     assert clock.now == pytest.approx(2.0)
 
 
@@ -276,7 +276,7 @@ async def test_the_throttle_survives_concurrency() -> None:
     clock = _Clock()
     client, http = _client(_transport(), requests_per_second=2.0, clock=clock, sleep=clock.sleep)
     async with http:
-        await asyncio.gather(*(client.get("/movie/550") for _ in range(6)))
+        await asyncio.gather(*(client.get("/movie/90000550") for _ in range(6)))
     assert clock.now == pytest.approx(2.0)
 
 
@@ -287,5 +287,5 @@ async def test_a_burst_within_the_budget_does_not_wait() -> None:
     client, http = _client(_transport(), requests_per_second=10.0, clock=clock, sleep=clock.sleep)
     async with http:
         for _ in range(10):
-            await client.get("/movie/550")
+            await client.get("/movie/90000550")
     assert clock.now == 0.0

@@ -22,11 +22,19 @@ of TMDb's reference pages, not an observation — so a shape diff from this
 script is the first evidence any of it is right.
 
     export USHER_TMDB_API_KEY=...
-    uv run python scripts/capture_tmdb_fixture.py --kind movie --id 550
-    uv run python scripts/capture_tmdb_fixture.py --kind series --id 1399
-    uv run python scripts/capture_tmdb_fixture.py --kind season --id 1399 --season 1
-    uv run python scripts/capture_tmdb_fixture.py --kind search --query "Dune" --year 2021
+    uv run python scripts/capture_tmdb_fixture.py --kind movie  --id <a real TMDb movie id>
+    uv run python scripts/capture_tmdb_fixture.py --kind series --id <a real TMDb series id>
+    uv run python scripts/capture_tmdb_fixture.py --kind season --id <that series id> --season 1
+    uv run python scripts/capture_tmdb_fixture.py --kind search \
+        --query <a real title> --year <its year>
     uv run python scripts/capture_tmdb_fixture.py --kind changes
+
+`--id` and `--query` have no defaults, deliberately. They name a *live*
+entity, so a default would be a real third-party identifier committed to
+this repository -- which `tests/fixtures/README.md` forbids and
+`tests/unit/test_no_third_party_data.py` enforces. It would also be a trap:
+a default silently captures the shape of whichever entity that id happens to
+be, in a script whose entire output is read as evidence.
 
 One request per run (a series detail plus nothing -- seasons are asked for
 separately), because a shape diff needs one entity, not a catalog.
@@ -90,12 +98,16 @@ async def _main() -> int:
     parser.add_argument(
         "--kind", choices=("movie", "series", "season", "search", "changes"), default="movie"
     )
-    parser.add_argument("--id", default="550")
+    parser.add_argument("--id", help="a real TMDb id; no default -- see the module docstring")
     parser.add_argument("--season", default="1")
-    parser.add_argument("--query", default="Dune")
+    parser.add_argument("--query", help="a real title to search for; no default")
     parser.add_argument("--year", type=int, default=None)
     parser.add_argument("--base-url", default=os.environ.get("USHER_TMDB_BASE_URL", TMDB_BASE_URL))
     args = parser.parse_args()
+    if args.kind in ("movie", "series", "season") and not args.id:
+        parser.error(f"--kind {args.kind} needs --id")
+    if args.kind == "search" and not args.query:
+        parser.error("--kind search needs --query")
 
     key = os.environ.get("USHER_TMDB_API_KEY")
     if not key:

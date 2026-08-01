@@ -85,25 +85,25 @@ async def test_a_batch_mixing_providers_does_not_cast_an_imdb_id_to_an_integer(
     against `titles` with an `OR` over the three providers has to write
     `p.value::integer` for the TMDb and TVDB arms, and Postgres does not
     guarantee to evaluate the provider test first -- so a batch carrying
-    `('imdb', 'tt0111161')` alongside any TMDb ref answers
-    `invalid input syntax for type integer: "tt0111161"` and the whole page
+    `('imdb', 'tt99000020')` alongside any TMDb ref answers
+    `invalid input syntax for type integer: "tt99000020"` and the whole page
     of 5,000 items fails.
 
     A fake cannot reach this at all: Python never casts a value it did not
     ask to cast. Splitting by provider is what makes the mixed batch below
     ordinary rather than fatal.
     """
-    movie = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=550, name="Fight Club")
+    movie = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
     film = await catalog.given_title(
-        kind=TitleKind.MOVIE, imdb_id="tt0111161", name="The Shawshank Redemption"
+        kind=TitleKind.MOVIE, imdb_id="tt99000020", name="A Synthetic Feature"
     )
     series = await catalog.given_title(
-        kind=TitleKind.SERIES, tvdb_id=121361, name="Game of Thrones"
+        kind=TitleKind.SERIES, tvdb_id=91000030, name="A Synthetic Series"
     )
     refs = [
-        ProviderRef(provider="tmdb", value="550", kind=TitleKind.MOVIE),
-        ProviderRef(provider="imdb", value="tt0111161", kind=None),
-        ProviderRef(provider="tvdb", value="121361", kind=None),
+        ProviderRef(provider="tmdb", value="90000550", kind=TitleKind.MOVIE),
+        ProviderRef(provider="imdb", value="tt99000020", kind=None),
+        ProviderRef(provider="tvdb", value="91000030", kind=None),
         ProviderRef(provider="tmdb", value="not-a-number", kind=TitleKind.MOVIE),
         ProviderRef(provider="zap2it", value="EP001", kind=None),
     ]

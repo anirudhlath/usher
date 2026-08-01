@@ -63,17 +63,17 @@ class TitleRepositoryContract:
         # mapping in any of the other 28.
         title = Title(
             kind=TitleKind.SERIES,
-            tmdb_id=1399,
-            imdb_id="tt0944947",
-            tvdb_id=121361,
-            name="Game of Thrones",
-            original_name="Game of Thrones",
-            sort_name="Game of Thrones",
+            tmdb_id=90001399,
+            imdb_id="tt99000030",
+            tvdb_id=91000030,
+            name="A Synthetic Series",
+            original_name="A Synthetic Series",
+            sort_name="A Synthetic Series",
             year=2011,
             release_date=date(2011, 4, 17),
             end_year=2019,
             overview="Nine noble families fight for control of the mythical land of Westeros.",
-            tagline="Winter Is Coming",
+            tagline="A Synthetic First Episode",
             runtime_minutes=57,
             status=ProductionStatus.ENDED,
             genres=("Drama", "Fantasy"),
@@ -165,9 +165,9 @@ class TitleRepositoryContract:
         The message may still name `second.id` to say which add() call
         failed; claiming that id already exists is what was wrong.
         """
-        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
+        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=90000100)
         second = Title(
-            kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", tmdb_id=438631
+            kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", tmdb_id=90000100
         )
         await repo.add(first)
         with pytest.raises(RepositoryConflict) as exc_info:
@@ -193,9 +193,9 @@ class TitleRepositoryContract:
         parametrized case, so a typo swapping which field
         `_provider_id_conflict` (the fake) or Postgres (the real
         repository) actually checks can't pass by accident."""
-        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt1160419")
+        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt99000100")
         second = Title(
-            kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", imdb_id="tt1160419"
+            kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", imdb_id="tt99000100"
         )
         await repo.add(first)
         with pytest.raises(RepositoryConflict) as exc_info:
@@ -206,9 +206,9 @@ class TitleRepositoryContract:
     async def test_add_rejects_a_duplicate_tvdb_id(self, repo: TitleRepository) -> None:
         """Same property, for the tvdb_id branch -- see
         test_add_rejects_a_duplicate_imdb_id's docstring."""
-        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tvdb_id=121361)
+        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tvdb_id=91000030)
         second = Title(
-            kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", tvdb_id=121361
+            kind=TitleKind.MOVIE, name="Dune (dup)", sort_name="Dune (dup)", tvdb_id=91000030
         )
         await repo.add(first)
         with pytest.raises(RepositoryConflict) as exc_info:
@@ -224,26 +224,28 @@ class TitleRepositoryContract:
         when both namespaces hold the id — the Postgres implementation
         raised a raw sqlalchemy.exc.MultipleResultsFound straight out of the
         port, which `db is driven, not driving` exists to prevent."""
-        movie = Title(kind=TitleKind.MOVIE, name="Fight Club", sort_name="Fight Club", tmdb_id=550)
-        series = Title(kind=TitleKind.SERIES, name="Bron", sort_name="Bron", tmdb_id=550)
+        movie = Title(
+            kind=TitleKind.MOVIE, name="Fight Club", sort_name="Fight Club", tmdb_id=90000550
+        )
+        series = Title(kind=TitleKind.SERIES, name="Bron", sort_name="Bron", tmdb_id=90000550)
         await repo.add(movie)
         await repo.add(series)
-        found_movie = await repo.get_by_tmdb_id(550, TitleKind.MOVIE)
-        found_series = await repo.get_by_tmdb_id(550, TitleKind.SERIES)
+        found_movie = await repo.get_by_tmdb_id(90000550, TitleKind.MOVIE)
+        found_series = await repo.get_by_tmdb_id(90000550, TitleKind.SERIES)
         assert found_movie is not None and found_movie.id == movie.id
         assert found_series is not None and found_series.id == series.id
 
     async def test_get_by_tmdb_id_finds_the_title(self, repo: TitleRepository) -> None:
-        title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
+        title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=90000100)
         await repo.add(title)
-        found = await repo.get_by_tmdb_id(438631, TitleKind.MOVIE)
+        found = await repo.get_by_tmdb_id(90000100, TitleKind.MOVIE)
         assert found is not None
         assert found.id == title.id
 
     async def test_get_by_imdb_id_finds_the_title(self, repo: TitleRepository) -> None:
-        title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt1160419")
+        title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt99000100")
         await repo.add(title)
-        found = await repo.get_by_imdb_id("tt1160419")
+        found = await repo.get_by_imdb_id("tt99000100")
         assert found is not None
         assert found.id == title.id
 
@@ -303,14 +305,14 @@ class TitleRepositoryContract:
         for the imdb_id branch -- see test_add_rejects_a_duplicate_imdb_id's
         docstring for why this is a separate case, not a parametrized one.
         """
-        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt1160419")
+        first = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt99000100")
         second = Title(
-            kind=TitleKind.MOVIE, name="Arrival", sort_name="Arrival", imdb_id="tt0104652"
+            kind=TitleKind.MOVIE, name="Arrival", sort_name="Arrival", imdb_id="tt99000180"
         )
         await repo.add(first)
         await repo.add(second)
         with pytest.raises(RepositoryConflict) as exc_info:
-            await repo.update(second.evolve(imdb_id="tt1160419"))
+            await repo.update(second.evolve(imdb_id="tt99000100"))
         assert exc_info.value.constraint == "ix_titles_imdb_id"
 
     async def test_update_rejects_a_conflicting_tvdb_id(self, repo: TitleRepository) -> None:

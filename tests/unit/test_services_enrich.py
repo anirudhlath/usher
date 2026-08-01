@@ -24,8 +24,8 @@ from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.services.enrich import EnrichService
 
-_MOVIE_TMDB_ID = 550
-_SERIES_TMDB_ID = 1399
+_MOVIE_TMDB_ID = 90000550
+_SERIES_TMDB_ID = 90001399
 
 
 @pytest.fixture
@@ -126,7 +126,7 @@ async def test_the_provider_fills_in_what_the_source_only_guessed_at(
     stored = await titles.get(title.id)
     assert stored is not None
     assert stored.name == "A Film"
-    assert stored.year == 1999
+    assert stored.year == 1988
     assert stored.genres == ("Drama", "Thriller")
     assert stored.community_rating == 8.4
 
@@ -289,7 +289,7 @@ async def test_the_provider_payload_is_cached_verbatim(
     stated purpose for `raw_payloads`, and ADR-0016."""
     title = await _given(titles, state=EnrichmentState.STUB)
     await service.enrich(title.id)
-    cached = await payloads.get("tmdb", "movie", "550")
+    cached = await payloads.get("tmdb", "movie", "90000550")
     assert cached is not None
     assert cached[0]["credits"]["cast"]
 
@@ -302,8 +302,8 @@ async def test_the_cache_key_names_the_id_space(
     series the film's cached payload."""
     movie = await _given(titles, state=EnrichmentState.STUB)
     await service.enrich(movie.id)
-    assert await payloads.get("tmdb", "movie", "550") is not None
-    assert await payloads.get("tmdb", "series", "550") is None
+    assert await payloads.get("tmdb", "movie", "90000550") is not None
+    assert await payloads.get("tmdb", "series", "90000550") is None
 
 
 async def test_a_cached_payload_within_the_ceiling_is_not_refetched(
@@ -344,7 +344,7 @@ async def test_a_payload_older_than_the_ceiling_is_refetched(
         now=lambda: datetime.now(UTC) + timedelta(days=2),
     )
     title = await _given(titles, state=EnrichmentState.STUB)
-    await payloads.put("tmdb", "movie", "550", {"id": 550, "title": "stale"})
+    await payloads.put("tmdb", "movie", "90000550", {"id": 90000550, "title": "stale"})
     await service.enrich(title.id)
     assert provider.fetches == 1
 

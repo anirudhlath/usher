@@ -29,21 +29,21 @@ _TITLE = new_id()
 
 
 def test_a_provider_ref_is_hashable_and_kind_scoped() -> None:
-    """ADR-0011 in DTO form: `tmdb_id` 550 is a movie *and* a series, so a
+    """ADR-0011 in DTO form: `tmdb_id` 90000550 is a movie *and* a series, so a
     ref that carried only the number could not be a dict key without
     silently merging the two."""
-    movie = ProviderRef(provider="tmdb", value="550", kind=TitleKind.MOVIE)
-    series = ProviderRef(provider="tmdb", value="550", kind=TitleKind.SERIES)
+    movie = ProviderRef(provider="tmdb", value="90000550", kind=TitleKind.MOVIE)
+    series = ProviderRef(provider="tmdb", value="90000550", kind=TitleKind.SERIES)
     assert movie != series
     assert len({movie, series}) == 2
-    assert {movie: 1}[ProviderRef(provider="tmdb", value="550", kind=TitleKind.MOVIE)] == 1
+    assert {movie: 1}[ProviderRef(provider="tmdb", value="90000550", kind=TitleKind.MOVIE)] == 1
 
 
 def test_a_provider_ref_may_be_kind_agnostic() -> None:
     """`imdb_id` is one global namespace covering film and television alike
     (ADR-0011), so its refs carry `kind=None` and the lookup is a
     single-column one."""
-    assert ProviderRef(provider="imdb", value="tt0111161", kind=None).kind is None
+    assert ProviderRef(provider="imdb", value="tt99000020", kind=None).kind is None
 
 
 def test_a_name_year_probe_is_hashable() -> None:
@@ -52,9 +52,9 @@ def test_a_name_year_probe_is_hashable() -> None:
 
 
 def test_every_dto_here_is_frozen() -> None:
-    ref = ProviderRef(provider="tmdb", value="550", kind=TitleKind.MOVIE)
+    ref = ProviderRef(provider="tmdb", value="90000550", kind=TitleKind.MOVIE)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        ref.value = "551"  # type: ignore[misc]
+        ref.value = "90000551"  # type: ignore[misc]
 
 
 def test_a_match_outcome_records_how_as_well_as_what() -> None:

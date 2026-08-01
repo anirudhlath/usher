@@ -72,7 +72,7 @@ PAGE_SIZE = 3
 
 # The catalog already holds this one (M2's bootstrap put 291,737 tmdb ids
 # there), so it matches on tier 1 and no stub is created.
-KNOWN_TMDB_ID = 550
+KNOWN_TMDB_ID = 90000550
 # It does not hold this one. 291,737 of 1,271,138 titles carry a `tmdb_id`,
 # so "a trusted provider id the catalog has never seen" is the common case
 # rather than the exception -- which is what makes stub-on-sight load-bearing
@@ -106,7 +106,7 @@ _SERIES = SourceItem(
     name="Example Series",
     kind=SourceItemKind.SERIES,
     year=2011,
-    provider_ids={"tvdb": "121361"},
+    provider_ids={"tvdb": "91000030"},
 )
 _EPISODES = [
     SourceItem(
@@ -117,7 +117,7 @@ _EPISODES = [
         # series' -- the finding that keeps episodes off the match ladder
         # entirely. Seeded here so the end-to-end run really exercises the
         # branch that ignores them.
-        provider_ids={"imdb": "tt2178782"},
+        provider_ids={"imdb": "tt99000110"},
         container="mkv",
         series_external_id="series-1",
         season_number=3,
@@ -409,7 +409,7 @@ async def test_no_episode_ever_mints_a_title(
     # Exactly two: the unknown movie's stub and the series' stub. Not four.
     assert after - before == 2
     assert (
-        await session.execute(text("SELECT count(*) FROM titles WHERE imdb_id = 'tt2178782'"))
+        await session.execute(text("SELECT count(*) FROM titles WHERE imdb_id = 'tt99000110'"))
     ).scalar_one() == 0
 
 

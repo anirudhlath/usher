@@ -74,10 +74,13 @@ permanent 4xx failures as retryable outages and to filter search years
 guess by guess, including what remains unverified. **One measured
 opportunity is recorded and deliberately not taken:**
 `append_to_response=season/N` collapses a series' enrichment from 1+N
-requests to 1, which is the difference between ~190k and ~35k requests for a
-full pass — it changes [03](03-sources-and-sync.md)'s request table and
-[04](04-catalog-bootstrap.md)'s crawl arithmetic and belongs in its own
-change.
+requests to 1 — at 32,409 series and a measured median of 9 seasons, ~324k
+requests against ~32k, i.e. **~10x** on the series half of a full pass. (The
+"~190k → ~35k, ~5x" first recorded here was arithmetically impossible;
+[04](04-catalog-bootstrap.md) and `CLAUDE.md` carry the correction and where
+the wrong figure came from.) It changes [03](03-sources-and-sync.md)'s
+request table and [04](04-catalog-bootstrap.md)'s crawl arithmetic and
+belongs in its own change.
 
 **M9 owes ADR-0012 a successor.** In v1, `POST /titles/{id}/play` returns a
 target URL carrying the source's session token, because M3 has no HTTP surface

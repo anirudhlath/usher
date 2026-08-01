@@ -87,7 +87,7 @@ def _resolver(binding: SourceBinding | None, seen: list[str] | None = None):  # 
 
 async def test_the_enrich_handler_enriches_the_title_its_key_names() -> None:
     titles = FakeTitleRepository()
-    title = Title(kind=TitleKind.MOVIE, tmdb_id=550, name="Stub", sort_name="Stub")
+    title = Title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Stub", sort_name="Stub")
     await titles.add(title)
     service = EnrichService(
         titles, FakeEpisodeRepository(), FakeRawPayloadStore(), FakeMetadataProvider(), _noop
@@ -128,12 +128,14 @@ async def test_the_match_handler_attaches_what_the_remote_search_resolved(
     binding: SourceBinding, adapter: FakeSourceAdapter, source: Source
 ) -> None:
     titles = FakeTitleRepository()
-    known = Title(kind=TitleKind.MOVIE, tmdb_id=550, name="A Film", sort_name="A Film", year=1999)
+    known = Title(
+        kind=TitleKind.MOVIE, tmdb_id=90000550, name="A Film", sort_name="A Film", year=1999
+    )
     await titles.add(known)
     provider = FakeMetadataProvider()
     provider.seed_candidates(
         MetadataCandidate(
-            provider_id=550, name="A Film", year=1999, kind=TitleKind.MOVIE, popularity=9.0
+            provider_id=90000550, name="A Film", year=1999, kind=TitleKind.MOVIE, popularity=9.0
         )
     )
     item = SourceItem(external_id="emby-1", name="A Film", kind=SourceItemKind.MOVIE, year=1999)

@@ -215,7 +215,7 @@ class PostgresTitleRepository(TitleRepository):
         # match a movie and a series holding the same tmdb_id, and
         # scalar_one_or_none() then raises a raw
         # sqlalchemy.exc.MultipleResultsFound out of the port -- reproduced
-        # directly against tmdb_id=550 in both namespaces. ADR-0011.
+        # directly against tmdb_id=90000550 in both namespaces. ADR-0011.
         if tmdb_id is None:
             return None
         with self._session.no_autoflush:  # see get()'s comment

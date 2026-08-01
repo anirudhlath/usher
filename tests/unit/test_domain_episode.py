@@ -52,7 +52,7 @@ def test_an_episode_carries_its_place_in_the_series() -> None:
         air_date=date(2013, 4, 28),
         runtime_minutes=57,
         tmdb_id=63_070,
-        imdb_id="tt2178782",
+        imdb_id="tt99000110",
     )
     assert (episode.season_number, episode.episode_number) == (2, 5)
     assert episode.absolute_number is None

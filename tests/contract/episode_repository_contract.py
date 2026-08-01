@@ -121,7 +121,7 @@ class EpisodeRepositoryContract:
                     title_id,
                     season_id,
                     1,
-                    name="Winter Is Coming",
+                    name="A Synthetic First Episode",
                     air_date=AIR_DATE,
                     runtime_minutes=62,
                 )
@@ -129,7 +129,7 @@ class EpisodeRepositoryContract:
         )
         _, episodes = await repository.list_for_title(title_id)
         assert [(one.episode_number, one.name, one.runtime_minutes) for one in episodes] == [
-            (1, "Winter Is Coming", 62)
+            (1, "A Synthetic First Episode", 62)
         ]
 
     async def test_upsert_episodes_is_keyed_on_title_season_and_number(
@@ -182,12 +182,12 @@ class EpisodeRepositoryContract:
                     title_id,
                     season_id,
                     1,
-                    name="Winter Is Coming",
+                    name="A Synthetic First Episode",
                     overview="Ned is summoned",
                     air_date=AIR_DATE,
                     runtime_minutes=62,
-                    tmdb_id=63056,
-                    imdb_id="tt1480055",
+                    tmdb_id=97000001,
+                    imdb_id="tt99000150",
                     absolute_number=1,
                 )
             ]
@@ -195,12 +195,12 @@ class EpisodeRepositoryContract:
         await repository.upsert_episodes([episode(title_id, season_id, 1)])
         _, episodes = await repository.list_for_title(title_id)
         stored = episodes[0]
-        assert stored.name == "Winter Is Coming"
+        assert stored.name == "A Synthetic First Episode"
         assert stored.overview == "Ned is summoned"
         assert stored.air_date == AIR_DATE
         assert stored.runtime_minutes == 62
-        assert stored.tmdb_id == 63056
-        assert stored.imdb_id == "tt1480055"
+        assert stored.tmdb_id == 97000001
+        assert stored.imdb_id == "tt99000150"
         assert stored.absolute_number == 1
 
     async def test_a_duplicate_episode_inside_one_batch_is_tolerated(

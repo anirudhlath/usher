@@ -34,7 +34,7 @@ MOVIE = SourceItem(
     name="Example Movie",
     kind=SourceItemKind.MOVIE,
     year=2021,
-    provider_ids={"tmdb": "438631"},
+    provider_ids={"tmdb": "90000100"},
     container="mkv",
     video_codec="hevc",
     hdr_format=HdrFormat.DOLBY_VISION,
@@ -47,13 +47,13 @@ SERIES = SourceItem(
     name="Example Series",
     kind=SourceItemKind.SERIES,
     year=2011,
-    provider_ids={"tvdb": "121361"},
+    provider_ids={"tvdb": "91000030"},
 )
 EPISODE = SourceItem(
     external_id="episode-1",
     name="Kissed by Fire",
     kind=SourceItemKind.EPISODE,
-    provider_ids={"imdb": "tt2178782"},
+    provider_ids={"imdb": "tt99000110"},
     container="mkv",
     series_external_id="series-1",
     season_number=3,
@@ -173,7 +173,7 @@ async def test_a_matched_skeleton_is_enqueued_for_enrichment(
     itself would leave every one of them unenriched forever, and nothing in
     the stub case above can tell."""
     await fixture.matching.given_title(
-        kind=TitleKind.MOVIE, name="Example Movie", year=2021, tmdb_id=438631
+        kind=TitleKind.MOVIE, name="Example Movie", year=2021, tmdb_id=90000100
     )
     await fixture.service.ingest_batch(SOURCE_ID, [MOVIE], observed_at=RUN_AT)
     assert len(await fixture.queue.claim([JobKind.ENRICH], limit=10)) == 1
@@ -189,7 +189,7 @@ async def test_an_already_enriched_title_is_not_re_enqueued(
         kind=TitleKind.MOVIE,
         name="Example Movie",
         year=2021,
-        tmdb_id=438631,
+        tmdb_id=90000100,
         enrichment_state=EnrichmentState.ENRICHED,
     )
     await fixture.service.ingest_batch(SOURCE_ID, [MOVIE], observed_at=RUN_AT)
@@ -205,7 +205,7 @@ async def test_a_stub_title_is_re_enqueued(fixture: _Fixture) -> None:
         kind=TitleKind.MOVIE,
         name="Example Movie",
         year=2021,
-        tmdb_id=438631,
+        tmdb_id=90000100,
         enrichment_state=EnrichmentState.STUB,
     )
     await fixture.service.ingest_batch(SOURCE_ID, [MOVIE], observed_at=RUN_AT)
@@ -467,14 +467,14 @@ async def test_a_nightly_re_walk_of_an_enriched_library_enqueues_nothing(
         kind=TitleKind.MOVIE,
         name="Example Movie",
         year=2021,
-        tmdb_id=438631,
+        tmdb_id=90000100,
         enrichment_state=EnrichmentState.ENRICHED,
     )
     series_title = await fixture.matching.given_title(
         kind=TitleKind.SERIES,
         name="Example Series",
         year=2011,
-        tvdb_id=121361,
+        tvdb_id=91000030,
         enrichment_state=EnrichmentState.ENRICHED,
     )
     assert series_title is not None

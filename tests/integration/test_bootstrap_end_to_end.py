@@ -75,14 +75,24 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
 
     await catalog.upsert_tmdb_ids(
         [
-            TmdbId(tmdb_id=278, kind=TitleKind.MOVIE, original_name="Shawshank", popularity=45.5),
-            TmdbId(tmdb_id=1399, kind=TitleKind.SERIES, original_name="GoT", popularity=90.1),
+            TmdbId(
+                tmdb_id=90000020,
+                kind=TitleKind.MOVIE,
+                original_name="Synthetic Feature",
+                popularity=12.5,
+            ),
+            TmdbId(
+                tmdb_id=90001399,
+                kind=TitleKind.SERIES,
+                original_name="Synthetic Series",
+                popularity=31.5,
+            ),
         ]
     )
     await catalog.upsert_crosswalk(
         [
-            IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=278),
-            IdCrosswalkPair(imdb_id="tt0944947", tmdb_series_id=1399, tvdb_series_id=121361),
+            IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=90000020),
+            IdCrosswalkPair(imdb_id="tt99000030", tmdb_series_id=90001399, tvdb_series_id=91000030),
         ]
     )
     linked = await catalog.link_crosswalk()
@@ -91,13 +101,13 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
     result = await session.execute(
         text(
             "SELECT imdb_id, tmdb_id, tvdb_id, popularity, community_rating, "
-            "enrichment_state FROM titles WHERE imdb_id IN ('tt0111161','tt0944947') "
+            "enrichment_state FROM titles WHERE imdb_id IN ('tt99000020','tt99000030') "
             "ORDER BY imdb_id"
         )
     )
     rows = result.all()
-    assert rows[0] == ("tt0111161", 278, None, 45.5, 9.3, "skeleton")
-    assert rows[1] == ("tt0944947", 1399, 121361, 90.1, 9.2, "skeleton")
+    assert rows[0] == ("tt99000020", 90000020, None, 12.5, 7.4, "skeleton")
+    assert rows[1] == ("tt99000030", 90001399, 91000030, 31.5, 6.8, "skeleton")
 
 
 async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, cache: Path) -> None:
@@ -174,7 +184,7 @@ async def test_a_restart_resumes_from_the_stored_checkpoint(
         # resume_from in BootstrapService._drain and watching this test's
         # final assertions still pass. `batches_seen` and the imdb_ids
         # actually written close that gap: a genuine resume calls write()
-        # exactly once, with only the one row (tt9999995) that was never
+        # exactly once, with only the one row (tt99000050) that was never
         # committed before the crash; a silent restart would call it three
         # times (batch_size=2 over all five rows again).
         seen_ids: list[str] = []
@@ -190,7 +200,7 @@ async def test_a_restart_resumes_from_the_stored_checkpoint(
         run = await service.import_dataset(second, write_and_record)
 
     assert batches_seen == 1
-    assert seen_ids == ["tt9999995"]
+    assert seen_ids == ["tt99000050"]
     assert run.status is ImportRunStatus.COMPLETED
     assert await catalog.count_titles() == 5
 

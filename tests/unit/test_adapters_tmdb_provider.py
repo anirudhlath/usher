@@ -29,8 +29,8 @@ from usher.ports.ingest import ProviderRef
 
 _KEY = SecretStr("0123456789abcdef0123456789abcdef")
 _TITLE_ID = uuid.UUID("0197a5b0-0000-7000-8000-000000000002")
-_MOVIE_REF = ProviderRef(provider="tmdb", value="550", kind=TitleKind.MOVIE)
-_SERIES_REF = ProviderRef(provider="tmdb", value="1399", kind=TitleKind.SERIES)
+_MOVIE_REF = ProviderRef(provider="tmdb", value="90000550", kind=TitleKind.MOVIE)
+_SERIES_REF = ProviderRef(provider="tmdb", value="90001399", kind=TitleKind.SERIES)
 
 
 class _Server:
@@ -63,9 +63,9 @@ class _Server:
         # The exact change-feed paths are matched before the detail prefixes
         # below, because `/3/movie/changes` also starts with `/3/movie/`.
         if path == "/3/movie/changes":
-            return httpx.Response(200, json=self._changes(request, first=[550, 90210]))
+            return httpx.Response(200, json=self._changes(request, first=[90000550, 90090210]))
         if path == "/3/tv/changes":
-            return httpx.Response(200, json=self._changes(request, first=[1399]))
+            return httpx.Response(200, json=self._changes(request, first=[90001399]))
         if path == "/3/search/movie":
             return httpx.Response(200, json=load_tmdb_fixture("search_movie"))
         if path == "/3/search/tv":
@@ -119,7 +119,7 @@ async def test_a_movie_is_one_request_carrying_the_documented_append_list() -> N
     provider, http = _provider(server)
     async with http:
         await provider.fetch(_MOVIE_REF)
-    assert server.paths() == ["/3/movie/550"]
+    assert server.paths() == ["/3/movie/90000550"]
     appended = server.requests[0].url.params["append_to_response"]
     assert appended == MOVIE_APPEND_TO_RESPONSE
     assert set(appended.split(",")) == {
@@ -156,7 +156,11 @@ async def test_a_series_fetch_composes_its_seasons_own_responses() -> None:
     provider, http = _provider(server)
     async with http:
         payload = await provider.fetch(_SERIES_REF)
-    assert server.paths() == ["/3/tv/1399", "/3/tv/1399/season/0", "/3/tv/1399/season/1"]
+    assert server.paths() == [
+        "/3/tv/90001399",
+        "/3/tv/90001399/season/0",
+        "/3/tv/90001399/season/1",
+    ]
     assert [len(one["episodes"]) for one in payload["seasons"]] == [2, 2]
 
 
@@ -172,7 +176,7 @@ async def test_the_composed_payload_still_carries_what_later_milestones_read() -
     assert payload["credits"]["cast"]
     assert payload["images"]["posters"]
     assert payload["videos"]["results"]
-    assert payload["belongs_to_collection"]["id"] == 90001
+    assert payload["belongs_to_collection"]["id"] == 98000001
 
 
 async def test_a_payload_with_no_id_is_malformed() -> None:
@@ -193,7 +197,7 @@ async def test_a_404_from_the_detail_route_reaches_the_caller_as_malformed_data(
     """Straight through from the client, and it is the branch that makes
     `JobWorker` park rather than retry."""
     server = _Server()
-    server.status_for["/3/movie/550"] = 404
+    server.status_for["/3/movie/90000550"] = 404
     provider, http = _provider(server)
     async with http:
         with pytest.raises(PortDataMalformed):
@@ -208,7 +212,7 @@ async def test_a_ref_for_another_provider_is_malformed_not_a_request() -> None:
     provider, http = _provider(server)
     async with http:
         with pytest.raises(PortDataMalformed):
-            await provider.fetch(ProviderRef(provider="imdb", value="tt0111161", kind=None))
+            await provider.fetch(ProviderRef(provider="imdb", value="tt99000020", kind=None))
     assert server.paths() == []
 
 
@@ -221,7 +225,7 @@ async def test_a_kindless_tmdb_ref_is_malformed_rather_than_guessed() -> None:
     provider, http = _provider(server)
     async with http:
         with pytest.raises(PortDataMalformed):
-            await provider.fetch(ProviderRef(provider="tmdb", value="550", kind=None))
+            await provider.fetch(ProviderRef(provider="tmdb", value="90000550", kind=None))
     assert server.paths() == []
 
 
@@ -283,9 +287,9 @@ async def test_a_movie_search_uses_the_movie_endpoint_and_its_own_year_parameter
     server = _Server()
     provider, http = _provider(server)
     async with http:
-        found = await provider.search("A Film", 1999, TitleKind.MOVIE)
+        found = await provider.search("A Film", 1988, TitleKind.MOVIE)
     assert server.paths() == ["/3/search/movie"]
-    assert server.requests[0].url.params["primary_release_year"] == "1999"
+    assert server.requests[0].url.params["primary_release_year"] == "1988"
     assert [one.kind for one in found] == [TitleKind.MOVIE, TitleKind.MOVIE]
 
 
@@ -298,9 +302,9 @@ async def test_a_series_search_uses_the_tv_endpoint_and_first_air_date_year() ->
     server = _Server()
     provider, http = _provider(server)
     async with http:
-        found = await provider.search("A Series", 2011, TitleKind.SERIES)
+        found = await provider.search("A Series", 2004, TitleKind.SERIES)
     assert server.paths() == ["/3/search/tv"]
-    assert server.requests[0].url.params["first_air_date_year"] == "2011"
+    assert server.requests[0].url.params["first_air_date_year"] == "2004"
     assert [one.kind for one in found] == [TitleKind.SERIES]
 
 
@@ -311,7 +315,7 @@ async def test_an_unscoped_search_asks_both_spaces() -> None:
     server = _Server()
     provider, http = _provider(server)
     async with http:
-        found = await provider.search("A", 2011)
+        found = await provider.search("A", 2004)
     assert sorted(server.paths()) == ["/3/search/movie", "/3/search/tv"]
     assert {one.kind for one in found} == {TitleKind.MOVIE, TitleKind.SERIES}
 
@@ -348,9 +352,9 @@ async def test_an_empty_year_filtered_search_is_retried_without_the_year(
     server.year_filter_is_exact = True
     provider, http = _provider(server)
     async with http:
-        found = await provider.search("A Film", 1999, kind)
+        found = await provider.search("A Film", 1988, kind)
     assert server.paths() == [path, path]
-    assert server.requests[0].url.params[parameter] == "1999"
+    assert server.requests[0].url.params[parameter] == "1988"
     assert parameter not in server.requests[1].url.params
     assert found, "the yearless retry's candidates must reach the caller"
 
@@ -366,7 +370,7 @@ async def test_a_year_filtered_search_that_finds_something_is_not_retried() -> N
     server = _Server()
     provider, http = _provider(server)
     async with http:
-        await provider.search("A Film", 1999, TitleKind.MOVIE)
+        await provider.search("A Film", 1988, TitleKind.MOVIE)
     assert server.paths() == ["/3/search/movie"]
 
 
@@ -391,7 +395,7 @@ async def test_a_search_that_finds_nothing_either_way_asks_exactly_twice() -> No
     server.search_finds_nothing = True
     provider, http = _provider(server)
     async with http:
-        found = await provider.search("A Film", 1999, TitleKind.MOVIE)
+        found = await provider.search("A Film", 1988, TitleKind.MOVIE)
     assert server.paths() == ["/3/search/movie", "/3/search/movie"]
     assert found == []
 
@@ -419,7 +423,7 @@ async def test_the_change_feed_is_resumable_and_walks_both_id_spaces() -> None:
     assert server.paths().count("/3/movie/changes") == 2
     assert server.paths().count("/3/tv/changes") == 2
     assert {one.kind for one in seen} == {TitleKind.MOVIE, TitleKind.SERIES}
-    assert ProviderRef(provider="tmdb", value="1399", kind=TitleKind.SERIES) in seen
+    assert ProviderRef(provider="tmdb", value="90001399", kind=TitleKind.SERIES) in seen
 
 
 async def test_the_change_window_is_clamped_to_fourteen_days() -> None:

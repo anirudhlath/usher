@@ -46,13 +46,13 @@ SERIES = SourceItem(
     name="Example Series",
     kind=SourceItemKind.SERIES,
     year=2011,
-    provider_ids={"tvdb": "121361"},
+    provider_ids={"tvdb": "91000030"},
 )
 EPISODE = SourceItem(
     external_id="episode-1",
     name="Kissed by Fire",
     kind=SourceItemKind.EPISODE,
-    provider_ids={"imdb": "tt2178782"},
+    provider_ids={"imdb": "tt99000110"},
     container="mkv",
     series_external_id="series-1",
     season_number=3,
@@ -185,7 +185,7 @@ async def test_a_second_walk_reuses_the_stub_the_first_walk_created(
     assert first is not None and second is not None
     assert first.title_id == second.title_id
     count = (
-        await session.execute(text("SELECT count(*) FROM titles WHERE tvdb_id = 121361"))
+        await session.execute(text("SELECT count(*) FROM titles WHERE tvdb_id = 91000030"))
     ).scalar_one()
     assert count == 1
 
@@ -249,7 +249,7 @@ async def test_a_walk_enqueues_enrichment_only_for_what_needs_it(
         name="Example Series",
         sort_name="Example Series",
         year=2011,
-        tvdb_id=121361,
+        tvdb_id=91000030,
         enrichment_state=EnrichmentState.ENRICHED,
     )
     await PostgresTitleRepository(session).add(enriched)

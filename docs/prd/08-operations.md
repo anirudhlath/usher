@@ -168,9 +168,9 @@ dashboard can distinguish "down" from "running without Emby".
 | Layer | Approach |
 |---|---|
 | **Unit** | Services against port fakes. No network, ever. Fakes are trivial because ports are ABCs. |
-| **Integration** | Real Postgres (testcontainers). Recorded provider payloads committed as fixtures — never live API calls in CI. |
+| **Integration** | Real Postgres (testcontainers). Provider payloads committed as fixtures — *shape*-recorded and value-synthetic, never a capture; never live API calls in CI. |
 | **Adapter contract suite** | One parametrised test class every `SourceAdapter` must pass. |
-| **Bootstrap** | Small committed slices of each dataset. Never a full download in tests. |
+| **Bootstrap** | Small committed slices in each dataset's real *format*, with every value invented. Never a real dataset file, never a full download in tests. |
 | **API** | Schema-validated request/response round-trips against the OpenAPI contract. |
 
 **The contract suite is the load-bearing one.** It is what proves the

@@ -118,8 +118,8 @@ class TitleRepository(ABC):
         movies and TV series in separate id spaces that both land in this
         one column, and they overlap heavily: 26,968 of the 56,975 distinct
         TMDb series ids Wikidata knows are also live TMDb movie ids
-        (measured 2026-07-30). "Which title has tmdb_id 550" has no single
-        answer; "which movie has tmdb_id 550" does. See
+        (measured 2026-07-30). "Which title has tmdb_id 90000550" has no single
+        answer; "which movie has tmdb_id 90000550" does. See
         [ADR-0011](../../../docs/prd/decisions/0011-tmdb-id-is-namespaced-by-kind.md).
 
         Every real caller already knows the kind — M4's matcher reads it off

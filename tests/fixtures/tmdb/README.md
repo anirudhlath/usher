@@ -5,25 +5,44 @@ The field names, nesting and types in these files were transcribed from
 movie-details`, `tv-series-details`, `tv-season-details`,
 `movie-release-dates`, `tv-series-content-ratings`, `movie-keywords`,
 `tv-series-keywords`, `search-movie`, `search-tv`, `changes-movie-list`) on
-2026-07-31. **Every human-readable value is invented.**
+2026-07-31. **Every value in these files is invented** — every
+human-readable string, every date, every runtime and count, and (since
+2026-08-01) every identifier.
 
 That is a licensing constraint, not a style. A real TMDb response is TMDb
 metadata, which TMDb's terms forbid redistributing and which `CLAUDE.md`'s
 "ship importers, never data" already forbids committing. The same rule
-governs `tests/fixtures/emby/`, and for the same reason.
+governs `tests/fixtures/emby/`, and for the same reason. Read
+[`../README.md`](../README.md) for the rule, the reserved identifier bands,
+and the guard that now enforces both.
 
-Numeric ids (`550`, `1399`, `3624`) are kept because they are addresses
-rather than metadata, and because a fixture whose id did not look like a
-TMDb id would hide an id-handling bug.
+**Every identifier is synthetic too, as of 2026-08-01, and the old note here
+was wrong to say otherwise.** It claimed the numeric ids were "addresses
+rather than metadata" and kept the real ones. Two things were wrong with
+that. TMDb's reference pages illustrate `/movie` and `/tv` with real
+responses, so "transcribed from published documentation" was transcribing a
+real payload — and this file kept not only the ids but the real `runtime`,
+`release_date`, `first_air_date`, `last_air_date`, episode air dates, season
+and episode counts, `credit_id` ObjectIds, TVDb and TVRage ids, and (on
+`movie.json`) an `imdb_id` belonging to an entirely different film from the
+one the rest of the record was shaped after. None of that is an address.
+
+Nothing was lost by replacing them. Ids here are opaque to every test that
+reads these files: each asserts `id in → same id out`, so a synthetic id is
+indistinguishable to the code under test. The ids are still id-*shaped*
+(integers for TMDb/TVDb, `tt` + digits for IMDb, 24 hex characters for a
+`credit_id`), which is what would catch an id-handling bug; they are simply
+in a band no real id occupies.
 
 **These began as transcriptions of documentation, and were shape-verified
 against the live API on 2026-08-01** (M4 Task 26). Regenerate a scrubbed
 *shape* from a live account with:
 
     export USHER_TMDB_API_KEY=...
-    uv run python scripts/capture_tmdb_fixture.py --kind movie --id 550
+    uv run python scripts/capture_tmdb_fixture.py --kind movie --id <a real TMDb id>
 
-and diff that against these. Its output is deliberately never committed —
+against a *real* id — the script has no default for exactly the reason this
+note exists — and diff that against these. Its output is deliberately never committed —
 see that script's module docstring.
 
 **What the first live diff found.** Not one key in any of these files is

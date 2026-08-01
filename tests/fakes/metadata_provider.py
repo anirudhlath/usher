@@ -61,56 +61,56 @@ from usher.ports.metadata import (
 # redistributing its metadata and CLAUDE.md's "ship importers, never data"
 # forbids committing it.
 _MOVIE_PAYLOAD: dict[str, Any] = {
-    "id": 550,
+    "id": 90000550,
     "title": "A Film",
     "original_title": "A Film",
-    "release_date": "1999-10-15",
+    "release_date": "1988-06-17",
     "overview": "A synthetic overview for a film that does not exist.",
     "tagline": "Invented, like everything else here.",
-    "runtime": 139,
+    "runtime": 111,
     "status": "Released",
     "genres": [{"id": 18, "name": "Drama"}, {"id": 53, "name": "Thriller"}],
     "keywords": {"keywords": [{"id": 1, "name": "invented"}]},
     "original_language": "en",
     "vote_average": 8.4,
-    "vote_count": 27_000,
-    "popularity": 61.4,
-    "credits": {"cast": [{"id": 819, "name": "Someone", "character": "Nobody"}]},
+    "vote_count": 1_234,
+    "popularity": 12.5,
+    "credits": {"cast": [{"id": 93000001, "name": "Someone", "character": "Nobody"}]},
 }
 
 _SERIES_PAYLOAD: dict[str, Any] = {
-    "id": 1399,
+    "id": 90001399,
     "name": "A Series",
     "original_name": "A Series",
-    "first_air_date": "2011-04-17",
-    "last_air_date": "2019-05-19",
+    "first_air_date": "2004-09-22",
+    "last_air_date": "2009-05-13",
     "overview": "A synthetic overview for a series that does not exist.",
     "status": "Ended",
     "genres": [{"id": 10765, "name": "Sci-Fi & Fantasy"}],
     "keywords": {"results": [{"id": 2, "name": "also invented"}]},
     "original_language": "en",
     "vote_average": 8.4,
-    "vote_count": 22_000,
-    "popularity": 346.0,
-    "credits": {"cast": [{"id": 22970, "name": "Someone Else", "character": "Nobody Else"}]},
+    "vote_count": 987,
+    "popularity": 31.5,
+    "credits": {"cast": [{"id": 93000004, "name": "Someone Else", "character": "Nobody Else"}]},
     "seasons": [
         {
             "season_number": 1,
             "name": "Season 1",
             "overview": "The first one.",
-            "air_date": "2011-04-17",
+            "air_date": "2004-09-22",
             "episode_count": 2,
-            "id": 3624,
+            "id": 96000001,
             "episodes": [
-                {"episode_number": 1, "name": "First", "air_date": "2011-04-17", "id": 63056},
-                {"episode_number": 2, "name": "Second", "air_date": "2011-04-24", "id": 63057},
+                {"episode_number": 1, "name": "First", "air_date": "2004-09-22", "id": 97000001},
+                {"episode_number": 2, "name": "Second", "air_date": "2004-09-29", "id": 97000002},
             ],
         }
     ],
 }
 
-_MOVIE_REF = ProviderRef(provider="tmdb", value="550", kind=TitleKind.MOVIE)
-_SERIES_REF = ProviderRef(provider="tmdb", value="1399", kind=TitleKind.SERIES)
+_MOVIE_REF = ProviderRef(provider="tmdb", value="90000550", kind=TitleKind.MOVIE)
+_SERIES_REF = ProviderRef(provider="tmdb", value="90001399", kind=TitleKind.SERIES)
 
 
 class FakeMetadataProvider(MetadataProvider):

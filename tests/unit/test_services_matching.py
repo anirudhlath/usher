@@ -68,9 +68,11 @@ async def test_a_tmdb_id_wins_over_everything_else(fixture: _Fixture) -> None:
     """Tier 1. The item's name and year both point at a *different* title,
     seeded on purpose: a matcher that took the best of all tiers rather than
     the first hit would resolve this by name."""
-    by_id = await fixture.matching.given_title(kind=TitleKind.MOVIE, name="Renamed", tmdb_id=438631)
+    by_id = await fixture.matching.given_title(
+        kind=TitleKind.MOVIE, name="Renamed", tmdb_id=90000100
+    )
     await fixture.matching.given_title(kind=TitleKind.MOVIE, name="Example Movie", year=2021)
-    outcomes = await fixture.service.match([_item("m1", provider_ids={"tmdb": "438631"})])
+    outcomes = await fixture.service.match([_item("m1", provider_ids={"tmdb": "90000100"})])
     assert outcomes[0].title_id == by_id
     assert outcomes[0].method is MatchMethod.TMDB_ID
 
@@ -81,13 +83,13 @@ async def test_a_tmdb_id_beats_an_imdb_id_pointing_elsewhere(fixture: _Fixture) 
     provider ids on one item, each resolving to a *different* title: only
     the order of the ladder decides which wins."""
     by_tmdb = await fixture.matching.given_title(
-        kind=TitleKind.MOVIE, name="By TMDb", tmdb_id=438631
+        kind=TitleKind.MOVIE, name="By TMDb", tmdb_id=90000100
     )
     by_imdb = await fixture.matching.given_title(
-        kind=TitleKind.MOVIE, name="By IMDb", imdb_id="tt1160419"
+        kind=TitleKind.MOVIE, name="By IMDb", imdb_id="tt99000100"
     )
     outcomes = await fixture.service.match(
-        [_item("m1", provider_ids={"tmdb": "438631", "imdb": "tt1160419"})]
+        [_item("m1", provider_ids={"tmdb": "90000100", "imdb": "tt99000100"})]
     )
     assert outcomes[0].title_id == by_tmdb, "the IMDb tier overtook the TMDb one"
     assert outcomes[0].title_id != by_imdb
@@ -96,9 +98,9 @@ async def test_a_tmdb_id_beats_an_imdb_id_pointing_elsewhere(fixture: _Fixture) 
 
 async def test_an_imdb_id_is_the_second_tier(fixture: _Fixture) -> None:
     title = await fixture.matching.given_title(
-        kind=TitleKind.MOVIE, name="Anything", imdb_id="tt1160419"
+        kind=TitleKind.MOVIE, name="Anything", imdb_id="tt99000100"
     )
-    outcomes = await fixture.service.match([_item("m1", provider_ids={"imdb": "tt1160419"})])
+    outcomes = await fixture.service.match([_item("m1", provider_ids={"imdb": "tt99000100"})])
     assert (outcomes[0].title_id, outcomes[0].method) == (title, MatchMethod.IMDB_ID)
 
 
@@ -106,15 +108,15 @@ async def test_an_imdb_id_beats_a_tvdb_id_pointing_elsewhere(fixture: _Fixture) 
     """The second half of the ordering property. Without it, swapping the
     IMDb and TVDb rows of `_PROVIDER_TIERS` survives the whole suite."""
     by_imdb = await fixture.matching.given_title(
-        kind=TitleKind.SERIES, name="By IMDb", imdb_id="tt0944947"
+        kind=TitleKind.SERIES, name="By IMDb", imdb_id="tt99000030"
     )
-    await fixture.matching.given_title(kind=TitleKind.SERIES, name="By TVDb", tvdb_id=121361)
+    await fixture.matching.given_title(kind=TitleKind.SERIES, name="By TVDb", tvdb_id=91000030)
     outcomes = await fixture.service.match(
         [
             _item(
                 "s1",
                 kind=SourceItemKind.SERIES,
-                provider_ids={"imdb": "tt0944947", "tvdb": "121361"},
+                provider_ids={"imdb": "tt99000030", "tvdb": "91000030"},
             )
         ]
     )
@@ -127,10 +129,10 @@ async def test_a_tvdb_id_is_the_third_tier(fixture: _Fixture) -> None:
     `ProviderIds.Tvdb` with no TMDb id at all -- so a ladder that stopped at
     IMDb would push most television to the review queue."""
     title = await fixture.matching.given_title(
-        kind=TitleKind.SERIES, name="Anything", tvdb_id=121361
+        kind=TitleKind.SERIES, name="Anything", tvdb_id=91000030
     )
     outcomes = await fixture.service.match(
-        [_item("s1", kind=SourceItemKind.SERIES, provider_ids={"tvdb": "121361"})]
+        [_item("s1", kind=SourceItemKind.SERIES, provider_ids={"tvdb": "91000030"})]
     )
     assert (outcomes[0].title_id, outcomes[0].method) == (title, MatchMethod.TVDB_ID)
 
@@ -151,9 +153,9 @@ async def test_a_tvdb_ref_carries_no_kind(fixture: _Fixture) -> None:
 
     fixture.matching.match_by_provider_ids = _record  # type: ignore[method-assign]
     await fixture.service.match(
-        [_item("s1", kind=SourceItemKind.SERIES, provider_ids={"tvdb": "121361"})]
+        [_item("s1", kind=SourceItemKind.SERIES, provider_ids={"tvdb": "91000030"})]
     )
-    assert seen == [[ProviderRef(provider="tvdb", value="121361", kind=None)]]
+    assert seen == [[ProviderRef(provider="tvdb", value="91000030", kind=None)]]
 
 
 async def test_name_and_year_are_the_fourth_tier(fixture: _Fixture) -> None:
@@ -172,7 +174,7 @@ async def test_a_trusted_provider_id_the_catalog_lacks_creates_a_stub(
     never seen is common rather than exotic -- and a TMDb or IMDb id is an
     identity claim strong enough to create a canonical title on."""
     outcomes = await fixture.service.match(
-        [_item("m1", provider_ids={"tmdb": "999999", "imdb": "tt9999999"})]
+        [_item("m1", provider_ids={"tmdb": "999999", "imdb": "tt99000090"})]
     )
     assert outcomes[0].method is MatchMethod.CREATED_STUB
     assert outcomes[0].title_id is not None
@@ -180,7 +182,7 @@ async def test_a_trusted_provider_id_the_catalog_lacks_creates_a_stub(
     assert created is not None
     assert created.enrichment_state is EnrichmentState.STUB
     assert created.tmdb_id == 999999
-    assert created.imdb_id == "tt9999999"
+    assert created.imdb_id == "tt99000090"
     assert created.kind is TitleKind.MOVIE
 
 
@@ -281,8 +283,8 @@ async def test_two_items_sharing_a_tmdb_id_across_kinds_get_two_stubs(
     production."""
     outcomes = await fixture.service.match(
         [
-            _item("m1", provider_ids={"tmdb": "550"}),
-            _item("s1", kind=SourceItemKind.SERIES, provider_ids={"tmdb": "550"}),
+            _item("m1", provider_ids={"tmdb": "90000550"}),
+            _item("s1", kind=SourceItemKind.SERIES, provider_ids={"tmdb": "90000550"}),
         ]
     )
     assert outcomes[0].title_id != outcomes[1].title_id
@@ -348,7 +350,7 @@ async def test_an_episode_is_never_matched_by_its_own_provider_ids(
     fixture: _Fixture,
 ) -> None:
     """The batch-level catastrophe. An Emby episode carries the *episode's*
-    own ids -- `{"Imdb": "tt2178782", "Tvdb": "4517466"}`, verified against
+    own ids -- `{"Imdb": "tt99000110", "Tvdb": "91000110"}`, verified against
     the live payload -- not its series'. TVDb's episode and series id spaces
     are different namespaces that overlap numerically, and
     `TitleMatchRepository`'s TVDb lookup deliberately does not filter on
@@ -357,7 +359,7 @@ async def test_an_episode_is_never_matched_by_its_own_provider_ids(
     deployment's items are episodes.
     """
     unrelated = await fixture.matching.given_title(
-        kind=TitleKind.SERIES, name="Something Else Entirely", tvdb_id=4517466
+        kind=TitleKind.SERIES, name="Something Else Entirely", tvdb_id=91000110
     )
     outcomes = await fixture.service.match(
         [
@@ -366,7 +368,7 @@ async def test_an_episode_is_never_matched_by_its_own_provider_ids(
                 kind=SourceItemKind.EPISODE,
                 name="Kissed by Fire",
                 year=2013,
-                provider_ids={"imdb": "tt2178782", "tvdb": "4517466"},
+                provider_ids={"imdb": "tt99000110", "tvdb": "91000110"},
                 series_external_id="series-1",
                 season_number=3,
                 episode_number=5,
@@ -391,7 +393,7 @@ async def test_an_episode_never_creates_a_title_stub(fixture: _Fixture) -> None:
                 "e1",
                 kind=SourceItemKind.EPISODE,
                 name="Kissed by Fire",
-                provider_ids={"imdb": "tt2178782"},
+                provider_ids={"imdb": "tt99000110"},
             )
         ]
     )
@@ -504,13 +506,13 @@ async def test_a_tvdb_only_stub_that_loses_a_race_attaches_to_the_winner() -> No
     shape and fails the whole batch. The second-chance read goes back
     through `TitleMatchRepository`, which answers all three providers."""
     fixture = _Fixture(matching=_BlindFirstLookup())
-    existing = Title(kind=TitleKind.SERIES, name="Winner", sort_name="Winner", tvdb_id=121361)
+    existing = Title(kind=TitleKind.SERIES, name="Winner", sort_name="Winner", tvdb_id=91000030)
     await fixture.titles.add(existing)
     await fixture.matching.given_title(
-        kind=TitleKind.SERIES, name="Winner", tvdb_id=121361, title_id=existing.id
+        kind=TitleKind.SERIES, name="Winner", tvdb_id=91000030, title_id=existing.id
     )
     outcomes = await fixture.service.match(
-        [_item("s1", kind=SourceItemKind.SERIES, provider_ids={"tvdb": "121361"})]
+        [_item("s1", kind=SourceItemKind.SERIES, provider_ids={"tvdb": "91000030"})]
     )
     assert outcomes[0].title_id == existing.id
 
@@ -524,11 +526,11 @@ async def test_a_stub_race_nobody_can_explain_is_raised_not_swallowed() -> None:
     from usher.ports.errors import RepositoryConflict
 
     fixture = _Fixture(matching=_BlindFirstLookup())
-    existing = Title(kind=TitleKind.SERIES, name="Winner", sort_name="Winner", tvdb_id=121361)
+    existing = Title(kind=TitleKind.SERIES, name="Winner", sort_name="Winner", tvdb_id=91000030)
     await fixture.titles.add(existing)
     # Deliberately *not* seeded into the match repository, so the
     # second-chance read finds nothing either.
     with pytest.raises(RepositoryConflict):
         await fixture.service.match(
-            [_item("s1", kind=SourceItemKind.SERIES, provider_ids={"tvdb": "121361"})]
+            [_item("s1", kind=SourceItemKind.SERIES, provider_ids={"tvdb": "91000030"})]
         )

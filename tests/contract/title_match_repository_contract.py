@@ -50,31 +50,33 @@ class TitleMatchRepositoryContract:
         """ADR-0011 in batch form. 26,968 TMDb ids are live in both spaces
         (measured), so an implementation keyed on the bare number returns one
         of the two arbitrarily -- and it is a coin flip which."""
-        movie = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=550, name="Fight Club")
-        series = await catalog.given_title(kind=TitleKind.SERIES, tmdb_id=550, name="Rescue Me")
-        resolved = await repository.match_by_provider_ids(
-            [tmdb("550", TitleKind.MOVIE), tmdb("550", TitleKind.SERIES)]
+        movie = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
+        series = await catalog.given_title(
+            kind=TitleKind.SERIES, tmdb_id=90000550, name="Rescue Me"
         )
-        assert resolved[tmdb("550", TitleKind.MOVIE)] == movie
-        assert resolved[tmdb("550", TitleKind.SERIES)] == series
+        resolved = await repository.match_by_provider_ids(
+            [tmdb("90000550", TitleKind.MOVIE), tmdb("90000550", TitleKind.SERIES)]
+        )
+        assert resolved[tmdb("90000550", TitleKind.MOVIE)] == movie
+        assert resolved[tmdb("90000550", TitleKind.SERIES)] == series
 
     async def test_a_tmdb_ref_without_a_kind_resolves_to_nothing(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:
         """The other half of ADR-0011, and the one an implementation is likely
-        to get wrong by being helpful. "Which title has tmdb_id 550" has no
+        to get wrong by being helpful. "Which title has tmdb_id 90000550" has no
         answer; returning the movie because it happened to be indexed first
         attaches a series' watch history to a film."""
-        await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=550, name="Fight Club")
-        assert await repository.match_by_provider_ids([tmdb("550", None)]) == {}
+        await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
+        assert await repository.match_by_provider_ids([tmdb("90000550", None)]) == {}
 
     async def test_an_imdb_ref_is_global(
         self, repository: TitleMatchRepository, catalog: TitleCatalog
     ) -> None:
         title = await catalog.given_title(
-            kind=TitleKind.MOVIE, imdb_id="tt0111161", name="The Shawshank Redemption"
+            kind=TitleKind.MOVIE, imdb_id="tt99000020", name="A Synthetic Feature"
         )
-        ref = ProviderRef(provider="imdb", value="tt0111161", kind=None)
+        ref = ProviderRef(provider="imdb", value="tt99000020", kind=None)
         assert (await repository.match_by_provider_ids([ref]))[ref] == title
 
     async def test_an_imdb_ref_that_carries_a_kind_is_still_answered(
@@ -86,9 +88,9 @@ class TitleMatchRepositoryContract:
         guessed -- and a source that reports an episode's `tt` id under
         `kind=movie` is exactly the shape M4 has to survive."""
         title = await catalog.given_title(
-            kind=TitleKind.SERIES, imdb_id="tt0944947", name="Game of Thrones"
+            kind=TitleKind.SERIES, imdb_id="tt99000030", name="A Synthetic Series"
         )
-        ref = ProviderRef(provider="imdb", value="tt0944947", kind=TitleKind.SERIES)
+        ref = ProviderRef(provider="imdb", value="tt99000030", kind=TitleKind.SERIES)
         assert (await repository.match_by_provider_ids([ref]))[ref] == title
 
     async def test_a_tvdb_ref_resolves(
@@ -97,9 +99,9 @@ class TitleMatchRepositoryContract:
         """50,793 titles carry one after M2's crosswalk, and a source that
         reports only a TVDB id is a real shape."""
         title = await catalog.given_title(
-            kind=TitleKind.SERIES, tvdb_id=121361, name="Game of Thrones"
+            kind=TitleKind.SERIES, tvdb_id=91000030, name="A Synthetic Series"
         )
-        ref = ProviderRef(provider="tvdb", value="121361", kind=None)
+        ref = ProviderRef(provider="tvdb", value="91000030", kind=None)
         assert (await repository.match_by_provider_ids([ref]))[ref] == title
 
     async def test_a_batch_lookup_answers_every_probe_it_was_given(
@@ -108,8 +110,8 @@ class TitleMatchRepositoryContract:
         """An implementation that silently drops refs it found nothing for
         leaves the caller unable to tell "no match" from "not asked", and the
         review queue then fills with items that were matched."""
-        await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=550, name="Fight Club")
-        known = tmdb("550", TitleKind.MOVIE)
+        await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
+        known = tmdb("90000550", TitleKind.MOVIE)
         unknown = tmdb("999999999", TitleKind.MOVIE)
         resolved = await repository.match_by_provider_ids([known, unknown])
         assert known in resolved
@@ -129,8 +131,8 @@ class TitleMatchRepositoryContract:
     ) -> None:
         """The point of the case above, stated as the consequence that
         matters: the other 4,999 items in the page still match."""
-        title = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=550, name="Fight Club")
-        good = tmdb("550", TitleKind.MOVIE)
+        title = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
+        good = tmdb("90000550", TitleKind.MOVIE)
         resolved = await repository.match_by_provider_ids(
             [tmdb("unknown", TitleKind.MOVIE), good, tmdb("", TitleKind.MOVIE)]
         )
@@ -150,8 +152,8 @@ class TitleMatchRepositoryContract:
     ) -> None:
         """`list_items`' contract permits the same item twice in one walk, so
         a page really does carry the same ref twice."""
-        title = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=550, name="Fight Club")
-        ref = tmdb("550", TitleKind.MOVIE)
+        title = await catalog.given_title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Fight Club")
+        ref = tmdb("90000550", TitleKind.MOVIE)
         assert await repository.match_by_provider_ids([ref, ref, ref]) == {ref: title}
 
     async def test_an_empty_provider_batch_is_a_no_op(

@@ -3,61 +3,61 @@
   "backdrop_path": "/synthetic-series-backdrop.jpg",
   "created_by": [
     {
-      "id": 9813,
-      "credit_id": "5256c8c219c2956ff604858a",
+      "id": 93000003,
+      "credit_id": "000000000000000000000004",
       "name": "An Invented Creator",
       "original_name": "An Invented Creator",
       "gender": 2,
       "profile_path": "/synthetic-creator.jpg"
     }
   ],
-  "episode_run_time": [57],
-  "first_air_date": "2011-04-17",
+  "episode_run_time": [44],
+  "first_air_date": "2004-09-22",
   "genres": [
-    { "id": 10765, "name": "Sci-Fi & Fantasy" },
-    { "id": 18, "name": "Drama" }
+    { "id": 95010765, "name": "Sci-Fi & Fantasy" },
+    { "id": 95000018, "name": "Drama" }
   ],
   "homepage": "https://example.invalid/a-series",
-  "id": 1399,
+  "id": 90001399,
   "in_production": false,
   "languages": ["en"],
-  "last_air_date": "2019-05-19",
+  "last_air_date": "2009-05-13",
   "last_episode_to_air": {
-    "id": 1551830,
+    "id": 97000099,
     "name": "An Invented Finale",
     "overview": "The last one.",
     "vote_average": 4.8,
-    "vote_count": 269,
-    "air_date": "2019-05-19",
-    "episode_number": 6,
+    "vote_count": 31,
+    "air_date": "2009-05-13",
+    "episode_number": 4,
     "episode_type": "finale",
     "production_code": "",
-    "runtime": 80,
-    "season_number": 8,
-    "show_id": 1399,
+    "runtime": 51,
+    "season_number": 3,
+    "show_id": 90001399,
     "still_path": "/synthetic-still.jpg"
   },
   "name": "A Series",
   "next_episode_to_air": null,
   "networks": [
     {
-      "id": 49,
+      "id": 94000003,
       "logo_path": "/synthetic-network.png",
       "name": "An Invented Network",
       "origin_country": "US"
     }
   ],
-  "number_of_episodes": 73,
-  "number_of_seasons": 8,
+  "number_of_episodes": 26,
+  "number_of_seasons": 3,
   "origin_country": ["US"],
   "original_language": "en",
   "original_name": "A Series",
   "overview": "A synthetic overview for a series that does not exist.",
-  "popularity": 346.098,
+  "popularity": 31.5,
   "poster_path": "/synthetic-series-poster.jpg",
   "production_companies": [
     {
-      "id": 76043,
+      "id": 94000002,
       "logo_path": "/synthetic-company.png",
       "name": "Another Invented Studio",
       "origin_country": "US"
@@ -66,9 +66,9 @@
   "production_countries": [{ "iso_3166_1": "US", "name": "United States of America" }],
   "seasons": [
     {
-      "air_date": "2010-12-05",
+      "air_date": "2004-06-01",
       "episode_count": 2,
-      "id": 3627,
+      "id": 96000000,
       "name": "Specials",
       "overview": "",
       "poster_path": "/synthetic-specials.jpg",
@@ -76,14 +76,14 @@
       "vote_average": 0.0
     },
     {
-      "air_date": "2011-04-17",
+      "air_date": "2004-09-22",
       "episode_count": 2,
-      "id": 3624,
+      "id": 96000001,
       "name": "Season 1",
       "overview": "The first invented season.",
       "poster_path": "/synthetic-season-1.jpg",
       "season_number": 1,
-      "vote_average": 8.3
+      "vote_average": 5.1
     }
   ],
   "softcore": false,
@@ -91,21 +91,21 @@
   "status": "Ended",
   "tagline": "Invented, like everything else here.",
   "type": "Scripted",
-  "vote_average": 8.456,
-  "vote_count": 22000,
+  "vote_average": 6.7,
+  "vote_count": 987,
   "credits": {
     "cast": [
       {
         "adult": false,
         "gender": 2,
-        "id": 22970,
+        "id": 93000004,
         "known_for_department": "Acting",
         "name": "Someone Else Invented",
         "original_name": "Someone Else Invented",
         "popularity": 20.1,
         "profile_path": "/synthetic-profile-3.jpg",
         "character": "Nobody Else At All",
-        "credit_id": "5256c8af19c2956ff6046e77",
+        "credit_id": "000000000000000000000003",
         "order": 0
       }
     ],
@@ -113,8 +113,8 @@
   },
   "keywords": {
     "results": [
-      { "id": 6091, "name": "invented tv keyword" },
-      { "id": 4152, "name": "second invented tv keyword" }
+      { "id": 95100003, "name": "invented tv keyword" },
+      { "id": 95100004, "name": "second invented tv keyword" }
     ]
   },
   "images": {
@@ -124,11 +124,11 @@
   },
   "videos": { "results": [] },
   "external_ids": {
-    "imdb_id": "tt0944947",
+    "imdb_id": "tt99000030",
     "freebase_mid": null,
     "freebase_id": null,
-    "tvdb_id": 121361,
-    "tvrage_id": 24493,
+    "tvdb_id": 91000030,
+    "tvrage_id": 92000030,
     "wikidata_id": "Q88888888",
     "facebook_id": null,
     "instagram_id": null,

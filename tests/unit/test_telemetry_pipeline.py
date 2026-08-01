@@ -141,7 +141,9 @@ async def test_a_walk_records_ingest_items_and_match_result(
     integrates, so a `pass` in place of either leaves "library growth per
     week" (dashboard 1) a flat line at zero."""
     await _ingest_service().ingest_batch(
-        new_id(), [_movie("m1", "550"), _movie("m2", "551")], observed_at=datetime.now(UTC)
+        new_id(),
+        [_movie("m1", "90000550"), _movie("m2", "90000551")],
+        observed_at=datetime.now(UTC),
     )
     recorded = _recorded(meter_reader)
     assert "usher.ingest.items" in recorded
@@ -187,7 +189,7 @@ async def test_enrichment_records_prd_10s_latency_metric(
         name="Fight Club",
         sort_name="Fight Club",
         year=1999,
-        tmdb_id=550,
+        tmdb_id=90000550,
         enrichment_state=EnrichmentState.STUB,
     )
     await titles.add(title)
@@ -217,7 +219,7 @@ async def test_a_provider_request_is_counted_by_status(
         SecretStr("key"),
         requests_per_second=1000.0,
     )
-    await client.get("/movie/550")
+    await client.get("/movie/90000550")
     recorded = _recorded(meter_reader)
     assert "usher.provider.requests" in recorded
     attributes, value = recorded["usher.provider.requests"][0]
@@ -242,7 +244,7 @@ async def test_a_provider_request_that_never_answered_is_still_counted(
         requests_per_second=1000.0,
     )
     with pytest.raises(PortUnavailable):
-        await client.get("/movie/550")
+        await client.get("/movie/90000550")
     recorded = _recorded(meter_reader)
     assert recorded["usher.provider.requests"][0][0]["status"] == "error"
 
@@ -316,7 +318,7 @@ async def test_the_pipeline_span_names_match_prd_10s_tree(
     """PRD 10 draws `ingest.item -> match.title`. A tree whose names drifted
     makes every Tempo query in the shipped dashboards wrong, silently."""
     await _ingest_service().ingest_batch(
-        new_id(), [_movie("m1", "550")], observed_at=datetime.now(UTC)
+        new_id(), [_movie("m1", "90000550")], observed_at=datetime.now(UTC)
     )
     names = {span.name for span in span_exporter.get_finished_spans()}
     assert {"ingest.item", "match.title"} <= names
@@ -328,7 +330,7 @@ async def test_match_title_is_a_child_of_ingest_item(
     """PRD 10 draws them nested, and a flat pair of siblings answers "why
     was this batch slow" with two unrelated durations."""
     await _ingest_service().ingest_batch(
-        new_id(), [_movie("m1", "550")], observed_at=datetime.now(UTC)
+        new_id(), [_movie("m1", "90000550")], observed_at=datetime.now(UTC)
     )
     spans = {span.name: span for span in span_exporter.get_finished_spans()}
     ingest, match = spans["ingest.item"], spans["match.title"]

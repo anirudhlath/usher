@@ -869,8 +869,8 @@ counterparts, not a before/after.** The IMDb-derived names are a proxy for
 Emby names, which were not available to this run — stated rather than
 implied.
 
-**`append_to_response=season/N` works, and it is worth ~5x on the whole
-enrichment path.** One request carrying
+**`append_to_response=season/N` works, and it is worth ~10x on the series
+half of the enrichment path.** One request carrying
 `credits,keywords,images,videos,external_ids,content_ratings` plus
 `season/0…season/13` — **exactly** TMDb's 20-item ceiling — returned Game of
 Thrones' entire hierarchy, **all 373 episodes across 9 seasons**, in place
@@ -890,9 +890,35 @@ measured because the change rests on it:
 
 **Not implemented.** It changes PRD 03's request table, PRD 04's crawl
 arithmetic and `TmdbMetadataProvider.fetch`, and belongs in its own change
-rather than folded into a verification run. At 32,409 series and a measured
-median of 9 seasons it is the difference between ~190k requests and ~35k
-for a full enrichment pass.
+rather than folded into a verification run.
+
+**The arithmetic, corrected 2026-08-01 — it was internally inconsistent
+when first recorded, and the wrong number was the headline one.** The
+shipped path costs `1 + N` requests for a series (one detail, one per
+season); the appended path costs 1. At **32,409 series** and a **median of
+9 seasons** that is 32,409 × 10 = **~324k requests** against **~32k**, i.e.
+**~10x** — not the "~190k → ~35k, ~5x" first written here. `~190k` was
+[PRD 04](docs/prd/04-catalog-bootstrap.md)'s Phase-3 tier-1 line, "~189k
+titles with ≥100 IMDb votes", borrowed one section over: a *whole-catalog
+title* count read as a *series request* count. Nothing measured it. The two
+figures cannot both be right — 32,409 × 10 is 324k, and ~190k would need a
+median of ~4.9 seasons.
+
+**The median is measured, and its sample is not a library.** 320 listed
+seasons across the 30 series the 2026-08-01 run walked, which is also the
+sample guess 8 is scanned against and which that entry already calls
+popular-skewed and weak evidence. Popular series have many seasons, so a
+real 32,409-series library's median is very likely *lower* and ~324k is an
+upper bound on the measurement taken rather than a prediction. Recorded
+with its sample instead of laundered into a constant — the same treatment
+`_confident`'s 72–75% and 83.1% get, and for the same reason.
+
+**~32k, not ~35k, and the difference is the ceiling.** One request per
+series is 32,409 exactly. Six namespaces leave 14 season slots, so a series
+with more than 14 seasons needs a second request; that is a small tail, so
+~32k is the figure and ~35k a generous allowance for it. Both are the same
+number to one significant figure; the ~10x is what matters and it holds
+either way.
 
 **TMDb's movie/TV divergence runs through three layers of its API, not
 one, and all three are now measured rather than read.** The field-name and
@@ -1619,13 +1645,60 @@ limiter that limits nothing. It belongs on `app.state` at lifespan, and
 nothing in PRD 07's surface calls enrichment directly (M5's demand
 promotion enqueues a job; `usher work` runs it).
 
-**Fixtures under `tests/fixtures/emby/` are shape-recorded and
-value-synthetic, and that is a licensing constraint, not a style.** A real
-Emby response embeds TMDb-sourced metadata, which TMDb's terms forbid
-redistributing and which "ship importers, never data" above already
-forbids committing; it also identifies a real library and carries real
-server and user ids. Regenerate a scrubbed *shape* with the script above
-and diff that; never paste a capture in.
+**Every fixture is shape-recorded and value-synthetic, and that is a
+licensing constraint, not a style.** A real Emby response embeds
+TMDb-sourced metadata, which TMDb's terms forbid redistributing and which
+"ship importers, never data" above already forbids committing; it also
+identifies a real library and carries real server and user ids. Regenerate
+a scrubbed *shape* with the script above and diff that; never paste a
+capture in.
+
+**That rule was broken from M1 to M4 and nothing noticed, which is the more
+useful half of the finding.** `tests/fixtures/bulk/` held verbatim IMDb
+rows — real ids, titles, years, runtimes, genres, and two `title.ratings`
+rows *with their vote counts*, the most licence-restricted part of that
+dataset — under a `README.md` asserting the rows were "typed by hand" and
+therefore only "recognisable identifiers". Hand-typing a real value does
+not make it synthetic, and **the false assurance was worse than the data**:
+it is what stopped three milestones of readers from checking. The TMDb and
+Emby fixtures had invented prose but kept real ids, air dates, runtimes,
+season/episode counts and `credit_id` ObjectIds — including, on
+`movie.json`, a real IMDb id belonging to a *different film* than the rest
+of the record was shaped after. Root cause is benign and worth knowing:
+**TMDb's reference pages illustrate their endpoints with real responses**,
+so "transcribed from published documentation" was transcribing a real
+payload. `scripts/capture_tmdb_fixture.py` was never the problem — it
+replaces every leaf with its type name — though its `--id 550` *default*
+was, and is now required.
+
+All of it was replaced on 2026-08-01, preserving every shape and format
+edge case (`\N`, tab separation, the header row, the movie/series `kind`
+split, the no-quoting-mechanism row, Emby's `VideoRange` vocabulary, every
+TMDb key and type). The one that needed care: the quoted-title row only
+pins the `csv.reader` trap if the invented title **opens and closes** with
+`"` — `csv` treats `"` as a quote character only at the start of a field,
+so a title with *interior* quotes survives both parsers and tests nothing.
+Verified both ways before committing.
+
+**`tests/unit/test_no_third_party_data.py` is the control, because a
+convention nothing checks is not one.** Three checks over `src/` and
+`tests/` — every IMDb id in a reserved `tt99`/`nm99` band; every id inside
+a committed fixture at or above a 90,000,000 floor (two orders of magnitude
+above TMDb's own daily-export id space); and a **hashed** regression list of
+the identifiers this repository once committed, hashed so the guard is not
+itself the last file holding them. Plus two cases that fail if the scan
+stops covering the fixtures — a guard that globs nothing passes exactly
+like a guard that passes, the same family as the `sitecustomize.py`
+installation proof. Mutation-verified 7/7: a real tconst back in a TSV, a
+real TMDb id back in a JSON fixture, a real TVDb id back in an Emby
+fixture, a real TMDb id back in a `.py` test, `_SCANNED_ROOTS` narrowed to
+`("src",)`, the IMDb regex made to match nothing, and the fixture walker
+made to return nothing. `docs/` and `CLAUDE.md` are deliberately **not**
+scanned: neither ships, and naming a real row as the *specimen* for a
+measurement is a claim about a dataset rather than a copy of one — which is
+why this file still names one and `src/usher/adapters/bulk/imdb.py` no
+longer does. `tests/fixtures/README.md` holds the bands and the allocation
+table.
 
 **A live run against this Emby server must be bounded, and the bound has to
 be in the *iterator*, not in `max_pages`.** Exhausting `max_pages` raises

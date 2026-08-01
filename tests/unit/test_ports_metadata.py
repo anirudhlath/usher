@@ -54,7 +54,7 @@ def test_the_verbatim_payload_travels_with_the_result() -> None:
     *every* annotated field on every dataclass and would pass against a
     result that dropped the payload entirely.
     """
-    payload: dict[str, Any] = {"id": 550, "credits": {"cast": [{"id": 1, "name": "Someone"}]}}
+    payload: dict[str, Any] = {"id": 90000550, "credits": {"cast": [{"id": 1, "name": "Someone"}]}}
     result = EnrichmentResult(title=_title(), seasons=(), episodes=(), payload=payload)
     assert result.payload["credits"]["cast"][0]["name"] == "Someone"
 
@@ -69,7 +69,7 @@ def test_an_enrichment_result_carries_the_hierarchy_a_series_needs() -> None:
         title_id=title.id, season_id=season.id, season_number=1, episode_number=1, name="Pilot"
     )
     result = EnrichmentResult(
-        title=title, seasons=(season,), episodes=(episode,), payload={"id": 1399}
+        title=title, seasons=(season,), episodes=(episode,), payload={"id": 90001399}
     )
     assert result.seasons == (season,)
     assert result.episodes == (episode,)
@@ -86,7 +86,7 @@ def test_an_enrichment_result_is_frozen() -> None:
 
 def test_fetch_takes_a_provider_ref_not_a_bare_integer() -> None:
     """The 🔶: `provider_id: int` baked in TMDb's id scheme, which IMDb's
-    `tt1160419` does not fit -- and PRD 01 lists additional metadata
+    `tt99000100` does not fit -- and PRD 01 lists additional metadata
     providers as an open extension seam.
 
     The annotation is compared to the *class*, not to the string
@@ -160,10 +160,14 @@ def test_a_search_candidate_still_speaks_the_canonical_vocabulary() -> None:
     `list[dict[str, Any]]`, which made the match stage index into TMDb's
     movie/TV divergence -- stays fixed either way."""
     candidate = MetadataCandidate(
-        provider_id=1399, name="Game of Thrones", year=2011, kind=TitleKind.SERIES, popularity=1.0
+        provider_id=90001399,
+        name="A Synthetic Series",
+        year=2011,
+        kind=TitleKind.SERIES,
+        popularity=1.0,
     )
     ref = ProviderRef(provider="tmdb", value=str(candidate.provider_id), kind=candidate.kind)
-    assert ref == ProviderRef(provider="tmdb", value="1399", kind=TitleKind.SERIES)
+    assert ref == ProviderRef(provider="tmdb", value="90001399", kind=TitleKind.SERIES)
 
 
 def test_to_result_takes_the_title_id_it_must_not_invent() -> None:

@@ -34,8 +34,8 @@ async def test_a_payload_round_trips_as_a_dict_not_a_string(
     loud: the value is a perfectly good `str` that reaches `EnrichService` and
     fails there, one layer away from the cause. This is what pins the actual
     behaviour rather than assuming it."""
-    await store.put("tmdb", "movie", "550", PAYLOAD)
-    found = await store.get("tmdb", "movie", "550")
+    await store.put("tmdb", "movie", "90000550", PAYLOAD)
+    found = await store.get("tmdb", "movie", "90000550")
     assert found is not None
     assert isinstance(found[0], dict)
     assert found[0]["genres"][0]["name"] == "Drama"
@@ -55,10 +55,10 @@ async def test_a_refresh_moves_fetched_at_inside_one_transaction(
     exactly the shape this suite's fixture provides, so the case is here
     rather than in the shared contract.
     """
-    await store.put("tmdb", "movie", "550", {"v": 1})
-    first = await store.get("tmdb", "movie", "550")
-    await store.put("tmdb", "movie", "550", {"v": 2})
-    second = await store.get("tmdb", "movie", "550")
+    await store.put("tmdb", "movie", "90000550", {"v": 1})
+    first = await store.get("tmdb", "movie", "90000550")
+    await store.put("tmdb", "movie", "90000550", {"v": 2})
+    second = await store.get("tmdb", "movie", "90000550")
     assert first is not None and second is not None
     assert second[1] > first[1]
     frozen = (await session.execute(text("SELECT now()"))).scalar_one()
@@ -71,8 +71,8 @@ async def test_a_second_put_does_not_add_a_row(
     """`uq_raw_payloads_provider_kind_reference` is the `ON CONFLICT` target,
     and without it every re-enrichment of the same title adds ~8 kB to a
     database PRD 08 budgets at 8-12 GB total."""
-    await store.put("tmdb", "movie", "550", {"v": 1})
-    await store.put("tmdb", "movie", "550", {"v": 2})
+    await store.put("tmdb", "movie", "90000550", {"v": 1})
+    await store.put("tmdb", "movie", "90000550", {"v": 2})
     count = (await session.execute(text("SELECT count(*) FROM raw_payloads"))).scalar_one()
     assert count == 1
 
@@ -113,7 +113,7 @@ async def test_an_empty_provider_is_a_port_error_not_an_integrity_error(
     raising `PendingRollbackError` instead of running.
     """
     with pytest.raises(RepositoryConflict) as caught:
-        await store.put("", "movie", "550", {"v": 1})
+        await store.put("", "movie", "90000550", {"v": 1})
     assert caught.value.constraint == "ck_raw_payloads_provider_not_empty"
-    await store.put("tmdb", "movie", "550", {"v": 1})
-    assert await store.get("tmdb", "movie", "550") is not None
+    await store.put("tmdb", "movie", "90000550", {"v": 1})
+    assert await store.get("tmdb", "movie", "90000550") is not None

@@ -34,7 +34,7 @@ The ladder, ordered by confidence and stopping at the first hit:
 
 **An episode never walks this ladder at all.** A source addresses episodes
 directly and an Emby episode payload carries the *episode's* own provider
-ids -- `{"Imdb": "tt2178782", "Tvdb": "4517466"}` on the live fixture -- not
+ids -- `{"Imdb": "tt99000110", "Tvdb": "91000110"}` on the live fixture -- not
 its series'. Two things follow, and both are catastrophic at 999,827
 episodes. TVDb numbers episodes and series in different namespaces that
 overlap numerically, and the TVDb lookup deliberately does not filter on

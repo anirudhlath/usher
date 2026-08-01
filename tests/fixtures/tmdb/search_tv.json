@@ -4,19 +4,19 @@
     {
       "adult": false,
       "backdrop_path": "/synthetic-series-backdrop.jpg",
-      "genre_ids": [10765, 18],
-      "id": 1399,
+      "genre_ids": [95010765, 95000018],
+      "id": 90001399,
       "origin_country": ["US"],
       "original_language": "en",
       "original_name": "A Series",
       "overview": "A synthetic overview for a series that does not exist.",
-      "popularity": 346.098,
+      "popularity": 31.5,
       "poster_path": "/synthetic-series-poster.jpg",
-      "first_air_date": "2011-04-17",
+      "first_air_date": "2004-09-22",
       "softcore": false,
       "name": "A Series",
-      "vote_average": 8.456,
-      "vote_count": 22000
+      "vote_average": 6.7,
+      "vote_count": 987
     }
   ],
   "total_pages": 1,

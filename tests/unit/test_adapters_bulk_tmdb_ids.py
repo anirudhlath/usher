@@ -47,10 +47,10 @@ async def test_parses_the_movie_export(tmp_path: Path) -> None:
         dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
         rows = [row async for batch in dataset.batches() for row in batch.rows]
     by_id = {row.tmdb_id: row for row in rows}
-    assert by_id[278].original_name == "The Shawshank Redemption"
-    assert by_id[278].popularity == 45.5
-    assert by_id[278].kind is TitleKind.MOVIE
-    assert by_id[99991].adult is True
+    assert by_id[90000020].original_name == "A Synthetic Feature"
+    assert by_id[90000020].popularity == 12.5
+    assert by_id[90000020].kind is TitleKind.MOVIE
+    assert by_id[90000071].adult is True
 
 
 async def test_missing_popularity_defaults_to_zero(tmp_path: Path) -> None:
@@ -62,7 +62,7 @@ async def test_missing_popularity_defaults_to_zero(tmp_path: Path) -> None:
     ) as client:
         dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
         rows = {r.tmdb_id: r async for batch in dataset.batches() for r in batch.rows}
-    assert rows[99992].popularity == 0.0
+    assert rows[90000072].popularity == 0.0
 
 
 async def test_the_tv_export_uses_original_name_and_has_no_adult_field(
@@ -78,9 +78,9 @@ async def test_the_tv_export_uses_original_name_and_has_no_adult_field(
     ) as client:
         dataset = TMDbIdDataset(client, cache, kind=TitleKind.SERIES, batch_size=10, today=_TODAY)
         rows = {r.tmdb_id: r async for batch in dataset.batches() for r in batch.rows}
-    assert rows[1399].original_name == "Game of Thrones"
-    assert rows[1399].adult is False
-    assert rows[45].kind is TitleKind.SERIES
+    assert rows[90000030].original_name == "A Synthetic Series"
+    assert rows[90000030].adult is False
+    assert rows[90000045].kind is TitleKind.SERIES
 
 
 async def test_walks_back_to_the_newest_export_that_exists(tmp_path: Path) -> None:

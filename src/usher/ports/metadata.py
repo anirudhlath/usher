@@ -8,7 +8,7 @@ is the reasoning and this docstring is the summary:
    aggregate carrying the title, its season/episode hierarchy, and the
    provider's verbatim payload.
 2. `fetch(provider_id: int, kind)` became `fetch(ref: ProviderRef)`, which
-   already fits IMDb's `tt1160419` alongside TMDb's `550`/`movie`.
+   already fits IMDb's `tt99000100` alongside TMDb's `90000550`/`movie`.
 3. `changed_since(days: int) -> list[int]` became
    `changed_since(since, cursor) -> ChangedPage`, a resumable page.
 
@@ -160,8 +160,8 @@ class MetadataProvider(ABC):
         normalisation. Nothing above `to_result` reads it.
 
         Takes a `ProviderRef` rather than an `int`: the ref carries a string
-        value and a kind, so it already fits IMDb's `tt1160419` and TMDb's
-        `550`/`movie` alike. A ref this provider cannot serve — the wrong
+        value and a kind, so it already fits IMDb's `tt99000100` and TMDb's
+        `90000550`/`movie` alike. A ref this provider cannot serve — the wrong
         `provider`, or a kind-less ref for a namespaced provider — is
         `PortDataMalformed`, not `PortUnavailable`: no amount of retrying
         turns it into an answer, and `JobWorker` parks the first rather than

@@ -1,10 +1,10 @@
 tconst	titleType	primaryTitle	originalTitle	isAdult	startYear	endYear	runtimeMinutes	genres
-tt0000001	short	Carmencita	Carmencita	0	1894	\N	1	Documentary,Short
-tt0073045	movie	"Giliap"	"Giliap"	0	1975	\N	137	Crime,Drama
-tt0111161	movie	The Shawshank Redemption	The Shawshank Redemption	0	1994	\N	142	Drama
-tt0944947	tvSeries	Game of Thrones	Game of Thrones	0	2011	2019	57	Action,Adventure,Drama
-tt9999991	tvEpisode	Winter Is Coming	Winter Is Coming	0	2011	\N	62	Adventure
-tt9999992	movie	Synthetic Adult Title	Synthetic Adult Title	1	2001	\N	80	Adult
-tt9999993	videoGame	Synthetic Game	Synthetic Game	0	2010	\N	\N	Action
-tt9999994	tvMiniSeries	Chernobyl	Chernobyl	0	2019	2019	330	Drama,History
-tt9999995	tvMovie	Synthetic TV Movie	\N	0	\N	\N	\N	\N
+tt99000001	short	A Synthetic Short	A Synthetic Short	0	1901	\N	3	Documentary,Short
+tt99000010	movie	"A Quoted Synthetic Title"	"A Quoted Synthetic Title"	0	1962	\N	111	Crime,Drama
+tt99000020	movie	A Synthetic Feature	A Synthetic Feature	0	1988	\N	123	Drama
+tt99000030	tvSeries	A Synthetic Series	A Synthetic Series	0	2004	2009	44	Action,Adventure,Drama
+tt99000060	tvEpisode	A Synthetic First Episode	A Synthetic First Episode	0	2004	\N	51	Adventure
+tt99000070	movie	A Synthetic Adult Title	A Synthetic Adult Title	1	1993	\N	80	Adult
+tt99000080	videoGame	A Synthetic Game	A Synthetic Game	0	2007	\N	\N	Action
+tt99000040	tvMiniSeries	A Synthetic Mini-Series	A Synthetic Mini-Series	0	2015	2015	288	Drama,History
+tt99000050	tvMovie	A Synthetic TV Movie	\N	0	\N	\N	\N	\N

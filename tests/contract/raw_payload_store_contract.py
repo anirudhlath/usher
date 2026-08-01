@@ -14,7 +14,7 @@ from typing import Any
 from usher.ports.repository import RawPayloadStore
 
 PAYLOAD: dict[str, Any] = {
-    "id": 550,
+    "id": 90000550,
     "title": "Fight Club",
     "genres": [{"id": 18, "name": "Drama"}],
     "belongs_to_collection": None,
@@ -24,8 +24,8 @@ PAYLOAD: dict[str, Any] = {
 
 class RawPayloadStoreContract:
     async def test_a_payload_round_trips(self, store: RawPayloadStore) -> None:
-        await store.put("tmdb", "movie", "550", PAYLOAD)
-        found = await store.get("tmdb", "movie", "550")
+        await store.put("tmdb", "movie", "90000550", PAYLOAD)
+        found = await store.get("tmdb", "movie", "90000550")
         assert found is not None
         payload, _ = found
         assert payload == PAYLOAD, "stored verbatim -- the whole point is no second network call"
@@ -35,8 +35,8 @@ class RawPayloadStoreContract:
         JSON nulls. A store that flattened or dropped them would make the
         re-derivation M7 and M9 depend on impossible, and would do it
         invisibly until those milestones."""
-        await store.put("tmdb", "movie", "550", PAYLOAD)
-        found = await store.get("tmdb", "movie", "550")
+        await store.put("tmdb", "movie", "90000550", PAYLOAD)
+        found = await store.get("tmdb", "movie", "90000550")
         assert found is not None
         assert found[0]["belongs_to_collection"] is None
         assert found[0]["genres"] == [{"id": 18, "name": "Drama"}]
@@ -45,24 +45,24 @@ class RawPayloadStoreContract:
         assert await store.get("tmdb", "movie", "999999") is None
 
     async def test_the_key_is_the_whole_triple(self, store: RawPayloadStore) -> None:
-        """TMDb id 550 is a movie *and* a series (26,968 such collisions,
+        """TMDb id 90000550 is a movie *and* a series (26,968 such collisions,
         measured), and IMDb ids look nothing like TMDb's. A store keyed on the
         reference alone hands a series' payload to a movie's enrichment."""
-        await store.put("tmdb", "movie", "550", {"kind": "movie"})
-        await store.put("tmdb", "series", "550", {"kind": "series"})
-        await store.put("imdb", "movie", "550", {"kind": "imdb"})
+        await store.put("tmdb", "movie", "90000550", {"kind": "movie"})
+        await store.put("tmdb", "series", "90000550", {"kind": "series"})
+        await store.put("imdb", "movie", "90000550", {"kind": "imdb"})
         for kind_or_provider, expected in (
             (("tmdb", "movie"), "movie"),
             (("tmdb", "series"), "series"),
             (("imdb", "movie"), "imdb"),
         ):
-            found = await store.get(kind_or_provider[0], kind_or_provider[1], "550")
+            found = await store.get(kind_or_provider[0], kind_or_provider[1], "90000550")
             assert found is not None and found[0]["kind"] == expected
 
     async def test_a_second_put_replaces_the_payload(self, store: RawPayloadStore) -> None:
-        await store.put("tmdb", "movie", "550", {"vote_average": 8.4})
-        await store.put("tmdb", "movie", "550", {"vote_average": 8.5})
-        found = await store.get("tmdb", "movie", "550")
+        await store.put("tmdb", "movie", "90000550", {"vote_average": 8.4})
+        await store.put("tmdb", "movie", "90000550", {"vote_average": 8.5})
+        found = await store.get("tmdb", "movie", "90000550")
         assert found is not None
         assert found[0] == {"vote_average": 8.5}
 
@@ -72,10 +72,10 @@ class RawPayloadStoreContract:
         of its `DO UPDATE SET` reports a six-month-old cache date for a payload
         fetched this morning -- and PRD 10's dashboard-5 panel then shows a
         compliance breach that is not real, or hides one that is."""
-        await store.put("tmdb", "movie", "550", {"v": 1})
-        first = await store.get("tmdb", "movie", "550")
-        await store.put("tmdb", "movie", "550", {"v": 2})
-        second = await store.get("tmdb", "movie", "550")
+        await store.put("tmdb", "movie", "90000550", {"v": 1})
+        first = await store.get("tmdb", "movie", "90000550")
+        await store.put("tmdb", "movie", "90000550", {"v": 2})
+        second = await store.get("tmdb", "movie", "90000550")
         assert first is not None and second is not None
         assert second[1] > first[1], "a refreshed payload carries a refreshed timestamp"
 

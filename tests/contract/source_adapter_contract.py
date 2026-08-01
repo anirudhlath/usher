@@ -71,7 +71,7 @@ MOVIE = SourceItem(
     name="Example Movie",
     kind=SourceItemKind.MOVIE,
     year=2021,
-    provider_ids={"tmdb": "438631", "imdb": "tt1160419"},
+    provider_ids={"tmdb": "90000100", "imdb": "tt99000100"},
     container="mkv",
     video_codec="hevc",
     audio_codec="truehd",
@@ -88,14 +88,14 @@ SERIES = SourceItem(
     name="Example Series",
     kind=SourceItemKind.SERIES,
     year=2011,
-    provider_ids={"tmdb": "1399", "imdb": "tt0944947", "tvdb": "121361"},
+    provider_ids={"tmdb": "90001399", "imdb": "tt99000030", "tvdb": "91000030"},
 )
 EPISODE = SourceItem(
     external_id="episode-1",
     name="Example Episode",
     kind=SourceItemKind.EPISODE,
     year=2013,
-    provider_ids={"imdb": "tt2178782", "tvdb": "4517466"},
+    provider_ids={"imdb": "tt99000110", "tvdb": "91000110"},
     container="mkv",
     video_codec="h264",
     audio_codec="eac3",
@@ -238,8 +238,8 @@ class SourceAdapterContract:
         await harness.given_item(MOVIE, changed_at=T0)
         item = await harness.adapter.get_item("movie-1")
         assert item is not None
-        assert item.provider_ids.get("tmdb") == "438631"
-        assert item.provider_ids.get("imdb") == "tt1160419"
+        assert item.provider_ids.get("tmdb") == "90000100"
+        assert item.provider_ids.get("imdb") == "tt99000100"
         assert all(key == key.lower() for key in item.provider_ids)
 
     async def test_added_at_is_timezone_aware(self, harness: SourceHarness) -> None:

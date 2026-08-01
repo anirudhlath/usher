@@ -65,8 +65,8 @@ def test_a_movie_and_a_series_are_mapped_by_the_same_function() -> None:
 
 def test_the_movie_name_and_date_come_from_title_and_release_date() -> None:
     movie = _title(_movie())
-    assert movie.release_date == date(1999, 10, 15)
-    assert movie.year == 1999
+    assert movie.release_date == date(1988, 6, 17)
+    assert movie.year == 1988
     assert movie.original_name == "A Film"
 
 
@@ -74,8 +74,8 @@ def test_the_series_name_and_date_come_from_name_and_first_air_date() -> None:
     """`payload["title"]` unconditionally is a `KeyError` on every one of the
     32,409 series this deployment holds."""
     series = _title(_series())
-    assert series.release_date == date(2011, 4, 17)
-    assert series.year == 2011
+    assert series.release_date == date(2004, 9, 22)
+    assert series.year == 2004
     assert series.original_name == "A Series"
 
 
@@ -114,7 +114,7 @@ def test_an_unconfigured_region_yields_no_content_rating_rather_than_another_cou
 
 
 def test_a_movie_imdb_id_comes_from_the_top_level_field() -> None:
-    assert _title(_movie()).imdb_id == "tt0111161"
+    assert _title(_movie()).imdb_id == "tt99000020"
 
 
 def test_a_series_imdb_id_comes_from_external_ids() -> None:
@@ -122,23 +122,23 @@ def test_a_series_imdb_id_comes_from_external_ids() -> None:
     `external_ids`, alongside the `tvdb_id` that is the *only* provider id
     most of this library's television carries."""
     series = _title(_series())
-    assert series.imdb_id == "tt0944947"
-    assert series.tvdb_id == 121361
+    assert series.imdb_id == "tt99000030"
+    assert series.tvdb_id == 91000030
 
 
 def test_a_movie_runtime_is_minutes_and_a_series_runtime_is_its_episode_length() -> None:
     """TMDb has no series-level runtime: `runtime` is a movie field and
     `episode_run_time` is a TV array. Reading `runtime` for both leaves every
     series with none."""
-    assert _title(_movie()).runtime_minutes == 139
-    assert _title(_series()).runtime_minutes == 57
+    assert _title(_movie()).runtime_minutes == 111
+    assert _title(_series()).runtime_minutes == 44
 
 
 def test_an_empty_episode_run_time_is_the_common_case_and_is_not_a_failure() -> None:
     """And it is the *majority* case, which is why it needs its own case.
 
     Measured live 2026-08-01: `episode_run_time` is `[]` on **26 of 30**
-    series detail responses (86.7%), including Game of Thrones. So the
+    series detail responses (86.7%), including A Synthetic Series. So the
     fixture above, which carries a value, is the 13% — a suite that only
     exercised it would be asserting on the exception. `Title.runtime_minutes`
     is simply not a fact TMDb still has about most television, and `None` is
@@ -158,7 +158,7 @@ def test_a_series_end_year_is_set_only_once_it_has_stopped() -> None:
     an end year, so `end_year` would render "2011-2026" for a show still on
     the air."""
     ended = _title(_series())
-    assert ended.end_year == 2019
+    assert ended.end_year == 2009
     running = _series()
     running["status"] = "Returning Series"
     assert _title(running).end_year is None
@@ -176,9 +176,9 @@ def test_a_series_produces_its_seasons_and_episodes() -> None:
     assert [one.season_number for one in seasons] == [0, 1]
     assert [(one.season_number, one.episode_number) for one in episodes] == [(1, 1), (1, 2)]
     assert episodes[0].name == "An Invented Pilot"
-    assert episodes[0].air_date == date(2011, 4, 17)
-    assert episodes[0].tmdb_id == 63056
-    assert episodes[0].runtime_minutes == 62
+    assert episodes[0].air_date == date(2004, 9, 22)
+    assert episodes[0].tmdb_id == 97000001
+    assert episodes[0].runtime_minutes == 51
 
 
 def test_a_specials_season_is_kept() -> None:
@@ -203,7 +203,7 @@ def test_every_episode_points_at_its_own_season_row() -> None:
 
 def test_a_payload_carrying_neither_title_nor_name_is_malformed() -> None:
     with pytest.raises(PortDataMalformed):
-        kind_of_payload({"id": 550})
+        kind_of_payload({"id": 90000550})
 
 
 def test_a_payload_carrying_both_title_and_name_is_malformed_rather_than_guessed() -> None:
@@ -211,7 +211,7 @@ def test_a_payload_carrying_both_title_and_name_is_malformed_rather_than_guessed
     picks an id space, and the two overlap on 26,968 measured ids
     (ADR-0011) -- so a guess here attaches a series' metadata to a film."""
     with pytest.raises(PortDataMalformed):
-        kind_of_payload({"id": 550, "title": "A Film", "name": "A Series"})
+        kind_of_payload({"id": 90000550, "title": "A Film", "name": "A Series"})
 
 
 def test_a_payload_with_no_id_is_malformed() -> None:
@@ -269,7 +269,7 @@ def test_a_negative_popularity_is_dropped() -> None:
 def test_an_imdb_id_that_is_not_one_is_dropped() -> None:
     """`Title.imdb_id` is pattern-validated. TMDb has served `""` and
     `"0"` in this field for entries nobody has filled in."""
-    for bad in ("", "0", "nm0000123", None):
+    for bad in ("", "0", "nm99000002", None):
         payload = _movie()
         payload["imdb_id"] = bad
         payload["external_ids"]["imdb_id"] = bad
@@ -337,10 +337,10 @@ def test_the_mapper_never_invents_an_identity() -> None:
 
 def test_movie_search_results_carry_the_movie_kind_and_its_own_date_field() -> None:
     candidates = search_candidates(load_tmdb_fixture("search_movie"), TitleKind.MOVIE)
-    assert [one.provider_id for one in candidates] == [550, 90210]
+    assert [one.provider_id for one in candidates] == [90000550, 90090210]
     assert candidates[0].kind is TitleKind.MOVIE
     assert candidates[0].name == "A Film"
-    assert candidates[0].year == 1999
+    assert candidates[0].year == 1988
 
 
 def test_series_search_results_carry_the_series_kind_and_first_air_date() -> None:
@@ -350,7 +350,7 @@ def test_series_search_results_carry_the_series_kind_and_first_air_date() -> Non
     candidates = search_candidates(load_tmdb_fixture("search_tv"), TitleKind.SERIES)
     assert candidates[0].kind is TitleKind.SERIES
     assert candidates[0].name == "A Series"
-    assert candidates[0].year == 2011
+    assert candidates[0].year == 2004
 
 
 def test_a_search_result_with_an_empty_date_still_becomes_a_candidate() -> None:
