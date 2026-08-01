@@ -8,8 +8,12 @@ refused there, which is the one defect in `_apply_watch_state` no case below
 can reach. `tests/integration/test_services_push.py` is the paired run.
 """
 
+import asyncio
+import itertools
+import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 
 import pytest
@@ -32,18 +36,21 @@ from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind
 from usher.domain.source import Source
+from usher.ports.errors import PortUnavailable
 from usher.ports.events import ClientEventKind
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.source import (
+    SourceAdapter,
     SourceEvent,
     SourceEventKind,
     SourceItem,
     SourceItemKind,
+    SourceNotSupported,
     SourceWatchState,
 )
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
-from usher.services.push import PushApplyService, PushOutcome
+from usher.services.push import PushApplyService, PushOutcome, PushSupervisor
 from usher.services.watch_sync import WatchStateSyncService
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
@@ -445,3 +452,577 @@ async def test_the_span_names_the_event_kind(
     )
     names = {span.name for span in spans.get_finished_spans()}
     assert "push.watch_state_changed" in names
+
+
+# ===========================================================================
+# The supervisor: reconnect, backoff, and the gap it closes.
+# ===========================================================================
+#
+# **Everything below runs on an injected clock and an injected sleep, and
+# nothing here sleeps for real except the two cases that measure an overlap.**
+# A supervised reconnect loop with a real backoff schedule is a suite that
+# takes minutes; with an injected one it is a suite that takes milliseconds
+# and asserts on the *schedule* rather than on having waited.
+#
+# **The two ways a case here can lie, both disarmed.** A mutation of this
+# loop does not necessarily fail -- it can spin, and `asyncio.wait_for`
+# cannot bound a coroutine that never yields to the event loop, so the case
+# would hang rather than fail and nothing on a starved loop could observe it.
+# `_ScriptedAdapter` therefore caps its own connection attempts and raises a
+# plain `AssertionError` past the cap (not a `UsherPortError`, so the
+# supervisor cannot catch it and the case fails in milliseconds with the
+# count in the message), the injected sleep yields, and every case is
+# additionally bounded by `asyncio.wait_for`.
+
+
+class _Lane:
+    """The three injected unit-of-work callables, recorded.
+
+    Every one of them opens its own session in production, which is why they
+    are callables rather than services: a supervisor that held a session
+    would hold it for the life of the socket -- hours, idle in transaction,
+    with a snapshot from whenever the lane started.
+    """
+
+    def __init__(self) -> None:
+        self.applied: list[SourceEvent] = []
+        self.gaps = 0
+        self.gap_windows: list[tuple[float, float]] = []
+        self.push_available: list[bool] = []
+        self.outcome = PushOutcome()
+        self.gap_seconds = 0.0
+        # Shared with a scripted adapter that notes its own opens, so the
+        # ordering case reads one list rather than monkeypatching a bound
+        # method it then has to type-ignore.
+        self.order: list[str] = []
+
+    async def apply(
+        self, source: Source, adapter: SourceAdapter, event: SourceEvent
+    ) -> PushOutcome:
+        self.applied.append(event)
+        return self.outcome
+
+    async def close_gap(self, source: Source, adapter: SourceAdapter) -> None:
+        started = time.perf_counter()
+        self.gaps += 1
+        self.order.append("gap")
+        if self.gap_seconds:
+            # Real wall time, in the two cases that measure an overlap. A
+            # gap closer that returned immediately would let the event loop
+            # run the whole connection through its cycle before the socket
+            # ever produced anything, and "the socket buffered during the
+            # walk" would be a claim about a walk that took no time.
+            await asyncio.sleep(self.gap_seconds)
+        self.gap_windows.append((started, time.perf_counter()))
+
+    async def set_push_available(self, source: Source, available: bool) -> None:
+        self.push_available.append(available)
+
+
+_DROP = SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("__drop__",))
+
+
+class _ScriptedAdapter(FakeSourceAdapter):
+    """A source whose push channel is a script of connections.
+
+    Each entry in `connections` is what one connection delivers before the
+    peer goes away; when the script runs out, `events()` itself raises
+    `PortUnavailable` without opening anything, which is a connection that
+    failed rather than one that dropped. That is what makes the connection
+    *count* an assertion with teeth: a supervisor that reset its failure
+    counter on connection would never reach the ceiling and would keep
+    calling `events()` forever.
+
+    **It really awaits.** A bare mock never suspends, so the event loop runs
+    each task through its whole cycle before starting the next and a
+    "concurrent" producer never overlaps anything -- the same reason
+    `tests/fakes/slow_transport.py` exists. Frames are produced by a task of
+    their own, with a real interval when a case asks for one, so a consumer
+    parked in the supervisor's own loop genuinely yields to it.
+
+    **Where it is more forgiving than `EmbyPushChannel`:** no transport, no
+    handshake, no watchdog of its own, and `supports_push` is a count of
+    frames this connection has *yielded* rather than a ledger with a
+    staleness window. The six push contract cases are what hold the real
+    channel to the three-clause rule; this exists to script a supervisor's
+    world, not to model a socket.
+    """
+
+    def __init__(
+        self,
+        source: Source,
+        connections: list[list[SourceEvent]],
+        *,
+        emit_interval: float = 0.0,
+        max_attempts: int = 40,
+        hang: bool = False,
+        unbounded: bool = False,
+    ) -> None:
+        super().__init__(source)
+        self._script = list(connections)
+        self._emit_interval = emit_interval
+        self._max_attempts = max_attempts
+        self._hang = hang
+        self._unbounded = unbounded
+        self._delivered_here = 0
+        self._channel_open = False
+        self.push_connections = 0
+        self.attempts = 0
+        self.produced_at: list[float] = []
+        self.parked = asyncio.Event()
+
+    @property
+    def supports_push(self) -> bool:
+        """Grounded in frames delivered on *this* connection.
+
+        The lane's own history is deliberately not carried across: a fresh
+        socket that upgrades and buffers must read `False` however well its
+        predecessor was working, which is the whole of the rule
+        `PushHealth.record_open` spells out by clearing `last_message_at`.
+        """
+        return self._channel_open and self._delivered_here > 0
+
+    def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
+        self.attempts += 1
+        if not self._push_supported:
+            # `disable_push()` is inherited, and it raises *before* the
+            # attempt is scripted: an adapter with no channel has no
+            # connection to count.
+            raise SourceNotSupported("push is disabled on this scripted source")
+        if self.attempts > self._max_attempts:
+            # Not a `UsherPortError`, deliberately: the supervisor must not
+            # be able to catch it. A loop that stopped counting failures
+            # fails here in milliseconds instead of spinning until an outer
+            # `wait_for` that a starved event loop can never fire.
+            raise AssertionError(
+                f"the supervisor opened {self.attempts} channels; it is not counting failures"
+            )
+        if not self._script:
+            if not self._unbounded:
+                raise PortUnavailable("the scripted source refused the connection")
+            # A proxy that upgrades and then buffers connects perfectly
+            # **every** time -- there is no supply of connections to run out
+            # of, which is exactly why the ceiling has to come from the
+            # failure counter rather than from the world getting tired. A
+            # script that ran dry would terminate a mutated loop for the
+            # wrong reason and let it pass.
+            return self._open([])
+        return self._open(self._script.pop(0))
+
+    @asynccontextmanager
+    async def _open(self, frames: list[SourceEvent]) -> AsyncIterator[AsyncIterator[SourceEvent]]:
+        self.push_connections += 1
+        self._channel_open = True
+        self._delivered_here = 0
+        queue: asyncio.Queue[SourceEvent] = asyncio.Queue()
+        producer = asyncio.create_task(self._produce(frames, queue))
+        try:
+            yield self._frames(queue)
+        finally:
+            producer.cancel()
+            self._channel_open = False
+
+    async def _produce(self, frames: list[SourceEvent], queue: asyncio.Queue[SourceEvent]) -> None:
+        for frame in frames:
+            await asyncio.sleep(self._emit_interval)
+            self.produced_at.append(time.perf_counter())
+            queue.put_nowait(frame)
+        if not self._hang:
+            queue.put_nowait(_DROP)
+
+    async def _frames(self, queue: asyncio.Queue[SourceEvent]) -> AsyncIterator[SourceEvent]:
+        while True:
+            # One cooperative yield per iteration, for the reason
+            # `EmbyPushChannel._events` spells out at length: a loop whose
+            # only other await can complete without suspending starves the
+            # event loop it shares with the server.
+            await asyncio.sleep(0)
+            self.parked.set()
+            frame = await queue.get()
+            if frame is _DROP:
+                raise PortUnavailable("the scripted peer went away")
+            self._delivered_here += 1
+            yield frame
+
+
+class _QuietAdapter(_ScriptedAdapter):
+    """A channel whose iterator *ends* rather than raising.
+
+    The port forbids it -- an iterator that stops because the connection
+    died is indistinguishable from a source with nothing more to say -- and
+    an adapter can still do it. What must not happen is a lane reading that
+    as a clean shutdown and returning silently, leaving a source that stops
+    pushing until somebody notices by hand.
+    """
+
+    async def _frames(self, queue: asyncio.Queue[SourceEvent]) -> AsyncIterator[SourceEvent]:
+        await asyncio.sleep(0)
+        return
+        yield  # pragma: no cover -- makes this a generator
+
+
+def _ticks(step: float = 1.0) -> Callable[[], float]:
+    """A monotonic clock that moves by `step` on every read."""
+    state = itertools.count(0.0, step)
+
+    def read() -> float:
+        return next(state)
+
+    return read
+
+
+def _supervisor(
+    lane: _Lane,
+    *,
+    clock: Callable[[], float] | None = None,
+    sleeps: list[float] | None = None,
+    **kwargs: object,
+) -> PushSupervisor:
+    recorded = sleeps if sleeps is not None else []
+
+    async def sleep(seconds: float) -> None:
+        recorded.append(seconds)
+        # Yields even though it does not wait. Without this the loop can run
+        # unbounded iterations without ever returning to the event loop, and
+        # a mutation that stopped counting failures would hang the case
+        # rather than fail it -- `asyncio.wait_for` needs the loop to run in
+        # order to fire.
+        await asyncio.sleep(0)
+
+    return PushSupervisor(
+        lane.apply,
+        lane.close_gap,
+        lane.set_push_available,
+        sleep=sleep,
+        clock=clock if clock is not None else _ticks(),
+        # A deterministic draw, so the *schedule* is asserted rather than a
+        # range. The jitter itself is asserted separately, below.
+        jitter=lambda low, high: high,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+def _event(external_id: str) -> SourceEvent:
+    return SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=(external_id,))
+
+
+def _overlap(first: tuple[float, float], second: tuple[float, float]) -> float:
+    """Intersection over union of two wall-clock windows.
+
+    The shape `JobQueueContract.overlapping()` established and for the same
+    reason: a count, an ordering or a completion is also what a *serialised*
+    run produces, and only measured intersection distinguishes them.
+    """
+    intersection = max(0.0, min(first[1], second[1]) - max(first[0], second[0]))
+    union = max(first[1], second[1]) - min(first[0], second[0])
+    return 0.0 if union <= 0 else intersection / union
+
+
+SUPERVISED_SOURCE = Source(
+    kind=SourceKind.EMBY,
+    name="Living Room Emby",
+    base_url="https://emby.invalid",
+    credentials_ref="ref-2",
+    device_id="device-2",
+)
+
+
+@pytest.fixture
+def lane() -> _Lane:
+    return _Lane()
+
+
+async def test_the_gap_is_closed_after_connecting_not_before(lane: _Lane) -> None:
+    """PRD 03: "run a delta reconcile on reconnect". **After** the socket is
+    up, so events arriving during the walk are buffered rather than lost --
+    the reverse order leaves the window between the walk and the handshake
+    silently uncovered.
+
+    **Asserted on a measured overlap, because the order alone is not the
+    property.** `order == ["connected", "gap"]` is satisfied by a
+    connect-then-immediately-close-then-walk implementation, and by any run
+    the event loop happened to serialise. What is actually claimed is that
+    the source produced events *while the walk was running* and that none of
+    them was lost, so the case forces a real 40 ms walk against a producer
+    emitting for ~30 ms on the open socket and measures how much of the
+    union of the two windows they share.
+    """
+    adapter = _ScriptedAdapter(
+        SUPERVISED_SOURCE,
+        [[_event(f"i{index}") for index in range(6)]],
+        emit_interval=0.005,
+    )
+    lane.gap_seconds = 0.04
+    supervisor = _supervisor(lane, max_consecutive_failures=1)
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+
+    gap_window = lane.gap_windows[0]
+    produced = (adapter.produced_at[0], adapter.produced_at[-1])
+    overlap = _overlap(gap_window, produced)
+    assert overlap >= 0.4, f"the walk and the socket did not overlap ({overlap:.1%} of the union)"
+    assert produced[0] >= gap_window[0] and produced[1] <= gap_window[1], (
+        "the source produced outside the walk's window, so this measured nothing"
+    )
+    assert [event.external_ids for event in lane.applied] == [
+        (f"i{index}",) for index in range(6)
+    ], "events produced while the gap-closing walk ran were lost"
+
+
+async def test_the_gap_runs_inside_the_channels_own_context(lane: _Lane) -> None:
+    """The cheap companion to the case above, and the one that names the
+    ordering directly. Kept because the overlap case would also pass against
+    a lane that opened the socket, ran the walk, and *then* subscribed."""
+
+    class _Noting(_ScriptedAdapter):
+        @asynccontextmanager
+        async def _open(
+            self, frames: list[SourceEvent]
+        ) -> AsyncIterator[AsyncIterator[SourceEvent]]:
+            lane.order.append("connected")
+            async with super()._open(frames) as stream:
+                yield stream
+
+    adapter = _Noting(SUPERVISED_SOURCE, [[_event("i1")]])
+    supervisor = _supervisor(lane, max_consecutive_failures=1)
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert lane.order[:2] == ["connected", "gap"]
+
+
+async def test_a_dropped_channel_is_reconnected_and_the_gap_closed_again(lane: _Lane) -> None:
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")], [_event("i2")]])
+    supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=2)
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert adapter.push_connections == 2
+    assert lane.gaps == 2
+    assert [event.external_ids for event in lane.applied] == [("i1",), ("i2",)]
+
+
+async def test_the_failure_counter_is_reset_by_delivery_not_by_connection(lane: _Lane) -> None:
+    """**The milestone's rule, one layer up.**
+
+    A proxy that upgrades and then buffers connects perfectly every time. If
+    connecting reset the counter, that source would reconnect forever,
+    silently, reporting a healthy lane -- and PRD 08's "after N failures
+    mark `supports_push = false`" would never fire, so the reconciler would
+    go on skipping the one source it is the only cover for.
+
+    Three connections that open cleanly and deliver nothing is exactly that
+    proxy. The ceiling has to be reached anyway.
+    """
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [], unbounded=True)
+    sleeps: list[float] = []
+    supervisor = _supervisor(
+        lane, clock=_ticks(step=1000.0), sleeps=sleeps, max_consecutive_failures=3
+    )
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert adapter.push_connections == 3
+    assert lane.push_available == [False]
+    assert sleeps == [5.0, 10.0], "the last failure hits the ceiling and must not sleep"
+
+
+async def test_a_delivering_channel_resets_the_counter(lane: _Lane) -> None:
+    """The other direction: a lane that drops three times and keeps working
+    must not park itself on the next ordinary blip an hour later.
+
+    Three connections that each deliver one event and then drop, followed by
+    one that delivers nothing. With the reset the ceiling of two is reached
+    on the fourth connection; without it, on the second.
+    """
+    adapter = _ScriptedAdapter(
+        SUPERVISED_SOURCE,
+        [[_event("i1")], [_event("i2")], [_event("i3")]],
+        unbounded=True,
+    )
+    supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=2)
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert adapter.push_connections == 4
+    assert True in lane.push_available
+
+
+async def test_push_available_is_written_true_on_first_delivery(lane: _Lane) -> None:
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
+    supervisor = _supervisor(lane, max_consecutive_failures=1)
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert lane.push_available[0] is True
+
+
+async def test_push_available_is_written_once_per_transition(lane: _Lane) -> None:
+    """`sources` is a table an operator reads and a row an `UPDATE` rewrites.
+    A lane that wrote on every message would issue one statement per second
+    of playback for a value that changed once."""
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event(f"i{index}") for index in range(5)]])
+    supervisor = _supervisor(lane, max_consecutive_failures=1)
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert lane.push_available == [True, False]
+
+
+async def test_the_backoff_doubles_and_is_capped(lane: _Lane) -> None:
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [], unbounded=True)
+    sleeps: list[float] = []
+    supervisor = _supervisor(
+        lane,
+        clock=_ticks(step=1000.0),
+        sleeps=sleeps,
+        max_consecutive_failures=6,
+        backoff_seconds=5.0,
+        max_backoff_seconds=40.0,
+    )
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    # `jitter=lambda low, high: high`, so these are the ceilings of each
+    # interval: 5, 10, 20, 40, 40. Five sleeps for six failures -- the last
+    # failure hits the ceiling and stops rather than sleeping.
+    assert sleeps == [5.0, 10.0, 20.0, 40.0, 40.0]
+
+
+def test_the_backoff_draws_from_the_upper_half_of_the_interval() -> None:
+    """PRD 08's equal jitter, not full jitter. Full jitter's minimum draw is
+    arbitrarily close to zero, so a share of failures retry effectively
+    immediately -- the hot loop the backoff exists to prevent, merely
+    rationed. The half-interval floor is what makes "a failed connection is
+    not instantly retried" a property rather than a probability."""
+    draws: list[tuple[float, float]] = []
+
+    def record(low: float, high: float) -> float:
+        draws.append((low, high))
+        return low
+
+    lane = _Lane()
+    supervisor = PushSupervisor(
+        lane.apply,
+        lane.close_gap,
+        lane.set_push_available,
+        backoff_seconds=8.0,
+        max_backoff_seconds=1000.0,
+        jitter=record,
+    )
+    for failures in (1, 2, 3):
+        supervisor._backoff(failures)
+    assert draws == [(4.0, 8.0), (8.0, 16.0), (16.0, 32.0)]
+
+
+def test_the_backoff_defaults_to_a_real_uniform_draw() -> None:
+    """Every case above injects the jitter, so all of them pass against a
+    default of `lambda low, high: low` -- which is not jitter at all and
+    puts every source in a household on the same schedule. The default is
+    asserted directly."""
+    lane = _Lane()
+    supervisor = PushSupervisor(lane.apply, lane.close_gap, lane.set_push_available)
+    draws = {round(supervisor._backoff(3), 6) for _ in range(200)}
+    assert len(draws) > 100, "the default jitter is not drawing a range"
+    assert min(draws) >= 10.0 and max(draws) < 20.0
+
+
+async def test_a_deferred_event_triggers_a_gap_close(lane: _Lane) -> None:
+    """`PushOutcome.deferred_to_delta` is the applier saying "this event
+    named more items than I will resolve one at a time". The supervisor is
+    what turns that into the paged walk M4 already built."""
+    lane.outcome = PushOutcome(deferred_to_delta=True)
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
+    supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=1)
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert lane.gaps == 2
+
+
+async def test_gap_closing_is_rate_limited(lane: _Lane) -> None:
+    """A flapping socket plus a delta per reconnect is a paged walk of
+    everything changed since the cursor, every few seconds. The first delta
+    after a real outage is the expensive one and is not skipped; the tenth
+    in a minute is."""
+    lane.outcome = PushOutcome(deferred_to_delta=True)
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event(f"i{index}") for index in range(5)]])
+    # A clock that does not move, so every later request lands inside the
+    # interval.
+    supervisor = _supervisor(
+        lane,
+        clock=lambda: 100.0,
+        max_consecutive_failures=1,
+        gap_min_interval_seconds=60.0,
+    )
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert lane.gaps == 1
+    assert len(lane.applied) == 5, "the rate limit swallowed the events too"
+
+
+async def test_the_first_gap_after_an_outage_is_never_skipped(lane: _Lane) -> None:
+    """The other half of the rate limit, and the half a lone counter
+    assertion cannot see: `gate.at` is `None` until one has run, so the
+    expensive walk after a real outage happens however recently the clock
+    says something did."""
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
+    supervisor = _supervisor(
+        lane, clock=lambda: 0.0, max_consecutive_failures=1, gap_min_interval_seconds=1e9
+    )
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert lane.gaps == 1
+
+
+async def test_a_source_with_no_push_channel_is_marked_and_left_alone(lane: _Lane) -> None:
+    """The port's `SourceNotSupported` contract. Not a failure to retry: an
+    adapter saying it has no channel will say the same thing on every
+    reconnect, and PRD 03's reconciler is the cover.
+
+    **`attempts` is the assertion with teeth, and the other three are not.**
+    Measured: a loop that dropped this arm entirely and let
+    `SourceNotSupported` fall through to `except UsherPortError` still ends
+    with `push_available == [False]`, `push_connections == 0` and
+    `gaps == 0` -- it reaches the ceiling instead of returning, so every
+    visible end state is identical and only the five wasted attempts and
+    four backoff sleeps in between differ. The plan's own draft of this case
+    asserted exactly those three things and the mutation survived it.
+    """
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
+    adapter.disable_push()
+    sleeps: list[float] = []
+    supervisor = _supervisor(lane, sleeps=sleeps, max_consecutive_failures=5)
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert adapter.attempts == 1, "an adapter with no channel was asked again"
+    assert sleeps == []
+    assert lane.push_available == [False]
+    assert adapter.push_connections == 0
+    assert lane.gaps == 0
+
+
+async def test_a_channel_that_ends_quietly_counts_as_a_failure(lane: _Lane) -> None:
+    """The port forbids an iterator that ends rather than raising, and an
+    adapter can still do it. Counted as a failure rather than treated as a
+    clean shutdown, because the alternative is a lane that returns silently
+    and a source that stops pushing until somebody notices by hand."""
+    adapter = _QuietAdapter(SUPERVISED_SOURCE, [], unbounded=True)
+    supervisor = _supervisor(lane, clock=_ticks(step=1000.0), max_consecutive_failures=2)
+    await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert adapter.push_connections == 2
+    assert lane.push_available == [False]
+
+
+async def test_cancellation_stops_the_lane_without_marking_the_source(lane: _Lane) -> None:
+    """Shutdown is not a push failure. A lifespan that cancelled its lanes
+    and left `supports_push = false` behind would disable push on every
+    source on every restart of the server until a walk re-enabled it."""
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[]], hang=True)
+    supervisor = _supervisor(lane, max_consecutive_failures=5)
+    task = asyncio.create_task(supervisor.run(SUPERVISED_SOURCE, adapter))
+    # Waited for rather than slept past: `asyncio.sleep(0)` once is not
+    # enough to reach the parked `recv`, and a cancel that landed earlier
+    # would test a different code path every time the scheduler felt like it.
+    await asyncio.wait_for(adapter.parked.wait(), timeout=5.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert lane.push_available == []
+
+
+async def test_a_bug_in_the_lane_is_not_swallowed_as_a_push_failure(lane: _Lane) -> None:
+    """`JobWorker`'s rule, one lane over: a `ZeroDivisionError` is a bug in
+    this process, and a loop that counted it as a push failure would spend a
+    backoff schedule and then park a healthy source with an error message
+    that describes nothing an operator can act on."""
+
+    async def explode(source: Source, adapter: SourceAdapter, event: SourceEvent) -> PushOutcome:
+        raise ZeroDivisionError("a bug, not an outage")
+
+    lane.apply = explode  # type: ignore[method-assign]
+    adapter = _ScriptedAdapter(SUPERVISED_SOURCE, [[_event("i1")]])
+    supervisor = _supervisor(lane, max_consecutive_failures=3)
+    with pytest.raises(ZeroDivisionError):
+        await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
+    assert lane.push_available == [True], "a bug marked the source unavailable"

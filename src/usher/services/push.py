@@ -27,6 +27,9 @@ session is neither -- the same shape `ReconcileService` and `JobWorker`
 already use.
 """
 
+import asyncio
+import random
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -36,12 +39,14 @@ from loguru import logger
 from opentelemetry import metrics, trace
 
 from usher.domain.source import Source
+from usher.ports.errors import UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.source import (
     SourceAdapter,
     SourceEvent,
     SourceEventKind,
     SourceItem,
+    SourceNotSupported,
     SourceWatchState,
 )
 from usher.services.ingest import IngestService
@@ -254,3 +259,199 @@ class PushApplyService:
             count=len(event.external_ids),
         )
         return PushOutcome(ignored=len(event.external_ids))
+
+
+# The three units of work a lane needs, each opening its own session. They
+# are callables rather than services because a supervisor that held a
+# session would hold it for the life of the socket -- hours, idle in
+# transaction, with a snapshot from whenever the lane started. The
+# composition root is where each one becomes
+# `async with factory() as session: ...`, which is the same shape
+# `usher.services.handlers.SourceResolver` already uses one milestone down.
+#
+# `user_id` is bound by the composition root into the applier rather than
+# carried on the supervisor: the lane has no use for it, and an attribute
+# that is stored and never read is a parameter every later caller has to
+# guess the meaning of.
+PushApplier = Callable[[Source, SourceAdapter, SourceEvent], Awaitable[PushOutcome]]
+GapCloser = Callable[[Source, SourceAdapter], Awaitable[None]]
+PushAvailabilityWriter = Callable[[Source, bool], Awaitable[None]]
+
+
+class _Gate:
+    """When the gap was last closed, for one run.
+
+    A small mutable holder rather than an instance attribute, so one
+    supervisor can safely run two sources -- the same reasoning
+    `ReconcileService._Progress` states, arrived at from the other side.
+    """
+
+    __slots__ = ("at",)
+
+    def __init__(self) -> None:
+        self.at: float | None = None
+
+
+class PushSupervisor:
+    def __init__(
+        self,
+        apply: PushApplier,
+        close_gap: GapCloser,
+        set_push_available: PushAvailabilityWriter,
+        *,
+        max_consecutive_failures: int = 5,
+        backoff_seconds: float = 5.0,
+        max_backoff_seconds: float = 300.0,
+        gap_min_interval_seconds: float = 60.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        jitter: Callable[[float, float], float] = random.uniform,
+    ) -> None:
+        self._apply = apply
+        self._close_gap = close_gap
+        self._set_push_available = set_push_available
+        self._max_failures = max_consecutive_failures
+        self._backoff_seconds = backoff_seconds
+        self._max_backoff = max_backoff_seconds
+        self._gap_min_interval = gap_min_interval_seconds
+        self._sleep = sleep
+        self._clock = clock
+        self._jitter = jitter
+
+    async def run(self, source: Source, adapter: SourceAdapter) -> None:
+        """Hold this source's push channel until it stops being worth
+        holding. Returns; never raises a `UsherPortError`.
+
+        Returns rather than looping forever, and that is PRD 08: "after N
+        failures mark `supports_push = false` and lean on the nightly walk."
+        A lane that retried indefinitely against a proxy stripping `Upgrade`
+        would look identical to a working one from every dashboard.
+        """
+        gate = _Gate()
+        failures = 0
+        delivering = False
+        while failures < self._max_failures:
+            try:
+                async with adapter.events() as events:
+                    # **After** the connection, deliberately. Anything that
+                    # changes during this walk arrives on the socket that is
+                    # already open and is buffered; the reverse order leaves
+                    # the window between the walk and the handshake silently
+                    # uncovered. `connect_websocket`'s `max_queue=256` is the
+                    # other half of the same decision.
+                    await self._gap(source, adapter, gate)
+                    delivering = await self._note(source, adapter, delivering)
+                    async for event in events:
+                        delivering = await self._note(source, adapter, delivering)
+                        if delivering:
+                            # Reset on **delivery**, never on connection. A
+                            # proxy that upgrades and then buffers connects
+                            # perfectly every time; if that reset the counter
+                            # the lane would reconnect forever and the
+                            # ceiling below would never be reached -- which
+                            # is PRD 08's failure policy quietly not
+                            # happening, on a source the reconciler has been
+                            # told it does not need to cover.
+                            failures = 0
+                        outcome = await self._apply(source, adapter, event)
+                        if outcome.deferred_to_delta:
+                            await self._gap(source, adapter, gate)
+            except SourceNotSupported as exc:
+                # Not a failure to retry: an adapter with no channel will say
+                # the same thing every time, and the reconciler is the cover
+                # PRD 03 designed for exactly this.
+                logger.info(
+                    "{source} has no push channel ({error}); the reconciler covers it",
+                    source=source.name,
+                    error=str(exc),
+                )
+                await self._set_push_available(source, False)
+                return
+            except asyncio.CancelledError:
+                # Shutdown is not a push failure. Marking the source here
+                # would disable push on every source on every restart until a
+                # walk re-enabled it. `CancelledError` is a `BaseException` in
+                # 3.13 and the arm below would not catch it anyway -- this is
+                # what stops a later reader widening that arm to
+                # `except Exception` without noticing.
+                raise
+            except UsherPortError as exc:
+                failures += 1
+                delivering = False
+                logger.warning(
+                    "{source}'s push channel failed ({failures}/{ceiling}): {error}",
+                    source=source.name,
+                    failures=failures,
+                    ceiling=self._max_failures,
+                    error=str(exc),
+                )
+            else:
+                # The port forbids an iterator that ends quietly, and an
+                # adapter can still do it. Counted as a failure rather than
+                # treated as a clean shutdown, because the alternative is a
+                # lane that returns silently and a source that stops pushing
+                # until somebody notices by hand.
+                failures += 1
+                delivering = False
+                logger.warning(
+                    "{source}'s push channel ended without raising ({failures}/{ceiling})",
+                    source=source.name,
+                    failures=failures,
+                    ceiling=self._max_failures,
+                )
+            if failures < self._max_failures:
+                await self._sleep(self._backoff(failures))
+        logger.error(
+            "{source}'s push channel failed {count} times in a row; marking it unavailable "
+            "and leaving this source to the nightly reconcile",
+            source=source.name,
+            count=failures,
+        )
+        await self._set_push_available(source, False)
+
+    async def _note(self, source: Source, adapter: SourceAdapter, was: bool) -> bool:
+        """Read `supports_push` and persist the transition.
+
+        The read is the adapter's, which grounds it in received messages
+        rather than in a socket being open. This layer neither knows nor
+        guesses -- and writing only on the *transition* keeps `sources` from
+        taking one `UPDATE` per second of playback for a value that changed
+        once.
+        """
+        now_delivering = adapter.supports_push
+        if now_delivering != was:
+            await self._set_push_available(source, now_delivering)
+        return now_delivering
+
+    async def _gap(self, source: Source, adapter: SourceAdapter, gate: _Gate) -> None:
+        """PRD 03's reconnect delta, rate-limited.
+
+        A flapping socket plus one delta per reconnect is a paged walk of
+        everything changed since the cursor every few seconds. The first
+        after a real outage is the expensive one and is never skipped,
+        because `gate.at` is `None` until one has run.
+        """
+        now = self._clock()
+        if gate.at is not None and now - gate.at < self._gap_min_interval:
+            logger.debug(
+                "skipping {source}'s gap-closing delta; one ran {ago:.0f}s ago",
+                source=source.name,
+                ago=now - gate.at,
+            )
+            return
+        gate.at = now
+        await self._close_gap(source, adapter)
+
+    def _backoff(self, failures: int) -> float:
+        """Equal jitter, exactly PRD 08's shape for the job queue.
+
+        A uniform draw from `[base/2, base) x 2^(failures-1)`, capped. Not
+        *full* jitter, whose minimum draw is arbitrarily close to zero, so a
+        share of failures retry effectively immediately -- the hot loop the
+        backoff exists to prevent, merely rationed. The spread is what breaks
+        a thundering herd across sources; the half-interval floor is what
+        makes "a failed connection is not instantly retried" a property
+        rather than a probability.
+        """
+        base = min(self._backoff_seconds * (2 ** (failures - 1)), self._max_backoff)
+        return self._jitter(base / 2, base)
