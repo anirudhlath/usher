@@ -510,17 +510,24 @@ def test_probe_push_is_a_concrete_method_every_adapter_inherits() -> None:
 
 async def test_an_adapter_with_no_push_channel_inherits_an_honest_probe() -> None:
     """Inheritance demonstrated against a *second* implementation that
-    wrote nothing: `FakeSourceAdapter.events()` raises `SourceNotSupported`
-    and it has no probe of its own, and it still reports the right answer.
+    wrote nothing: `FakeSourceAdapter` with its channel disabled raises
+    `SourceNotSupported` from `events()` and has no probe of its own, and it
+    still reports the right answer.
 
     `SourceNotSupported` is a `UsherPortError`, so it lands on the same arm
     a refused connection does -- which is correct: from an operator's side
     "this adapter has no socket" and "this socket would not open" are both
     "no channel", told apart by `detail`.
+
+    `disable_push()` rather than the default state, because from M5 that
+    fake *has* a channel -- the six push contract cases need one. The
+    no-channel state is the arrangement this case is about, so it arranges
+    it instead of inheriting it.
     """
     from tests.fakes.source_adapter import FakeSourceHarness
 
     harness = FakeSourceHarness()
+    await harness.disable_push()
     probe = await harness.adapter.probe_push(timeout_seconds=0.01)
     assert probe.upgraded is False
     assert probe.delivering is False

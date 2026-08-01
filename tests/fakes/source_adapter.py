@@ -31,12 +31,26 @@ teeth only in `EmbyHarness`, where the fake server's *listing* renderer
 omits the two fields exactly as Emby 4.9.5.0 does. The fake's job is to
 prove the assertion is expressible without reference to Emby; it is not
 evidence that any adapter needed it.
+
+**Its push channel is the same kind of forgiving, and worse.** There is no
+transport under it at all: no handshake, no frames, no close code, no
+backpressure. Its health ledger decays only because a test advanced a clock
+it owns, and it goes silent or drops because a test said so, so nothing
+about a real socket's failure modes is expressible here. What it *is*
+evidence for is that the six push contract cases are statable without a wire
+format -- and that they are satisfiable by a second, independently written
+three-clause health rule, which is the only sense in which "the port stated
+the rule" is a testable claim rather than "`EmbyAdapter` happens to behave
+that way". The same six run against the real `EmbyAdapter` over a real
+`EmbyPushChannel` with a real watchdog
+(`tests/unit/test_adapters_emby_contract.py`), and only M5's live
+verification closes the gap after that.
 """
 
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from urllib.parse import quote
 
 from pydantic import AwareDatetime
@@ -49,6 +63,7 @@ from usher.ports.errors import PortAuthFailed, PortUnavailable
 from usher.ports.source import (
     SourceAdapter,
     SourceEvent,
+    SourceEventKind,
     SourceItem,
     SourceItemKind,
     SourceNotSupported,
@@ -64,6 +79,19 @@ from usher.ports.source import (
 # alternative to -- importing Emby's mapper here would make "the suite is
 # not Emby-shaped" untrue by construction.
 _LAYOUTS = {1: "1_0", 2: "2_0", 6: "5_1", 8: "7_1"}
+
+# Put on the queue by `drop_push` so a consumer parked on `get()` wakes and
+# raises, rather than hanging until the case's own `wait_for` expires and
+# reports a timeout where the real answer is a raise. `push_drop`'s contract
+# is "promptly", and the flag alone could only be noticed on the next poll
+# tick.
+_DROPPED = SourceEvent(kind=SourceEventKind.ITEM_REMOVED, external_ids=("__dropped__",))
+
+# How long one `get()` waits before the drain runs its own watchdog. Real
+# wall time, and the only real wall time anywhere in this fake's push side --
+# everything else runs on the injected clock, which is what keeps a
+# staleness case sub-millisecond instead of ninety seconds.
+_POLL_SECONDS = 0.01
 
 
 class FakeSourceAdapter(SourceAdapter):
@@ -85,6 +113,22 @@ class FakeSourceAdapter(SourceAdapter):
         self._auth_rejected = False
         self._lock = asyncio.Lock()
         self.authentications = 0
+        # The push channel. A ledger of its own shape and the same
+        # three-clause health rule, written out below rather than importing
+        # `PushHealth` -- for the reason `FakeEmbyServer` defines
+        # `_TICKS_PER_SECOND` itself: a fake that shared the
+        # implementation's own rule could not disagree with it, and
+        # disagreement is the only thing a contract suite is for.
+        self._push_queue: asyncio.Queue[SourceEvent] = asyncio.Queue()
+        self._push_open = False
+        self._push_supported = True
+        self._push_messages = 0
+        self._push_opened_at: float | None = None
+        self._push_last_message_at: float | None = None
+        self._push_dropped = False
+        self._push_silent = False
+        self._push_now = 0.0
+        self.push_stale_after = 90.0
 
     # -- harness-facing state ------------------------------------------
 
@@ -123,6 +167,47 @@ class FakeSourceAdapter(SourceAdapter):
     def expire_credentials(self) -> None:
         self._server_token = f"session-{self.authentications + 1}"
 
+    # -- push, for the harness -----------------------------------------
+
+    def push(self, event: SourceEvent) -> None:
+        """Queue an event as this source's own channel would deliver it.
+
+        A `WATCH_STATE_CHANGED` naming ids carries **this source's seeded
+        states** for them, not whatever the caller happened to put on the
+        event -- the same rule `EmbyHarness` follows by rendering the frame
+        from the fake server's state. Echoing the caller's own tuple back
+        would make `test_events_yields_what_the_source_pushed`'s carried
+        assertion agree with the harness by construction, and it would then
+        pass against an adapter that fabricated a position.
+        """
+        if event.kind is SourceEventKind.WATCH_STATE_CHANGED and not event.watch_states:
+            seeded = tuple(
+                state
+                for external_id in event.external_ids
+                if (state := self._states.get(external_id)) is not None
+            )
+            event = SourceEvent(
+                kind=event.kind, external_ids=event.external_ids, watch_states=seeded
+            )
+        self._push_queue.put_nowait(event)
+
+    def silence_push(self) -> None:
+        """Deliver nothing more, including whatever is already queued. The
+        connection stays open, which is the whole point."""
+        self._push_silent = True
+        while not self._push_queue.empty():
+            self._push_queue.get_nowait()
+
+    def drop_push(self) -> None:
+        self._push_dropped = True
+        self._push_queue.put_nowait(_DROPPED)
+
+    def advance_push_clock(self, seconds: float) -> None:
+        self._push_now += seconds
+
+    def disable_push(self) -> None:
+        self._push_supported = False
+
     # -- the port ------------------------------------------------------
 
     @property
@@ -131,7 +216,26 @@ class FakeSourceAdapter(SourceAdapter):
 
     @property
     def supports_push(self) -> bool:
-        return False
+        """Grounded in messages, spelled out rather than imported.
+
+        **`self._push_messages > 0` is redundant with the clause after it
+        through this fake's own public surface, and is kept anyway** --
+        `_drain` writes both fields in the same statement, so nothing can
+        reach a state where the count is zero and the instant is not
+        `None`. What makes them different is a *reopen*: `_events` clears
+        the instant and keeps the count, exactly as `PushHealth.record_open`
+        does, so the second open of a channel that has delivered before
+        reads `False` on the third clause and not on the second. Same
+        equivalent-mutant shape M4 recorded for `jobs.py`'s `GREATEST`
+        alongside its `WHERE`, and kept for the same reason: one is the
+        lane's history, the other is this connection's.
+        """
+        return (
+            self._push_open
+            and self._push_messages > 0
+            and self._push_last_message_at is not None
+            and self._push_now - self._push_last_message_at <= self.push_stale_after
+        )
 
     async def _ready(self) -> None:
         if self._closed:
@@ -260,10 +364,70 @@ class FakeSourceAdapter(SourceAdapter):
         )
 
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
-        raise SourceNotSupported("this adapter has no push channel")
+        if not self._push_supported:
+            raise SourceNotSupported("push is disabled on this fake source")
+        return self._events()
+
+    @asynccontextmanager
+    async def _events(self) -> AsyncIterator[AsyncIterator[SourceEvent]]:
+        self._push_open = True
+        self._push_opened_at = self._push_now
+        # Cleared, and `_push_messages` deliberately not: the count is the
+        # lane's history across reconnects, the instant is evidence about a
+        # socket that is now closed. Carrying the instant over would let a
+        # fresh connection that delivers nothing inherit its predecessor's
+        # freshness -- the exact state this milestone refuses.
+        self._push_last_message_at = None
+        try:
+            yield self._drain()
+        finally:
+            self._push_open = False
+
+    async def _drain(self) -> AsyncIterator[SourceEvent]:
+        while True:
+            try:
+                event = await asyncio.wait_for(self._push_queue.get(), timeout=_POLL_SECONDS)
+            except TimeoutError:
+                # A tick, not a failure, and the tick is what runs the
+                # watchdog -- the same split `EmbyPushChannel` makes, so
+                # that both implementations answer the contract's stalled
+                # case for the same structural reason rather than by
+                # coincidence.
+                if self._push_dropped:
+                    raise PortUnavailable("the fake push channel was dropped") from None
+                if self._silent_for() > self.push_stale_after:
+                    raise PortUnavailable(
+                        f"the fake push channel delivered no message in {self._silent_for():.0f}s"
+                    ) from None
+                continue
+            if event is _DROPPED:
+                raise PortUnavailable("the fake push channel was dropped")
+            if self._push_silent:
+                # Queued before the channel went silent. Dropped rather than
+                # yielded, and not counted: `silence_push` drains what is
+                # already there, so this is the race where a producer got in
+                # between the drain and the flag.
+                continue
+            self._push_messages += 1
+            self._push_last_message_at = self._push_now
+            yield event
+
+    def _silent_for(self) -> float:
+        """Seconds since anything arrived, measured from the open when
+        nothing has -- `PushHealth.silent_for`'s rule, re-derived. That
+        fallback is what makes a channel that has *never* delivered become
+        stale, which is the one failure the watchdog exists for."""
+        since = self._push_last_message_at
+        if since is None:
+            since = self._push_opened_at
+        return 0.0 if since is None else self._push_now - since
 
     async def aclose(self) -> None:
         self._closed = True
+        # A closed adapter has no channel, whatever the ledger last saw --
+        # `EmbyAdapter.aclose` records the same thing through
+        # `PushHealth.record_close`.
+        self._push_open = False
 
 
 class FakeSourceHarness(SourceHarness):
@@ -312,6 +476,34 @@ class FakeSourceHarness(SourceHarness):
 
     def authentications(self) -> int:
         return self._adapter.authentications
+
+    async def push_event(self, event: SourceEvent) -> None:
+        self._adapter.push(event)
+
+    async def push_silence(self) -> None:
+        self._adapter.silence_push()
+
+    async def push_drop(self) -> None:
+        self._adapter.drop_push()
+
+    async def advance_push_clock(self, seconds: float) -> None:
+        self._adapter.advance_push_clock(seconds)
+
+    def can_advance_push_clock(self) -> bool:
+        return True
+
+    def push_stale_after(self) -> float:
+        return self._adapter.push_stale_after
+
+    def can_disable_push(self) -> bool:
+        """The only harness that can. `EmbyAdapter` has no state in which
+        `events()` raises `SourceNotSupported`, so it declines instead --
+        which is why `test_events_raises_source_not_supported_when_push_is_
+        unavailable` skips there rather than being deleted."""
+        return True
+
+    async def disable_push(self) -> None:
+        self._adapter.disable_push()
 
     async def aclose(self) -> None:
         await self._adapter.aclose()
