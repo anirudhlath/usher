@@ -57,11 +57,22 @@ class EventPublisherContract:
         port has no `subscribe` -- so this asserts the weaker, universally
         checkable half: a burst larger than any plausible buffer completes.
         `EventBusContract` asserts the real thing.
+
+        **Bounded, and it was not at first.** Run unbounded against the
+        mutation this whole file exists for -- `await queue.put(...)` for
+        `put_nowait` -- it does not fail, it *deadlocks*: the burst fills the
+        subscriber's queue on publish 65 of 1,000 and nothing will ever read
+        it. The sweep recorded HUNG rather than KILLED, which is a mutation
+        no case observed rather than one every case caught.
         """
-        for index in range(_BURST):
-            await publisher.publish(
-                ClientEvent(kind=ClientEventKind.SYNC_PROGRESS, data={"seen": index})
-            )
+
+        async def burst() -> None:
+            for index in range(_BURST):
+                await publisher.publish(
+                    ClientEvent(kind=ClientEventKind.SYNC_PROGRESS, data={"seen": index})
+                )
+
+        await asyncio.wait_for(burst(), timeout=_NOT_BLOCKING_SECONDS)
 
     async def test_publish_is_not_a_suspension_point_a_caller_can_be_starved_on(
         self, publisher: EventPublisher
