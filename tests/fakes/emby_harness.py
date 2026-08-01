@@ -171,6 +171,14 @@ class EmbyHarness(SourceHarness):
         against the first object would silently stop affecting the channel
         the moment anything reconnected -- a `push_drop` that dropped
         nothing, which reads as a passing case.
+
+        **A known equivalent mutant against the contract suite as it stands,
+        and kept anyway**, the way `jobs.py` keeps its `GREATEST` alongside
+        its `WHERE`. Measured: collapsing this to `return self._push` leaves
+        all 49 cases green on both subclasses, because no case opens
+        `events()` twice, so the queued connection *is* the one handed out.
+        What it buys is the first reconnect case (`services/push.py`) not
+        having to discover this, and it costs one indexing expression.
         """
         return (
             self._push_connector.handed_out[-1] if self._push_connector.handed_out else self._push

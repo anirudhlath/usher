@@ -36,7 +36,7 @@ any source produces.
 `tests/unit/test_fakes_emby_server.py` pins everything on the other side
 of that line -- this file is the entire basis for running the source
 contract against the real adapter, so a divergence here is a place a
-wrong adapter passes all 43 of its assertions.
+wrong adapter passes all 49 of its assertions.
 
 **The listing route and the item route render different `UserData`, and
 that asymmetry is a measurement, not a convenience** -- see `_user_data`.

@@ -33,11 +33,22 @@ def test_both_implementations_run_the_same_assertions() -> None:
     of it. Nothing stops a subclass from overriding a case with a weaker one
     -- so this asserts neither does, and that the count is not silently
     drifting as cases are added.
+
+    **The count has to move in the same commit as the cases**, or the suite
+    stays red -- which is the design of this guard rather than friction with
+    it. M3 shipped `== 39`, M4 took it to 43, and M5's six push cases take
+    it to 49.
+
+    Exactly one of the 49 skips on this subclass:
+    `test_events_raises_source_not_supported_when_push_is_unavailable`,
+    because `EmbyAdapter` has no state in which `events()` raises
+    `SourceNotSupported` -- it always has a channel to offer and finds out
+    afterwards whether it delivers. `TestFakeSourceAdapter` runs all 49.
     """
     from tests.unit.test_source_adapter_contract import TestFakeSourceAdapter
 
     cases = {name for name in dir(SourceAdapterContract) if name.startswith("test_")}
-    assert len(cases) == 43
+    assert len(cases) == 49
     for subclass in (TestEmbyAdapter, TestFakeSourceAdapter):
         overridden = {
             name

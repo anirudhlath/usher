@@ -498,13 +498,18 @@ class EmbyPushChannel:
             # for the reason `jobs.py` keeps its `GREATEST` alongside its
             # `WHERE`: no test can kill it, because the only observer of a
             # starved event loop would itself be on that loop. Deleting it
-            # passes all 38 cases here, since `FakePushConnection.recv` does
+            # passes all 55 cases here, since `FakePushConnection.recv` does
             # suspend. What it is worth was measured the other way round:
             # with the fake's suspension removed *and* this line absent, the
-            # suite does not fail, it **hangs** -- 35 cases in, then nothing,
-            # killed at 45 s, because `asyncio.wait_for` needs the loop to
+            # suite does not fail, it **hangs** -- 37 cases in, then nothing,
+            # killed at 90 s, because `asyncio.wait_for` needs the loop to
             # run in order to fire. With this line present that same
-            # mutation fails one case in 0.12 s.
+            # mutation fails one case in 0.6 s.
+            #
+            # Re-measured at 55 cases in M5 group C rather than renumbered
+            # from the 38 this said when it was written: a count inside a
+            # mutation result is part of the measurement, and the suite it
+            # counts had grown by 17 cases since.
             await asyncio.sleep(0)
             try:
                 frame = await connection.recv(self._poll_seconds)
