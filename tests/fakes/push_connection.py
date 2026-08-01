@@ -8,12 +8,18 @@ subprotocol mismatch are every one of them invisible here. It never
 fragments a message, never sends a binary frame, never applies backpressure
 at `max_queue`, and its `aclose()` cannot fail. It has no notion of a close
 code, so "the peer went away cleanly" and "the peer went away abruptly" are
-the same event. And its `recv(timeout)` **ignores `timeout` entirely**: it
-raises `TimeoutError` the instant a test asks it to, where the real one
-raises only after that many seconds of real wall time. That last one is the
-load-bearing forgiveness -- it is what lets a staleness watchdog be tested
-on an injected clock in under a millisecond -- and it means nothing here can
-ever catch a channel that passed the *wrong* timeout, or none at all.
+the same event. And its `recv(timeout)` **ignores `timeout`'s effect
+entirely**: it raises `TimeoutError` the instant a test asks it to, where
+the real one raises only after that many seconds of real wall time. That
+last one is the load-bearing forgiveness -- it is what lets a staleness
+watchdog be tested on an injected clock in under a millisecond rather than
+in a minute and a half -- and it is why the *value* is recorded even though
+it is not honoured. Without `recv_timeouts` nothing here could catch a
+channel that passed the wrong timeout, or none at all, and the whole
+watchdog rests on `recv` returning control on a cadence the channel chose;
+`test_the_channel_polls_with_its_own_timeout` is the case that reads it.
+The real connection hands the same value to `asyncio.wait_for`, so a wrong
+one there is a lane that either spins or never runs its watchdog.
 
 What closes those gaps is a loopback test driving the real `websockets`
 client against a real `websockets` server on `127.0.0.1` -- a real
@@ -42,6 +48,10 @@ class FakePushConnection(PushConnection):
         self.sent: list[str] = []
         self.closed = False
         self.recv_calls = 0
+        # The timeouts this connection was *asked* for, in order. It honours
+        # none of them -- see the module docstring -- so recording them is
+        # the only thing that can observe a caller passing the wrong one.
+        self.recv_timeouts: list[float] = []
         self._frames: asyncio.Queue[str] = asyncio.Queue()
         self._failure: PortUnavailable | None = None
         self._stalled = False
@@ -77,6 +87,7 @@ class FakePushConnection(PushConnection):
 
     async def recv(self, timeout: float) -> str:
         self.recv_calls += 1
+        self.recv_timeouts.append(timeout)
         # A real suspension point on every call, before anything is
         # inspected: without it a consumer task runs to completion before a
         # producer task ever starts, and a test that looked concurrent is

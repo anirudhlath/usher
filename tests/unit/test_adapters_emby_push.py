@@ -739,6 +739,204 @@ async def test_a_tick_with_nothing_on_it_is_not_the_end_of_the_stream() -> None:
     assert channel.health.messages_received == 1
 
 
+# ---------------------------------------------------------------------------
+# The watchdog: a socket that stops delivering is a dead socket.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_channel_that_never_delivers_raises_after_the_staleness_window() -> None:
+    """**The failure this milestone exists for**, in one test.
+
+    The socket upgraded -- ADR-0004 measured a handshake against a
+    *nonexistent* path doing exactly that and being held open -- the
+    subscription was sent, the connection object is fine, and nothing is
+    arriving. Without the watchdog the lane holds it forever:
+    `supports_push` is then the only thing that reports the truth and
+    nothing acts on it, because a channel that never raises is a channel
+    `PushSupervisor` never reconnects.
+
+    The clock is injected, so this is the sub-millisecond version of a
+    ninety-second failure.
+    """
+    ticks = iter([0.0, 30.0, 60.0, 91.0, 120.0])
+    connection = FakePushConnection()
+    connection.stall()
+    connector = FakePushConnector([connection])
+    channel = EmbyPushChannel(
+        _StubSession(),
+        base_url="https://emby.invalid",
+        device_id="d",
+        health=PushHealth(stale_after=90.0),
+        connect=connector,
+        clock=lambda: next(ticks),
+        poll_seconds=0.001,
+    )
+    async with channel.open() as events:
+        with pytest.raises(PortUnavailable, match="delivered no message") as caught:
+            await asyncio.wait_for(anext(aiter(events)), timeout=BOUND)
+    # A duration and a path, never a URL: this message travels into a log
+    # line and a `SourceStatus.detail`, and the URL it would name carries
+    # the session token.
+    message = str(caught.value)
+    assert "session-token-1" not in message
+    assert "api_key" not in message
+    assert WEBSOCKET_PATH in message
+    assert channel.health.messages_received == 0
+    assert channel.health.is_delivering(now=120.0) is False
+
+
+async def test_a_channel_that_delivered_and_then_went_quiet_raises() -> None:
+    """The other half, and the one `ping_timeout` cannot reach: a peer that
+    answers pongs while delivering nothing passes the WebSocket keepalive.
+    The socket worked, and then stopped, and the lane must notice.
+
+    **The plan's version of this case could not have passed and could not
+    have tested this path.** It called `connection.stall()` *before* the
+    first `anext`, and `stall()` refuses whatever is already queued -- so
+    the seeded frame was never delivered, `messages_received` was 0 rather
+    than the 1 it asserted, and the case was a second copy of the
+    never-delivered one above. The message has to actually arrive first,
+    which means consuming it, which means seeding one that maps to an event
+    rather than `Sessions` (which maps to nothing and so never returns from
+    `anext`).
+    """
+    ticks = iter([0.0, 1.0, 40.0, 80.0, 92.0, 100.0])
+    connection = FakePushConnection()
+    connection.deliver(json.dumps(load_emby_fixture("push_user_data_changed")))
+    connector = FakePushConnector([connection])
+    channel = EmbyPushChannel(
+        _StubSession(),
+        base_url="https://emby.invalid",
+        device_id="d",
+        health=PushHealth(stale_after=90.0),
+        connect=connector,
+        clock=lambda: next(ticks),
+        poll_seconds=0.001,
+    )
+    async with channel.open() as events:
+        stream = aiter(events)
+        first = await asyncio.wait_for(anext(stream), timeout=BOUND)
+        assert first.kind is SourceEventKind.WATCH_STATE_CHANGED
+        assert channel.health.is_delivering(now=1.0) is True
+        connection.stall()
+        with pytest.raises(PortUnavailable, match="delivered no message"):
+            await asyncio.wait_for(anext(stream), timeout=BOUND)
+    assert channel.health.messages_received == 1
+
+
+async def test_a_channel_inside_the_window_keeps_waiting() -> None:
+    """The mutation this rules out is a watchdog that fires on the first
+    tick, which turns every idle second into a reconnect and a gap-closing
+    delta walk against a server PRD 01 measures at 1-5 s per request.
+
+    The clock is a clamped ramp rather than the plan's fixed list of seven
+    instants. `recv` here ignores its timeout and answers immediately, so
+    0.05 s of wall time is *thousands* of ticks -- a list is exhausted in
+    microseconds and `next()` on a spent iterator inside an async generator
+    surfaces as `RuntimeError`, not as the `TimeoutError` the case is
+    looking for. Clamping below `stale_after` makes "the watchdog cannot
+    fire" a property of the clock rather than of how fast this host is.
+    """
+    connection = FakePushConnection()
+    connection.stall()
+    connector = FakePushConnector([connection])
+    elapsed = 0.0
+
+    def clock() -> float:
+        nonlocal elapsed
+        elapsed += 10.0
+        return min(elapsed, 80.0)
+
+    channel = EmbyPushChannel(
+        _StubSession(),
+        base_url="https://emby.invalid",
+        device_id="d",
+        health=PushHealth(stale_after=90.0),
+        connect=connector,
+        clock=clock,
+        poll_seconds=0.001,
+    )
+    async with channel.open() as events:
+        with pytest.raises(TimeoutError):
+            # Nothing raises and nothing yields: the channel is waiting,
+            # which is the correct behaviour and is only observable as the
+            # *test's* own timeout expiring.
+            await asyncio.wait_for(anext(aiter(events)), timeout=0.05)
+    assert connection.recv_calls >= 3
+
+
+async def test_a_channel_that_keeps_delivering_is_never_torn_down() -> None:
+    """The watchdog measures from the *last message*, not from the open, and
+    that is only observable on a channel that has been up far longer than
+    `stale_after` and is still working.
+
+    Without it a lane on a healthy socket is torn down every 90 seconds for
+    the rest of its life -- and every teardown costs `PushSupervisor` a
+    reconnect and a gap-closing delta walk. `PushHealth.silent_for` pins
+    both branches directly; this is the same rule one layer up, where the
+    consequence lives.
+    """
+    connection = FakePushConnection()
+    connection.deliver(json.dumps(load_emby_fixture("push_user_data_changed")))
+    connector = FakePushConnector([connection])
+    now = 0.0
+    channel = EmbyPushChannel(
+        _StubSession(),
+        base_url="https://emby.invalid",
+        device_id="d",
+        health=PushHealth(stale_after=90.0),
+        connect=connector,
+        clock=lambda: now,
+        poll_seconds=0.001,
+    )
+    async with channel.open() as events:  # opened_at = 0.0
+        now = 500.0
+        stream = aiter(events)
+        await asyncio.wait_for(anext(stream), timeout=BOUND)  # last_message_at = 500.0
+        # 560 s past the open and 60 s past the last message. Measured from
+        # the open this channel is nine minutes silent and would be torn
+        # down; measured from the message it is well inside the window.
+        now = 560.0
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(anext(stream), timeout=0.05)
+    assert connection.recv_calls >= 3
+    assert channel.health.messages_received == 1
+
+
+async def test_the_channel_polls_with_its_own_timeout() -> None:
+    """`FakePushConnection.recv` ignores its `timeout`'s *effect* -- that is
+    what makes a staleness test sub-millisecond instead of ninety seconds --
+    so the value passed is observable only because the fake records it.
+
+    Without this case nothing in the unit suite can tell a channel that
+    polls on its configured cadence from one that passes `0`, or the
+    staleness ceiling, or nothing at all. The real connection hands the same
+    value to `asyncio.wait_for`, where `0` is a hot spin that starves the
+    lane's own event loop and a value above `stale_after` is a watchdog that
+    can never run before the poll it is waiting on returns.
+    """
+    connection = FakePushConnection()
+    connection.stall()
+    connector = FakePushConnector([connection])
+    channel = EmbyPushChannel(
+        _StubSession(),
+        base_url="https://emby.invalid",
+        device_id="d",
+        health=PushHealth(stale_after=90.0),
+        connect=connector,
+        # Frozen: the subject here is the value handed to `recv`, and a
+        # clock that advanced would make the watchdog fire mid-case for a
+        # reason that has nothing to do with it.
+        clock=lambda: 0.0,
+        poll_seconds=0.25,
+    )
+    async with channel.open() as events:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(anext(aiter(events)), timeout=0.05)
+    assert connection.recv_timeouts, "the channel never called recv"
+    assert set(connection.recv_timeouts) == {0.25}
+
+
 async def test_the_fake_connection_really_suspends_on_every_recv() -> None:
     """The fake's own load-bearing property, pinned directly.
 

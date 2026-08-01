@@ -452,7 +452,19 @@ class EmbyPushChannel:
             try:
                 frame = await connection.recv(self._poll_seconds)
             except TimeoutError:
-                # A tick, not a failure. The staleness watchdog goes here.
+                # A tick, not a failure -- and the tick is what runs the
+                # watchdog. `PushHealth.is_delivering` makes an
+                # upgraded-but-silent socket *report* unhealthy; this is
+                # what makes the lane stop using one.
+                #
+                # Deliberately not what `websockets`' own
+                # `ping_interval`/`ping_timeout` covers. Those detect a dead
+                # TCP peer. A *live* peer that answers pongs and delivers
+                # nothing passes them and fails this -- and that peer is
+                # exactly what ADR-0004 measured, where a handshake against
+                # a nonexistent path upgraded and was held open. The two are
+                # layered; neither substitutes for the other.
+                self._raise_if_stale()
                 continue
             # Counted **before** it is parsed and before it is mapped. A
             # frame is evidence the socket is alive whatever it says, and
@@ -462,6 +474,38 @@ class EmbyPushChannel:
             for event in self._decode(frame, source_user_id):
                 self._health.record_event()
                 yield event
+
+    def _raise_if_stale(self) -> None:
+        """Raise `PortUnavailable` when nothing has arrived for
+        `stale_after`.
+
+        **Raises rather than reconnecting**, and that is the whole reason
+        this is one line rather than a loop. A channel is one connection;
+        reconnect belongs to `PushSupervisor`, because PRD 03 puts the
+        gap-closing delta reconcile *on* the reconnect. A channel that
+        quietly re-established its own socket would skip that walk and leave
+        the supervisor's consecutive-failure counter with nothing to count,
+        so a permanently broken proxy would look like a permanently healthy
+        lane -- which is the same lie `is_delivering` refuses, arrived at
+        from the other side.
+
+        Silence is measured from the last message, falling back to the open
+        (`PushHealth.silent_for`), so a channel that has *never* delivered
+        becomes stale too. That fallback is the case this milestone is named
+        for: without it the one failure mode the watchdog exists to catch is
+        the one it cannot see.
+
+        **The message names a duration and a path, never a URL.** This
+        string reaches a log line and `SourceStatus.detail`, and the URL it
+        would otherwise name carries the session token (ADR-0012).
+        """
+        silent = self._health.silent_for(now=self._clock())
+        if silent <= self._health.stale_after:
+            return
+        raise PortUnavailable(
+            f"{WEBSOCKET_PATH} delivered no message in {silent:.0f}s "
+            f"(ceiling {self._health.stale_after:.0f}s); treating the channel as dead"
+        )
 
     def _decode(self, frame: str, source_user_id: str | None) -> tuple[SourceEvent, ...]:
         try:
