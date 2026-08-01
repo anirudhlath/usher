@@ -166,7 +166,8 @@ class PushHealth:
     def record_open(self, *, now: float) -> None:
         """A connection is up. Says nothing about whether it works.
 
-        Two fields move in opposite directions here and both are deliberate.
+        Three fields move here and they move in different directions,
+        deliberately.
 
         `messages_received` and `reconnects` are **not** reset: they are the
         *lane's* history, and a reconnect that zeroed the count would make a
@@ -174,6 +175,15 @@ class PushHealth:
         never delivered -- which is a lie in the other direction, and which
         `PushSupervisor`'s "reset the failure counter only on evidence of
         delivery" rule would then act on.
+
+        `reconnects` is incremented **here, on the second and later open**,
+        rather than on a failure. That is the quantity PRD 10's dashboard
+        plots: a lane that failed to connect five times and then succeeded
+        reconnected *once*, and a counter on the failure would report five
+        and make an unreachable source look like a flapping one. The first
+        open is not a reconnect, which is why the guard is `opened_at is not
+        None` rather than an unconditional `+= 1` -- otherwise every source
+        starts its dashboard at 1.
 
         `last_message_at` **is** cleared, because it is evidence about a
         socket that is now closed. Carrying it across would let a fresh
@@ -184,6 +194,8 @@ class PushHealth:
         falls back to `opened_at`, which is what makes a channel that never
         delivers anything become measurably silent.
         """
+        if self.opened_at is not None:
+            self.reconnects += 1
         self.connected = True
         self.opened_at = now
         self.last_message_at = None
@@ -197,9 +209,6 @@ class PushHealth:
 
     def record_event(self) -> None:
         self.events_emitted += 1
-
-    def record_reconnect(self) -> None:
-        self.reconnects += 1
 
     def is_delivering(self, *, now: float) -> bool:
         """Whether this channel is a push channel a caller may rely on.

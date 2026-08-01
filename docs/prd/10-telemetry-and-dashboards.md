@@ -100,9 +100,9 @@ is maintained rather than aspirational.
 | `usher.watch_state.run.duration` | histogram | source, status | ✅ M4 |
 | `usher.watch_state.backfilled` | counter | source | ✅ M4 |
 | `usher.source.request.duration` | histogram | source, op | ✅ M3 |
-| `usher.source.push.connected` | gauge | source | M5 |
-| `usher.source.push.reconnects` | counter | source | M5 |
-| `usher.source.push.events` | counter | source, kind | ✅ M5 |
+| `usher.source.push.connected` | gauge | source | M5 — see below |
+| `usher.source.push.reconnects` | counter | source | M5 — see below |
+| `usher.source.push.events` | counter | source, kind | M5 — see below |
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
 | `usher.embedding.duration` | histogram | — | M6 |
@@ -133,6 +133,53 @@ can only answer the question it actually has:
   "provider degraded" alert divides 429s and 5xxs by the total — a
   denominator that omitted the failures would read *low* exactly during an
   outage.
+
+Four more M5 made, in the same spirit — and one honest caveat first.
+
+**The three push rows are not ticked, and the instruments exist.** The
+gauges, the counter and their reader hook all ship, each pinned by a test
+that drives the emitting code and reads the value back out of an in-memory
+metric reader. What does not exist yet is the *lane*: nothing in a running
+process registers a push reader or applies a push event until `create_app`
+grows its supervised lanes, so no deployment emits these today and a ✅ would
+be the exact claim this column's rule forbids. Tick all three in the change
+that starts the lanes.
+
+- **`usher.source.push.connected` reports *delivery*, not connection.** A
+  gauge fed by the socket's state would read 1 for the failure
+  [ADR-0004](decisions/0004-push-over-polling.md) measured — a handshake
+  against a nonexistent path, upgraded and held open, delivering nothing —
+  which is precisely the condition the "Push down" alert below exists to
+  catch. The series keeps its name, because a metric renamed is a dashboard
+  panel silently blank, and reports the honest quantity: the adapter's
+  message ledger, not its connection object.
+- **`usher.source.push.reconnects` is an *asynchronous* counter, and it
+  counts on the second and later `open`.** Asynchronous because the value is
+  a cumulative total read out of an in-memory ledger rather than something
+  incremented at an event — the one place in this project where an
+  observable callback is unambiguously safe, since there is no query to
+  bounce onto the event loop. On the second open rather than on a failure
+  because a lane that failed to connect five times and then succeeded
+  reconnected *once*; a counter on the failure reports five and makes an
+  unreachable source look like a flapping one, which is a different
+  diagnosis with a different fix.
+- **`usher.source.push.events` is new to this table, labelled `source` and
+  `kind`.** It is what separates "the lane is up" from "the lane is doing
+  anything", and the `kind` label is what separates an event that cost a
+  merge from one that
+  [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
+  forbids acting on at all. Counted on the way *out* of applying, so an
+  event answered with a delta walk is still counted — a series that dropped
+  those would read as a quiet source during exactly the library scan that
+  produced them.
+- **Queue depth by priority (dashboard 3) is a Postgres query, not a
+  metric.** M4 recorded that `usher.jobs.queued` is labelled `kind` and that
+  "M5 introduces demand promotion and is where the band becomes a real
+  series". M5 introduces demand promotion and the label stays `kind`: a
+  priority band needs a second `GROUP BY` on `JobQueue`, and this document's
+  own first principle puts "what is in the queue right now, broken down
+  however you like" on the datasource that can answer it exactly. The panel
+  reads `jobs` directly.
 
 ## Analytics tables
 

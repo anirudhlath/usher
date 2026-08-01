@@ -167,10 +167,46 @@ def test_a_reconnect_keeps_the_lanes_message_history() -> None:
     health.record_open(now=100.0)
     health.record_message(now=101.0)
     health.record_close()
-    health.record_reconnect()
     health.record_open(now=200.0)
     health.record_message(now=201.0)
     assert (health.messages_received, health.reconnects) == (2, 1)
+
+
+def test_a_first_connection_is_not_a_reconnect() -> None:
+    """PRD 10's `usher.source.push.reconnects`, and the off-by-one that
+    would put every source's dashboard panel at 1 from start-up.
+
+    Counted on the second and later *open* rather than on a failure, because
+    a lane that failed to connect five times and then succeeded reconnected
+    once -- a counter on the failure reports five and makes an unreachable
+    source look like a flapping one, which is a different diagnosis with a
+    different fix.
+    """
+    health = PushHealth(stale_after=90.0)
+    health.record_open(now=100.0)
+    assert health.reconnects == 0
+    health.record_close()
+    health.record_open(now=200.0)
+    assert health.reconnects == 1
+
+
+async def test_the_channel_counts_its_own_reconnects() -> None:
+    """The ledger's arithmetic is only worth anything if the channel drives
+    it -- and until this, nothing in `src/` ever did: `record_reconnect` was
+    a method with no caller, so PRD 10's reconnect series would have plotted
+    a flat zero for every source forever.
+
+    Two opens through the real `open()`, and one reconnect. Defined here
+    rather than on the ledger alone because the ledger's own case cannot see
+    a channel that never calls it.
+    """
+    channel = _channel(FakePushConnector([FakePushConnection(), FakePushConnection()]))
+    async with channel.open():
+        pass
+    assert channel.health.reconnects == 0
+    async with channel.open():
+        pass
+    assert channel.health.reconnects == 1
 
 
 def test_a_reconnect_measures_silence_from_the_new_open_not_the_old_message() -> None:
