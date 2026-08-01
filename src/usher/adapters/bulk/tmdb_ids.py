@@ -7,14 +7,20 @@ best and, without a checksum anywhere in this pipeline, gives an active
 network intermediary a free hand at worst):
 
     movie_ids_07_29_2026.json.gz      26.1 MiB
-      {"adult":false,"id":3924,"original_title":"Blondie",
+      {"adult":false,"id":90000045,"original_title":"A Synthetic Feature",
        "popularity":1.2707,"video":false}
     tv_series_ids_07_29_2026.json.gz
-      {"id":1,"original_name":"プライド","popularity":3.7982}
+      {"id":90000046,"original_name":"日本語のタイトル","popularity":3.7982}
+
+The two records above are the observed *shape* with invented values, not two
+real ones -- they were transcribed verbatim until 2026-08-01, which is
+third-party data in a shipped package. See `tests/fixtures/README.md`.
 
 Two asymmetries that matter and are handled explicitly: the TV export has no
 `adult` field at all, and it spells the name `original_name` rather than
-`original_title`.
+`original_title`. The second record keeps a non-ASCII title because the
+export really does carry them and a fixture that did not would hide an
+encoding bug.
 
 Neither export carries a localised title, a year, a release date, or an
 overview -- which is why Phase 1 lands in `tmdb_ids` rather than creating

@@ -121,7 +121,7 @@ _SAMPLES: tuple[object, ...] = (
     _CURSOR,
     BulkBatch[ImdbTitle](rows=(_TITLE,), cursor=_CURSOR),
     _TITLE,
-    ImdbRating(imdb_id="tt0111161", community_rating=9.3, vote_count=2_900_000),
+    ImdbRating(imdb_id="tt99000020", community_rating=7.4, vote_count=12_345),
     TmdbId(
         tmdb_id=278,
         kind=TitleKind.MOVIE,
@@ -2009,7 +2009,7 @@ class BulkCatalogRepositoryContract:
         await repo.upsert_titles([SHAWSHANK])
         applied = await repo.apply_ratings(
             [
-                ImdbRating(imdb_id="tt0111161", community_rating=9.3, vote_count=2_900_000),
+                ImdbRating(imdb_id="tt99000020", community_rating=7.4, vote_count=12_345),
                 ImdbRating(imdb_id="tt9999999", community_rating=1.0, vote_count=3),
             ]
         )
@@ -2020,7 +2020,7 @@ class BulkCatalogRepositoryContract:
         self, repo: BulkCatalogRepository
     ) -> None:
         await repo.upsert_titles([SHAWSHANK])
-        rating = ImdbRating(imdb_id="tt0111161", community_rating=9.3, vote_count=2_900_000)
+        rating = ImdbRating(imdb_id="tt99000020", community_rating=7.4, vote_count=12_345)
         assert await repo.apply_ratings([rating]) == 1
         assert await repo.apply_ratings([rating]) == 0
 
@@ -3958,7 +3958,7 @@ EOF
 
 ## Task 10: The IMDb datasets
 
-Every TSV quirk PRD 04 alludes to, handled explicitly. The one that costs real data if missed: **IMDb's TSVs have no quoting mechanism, and title fields contain literal `"` characters.** `csv.reader` with its default `QUOTE_MINIMAL` silently strips them — verified against a real prefix of `title.basics.tsv.gz`, where line `tt0073045` reads `"Giliap"` and `csv.reader` returns `Giliap`. This module uses `line.split("\t")` and never the `csv` module.
+Every TSV quirk PRD 04 alludes to, handled explicitly. The one that costs real data if missed: **IMDb's TSVs have no quoting mechanism, and title fields contain literal `"` characters.** `csv.reader` with its default `QUOTE_MINIMAL` silently strips them — verified against a real prefix of `title.basics.tsv.gz`, where a title field both opens and closes with a literal `"` and `csv.reader` strips both (`CLAUDE.md` names the specimen; a plan is not the place to reproduce a row). This module uses `line.split("\t")` and never the `csv` module.
 
 **Files:**
 - Create: `src/usher/adapters/bulk/imdb.py`
@@ -3967,36 +3967,40 @@ Every TSV quirk PRD 04 alludes to, handled explicitly. The one that costs real d
 
 - [ ] **Step 1: Write the committed fixture slices**
 
-These are hand-written and obviously synthetic apart from four well-known ids, which are here only so the rows are recognisable. Committed as plain `.tsv` rather than `.tsv.gz` so a reviewer can read the diff; the test gzips them into `tmp_path`.
+These are hand-written and every value in them is invented. Committed as plain `.tsv` rather than `.tsv.gz` so a reviewer can read the diff; the test gzips them into `tmp_path`.
+
+> **Corrected 2026-08-01.** As originally written, this step said the slices were "obviously synthetic apart from four well-known ids, which are here only so the rows are recognisable", and the rows below carried real IMDb titles, years, runtimes, genres and two `title.ratings` rows *with their vote counts* — the most licence-restricted part of that dataset. They were committed and shipped for four milestones under a README repeating the same claim. A recognisable id is not the problem; a real row is, and hand-typing one does not make it synthetic. The blocks below are the rows that are actually committed now. See `tests/fixtures/README.md` for the reserved identifier bands and `tests/unit/test_no_third_party_data.py` for the check that now refuses a dataset row anywhere in this repository — including in a plan document, which is data *and* the instruction that recreates it.
 
 `tests/fixtures/bulk/title.basics.slice.tsv` — **tab-separated, no trailing spaces**:
 
 ```text
 tconst	titleType	primaryTitle	originalTitle	isAdult	startYear	endYear	runtimeMinutes	genres
-tt0000001	short	Carmencita	Carmencita	0	1894	\N	1	Documentary,Short
-tt0073045	movie	"Giliap"	"Giliap"	0	1975	\N	137	Crime,Drama
-tt0111161	movie	The Shawshank Redemption	The Shawshank Redemption	0	1994	\N	142	Drama
-tt0944947	tvSeries	Game of Thrones	Game of Thrones	0	2011	2019	57	Action,Adventure,Drama
-tt9999991	tvEpisode	Winter Is Coming	Winter Is Coming	0	2011	\N	62	Adventure
-tt9999992	movie	Synthetic Adult Title	Synthetic Adult Title	1	2001	\N	80	Adult
-tt9999993	videoGame	Synthetic Game	Synthetic Game	0	2010	\N	\N	Action
-tt9999994	tvMiniSeries	Chernobyl	Chernobyl	0	2019	2019	330	Drama,History
-tt9999995	tvMovie	Synthetic TV Movie	\N	0	\N	\N	\N	\N
+tt99000001	short	A Synthetic Short	A Synthetic Short	0	1901	\N	3	Documentary,Short
+tt99000010	movie	"A Quoted Synthetic Title"	"A Quoted Synthetic Title"	0	1962	\N	111	Crime,Drama
+tt99000020	movie	A Synthetic Feature	A Synthetic Feature	0	1988	\N	123	Drama
+tt99000030	tvSeries	A Synthetic Series	A Synthetic Series	0	2004	2009	44	Action,Adventure,Drama
+tt99000060	tvEpisode	A Synthetic First Episode	A Synthetic First Episode	0	2004	\N	51	Adventure
+tt99000070	movie	A Synthetic Adult Title	A Synthetic Adult Title	1	1993	\N	80	Adult
+tt99000080	videoGame	A Synthetic Game	A Synthetic Game	0	2007	\N	\N	Action
+tt99000040	tvMiniSeries	A Synthetic Mini-Series	A Synthetic Mini-Series	0	2015	2015	288	Drama,History
+tt99000050	tvMovie	A Synthetic TV Movie	\N	0	\N	\N	\N	\N
 ```
 
 `tests/fixtures/bulk/title.ratings.slice.tsv`:
 
 ```text
 tconst	averageRating	numVotes
-tt0111161	9.3	2900000
-tt0944947	9.2	2200000
-tt9999999	4.1	7
+tt99000020	7.4	12345
+tt99000030	6.8	4321
+tt99000090	4.1	7
 ```
 
-> Add a short `tests/fixtures/bulk/README.md` stating: *"Hand-written
-> synthetic slices. No third-party dataset file may be committed here — see
-> PRD 04's licensing section. The four real IMDb ids are recognisable
-> identifiers only; the rows are typed by hand."*
+> Add `tests/fixtures/bulk/README.md` recording what each row pins and how
+> to change one. **Corrected 2026-08-01:** the text this step originally
+> prescribed — *"the four real IMDb ids are recognisable identifiers only;
+> the rows are typed by hand"* — is the false assurance that let the real
+> rows sit here for four milestones. Do not restate a reassurance you have
+> not verified.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -4546,17 +4550,17 @@ Phase 1 lands in `tmdb_ids`, not `titles`. The export carries an id, an original
 `tests/fixtures/bulk/movie_ids.slice.jsonl`:
 
 ```text
-{"adult":false,"id":278,"original_title":"The Shawshank Redemption","popularity":45.5,"video":false}
-{"adult":false,"id":45,"original_title":"Synthetic Film","popularity":3.25,"video":false}
-{"adult":true,"id":99991,"original_title":"Synthetic Adult Film","popularity":0.1,"video":false}
-{"adult":false,"id":99992,"original_title":"No Popularity Field","video":false}
+{"adult":false,"id":90000020,"original_title":"A Synthetic Feature","popularity":12.5,"video":false}
+{"adult":false,"id":90000045,"original_title":"Another Synthetic Feature","popularity":3.25,"video":false}
+{"adult":true,"id":90000071,"original_title":"A Synthetic Adult Film","popularity":0.1,"video":false}
+{"adult":false,"id":90000072,"original_title":"No Popularity Field","video":false}
 ```
 
 `tests/fixtures/bulk/tv_series_ids.slice.jsonl` — note there is no `adult` key anywhere, which is the real export's shape:
 
 ```text
-{"id":1399,"original_name":"Game of Thrones","popularity":90.1}
-{"id":45,"original_name":"Synthetic Series","popularity":30.0}
+{"id":90000030,"original_name":"A Synthetic Series","popularity":31.5}
+{"id":90000045,"original_name":"Another Synthetic Series","popularity":30.0}
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -4720,10 +4724,10 @@ best and, without a checksum anywhere in this pipeline, gives an active
 network intermediary a free hand at worst):
 
     movie_ids_07_29_2026.json.gz      26.1 MiB
-      {"adult":false,"id":3924,"original_title":"Blondie",
+      {"adult":false,"id":90000045,"original_title":"A Synthetic Feature",
        "popularity":1.2707,"video":false}
     tv_series_ids_07_29_2026.json.gz
-      {"id":1,"original_name":"プライド","popularity":3.7982}
+      {"id":90000046,"original_name":"日本語のタイトル","popularity":3.7982}
 
 Two asymmetries that matter and are handled explicitly: the TV export has no
 `adult` field at all, and it spells the name `original_name` rather than

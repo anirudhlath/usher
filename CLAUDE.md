@@ -741,7 +741,7 @@ CLI/deps changes**, by running the whole suite under a
 `sitecustomize.py` that patches `socket.socket.connect`, `connect_ex` and
 `socket.getaddrinfo` to raise on anything that is not loopback (`AF_UNIX` is
 left alone, so Docker's socket still works and `testcontainers` still reaches
-`127.0.0.1`). **1,318 unit + 425 integration passed (1 unit case skipped), zero blocks.** The
+`127.0.0.1`). **1,319 unit + 425 integration passed (1 unit case skipped), zero blocks.** The
 guard lives outside the tree — it is a check to re-run, not a dependency to
 add, because `PYTHONPATH`-injecting a socket monkeypatch into every developer's
 suite costs more than it catches.
@@ -1563,8 +1563,8 @@ integration), mypy strict clean over `src` and `tests`, 6 import contracts:
 
 ```bash
 uv run usher --help                              # the CLI, also installed as `python -m usher`
-uv run pytest                                    # 1743 passed + 1 skipped (1319 unit / 425 integration)
-uv run pytest tests/unit                         # 1318 passed + 1 skipped, no Docker and no network
+uv run pytest                                    # 1744 passed + 1 skipped (1320 unit / 425 integration)
+uv run pytest tests/unit                         # 1319 passed + 1 skipped, no Docker and no network
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .
@@ -1735,19 +1735,33 @@ convention nothing checks is not one.** Three checks over `src/` and
 a committed fixture at or above a 90,000,000 floor (two orders of magnitude
 above TMDb's own daily-export id space); and a **hashed** regression list of
 the identifiers this repository once committed, hashed so the guard is not
-itself the last file holding them. Plus two cases that fail if the scan
-stops covering the fixtures — a guard that globs nothing passes exactly
-like a guard that passes, the same family as the `sitecustomize.py`
-installation proof. Mutation-verified 7/7: a real tconst back in a TSV, a
-real TMDb id back in a JSON fixture, a real TVDb id back in an Emby
-fixture, a real TMDb id back in a `.py` test, `_SCANNED_ROOTS` narrowed to
-`("src",)`, the IMDb regex made to match nothing, and the fixture walker
-made to return nothing. `docs/` and `CLAUDE.md` are deliberately **not**
-scanned: neither ships, and naming a real row as the *specimen* for a
-measurement is a claim about a dataset rather than a copy of one — which is
-why this file still names one and `src/usher/adapters/bulk/imdb.py` no
-longer does. `tests/fixtures/README.md` holds the bands and the allocation
-table.
+itself the last file holding them. `docs/` and `CLAUDE.md` are deliberately
+outside those three: neither ships, and naming a real row as the *specimen*
+for a measurement is a claim about a dataset rather than a copy of one —
+which is why this file still names one and
+`src/usher/adapters/bulk/imdb.py` no longer does.
+
+**A fourth check scans the whole repository, `docs/` included, for a
+dataset *row* rather than an identifier — and that location-independent one
+is what caught the two the other three missed.** `docs/plans/2026-07-30-m2-
+bootstrap.md` prescribed the original fixture verbatim, ratings rows and
+vote counts included: data, *and* the instruction that recreates it, which
+is the worse half and is why "docs are just notes" does not hold for a row.
+And `usher.adapters.bulk.tmdb_ids`' module docstring carried two real TMDb
+id-export records — in the wheel. Both are corrected. Matching on shape (a
+tconst followed by a tab; a JSON object carrying `original_title`/
+`original_name`) is what makes scanning prose free of noise: no sentence
+looks like that.
+
+Plus two cases that fail if the scans stop scanning — a guard that globs
+nothing passes exactly like a guard that passes, the same family as the
+`sitecustomize.py` installation proof. **Mutation-verified 11/11:** a real
+tconst back in a TSV fixture, a real TMDb id back in a JSON fixture, a real
+TVDb id back in an Emby fixture, a real TMDb id back in a `.py` test, a
+real dataset row back in a plan document, a real export record back in a
+shipped docstring, `_SCANNED_ROOTS` narrowed to `("src",)`, the repo-wide
+walk emptied, and each of the three matchers made to match nothing.
+`tests/fixtures/README.md` holds the bands and the allocation table.
 
 **A live run against this Emby server must be bounded, and the bound has to
 be in the *iterator*, not in `max_pages`.** Exhausting `max_pages` raises

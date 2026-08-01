@@ -229,9 +229,9 @@ async def test_position_counts_lines_consumed_not_rows_kept(tmp_path: Path) -> N
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)
     body = (
-        b'{"adult":false,"id":1,"original_title":"A","popularity":1.0,"video":false}\n'
+        b'{"adult":false,"id":90000001,"original_title":"A","popularity":1.0,"video":false}\n'
         b"\n"
-        b'{"adult":false,"id":2,"original_title":"B","popularity":2.0,"video":false}\n'
+        b'{"adult":false,"id":90000002,"original_title":"B","popularity":2.0,"video":false}\n'
     )
     (cache / "movie_ids_07_30_2026.json.gz").write_bytes(gzip.compress(body))
     async with httpx.AsyncClient(
@@ -240,7 +240,7 @@ async def test_position_counts_lines_consumed_not_rows_kept(tmp_path: Path) -> N
         dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
         batches = [batch async for batch in dataset.batches()]
     assert len(batches) == 1
-    assert [row.tmdb_id for row in batches[0].rows] == [1, 2]
+    assert [row.tmdb_id for row in batches[0].rows] == [90000001, 90000002]
     # 3 raw lines (id=1, blank, id=2); only 2 are kept.
     assert batches[0].cursor.position == 3
     assert batches[0].cursor.rows_seen == 2
@@ -296,16 +296,16 @@ async def test_a_same_day_republish_does_not_silently_skip_records(tmp_path: Pat
     cache.mkdir(parents=True)
     name = "movie_ids_07_30_2026.json.gz"
     body_a = (
-        b'{"adult":false,"id":1,"original_title":"A-1","popularity":1.0,"video":false}\n'
-        b'{"adult":false,"id":2,"original_title":"A-2","popularity":2.0,"video":false}\n'
-        b'{"adult":false,"id":3,"original_title":"A-3","popularity":3.0,"video":false}\n'
-        b'{"adult":false,"id":4,"original_title":"A-4","popularity":4.0,"video":false}\n'
+        b'{"adult":false,"id":90000001,"original_title":"A-1","popularity":1.0,"video":false}\n'
+        b'{"adult":false,"id":90000002,"original_title":"A-2","popularity":2.0,"video":false}\n'
+        b'{"adult":false,"id":90000003,"original_title":"A-3","popularity":3.0,"video":false}\n'
+        b'{"adult":false,"id":90000004,"original_title":"A-4","popularity":4.0,"video":false}\n'
     )
     body_b = (
-        b'{"adult":false,"id":11,"original_title":"B-1","popularity":1.0,"video":false}\n'
-        b'{"adult":false,"id":12,"original_title":"B-2","popularity":2.0,"video":false}\n'
-        b'{"adult":false,"id":13,"original_title":"B-3","popularity":3.0,"video":false}\n'
-        b'{"adult":false,"id":14,"original_title":"B-4","popularity":4.0,"video":false}\n'
+        b'{"adult":false,"id":90000011,"original_title":"B-1","popularity":1.0,"video":false}\n'
+        b'{"adult":false,"id":90000012,"original_title":"B-2","popularity":2.0,"video":false}\n'
+        b'{"adult":false,"id":90000013,"original_title":"B-3","popularity":3.0,"video":false}\n'
+        b'{"adult":false,"id":90000014,"original_title":"B-4","popularity":4.0,"video":false}\n'
     )
     # Single-element lists, not a dict: a dict mixing str/bytes values loses
     # per-key type narrowing under mypy strict.

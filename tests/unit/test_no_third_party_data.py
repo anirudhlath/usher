@@ -42,7 +42,20 @@ claim about a dataset, not a copy of one. Neither ships.
   cannot reject them in a `.py` file without also rejecting `tmdb_id=1`,
   which is a legitimate placeholder. Naming the offender can.
 
-`test_the_guard_reads_what_it_claims_to_read` is the fourth, and exists
+`test_no_dataset_row_is_committed_anywhere` is the fourth, and it is the
+only one that scans the **whole repository**, `docs/` included. The three
+above are scoped to what ships and to what a contributor copies; this one
+targets a *shape* rather than a location, because a row of IMDb's
+`title.basics` or a record of TMDb's daily id export is the licence-relevant
+artifact wherever it sits. It is what would have caught two things the
+location-scoped checks missed on the first pass: `docs/plans/`'s M2 document,
+which prescribed the original fixture verbatim -- data, and the instruction
+that would put it back -- and two real id-export records transcribed into
+`usher.adapters.bulk.tmdb_ids`' module docstring, which is in the wheel.
+Prose never looks like a nine-column tab-separated line beginning with a
+tconst, so scanning documentation for this costs nothing in noise.
+
+`test_the_guard_reads_what_it_claims_to_read` is the fifth, and exists
 because a guard that globs nothing passes exactly like a guard that passes.
 Same family as `CLAUDE.md`'s "prove the guard is installed before believing
 a green run" for the network check.
@@ -157,6 +170,19 @@ def _fingerprint(value: str) -> str:
 
 # An id-*position*, so a bare `550` that happens to be a byte count or a
 # line number is not a finding. Each alternative captures exactly one value.
+# A committed *dataset row*, as opposed to an identifier in prose. An IMDb
+# `title.basics`/`title.ratings` line is a tconst followed by a tab; a TMDb
+# daily-export record is one JSON object carrying `original_title` or
+# `original_name`. Both shapes are unmistakable and neither occurs in prose.
+_IMDB_DATASET_ROW = re.compile(r"^(tt\d{7,8})\t")
+_TMDB_EXPORT_RECORD = re.compile(r"\{[^{}]*\"(?:original_title|original_name)\"[^{}]*\}", re.S)
+_EXPORT_RECORD_ID = re.compile(r"\"id\"\s*:\s*(\d+)")
+
+# Everything the whole-repository scan walks past.
+_NEVER_SCANNED = frozenset(
+    {".git", ".venv", "data", "__pycache__", ".ruff_cache", ".pytest_cache", ".mypy_cache"}
+)
+
 _ID_POSITIONS = (
     re.compile(
         r"\b(?:tmdb_id|tvdb_id|tvrage_id|imdb_id|provider_id|show_id"
@@ -166,6 +192,43 @@ _ID_POSITIONS = (
     re.compile(r"\bvalue=\"([^\"]+)\""),
     re.compile(r"\bby_id\[(\d+)\]"),
 )
+
+
+def _every_text_file() -> list[Path]:
+    """The whole repository, minus caches, the venv, and the gitignored
+    dataset directory. Binary files are skipped by decode failure rather
+    than by extension, so a new text format is covered the day it appears."""
+    found: list[Path] = []
+    for path in _REPO.rglob("*"):
+        if not path.is_file() or _NEVER_SCANNED & set(path.relative_to(_REPO).parts):
+            continue
+        try:
+            path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        found.append(path)
+    return sorted(found)
+
+
+def _committed_dataset_rows() -> list[str]:
+    """Every dataset-shaped row in the repository whose id is not synthetic."""
+    offenders: list[str] = []
+    for path in _every_text_file():
+        text = path.read_text()
+        where = str(path.relative_to(_REPO))
+        for number, line in enumerate(text.splitlines(), start=1):
+            match = _IMDB_DATASET_ROW.match(line)
+            if match and not _SYNTHETIC_IMDB_ID.match(match.group(1)):
+                offenders.append(f"{where}:{number}: IMDb dataset row {match.group(1)}")
+        for record in _TMDB_EXPORT_RECORD.finditer(text):
+            found = _EXPORT_RECORD_ID.search(record.group(0))
+            if found and int(found.group(1)) < _SYNTHETIC_ID_FLOOR:
+                offenders.append(f"{where}: TMDb export record id {found.group(1)}")
+    return offenders
+
+
+def _basics_lines() -> list[str]:
+    return (_FIXTURES / "bulk" / "title.basics.slice.tsv").read_text().splitlines()
 
 
 def _scanned_files() -> list[Path]:
@@ -306,6 +369,23 @@ def test_no_identifier_this_repository_once_committed_has_come_back() -> None:
     )
 
 
+def test_no_dataset_row_is_committed_anywhere() -> None:
+    """No row of IMDb's dumps or TMDb's id export, anywhere in the tree.
+
+    The only check that scans `docs/` too. A dataset row is the
+    licence-relevant artifact wherever it sits, and a *plan* that transcribes
+    one is worse than a fixture that does: it is data and the instruction
+    that recreates it. Matched on shape, so an identifier cited in prose is
+    not a finding and a nine-column tab-separated line beginning with a
+    tconst is.
+    """
+    offenders = _committed_dataset_rows()
+    assert offenders == [], (
+        "dataset rows committed to this repository -- see "
+        "tests/fixtures/README.md:\n" + "\n".join(offenders)
+    )
+
+
 @pytest.mark.parametrize(
     "relative",
     [
@@ -349,5 +429,9 @@ def test_the_guard_actually_matched_something() -> None:
     stops working.
     """
     assert len(_scanned_files()) > 100
+    assert len(_every_text_file()) > len(_scanned_files())
     assert len(_all_imdb_ids()) >= 15
     assert len(_fixture_id_values()) >= 40
+    # The dataset-row scan finds the committed slices; it just finds them
+    # synthetic. A regex that matched no row at all would pass its own test.
+    assert sum(bool(_IMDB_DATASET_ROW.match(line)) for line in _basics_lines()) == 9

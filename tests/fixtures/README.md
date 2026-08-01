@@ -39,16 +39,23 @@ tokens, codec and container names. Those are the protocol. A fixture that
 invented them would exercise nothing, and none of them says anything about a
 particular work.
 
-Enforced by `tests/unit/test_no_third_party_data.py`, which scans `src/` and
-`tests/` — three checks (an IMDb-band pattern, a floor on every id inside a
+Enforced by `tests/unit/test_no_third_party_data.py`. Three checks scan
+`src/` and `tests/` — an IMDb-band pattern, a floor on every id inside a
 fixture, and a hashed regression list of the identifiers this repository is
-known to have committed), plus two that fail if the scan itself stops
-scanning. Mutation-verified: seven mutations, seven killed.
+known to have committed. A fourth scans the **whole repository**, `docs/`
+included, for a dataset *row*: an IMDb TSV line or a TMDb id-export record,
+matched on shape. Two more fail if the scans stop scanning. Mutation-
+verified: eleven mutations, eleven killed.
 
-`docs/` and `CLAUDE.md` are **not** scanned, deliberately. They are the
-project's engineering record; a sentence naming a real row as the specimen
-for a measurement is a factual claim about a dataset, not a copy of one, and
-neither directory ships in the wheel or the container image.
+The split is deliberate. `docs/` and `CLAUDE.md` are the project's
+engineering record and neither ships, so a sentence naming a real row as the
+*specimen* for a measurement is a factual claim about a dataset rather than
+a copy of one — but a *row* is a copy wherever it sits, and a plan that
+transcribes one is data plus the instruction that recreates it. That is not
+hypothetical: `docs/plans/2026-07-30-m2-bootstrap.md` held the original
+fixture verbatim, and `usher.adapters.bulk.tmdb_ids`' module docstring held
+two real TMDb export records inside the shipped package. The three
+location-scoped checks missed both; the shape-scoped one found them.
 
 ## The identifier allocation
 
