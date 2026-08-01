@@ -401,6 +401,111 @@ async def test_a_walk_never_retracts_a_watch_state(fixture: _Fixture) -> None:
     assert swept == []
 
 
+# -- the split: one merge chain, two callers ---------------------------------
+
+
+async def test_apply_states_merges_a_batch_and_reports_its_targets(fixture: _Fixture) -> None:
+    """The push lane's entry point. The same chain as a walk's, minus the
+    run bookkeeping -- because a push event is not a run, and inventing a
+    `sync_runs` row per `UserDataChanged` would put a row per few seconds of
+    playback into a table an operator reads."""
+    await fixture.given_matched("movie-1")
+    outcome = await fixture.service.apply_states(
+        fixture.source.id,
+        [SourceWatchState(external_id="movie-1", position_seconds=61, played=False)],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    assert outcome.merged == (MediaItemTarget(title_id=fixture.titles["movie-1"], episode_id=None),)
+    assert (outcome.unmatched, outcome.rows_written) == (0, 1)
+    stored = await fixture.stored("movie-1")
+    assert stored is not None
+    assert stored.position_seconds == 61  # type: ignore[attr-defined]
+
+
+async def test_apply_states_does_not_commit(fixture: _Fixture) -> None:
+    """The commit is the caller's, and the two callers disagree about what
+    a unit of work is: a walk commits per batch of a thousand, the push lane
+    per event. A commit in here would make the second impossible to state."""
+    await fixture.given_matched("movie-1")
+    before = fixture.commits
+    await fixture.service.apply_states(
+        fixture.source.id,
+        [SourceWatchState(external_id="movie-1", position_seconds=61, played=False)],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    assert fixture.commits == before
+
+
+async def test_apply_states_counts_an_unmatched_item_without_raising(fixture: _Fixture) -> None:
+    """PRD 02: unmatched items are never dropped, and there will always be
+    some. `merge_from_source` answers a target-less merge with
+    `PortDataMalformed`, which on the push lane would take the channel down
+    and cost a reconnect plus a gap-closing delta walk."""
+    outcome = await fixture.service.apply_states(
+        fixture.source.id,
+        [SourceWatchState(external_id="unknown", position_seconds=1, played=False)],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    assert outcome.merged == ()
+    assert outcome.unmatched == 1
+
+
+async def test_apply_states_enqueues_a_history_backfill_for_a_played_unknown_count(
+    fixture: _Fixture,
+) -> None:
+    """ADR-0014's chain, reached from the push lane exactly as it is from a
+    walk. A `UserDataChanged` entry carries no trustworthy `PlayCount`, so
+    every played item pushed produces one of these."""
+    await fixture.given_matched("movie-1")
+    outcome = await fixture.service.apply_states(
+        fixture.source.id,
+        [SourceWatchState(external_id="movie-1", position_seconds=0, played=True, play_count=None)],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    queued = await fixture.queue.claim([JobKind.WATCH_HISTORY], limit=10)
+    assert [(job.kind, job.key) for job in queued] == [(JobKind.WATCH_HISTORY, "movie-1")]
+    assert outcome.needing_history == ("movie-1",)
+
+
+async def test_apply_states_reports_merges_built_not_rows_changed(fixture: _Fixture) -> None:
+    """`items_matched` on a `SyncRun` is the number of merges *built*.
+    `merge_from_source` returns rows *changed*, and the two differ whenever
+    PRD 03's "latest `updated_at` wins" refuses one -- a client set a resume
+    position thirty seconds ago and a walk that started an hour ago must not
+    stomp it. Returning the repository's count in `items_matched`'s place
+    silently changes what every stored `sync_runs` row means and what
+    PRD 10's dashboard plots."""
+    await fixture.given_matched("movie-1")
+    fixture.watch_states.refuse_next_merge()
+    outcome = await fixture.service.apply_states(
+        fixture.source.id,
+        [SourceWatchState(external_id="movie-1", position_seconds=61, played=False)],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    assert len(outcome.merged) == 1
+    assert outcome.rows_written == 0
+
+
+async def test_a_walk_still_reports_the_same_counters_after_the_split(
+    fixture: _Fixture,
+) -> None:
+    """The refactor's own regression test. `_flush` used to compute
+    `items_matched` as `len(batch) - unmatched` inline; if the split starts
+    reporting rows-written instead, every existing `sync_runs` row means
+    something different -- and the two agree on every batch where nothing is
+    refused, which is nearly all of them."""
+    await fixture.given_matched("movie-1")
+    fixture.adapter.seed(_item("orphan-1"), T0)
+    fixture.watch_states.refuse_next_merge()
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert (run.items_seen, run.items_matched, run.items_unmatched) == (2, 1, 1)
+
+
 # -- the enqueue, which is what bounds the backfill --------------------------
 
 

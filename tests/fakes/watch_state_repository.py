@@ -31,6 +31,12 @@ what actually closes:
   Postgres's do.
 - No transaction, so a batch that raises part-way cannot leave a session
   poisoned and nothing here can test the SAVEPOINT.
+- **A refused merge is not reachable by arranging timestamps**, because the
+  stored `updated_at` a real refusal compares against is the *write* instant
+  the trigger owns rather than the `observed_at` this fake stores. So
+  `refuse_next_merge()` below exists as an explicit affordance; without it a
+  caller that publishes on rows-changed and one that publishes on
+  merges-built are indistinguishable here.
 """
 
 import uuid
@@ -49,6 +55,27 @@ _Key = tuple[uuid.UUID, uuid.UUID | None, uuid.UUID | None]
 class FakeWatchStateRepository(WatchStateRepository):
     def __init__(self) -> None:
         self._states: dict[_Key, WatchState] = {}
+        self._refuse_next = False
+
+    def refuse_next_merge(self) -> None:
+        """Answer the next `merge_from_source` with `0` and store nothing.
+
+        A test-double affordance, not a port method -- the same shape
+        `FakeMediaItemRepository.reset_calls` is. It models the one outcome
+        this fake otherwise cannot produce: the real repository's
+        `WHERE watch_states.updated_at < deduped.observed_at` refusing a
+        merge whose observation is older than what a client already wrote.
+
+        Not reachable here by arranging timestamps, because the refusal that
+        matters is against a stored `updated_at` the `BEFORE UPDATE` trigger
+        owns -- this fake stores `observed_at` there instead, so a caller
+        would have to know the write instant to construct the refusal, and
+        against Postgres it cannot. What depends on the distinction is
+        `PushApplyService`, which publishes on rows *changed* rather than on
+        merges built; without this, a publisher that ignored the count would
+        pass every unit case.
+        """
+        self._refuse_next = True
 
     async def merge_from_source(self, merges: Sequence[WatchStateMerge]) -> int:
         # Validated over the whole batch before anything is written: a batch
@@ -61,6 +88,13 @@ class FakeWatchStateRepository(WatchStateRepository):
                     "a watch state must name exactly one of title_id or episode_id",
                     detail=f"user_id={entry.user_id}",
                 )
+        if self._refuse_next:
+            # After the validation, never before: the real one's CHECK fires
+            # on a malformed merge whether or not the conflict rule would
+            # have refused it, and a fake that answered `0` first would let
+            # a caller pass a target-less merge unnoticed.
+            self._refuse_next = False
+            return 0
         changed = 0
         # Last-wins within the batch, ordered by `observed_at` so the freshest
         # observation wins rather than whichever happened to be last in the
