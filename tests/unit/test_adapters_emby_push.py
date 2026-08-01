@@ -1,10 +1,25 @@
 """The Emby push channel: the ledger, the mapper, the socket, the watchdog."""
 
+import asyncio
+import json
+import time
+from collections.abc import AsyncIterator, Callable
+
 import pytest
 
 from tests.fakes.emby_fixtures import load_emby_fixture
-from usher.adapters.emby.push import PushHealth, to_source_events
-from usher.ports.source import SourceEventKind
+from tests.fakes.push_connection import FakePushConnection, FakePushConnector
+from usher.adapters.emby.push import (
+    SUBSCRIBE_FRAME,
+    WEBSOCKET_PATH,
+    EmbyPushChannel,
+    PushConnection,
+    PushHealth,
+    SessionLike,
+    to_source_events,
+)
+from usher.ports.errors import PortUnavailable
+from usher.ports.source import SourceEvent, SourceEventKind
 
 # The two `UserDataList` entries of `push_user_data_changed.json`, and the
 # four ids `push_library_changed.json` names. Bound here so a fixture edit
@@ -14,6 +29,28 @@ STATE_B = "90000101"
 ADDED = ("90000200", "90000201")
 REMOVED = "90000202"
 UPDATED = "90000203"
+
+# Every `async for` over the channel is bounded. An iterator that stopped
+# yielding instead of raising, or a `recv` that stopped awaiting, must fail
+# its own case rather than hang the suite -- `SELECT ... FOR UPDATE SKIP
+# LOCKED`'s two wrong spellings taught this project the same lesson, which
+# is why `pytest-timeout` is deliberately not a dependency and the bound
+# belongs to the cases that need it.
+BOUND = 5.0
+
+
+async def _drain(events: AsyncIterator[SourceEvent]) -> None:
+    async for _ in events:
+        pass
+
+
+async def _take(events: AsyncIterator[SourceEvent], count: int) -> list[SourceEvent]:
+    received: list[SourceEvent] = []
+    async for event in events:
+        received.append(event)
+        if len(received) == count:
+            return received
+    return received
 
 
 def test_a_fresh_ledger_is_not_delivering() -> None:
@@ -301,3 +338,436 @@ def test_a_state_carries_no_user_when_the_source_did_not_distinguish() -> None:
     value on `watch_states`."""
     events = to_source_events(load_emby_fixture("push_user_data_changed"), source_user_id=None)
     assert all(state.source_user_id is None for state in events[0].watch_states)
+
+
+# ---------------------------------------------------------------------------
+# The channel: one connection, subscribed, counted, and closed.
+# ---------------------------------------------------------------------------
+
+
+class _StubSession(SessionLike):
+    """Just the two things the channel asks an `EmbySession` for."""
+
+    def __init__(self, token: str = "session-token-1", user_id: str = "u1") -> None:
+        self._token = token
+        self._user_id = user_id
+        self.token_reads = 0
+
+    async def access_token(self) -> str:
+        self.token_reads += 1
+        return self._token
+
+    async def user_id(self) -> str:
+        return self._user_id
+
+
+class _RecordingConnector(FakePushConnector):
+    """Records every URL it is handed, and on demand raises one carrying it.
+
+    `websockets.exceptions.InvalidURI` is exactly that shape -- an exception
+    whose `str()` is the URI -- and it is the reason this module translates
+    a connector failure by its exception *type* rather than by
+    interpolating it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.urls: list[str] = []
+        self.leak_the_url = False
+
+    async def __call__(self, url: str) -> PushConnection:
+        self.urls.append(url)
+        if self.leak_the_url:
+            raise ValueError(url)
+        return await super().__call__(url)
+
+
+def _channel(
+    connector: FakePushConnector,
+    *,
+    session: _StubSession | None = None,
+    clock: Callable[[], float] | None = None,
+    stale_after: float = 90.0,
+) -> EmbyPushChannel:
+    times = iter(range(0, 100_000))
+    return EmbyPushChannel(
+        session or _StubSession(),
+        base_url="https://emby.invalid",
+        device_id="device-1",
+        health=PushHealth(stale_after=stale_after),
+        connect=connector,
+        clock=clock or (lambda: float(next(times))),
+        poll_seconds=0.01,
+    )
+
+
+async def test_the_channel_subscribes_with_adr_0004s_own_frame() -> None:
+    """The frame ADR-0004's end-to-end session actually sent, verbatim.
+    Without it Emby holds the socket and sends nothing -- which is the exact
+    upgraded-but-silent state this milestone is built around, arrived at by
+    forgetting one line."""
+    connector = FakePushConnector()
+    channel = _channel(connector)
+    async with channel.open() as events:
+        connection = connector.handed_out[0]
+        assert connection.sent == [SUBSCRIBE_FRAME]
+        assert json.loads(SUBSCRIBE_FRAME) == {"MessageType": "SessionsStart", "Data": "0,1000"}
+        connection.drop()
+        with pytest.raises(PortUnavailable):
+            await asyncio.wait_for(_drain(events), timeout=BOUND)
+
+
+async def test_the_socket_url_carries_the_token_and_the_device_id() -> None:
+    """PRD 03's own spelling. `deviceId` is lower-cased on the query where
+    the `Authorization` header spells it `DeviceId`; ADR-0004 read both out
+    of `SessionWebSocketListener` and they are genuinely different."""
+    connector = _RecordingConnector()
+    channel = _channel(connector)
+    async with channel.open():
+        pass
+    assert connector.urls == [
+        "wss://emby.invalid/embywebsocket?api_key=session-token-1&deviceId=device-1"
+    ]
+
+
+async def test_the_socket_url_percent_encodes_both_values() -> None:
+    """A token and a device id are both persisted strings an operator could
+    have influenced, and `&`/`=`/`?` in either would otherwise re-shape the
+    query. `EmbyAdapter._segment` documents the same reasoning for a path
+    segment."""
+    connector = _RecordingConnector()
+    channel = EmbyPushChannel(
+        _StubSession(token="a&b=c?d"),
+        base_url="http://emby.invalid/emby/",
+        device_id="dev ice/1",
+        health=PushHealth(stale_after=90.0),
+        connect=connector,
+        clock=lambda: 0.0,
+    )
+    async with channel.open():
+        pass
+    assert connector.urls == [
+        "ws://emby.invalid/emby/embywebsocket?api_key=a%26b%3Dc%3Fd&deviceId=dev%20ice%2F1"
+    ]
+
+
+async def test_the_channel_takes_its_token_from_the_session_on_every_open() -> None:
+    """PRD 03's durable-client property comes from authenticating *once*
+    with a stable `DeviceId`. Caching the token on the channel instead would
+    survive the first re-authentication and then present a revoked one
+    forever, and `EmbySession` is the thing that owns the single-flight
+    re-auth, the negative cache and the exactly-one-retry."""
+    session = _StubSession()
+    channel = _channel(_RecordingConnector(), session=session)
+    async with channel.open():
+        pass
+    async with channel.open():
+        pass
+    assert session.token_reads == 2
+
+
+async def test_the_channel_counts_every_frame_including_ones_it_maps_to_nothing() -> None:
+    """A `Sessions` message produces no event and is the *reason* an idle
+    library's channel stays measurably alive. Counting only mapped events
+    would make a library nobody touched for a day look dead, and the
+    watchdog would reconnect it every `stale_after` seconds forever."""
+    connection = FakePushConnection()
+    connector = FakePushConnector([connection])
+    channel = _channel(connector)
+    connection.deliver(json.dumps(load_emby_fixture("push_sessions")))
+    connection.deliver("{ not json")
+    connection.deliver(json.dumps(load_emby_fixture("push_library_changed")))
+    async with channel.open() as events:
+        received = await asyncio.wait_for(_take(events, 3), timeout=BOUND)
+    assert channel.health.messages_received == 3
+    assert channel.health.events_emitted == 3
+    assert [event.kind.value for event in received] == [
+        "item_added",
+        "item_updated",
+        "item_removed",
+    ]
+
+
+async def test_a_frame_that_is_not_json_is_counted_and_skipped() -> None:
+    """It is evidence the socket is alive, which is the only thing the
+    health ledger claims. Raising would cost a reconnect and a gap-closing
+    delta walk for one bad frame."""
+    connection = FakePushConnection()
+    connector = FakePushConnector([connection])
+    channel = _channel(connector)
+    connection.deliver("<html>502 Bad Gateway</html>")
+    connection.deliver(json.dumps(load_emby_fixture("push_user_data_changed")))
+    async with channel.open() as events:
+        received = await asyncio.wait_for(_take(events, 1), timeout=BOUND)
+    assert [event.kind.value for event in received] == ["watch_state_changed"]
+    assert channel.health.messages_received == 2
+    assert channel.health.events_emitted == 1
+
+
+async def test_a_json_frame_that_is_not_an_object_is_counted_and_skipped() -> None:
+    """`json.loads("[1, 2]")` succeeds and hands back a list, which has no
+    `.get`. A frame that parses is not a frame that is a message."""
+    connection = FakePushConnection()
+    connector = FakePushConnector([connection])
+    channel = _channel(connector)
+    connection.deliver("[1, 2]")
+    connection.deliver(json.dumps(load_emby_fixture("push_user_data_changed")))
+    async with channel.open() as events:
+        await asyncio.wait_for(_take(events, 1), timeout=BOUND)
+    assert channel.health.messages_received == 2
+
+
+async def test_a_dropped_connection_raises_out_of_the_iterator() -> None:
+    """`SourceAdapter.list_items`' guarantee, one channel over: an iterator
+    that *stopped* is indistinguishable from a source with nothing more to
+    say, and `PushSupervisor` would record a clean shutdown and never
+    reconnect.
+
+    The drop happens *inside* the block, after the subscribe. The plan
+    dropped it before `open()`, which fails at `connection.send` and never
+    reaches the iterator at all -- a case that passes while testing a
+    different path. The one it named is covered here, and the one it
+    accidentally tested is covered by
+    `test_a_send_that_fails_does_not_leave_the_connection_open`.
+    """
+    connection = FakePushConnection()
+    connector = FakePushConnector([connection])
+    channel = _channel(connector)
+    connection.deliver(json.dumps(load_emby_fixture("push_library_changed")))
+    async with channel.open() as events:
+        assert connection.sent == [SUBSCRIBE_FRAME]
+        connection.drop("connection closed by peer")
+        with pytest.raises(PortUnavailable, match="closed by peer"):
+            await asyncio.wait_for(_drain(events), timeout=BOUND)
+
+
+async def test_the_channel_closes_its_connection_however_the_block_ends() -> None:
+    connection = FakePushConnection()
+    connector = FakePushConnector([connection])
+    channel = _channel(connector)
+    with pytest.raises(ZeroDivisionError):
+        async with channel.open():
+            raise ZeroDivisionError("something else went wrong")
+    assert connection.closed is True
+    assert channel.health.connected is False
+
+
+async def test_the_channel_closes_its_connection_on_a_clean_exit() -> None:
+    connection = FakePushConnection()
+    connector = FakePushConnector([connection])
+    channel = _channel(connector)
+    async with channel.open():
+        assert channel.health.connected is True
+    assert connection.closed is True
+    assert channel.health.connected is False
+
+
+async def test_a_connector_exception_carrying_the_url_does_not_leak_it() -> None:
+    """ADR-0012's handling rules, on the second URL that carries the token.
+
+    `websockets.exceptions.InvalidURI.__str__` contains the URI, so an error
+    message built the way `EmbySession` builds its own -- which interpolates
+    `{exc}`, and explains why that is safe *there* -- leaks the credential
+    here. A bare `ValueError(url)` is that exception's shape exactly.
+    """
+    connector = _RecordingConnector()
+    connector.leak_the_url = True
+    channel = _channel(connector)
+    with pytest.raises(PortUnavailable) as caught:
+        async with channel.open():
+            pass
+    message = str(caught.value)
+    assert "session-token-1" not in message
+    assert "api_key" not in message
+    assert WEBSOCKET_PATH in message
+    assert "ValueError" in message
+    assert channel.health.connected is False
+
+
+async def test_an_already_translated_connect_failure_propagates_unchanged() -> None:
+    """The plan asserted `WEBSOCKET_PATH in str(...)` against this shape and
+    it is not true: a `PortUnavailable` from the connector is re-raised as
+    it stands, so the message is the connector's.
+
+    That is the right behaviour and the assertion was the wrong one. The
+    only connector that raises a `UsherPortError` is this project's own
+    wrapper, whose message names a path and never a URL by construction;
+    re-wrapping it would bury the reason ("no route to host") behind a
+    generic one and would double-translate an error that is already this
+    port's vocabulary.
+    """
+    connector = FakePushConnector()
+    connector.fail_next("no route to host")
+    channel = _channel(connector)
+    with pytest.raises(PortUnavailable, match="no route to host"):
+        async with channel.open():
+            pass
+    assert channel.health.connected is False
+    assert connector.attempts == 1
+
+
+async def test_a_send_that_fails_does_not_leave_the_connection_open() -> None:
+    """The subscribe frame is sent *after* `record_open`, so a failure there
+    is the one path that could leave a ledger reporting `connected` on a
+    socket nobody is holding -- which is the milestone's own failure mode,
+    reached from inside."""
+    connection = FakePushConnection()
+    connection.drop("peer went away during the handshake")
+    connector = FakePushConnector([connection])
+    channel = _channel(connector)
+    with pytest.raises(PortUnavailable, match="during the handshake"):
+        async with channel.open():
+            pass
+    assert connection.closed is True
+    assert channel.health.connected is False
+
+
+async def test_the_health_ledger_is_the_one_the_caller_handed_in() -> None:
+    """The adapter holds it across reconnects, so `reconnects` and
+    `messages_received` are the lane's history rather than one
+    connection's."""
+    health = PushHealth(stale_after=90.0)
+    connector = FakePushConnector()
+    channel = EmbyPushChannel(
+        _StubSession(),
+        base_url="https://emby.invalid",
+        device_id="d",
+        health=health,
+        connect=connector,
+        clock=lambda: 0.0,
+    )
+    assert channel.health is health
+
+
+async def test_a_consumer_and_a_producer_genuinely_overlap() -> None:
+    """The trap this project has been bitten by, applied to a long-lived
+    socket.
+
+    A bare mock never suspends, so the event loop runs each gathered task
+    through its *entire* cycle before starting the next -- and M3's deleted
+    single-flight lock passed five runs in a row against exactly that. A
+    count assertion here would be worthless for the same reason: "four
+    frames produced, four events consumed" is also what a fully serialised
+    run produces.
+
+    So this asserts on *observed overlap*: the consumer's first event must
+    land before the producer's last frame is queued, and the two wall-clock
+    windows must genuinely intersect.
+
+    The producer is paced against the consumer -- it waits for a `recv` call
+    to land before queueing the next frame -- rather than dumping frames on
+    its own schedule. Both spellings were measured. Unpaced, the producer
+    outruns the consumer (which spends two loop turns per frame, one of them
+    the channel's own cooperative yield) and the windows share only ~37% of
+    their union with 3 of 8 events landing mid-production; paced, they share
+    **80.3-85.4% over 30 runs** with 7 of 8. The paced number is the honest one to assert on,
+    because it is measuring the property under test -- that the two tasks
+    take turns -- rather than the ratio of their loop-turn costs.
+    """
+    connection = FakePushConnection()
+    connector = FakePushConnector([connection])
+    channel = _channel(connector)
+    frame = json.dumps({"MessageType": "LibraryChanged", "Data": {"ItemsAdded": ["90000500"]}})
+    produced: list[float] = []
+    consumed: list[float] = []
+    rounds = 8
+
+    async with channel.open() as events:
+
+        async def produce() -> None:
+            for _ in range(rounds):
+                seen = connection.recv_calls
+                while connection.recv_calls == seen:
+                    await asyncio.sleep(0)
+                connection.deliver(frame)
+                produced.append(time.perf_counter())
+
+        async def consume() -> None:
+            async for _ in events:
+                consumed.append(time.perf_counter())
+                if len(consumed) == rounds:
+                    return
+
+        await asyncio.wait_for(asyncio.gather(produce(), consume()), timeout=BOUND)
+
+    # Serialised would mean every produce() timestamp precedes every
+    # consume() one. Genuine interleaving means the consumer had already
+    # delivered events before the producer finished queueing.
+    assert consumed[0] < produced[-1]
+    overlap = min(consumed[-1], produced[-1]) - max(consumed[0], produced[0])
+    union = max(consumed[-1], produced[-1]) - min(consumed[0], produced[0])
+    assert overlap > 0
+    assert overlap / union > 0.5, f"windows overlapped only {overlap / union:.1%} of their union"
+    # Interleaving itself, counted: all but the boundary events landed while
+    # the producer was still queueing. A serialised run scores zero here.
+    interleaved = sum(1 for one in consumed if produced[0] < one < produced[-1])
+    assert interleaved >= rounds - 2, f"only {interleaved}/{rounds} landed mid-production"
+    # And every frame really went through `recv` rather than being handed
+    # over some other way.
+    assert connection.recv_calls >= rounds
+
+
+async def test_a_tick_with_nothing_on_it_is_not_the_end_of_the_stream() -> None:
+    """`recv` raising `TimeoutError` means "nothing yet", never "nothing
+    more".
+
+    An iterator that returned on a tick would end the stream at the first
+    quiet moment -- which on an idle library is every moment -- and
+    `PushSupervisor` would read that as a clean shutdown and never
+    reconnect. The plan left `except TimeoutError: continue` in place from
+    Task 6 with no case behind it: every other case here pre-fills the queue,
+    so the consumer never meets an empty one and the `return` spelling
+    survives them all. This is the case that meets one.
+    """
+    connection = FakePushConnection()
+    connector = FakePushConnector([connection])
+    channel = _channel(connector)
+
+    async def deliver_late() -> None:
+        for _ in range(1000):
+            if connection.recv_calls >= 3:
+                break
+            await asyncio.sleep(0)
+        connection.deliver(json.dumps(load_emby_fixture("push_library_changed")))
+
+    async with channel.open() as events:
+        received, _ = await asyncio.wait_for(
+            asyncio.gather(_take(events, 1), deliver_late()), timeout=BOUND
+        )
+    assert [event.kind.value for event in received] == ["item_added"]
+    assert connection.recv_calls >= 3
+    assert channel.health.messages_received == 1
+
+
+async def test_the_fake_connection_really_suspends_on_every_recv() -> None:
+    """The fake's own load-bearing property, pinned directly.
+
+    "A test that never truly awaits is not a concurrency test" is this
+    project's most expensive lesson -- a deleted single-flight lock passed
+    five runs in a row against a transport that never suspended. The overlap
+    case above is the measurement, but it cannot be the *guard*: with this
+    suspension removed, a `while True` around `recv` never returns control
+    to the event loop, and `asyncio.wait_for` needs the loop to run in order
+    to fire, so the suite hangs rather than fails. Measured -- 35 cases in,
+    then nothing, killed at 45 s.
+
+    So the property is observed from outside any channel, where a starved
+    loop is impossible: `recv` must let another task make progress before it
+    answers.
+    """
+    connection = FakePushConnection()
+    ticks = 0
+
+    async def spin() -> None:
+        nonlocal ticks
+        while ticks < 3:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    async def one_recv() -> None:
+        with pytest.raises(TimeoutError):
+            await connection.recv(0.01)
+        assert ticks > 0, "recv answered without ever yielding to the event loop"
+
+    await asyncio.wait_for(asyncio.gather(one_recv(), spin()), timeout=BOUND)
+    assert connection.recv_calls == 1

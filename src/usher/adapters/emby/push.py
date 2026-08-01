@@ -11,7 +11,7 @@ push health comes from `PushHealth`, which counts *messages*, and a channel
 that stops delivering raises out of its own iterator rather than sitting
 there looking well.
 
-Three seams, each with a reason:
+Four seams, each with a reason:
 
 1. **`PushConnection` is an ABC**, not a structural type, even though it is
    not a port. The real `websockets.ClientConnection` cannot subclass it, so
@@ -28,20 +28,58 @@ Three seams, each with a reason:
    lets the staleness watchdog run on an injected clock instead of on real
    wall time, and it is the difference between a 90-second test and a
    sub-millisecond one.
-3. **The URL is built inside `_socket_url` and is never stored, returned,
+3. **`SessionLike` is a `Protocol` and `PushConnection` is an ABC**, ten
+   lines apart, and the difference is the one thing ADR-0001's argument
+   turns on: whether an implementation can inherit. `EmbySession` already
+   has both methods and lives in this same package, so making it inherit
+   would have `session.py` import `push.py` -- the wrong direction, and one
+   import from a cycle. ADR-0001 governs *ports*; neither of these is one.
+4. **The URL is built inside `_socket_url` and is never stored, returned,
    logged, or interpolated into an exception.** Every error message this
    module raises names a path, never a URL. ADR-0012's handling rules apply
    to it unchanged.
 """
 
+import asyncio
+import json
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
+from urllib.parse import quote, urlsplit, urlunsplit
+
+from loguru import logger
 
 from usher.adapters.emby.mapping import library_ids, user_data_states
+from usher.ports.errors import PortUnavailable, UsherPortError
 from usher.ports.source import SourceEvent, SourceEventKind
+
+WEBSOCKET_PATH = "/embywebsocket"
+
+# ADR-0004's own subscription, verbatim: the frame its end-to-end session
+# sent before `Sessions` and `UserDataChanged` started arriving, and the one
+# thing about this channel's protocol that was measured against the live
+# server rather than read. `"0,1000"` is the listener's
+# `initialDelayMs,intervalMs` pair. Without it Emby holds the socket open
+# and sends nothing -- which is indistinguishable from every other
+# upgraded-but-silent failure this module exists to detect, arrived at by
+# forgetting one line.
+SUBSCRIBE_FRAME = '{"MessageType": "SessionsStart", "Data": "0,1000"}'
+
+# How long one `recv` waits before reporting "nothing yet". A *tick*, not a
+# timeout: each one runs the staleness watchdog. Small enough that a channel
+# crossing `stale_after` is noticed within a few seconds of doing so, large
+# enough that an idle lane is not spinning.
+DEFAULT_POLL_SECONDS = 5.0
+
+# How long a channel may deliver nothing at all before it is treated as
+# dead. Emby's own `Sessions` messages arrive on the subscription interval
+# above, so silence past several of those is a real signal rather than an
+# idle library. A setting (`push_stale_after_seconds`) rather than a
+# constant, because the interval is a property of the server.
+DEFAULT_STALE_AFTER_SECONDS = 90.0
 
 
 @dataclass(slots=True)
@@ -243,3 +281,197 @@ def to_source_events(
             if (named := library_ids(data.get(key)))
         )
     return ()
+
+
+PushConnector = Callable[[str], Awaitable[PushConnection]]
+
+
+class SessionLike(Protocol):
+    """The two things this channel asks of an `EmbySession`.
+
+    Named so the channel's own tests can substitute without constructing a
+    session, an httpx client and a credential -- and so the dependency is
+    *two methods* rather than "an `EmbySession`", which is what keeps a
+    later reader from reaching for `request()` from inside a socket loop.
+
+    **A `Protocol`, and `PushConnection` twelve lines up is an `ABC`.** That
+    is not an inconsistency and it is not ADR-0001 being ignored: ADR-0001
+    governs *ports*, and neither of these is one. The two seams differ in
+    the thing ADR-0001's argument turns on -- whether an implementation can
+    inherit. `websockets.ClientConnection` cannot, so `PushConnection` needs
+    a wrapper anyway and gets fail-fast instantiation for free. `EmbySession`
+    already has both methods, in the same package, and making it inherit
+    from here would have `session.py` import `push.py` -- the wrong
+    direction, and one import away from a cycle the day this module wants a
+    session. The plan specified an ABC for both; that version does not
+    type-check at the call site, because `EmbySession` is not a subclass and
+    `abc.register()` is invisible to mypy.
+    """
+
+    async def access_token(self) -> str: ...
+
+    async def user_id(self) -> str: ...
+
+
+class EmbyPushChannel:
+    """One `/embywebsocket` connection, and the ledger that says whether it
+    is working.
+
+    Reuses `EmbySession` rather than authenticating: PRD 03's durable-client
+    property comes from authenticating *once* with a stable `DeviceId`, and
+    verified 2026-07-31, presenting an existing token alongside a different
+    `DeviceId` neither forks nor invalidates the session -- Emby binds a
+    session to the token's own authentication record. A channel that
+    authenticated per reconnect would mint a session per reconnect and undo
+    the one property the header exists for. Reusing the session also
+    inherits its single-flight re-authentication, its negative cache, and
+    its exactly-one-retry for free.
+    """
+
+    def __init__(
+        self,
+        session: SessionLike,
+        *,
+        base_url: str,
+        device_id: str,
+        health: PushHealth,
+        connect: PushConnector,
+        clock: Callable[[], float] = _clock,
+        poll_seconds: float = DEFAULT_POLL_SECONDS,
+    ) -> None:
+        self._session = session
+        self._base_url = base_url
+        self._device_id = device_id
+        self._health = health
+        self._connect = connect
+        self._clock = clock
+        self._poll_seconds = poll_seconds
+
+    @property
+    def health(self) -> PushHealth:
+        return self._health
+
+    async def _socket_url(self) -> str:
+        """`/embywebsocket?api_key=<token>&deviceId=<id>`, built and handed
+        straight to the connector.
+
+        **Never stored on the instance, never returned to a caller outside
+        this module, never logged, never interpolated into an exception,
+        never a span attribute.** ADR-0012's handling rules, applied to the
+        second place this token is materialised. `quote` on both values
+        because an `external_id`-shaped rule applies to a device id too: it
+        is a persisted string an operator could have influenced, and
+        `EmbyAdapter._segment` documents the same reasoning for a path.
+
+        The token is read from the session on **every** open rather than
+        cached here, so a channel that reconnects after a silent
+        re-authentication presents the new token; a cached one would present
+        a revoked credential forever.
+
+        `http`/`https` become `ws`/`wss`. Emby accepts either scheme on this
+        route, and using the WebSocket scheme is what keeps a reader from
+        wondering; `websockets` requires one.
+        """
+        token = await self._session.access_token()
+        parts = urlsplit(self._base_url.rstrip("/"))
+        scheme = {"http": "ws", "https": "wss"}.get(parts.scheme, parts.scheme)
+        query = f"api_key={quote(token, safe='')}&deviceId={quote(self._device_id, safe='')}"
+        return urlunsplit((scheme, parts.netloc, f"{parts.path}{WEBSOCKET_PATH}", query, ""))
+
+    @asynccontextmanager
+    async def open(self) -> AsyncIterator[AsyncIterator[SourceEvent]]:
+        """Connect, subscribe, and yield the event stream.
+
+        The connection is closed however the block ends -- a `finally`, not a
+        trailing call, because the consumer is an `async for` a caller may
+        `break` out of and because `PushSupervisor` wraps this in a
+        `try/except` that catches its own iterator's raise. The `finally`
+        starts *before* the subscribe frame is sent, so a peer that goes
+        away during the handshake cannot leave a ledger reporting
+        `connected` on a socket nobody is holding.
+        """
+        url = await self._socket_url()
+        try:
+            connection = await self._connect(url)
+        except UsherPortError:
+            # Already this port's vocabulary, and the only connector that
+            # produces one is this project's own wrapper -- whose message
+            # names a path and never a URL by construction. Re-wrapping it
+            # would bury the reason behind a generic one.
+            raise
+        except Exception as exc:
+            # A bare `except Exception` on purpose, and carrying no
+            # suppression directive: the plan wrote one for `BLE001`, which
+            # is not in this project's ruff selection, and `RUF100` -- which
+            # is -- rejects a directive for a rule nothing enables. The
+            # connector is arbitrary third-party code and *anything* it
+            # raises must become this port's vocabulary rather than
+            # escaping to `PushSupervisor` untranslated.
+            #
+            # `type(exc).__name__`, never `{exc}`. The connector's own
+            # exceptions can carry the URI (`websockets.exceptions.InvalidURI`
+            # does), and that URI carries the session token. `EmbySession`
+            # interpolates `{exc}` and explains why that is safe there;
+            # nothing about that argument transfers to this URL.
+            raise PortUnavailable(
+                f"{WEBSOCKET_PATH} could not be opened: {type(exc).__name__}"
+            ) from exc
+        self._health.record_open(now=self._clock())
+        try:
+            await connection.send(SUBSCRIBE_FRAME)
+            yield self._events(connection)
+        finally:
+            self._health.record_close()
+            await connection.aclose()
+
+    async def _events(self, connection: PushConnection) -> AsyncIterator[SourceEvent]:
+        source_user_id = await self._session.user_id()
+        while True:
+            # One cooperative yield per iteration, and it is not decoration.
+            # This is a `while True` whose only other await is `recv`, and
+            # `recv` is permitted to complete *without suspending* --
+            # `websockets`' does exactly that whenever frames are already
+            # buffered, which on a busy socket is most of the time. PRD 01's
+            # concurrency model is one process with per-lane semaphores, so
+            # this lane shares an event loop with the HTTP server and the
+            # job worker; a lane that can run unbounded iterations without
+            # yielding starves both.
+            #
+            # **This line is a known mutation survivor and is kept anyway**,
+            # for the reason `jobs.py` keeps its `GREATEST` alongside its
+            # `WHERE`: no test can kill it, because the only observer of a
+            # starved event loop would itself be on that loop. Deleting it
+            # passes all 38 cases here, since `FakePushConnection.recv` does
+            # suspend. What it is worth was measured the other way round:
+            # with the fake's suspension removed *and* this line absent, the
+            # suite does not fail, it **hangs** -- 35 cases in, then nothing,
+            # killed at 45 s, because `asyncio.wait_for` needs the loop to
+            # run in order to fire. With this line present that same
+            # mutation fails one case in 0.12 s.
+            await asyncio.sleep(0)
+            try:
+                frame = await connection.recv(self._poll_seconds)
+            except TimeoutError:
+                # A tick, not a failure. The staleness watchdog goes here.
+                continue
+            # Counted **before** it is parsed and before it is mapped. A
+            # frame is evidence the socket is alive whatever it says, and
+            # counting only mapped events would make an idle library --
+            # which is most libraries most of the time -- look dead.
+            self._health.record_message(now=self._clock())
+            for event in self._decode(frame, source_user_id):
+                self._health.record_event()
+                yield event
+
+    def _decode(self, frame: str, source_user_id: str | None) -> tuple[SourceEvent, ...]:
+        try:
+            message = json.loads(frame)
+        except ValueError:
+            # The length, never the frame: a proxy's error page is harmless
+            # but a frame this channel failed to parse is not necessarily,
+            # and `Data` is the one place a token could plausibly appear.
+            logger.debug("push frame was not JSON; skipped ({length} bytes)", length=len(frame))
+            return ()
+        if not isinstance(message, Mapping):
+            return ()
+        return to_source_events(message, source_user_id=source_user_id)
