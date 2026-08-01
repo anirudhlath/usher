@@ -134,6 +134,25 @@ def test_a_movie_runtime_is_minutes_and_a_series_runtime_is_its_episode_length()
     assert _title(_series()).runtime_minutes == 57
 
 
+def test_an_empty_episode_run_time_is_the_common_case_and_is_not_a_failure() -> None:
+    """And it is the *majority* case, which is why it needs its own case.
+
+    Measured live 2026-08-01: `episode_run_time` is `[]` on **26 of 30**
+    series detail responses (86.7%), including Game of Thrones. So the
+    fixture above, which carries a value, is the 13% — a suite that only
+    exercised it would be asserting on the exception. `Title.runtime_minutes`
+    is simply not a fact TMDb still has about most television, and `None` is
+    the honest answer rather than a mapping gap to go looking for.
+    """
+    payload = _series()
+    payload["episode_run_time"] = []
+    title = _title(payload)
+    assert title.runtime_minutes is None
+    # And it must not show up as provenance: claiming `tmdb` supplied a
+    # runtime it did not is what makes a second provider's merge ambiguous.
+    assert "runtime_minutes" not in title.field_provenance
+
+
 def test_a_series_end_year_is_set_only_once_it_has_stopped() -> None:
     """`last_air_date` on a returning series is its most recent episode, not
     an end year, so `end_year` would render "2011-2026" for a show still on

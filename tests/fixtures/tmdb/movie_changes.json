@@ -1,7 +1,7 @@
 {
   "results": [
-    { "id": 550, "adult": false },
-    { "id": 90210, "adult": false }
+    { "id": 550, "adult": false, "softcore": false },
+    { "id": 90210, "adult": false, "softcore": false }
   ],
   "page": 1,
   "total_pages": 2,

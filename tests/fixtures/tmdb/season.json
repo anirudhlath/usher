@@ -40,6 +40,14 @@
   "name": "Season 1",
   "overview": "The first invented season.",
   "id": 3624,
+  "networks": [
+    {
+      "id": 49,
+      "logo_path": "/synthetic-network.png",
+      "name": "An Invented Network",
+      "origin_country": "US"
+    }
+  ],
   "poster_path": "/synthetic-season-1.jpg",
   "season_number": 1,
   "vote_average": 8.3

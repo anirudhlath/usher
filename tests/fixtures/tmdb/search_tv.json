@@ -13,6 +13,7 @@
       "popularity": 346.098,
       "poster_path": "/synthetic-series-poster.jpg",
       "first_air_date": "2011-04-17",
+      "softcore": false,
       "name": "A Series",
       "vote_average": 8.456,
       "vote_count": 22000

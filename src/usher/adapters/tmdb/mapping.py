@@ -22,8 +22,18 @@ error:
 | append namespace | `release_dates` | `content_ratings` |
 
 All eight rows were read from TMDb's published reference on 2026-07-31 (see
-`tests/fixtures/tmdb/README.md` for the endpoint list), not from memory and
-not from a live capture.
+`tests/fixtures/tmdb/README.md` for the endpoint list), and **every one was
+then confirmed against the live API on 2026-08-01** over 29 movie and 30
+series detail responses: each movie carried `title`/`release_date`/`runtime`/
+`keywords.keywords`/a top-level `imdb_id` and none carried `name`,
+`first_air_date`, `episode_run_time` or `title`'s TV counterparts; each
+series carried the mirror set and none carried a top-level `imdb_id` at all.
+
+One row is a trap the survey found rather than confirmed: **`episode_run_time`
+is an empty array on 26 of those 30 series** (86.7%), so `_runtime` correctly
+returns `None` for the great majority of television and `Title.runtime_minutes`
+is simply not a fact TMDb has about a series any more. A test that asserts a
+series runtime is asserting about the 13% case.
 
 **Nothing TMDb can put in a payload may raise.** `Title` pattern-validates
 `imdb_id`, bounds `community_rating` to 0-10 and `year`/`runtime_minutes`/

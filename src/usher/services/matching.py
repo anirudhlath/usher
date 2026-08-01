@@ -446,6 +446,18 @@ def _confident(
 
     An item with no year is matched on the name alone, which is why the
     uniqueness requirement is not optional: "Dune" alone matches three films.
+
+    **The +/-1 is the caller's, and against TMDb it only exists because the
+    provider makes room for it.** Measured live 2026-08-01 over 320 names:
+    TMDb's `primary_release_year`/`first_air_date_year` are *exact* filters,
+    so all 294 candidates it returned carried the year that was asked for
+    and this comparison never rejected a single one.
+    `TmdbMetadataProvider._search_one` re-asks without the year when the
+    filtered search finds nothing, which is what puts a +/-1 candidate in
+    front of this function at all. Over the same 320 names the rule resolves
+    **83.1%** on TMDb's search results as they were before that retry and
+    **87.2%** with it -- against 72-75% for the identical predicate run over
+    the local catalog (tier 3).
     """
     wanted = item.name.strip().casefold()
     matches = [

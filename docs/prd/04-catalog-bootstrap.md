@@ -151,6 +151,18 @@ Tier 1 is the default and is sufficient for any realistic home library plus a
 generous recommendation pool. One request per title thanks to
 `append_to_response`.
 
+**"One request per title" holds for a movie and does not for a series**, and
+the table above predates that distinction. A series costs one request plus
+one per season, because TMDb's series detail lists its seasons and carries no
+episodes ([03](03-sources-and-sync.md)). Measured live 2026-08-01: Game of
+Thrones is ten requests, and 30 popular series carried 320 seasons between
+them (median 9). **`append_to_response=season/N` collapses that back to one**
+— verified, including the 20-item ceiling that bounds it at 14 seasons
+alongside the six namespaces already appended, and including that a season
+the series does not have is silently omitted rather than erroring. Recorded
+here, not yet taken; it is a change to the adapter's `fetch` and to
+[03](03-sources-and-sync.md)'s request table, and belongs in its own change.
+
 TMDb disabled its old hard rate limit in 2019; current guidance is a ceiling
 "somewhere in the 40 requests per second range". Usher self-limits to ~25 rps
 with jittered exponential backoff on 429, and checkpoints its cursor so the

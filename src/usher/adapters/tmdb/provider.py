@@ -10,12 +10,17 @@ the first is visible in a response body:
    `/search/tv`; `/movie/changes` against `/tv/changes`; and a series' episodes
    live behind `/tv/{id}/season/{n}`, which has no movie counterpart at all.
 3. **`append_to_response` vocabularies.** `release_dates` is a movie-only
-   namespace and `content_ratings` is a TV-only one. One shared append list
-   is therefore not "a value that comes back wrong" — it is a request for a
-   namespace that does not exist on that half of the API.
+   namespace and `content_ratings` is a TV-only one. **Verified live
+   2026-08-01: asking either half for the other's namespace is answered
+   `200` with the key simply absent** — not an error, not even a warning.
+   So one shared append list is the worst of the three: half the catalog
+   loses its `content_rating` (or its certification) silently, on a
+   response that looks entirely successful. An unknown namespace
+   (`zzz_not_a_namespace`) behaves the same way.
 
-All three were read from TMDb's published reference on 2026-07-31, not from
-memory; `tests/fixtures/tmdb/README.md` lists the pages.
+All three were read from TMDb's published reference on 2026-07-31 and
+confirmed against the live API on 2026-08-01;
+`tests/fixtures/tmdb/README.md` lists the pages.
 
 **A series costs one request plus one per season.** TMDb's series detail
 lists its seasons but carries no episodes, and PRD 03 already specifies "plus
@@ -33,6 +38,10 @@ results but supports neither `primary_release_year` nor `first_air_date_year`,
 so it cannot filter by year at all — which is why an unscoped search here is
 two requests rather than one multi. ADR-0017 is why the port carries an
 optional `kind` for the caller that knows.
+
+**And it retries without the year when the year found nothing**, because
+TMDb's year filter is exact while the match ladder's is ±1. See
+`_search_one`, which carries the measurement.
 """
 
 import datetime as dt
@@ -115,11 +124,7 @@ class TmdbMetadataProvider(MetadataProvider):
         kinds = (kind,) if kind is not None else (TitleKind.MOVIE, TitleKind.SERIES)
         found: list[MetadataCandidate] = []
         for one in kinds:
-            params = {"query": name, "include_adult": "false"}
-            if year is not None:
-                params[_SEARCH_YEAR_PARAM[one]] = str(year)
-            body = await self._client.get(_SEARCH_PATH[one], params)
-            found.extend(search_candidates(body, one))
+            found.extend(await self._search_one(name, year, one))
         if kind is not None:
             # One space: TMDb's own relevance ordering, untouched.
             return found
@@ -173,6 +178,42 @@ class TmdbMetadataProvider(MetadataProvider):
         )
 
     # -- internals -----------------------------------------------------
+
+    async def _search_one(
+        self, name: str, year: int | None, kind: TitleKind
+    ) -> list[MetadataCandidate]:
+        """One id space, with the year retried away if it found nothing.
+
+        **TMDb's year filter is exact and the caller's rule is not**, and
+        without this the tighter of the two silently wins. Measured live
+        2026-08-01 over 320 IMDb names: all 294 candidates TMDb returned
+        carried *exactly* the year asked for, so
+        `usher.services.matching._confident`'s own
+        `abs(candidate.year - item.year) <= 1` never fired once -- tier 4 ran
+        at +/-0 while tier 3, the identical rule against the local catalog,
+        runs at +/-1. 26 of the 320 came back completely empty and re-asking
+        those without the year resolved **13** confidently, every one a
+        title whose TMDb date is one year off IMDb's (Danny Phantom 2003 vs
+        2004, Toast of London 2012 vs 2013, and eleven more).
+
+        A *fallback* rather than dropping the filter, because dropping it was
+        measured too and is worse: of 133 names that already resolved, 6
+        stopped resolving without the year, since "exactly one survivor"
+        across every year at once is a harder test than within one. So the
+        second request only happens when the first found nothing -- it can
+        add matches and cannot remove any, and costs one extra request on
+        the ~8% of probes that come back empty rather than on all of them.
+        """
+        params = {"query": name, "include_adult": "false"}
+        if year is None:
+            return search_candidates(await self._client.get(_SEARCH_PATH[kind], params), kind)
+        body = await self._client.get(
+            _SEARCH_PATH[kind], {**params, _SEARCH_YEAR_PARAM[kind]: str(year)}
+        )
+        candidates = search_candidates(body, kind)
+        if candidates:
+            return candidates
+        return search_candidates(await self._client.get(_SEARCH_PATH[kind], params), kind)
 
     def _resolve(self, ref: ProviderRef) -> tuple[TitleKind, int]:
         """A ref this provider can actually serve, or `PortDataMalformed`.

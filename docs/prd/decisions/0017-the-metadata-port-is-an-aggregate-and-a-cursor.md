@@ -108,7 +108,28 @@ it was asked for**, and clamps rather than raising.
   `PortUnavailable`.** TMDb answers 404 for an id it has merged away, and the
   catalog holds 291,737 TMDb ids from a bulk export that ages. Retrying does
   not help, so `JobWorker` parks it immediately rather than spending five
-  rate-limited attempts first.
+  rate-limited attempts first. **Live verification on 2026-08-01 widened
+  this from 404 to the whole 4xx range** except 429 and 408: TMDb was
+  observed answering **422** for a 15-day `/movie/changes` window and **400**
+  for a 21-item `append_to_response`, and both are statements about the
+  request rather than about the upstream's health. The 404 argument covers
+  them unchanged — five rate-limited retries reach the same answer, and the
+  job then parks with "upstream unavailable" instead of with what was wrong.
+- **A clamped change window is exactly as wide as TMDb allows, with no
+  margin.** Measured live 2026-08-01: `[today-14, today]` is accepted,
+  `[today-15, today]` is a 422 reading *"Should be a range no longer than 14
+  days"*, and both endpoints are inclusive (`start == end` is a valid
+  one-day window). So the clamp in `TmdbMetadataProvider.changed_since` is
+  not conservative — it is the boundary.
+- **A provider may narrow a `year` the caller gave it, and must not narrow
+  it silently.** TMDb's `primary_release_year`/`first_air_date_year` are
+  *exact* filters where the match ladder's rule is ±1, measured live over
+  320 names: all 294 candidates returned carried exactly the year asked for,
+  and 26 probes came back empty rather than one year off.
+  `TmdbMetadataProvider` therefore re-asks without the year when the filtered
+  search finds nothing — a fallback, not a widening, because dropping the
+  filter outright loses 6 of 133 already-resolving names to ambiguity while
+  the fallback loses none and recovers 13 of the 26.
 
 ## Evidence
 
@@ -119,6 +140,8 @@ it was asked for**, and clamps rather than raising.
   catalog titles of which 291,737 carry a `tmdb_id` — `CLAUDE.md`.
 - TMDb's `/movie/changes` 14-day window cap and the `append_to_response`
   vocabulary — [03](../03-sources-and-sync.md),
-  [04](../04-catalog-bootstrap.md).
+  [04](../04-catalog-bootstrap.md). Both verified live 2026-08-01, along
+  with the 422/400/404 status vocabulary and the exact-year search filter
+  above; `CLAUDE.md` carries the full guess-by-guess table.
 - `EnrichmentState.ENRICHED > EnrichmentState.SKELETON` is `False` —
   [ADR-0008](0008-enrichment-tier-vs-failure.md).

@@ -39,6 +39,16 @@ class _Server:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.status_for: dict[str, int] = {}
+        # TMDb's `primary_release_year`/`first_air_date_year` are *exact*
+        # filters -- measured live 2026-08-01, where all 294 candidates
+        # returned across 320 probes carried the year that was asked for and
+        # 26 probes came back completely empty. Setting this reproduces that
+        # one behaviour: a year one off the provider's own date is not a
+        # lower-ranked result, it is no result.
+        self.year_filter_is_exact = False
+        # And this one is the same endpoint simply knowing nothing, with or
+        # without a year.
+        self.search_finds_nothing = False
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -46,6 +56,10 @@ class _Server:
         forced = self.status_for.get(path)
         if forced is not None:
             return httpx.Response(forced, json={"status_message": "forced"})
+        if path.startswith("/3/search/") and (
+            self.search_finds_nothing or (self.year_filter_is_exact and self._dated(request))
+        ):
+            return httpx.Response(200, json={"page": 1, "results": [], "total_pages": 1})
         # The exact change-feed paths are matched before the detail prefixes
         # below, because `/3/movie/changes` also starts with `/3/movie/`.
         if path == "/3/movie/changes":
@@ -65,6 +79,12 @@ class _Server:
         if path.startswith("/3/tv/"):
             return httpx.Response(200, json=load_tmdb_fixture("series"))
         return httpx.Response(404, json={})
+
+    @staticmethod
+    def _dated(request: httpx.Request) -> bool:
+        return any(
+            one in request.url.params for one in ("primary_release_year", "first_air_date_year")
+        )
 
     @staticmethod
     def _changes(request: httpx.Request, *, first: list[int]) -> dict[str, Any]:
@@ -302,6 +322,78 @@ async def test_a_search_with_no_year_sends_no_year_parameter() -> None:
     async with http:
         await provider.search("A Film", None, TitleKind.MOVIE)
     assert "primary_release_year" not in server.requests[0].url.params
+
+
+@pytest.mark.parametrize(
+    ("kind", "path", "parameter"),
+    [
+        (TitleKind.MOVIE, "/3/search/movie", "primary_release_year"),
+        (TitleKind.SERIES, "/3/search/tv", "first_air_date_year"),
+    ],
+)
+async def test_an_empty_year_filtered_search_is_retried_without_the_year(
+    kind: TitleKind, path: str, parameter: str
+) -> None:
+    """TMDb's year filter is exact; the caller's rule is +/-1. Without this
+    retry the tighter of the two silently wins.
+
+    Measured live 2026-08-01 over 320 names: every one of the 294 candidates
+    TMDb returned carried *exactly* the year asked for, so `_confident`'s
+    own `abs(candidate.year - item.year) <= 1` is unreachable and tier 4
+    runs at +/-0 while tier 3 runs at +/-1. 26 of the 320 came back empty,
+    and re-asking those 26 without the year resolved 13 of them confidently
+    -- every one a title whose TMDb date is one year off the source's.
+    """
+    server = _Server()
+    server.year_filter_is_exact = True
+    provider, http = _provider(server)
+    async with http:
+        found = await provider.search("A Film", 1999, kind)
+    assert server.paths() == [path, path]
+    assert server.requests[0].url.params[parameter] == "1999"
+    assert parameter not in server.requests[1].url.params
+    assert found, "the yearless retry's candidates must reach the caller"
+
+
+async def test_a_year_filtered_search_that_finds_something_is_not_retried() -> None:
+    """The retry is a fallback, not a widening. Dropping the year filter
+    outright was measured too and is *worse*: of 133 names that already
+    resolved with it, 6 stopped resolving without it, because "exactly one
+    survivor" across every year at once is harder than within one. So the
+    second request happens only when the first found nothing, which can add
+    matches and cannot remove any -- and costs an extra request on the 8%
+    of probes that came back empty rather than on all of them."""
+    server = _Server()
+    provider, http = _provider(server)
+    async with http:
+        await provider.search("A Film", 1999, TitleKind.MOVIE)
+    assert server.paths() == ["/3/search/movie"]
+
+
+async def test_an_empty_search_with_no_year_is_not_retried() -> None:
+    """There is nothing to drop, so a retry would be the identical request
+    twice -- one wasted rate-limited call per unmatched item, on the tier
+    PRD 03 already calls a last resort."""
+    server = _Server()
+    server.search_finds_nothing = True
+    provider, http = _provider(server)
+    async with http:
+        found = await provider.search("A Film", None, TitleKind.MOVIE)
+    assert server.paths() == ["/3/search/movie"]
+    assert found == []
+
+
+async def test_a_search_that_finds_nothing_either_way_asks_exactly_twice() -> None:
+    """The fallback is bounded at one extra request. A provider that kept
+    re-asking would turn every genuinely unknown title into an unbounded
+    loop against a rate-limited API."""
+    server = _Server()
+    server.search_finds_nothing = True
+    provider, http = _provider(server)
+    async with http:
+        found = await provider.search("A Film", 1999, TitleKind.MOVIE)
+    assert server.paths() == ["/3/search/movie", "/3/search/movie"]
+    assert found == []
 
 
 # -- the change feed -------------------------------------------------------

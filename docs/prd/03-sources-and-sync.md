@@ -406,6 +406,42 @@ makes the walk's duration a function of TMDb's rate limit rather than of the
 source's. It runs off the priority queue instead, which is what the queue's
 concurrency limit is for.
 
+**Measured against TMDb's own search, 2026-08-01** — the measurement tier 4
+had never had, because until Task 26 nothing in this repository had made a
+TMDb API request. 320 IMDb names (160 movies, 160 series, stratified into
+four `numVotes` bands so the popular end a real library sits at is visible
+separately from the long tail), each searched through the shipped
+`TmdbMetadataProvider` and judged by the shipped `_confident`:
+
+| | rate |
+|---|---|
+| all 320 | **83.1%** |
+| movies (160) | 87.5% |
+| series (160) | 78.8% |
+| `numVotes` ≥ 100,000 | 90.0% |
+| 10,000–100,000 | 91.3% |
+| 1,000–10,000 | 81.3% |
+| 100–1,000 | 70.0% |
+
+Two things fall out of it. **TMDb's relevance ordering really does put the
+obvious answer first** — 263 of the 266 confident resolutions were TMDb's
+*first* result, the other three no lower than rank 3, and for series it was
+126 of 126 — so the rule and the ordering agree, and the rule is not
+depending on the ordering to do it. And **TMDb's year filter is exact where
+this ladder's is ±1**: all 294 candidates it returned carried exactly the
+year asked for, so 26 of the 320 came back with *nothing* rather than with a
+one-year-off answer. Re-asking those 26 without the year resolves 13 of
+them, every one a title TMDb dates a year away from IMDb; the adapter now
+does that automatically when a year-filtered search finds nothing, which
+takes the table above to **87.2%** overall. Dropping the year filter
+outright was measured too and is worse — 6 of 133 already-resolving names
+stop resolving, because "exactly one survivor" across every year at once is
+a harder test than within one.
+
+This is the tier-3 number's counterpart, not its replacement: the two are
+different candidate sets and both are now measured (72–75% locally, 83–87%
+remotely, on different name samples).
+
 **Episodes never walk this ladder.** An Emby episode payload carries the
 *episode's* own provider ids (`{"Imdb": "tt2178782", "Tvdb": "4517466"}` on a
 live payload), not its series'. TVDb numbers episodes and series in different
@@ -427,13 +463,38 @@ sets `field_provenance`.
 **The `append_to_response` list is not the same for both id spaces**, which
 is a correction to what this section said before M4 built the adapter:
 `release_dates` is a movie-only namespace and `content_ratings` is the TV-only
-equivalent, so one shared list asks half the catalog for an endpoint that does
-not exist. Read from TMDb's published reference, 2026-07-31.
+equivalent. Read from TMDb's published reference on 2026-07-31, then
+**measured against the live API on 2026-08-01 — and the measurement corrects
+the correction.** Asking either half for the other's namespace is not an
+error: TMDb answers `200` with the requested key simply absent from the body,
+and does the same for a namespace that does not exist at all. So one shared
+list is worse than an endpoint that does not exist would be. It is silent:
+half the catalog loses its certification on a response that looks completely
+successful.
 
 | Kind | Request |
 |---|---|
 | movie | `GET /movie/{id}?append_to_response=credits,keywords,images,videos,external_ids,release_dates` |
 | series | `GET /tv/{id}?append_to_response=credits,keywords,images,videos,external_ids,content_ratings`, then `GET /tv/{id}/season/{n}` per season |
+
+Two facts about that second row, both measured live on 2026-08-01 and both
+consequential enough to state here rather than in an adapter docstring:
+
+- **`credits` is a valid TV namespace** (`aggregate_credits` exists
+  alongside it and is *also* valid — it is a second view, not a replacement).
+- **`append_to_response=season/N` works**, so the per-season requests in
+  that row are optional rather than necessary. One request carrying
+  `credits,keywords,images,videos,external_ids,content_ratings` plus
+  `season/0…season/13` — exactly TMDb's documented 20-item ceiling, which is
+  enforced with an HTTP 400 at 21 — returned Game of Thrones' entire
+  hierarchy, all 373 episodes across 9 seasons, in place of the ten requests
+  the row above costs. A season the series does not have is silently omitted
+  rather than erroring, and the appended block is byte-identical to the
+  season's own detail response but for a missing top-level `id`, which the
+  series' own `seasons[]` summary already carries. **This is recorded and
+  not yet taken**: it is a change to this row, to the adapter's `fetch`, and
+  to the request-budget arithmetic in [04](04-catalog-bootstrap.md), and it
+  belongs in its own change rather than folded into a verification run.
 
 The same divergence runs through the field names (`title`/`name`,
 `release_date`/`first_air_date`, `keywords.keywords`/`keywords.results`, a
@@ -462,6 +523,16 @@ term. The feed is walked through a resumable cursor
 (`changed_since(since, cursor) -> ChangedPage`), and a provider may answer a
 narrower window than it was asked for — TMDb caps it at 14 days — so an
 exhausted feed is not proof that nothing older changed.
+
+**That cap is real, both endpoints of the window are inclusive, and the
+clamp sits exactly on the boundary with nothing to spare.** Measured live
+2026-08-01: `start_date == end_date` is a valid one-day window returning
+4,278 movies, `[d, d+1]` returns 8,155 against 4,278 and 4,373 for the two
+days taken separately (so it covers both, deduplicated), `[today-14, today]`
+returns 47,945, and `[today-15, today]` is **HTTP 422** —
+`"Invalid date range: Should be a range no longer than 14 days."` The
+adapter clamps `start` to `today - 14 days`, which is the widest window TMDb
+accepts; one day wider and the daily re-enrichment job fails outright.
 
 The tier a title lands on is the pipeline's decision, never the provider's:
 `to_result` does not set `enrichment_state`, and `EnrichService` only ever

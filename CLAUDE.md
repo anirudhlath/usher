@@ -21,7 +21,8 @@ pipeline: `MatchService`/`IngestService`/`ReconcileService`/
 Postgres priority queue, the TMDb metadata provider, the `sync`/
 `sync-status`/`unmatched`/`work` CLI, and the pipeline's span tree and
 metrics (M4) — all exist and are verified working, M3 and M4 including
-against a live Emby 4.9.5.0 server. See
+against a live Emby 4.9.5.0 server and, as of 2026-08-01, against the live
+TMDb v3 API. See
 `docs/plans/2026-07-28-m1-foundation.md`,
 `docs/plans/2026-07-30-m2-bootstrap.md`,
 `docs/plans/2026-07-30-m3-emby-adapter.md` and
@@ -237,14 +238,17 @@ rather than quietly dropped: it is the mistake worth not repeating.)
   before/after diff is empty). Choosing an all-zero item is what made
   restoration exact rather than approximate; on any other item `PlayCount`
   is not restorable by any route this project knows.
-- **Not verified in this run, and named rather than implied:** anything
-  needing a TMDb API key (no key is configured, so `TmdbClient`,
-  `TmdbMetadataProvider`, the `enrich` handler and `_confident` against
-  *TMDb's own* search results have still never made a real request — the
-  rate measured above is the same rule run locally); a full
+- **Not verified in that run, and named rather than implied:** a full
   1,126,674-item walk; `POST /Users/AuthenticateByName`; silent 401
   re-authentication end to end; durable-device registration across
-  restarts.
+  restarts. Anything needing a TMDb API key was also unverified there and
+  **is no longer** — a key was configured the next day and the TMDb half of
+  Task 26 ran on 2026-08-01; see the TMDb live-verification section below,
+  including `_confident` against TMDb's own search results, which that run
+  measured at 83.1%/87.2% against the 72–75% the *local* rule scores.
+  `EnrichService` and the `enrich` job handler are still driven only by
+  fakes: the live run exercised `TmdbClient`, `TmdbMetadataProvider` and the
+  mapper, not the service above them.
 
 **M3's live verification found the write-back route was simply wrong, and
 three other things worth not re-deriving.** Run 2026-07-31 against the live
@@ -731,14 +735,23 @@ a span, so a worker that built one records the same empty `links` tuple).
 Both mutations survived the whole suite until the direct case existed.
 
 **No test in this repository makes a network request, and that is measured
-rather than asserted.** Verified 2026-07-31 by running the whole suite under a
+rather than asserted.** Verified 2026-07-31 and **re-verified 2026-08-01
+after the live TMDb run**, by running the whole suite under a
 `sitecustomize.py` that patches `socket.socket.connect`, `connect_ex` and
 `socket.getaddrinfo` to raise on anything that is not loopback (`AF_UNIX` is
 left alone, so Docker's socket still works and `testcontainers` still reaches
-`127.0.0.1`). **1,289 unit + 424 integration, all green, zero blocks.** The
+`127.0.0.1`). **1,298 unit + 424 integration passed (1 unit case skipped), zero blocks.** The
 guard lives outside the tree — it is a check to re-run, not a dependency to
 add, because `PYTHONPATH`-injecting a socket monkeypatch into every developer's
 suite costs more than it catches.
+
+**Prove the guard is installed before believing a green run.** A
+`sitecustomize.py` that is not on `PYTHONPATH` produces exactly the same
+output as one that is and blocks nothing — the same family as the
+venv-shebang trap. The 2026-08-01 re-run printed `[netguard] installed` from
+the module itself and then, in the same environment,
+`socket.getaddrinfo("api.themoviedb.org", 443)` raised
+`RuntimeError: NETWORK BLOCKED`. Both checks, or the run proves nothing.
 
 **M4's final mutation sweep: 39 mutations, one survivor, and the survivor is
 an equivalent mutant the code comment predicted.** Run 2026-07-31 in place,
@@ -790,38 +803,171 @@ also pins "a refused sweep leaves the session usable for the `FAILED` row that
 explains it", which no fake can express (the guard is evaluated in Python
 after a successful `SELECT`, so Postgres never aborts the transaction).
 
+**The TMDb half of M4's live verification: ten open guesses, eight
+settled, and the two corrections both went the same way — TMDb is more
+silent than the code assumed, not louder.** Run 2026-08-01 against
+`api.themoviedb.org/3` with a real v3 key, driving the shipped
+`TmdbClient`/`TmdbMetadataProvider`/`usher.adapters.tmdb.mapping`/
+`usher.services.matching._confident` from a throwaway script outside the
+working tree. **712 requests total**, GET only, no write route of any
+kind touched. Before this run **no request had ever been made** from this
+repository and every TMDb fixture was a transcription of documentation.
+The whole status distribution, since it is the evidence for half the table
+below: **699 × 200, 7 × 404, 2 × 401, 2 × 422, 2 × 400 — and no 429 and no
+5xx at all.** Every one of the thirteen non-200s was deliberately provoked
+and is accounted for in the table below.
+
+| # | Guess | Verdict | Evidence |
+|---|---|---|---|
+| 1 | TMDb sends `Retry-After` on a 429 | **still unverified** | Zero 429s in 712 requests at 25 rps, and no `retry-after` header on *any* response including the 401s and 422s. Deliberately not provoked. |
+| 2 | An invalid `append_to_response` namespace errors | **refuted** | `200`, key silently absent — for a wrong-space namespace *and* for `zzz_not_a_namespace`. |
+| 3 | The 404 body shape | **confirmed & recorded** | `{"success": false, "status_code": 34, "status_message": "The resource you requested could not be found."}`, `application/json;charset=utf-8`, on `/movie`, `/tv` and `/tv/{id}/season/{n}` alike. |
+| 4 | A v4 read access token is JWT-shaped | **unverifiable here, cost bounded** | The configured credential is a classic 32-hex v3 key; `_is_v4_token` correctly says no. A false positive was measured instead: the v3 key sent as `Authorization: Bearer` answers **401** (`status_code: 7`), i.e. loud and immediate, never a wrong answer. |
+| 5 | The changes window's inclusivity and its 14-day cap | **confirmed, and it is the boundary** | `start == end` is a valid one-day window (4,278 results); `[d, d+1]` covers both days deduplicated; `[today-14, today]` → 200; `[today-15, today]` → **422**, `"Invalid date range: Should be a range no longer than 14 days."` The shipped clamp sits exactly on it with nothing spare. |
+| 6 | `credits` is a valid TV append namespace | **confirmed** | Present with 14 cast entries. `aggregate_credits` is *also* valid — a second view, not a replacement. |
+| 7 | `append_to_response=season/N` works | **confirmed — see below** | It does, and it collapses a series from 1+N requests to 1. |
+| 8 | A season the series lists that 404s on its own route | **still unverified** | 320 listed seasons across 30 series, **zero** absent. The propagate-and-park branch has still never met a real occurrence. Sample skews popular, so it is weak evidence of absence. |
+| 9 | Search orders by relevance with the obvious answer first | **confirmed** | 263 of 266 confident resolutions were TMDb's **first** result (max rank 3; series 126/126 at rank 0), and the top result was an exact normalised name match on 269 of 320 probes. |
+| 10 | `spoken_languages[].iso_639_1` and `origin_country` are well-formed | **confirmed** | Zero anomalies over 59 detail payloads; `origin_country` present on 29/29 movies and 30/30 series, always a list of strings. |
+
+**Two things live TMDb contradicted, both now fixed with a failing test
+first.**
+
+- **A 4xx that is not a 429 is `PortDataMalformed`, not `PortUnavailable`.**
+  Observed: **422** for a 15-day change window (`status_code: 20`) and
+  **400** for a 21-item `append_to_response` (`status_code: 27`, *"the
+  maximum number of remote calls is 20"*). Both were classified as outages,
+  so `JobWorker` would spend five rate-limited retries and a backoff
+  schedule reaching the identical answer and then park with the wrong
+  reason. 408 is excluded and stays retryable — TMDb has never been
+  observed sending one, but `Settings.tmdb_base_url` exists so a household
+  can front TMDb with a proxy.
+- **TMDb's year filter is exact where the match ladder's is ±1.** All 294
+  candidates returned across 320 probes carried *exactly* the year asked
+  for, so `_confident`'s own `abs(candidate.year - item.year) <= 1` never
+  fired once and tier 4 silently ran at ±0. 26 of 320 came back empty
+  rather than one year off; re-asking those without the year resolves
+  **13**, every one a title TMDb dates a year away from IMDb (Danny Phantom
+  2003/2004, Toast of London 2012/2013, …). `TmdbMetadataProvider._search_one`
+  now retries yearless when the filtered search finds nothing. A *fallback*
+  and not a widening, because dropping the filter outright was measured too
+  and is worse: 6 of 133 already-resolving names stop resolving, since
+  "exactly one survivor" across every year at once is a harder test than
+  within one.
+
+**`_confident` against TMDb's own search: 83.1%, and 87.2% with the
+yearless fallback.** The number the Emby half explicitly could not take.
+320 IMDb names (160 movies / 160 series) stratified into four `numVotes`
+bands, each searched through the shipped provider and judged by the shipped
+rule: **87.5% of movies**, **78.8% of series**; by band, 90.0% / 91.3% /
+81.3% / 70.0% descending, so a real library — which sits at the popular end
+— should expect the high eighties to low nineties. Failures decompose as 26
+zero-result, 22 results-but-no-exact-name, 6 ambiguous. Compare tier 3's
+72.2%/75.3% for the identical predicate over the local 1.27M-row catalog:
+**different candidate sets and different name samples, so these are
+counterparts, not a before/after.** The IMDb-derived names are a proxy for
+Emby names, which were not available to this run — stated rather than
+implied.
+
+**`append_to_response=season/N` works, and it is worth ~5x on the whole
+enrichment path.** One request carrying
+`credits,keywords,images,videos,external_ids,content_ratings` plus
+`season/0…season/13` — **exactly** TMDb's 20-item ceiling — returned Game of
+Thrones' entire hierarchy, **all 373 episodes across 9 seasons**, in place
+of the ten requests the shipped path costs. Four supporting facts, each
+measured because the change rests on it:
+
+- The ceiling is **enforced**: 21 items is a **400**, `status_code: 27`.
+  Six namespaces already appended leaves exactly 14 season slots.
+- `season/0` (specials) appends like any other, 300 episodes on GoT.
+- An unlisted season number is **silently omitted**, not an error — which
+  is also the cheap detector guess 8 was scanned with.
+- The appended block is identical to the season's own detail response
+  **but for a missing top-level `id`**, and the series' own `seasons[]`
+  summary carries that same id (3627/3624/107971 on GoT, byte-identical to
+  the season route's). So `_compose_seasons`' existing merge-over-the-summary
+  would lose nothing.
+
+**Not implemented.** It changes PRD 03's request table, PRD 04's crawl
+arithmetic and `TmdbMetadataProvider.fetch`, and belongs in its own change
+rather than folded into a verification run. At 32,409 series and a measured
+median of 9 seasons it is the difference between ~190k requests and ~35k
+for a full enrichment pass.
+
 **TMDb's movie/TV divergence runs through three layers of its API, not
-one, and the third is the dangerous one.** Read from TMDb's published
-reference on 2026-07-31 (`developer.themoviedb.org`), not from memory and
-not from a live capture — nothing in this repository has ever made a real
-TMDb API request, which is what Task 26 exists to fix.
+one, and all three are now measured rather than read.** The field-name and
+endpoint rows were read from `developer.themoviedb.org` on 2026-07-31 and
+**every one was confirmed live on 2026-08-01** over 29 movie and 30 series
+detail responses.
 
 - **Field names.** `title`/`name`, `original_title`/`original_name`,
   `release_date`/`first_air_date`, `runtime` (minutes) against
   `episode_run_time` (an array), `keywords.keywords` against
   `keywords.results`, a top-level `imdb_id` against `external_ids.imdb_id`.
-  Tabulated in `usher.adapters.tmdb.mapping`'s docstring.
+  Tabulated in `usher.adapters.tmdb.mapping`'s docstring. Live: 29/29
+  movies carried the whole movie column and **none** of the series column;
+  30/30 series the mirror, with `external_ids.tvdb_id` non-null on all 30.
 - **Endpoints.** `/movie/{id}` against `/tv/{id}`; `/search/movie` with
   `primary_release_year` against `/search/tv` with `first_air_date_year`;
   `/movie/changes` against `/tv/changes`; and a series' episodes live
   behind `/tv/{id}/season/{n}`, which has no movie counterpart at all.
 - **`append_to_response` vocabularies.** `release_dates` is a movie-only
-  namespace and `content_ratings` is the TV-only equivalent. This is the
-  one that does not merely produce a wrong value: a shared append list
-  asks half the catalog for a namespace that does not exist. PRD 03 named
-  one list for both and is corrected.
+  namespace and `content_ratings` is the TV-only equivalent. **The
+  consequence was stated wrongly and is corrected**: a shared list does not
+  ask for a namespace that does not exist and get an error, it gets `200`
+  with the key absent. So the failure is silent — half the catalog loses
+  its certification on a response that looks entirely successful — which is
+  a *stronger* reason for the split than the one previously recorded.
+
+**`episode_run_time` is empty on 86.7% of series** — `[]` on 26 of 30 live
+detail responses, Game of Thrones among them. `Title.runtime_minutes` is
+simply not a fact TMDb still holds about most television, and `None` is the
+answer rather than a mapping gap. The committed `series.json` fixture
+carries the rarer populated shape, so the common one needed its own case
+(`test_an_empty_episode_run_time_is_the_common_case_and_is_not_a_failure`).
+
+**ADR-0011 is not a theoretical hazard: 12 of 14 small ids probed are live
+in both id spaces, and every pair is an unrelated work.** Live 2026-08-01 —
+`550` is *Fight Club* and *Till Death Us Do Part*; `238` is *The Godfather*
+and *Star Cops*; `680` is *Pulp Fiction* and *Shaquille*; `605` is *The
+Matrix Revolutions* and *Sabrina, the Teenage Witch*. No movie payload
+carried a `name` key and no series payload a `title` key, so
+`kind_of_payload`'s exactly-one rule resolved all 24 correctly and
+`title_from_payload` produced two unrelated canonical titles per id with no
+possibility of conflation.
 
 **A kind-less TMDb reference is `PortDataMalformed`, never a guess.**
 ADR-0011 at the request layer: 26,968 ids are live in both spaces, so
 `GET /movie/{id}` for a ref that meant a series returns a **real payload
 for an unrelated film**, which is then written onto the title as enriched
-metadata with no error anywhere.
+metadata with no error anywhere. Verified live through the real provider.
 
 **A TMDb 404 is `PortDataMalformed`, not `PortUnavailable`.** The catalog
 holds 291,737 TMDb ids from a bulk export that ages, and TMDb answers 404
 for an id it has merged away. Retrying cannot turn any of them into an
 answer, so this is the branch that makes `JobWorker`'s park-immediately
-path fire in production rather than only in a test.
+path fire in production rather than only in a test. Confirmed live, body
+shape and all, and now generalised to the whole 4xx range above.
+
+**The committed TMDb fixtures were transcriptions and they held up.** The
+first shape diff any of them has ever had (2026-08-01, via
+`scripts/capture_tmdb_fixture.py`) found **not one key in any fixture that
+the live response lacks** — every field the mapper reads was transcribed
+correctly from documentation. The live API carried six the fixtures did
+not, all now added shape-only so the *next* diff is empty and a real drift
+is visible: `softcore` (a boolean, on movie details, series details, search
+results and the change feed), `iso_3166_1` on every `images.*` entry, and
+**`networks` on the season detail**, which the `tv-season-details`
+reference page does not show. Two differences are deliberately left open
+because they are value-level, not shape-level, and closing them would make
+a fixture claim something false — see `tests/fixtures/tmdb/README.md`.
+
+**Still not verified after this run, named rather than implied:** a real
+429 and whether one carries `Retry-After`; a v4 read access token in any
+form (so `_is_v4_token`'s positive branch has never been exercised against
+a real credential); a season TMDb lists that its own route refuses; TMDb's
+behaviour under sustained concurrency (this run was sequential through one
+token bucket at 25 rps); and any of it against a non-`US` `tmdb_region`.
 
 **A TMDb v3 API key in the query string lands in every trace.**
 `HTTPXClientInstrumentor` (wired in `configure_tracing`) records the full
@@ -1378,8 +1524,8 @@ and interrogated over HTTP, and the suite is 865 tests (733 unit / 132
 integration), mypy strict clean over `src` and `tests`, 6 import contracts:
 
 ```bash
-uv run pytest                                    # 1713 tests as of M4 group F1 (1289 unit / 424 integration)
-uv run pytest tests/unit                         # 1289 tests, no Docker and no network
+uv run pytest                                    # 1722 passed + 1 skipped as of M4 Task 26 (1299 unit / 424 integration)
+uv run pytest tests/unit                         # 1298 passed + 1 skipped, no Docker and no network
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .
@@ -1395,7 +1541,23 @@ curl -sS http://localhost:8000/admin/sources/<id>/status
 # and its output is deliberately never committed -- see the module docstring.
 export USHER_EMBY_URL=... USHER_EMBY_USER=... USHER_EMBY_PASSWORD=...
 uv run python scripts/capture_emby_fixture.py --type Episode > /tmp/shape.json
+
+# The same thing for TMDb. Verified working against the live API 2026-08-01;
+# `set -a; . ./.env; set +a` rather than a literal key, so no credential ever
+# reaches a shell history or a recorded command.
+set -a; . ./.env; set +a
+uv run python scripts/capture_tmdb_fixture.py --kind movie  --id 550   > /tmp/shape.json
+uv run python scripts/capture_tmdb_fixture.py --kind series --id 1399  > /tmp/shape.json
+uv run python scripts/capture_tmdb_fixture.py --kind season --id 1399 --season 1
+uv run python scripts/capture_tmdb_fixture.py --kind search --query Dune --year 2021
+uv run python scripts/capture_tmdb_fixture.py --kind changes
 ```
+
+**`--kind search` sends `primary_release_year` whatever it is given**, so it
+records the `/search/movie` shape and never `/search/tv`'s. Fine for a shape
+diff (the two pages are the same shape but for `title`/`name` and
+`release_date`/`first_air_date`), worth knowing before reading its output as
+evidence about TV search.
 
 Verified working as of M4 group F1 (the CLI, telemetry, and the end-to-end
 measurement) — the ingest pipeline is runnable by an operator, not just by a

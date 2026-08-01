@@ -170,6 +170,61 @@ async def test_a_server_error_is_an_outage() -> None:
             await client.get("/movie/550")
 
 
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        # Live 2026-08-01: `/movie/changes` with a 15-day window.
+        (
+            422,
+            {
+                "success": False,
+                "status_code": 20,
+                "status_message": "Invalid date range: Should be a range no longer than 14 days.",
+            },
+        ),
+        # Live 2026-08-01: 21 `append_to_response` items.
+        (
+            400,
+            {
+                "success": False,
+                "status_code": 27,
+                "status_message": (
+                    "Too many append to response objects: The maximum number of remote calls is 20."
+                ),
+            },
+        ),
+    ],
+)
+async def test_a_rejected_request_is_malformed_data_not_an_outage(status: int, body: Any) -> None:
+    """A 4xx that is not a 429 cannot become an answer by being sent again.
+
+    Both bodies are the ones TMDb really returned on 2026-08-01, and both
+    are permanent properties of the *request*: a 15-day change window and a
+    21-item `append_to_response`. Translated as `PortUnavailable` they are
+    retryable, so `JobWorker` spends five rate-limited attempts and a
+    backoff schedule on a request that can never succeed, then parks with
+    "upstream unavailable" rather than with what was actually wrong. Same
+    argument the 404 case above makes, arriving from the other four
+    statuses TMDb has been observed to use.
+    """
+    client, http = _client(_transport(status=status, body=body))
+    async with http:
+        with pytest.raises(PortDataMalformed):
+            await client.get("/movie/550")
+
+
+async def test_a_request_timeout_is_still_an_outage() -> None:
+    """The one 4xx that is *not* the caller's fault. TMDb itself has never
+    been observed to send it, but `Settings.tmdb_base_url` exists precisely
+    so a household can put a proxy in front of TMDb, and a proxy that gives
+    up waiting is exactly the transient failure the queue's backoff is
+    for."""
+    client, http = _client(_transport(status=408))
+    async with http:
+        with pytest.raises(PortUnavailable):
+            await client.get("/movie/550")
+
+
 async def test_a_non_json_body_is_malformed() -> None:
     """A reverse proxy or a captive portal serving HTML with status 200. A
     raw `json.JSONDecodeError` escaping the port is not something a caller

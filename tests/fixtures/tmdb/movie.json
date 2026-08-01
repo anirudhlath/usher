@@ -33,6 +33,7 @@
   "release_date": "1999-10-15",
   "revenue": 2000000,
   "runtime": 139,
+  "softcore": false,
   "spoken_languages": [
     { "english_name": "English", "iso_639_1": "en", "name": "English" },
     { "english_name": "French", "iso_639_1": "fr", "name": "Français" }
@@ -88,18 +89,31 @@
         "aspect_ratio": 1.778,
         "height": 2160,
         "iso_639_1": null,
+        "iso_3166_1": null,
         "file_path": "/synthetic-backdrop.jpg",
         "vote_average": 5.3,
         "vote_count": 4,
         "width": 3840
       }
     ],
-    "logos": [],
+    "logos": [
+      {
+        "aspect_ratio": 3.2,
+        "height": 250,
+        "iso_639_1": "en",
+        "iso_3166_1": null,
+        "file_path": "/synthetic-logo.png",
+        "vote_average": 5.3,
+        "vote_count": 2,
+        "width": 800
+      }
+    ],
     "posters": [
       {
         "aspect_ratio": 0.667,
         "height": 3000,
         "iso_639_1": "en",
+        "iso_3166_1": "US",
         "file_path": "/synthetic-poster.jpg",
         "vote_average": 5.4,
         "vote_count": 9,

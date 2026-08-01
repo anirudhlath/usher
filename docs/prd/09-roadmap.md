@@ -63,6 +63,22 @@ cursor, and a `WatchStateSyncService` whose merge is safe to call with a
 *partial* state — which is exactly what a `UserDataChanged` push event hands
 it.
 
+**M4 was live-verified against both of its upstreams**, on 2026-07-31 against
+an Emby 4.9.5.0 server and on 2026-08-01 against TMDb's v3 API — the latter
+being the first request this project has ever made to `api.themoviedb.org`,
+since every TMDb fixture until then was a transcription of documentation.
+Both runs found real defects the fakes could not:  Emby's watch-state
+write-back route was simply wrong, and TMDb turned out to classify two
+permanent 4xx failures as retryable outages and to filter search years
+*exactly* where the match ladder filters ±1. `CLAUDE.md` carries both runs
+guess by guess, including what remains unverified. **One measured
+opportunity is recorded and deliberately not taken:**
+`append_to_response=season/N` collapses a series' enrichment from 1+N
+requests to 1, which is the difference between ~190k and ~35k requests for a
+full pass — it changes [03](03-sources-and-sync.md)'s request table and
+[04](04-catalog-bootstrap.md)'s crawl arithmetic and belongs in its own
+change.
+
 **M9 owes ADR-0012 a successor.** In v1, `POST /titles/{id}/play` returns a
 target URL carrying the source's session token, because M3 has no HTTP surface
 to redirect from. M9 builds that surface, so M9 is where the opaque,

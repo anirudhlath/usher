@@ -54,6 +54,10 @@ from usher.ports.errors import (
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 
+# The one 4xx that is a reason to send the request again rather than a
+# statement about the request itself. See `_decode`.
+_REQUEST_TIMEOUT = 408
+
 # TMDb's required attribution wording for non-commercial API use. Restated
 # here rather than imported from `usher.adapters.bulk.tmdb_ids`: that module
 # is the *export* importer, which needs no API key at all, and an adapter
@@ -234,6 +238,27 @@ class TmdbClient:
             # into an answer, so `JobWorker` parks it on the first attempt
             # rather than spending five rate-limited ones first.
             raise PortDataMalformed("TMDb has no entity at this reference", detail=path)
+        if 400 <= response.status_code < 500 and response.status_code != _REQUEST_TIMEOUT:
+            # The same argument as the 404 above, generalised to the rest of
+            # the 4xx range -- and generalised because live TMDb was observed
+            # using two more of them on 2026-08-01: **422** for a
+            # `/movie/changes` window longer than 14 days
+            # (`status_code: 20`), and **400** for a 21-item
+            # `append_to_response` (`status_code: 27`, "the maximum number of
+            # remote calls is 20"). Both are permanent properties of the
+            # request, so retrying spends five rate-limited attempts and a
+            # backoff schedule reaching the same answer, then parks the job
+            # with "upstream unavailable" rather than with what was wrong.
+            #
+            # 429 is handled further up and 408 is excluded by the condition
+            # itself: those are the two 4xx codes that really do mean "send
+            # this again". TMDb has never been observed to send a 408, but
+            # `Settings.tmdb_base_url` exists so a household can put a proxy
+            # in front of TMDb, and a proxy that gives up waiting is exactly
+            # what the queue's backoff is for.
+            raise PortDataMalformed(
+                f"TMDb rejected the request with HTTP {response.status_code}", detail=path
+            )
         if response.status_code >= 400:
             raise PortUnavailable(f"GET {path} returned HTTP {response.status_code}")
         try:
