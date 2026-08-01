@@ -74,6 +74,18 @@ Rules:
 - At the config layer, `database_url`, `secret_key`, and `tmdb_api_key` are
   held as `pydantic.SecretStr` and unwrapped only at the point of use, so the
   rules above are enforced by the type system, not just convention.
+- **"Never logged" has to cover libraries Usher hands a credential to, not
+  just Usher's own log lines.** From M5 the source token is also the query
+  string of a `websockets` URL, and that client debug-logs its own request
+  line — so at `USHER_LOG_LEVEL=DEBUG` the rule was broken by code this
+  project does not own. Measured against the real library before it was
+  fixed. The guard is a logger whose *level* is above `CRITICAL`, because
+  `configure_logging` clears `handlers` and re-forces `propagate = True` on
+  every logger and never touches `level`; it is re-asserted on every
+  connect, and it costs the library's own handshake and frame diagnostics.
+  [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) records
+  the reproduction and the two other lines through that logger that could
+  carry the same URL.
 
 ## Failure and degradation
 

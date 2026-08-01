@@ -42,15 +42,19 @@ Four seams, each with a reason:
 
 import asyncio
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from loguru import logger
+
+if TYPE_CHECKING:  # pragma: no cover -- typing only; see `connect_websocket`
+    from websockets.asyncio.client import ClientConnection
 
 from usher.adapters.emby.mapping import library_ids, user_data_states
 from usher.ports.errors import PortUnavailable, UsherPortError
@@ -80,6 +84,59 @@ DEFAULT_POLL_SECONDS = 5.0
 # idle library. A setting (`push_stale_after_seconds`) rather than a
 # constant, because the interval is a property of the server.
 DEFAULT_STALE_AFTER_SECONDS = 90.0
+
+# The `websockets` client logs its own request line at DEBUG --
+# `websockets/client.py:294`, `logger.debug("> GET %s HTTP/1.1",
+# request.path)` -- and this channel's request path is
+# `/embywebsocket?api_key=<token>&deviceId=<id>`.
+# `usher.telemetry.configure_logging` forces `propagate = True` on every
+# logger that exists when it runs and installs an intercept handler on root
+# at level 0, so at `log_level="DEBUG"` that line is a structured log record
+# carrying the session token. Reproduced against the real library, client
+# and server on `127.0.0.1`, before this existed. PRD 08: credentials are
+# never logged, "including in error paths and request dumps".
+_SOCKET_LOGGER_NAME = "usher.source.emby.socket"
+
+
+def socket_logger() -> logging.Logger:
+    """A logger `websockets` can write to and nothing can read from.
+
+    **The level is the durable half and the other two are belt and braces.**
+    `configure_logging` clears `handlers` and sets `propagate = True` on
+    every logger in `loggerDict`, so both of those are undone the next time
+    an app is built -- and a socket outlives the call that opened it, so
+    "the next time" lands *during* the connection they were protecting.
+    It never touches `level`, and `logging.basicConfig(level=0)` sets
+    *root*'s level rather than this one's, so a level above `CRITICAL`
+    survives: `Logger.isEnabledFor` consults `getEffectiveLevel()`, which is
+    this logger's own because it is set, and a record that is not enabled is
+    never formatted -- so the token is not interpolated, let alone emitted.
+
+    Stronger than that in practice, and measured rather than assumed:
+    `websockets.protocol.Protocol.__init__` computes
+    `self.debug = logger.isEnabledFor(logging.DEBUG)` **once**, at
+    construction, and every request-line, header and frame log in the
+    library is behind `if self.debug`. So handing this logger to `connect`
+    does not suppress those records, it stops them from being reached.
+
+    Re-asserted on every call rather than once at import, for the reason
+    above: `create_app`, `usher.cli.main` and dozens of tests each call
+    `configure_logging`, at times import order says nothing about.
+
+    **What this costs.** The library's own handshake, frame and close-code
+    diagnostics are gone. That is a real loss when debugging a socket, and
+    it is paid for by this module's own structured logging (which carries a
+    `redact_query`'d URL and the ledger's counters) and by `usher push
+    --probe`, which reports what actually arrived. It is not a trade against
+    PRD 08's rule; that rule has one documented exception in v1
+    (ADR-0012's playback URL) and this is not it.
+    """
+    silenced = logging.getLogger(_SOCKET_LOGGER_NAME)
+    silenced.setLevel(logging.CRITICAL + 1)
+    silenced.propagate = False
+    if not silenced.handlers:
+        silenced.addHandler(logging.NullHandler())
+    return silenced
 
 
 @dataclass(slots=True)
@@ -519,3 +576,118 @@ class EmbyPushChannel:
         if not isinstance(message, Mapping):
             return ()
         return to_source_events(message, source_user_id=source_user_id)
+
+
+class _WebsocketsConnection(PushConnection):
+    """`websockets.asyncio.client.ClientConnection`, behind this adapter's
+    own three methods.
+
+    The wrapper exists so that **no `websockets` exception ever crosses into
+    `usher.ports.errors` carrying its own message.**
+    `websockets.exceptions.InvalidURI.__str__` is
+    `f"{self.uri} isn't a valid URI: {self.msg}"` -- read from the installed
+    library, not assumed -- and this channel's URI carries the session
+    token; `InvalidProxy` has the same shape for a proxy URL, and
+    `InvalidStatus` carries the response. `EmbySession` interpolates `{exc}`
+    into its own messages and explains why that is safe *there* (httpx
+    exceptions carry a method and a URL, and Usher's own outbound URLs carry
+    no token -- the session rides in the `X-Emby-Token` header). Nothing
+    about that argument transfers here, and the difference is the kind of
+    thing a later reader would "unify". Every translation below names the
+    exception's *type* and nothing else.
+    """
+
+    def __init__(self, connection: "ClientConnection") -> None:
+        self._connection = connection
+
+    async def send(self, message: str) -> None:
+        try:
+            await self._connection.send(message)
+        except Exception as exc:
+            # A bare `except Exception` and no suppression directive, for
+            # the reason `EmbyPushChannel.open` records: `BLE001` is not in
+            # this project's ruff selection and `RUF100` -- which is --
+            # rejects a directive for a rule nothing enables.
+            raise PortUnavailable(f"{WEBSOCKET_PATH} send failed: {type(exc).__name__}") from exc
+
+    async def recv(self, timeout: float) -> str:
+        """One text frame, or `TimeoutError` when nothing arrived in time.
+
+        `asyncio.wait_for` around the library's own `recv()` rather than a
+        library-level deadline, because there is no library-level deadline:
+        `websockets` documents cancelling `recv` as safe ("there's no risk
+        of losing data; the next invocation will return the next message")
+        and names `asyncio.wait_for` as the way to enforce a timeout.
+        """
+        try:
+            frame = await asyncio.wait_for(self._connection.recv(), timeout)
+        except TimeoutError:
+            # Re-raised as itself: the caller's watchdog owns this, and
+            # translating it to `PortUnavailable` here would make every idle
+            # poll a reconnect and a gap-closing delta walk.
+            raise
+        except Exception as exc:
+            raise PortUnavailable(f"{WEBSOCKET_PATH} closed: {type(exc).__name__}") from exc
+        # Emby sends text. A binary frame is decoded rather than raising: it
+        # is still evidence the socket is alive, and it then fails to parse
+        # as JSON, which the channel already drops-and-counts.
+        return frame if isinstance(frame, str) else bytes(frame).decode("utf-8", "replace")
+
+    async def aclose(self) -> None:
+        try:
+            await self._connection.close()
+        except Exception as exc:
+            # Never raises: this runs in a `finally` that is itself often
+            # unwinding the `PortUnavailable` explaining why the lane
+            # dropped, and a close failure replacing the real reason is
+            # worse than a log line. The port documents `aclose` as never
+            # raising for exactly this.
+            logger.debug("push connection close failed: {kind}", kind=type(exc).__name__)
+
+
+async def connect_websocket(
+    url: str,
+    *,
+    open_timeout: float = 10.0,
+    ping_interval: float = 20.0,
+    ping_timeout: float = 20.0,
+    max_queue: int = 256,
+) -> PushConnection:
+    """The default `PushConnector`: a real `websockets` client, wrapped.
+
+    **`ping_interval=20` is PRD 03's heartbeat and is the library's own
+    default.** "Emby sends no keepalive of its own. nginx closes idle
+    connections at 60 s and Cloudflare at ~100 s, so the client must
+    generate traffic." A WebSocket ping frame is traffic. It is passed
+    explicitly rather than left to the default so that a future default
+    change is a diff rather than a silent regression. It is **layered with**
+    the staleness watchdog rather than an alternative to it: this detects a
+    dead TCP peer, and the watchdog detects a live peer that has stopped
+    delivering.
+
+    **`max_queue=256`, not the default 16.** The supervisor runs a
+    gap-closing delta reconcile *after* connecting, with the socket already
+    live, precisely so nothing that happens during the walk is missed --
+    and at the default the client stops reading after 16 buffered frames and
+    applies TCP backpressure to the server for the length of that walk. 256
+    frames of `UserDataChanged` is a few hundred kilobytes; the walk it
+    covers is minutes.
+
+    **`logger=socket_logger()` is the only argument here that is a security
+    control rather than a tuning knob.** See `socket_logger`.
+
+    The import is **local**, not module-scope: `usher.adapters.emby` is
+    imported by the factory on every composition-root build, and
+    `websockets` is a dependency only the push lane needs.
+    """
+    from websockets.asyncio.client import connect
+
+    connection = await connect(
+        url,
+        open_timeout=open_timeout,
+        ping_interval=ping_interval,
+        ping_timeout=ping_timeout,
+        max_queue=max_queue,
+        logger=socket_logger(),
+    )
+    return _WebsocketsConnection(connection)

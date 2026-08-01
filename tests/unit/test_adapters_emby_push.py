@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+import logging
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
+from typing import Any, cast
 
 import pytest
+from loguru import logger as loguru_logger
 
 from tests.fakes.emby_fixtures import load_emby_fixture
 from tests.fakes.push_connection import FakePushConnection, FakePushConnector
@@ -16,10 +19,14 @@ from usher.adapters.emby.push import (
     PushConnection,
     PushHealth,
     SessionLike,
+    connect_websocket,
+    socket_logger,
     to_source_events,
 )
+from usher.config import Settings
 from usher.ports.errors import PortUnavailable
 from usher.ports.source import SourceEvent, SourceEventKind
+from usher.telemetry import configure_logging
 
 # The two `UserDataList` entries of `push_user_data_changed.json`, and the
 # four ids `push_library_changed.json` names. Bound here so a fixture edit
@@ -969,3 +976,399 @@ async def test_the_fake_connection_really_suspends_on_every_recv() -> None:
 
     await asyncio.wait_for(asyncio.gather(one_recv(), spin()), timeout=BOUND)
     assert connection.recv_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# `websockets` logs its own request line, and this channel's request line is
+# the token.
+# ---------------------------------------------------------------------------
+
+# The exact shape `websockets/client.py:294` formats, with a token an
+# assertion can look for. `send_request` is `logger.debug("> GET %s
+# HTTP/1.1", request.path)` and `request.path` for this channel is the whole
+# path *and query*.
+LEAKY_TOKEN = "session-token-1"
+LEAKY_PATH = f"{WEBSOCKET_PATH}?api_key={LEAKY_TOKEN}&deviceId=d"
+
+
+def _logging_settings(*, level: str) -> Settings:
+    return Settings(
+        database_url="postgresql+asyncpg://u:p@localhost/db",
+        secret_key="0123456789abcdef0123456789abcdef",
+        log_level=level,
+        log_json=False,
+    )
+
+
+@pytest.fixture
+def restored_logging() -> Iterator[None]:
+    """Undo what `configure_logging` does to the whole process.
+
+    It is not a pure function: it removes every loguru sink, installs one on
+    `sys.stdout`, clears `handlers` and forces `propagate = True` on every
+    logger in `loggerDict`, and puts an intercept handler on root at level 0.
+    A test that ran it and walked away would leave the rest of the session
+    logging through a sink bound to *this* test's captured stdout.
+
+    Left with no loguru sink afterwards, which is what the other three
+    log-capturing cases in this suite already do.
+    """
+    root_handlers = list(logging.root.handlers)
+    root_level = logging.root.level
+    try:
+        yield
+    finally:
+        loguru_logger.remove()
+        loguru_logger.configure(patcher=None)
+        logging.root.handlers = root_handlers
+        logging.root.setLevel(root_level)
+
+
+def test_the_stock_websockets_logger_really_does_print_the_token(
+    capsys: pytest.CaptureFixture[str], restored_logging: None
+) -> None:
+    """**The bug, pinned as a test rather than described in a comment.**
+
+    This is the reproduction that justifies `socket_logger` existing at all,
+    and it is a test so that the justification cannot quietly stop being
+    true. Nothing here is Usher's code: `websockets` logs its request line
+    at DEBUG through `logging.getLogger("websockets.client")`, and
+    `configure_logging` forces `propagate = True` on every logger that
+    exists when it runs and installs an intercept handler on root at level
+    0 -- so at `USHER_LOG_LEVEL=DEBUG`, the level an operator sets precisely
+    when a source is misbehaving, the session token is on stdout.
+
+    If this case ever *fails*, `configure_logging` has changed shape and the
+    premise of the guard below should be re-read rather than the assertion
+    flipped.
+    """
+    configure_logging(_logging_settings(level="DEBUG"))
+    logging.getLogger("websockets.client").debug("> GET %s HTTP/1.1", LEAKY_PATH)
+    captured = capsys.readouterr()
+    assert LEAKY_TOKEN in captured.out
+
+
+def test_the_socket_logger_survives_a_later_configure_logging(
+    capsys: pytest.CaptureFixture[str], restored_logging: None
+) -> None:
+    """**The order here is the assertion, and the plan had it backwards.**
+
+    A socket outlives the call that opened it. `socket_logger()` runs at
+    connect time; `configure_logging` runs whenever an app is built or the
+    CLI starts, which for a lane that has been up for hours is *afterwards*
+    -- and it clears `handlers` and re-forces `propagate = True` on every
+    logger it finds. So `propagate = False` and a `NullHandler` are both
+    undone while the connection they were protecting is still open.
+
+    The level is the half that survives: `configure_logging` never touches
+    it, `logging.basicConfig(level=0)` sets *root*'s rather than this
+    logger's, and `isEnabledFor` consults `getEffectiveLevel()`, which is
+    this logger's own because it is set. A record that is not enabled is
+    never formatted, so the token is not even interpolated.
+
+    The plan ordered this case `configure_logging` first and `socket_logger`
+    second, and then claimed that dropping the level would fail it. It would
+    not: in that order the `propagate = False` set second is never undone,
+    so the level is unobserved and the mutation survives. Measured both
+    ways.
+    """
+    silenced = socket_logger()
+    configure_logging(_logging_settings(level="DEBUG"))
+    silenced.debug("> GET %s HTTP/1.1", LEAKY_PATH)
+    # WARNING and CRITICAL as well as DEBUG: a guard spelled
+    # `setLevel(logging.WARNING)` would stop the request line and let the
+    # keepalive and broadcast warnings through, and `websockets` has both.
+    silenced.warning("> GET %s HTTP/1.1", LEAKY_PATH)
+    silenced.critical("> GET %s HTTP/1.1", LEAKY_PATH)
+    captured = capsys.readouterr()
+    assert LEAKY_TOKEN not in captured.out
+    assert LEAKY_TOKEN not in captured.err
+
+
+def test_the_socket_logger_is_silent_when_the_app_was_configured_first(
+    capsys: pytest.CaptureFixture[str], restored_logging: None
+) -> None:
+    """The other order -- an app built before the lane started -- which is
+    the ordinary one. Both hold; only the case above distinguishes which
+    guard is doing the work."""
+    configure_logging(_logging_settings(level="DEBUG"))
+    silenced = socket_logger()
+    silenced.debug("> GET %s HTTP/1.1", LEAKY_PATH)
+    silenced.warning("> GET %s HTTP/1.1", LEAKY_PATH)
+    captured = capsys.readouterr()
+    assert LEAKY_TOKEN not in captured.out
+    assert LEAKY_TOKEN not in captured.err
+
+
+def test_the_socket_logger_is_re_silenced_on_every_call() -> None:
+    """`configure_logging` walks `logging.root.manager.loggerDict` and sets
+    `propagate = True` on everything it finds, so a `propagate = False` set
+    once at import is undone the next time an app is built -- and the test
+    suite alone builds dozens. Re-asserting per call is what makes the
+    guarantee hold in the order production actually runs in."""
+    silenced = socket_logger()
+    silenced.propagate = True
+    silenced.setLevel(logging.DEBUG)
+    silenced.handlers = []
+    again = socket_logger()
+    assert again is silenced
+    assert again.propagate is False
+    assert again.isEnabledFor(logging.CRITICAL) is False
+    assert again.handlers != []
+
+
+def test_the_socket_logger_is_not_one_configure_logging_can_find_by_name() -> None:
+    """It is a `usher.*` name, so `USHER_LOG_LEVEL` and every loguru sink
+    are irrelevant to it -- but it is still an ordinary stdlib logger, and
+    the guarantee is that its *level* is what stops the record. Asserted on
+    the level rather than on the name, because renaming it is harmless and
+    lowering it is not."""
+    assert socket_logger().level > logging.CRITICAL
+
+
+async def test_connect_websocket_hands_the_library_the_silenced_logger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one argument in `connect_websocket` that is a security control
+    rather than a tuning knob, pinned where it is passed.
+
+    The plan's own mutation table records `logger=None` as having nothing in
+    the unit suite behind it and says "write the case". This is that case,
+    and the loopback one below is the same claim through the real library.
+    """
+    captured: dict[str, Any] = {}
+
+    class _Stub:
+        async def close(self) -> None: ...
+
+    async def _fake_connect(url: str, **kwargs: Any) -> _Stub:
+        captured["url"] = url
+        captured.update(kwargs)
+        return _Stub()
+
+    monkeypatch.setattr("websockets.asyncio.client.connect", _fake_connect)
+    connection = await connect_websocket(f"ws://emby.invalid{LEAKY_PATH}")
+    assert isinstance(connection, PushConnection)
+    assert captured["logger"] is socket_logger()
+    # PRD 03's heartbeat, and the library's own default -- passed explicitly
+    # so a future default change is a diff rather than a silent regression.
+    assert (captured["ping_interval"], captured["ping_timeout"]) == (20.0, 20.0)
+    # Not the default 16: the supervisor runs a gap-closing delta reconcile
+    # with the socket already live, and at 16 buffered frames the client
+    # stops reading and backpressures the server for the length of the walk.
+    assert captured["max_queue"] == 256
+
+
+async def test_a_real_websockets_handshake_prints_no_token(
+    capsys: pytest.CaptureFixture[str], restored_logging: None
+) -> None:
+    """**The absence, proved against the real library rather than a
+    stand-in**: a real `websockets` client, a real `websockets` server on
+    `127.0.0.1`, a real upgrade, and `configure_logging` at DEBUG -- the
+    exact configuration that puts the token on stdout in
+    `test_the_stock_websockets_logger_really_does_print_the_token` above.
+
+    Loopback only, so the suite still makes no network request.
+
+    **The test's own server is silenced too, and that is a finding rather
+    than a convenience.** `websockets/server.py:561` logs `< GET %s
+    HTTP/1.1` with the same path, so a loopback case that silenced only the
+    client would fail on its harness rather than on the code under test --
+    and the obvious repair is to weaken the assertion, which is how a real
+    leak gets ratified. Measured: with both stock loggers, one handshake
+    puts the token on stdout twice, once from each side.
+
+    Task 12's `tests/integration/test_push_loopback.py` is the fuller
+    transport test (ping/pong, an abrupt close, a close code); this is the
+    credential half of it, kept here because it needs no Docker.
+    """
+    from websockets.asyncio.server import serve
+
+    received: list[str] = []
+
+    async def handler(connection: Any) -> None:
+        received.append(await connection.recv())
+        await connection.send(json.dumps(load_emby_fixture("push_sessions")))
+        await connection.wait_closed()
+
+    async with serve(handler, "127.0.0.1", 0, logger=socket_logger()) as server:
+        port = server.sockets[0].getsockname()[1]
+        configure_logging(_logging_settings(level="DEBUG"))
+        connection = await connect_websocket(
+            f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}?api_key={LEAKY_TOKEN}&deviceId=d"
+        )
+        try:
+            await connection.send(SUBSCRIBE_FRAME)
+            frame = await connection.recv(BOUND)
+        finally:
+            await connection.aclose()
+
+    assert received == [SUBSCRIBE_FRAME]
+    assert json.loads(frame)["MessageType"] == "Sessions"
+    captured = capsys.readouterr()
+    assert LEAKY_TOKEN not in captured.out
+    assert LEAKY_TOKEN not in captured.err
+
+
+async def test_the_real_connection_translates_a_closed_socket_by_type(
+    restored_logging: None,
+) -> None:
+    """`_WebsocketsConnection` exists so that **no `websockets` exception
+    ever crosses into `usher.ports.errors` carrying its own message**.
+    `InvalidURI.__str__` is `f"{self.uri} isn't a valid URI: ..."` -- read
+    from the installed library, not assumed -- and this channel's URI is the
+    token. Every translation names the exception's *type* and nothing else.
+
+    Driven against a real server that goes away, so the exception being
+    translated is a real `ConnectionClosed` rather than one a test raised.
+    """
+    from websockets.asyncio.server import serve
+
+    async def handler(connection: Any) -> None:
+        await connection.close()
+
+    async with serve(handler, "127.0.0.1", 0, logger=socket_logger()) as server:
+        port = server.sockets[0].getsockname()[1]
+        connection = await connect_websocket(
+            f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}?api_key={LEAKY_TOKEN}&deviceId=d"
+        )
+        with pytest.raises(PortUnavailable) as caught:
+            for _ in range(100):
+                await connection.recv(BOUND)
+        await connection.aclose()
+
+    message = str(caught.value)
+    assert LEAKY_TOKEN not in message
+    assert "api_key" not in message
+    assert WEBSOCKET_PATH in message
+    assert "ConnectionClosed" in message
+
+
+async def test_the_real_connection_never_raises_out_of_aclose() -> None:
+    """`aclose` runs in a `finally` that is itself often unwinding the
+    `PortUnavailable` that explains why the lane dropped. A close failure
+    replacing that reason is worse than a log line, so it is swallowed --
+    and the port already documents `aclose` as never raising."""
+
+    class _Exploding:
+        async def close(self) -> None:
+            raise RuntimeError("the transport is already gone")
+
+    from usher.adapters.emby.push import _WebsocketsConnection
+
+    # `cast`, because handing it something that is not a
+    # `ClientConnection` is the whole point: the `except` arm exists for
+    # a transport that is already gone, and mypy is right that no real
+    # one has this shape.
+    await _WebsocketsConnection(cast(Any, _Exploding())).aclose()
+
+
+async def test_the_real_connection_times_out_on_a_silent_socket_rather_than_hanging(
+    restored_logging: None,
+) -> None:
+    """The real half of the tick the whole watchdog rides on.
+
+    `FakePushConnection.recv` ignores its `timeout` -- that forgiveness is
+    what makes a staleness test sub-millisecond -- so nothing in the fake
+    world can show that the real connection honours one. `websockets` has no
+    deadline of its own on `recv()`; `asyncio.wait_for` is the mechanism its
+    own documentation names, and without it a live-but-silent socket never
+    returns control to the loop that runs the watchdog. Which is exactly the
+    peer ADR-0004 measured.
+
+    **The outer bound and the elapsed assertion are both load-bearing, and
+    the first draft of this case had neither.** Deleting the inner deadline
+    makes `recv` block forever against this server, so without
+    `asyncio.wait_for` the mutation *hangs the suite* instead of failing it
+    -- measured; the sweep sat on it until it was killed, and `timeout`
+    SIGTERMs Python without running `finally`, so it left the mutated file
+    behind. And with only the outer bound, that same mutation raises
+    `TimeoutError` from the *outer* `wait_for` and satisfies
+    `pytest.raises`, so the elapsed window is what tells the two apart.
+    """
+    from websockets.asyncio.server import serve
+
+    async def handler(connection: Any) -> None:
+        await connection.wait_closed()
+
+    async with serve(handler, "127.0.0.1", 0, logger=socket_logger()) as server:
+        port = server.sockets[0].getsockname()[1]
+        connection = await connect_websocket(f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}")
+        try:
+            started = time.perf_counter()
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(connection.recv(0.05), timeout=BOUND)
+            elapsed = time.perf_counter() - started
+            # A tick, and it really waited for one: an implementation that
+            # answered instantly would spin the lane's event loop, and one
+            # with no deadline of its own would come back at `BOUND`.
+            assert 0.04 <= elapsed < 1.0, f"recv(0.05) took {elapsed:.3f}s"
+            # And the socket is still usable afterwards -- `websockets`
+            # documents cancelling `recv` as safe, which is what makes a
+            # poll loop legitimate rather than lossy.
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(connection.recv(0.05), timeout=BOUND)
+        finally:
+            await connection.aclose()
+
+
+async def test_the_real_connection_decodes_a_binary_frame_rather_than_raising(
+    restored_logging: None,
+) -> None:
+    """Emby sends text. A binary frame is still evidence the socket is
+    alive, which is the only thing the health ledger claims -- so it is
+    decoded and counted, and then fails to parse as JSON, which the channel
+    already drops-and-counts. Raising would cost a reconnect and a
+    gap-closing delta walk for one frame of the wrong opcode."""
+    from websockets.asyncio.server import serve
+
+    async def handler(connection: Any) -> None:
+        await connection.send(b"\xff not utf-8, and not json either")
+        await connection.wait_closed()
+
+    async with serve(handler, "127.0.0.1", 0, logger=socket_logger()) as server:
+        port = server.sockets[0].getsockname()[1]
+        connection = await connect_websocket(f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}")
+        try:
+            frame = await connection.recv(BOUND)
+        finally:
+            await connection.aclose()
+
+    assert isinstance(frame, str)
+    assert "not utf-8" in frame
+
+
+async def test_the_real_connection_translates_a_failed_send_by_type(
+    restored_logging: None,
+) -> None:
+    """`send`'s failure arm, which is the subscribe frame's arm: `open()`
+    sends `SUBSCRIBE_FRAME` immediately after `record_open`, so a peer that
+    goes away during the handshake reaches exactly this translation.
+
+    It had no case at all until a mutation sweep said so -- interpolating
+    `{exc}` here survived every other one of these fifty-odd tests. The
+    close exceptions do not happen to carry the URI today; `InvalidURI` and
+    `InvalidProxy` do, and "today's exception type is harmless" is not a
+    guarantee this module is allowed to rest on.
+    """
+    from websockets.asyncio.server import serve
+
+    async def handler(connection: Any) -> None:
+        await connection.close()
+
+    async with serve(handler, "127.0.0.1", 0, logger=socket_logger()) as server:
+        port = server.sockets[0].getsockname()[1]
+        connection = await connect_websocket(
+            f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}?api_key={LEAKY_TOKEN}&deviceId=d"
+        )
+        with pytest.raises(PortUnavailable) as caught:
+            for _ in range(100):
+                await connection.send(SUBSCRIBE_FRAME)
+                await asyncio.sleep(0)
+        await connection.aclose()
+
+    message = str(caught.value)
+    assert LEAKY_TOKEN not in message
+    assert "api_key" not in message
+    assert WEBSOCKET_PATH in message
+    assert "send failed: ConnectionClosed" in message

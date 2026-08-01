@@ -160,6 +160,40 @@ included — and it is not bounded in *time* by anything Usher controls.
   `credentials_ref`.
 - `verify()`'s `SourceStatus.detail` is built from translated port errors
   for the same reason.
+- **A third-party client can log the URL for you, and one does.** Every
+  rule above governs Usher's own code. From M5 the same token is also
+  handed to `websockets`, and `websockets/client.py:294` is
+  `logger.debug("> GET %s HTTP/1.1", request.path)` — the whole path *and
+  query*, which for `/embywebsocket` is the token.
+  `usher.telemetry.configure_logging` forces `propagate = True` on every
+  logger that exists when it runs and installs an intercept handler on root
+  at level 0, so at `USHER_LOG_LEVEL=DEBUG` — the level an operator sets
+  precisely when a source is misbehaving — that line is a structured log
+  record on stdout, and from there in Loki.
+
+  **Measured before it was fixed**, against the real library with a real
+  client and a real server on `127.0.0.1`: one handshake put the token on
+  stdout **twice** — once from `websockets.client:send_request:294` and
+  once from `websockets.server:parse:561`, which logs the same request line
+  on the receiving side. Only the first is reachable in production (Usher
+  runs no WebSocket server), and the second is what a loopback *test* leaks
+  if only the client is silenced.
+
+  `usher.adapters.emby.push.socket_logger` closes it, **at the level**,
+  because that is the only part `configure_logging` does not undo: it
+  clears `handlers` and re-forces `propagate = True` on every logger it
+  finds, and never touches `level`. `logging.basicConfig(level=0)` sets
+  *root*'s level rather than that logger's, and `isEnabledFor` consults
+  `getEffectiveLevel()`. Re-asserted per connect, since a socket outlives
+  the call that opened it and `create_app`/`usher.cli.main` each call
+  `configure_logging` at times import order says nothing about. Two other
+  paths through that same logger could carry the URL and are closed by the
+  same line: `websockets/client.py:296` logs every request *header*, which
+  includes the `Authorization: Basic` one the library synthesises when a
+  URL carries userinfo; and `websockets/asyncio/client.py:641` logs
+  `traceback.format_exception_only(exc)` at **INFO** in the reconnecting
+  `async for` form, where an `InvalidURI` renders as
+  `f"{self.uri} isn't a valid URI: …"`.
 
 ## The successor, in M9
 

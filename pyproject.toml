@@ -17,6 +17,12 @@ dependencies = [
     "uuid6>=2024.7.10",
     "loguru>=0.7",
     "httpx[http2]>=0.27",
+    # The push channel's transport. Already resolved at 16.1.1 transitively
+    # through `uvicorn[standard]`, and declared here anyway: a transitive
+    # dependency is not a contract, and `uvicorn`'s extras are free to drop
+    # it. `usher.adapters.emby.push` imports it lazily, inside the connector,
+    # so a deployment that runs no push lane never pays for it.
+    "websockets>=15",
     "opentelemetry-api>=1.28",
     "opentelemetry-sdk>=1.28",
     "opentelemetry-exporter-otlp>=1.28",
