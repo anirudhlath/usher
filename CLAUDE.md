@@ -735,12 +735,13 @@ a span, so a worker that built one records the same empty `links` tuple).
 Both mutations survived the whole suite until the direct case existed.
 
 **No test in this repository makes a network request, and that is measured
-rather than asserted.** Verified 2026-07-31 and **re-verified 2026-08-01
-after the live TMDb run**, by running the whole suite under a
+rather than asserted.** Verified 2026-07-31, **re-verified 2026-08-01 after
+the live TMDb run**, and **again 2026-08-01 after the fixture scrub and the
+CLI/deps changes**, by running the whole suite under a
 `sitecustomize.py` that patches `socket.socket.connect`, `connect_ex` and
 `socket.getaddrinfo` to raise on anything that is not loopback (`AF_UNIX` is
 left alone, so Docker's socket still works and `testcontainers` still reaches
-`127.0.0.1`). **1,298 unit + 424 integration passed (1 unit case skipped), zero blocks.** The
+`127.0.0.1`). **1,318 unit + 425 integration passed (1 unit case skipped), zero blocks.** The
 guard lives outside the tree — it is a check to re-run, not a dependency to
 add, because `PYTHONPATH`-injecting a socket monkeypatch into every developer's
 suite costs more than it catches.
@@ -1226,6 +1227,17 @@ just by running it:**
   autogenerate never sees them, in either direction — adding, dropping, or
   changing one is always a hand-written `op.execute(...)` migration.
 
+**Import `testcontainers.community.postgres`, not `testcontainers.postgres`.**
+The latter is a shim that raises a `DeprecationWarning` at import time and
+was the only warning this suite emitted; the community module is the same
+class with the same behaviour (confirmed by running the whole integration
+suite against it). Changed 2026-08-01 — a shim that announces its own
+removal eventually takes it, and a suite with one permanently-expected
+warning is a suite where the next real warning is invisible. Still imported
+*inside* the `postgres_url` fixture rather than at module scope: `pytest -m
+"not integration"` imports that conftest even though it filters every test
+in it back out, and `testcontainers` drags in `docker`.
+
 Verified working as of Group E (title repository, first integration tests) —
 `tests/integration/` runs against a real PostgreSQL, started and torn down
 per test run by `testcontainers` (`pgvector/pgvector:pg17`; first run pulls
@@ -1550,8 +1562,9 @@ and interrogated over HTTP, and the suite is 865 tests (733 unit / 132
 integration), mypy strict clean over `src` and `tests`, 6 import contracts:
 
 ```bash
-uv run pytest                                    # 1722 passed + 1 skipped as of M4 Task 26 (1299 unit / 424 integration)
-uv run pytest tests/unit                         # 1298 passed + 1 skipped, no Docker and no network
+uv run usher --help                              # the CLI, also installed as `python -m usher`
+uv run pytest                                    # 1743 passed + 1 skipped (1319 unit / 425 integration)
+uv run pytest tests/unit                         # 1318 passed + 1 skipped, no Docker and no network
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .
@@ -1593,14 +1606,15 @@ test:
 export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:5432/usher"
 export USHER_SECRET_KEY="<32+ char secret>"
 uv run alembic upgrade head
-uv run python -m usher sync --source "Living Room Emby"   # items, then watch state
-uv run python -m usher sync --kind delta                  # every enabled source
-uv run python -m usher sync --allow-full-retraction       # ADR-0015's ceiling off
-uv run python -m usher sync-status                        # runs, queue depth, parked
-uv run python -m usher unmatched --limit 50               # the review queue
-uv run python -m usher unmatched --resolve <media_item_id> --title <title_id>
-uv run python -m usher work --once                        # one pass over the queue
-uv run python -m usher work                               # a worker daemon
+uv run usher --help                          # every command and flag
+uv run usher sync --source "Living Room Emby"   # items, then watch state
+uv run usher sync --kind delta                  # every enabled source
+uv run usher sync --allow-full-retraction       # ADR-0015's ceiling off
+uv run usher sync-status                        # runs, queue depth, parked
+uv run usher unmatched --limit 50               # the review queue
+uv run usher unmatched --resolve <media_item_id> --title <title_id>
+uv run usher work --once                        # one pass over the queue
+uv run usher work                               # a worker daemon
 
 # NOT tests -- they write to a real database. See each module's docstring.
 uv run python scripts/measure_ingest.py --items 50000
@@ -1616,6 +1630,22 @@ minutes and no API key.** `bootstrap --phase all` pulls IMDb's
 wall clock end to end. That is the catalog M4's match ladder has to be
 measured against — an empty one sends everything to tier 5 and measures
 nothing.
+
+**`usher` is a console script (`[project.scripts]`, added 2026-08-01) and
+`python -m usher` is the same code path.** Both land on `usher.cli.main`.
+The container's `CMD` stays `alembic upgrade head && exec python -m usher` —
+the module form is the one whose `exec`/SIGTERM behaviour was verified
+against a running container, and there is nothing to gain by re-verifying an
+equivalent spelling. Verified from a clean `uv sync`.
+
+**A console script calls `main()` with *no arguments*, which is why `main`
+reads `sys.argv` itself.** Before that it treated `argv is None` as "no
+arguments at all" and substituted `["serve"]`, so `usher sync-status` would
+have silently started the HTTP server — an entry point that ignores
+everything it is given and looks like it works, because the server does
+start. `argv or ["serve"]` still applies once `sys.argv[1:]` is empty, which
+is the property the container's `CMD` depends on. Both halves pinned in
+`tests/unit/test_main.py`.
 
 `--source` is optional: omitted, `sync` walks every *enabled* source, and a
 source whose credential row has gone missing is skipped with a message
@@ -1634,6 +1664,25 @@ unrunnable without it. Deliberately not a repository port — no *service*
 needs it (`WatchStateSyncService` takes a `user_id` per call), and an ABC
 plus a fake plus a contract suite for one `SELECT` is a port with nothing on
 the other side.
+
+**It was reachable only from `usher.cli`, so a server-only deployment had an
+empty `users` table** — `docker compose up` against a healthy Postgres left
+`watch_states.user_id` with nothing to reference, and the row appeared only
+once `work --once` ran. Not a live bug in M4 (no route writes a watch state;
+the three admin routes are M9's) and a live bug the moment M5 adds one.
+Fixed as `usher.api.deps.get_default_user_id`/`DefaultUserIdDep`, a
+**request-scoped dependency and deliberately not a lifespan call**:
+`create_app`'s lifespan builds an engine and opens no connection, which is
+what makes `/health` answer 200 with Postgres down while `/health/ready`
+reports 503 — verified live against a real container. A write at startup
+turns a database outage into a crash loop and an unmigrated schema into a
+failure to boot, trading a documented, tested degradation for a worse one,
+for a row only a request ever needs. It also would have broken
+`tests/unit/test_api_health.py` and `test_telemetry.py`, which build a real
+app against no Postgres at all. Nothing routes over it yet, for the same
+reason nothing routes over the pipeline services beside it;
+`tests/integration/test_pipeline_deps.py` drives it through a real request
+and asserts the row is *committed*, read back on a second session.
 
 `api/deps.py` carries all eight new repositories plus `MatchService`/
 `IngestService`/`ReconcileService`/`WatchStateSyncService`, so M9 adds

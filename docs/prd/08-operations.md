@@ -209,9 +209,10 @@ M1 `compose.yml` — nothing before M6 (embeddings) writes there.
 - First run detects an empty catalog and offers bootstrap through the admin API
   — it does not start a multi-hour download unprompted.
 - Bootstrap is resumable and checkpointed; a restart mid-import continues.
-- **The operator trigger is `python -m usher`, and it exists before the HTTP
-  surface does.** `bootstrap` / `bootstrap-status` (M2) and `sync` /
-  `sync-status` / `unmatched` / `work` (M4) are the CLI composition root;
+- **The operator trigger is `usher` (also `python -m usher`), and it exists
+  before the HTTP surface does.** `bootstrap` / `bootstrap-status` (M2) and
+  `sync` / `sync-status` / `unmatched` / `work` (M4) are the CLI composition
+  root, documented command by command in `README.md`;
   [07](07-client-api.md)'s `POST /admin/sources/{id}/sync` and the two
   `/admin/unmatched` routes are M9's and are built over the same services.
   Every one of them has to work against an *empty* database — a command an

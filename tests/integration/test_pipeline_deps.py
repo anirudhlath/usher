@@ -14,6 +14,7 @@ wiring nothing checks, and M9 would otherwise be the first thing to
 discover that a service needs something a request scope cannot give it.
 """
 
+import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
@@ -21,9 +22,11 @@ import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 
 from usher.api.app import create_app
 from usher.api.deps import (
+    get_default_user_id,
     get_episode_repository,
     get_ingest_service,
     get_job_queue,
@@ -38,6 +41,8 @@ from usher.api.deps import (
     get_watch_state_sync_service,
 )
 from usher.config import Settings
+from usher.db.base import build_engine, build_session_factory
+from usher.db.users import DEFAULT_USER_NAME
 
 _PROVIDERS = {
     "titles": get_title_repository,
@@ -94,6 +99,72 @@ async def test_the_providers_answer_with_a_live_session(probe: AsyncClient) -> N
     the real graph is what makes that observable at all."""
     response = await probe.get("/_probe/media_items")
     assert response.json()["built"] == "PostgresMediaItemRepository"
+
+
+async def test_a_request_resolves_the_default_user_and_writes_the_row(
+    postgres_url: str,
+) -> None:
+    """The singleton `users` row exists on the *server* path, not only after
+    `usher work` has run.
+
+    `usher.db.users.ensure_default_user` was called from `usher.cli` and
+    nowhere else, so `docker compose up` against a healthy server left
+    `users` empty and `watch_states.user_id` -- a real foreign key -- with
+    nothing to reference. Not reachable in M4 (no route writes a watch
+    state; the three admin routes are M9's) and reachable in M5, which adds
+    exactly such routes.
+
+    **Deliberately a request-scoped dependency and not a lifespan call.**
+    `create_app`'s lifespan builds an engine and opens no connection, which
+    is what makes `/health` answer 200 with Postgres down while
+    `/health/ready` reports 503 -- verified live against a real container,
+    PRD 08's "the app refuses to serve on a schema mismatch rather than
+    guessing". A startup write turns a database outage into a crash loop
+    and turns an unmigrated database into a failure to boot, trading a
+    documented, tested degradation for a worse one. It would also break
+    `tests/unit/test_api_health.py` and `test_telemetry.py`, which build a
+    real app with no Postgres at all. Resolved per request instead: the
+    first route that needs a user id creates the row inside that request's
+    own transaction, and `get_session` commits it.
+
+    This test drives a *route*, so it commits for real against the
+    session-scoped container -- hence the cleanup. Same rule
+    `tests/integration/test_cli_pipeline.py` follows.
+    """
+    app = create_app(Settings(database_url=postgres_url, secret_key="0" * 32))
+
+    @app.get("/_probe/default_user")
+    def _default_user(
+        user_id: Annotated[uuid.UUID, Depends(get_default_user_id)],
+    ) -> dict[str, str]:
+        return {"user_id": str(user_id)}
+
+    async with LifespanManager(app) as manager:
+        transport = ASGITransport(app=manager.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            first = (await client.get("/_probe/default_user")).json()["user_id"]
+            second = (await client.get("/_probe/default_user")).json()["user_id"]
+
+        # A second session, because the assertion is that the request
+        # *committed* -- reading back through the same one would pass
+        # against a write that was only ever flushed.
+        factory = build_session_factory(build_engine(postgres_url))
+        async with factory() as session:
+            rows = (
+                await session.execute(
+                    text("SELECT id, is_default FROM users WHERE name = :name"),
+                    {"name": DEFAULT_USER_NAME},
+                )
+            ).all()
+            await session.execute(
+                text("DELETE FROM users WHERE name = :name"), {"name": DEFAULT_USER_NAME}
+            )
+            await session.commit()
+
+    assert first == second, "two requests must resolve the same singleton user"
+    assert len(rows) == 1, "the row is created once, not once per request"
+    assert str(rows[0][0]) == first
+    assert rows[0][1] is True
 
 
 async def test_the_reconcile_service_carries_this_deployments_tuning(

@@ -26,6 +26,14 @@ dependencies = [
     "cryptography>=49.0.0",
 ]
 
+[project.scripts]
+# `usher <command>` as well as `python -m usher <command>`; both land on
+# `usher.cli.main`, which reads `sys.argv` when handed no argv. The
+# container's CMD stays `alembic upgrade head && exec python -m usher` --
+# the two are the same code path, and the module form is the one whose
+# `exec`/SIGTERM behaviour has been verified against a running container.
+usher = "usher.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",

@@ -7,6 +7,7 @@ direct naming of a *concrete* adapter, which is why the factory below is
 `ConfiguredSourceAdapterFactory` and not `EmbyAdapter`.
 """
 
+import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated, cast
 
@@ -24,6 +25,7 @@ from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
+from usher.db.users import ensure_default_user
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import (
     EpisodeRepository,
@@ -123,6 +125,39 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
+
+
+async def get_default_user_id(session: SessionDep) -> uuid.UUID:
+    """The singleton `is_default` user's id, creating the row on first use.
+
+    `usher.db.users.ensure_default_user` used to be called from `usher.cli`
+    and nowhere else, so a deployment that only ever ran the server -- which
+    is exactly what the container's `CMD` does -- had an empty `users`
+    table, and `watch_states.user_id` is a real foreign key. Unreachable in
+    M4, because no route writes a watch state; M5's push and reconnect-delta
+    routes are precisely the ones that do.
+
+    **Request-scoped rather than a lifespan call, deliberately.**
+    `create_app`'s lifespan builds an engine and opens no connection, and
+    that is load-bearing: `/health` keeps answering 200 with Postgres down
+    while `/health/ready` reports 503, verified live against a real
+    container (PRD 08). A write at startup would turn a database outage into
+    a crash loop and an unmigrated schema into a failure to boot -- trading a
+    documented, tested degradation for a worse one, and for a row that is
+    only ever needed by a request. Here it costs one `SELECT` on the request
+    that needs it and one `INSERT` on the first such request ever, inside
+    that request's own transaction, committed by `get_session`.
+
+    Nothing routes over this yet, for the same reason nothing routes over
+    the pipeline services above: the surface is M5's and M9's. It is wired
+    and tested now so the milestone that adds those routes is adding
+    routes, not discovering wiring
+    (`tests/integration/test_pipeline_deps.py`).
+    """
+    return await ensure_default_user(session)
+
+
+DefaultUserIdDep = Annotated[uuid.UUID, Depends(get_default_user_id)]
 
 
 def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:

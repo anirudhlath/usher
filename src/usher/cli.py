@@ -12,6 +12,7 @@ the same property: nothing downloads unless an operator asks.
 
 import argparse
 import asyncio
+import sys
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
@@ -668,10 +669,22 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    # `argv or ["serve"]`: `python -m usher` with no arguments must keep
-    # starting the server, because that is exactly what the container's CMD
-    # runs (`alembic upgrade head && exec python -m usher`). Adding
-    # subcommands must not change that.
+    """Every entry point's single door: `python -m usher`, the `usher`
+    console script (`[project.scripts]`), and the container's `CMD`.
+
+    **`argv is None` means "read `sys.argv`", not "no arguments".** A
+    console script is called as `main()` with nothing passed, so a `None`
+    that fell through to the no-arguments branch made `usher sync-status`
+    silently start the HTTP server -- an entry point that ignores everything
+    it is given and looks like it works, because the server does start.
+    `tests/unit/test_main.py` pins both halves.
+
+    `argv or ["serve"]` after that: no arguments *at all* must keep starting
+    the server, because that is exactly what the container's CMD runs
+    (`alembic upgrade head && exec python -m usher`). Adding subcommands
+    must not change it, and neither must adding an entry point.
+    """
+    argv = sys.argv[1:] if argv is None else list(argv)
     args = parse_args(list(argv) if argv else ["serve"])
     settings = get_settings()
     configure_telemetry(settings)

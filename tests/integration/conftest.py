@@ -108,14 +108,18 @@ def _upgrade_head(database_url: str) -> None:
 
 @pytest.fixture(scope="session")
 def postgres_url() -> Iterator[str]:
-    # Local import: testcontainers.postgres itself raises a
-    # DeprecationWarning at import time (superseded by
-    # testcontainers.community.postgres). Deferring the import until this
-    # fixture actually runs keeps that warning from firing during
-    # collection alone -- `pytest -m "not integration"` still imports this
-    # whole conftest module even though it filters every test in it back
-    # out, and previously paid the warning for that alone.
-    from testcontainers.postgres import PostgresContainer
+    # `testcontainers.community.postgres`, not `testcontainers.postgres`:
+    # the latter is a shim that raises a DeprecationWarning at import time
+    # and is the only warning this suite emits. Same class, same behaviour
+    # -- confirmed by running the whole integration suite against it -- and
+    # it removes a future break rather than deferring one, since a shim
+    # that announces its own removal will eventually take it.
+    #
+    # Still a local import. `pytest -m "not integration"` imports this whole
+    # conftest module even though it filters every test in it back out, and
+    # `testcontainers` pulls in `docker`; deferring keeps that off the fast
+    # path.
+    from testcontainers.community.postgres import PostgresContainer
 
     with PostgresContainer(
         "pgvector/pgvector:pg17",
