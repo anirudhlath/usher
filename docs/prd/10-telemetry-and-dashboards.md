@@ -102,6 +102,7 @@ is maintained rather than aspirational.
 | `usher.source.request.duration` | histogram | source, op | ✅ M3 |
 | `usher.source.push.connected` | gauge | source | M5 |
 | `usher.source.push.reconnects` | counter | source | M5 |
+| `usher.source.push.events` | counter | source, kind | ✅ M5 |
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
 | `usher.embedding.duration` | histogram | — | M6 |
@@ -194,8 +195,10 @@ Queue depth by priority · enrichment throughput and p50/p99 · **promotion
 latency against the 5 s read-through target** · parked jobs · sync run outcomes
 and duration · **push connection uptime and reconnect count** — the direct
 health signal for the WebSocket risk in
-[ADR-0004](decisions/0004-push-over-polling.md) · Emby request latency · TMDb
-requests/sec against the ~40 ceiling with 429 count.
+[ADR-0004](decisions/0004-push-over-polling.md) · **push events applied, by
+kind**, which separates "the lane is up" from "the lane is doing anything"
+· Emby request latency · TMDb requests/sec against the ~40 ceiling with 429
+count.
 
 **Queue depth, parked jobs, sync run outcomes and duration are backed by real
 data as of M4** — `jobs`, `sync_runs` and `usher.sync.run.duration` all exist

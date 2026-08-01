@@ -48,7 +48,7 @@ from usher.domain.sync import SyncRunKind, SyncRunStatus
 from usher.ports.errors import PortUnavailable, UsherPortError
 from usher.ports.ingest import MediaItemTarget, MediaItemUpsert, WatchStateMerge
 from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
-from usher.services.watch_sync import WatchStateSyncService, _watch_target
+from usher.services.watch_sync import MergedState, WatchStateSyncService, _watch_target
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
 LATER = datetime(2099, 1, 1, tzinfo=UTC)
@@ -416,11 +416,47 @@ async def test_apply_states_merges_a_batch_and_reports_its_targets(fixture: _Fix
         user_id=fixture.user_id,
         observed_at=T0,
     )
-    assert outcome.merged == (MediaItemTarget(title_id=fixture.titles["movie-1"], episode_id=None),)
+    assert outcome.merged == (
+        MergedState(
+            external_id="movie-1",
+            target=MediaItemTarget(title_id=fixture.titles["movie-1"], episode_id=None),
+        ),
+    )
     assert (outcome.unmatched, outcome.rows_written) == (0, 1)
     stored = await fixture.stored("movie-1")
     assert stored is not None
     assert stored.position_seconds == 61  # type: ignore[attr-defined]
+
+
+async def test_apply_states_pairs_every_target_with_the_state_it_came_from(
+    fixture: _Fixture,
+) -> None:
+    """**The pairing, and the reason it is reported rather than recovered.**
+    The M5 plan's own self-review found a caller zipping `merged` against
+    the batch it handed in; `merged` is the *matched subset*, so one
+    unmatched item at the front shifts every pair by one and the push lane
+    publishes item A's resume position under item B's title.
+
+    An unmatched item first, then two matched ones, is the smallest batch
+    that shows it -- with the unmatched item last, a positional zip agrees
+    with the truth and ratifies the bug."""
+    await fixture.given_matched("movie-1")
+    await fixture.given_matched("movie-2")
+    outcome = await fixture.service.apply_states(
+        fixture.source.id,
+        [
+            SourceWatchState(external_id="orphan-1", position_seconds=11, played=False),
+            SourceWatchState(external_id="movie-1", position_seconds=22, played=False),
+            SourceWatchState(external_id="movie-2", position_seconds=33, played=False),
+        ],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    assert [entry.external_id for entry in outcome.merged] == ["movie-1", "movie-2"]
+    assert [entry.target.title_id for entry in outcome.merged] == [
+        fixture.titles["movie-1"],
+        fixture.titles["movie-2"],
+    ]
 
 
 async def test_apply_states_does_not_commit(fixture: _Fixture) -> None:

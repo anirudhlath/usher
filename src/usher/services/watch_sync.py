@@ -65,15 +65,36 @@ _backfilled = _meter.create_counter(
 
 
 @dataclass(frozen=True, slots=True)
+class MergedState:
+    """One state a merge was built for, and where it landed.
+
+    **The pair travels together because separating it is a real bug, found
+    by the M5 plan's own self-review.** The push lane publishes one client
+    event per merged state, carrying that state's position and played flag
+    against that state's target. Recovering the pairing outside this service
+    -- by zipping the targets against the batch the caller handed in --
+    mis-pairs the moment the batch contains one unmatched item, because the
+    targets are only the matched subset and `zip` aligns by position. It
+    then publishes item A's resume position under item B's title id, which
+    a client renders.
+
+    Same rule `SourceEvent` states for `watch_states` one layer up, arrived
+    at from the other side: keyed, never aligned by position.
+    """
+
+    external_id: str
+    target: MediaItemTarget
+
+
+@dataclass(frozen=True, slots=True)
 class MergeOutcome:
     """What one batch of inbound watch state did.
 
-    `merged` is the targets a merge was *built* for, not the rows the
-    repository changed -- the two differ whenever PRD 03's "latest
-    `updated_at` wins" refuses one, and `SyncRun.items_matched` has always
-    meant the first. Returning the repository's count in its place would
-    silently change what every existing `sync_runs` row means and what
-    PRD 10's dashboard plots.
+    `merged` is what a merge was *built* for, not the rows the repository
+    changed -- the two differ whenever PRD 03's "latest `updated_at` wins"
+    refuses one, and `SyncRun.items_matched` has always meant the first.
+    Returning the repository's count in its place would silently change what
+    every existing `sync_runs` row means and what PRD 10's dashboard plots.
 
     `rows_written` is the second, and is what the push lane publishes on:
     telling a client its watch state changed when nothing did is a
@@ -85,7 +106,7 @@ class MergeOutcome:
     predicate, and two copies is how they come to disagree.
     """
 
-    merged: tuple[MediaItemTarget, ...]
+    merged: tuple[MergedState, ...]
     unmatched: int
     rows_written: int
     needing_history: tuple[str, ...]
@@ -357,7 +378,7 @@ class WatchStateSyncService:
             source_id, [state.external_id for state in states]
         )
         merges: list[WatchStateMerge] = []
-        applied: list[MediaItemTarget] = []
+        applied: list[MergedState] = []
         needing_history: list[str] = []
         unmatched = 0
         for state in states:
@@ -374,7 +395,7 @@ class WatchStateSyncService:
                 unmatched += 1
                 continue
             merges.append(self._merge_for(state, target, user_id, observed_at))
-            applied.append(target)
+            applied.append(MergedState(external_id=state.external_id, target=target))
             if state.played and state.play_count is None:
                 needing_history.append(state.external_id)
         rows_written = await self._watch_states.merge_from_source(merges) if merges else 0
