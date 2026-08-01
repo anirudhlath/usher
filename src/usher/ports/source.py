@@ -145,19 +145,59 @@ class WatchStateUpdate:
 
 @dataclass(frozen=True)
 class SourceEvent:
-    """🔶 Provisional — carries no payload, so a `WATCH_STATE_CHANGED`
-    event forces the push lane to re-walk `watch_state(since=...)` to
-    discover what changed, even though Emby's own `UserDataChanged`
-    message already carries the position and played flag. Settle in M5,
-    when the push lane is actually built and the cost of re-walking is
-    measurable against just carrying the payload through.
+    """One thing a source's push channel said changed.
 
-    Reviewed in M3 and deliberately left alone: M3 builds no push lane, so
-    the measurement this marker is waiting for is still not available.
+    **Settled in M5** — this DTO used to carry a 🔶 asking whether a
+    `WATCH_STATE_CHANGED` event should re-walk `watch_state(since=...)` to
+    discover what changed, or carry the payload the upstream already sent.
+    It carries the payload, and the two candidates were never close:
+    `watch_state(since=...)` is a paged listing walk whose only knob is the
+    cursor, measured at 29,027 items over a 30-day `MinDateLastSavedForUser`
+    window against the one real deployment. Per event, on a lane PRD 01
+    budgets at one connection per source.
+
+    `external_ids` is the authoritative list of affected items.
+    `watch_states` is the subset the adapter was able to parse out of the
+    upstream's own message, **keyed by `external_id` rather than aligned by
+    position** — an id in the first and not the second is a state the caller
+    must fetch with `get_watch_state`, and aligning by position would let
+    one unparseable entry write every later state onto the wrong item.
+    `__post_init__` makes that a property of the DTO rather than a sentence
+    here: a state naming an item the event did not is refused, so an adapter
+    that built the two tuples out of different sets of message entries fails
+    at construction instead of merging one item's state onto another's row.
+    Unreachable from any payload on the Emby path — `UserDataChanged` has
+    one `UserDataList` and both tuples come from its entries — so this
+    refuses adapter bugs, not sources.
+
+    **A carried state's `play_count`/`last_played_at` obey ADR-0014 exactly
+    as a walk's do.** An adapter reports a number only if it is true. On
+    Emby they are `None`: a `UserDataChanged` message is a third payload
+    shape (a listing is one, an item route is another) and no run in this
+    repository has ever parsed one, so absence is the honest answer and the
+    `WATCH_HISTORY` backfill recovers the pair from the single-item route.
+    A reported `0` is a positive claim that `merge_from_source` writes, so
+    guessing one here overwrites real play history permanently.
+
+    The item kinds carry no payload at all — Emby's `LibraryChanged` sends
+    ids, not items — so `ITEM_ADDED`/`ITEM_UPDATED` are resolved with
+    `get_item` per id, bounded by the caller.
     """
 
     kind: SourceEventKind
     external_ids: tuple[str, ...] = field(default_factory=tuple)
+    watch_states: tuple[SourceWatchState, ...] = ()
+
+    def __post_init__(self) -> None:
+        named = set(self.external_ids)
+        unnamed = [
+            state.external_id for state in self.watch_states if state.external_id not in named
+        ]
+        if unnamed:
+            raise ValueError(
+                "a carried watch state must name an item the event listed in external_ids; "
+                f"unlisted: {sorted(unnamed)}"
+            )
 
 
 def redact_query(url: str) -> str:

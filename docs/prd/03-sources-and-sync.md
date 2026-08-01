@@ -122,19 +122,25 @@ Operational requirements:
 > and receives `Sessions`, so a successful upgrade proves nothing. The adapter
 > must assert on *received messages* to consider push healthy.
 
-> 🔶 **Provisional.** `SourceEvent`, the push channel's own DTO, carries no
-> payload beyond `kind` and the affected `external_ids`. That forces a
-> `WATCH_STATE_CHANGED` event to re-walk `watch_state(since=...)` to
-> discover what actually changed, even though Emby's own `UserDataChanged`
-> message already carries the position and played flag. Settle in **M5**,
-> when the push lane is built and the cost of re-walking is measurable
-> against just carrying the payload through.
+> **Settled in M5.** `SourceEvent` carries the states the upstream's own
+> message already contained (`watch_states`, keyed by `external_id`), and an
+> id it could not parse falls back to `get_watch_state` — one authoritative
+> request. The alternative the marker named, re-walking
+> `watch_state(since=...)`, was never close: that walk's only knob is the
+> cursor, and over a 30-day `MinDateLastSavedForUser` window it returns
+> 29,027 items, per event, on a lane budgeted at one connection per source.
 >
-> **Reviewed in M3, deliberately left alone.** M3 settled the other two 🔶
-> markers this section and 07 named for it (`SourceAdapter.verify()`,
-> `StreamTarget`) but builds no push lane itself, so the re-walk-cost
-> measurement this marker is waiting for is still not available. Still
-> M5's to settle.
+> The two lists may differ in length and are never aligned by position — a
+> state names its own item, and one the event did not list is refused at
+> construction. Position-aligning them would let a single unparseable entry
+> write every later state onto the wrong item.
+>
+> **A carried state's `play_count`/`last_played_at` are `None` on Emby**, and
+> that is [ADR-0014](decisions/0014-absence-is-not-zero.md) rather than
+> laziness: a `UserDataChanged` message is a third payload shape, no run has
+> parsed one, and absence is the only honest report of a field nobody has
+> measured. The `watch_history` backfill recovers the pair from the
+> single-item route, which is the chain M4 already built.
 
 ### Walking the library
 

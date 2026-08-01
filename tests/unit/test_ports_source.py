@@ -22,6 +22,8 @@ from usher.ports.source import (
     CANONICAL_PROVIDER_IDS,
     SourceAdapter,
     SourceAdapterFactory,
+    SourceEvent,
+    SourceEventKind,
     SourceStatus,
     SourceWatchState,
     StreamTarget,
@@ -340,6 +342,103 @@ def test_source_watch_state_still_carries_a_reported_zero() -> None:
     must be able to say so."""
     state = SourceWatchState(external_id="movie-1", position_seconds=0, played=False, play_count=0)
     assert state.play_count == 0
+
+
+def test_a_source_event_may_carry_the_states_it_already_knows() -> None:
+    """The 🔶 this milestone was left to settle. A `WATCH_STATE_CHANGED`
+    event that carried only ids forces the lane to re-walk
+    `watch_state(since=...)`, which is a paged listing walk measured at
+    29,027 items over a 30-day window -- per event, on a lane budgeted at
+    one connection per source.
+    """
+    state = SourceWatchState(external_id="i1", position_seconds=61, played=False)
+    event = SourceEvent(
+        kind=SourceEventKind.WATCH_STATE_CHANGED,
+        external_ids=("i1", "i2"),
+        watch_states=(state,),
+    )
+    assert event.external_ids == ("i1", "i2")
+    assert event.watch_states == (state,)
+
+
+def test_a_source_event_still_defaults_to_carrying_nothing() -> None:
+    """An adapter whose upstream sends only ids must still be able to build
+    one, and the item kinds never carry a state at all."""
+    event = SourceEvent(kind=SourceEventKind.ITEM_ADDED, external_ids=("i1",))
+    assert event.watch_states == ()
+
+
+def test_a_carried_state_is_keyed_by_external_id_not_by_position() -> None:
+    """`external_ids` is the authoritative list and `watch_states` is the
+    subset the adapter could parse. Aligning them by position would make one
+    unparseable entry shift every later state onto the wrong item -- which
+    on this channel means writing one household member's resume position
+    onto a different film, and writing a *third* film's zero over the real
+    play history of a fourth.
+
+    So the lengths are deliberately allowed to differ, and the id on the
+    state -- not its index -- is what says which item it belongs to.
+    """
+    event = SourceEvent(
+        kind=SourceEventKind.WATCH_STATE_CHANGED,
+        external_ids=("a", "b", "c"),
+        watch_states=(SourceWatchState(external_id="c", position_seconds=5, played=False),),
+    )
+    by_id = {state.external_id: state for state in event.watch_states}
+    assert set(by_id) == {"c"}
+    assert [i for i in event.external_ids if i not in by_id] == ["a", "b"]
+
+
+def test_a_state_for_an_item_the_event_never_named_is_refused() -> None:
+    """The invariant that makes "keyed by `external_id`, not by position"
+    a property of the DTO rather than a sentence in its docstring.
+
+    Without it, "`watch_states` is a *subset*" is unenforced prose, and the
+    case above -- which builds its own dict and asserts on that -- passes
+    against every possible implementation, including one that intends the
+    two tuples to be aligned. With it, an adapter that assembles the two
+    lists from different sets of message entries fails at construction
+    instead of merging one item's state onto another's row.
+
+    Cheap to keep correct on the Emby path: `UserDataChanged` carries one
+    `UserDataList`, and both tuples are built from the same entries, so a
+    source cannot provoke this with any payload -- only an adapter can, by
+    being wrong. Same reason `SourceStatus.__post_init__` refuses
+    authenticated-but-unreachable.
+    """
+    with pytest.raises(ValueError, match="external_ids"):
+        SourceEvent(
+            kind=SourceEventKind.WATCH_STATE_CHANGED,
+            external_ids=("a", "b"),
+            watch_states=(SourceWatchState(external_id="c", position_seconds=5, played=False),),
+        )
+
+
+def test_a_carried_state_reports_absent_play_history_rather_than_zero() -> None:
+    """ADR-0014 reaches the push channel unchanged, and this is the case
+    that fails if it stops doing so.
+
+    A `UserDataChanged` message is a **third** payload shape -- a listing is
+    one, the single-item route is another -- and no run in this repository
+    has ever parsed one. So an adapter building this DTO out of one cannot
+    honestly report a count, and the M4 chain it feeds treats `0` as a
+    positive claim: `merge_from_source` writes a reported zero, permanently,
+    over a row holding a real 13.
+
+    The default is the whole guard. Making `play_count` default to `0` here
+    -- or having the event fill an unset one in -- turns every pause on a
+    played film into a silent history wipe, which is the exact failure the
+    previous milestone was built around. `WatchStateSyncService` then sees
+    `played and play_count is None` and enqueues the `WATCH_HISTORY`
+    backfill, which asks the one route that can count.
+    """
+    event = SourceEvent(
+        kind=SourceEventKind.WATCH_STATE_CHANGED,
+        external_ids=("i1",),
+        watch_states=(SourceWatchState(external_id="i1", position_seconds=61, played=True),),
+    )
+    assert [state.play_count for state in event.watch_states] == [None]
+    assert [state.last_played_at for state in event.watch_states] == [None]
 
 
 def test_get_watch_state_is_on_the_port() -> None:
