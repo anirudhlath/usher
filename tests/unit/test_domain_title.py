@@ -43,11 +43,11 @@ def test_title_accepts_provider_ids_as_attributes() -> None:
         kind=TitleKind.MOVIE,
         name="Dune",
         sort_name="Dune",
-        tmdb_id=438631,
-        imdb_id="tt1160419",
+        tmdb_id=90000100,
+        imdb_id="tt99000100",
     )
-    assert title.tmdb_id == 438631
-    assert title.imdb_id == "tt1160419"
+    assert title.tmdb_id == 90000100
+    assert title.imdb_id == "tt99000100"
 
 
 def test_title_is_immutable() -> None:
@@ -199,7 +199,7 @@ def test_imdb_id_rejects_person_ids() -> None:
     """ "nm..." identifies a person, not a title — a plausible copy-paste
     mistake that must not land on Title.imdb_id."""
     with pytest.raises(ValidationError):
-        Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="nm0000190")
+        Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="nm99000001")
 
 
 def test_imdb_id_rejects_unprefixed_ids() -> None:
@@ -208,8 +208,8 @@ def test_imdb_id_rejects_unprefixed_ids() -> None:
 
 
 def test_imdb_id_accepts_seven_and_eight_digit_forms() -> None:
-    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt1160419")
-    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt11604190")
+    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt99000100")
+    Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", imdb_id="tt99001000")
 
 
 # --- ProductionStatus --------------------------------------------------
@@ -252,8 +252,8 @@ def test_title_serialization_round_trips() -> None:
         name="Dune",
         sort_name="Dune",
         year=2021,
-        tmdb_id=438631,
-        imdb_id="tt1160419",
+        tmdb_id=90000100,
+        imdb_id="tt99000100",
         genres=["scifi", "drama"],
         field_provenance={"name": "tmdb"},
     )

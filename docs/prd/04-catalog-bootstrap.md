@@ -151,6 +151,30 @@ Tier 1 is the default and is sufficient for any realistic home library plus a
 generous recommendation pool. One request per title thanks to
 `append_to_response`.
 
+**"One request per title" holds for a movie and does not for a series**, and
+the table above predates that distinction. A series costs one request plus
+one per season, because TMDb's series detail lists its seasons and carries no
+episodes ([03](03-sources-and-sync.md)). Measured live 2026-08-01: the sampled
+long-running series cost ten requests each, and 30 series carried 320 seasons
+between them — **median 9**. So the series half of a full pass is 32,409 ×
+(1 + 9) ≈ **324k requests**.
+
+**`append_to_response=season/N` collapses that back to one** — 32,409, i.e.
+**~10x** — verified, including the 20-item ceiling that bounds it at 14
+seasons alongside the six namespaces already appended (a series with more
+seasons than that needs a second request; a small tail), and including that a
+season the series does not have is silently omitted rather than erroring.
+Recorded here, not yet taken; it is a change to the adapter's `fetch` and to
+[03](03-sources-and-sync.md)'s request table, and belongs in its own change.
+
+Two honest caveats on the 324k, because it is a planning figure and not a
+measurement. The median comes from **30 series that skew popular**, and
+popular series have more seasons than a library's median does, so this is an
+upper bound. And an earlier draft of this paragraph said "~190k → ~35k, ~5x":
+`~190k` was the tier-1 *title* count from the table above, borrowed one
+section over and read as a series *request* count. `CLAUDE.md` records the
+correction. 32,409 × 10 is 324k; ~190k would require a median of ~4.9.
+
 TMDb disabled its old hard rate limit in 2019; current guidance is a ceiling
 "somewhere in the 40 requests per second range". Usher self-limits to ~25 rps
 with jittered exponential backoff on 429, and checkpoints its cursor so the
@@ -175,16 +199,16 @@ Then embed all titles that have overviews.
 | Daily | TMDb `/movie/changes` → re-enrich mutated titles (minutes, not hours) |
 | Continuous | Demand-driven enrichment ([03](03-sources-and-sync.md)) |
 
-> 🔶 **Provisional.** `MetadataProvider.changed_since(days: int) ->
-> list[int]` (`usher.ports.metadata`) can't express a resumable cursor
-> through TMDb's paginated, 14-day-capped `/movie/changes` feed — a
-> partial run has no way to pick up where it left off. Relatedly,
-> `fetch`'s `provider_id: int` bakes in TMDb's integer id scheme, which
-> IMDb's own ids (`tt1160419`) don't fit — a problem only once a second
-> `MetadataProvider` exists ([01](01-architecture.md) lists this as an
-> open extension seam; [09](09-roadmap.md) names OMDb/TVDb as post-v1
-> candidates). Settle both in **M4**, when TMDb is still the only
-> implementation and a second provider's real shape isn't guesswork yet.
+Both re-enrichment signatures were settled in M4
+([ADR-0017](decisions/0017-the-metadata-port-is-an-aggregate-and-a-cursor.md)).
+`MetadataProvider.changed_since(since, cursor) -> ChangedPage` walks the
+`/movie/changes` feed through an opaque, resumable cursor, so a partial daily
+run picks up where it stopped instead of restarting the window; and
+`fetch(ref: ProviderRef)` carries a string value plus a kind, so IMDb's
+`tt1160419` fits the same signature TMDb's `550`/`movie` does. The 14-day cap
+is clamped rather than rejected, and a caller may not read an exhausted feed
+as proof that nothing older changed — the full recovery path is a
+re-enrichment sweep over `titles`, not this feed.
 
 ## Licensing — ship importers, never data
 
@@ -192,6 +216,19 @@ Usher's MIT license is unaffected by any of these sources, because Usher never
 redistributes their data. **The repository and its release artifacts contain
 zero third-party metadata.** Each user runs the importers and holds their own
 TMDb API key.
+
+That sentence was **not true from M1 to M4**, and the correction is worth
+recording rather than quietly applying. `tests/fixtures/bulk/` carried
+verbatim IMDb rows -- real ids, titles, years, runtimes, genres, and two
+`title.ratings` rows with their vote counts, which is the most
+licence-restricted part of that dataset -- under a note asserting they were
+synthetic because they had been "typed by hand". Hand-typing a real value
+does not make it synthetic. The TMDb and Emby fixtures were scrubbed of
+prose but had kept real ids, air dates, runtimes and season counts, for the
+same reason in reverse: TMDb's own reference pages illustrate their
+endpoints with *real* responses, so "transcribed from documentation" was
+transcribing a real payload. All of it was replaced on 2026-08-01 and the
+rule is now mechanically enforced -- see rule 6 below.
 
 | Source | Personal self-hosted use | Redistribute | Attribution |
 |---|---|---|---|
@@ -211,6 +248,15 @@ Hard rules encoded in the project:
 5. **Commercial use is out of scope.** Both IMDb and TMDb require separate
    licensing for it, and TMDb explicitly names AI/ML training on their content
    as commercial.
+6. **A test asserts rules 1-2 rather than trusting them.**
+   `tests/unit/test_no_third_party_data.py` scans `src/` and `tests/` and
+   fails on any real third-party identifier: IMDb ids must sit in a reserved
+   synthetic band, every id inside a committed fixture must be above a floor
+   no live TMDb/TVDb id reaches, and a hashed regression list names the
+   specific ids that were once committed here. Two further cases fail if the
+   scan itself stops covering the fixtures, because a guard that globs
+   nothing passes exactly like a guard that passes.
+   `tests/fixtures/README.md` holds the bands and the allocation table.
 
 ## Cost
 

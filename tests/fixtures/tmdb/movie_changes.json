@@ -1,0 +1,9 @@
+{
+  "results": [
+    { "id": 90000550, "adult": false, "softcore": false },
+    { "id": 90090210, "adult": false, "softcore": false }
+  ],
+  "page": 1,
+  "total_pages": 2,
+  "total_results": 4
+}

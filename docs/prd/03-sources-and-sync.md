@@ -141,8 +141,11 @@ Operational requirements:
 `list_items` and `watch_state` page over the source's own listing, one page in
 flight at a time. Measured against the live deployment on 2026-07-31, a walk of
 it is **1,126,674 items** — 94,438 movies, 32,409 series and 999,827 episodes —
-so materialising one is not an option. Three properties the adapter contract
-enforces, each now checked against that server:
+so materialising one is not an option. (Re-measured at the end of the same
+week: **1,126,789** — 94,448 / 32,414 / 999,927. Every figure derived from a
+live library is a dated snapshot, not a constant; the numbers below keep the
+date they were taken on rather than being refreshed in place.) Three properties
+the adapter contract enforces, each now checked against that server:
 
 - **A stable ascending sort by creation date, with a tiebreak.**
   `SortBy=DateCreated,SortName`. Items added during a walk land at the end, so
@@ -209,6 +212,47 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 
 Polling is the backstop, not the design.
 
+**Retraction is a separate step, and it can decline.** Marking unseen items
+unavailable is a distinct call the reconciler makes only after the walk
+returns normally — never a side effect of the upsert — and even then it
+refuses to retract more than `sync_max_retract_fraction` (default `0.25`) of
+a source in one run, raising and changing nothing. `list_items` raising
+rather than truncating already covers a walk that *failed*; this covers a
+walk that *succeeded* and returned far less than the library holds, which an
+unmounted drive, an accidentally-removed library, and a permissions change on
+Usher's own account all produce identically. `1.0` disables the ceiling,
+which is what an operator deliberately removing a library passes. See
+[ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md).
+
+An item that reappears in a walk is available again at that moment: the
+upsert restores it, because appearing in a walk *is* the evidence of
+availability. The sweep only ever sets `false`.
+
+**Only a full walk sweeps, and the ceiling is not a substitute for that.** A
+delta walk returns only what changed, so by construction nearly everything is
+"unseen" — a sweep after one would retract the library. The ceiling fires on
+a *fraction*, so it catches that catastrophe and misses the quiet version: a
+full walk that failed after committing eight of ten batches leaves 20% of the
+source stale, which is under the default ceiling, so a sweep that ran anyway
+would succeed and silently retract those rows. The gate is the success path,
+not the guard.
+
+**A delta walk resumes from the newest run of *either* item lane that
+completed.** Full and delta both walk `list_items` and differ only in whether
+a `since` is passed, so a nightly full run that finished at 03:00 is a valid
+floor for a delta at noon; reading only the delta lane would re-walk a window
+the nightly run already covered. Only *completed* runs count — resuming from
+one that failed halfway skips everything it never reached, silently. A full
+walk ignores every cursor: one that inherited a `since` would return only
+what changed and then sweep, which is exactly the combination ADR-0015 exists
+to make unreachable. (`watch_state` is a third lane with its own cursor: it
+walks a different method under a different upstream filter.)
+
+**Each batch is committed with the run's counters.** 1,126,674 items is
+hours; a crash must cost the batch in flight rather than the walk, and a
+`sync_runs` row an operator can watch has to exist before the walk starts
+rather than after it finishes.
+
 ## Read-through with a priority queue
 
 The catalog is usable immediately and improves under you. Three mechanisms:
@@ -254,52 +298,248 @@ work.
 
 ### 1. Ingest
 
-Normalise the source item; store the raw payload in `raw_payloads`; upsert
-`MediaItem` on `(source_id, external_id)`; create or attach a `Title` stub.
+Normalise the source item; upsert `MediaItem` on `(source_id, external_id)`;
+create or attach a `Title` stub.
+
+**Source payloads are not stored.** This stage used to say to keep each
+item's raw payload in `raw_payloads`; at 1,126,674 items and ~8 kB apiece
+that is ~9 GB against a database [08](08-operations.md) budgets at 8–12 GB
+total, to cache something re-readable from the source in one request.
+`raw_payloads` caches *provider* responses only — see
+[ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md).
 
 The adapter emits movies, series, **and episodes** — Emby addresses episodes
 directly, and `SourceItem` carries `series_external_id`, `season_number`, and
 `episode_number` for exactly this (all three verified present on a live episode
 payload, 2026-07-31). Episodes are also the bulk of the work: 999,827 of this
-deployment's 1,126,674 items. Persisting the series hierarchy waits on
-`Season`/`Episode` domain models and an `episodes` table, both of which land
-with the enrich stage in **M4**; until then episode items are produced and not
-yet stored.
+deployment's 1,126,674 items. `Season`/`Episode` and the `seasons`/`episodes`
+tables landed with **M4**, so the series hierarchy is now storable;
+`media_items.episode_id` and `watch_states.episode_id` have real foreign-key
+targets for the first time.
+
+**An episode is attached to its series' `Title`, and the attachment spans
+pages.** A walk is sorted by creation date, which guarantees nothing about a
+series preceding its own episodes — Emby genuinely interleaves them — so the
+series map is built from the whole page *and* from a batched read of what
+earlier pages already stored. An episode whose series is not yet known is
+stored unmatched and enqueued for a re-match; it is never dropped and never
+attached to a guess. An episode with no season or episode number is left
+unmatched for the same reason: defaulting the numbers to zero collapses every
+such episode of a series into one row.
+
+**Enrichment is enqueued only for the titles that need it.** A nightly walk
+sees all 1,126,674 items every night; enqueueing an `enrich` job for each
+makes the queue permanently the size of the library. One batched read of the
+titles' enrichment tiers per page decides, compared through `ENRICHMENT_RANK`
+([ADR-0008](decisions/0008-enrichment-tier-vs-failure.md)) rather than by
+comparing `EnrichmentState` members, which are `StrEnum` and order
+lexicographically.
+
+**Every repository call in this stage is once per batch**, including the
+season and episode writes: at 999,827 episodes, three round trips apiece is
+the difference between a walk that finishes and one that does not.
 
 ### 2. Match — resolve to a canonical Title
 
-Ordered by confidence, stopping at the first hit:
+Ordered by confidence, stopping at the first hit. **Every lookup is issued
+once per batch**, not once per item: `MatchService` turns a page of source
+items into one set of provider references and one set of name+year probes,
+and `TitleMatchRepository` answers each in a bounded number of statements.
+At 1,126,674 items a per-item matcher is not slow, it is a design defect.
 
-1. `ProviderIds.Tmdb` from the source → direct `tmdb_id` lookup.
+1. `ProviderIds.Tmdb` from the source → `(tmdb_id, kind)` lookup. The kind is
+   not optional — TMDb's movie and series id spaces overlap on 26,968 ids
+   ([ADR-0011](decisions/0011-tmdb-id-is-namespaced-by-kind.md)).
 2. `ProviderIds.Imdb` → local lookup against the bootstrapped IMDb skeleton
    ([04](04-catalog-bootstrap.md)) — no network call, because the catalog
-   already knows 12.7M titles.
-3. Name + year against the local skeleton, accepted above a confidence bar
-   (normalised title match, year within ±1).
-4. TMDb search API as a last resort.
-5. No confident match → `title_id` stays NULL; the item enters the review queue.
+   already knows 12.7M titles. One global namespace, so no kind participates.
+3. `ProviderIds.Tvdb` → `tvdb_id` lookup. M2's bootstrap linked 50,793 titles
+   this way and Emby series routinely carry a TVDb id and no TMDb one, so a
+   ladder stopping at IMDb pushes most television into the review queue for
+   no reason. Like IMDb, one namespace, no kind.
+4. Name + year against the local skeleton, accepted above a confidence bar
+   (normalised title match, year within ±1) **and only when unambiguous** —
+   several titles sharing a name, kind and year is common (remakes, and
+   IMDb's own duplicates), and picking one attaches watch history to the
+   wrong film.
+
+   **Measured on real source names, 2026-07-31**, against the live Emby
+   deployment and a real 1,271,314-title bootstrap: this rule resolves
+   **72.2% of movie names** (433/600, sampled across six windows spanning the
+   whole 94,448-movie collection) and **75.3% of series names** (223/296).
+   It was expected to resolve almost nothing — edition suffixes, years in
+   the name and release-group noise — and it does not. Of the movie misses,
+   **142 are absent from the catalog and only 25 are ambiguous**, so what
+   feeds the review queue is mostly a catalog that does not hold the title,
+   not a bar set too high. A probe carrying **no year resolves nothing at
+   all**, by construction: `year BETWEEN p.year - 1 AND p.year + 1`
+   propagates `NULL`, which is deliberate — any other spelling matches every
+   undated IMDb skeleton sharing the name.
+5. A trusted provider id the catalog does not hold → **create a stub**
+   ("stub-on-sight"). Deliberately narrower than "create a Title from what
+   the source said": an id from TMDb, IMDb or TVDb is an identity claim
+   strong enough to build a canonical title on; a bare name is not. Only
+   291,772 of the catalog's 1,271,314 titles carry a `tmdb_id`, so this is
+   expected to be the common path for anything modern.
+
+   **It was not, on the one live slice measured.** A real 600-item walk
+   created **zero** stubs: all 22 non-episode items resolved at tier 1 or 2
+   (21 by `tmdb_id`, 1 by `imdb_id`), and the other 578 were episodes, which
+   never walk the ladder. One consequence worth keeping: with no new titles,
+   a first walk and a nightly walk cost *exactly* the same — 40 statements
+   for a 600-item batch either way — because stub creation is the only
+   non-set-based step in the pipeline.
+
+   **A provider id the source reports may not be one.** 11 of 885 real
+   `ProviderIds.Imdb` values in a 900-item sample are bare digits with no
+   `tt` prefix. `Title.imdb_id` is pattern-validated and a pydantic
+   `ValidationError` is not a `UsherPortError`, so an unfiltered value here
+   aborts that source's sync permanently. Every id is filtered to the shape
+   the model accepts before the constructor sees it.
+6. No confident match → `title_id` stays NULL; the item enters the review
+   queue, and a `match` job is enqueued at `BACKFILL` priority.
+
+**The TMDb search tier is queued, not inline.** It is one network call per
+unmatched item, and a first full walk against an unbootstrapped catalog
+produces those in the hundreds of thousands — running them inside the walk
+makes the walk's duration a function of TMDb's rate limit rather than of the
+source's. It runs off the priority queue instead, which is what the queue's
+concurrency limit is for.
+
+**Measured against TMDb's own search, 2026-08-01** — the measurement tier 4
+had never had, because until Task 26 nothing in this repository had made a
+TMDb API request. 320 IMDb names (160 movies, 160 series, stratified into
+four `numVotes` bands so the popular end a real library sits at is visible
+separately from the long tail), each searched through the shipped
+`TmdbMetadataProvider` and judged by the shipped `_confident`:
+
+| | rate |
+|---|---|
+| all 320 | **83.1%** |
+| movies (160) | 87.5% |
+| series (160) | 78.8% |
+| `numVotes` ≥ 100,000 | 90.0% |
+| 10,000–100,000 | 91.3% |
+| 1,000–10,000 | 81.3% |
+| 100–1,000 | 70.0% |
+
+Two things fall out of it. **TMDb's relevance ordering really does put the
+obvious answer first** — 263 of the 266 confident resolutions were TMDb's
+*first* result, the other three no lower than rank 3, and for series it was
+126 of 126 — so the rule and the ordering agree, and the rule is not
+depending on the ordering to do it. And **TMDb's year filter is exact where
+this ladder's is ±1**: all 294 candidates it returned carried exactly the
+year asked for, so 26 of the 320 came back with *nothing* rather than with a
+one-year-off answer. Re-asking those 26 without the year resolves 13 of
+them, every one a title TMDb dates a year away from IMDb; the adapter now
+does that automatically when a year-filtered search finds nothing, which
+takes the table above to **87.2%** overall. Dropping the year filter
+outright was measured too and is worse — 6 of 133 already-resolving names
+stop resolving, because "exactly one survivor" across every year at once is
+a harder test than within one.
+
+This is the tier-3 number's counterpart, not its replacement: the two are
+different candidate sets and both are now measured (72–75% locally, 83–87%
+remotely, on different name samples).
+
+**Episodes never walk this ladder.** An Emby episode payload carries the
+*episode's* own provider ids (`{"Imdb": "tt2178782", "Tvdb": "4517466"}` on a
+live payload), not its series'. TVDb numbers episodes and series in different
+namespaces that overlap numerically, so tier 3 would resolve an episode to
+whichever unrelated series holds that integer; and no episode's IMDb id is in
+the catalog at all (`tvEpisode` is excluded from the bootstrap by design), so
+tier 5 would mint one junk `Title` per episode — 999,827 of them. An episode
+is resolved by attaching it to its series' `Title` during ingest, and
+enqueued for a re-match only when that series is not yet known.
 
 Bootstrapping first makes stages 2–3 local, which is why matching is fast and
 mostly offline.
 
 ### 3. Enrich
 
-One TMDb request per title using
-`append_to_response=credits,keywords,images,videos,external_ids,release_dates`,
-plus per-season episode fetches for series. Populates `Title`, `Season`,
-`Episode`, `Person`, `Credit`, `Collection`, `Image`, and sets
-`field_provenance`.
+One TMDb request per title, plus per-season episode fetches for series, and
+sets `field_provenance`.
+
+**The `append_to_response` list is not the same for both id spaces**, which
+is a correction to what this section said before M4 built the adapter:
+`release_dates` is a movie-only namespace and `content_ratings` is the TV-only
+equivalent. Read from TMDb's published reference on 2026-07-31, then
+**measured against the live API on 2026-08-01 — and the measurement corrects
+the correction.** Asking either half for the other's namespace is not an
+error: TMDb answers `200` with the requested key simply absent from the body,
+and does the same for a namespace that does not exist at all. So one shared
+list is worse than an endpoint that does not exist would be. It is silent:
+half the catalog loses its certification on a response that looks completely
+successful.
+
+| Kind | Request |
+|---|---|
+| movie | `GET /movie/{id}?append_to_response=credits,keywords,images,videos,external_ids,release_dates` |
+| series | `GET /tv/{id}?append_to_response=credits,keywords,images,videos,external_ids,content_ratings`, then `GET /tv/{id}/season/{n}` per season |
+
+Two facts about that second row, both measured live on 2026-08-01 and both
+consequential enough to state here rather than in an adapter docstring:
+
+- **`credits` is a valid TV namespace** (`aggregate_credits` exists
+  alongside it and is *also* valid — it is a second view, not a replacement).
+- **`append_to_response=season/N` works**, so the per-season requests in
+  that row are optional rather than necessary. One request carrying
+  `credits,keywords,images,videos,external_ids,content_ratings` plus
+  `season/0…season/13` — exactly TMDb's documented 20-item ceiling, which is
+  enforced with an HTTP 400 at 21 — returned Game of Thrones' entire
+  hierarchy, all 373 episodes across 9 seasons, in place of the ten requests
+  the row above costs. A season the series does not have is silently omitted
+  rather than erroring, and the appended block is byte-identical to the
+  season's own detail response but for a missing top-level `id`, which the
+  series' own `seasons[]` summary already carries. **This is recorded and
+  not yet taken**: it is a change to this row, to the adapter's `fetch`, and
+  to the request-budget arithmetic in [04](04-catalog-bootstrap.md), and it
+  belongs in its own change rather than folded into a verification run.
+
+The same divergence runs through the field names (`title`/`name`,
+`release_date`/`first_air_date`, `keywords.keywords`/`keywords.results`, a
+top-level `imdb_id` against `external_ids.imdb_id`, `runtime` against
+`episode_run_time`), the search endpoints (`/search/movie` with
+`primary_release_year` against `/search/tv` with `first_air_date_year`), and
+the change feeds (`/movie/changes` against `/tv/changes`). All of it stops in
+`usher.adapters.tmdb`, whose `mapping.py` tabulates the eight field-level
+rows; nothing above the adapter reads a TMDb key.
+
+**M4 populates `Title`, `Season` and `Episode`, and caches the response
+verbatim.** `Person`, `Credit`, `Collection` and `Image` are populated by the
+milestone that first *reads* them — `Person`/`Credit` and `Collection` by M7,
+`Image` by M9 — each re-derived from the cached payload in `raw_payloads`
+with **no second network call**, which is what
+[02](02-data-model.md)'s cache is for
+([ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)). So
+`MetadataProvider.to_result()` returns an `EnrichmentResult` carrying the
+title, its season/episode hierarchy, and the raw payload; the four deferred
+entities are added to it as *fields*, not as a signature change
+([ADR-0017](decisions/0017-the-metadata-port-is-an-aggregate-and-a-cursor.md)).
 
 Re-enrichment is driven by TMDb's `/movie/changes` feed rather than blind TTL
 sweeps, with a hard re-fetch ceiling under 6 months to respect TMDb's caching
-term.
+term. The feed is walked through a resumable cursor
+(`changed_since(since, cursor) -> ChangedPage`), and a provider may answer a
+narrower window than it was asked for — TMDb caps it at 14 days — so an
+exhausted feed is not proof that nothing older changed.
 
-> 🔶 **Provisional.** `MetadataProvider.to_title()` returns a single
-> `Title`, but this stage populates `Season`, `Episode`, `Person`,
-> `Credit`, `Collection`, and `Image` too — none of which exist as domain
-> models yet, so the real return shape (a `Title` plus its aggregate, an
-> `EnrichmentResult` bundle, or several methods) would be guesswork today.
-> Settle in **M4**, once those models exist.
+**That cap is real, both endpoints of the window are inclusive, and the
+clamp sits exactly on the boundary with nothing to spare.** Measured live
+2026-08-01: `start_date == end_date` is a valid one-day window returning
+4,278 movies, `[d, d+1]` returns 8,155 against 4,278 and 4,373 for the two
+days taken separately (so it covers both, deduplicated), `[today-14, today]`
+returns 47,945, and `[today-15, today]` is **HTTP 422** —
+`"Invalid date range: Should be a range no longer than 14 days."` The
+adapter clamps `start` to `today - 14 days`, which is the widest window TMDb
+accepts; one day wider and the daily re-enrichment job fails outright.
+
+The tier a title lands on is the pipeline's decision, never the provider's:
+`to_result` does not set `enrichment_state`, and `EnrichService` only ever
+raises it through `ENRICHMENT_RANK`
+([ADR-0008](decisions/0008-enrichment-tier-vs-failure.md)). A failed
+enrichment records `Title.enrichment_error` and leaves the tier exactly where
+it was.
 
 ### 4. Index
 
@@ -315,18 +555,43 @@ is a pure function of catalog state and can be rebuilt from scratch at any time.
   `WatchState` with `origin = source`. Progress made in Infuse or Emby's own
   apps flows in.
 
-  ⚠️ **`play_count` and `last_played_at` are best-effort from a walk, and
-  M4 must not write them from one.** Verified 2026-07-31 against Emby
-  4.9.5.0: a *listing* reports `PlayCount: 0` and omits `LastPlayedDate`
-  entirely, for the same item whose single-item fetch reports `PlayCount: 2`
-  and a real date. Position and played flag are correct in both. No `Fields`
-  value, `EnableUserData`, or `Ids` restriction changes it. Recovering the
-  pair costs one request per item and this library is 1,126,674 items, so
-  the walk cannot. A consumer that writes them from a walk writes zero over
-  real history — the same class of mistake as pushing a zero state over
-  something already known. Making the two fields optional on
-  `SourceWatchState` is the honest fix and is a port change M4 should make
-  deliberately.
+  **`play_count` and `last_played_at` are absent from a walk, not zero**
+  ([ADR-0014](decisions/0014-absence-is-not-zero.md)). Verified 2026-07-31
+  against Emby 4.9.5.0: a *listing* reports `PlayCount: 0` and omits
+  `LastPlayedDate` entirely, for the same item whose single-item fetch
+  reports `PlayCount: 2` and a real date. Position and played flag are
+  correct in both. No `Fields` value, `EnableUserData`, or `Ids` restriction
+  changes it. Recovering the pair costs one request per item and this
+  library is 1,126,674 items, so the walk cannot.
+
+  Both fields are therefore `int | None` / `AwareDatetime | None` on
+  `SourceWatchState`, where `None` means "this read could not determine it"
+  and `0` stays a positive claim — a reset has to remain propagable, which
+  is the same reason an all-zero state is emitted rather than filtered out
+  of a walk. `SourceAdapter.get_watch_state(external_id)` is the
+  authoritative single-item read, and `merge_from_source` is `COALESCE`-
+  shaped, so a walk *cannot* write zero over real history rather than merely
+  being trusted not to. Recovering it is a queued backfill over
+  `played = true AND play_count = 0`, bounded by the household's watched
+  items rather than by the library.
+
+  **That backfill's merge is stamped with the instant it read the source,
+  never with the walk's.** "Latest `updated_at` wins" applies to the whole
+  record, and `watch_states` has a `BEFORE UPDATE` trigger that stamps the
+  write instant — so a repair carrying the walk's instant is refused by the
+  very row it exists to repair, and the row keeps matching
+  `played AND play_count = 0` for good. Measured to terminate otherwise:
+  seven rows drained three at a time empty in three passes. A source whose
+  *single-item* route also cannot count leaves rows matching indefinitely,
+  bounded at one request per row per pass and rotating rather than starving
+  (the queue-filling query is oldest-first and a merge moves `updated_at`).
+
+  **An episode's watch state attaches to its `Episode`, never to its
+  series' `Title`.** A `MediaItem` for an episode carries both ids and a
+  `WatchState` may carry exactly one, so the inbound merge collapses the
+  pair with the episode winning. Attaching to the title instead violates no
+  constraint and merges every episode of a show onto one row — 999,827
+  episodes onto 32,409 series.
 - **Outbound:** client actions write `WatchState` with `origin = api`, then
   push to the source best-effort. Failure enqueues a retry and never blocks the
   API response. On Emby that push is **one call, plus a second only when the

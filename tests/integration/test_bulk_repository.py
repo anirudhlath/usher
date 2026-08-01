@@ -109,7 +109,7 @@ async def test_copy_writes_the_server_default_columns(session: AsyncSession) -> 
     result = await session.execute(
         text(
             "SELECT enrichment_state, field_provenance, keywords, created_at IS NOT NULL "
-            "FROM titles WHERE imdb_id = 'tt0111161'"
+            "FROM titles WHERE imdb_id = 'tt99000020'"
         )
     )
     state, provenance, keywords, has_created_at = result.one()
@@ -127,10 +127,10 @@ async def test_copy_preserves_embedded_double_quotes(session: AsyncSession) -> N
     repo = PostgresBulkCatalogRepository(session)
     await repo.upsert_titles([SHAWSHANK])
     result = await session.execute(
-        text("SELECT name, sort_name FROM titles WHERE imdb_id = 'tt0111161'")
+        text("SELECT name, sort_name FROM titles WHERE imdb_id = 'tt99000020'")
     )
     name, sort_name = result.one()
-    assert name == 'The "Shawshank" Redemption'
+    assert name == 'A "Quoted" Synthetic Feature'
     assert sort_name == name
 
 

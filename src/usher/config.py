@@ -75,6 +75,53 @@ class Settings(BaseSettings):
     # re-authentication) for as long as it stays wrong.
     source_reauth_cooldown_seconds: float = Field(default=60.0, ge=0)
 
+    # The ingest pipeline (PRD 03). Same reasoning as the bulk and source
+    # settings above: PRD 08's TOML config layer does not exist yet.
+    sync_batch_size: int = Field(default=1_000, ge=1, le=50_000)
+    # The fraction of a source's items one reconcile may mark unavailable
+    # before it refuses and changes nothing (ADR-0015). 1.0 disables the
+    # guard, which is what an operator deliberately removing a library
+    # passes on the command line.
+    sync_max_retract_fraction: float = Field(default=0.25, ge=0.0, le=1.0)
+    job_batch_size: int = Field(default=20, ge=1, le=500)
+    # PRD 08's "after N attempts a job is parked with its error". `ge=1`
+    # rather than `ge=0`: a ceiling of zero would park every job on its first
+    # failure, which is `retryable=False` applied indiscriminately and takes
+    # the retry out of a retry queue.
+    job_max_attempts: int = Field(default=5, ge=1)
+    # The base of the exponential backoff, before jitter. `gt=0` because a
+    # zero base collapses the whole schedule to "retry immediately", which is
+    # the hot loop the backoff exists to prevent.
+    job_backoff_seconds: float = Field(default=30.0, gt=0)
+
+    # The metadata provider (PRD 03's enrich stage). `tmdb_api_key` above is
+    # the credential; these are its tuning. Same reasoning as every block
+    # above: PRD 08's TOML config layer does not exist yet.
+    #
+    # The base URL *is* here, unlike the bulk datasets' hosts, for the reason
+    # `wikidata_endpoint` is: TMDb's API has documented alternate hosts
+    # (`api.tmdb.org`) and a self-hosted proxy in front of it is a normal
+    # deployment for a household behind a restrictive network.
+    tmdb_base_url: str = "https://api.themoviedb.org/3"
+    # PRD 10's dashboard 3 plots "TMDb requests/sec against the ~40 ceiling
+    # with 429 count" -- and TMDb's own documentation puts its limits
+    # "somewhere in the 40 requests per second range" without publishing a
+    # number. 30 leaves headroom for the retry a 429 triggers without the
+    # retry itself becoming the thing that trips the next one.
+    tmdb_requests_per_second: float = Field(default=30.0, gt=0)
+    # Which certification body's rating lands in `Title.content_rating`.
+    # TMDb returns every country's; picking one is configuration, not a
+    # constant, because a household outside the US wants its own -- and
+    # showing them somebody else's rating is worse than showing none.
+    tmdb_region: str = Field(default="US", min_length=2, max_length=2)
+    # How long a cached provider payload is reused before the enrich stage
+    # refetches. TMDb's licensing term is a *ceiling* of six months rather
+    # than a target, so `le=180` is the compliance bound expressed as a type
+    # -- a value above it would put the deployment out of terms silently.
+    # `ge=1` because zero means "refetch on every attempt", which turns a
+    # retry storm into the rate limit it is meant to avoid.
+    enrich_cache_max_age_days: int = Field(default=30, ge=1, le=180)
+
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
 

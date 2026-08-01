@@ -46,9 +46,9 @@ async def test_each_property_fills_exactly_one_column() -> None:
     precisely because of this: a P4983 pass must not blank a P4947 value."""
     transport = _wdqs(
         {
-            ("P4947", "tt0"): _bindings(("tt0111161", "278")),
-            ("P4983", "tt0"): _bindings(("tt0944947", "1399")),
-            ("P4835", "tt0"): _bindings(("tt0944947", "121361")),
+            ("P4947", "tt9"): _bindings(("tt99000020", "90000020")),
+            ("P4983", "tt9"): _bindings(("tt99000030", "90001399")),
+            ("P4835", "tt9"): _bindings(("tt99000030", "91000030")),
         }
     )
     async with httpx.AsyncClient(transport=transport) as client:
@@ -58,9 +58,9 @@ async def test_each_property_fills_exactly_one_column() -> None:
         (row.imdb_id, row.tmdb_movie_id, row.tmdb_series_id, row.tvdb_series_id) for row in rows
     }
     assert by_column == {
-        ("tt0111161", 278, None, None),
-        ("tt0944947", None, 1399, None),
-        ("tt0944947", None, None, 121361),
+        ("tt99000020", 90000020, None, None),
+        ("tt99000030", None, 90001399, None),
+        ("tt99000030", None, None, 91000030),
     }
 
 
@@ -70,10 +70,10 @@ async def test_skips_values_that_cannot_be_a_valid_mapping() -> None:
     String(16) during COPY, which is a much worse place to find out."""
     transport = _wdqs(
         {
-            ("P4947", "tt0"): _bindings(
-                ("tt0111161", "278"),
+            ("P4947", "tt9"): _bindings(
+                ("tt99000020", "90000020"),
                 ("not-an-imdb-id", "1"),
-                ("tt0000002", "not-a-number"),
+                ("tt99000002", "not-a-number"),
                 ("tt" + "9" * 40, "2"),
             )
         }
@@ -81,7 +81,7 @@ async def test_skips_values_that_cannot_be_a_valid_mapping() -> None:
     async with httpx.AsyncClient(transport=transport) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
         rows = [row async for batch in dataset.batches() for row in batch.rows]
-    assert [row.imdb_id for row in rows] == ["tt0111161"]
+    assert [row.imdb_id for row in rows] == ["tt99000020"]
 
 
 async def test_skips_a_digit_that_isdigit_accepts_but_int_cannot_parse() -> None:
@@ -91,7 +91,7 @@ async def test_skips_a_digit_that_isdigit_accepts_but_int_cannot_parse() -> None
     is meant to be gatekeeping. Wikidata is openly editable, so this input
     class is exactly the kind of value a vandalised or malformed statement
     could contain; skipping it must not raise."""
-    transport = _wdqs({("P4947", "tt0"): _bindings(("tt0111161", "²"))})
+    transport = _wdqs({("P4947", "tt9"): _bindings(("tt99000020", "²"))})
     async with httpx.AsyncClient(transport=transport) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
         rows = [row async for batch in dataset.batches() for row in batch.rows]
@@ -103,7 +103,7 @@ async def test_skips_a_value_too_large_for_the_int4_column() -> None:
     outright, but id_crosswalk's provider-id columns are a plain Postgres
     Integer (int4, max 2147483647) -- a value past that would abort the
     whole COPY batch on the far side rather than just this one row."""
-    transport = _wdqs({("P4947", "tt0"): _bindings(("tt0111161", "99999999999999"))})
+    transport = _wdqs({("P4947", "tt9"): _bindings(("tt99000020", "99999999999999"))})
     async with httpx.AsyncClient(transport=transport) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
         rows = [row async for batch in dataset.batches() for row in batch.rows]
@@ -115,19 +115,24 @@ async def test_a_large_work_unit_is_split_into_batch_size_chunks() -> None:
     work unit (tt0/P4947) -- unchunked, that is a single COPY+upsert
     transaction on the far side. `batch_size` bounds the write side; only
     the fetch itself is still whole-unit (WDQS has no cheap way to
-    paginate a single query deterministically)."""
-    pairs = tuple((f"tt{n:07d}", str(n)) for n in range(1, 12))  # 11 pairs
-    transport = _wdqs({("P4947", "tt0"): _bindings(*pairs)})
+    paginate a single query deterministically).
+
+    The fixture drives the `tt9` shard rather than `tt0`, because every
+    synthetic id in this repository lives in the reserved `tt99`-prefixed
+    band -- see tests/fixtures/README.md."""
+    pairs = tuple((f"tt99{n:06d}", str(n)) for n in range(1, 12))  # 11 pairs
+    transport = _wdqs({("P4947", "tt9"): _bindings(*pairs)})
     async with httpx.AsyncClient(transport=transport) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA, batch_size=5)
         batches = [batch async for batch in dataset.batches()]
     sized = [batch for batch in batches if batch.rows]
     assert [len(batch.rows) for batch in sized] == [5, 5, 1]
-    # None of the sub-batches for the oversized unit (index 0) advance past
-    # it except the last -- a crash before that must redo the whole unit,
-    # not resume it partway (WDQS results aren't deterministically
-    # paginable, so "partway" isn't a position this adapter can express).
-    assert [batch.cursor.position for batch in sized] == [0, 0, 1]
+    # None of the sub-batches for the oversized unit (`tt9`/P4947, work
+    # unit index 9) advance past it except the last -- a crash before that
+    # must redo the whole unit, not resume it partway (WDQS results aren't
+    # deterministically paginable, so "partway" isn't a position this
+    # adapter can express).
+    assert [batch.cursor.position for batch in sized] == [9, 9, 10]
     assert sized[-1].cursor.rows_seen == 11
 
 
@@ -171,7 +176,7 @@ async def test_the_cursor_advances_past_empty_units() -> None:
     covers the case where a *later* unit has rows, confirming the row-less
     batches in between don't disturb `rows_seen`'s running total or the
     final unit's own position."""
-    transport = _wdqs({("P4835", "tt9"): _bindings(("tt0944947", "121361"))})
+    transport = _wdqs({("P4835", "tt9"): _bindings(("tt99000030", "91000030"))})
     async with httpx.AsyncClient(transport=transport) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
         batches = [batch async for batch in dataset.batches()]
@@ -240,7 +245,7 @@ async def test_rows_seen_accumulates_across_a_normal_resume() -> None:
     """Distinct from the empty-tail resume test: an ordinary resume that
     finds more rows must add them to the stored rows_seen, not reset or
     ignore it."""
-    transport = _wdqs({("P4835", "tt9"): _bindings(("tt0944947", "121361"))})
+    transport = _wdqs({("P4835", "tt9"): _bindings(("tt99000030", "91000030"))})
     async with httpx.AsyncClient(transport=transport) as client:
         dataset = WikidataCrosswalkDataset(client, user_agent=_UA)
         revision = await dataset.revision()

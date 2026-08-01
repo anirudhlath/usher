@@ -1,0 +1,185 @@
+{
+  "adult": false,
+  "backdrop_path": "/synthetic-backdrop.jpg",
+  "belongs_to_collection": {
+    "id": 98000001,
+    "name": "An Invented Collection",
+    "poster_path": "/synthetic-collection-poster.jpg",
+    "backdrop_path": "/synthetic-collection-backdrop.jpg"
+  },
+  "budget": 1000000,
+  "genres": [
+    { "id": 95000018, "name": "Drama" },
+    { "id": 95000053, "name": "Thriller" }
+  ],
+  "homepage": "https://example.invalid/a-film",
+  "id": 90000550,
+  "imdb_id": "tt99000020",
+  "origin_country": ["US"],
+  "original_language": "en",
+  "original_title": "A Film",
+  "overview": "A synthetic overview for a film that does not exist.",
+  "popularity": 12.5,
+  "poster_path": "/synthetic-poster.jpg",
+  "production_companies": [
+    {
+      "id": 94000001,
+      "logo_path": "/synthetic-logo.png",
+      "name": "An Invented Studio",
+      "origin_country": "US"
+    }
+  ],
+  "production_countries": [{ "iso_3166_1": "US", "name": "United States of America" }],
+  "release_date": "1988-06-17",
+  "revenue": 2000000,
+  "runtime": 111,
+  "softcore": false,
+  "spoken_languages": [
+    { "english_name": "English", "iso_639_1": "en", "name": "English" },
+    { "english_name": "French", "iso_639_1": "fr", "name": "Français" }
+  ],
+  "status": "Released",
+  "tagline": "Invented, like everything else here.",
+  "title": "A Film",
+  "video": false,
+  "vote_average": 6.204,
+  "vote_count": 1234,
+  "credits": {
+    "cast": [
+      {
+        "adult": false,
+        "gender": 2,
+        "id": 93000001,
+        "known_for_department": "Acting",
+        "name": "Someone Invented",
+        "original_name": "Someone Invented",
+        "popularity": 12.3,
+        "profile_path": "/synthetic-profile.jpg",
+        "cast_id": 4,
+        "character": "Nobody At All",
+        "credit_id": "000000000000000000000001",
+        "order": 0
+      }
+    ],
+    "crew": [
+      {
+        "adult": false,
+        "gender": 2,
+        "id": 93000002,
+        "known_for_department": "Directing",
+        "name": "Another Invention",
+        "original_name": "Another Invention",
+        "popularity": 9.9,
+        "profile_path": "/synthetic-profile-2.jpg",
+        "credit_id": "000000000000000000000002",
+        "department": "Directing",
+        "job": "Director"
+      }
+    ]
+  },
+  "keywords": {
+    "keywords": [
+      { "id": 95100001, "name": "invented keyword" },
+      { "id": 95100002, "name": "second invented keyword" }
+    ]
+  },
+  "images": {
+    "backdrops": [
+      {
+        "aspect_ratio": 1.778,
+        "height": 2160,
+        "iso_639_1": null,
+        "iso_3166_1": null,
+        "file_path": "/synthetic-backdrop.jpg",
+        "vote_average": 5.3,
+        "vote_count": 4,
+        "width": 3840
+      }
+    ],
+    "logos": [
+      {
+        "aspect_ratio": 3.2,
+        "height": 250,
+        "iso_639_1": "en",
+        "iso_3166_1": null,
+        "file_path": "/synthetic-logo.png",
+        "vote_average": 5.3,
+        "vote_count": 2,
+        "width": 800
+      }
+    ],
+    "posters": [
+      {
+        "aspect_ratio": 0.667,
+        "height": 3000,
+        "iso_639_1": "en",
+        "iso_3166_1": "US",
+        "file_path": "/synthetic-poster.jpg",
+        "vote_average": 5.4,
+        "vote_count": 9,
+        "width": 2000
+      }
+    ]
+  },
+  "videos": {
+    "results": [
+      {
+        "iso_639_1": "en",
+        "iso_3166_1": "US",
+        "name": "An Invented Trailer",
+        "key": "synthetic-key",
+        "site": "YouTube",
+        "size": 1080,
+        "type": "Trailer",
+        "official": true,
+        "published_at": "1988-05-01T00:00:00.000Z",
+        "id": "000000000000000000000006"
+      }
+    ]
+  },
+  "external_ids": {
+    "imdb_id": "tt99000020",
+    "wikidata_id": "Q99999999",
+    "facebook_id": null,
+    "instagram_id": null,
+    "twitter_id": null
+  },
+  "release_dates": {
+    "results": [
+      {
+        "iso_3166_1": "GB",
+        "release_dates": [
+          {
+            "certification": "18",
+            "descriptors": [],
+            "iso_639_1": "",
+            "note": "",
+            "release_date": "1988-07-22T00:00:00.000Z",
+            "type": 3
+          }
+        ]
+      },
+      {
+        "iso_3166_1": "US",
+        "release_dates": [
+          {
+            "certification": "",
+            "descriptors": [],
+            "iso_639_1": "",
+            "note": "Invented festival screening",
+            "release_date": "1988-05-30T00:00:00.000Z",
+            "type": 1
+          },
+          {
+            "certification": "R",
+            "descriptors": [],
+            "iso_639_1": "",
+            "note": "",
+            "release_date": "1988-06-17T00:00:00.000Z",
+            "type": 3
+          }
+        ]
+      }
+    ]
+  }
+}

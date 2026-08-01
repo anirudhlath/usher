@@ -86,6 +86,8 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pydantic import AwareDatetime
+
 from usher.domain.enums import HdrFormat
 from usher.ports.errors import PortDataMalformed
 from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
@@ -441,7 +443,10 @@ def to_source_item(payload: Mapping[str, Any]) -> SourceItem | None:
 
 
 def to_watch_state(
-    payload: Mapping[str, Any], *, source_user_id: str | None
+    payload: Mapping[str, Any],
+    *,
+    source_user_id: str | None,
+    play_history_is_trustworthy: bool,
 ) -> SourceWatchState | None:
     """One Emby item's `UserData` into a `SourceWatchState`.
 
@@ -451,17 +456,39 @@ def to_watch_state(
     over whatever Usher already knows. A `UserData` block that *is* present
     and happens to be all zeros is emitted -- see the port's `watch_state`
     docstring for why filtering those is a correctness bug.
+
+    **`play_history_is_trustworthy` names the route, not a preference.**
+    Verified 2026-07-31 against Emby 4.9.5.0: `GET /Users/{u}/Items` reports
+    `PlayCount: 0` and omits `LastPlayedDate` entirely, for the very item
+    whose `GET /Users/{u}/Items/{id}` reports `PlayCount: 2` and a real
+    date. No `Fields` value, no `EnableUserData`, and no `Ids` restriction
+    changes it. So a listing's zero is not a count, it is the absence of
+    one, and the caller -- which is the only thing that knows which route it
+    called -- has to say so. Passing `True` from a listing walk is the exact
+    bug this parameter exists to make un-writable by accident, which is also
+    why it has no default: a call site that has not thought about the route
+    does not compile.
+
+    Even under `True`, a key that is simply not present yields `None`
+    rather than `0`: trusting the route is not the same as inventing a
+    value. See [ADR-0014](../../../../docs/prd/decisions/0014-absence-is-not-zero.md).
     """
     external_id = as_text(payload.get("Id"))
     user_data = payload.get("UserData")
     if external_id is None or not isinstance(user_data, Mapping):
         return None
     ticks = as_int(user_data.get("PlaybackPositionTicks")) or 0
+    play_count: int | None = None
+    last_played_at: AwareDatetime | None = None
+    if play_history_is_trustworthy:
+        counted = as_int(user_data.get("PlayCount"))
+        play_count = max(counted, 0) if counted is not None else None
+        last_played_at = parse_datetime(user_data.get("LastPlayedDate"))
     return SourceWatchState(
         external_id=external_id,
         position_seconds=max(ticks, 0) // TICKS_PER_SECOND,
         played=bool(user_data.get("Played", False)),
-        play_count=max(as_int(user_data.get("PlayCount")) or 0, 0),
-        last_played_at=parse_datetime(user_data.get("LastPlayedDate")),
+        play_count=play_count,
+        last_played_at=last_played_at,
         source_user_id=source_user_id,
     )

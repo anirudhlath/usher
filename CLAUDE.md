@@ -7,22 +7,40 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M3 Emby adapter complete.** The project scaffold, environment
+**Status: M4 complete.** The project scaffold, environment
 config, domain models, port ABCs, persistence (SQLAlchemy schema + Alembic
 migrations + title repository), the telemetry bootstrap, a FastAPI app
 with liveness/readiness endpoints, the container image + compose stack + CI
 (M1), the bulk-dataset bootstrap pipeline — IMDb skeleton, TMDb ID export,
-Wikidata crosswalk, all resumable and checkpointed (M2) — and the Emby
+Wikidata crosswalk, all resumable and checkpointed (M2) — the Emby
 `SourceAdapter` with encrypted source credentials, a source repository, the
 admin source routes, and a source-agnostic contract suite that runs against
-both a pure in-memory adapter and the real one (M3) — all exist and are
-verified working, M3 including against a live Emby 4.9.5.0 server. See
+both a pure in-memory adapter and the real one (M3) — and the ingest
+pipeline: `MatchService`/`IngestService`/`ReconcileService`/
+`WatchStateSyncService`/`EnrichService` over nine repository ports and a
+Postgres priority queue, the TMDb metadata provider, the `sync`/
+`sync-status`/`unmatched`/`work` CLI, and the pipeline's span tree and
+metrics (M4) — all exist and are verified working, M3 and M4 including
+against a live Emby 4.9.5.0 server and, as of 2026-08-01, against the live
+TMDb v3 API. See
 `docs/plans/2026-07-28-m1-foundation.md`,
-`docs/plans/2026-07-30-m2-bootstrap.md` and
-`docs/plans/2026-07-30-m3-emby-adapter.md` for the task breakdowns and
-`docs/prd/09-roadmap.md` for what's next (M4). Do not invent commands for
+`docs/plans/2026-07-30-m2-bootstrap.md`,
+`docs/plans/2026-07-30-m3-emby-adapter.md` and
+`docs/plans/2026-07-31-m4-ingest.md` for the task breakdowns and
+`docs/prd/09-roadmap.md` for what's next (M5 — push, reconnect delta, demand
+promotion, SSE). Do not invent commands for
 tooling that does not exist yet — check the Commands section below before
 assuming something runs.
+
+**M4's four deliberate boundary calls**, each stated with its reason in the
+M4 plan's Scope section and in PRD 09: the **index** stage is M6's (no
+`index` job kind ships, because a job kind whose handler is a stub is a
+queue that grows forever); **push/reconnect-delta/demand/SSE** are M5's (M4
+builds the queue's promotion *mechanism* but nothing calls it with
+`JobPriority.DEMAND`); the **three admin HTTP routes** are M9's, with the
+same capability delivered through `usher.cli`; and enrichment populates
+`Title`/`Season`/`Episode` only, with `Person`/`Credit`/`Collection`/`Image`
+re-derived from `raw_payloads` by M7/M9 with **no second network call**.
 
 ## Keep the PRD current
 
@@ -82,6 +100,155 @@ earlier negative findings were both wrong — see
 
 Health-check caveat: a handshake against *any* path succeeds, so a successful
 upgrade is not a health signal. Assert on received messages instead.
+
+**M4's live verification: the design's central measurement holds, the
+matcher's exact-name tier was expected to match "almost nothing" and matches
+about three quarters, and the defect the plan called hypothetical is real in
+this library.** Run
+2026-07-31 against the same live Emby **4.9.5.0** server, driving the real
+`EmbyAdapter` and the real `ReconcileService`/`IngestService`/`MatchService`/
+`WatchStateSyncService` against a real `pgvector/pgvector:pg17` holding a
+real M2 bootstrap (1,271,314 titles). Bounded deliberately: **600 items
+ingested** and ~90 deliberate requests, from a throwaway script outside the
+working tree. (Plus several hundred accidental ones from a single runaway
+probe, killed — see the bounding note near the end of this file. Counted here
+rather than quietly dropped: it is the mistake worth not repeating.)
+
+- **The finding M4 exists to answer, re-measured through the real adapter,
+  on one item, in one run.** The *listing* reports `PlayCount: 0` and no
+  `LastPlayedDate`; the *single-item* route reports `PlayCount: 13` and
+  `LastPlayedDate: 2026-07-30T08:12:53Z`; `PlaybackPositionTicks` and
+  `Played` agree. Through `EmbyAdapter`: the walk yields
+  `play_count=None, last_played_at=None`, `get_watch_state` yields `13` and
+  the real timestamp. Over the first 100 states of a real
+  `adapter.watch_state()` walk, `play_count` and `last_played_at` are
+  `None` for **all 100**. ADR-0014's premise is measured, not assumed.
+- **The milestone's central property, end to end against real payloads.** A
+  row holding the authoritative `play_count = 13` was then fed the *listing*
+  payload for the same item through `to_watch_state(...,
+  play_history_is_trustworthy=False)` and `merge_from_source`. It reads back
+  **13**, `played = true`, and the original `last_played_at`. The walk
+  cannot zero real history, verified against the live server rather than
+  against a fake told to behave like it.
+- **`MatchService`'s exact-name rule matches ~74% of real Emby names, not
+  "almost nothing".** Measured against the real 1,271,314-title catalog with
+  the *identical* rule `_confident` applies (exact normalised name, year
+  ±1, exactly one survivor), over 600 movies and 300 series sampled across
+  six windows spanning the whole collection: **72.2% of movies** (433/600)
+  and **75.3% of series** (223/296 distinct probes). Of the movie misses,
+  142 are *absent* from the catalog and only 25 are *ambiguous* — so the
+  review queue is a trickle, and what feeds it is mostly the catalog not
+  holding the title at all rather than the rule being too strict. This
+  reverses the plan's stated expectation and it is the single most
+  load-bearing number the live run produced.
+
+  **What this is and is not.** It is `_confident`'s *predicate*, run over
+  the local catalog — i.e. tier 3 — not `_confident` against TMDb's own
+  search results, which no run in this repository has ever made. The two
+  differ in their candidate set, and in opposite directions: TMDb returns a
+  handful of relevance-ranked results, so "exactly one survivor" is *easier*
+  to satisfy than against 1,271,314 rows; but TMDb can also return nothing
+  for a name the local skeleton holds. So treat 72–75% as a measurement of
+  the rule on real names, not as a prediction of tier 4's yield.
+- **On this library the name+year tier out-resolves the `tmdb_id` tier.**
+  68.5% of movie TMDb refs and 68.7% of series TMDb refs resolve, against
+  72.2%/75.3% for name+year — because only 291,772 of 1,271,314 catalog
+  titles carry a `tmdb_id` at all. Tier 3 is not the fallback the ladder's
+  ordering makes it look like.
+- **A probe with no year resolves nothing, by construction, confirmed on
+  real data.** `t.year BETWEEN p.year - 1 AND p.year + 1` propagates `NULL`,
+  so the same 900 names re-run with the year stripped match **0**. That is
+  the documented intent (the alternative matches every undated IMDb
+  skeleton of the same name) — recorded here because "0.0%" looks like a
+  bug and is not.
+- **A malformed `ProviderIds.Imdb` is real, not hypothetical: 11 of 885 in
+  the sample** (1.2%), all bare 6- or 7-digit numbers with no `tt` prefix.
+  Fed to the real `MatchService` they resolve cleanly (9 stubs, 2 name+year)
+  and nothing raises. **The guard that makes that true is `_as_imdb`, not
+  `_usable_ids`** — the two are layered, and removing `_usable_ids`'s
+  filtering alone still does not raise, because `_create_stub` calls
+  `_as_imdb` again at the constructor. Removing `_as_imdb`'s pattern check
+  raises `pydantic_core.ValidationError` on these exact real payloads, which
+  is **not** a `UsherPortError`, which is a permanently aborted sync. Measured
+  both ways.
+- **An episode never walks the ladder, confirmed on real data.** Of 600 live
+  items, 578 were episodes and every one returned `UNMATCHED` from
+  `MatchService` with no lookups; `IngestService` attached them as
+  `SERIES_PARENT`. Zero episodes reached a provider tier or the stub tier.
+- **Stub-on-sight never fired, and that makes the cold and warm walks
+  identical.** All 22 non-episode items resolved to existing catalog titles
+  (21 by `tmdb_id`, 1 by `imdb_id`), so **zero stubs were created** — and
+  walk 2 over the same 600 items cost exactly the same **40 statements**,
+  `0.0667` per item, as walk 1. That is the "16,950 of the first walk's
+  17,722 statements are stub-on-sight, bounded by new titles" claim
+  arriving from the other direction: with no new titles, there is no cold
+  penalty at all. (40 statements for one 600-item batch is above the 15.4
+  statements/batch Task 25 averaged over 50 batches, because this is a
+  single first batch where every series, season and episode is new.)
+- **A delta walk completes and its cursor advances; a failed walk sweeps
+  nothing.** A `DELTA` reconcile against the live server inherited the last
+  completed `FULL` run's instant, returned 0 items (nothing had changed in
+  that window), recorded `COMPLETED`, and advanced `sync_runs.cursor_at`. A
+  `FULL` walk interrupted mid-stream recorded `FAILED` with its message and
+  left all 601 `available` rows untouched — `items_retracted = 0`.
+- **The delta filters, re-measured on a fresh 30-day window.**
+  `MinDateLastSaved` = 28,955, `MinDateLastSavedForUser` = 29,027, unfiltered
+  = 1,126,789. Still honoured, still genuinely different, and an *invented*
+  parameter name still returns the full unfiltered count — the "degrades to
+  a full walk" safety property, re-measured.
+- **The library grew.** 1,126,789 items now (94,448 movies / 32,414 series /
+  999,927 episodes), against 1,126,674 four days earlier. Any figure derived
+  from it is a snapshot, not a constant.
+- **`VideoRange`'s vocabulary holds over a second, different slice.** 600
+  movies spread across the whole collection by `DateCreated` ascending:
+  `SDR` 597, `DolbyVision` 2, `HDR 10` 1, with `ExtendedVideoType/SubType`
+  ∈ {`None/None`, `Hdr10/Hdr10`, `DolbyVision/DoviProfile50`,
+  `DolbyVision/DoviProfile81`}. `VideoRangeType`, `DvProfile` and
+  `DvVersionMajor` are absent from every video stream. The mapper produced
+  the right `SourceItem` for all 1,100 sampled payloads (600 movies, 300
+  series, 200 episodes) with **zero failures and zero skips**, and the
+  technical metadata survives all the way into `media_items`: 496 `h264` +
+  85 `hevc`, 581 of 601 rows carrying width/container/file size (the 20
+  without are `Series` rows, which have no `MediaSource` — correct), and one
+  row carrying `hdr_format = DV` from a real `VideoRange: "DolbyVision"`
+  payload. `SDR → NULL` and `DolbyVision → DV` are both confirmed on stored
+  rows; `HDR 10 → HDR10` appeared in the sampled payloads but not in the
+  ingested slice, so that arm is still fixture-only end to end.
+- **Emby's `ProviderIds` key space is far wider than three, and case is not
+  stable.** Observed on 900 movie/series payloads: `Tmdb`, `Imdb`, `Tvdb`,
+  `TvMaze`, `Official Website`, `TvRage`, `X (Twitter)`, `Zap2It`,
+  `TV Maze` (with a space, alongside `TvMaze` without), `Wikipedia`, `EIDR`,
+  `Wikidata`, `Reddit`, `Fan Site`, `IMDB` (14 items — uppercase),
+  `Facebook`, `Instagram`, `TmdbCollection`, `Youtube`, `tmdb` (3 items —
+  lowercase), `Twitter`. `mapping.provider_ids`' `key.lower()` is what makes
+  `IMDB` and `tmdb` usable at all, and an exact-key `get("tmdb")` is what
+  keeps `TmdbCollection` from being read as a TMDb id. A prefix match there
+  would attach films to collections. The one residual risk is an item
+  carrying both `Imdb` and `IMDB` with different values, where `key.lower()`
+  silently keeps whichever came last; none was observed.
+- **The one write to a real account, and its restoration.** An item was
+  chosen whose complete `UserData` was already
+  `{PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played:
+  false}` precisely so the one destructive Emby route is an *exact* restore.
+  `push_watch_state(played=True)` took it to `PlayCount: 1`, `Played: true`,
+  `LastPlayedDate: 2026-07-31T13:41:53Z`; `get_watch_state` — the backfill's
+  own read path — returned `play_count=1` and that timestamp, which is the
+  backfill verified end to end against a real write. `DELETE
+  /Users/{u}/PlayedItems/{item}` restored the object **byte-for-byte** (the
+  before/after diff is empty). Choosing an all-zero item is what made
+  restoration exact rather than approximate; on any other item `PlayCount`
+  is not restorable by any route this project knows.
+- **Not verified in that run, and named rather than implied:** a full
+  1,126,674-item walk; `POST /Users/AuthenticateByName`; silent 401
+  re-authentication end to end; durable-device registration across
+  restarts. Anything needing a TMDb API key was also unverified there and
+  **is no longer** — a key was configured the next day and the TMDb half of
+  Task 26 ran on 2026-08-01; see the TMDb live-verification section below,
+  including `_confident` against TMDb's own search results, which that run
+  measured at 83.1%/87.2% against the 72–75% the *local* rule scores.
+  `EnrichService` and the `enrich` job handler are still driven only by
+  fakes: the live run exercised `TmdbClient`, `TmdbMetadataProvider` and the
+  mapper, not the service above them.
 
 **M3's live verification found the write-back route was simply wrong, and
 three other things worth not re-deriving.** Run 2026-07-31 against the live
@@ -159,7 +326,9 @@ full walk" safety property, measured.
 series, 999,827 episodes. The movie figure the adapter was designed around
 was one third of the walk. At the default page size that is 5,634 pages —
 **56% of `MAX_PAGES`**, so the headroom is 1.8x, not the ~21x the constant's
-comment claimed.
+comment claimed. **Re-measured four days later: 1,126,789** (94,448 /
+32,414 / 999,927). It moves; treat every figure derived from it as a
+snapshot with a date on it, not a constant.
 
 **A token presented with a different `DeviceId` neither forks nor
 invalidates its session.** `GET /Sessions` was byte-identical before and
@@ -173,16 +342,46 @@ it.
 /Users/AuthenticateByName` itself (that run held a token, not a password —
 it is verified separately by ADR-0004's session), silent re-authentication
 on a 401 end to end, durable-device registration across restarts, and
-`multi_version_movie.json`'s shape — no item with more than one
-`MediaSource` exists in the newest 800 movies of this deployment, so
-`primary_media_source`'s selection rule has never met a real multi-version
-payload.
+`multi_version_movie.json`'s shape.
+
+**`multi_version_movie.json` has now been looked for twice, over disjoint
+slices, and still has never met a real payload.** M3 searched the newest 800
+movies; M4 searched 600 movies spread across six windows of the whole
+94,448-movie collection ordered by `DateCreated` ascending (indices 0,
+18889, 37779, 56668, 75558, 94348). **Every one of the 1,400 movies examined
+carries exactly one `MediaSource`** — the count distribution is `{1: 600}`
+with nothing else in it. So `primary_media_source`'s selection rule remains
+fixture-only, and this deployment now looks like a genuinely
+single-version library rather than one whose multi-version items happened to
+sit outside the first sample. The fixture stays: another Emby deployment
+will have them, and the rule is cheap.
 
 **`Policy.IsAdministrator` is readable**, on `GET /Users/{userId}`, with the
 user's own non-admin token — a 45-key `Policy` object. (`GET /Users/Me`
 answers 500 on this build.) ADR-0012 assumes a non-admin account and nothing
 enforces it; this is the check that would make it observable, recorded there
 as recommended-not-implemented.
+
+**`SELECT … FOR UPDATE SKIP LOCKED` is the whole of the queue's exclusion,
+and both wrong spellings *hang* rather than answer.** Verified against
+`pgvector/pgvector:pg17` by deleting each in turn from
+`usher.db.repositories.jobs`: a bare `FOR UPDATE` makes the second worker
+block on the first's uncommitted row lock, and removing the locking clause
+entirely makes both workers read the same pending row so the second's
+`UPDATE` blocks on the same lock one statement later. Neither returns a wrong
+answer; both wait forever. So the concurrency cases in
+`tests/integration/test_job_queue.py` bound every claim with
+`asyncio.wait_for` — `pytest-timeout` is deliberately not a dependency, since
+the timeout belongs to the two cases that need it rather than to the runner.
+
+**A concurrency test must assert on *observed overlap*, not on a count.**
+"Exactly one of two claimers got the job" is also what a serialised pair of
+claims produces — the M3 failure verbatim, where a deleted single-flight lock
+let a concurrency test pass five runs in a row. `JobQueueContract`'s harness
+releases N claimers through an `asyncio.Barrier` and records the wall-clock
+interval each claim occupied; `overlapping()` fails unless those intervals
+genuinely intersect. Measured on this host: the two windows share **76.2%** of
+their union.
 
 **Bulk loading bypasses the repository, and the SQL has three traps.**
 Verified against `pgvector/pgvector:pg17` on 2026-07-30, all three of which
@@ -199,9 +398,129 @@ Verified against `pgvector/pgvector:pg17` on 2026-07-30, all three of which
   rowcount reports their sum.
 
 `asyncpg`'s binary `COPY` is strictly typed (a `str` into an `integer` column
-raises `TypeError` client-side) and CHECK constraints fire during `COPY`, so
-one bad row aborts its batch. Reach the driver with
+raises `TypeError` client-side) and CHECK constraints fire during `COPY` into
+a *constrained* table, so one bad row aborts its batch. Reach the driver with
 `(await (await session.connection()).get_raw_connection()).driver_connection`.
+This project's staging tables are deliberately unconstrained, which moves
+that failure one statement later — see the staging note below.
+
+**`ON CONFLICT DO UPDATE` cannot read a CTE, and that is what makes M4's
+watch-state merge two statements.** Verified 2026-07-31 against
+`pgvector/pgvector:pg17`. Three findings, in the order they bite:
+
+- `ON CONFLICT (kind, key) DO UPDATE SET priority = d.a`, where `d` is the
+  statement's own CTE, fails with `missing FROM-clause entry for table "d"`.
+  Only `excluded` and the target table are in scope.
+- **The natural one-statement spelling of the watch-state merge silently
+  zeroes real play history.** `watch_states.play_count` is `NOT NULL`, so
+  the insert path must write `COALESCE(play_count, 0)` — and that collapse
+  happens before the conflict clause runs, so `excluded.play_count` is `0`
+  rather than `NULL` and
+  `COALESCE(excluded.play_count, watch_states.play_count)` always picks the
+  zero. Measured on a row holding `play_count = 7`, fed a merge carrying
+  `NULL`: reads back **0**. This is exactly the failure ADR-0014 exists to
+  prevent, arriving at the one layer where it is permanent.
+- **`last_played_at` survives that same statement**, because it is nullable
+  and therefore never collapsed. So "the natural spelling zeroes history" is
+  true of exactly one of the two columns, and a test suite that checked only
+  the timestamp would have ratified the bug. The two need separate cases.
+
+The working shape is `UPDATE … FROM deduped` (where the `NULL` is still
+`NULL` and still in scope) followed by `INSERT … ON CONFLICT DO NOTHING` —
+two statements per conflict target, four per batch, all set-based.
+`usher/db/repositories/watch_state.py`.
+
+**`watch_states` has a `BEFORE UPDATE` trigger that owns `updated_at`.**
+`trg_watch_states_set_updated_at` assigns `now()` unconditionally (the core
+schema creates it alongside `sources` and `titles`; `media_items` has none
+deliberately). So a merge's own `updated_at = observed_at` lands on the
+*insert* path only, and a merged row's stored `updated_at` is its write
+instant. Benign for the "latest `updated_at` wins" conflict rule — if
+anything the more honest reading — but it means that assignment is not
+observable on the update path, and `FakeWatchStateRepository` stores
+`observed_at` on both paths, so the two diverge there. Pinned by
+`tests/integration/test_watch_state_repository.py::test_the_update_trigger_owns_updated_at`.
+
+**`:param::type` does not work in a SQLAlchemy `text()` statement.** Its
+bind-parameter regex treats a name immediately followed by `::` as a
+Postgres cast and skips the bind entirely, so `:source_id::uuid` reaches the
+driver as that literal string and asyncpg answers
+`PostgresSyntaxError: syntax error at or near ":"`. Verified by compiling
+both spellings against the asyncpg dialect. Use `CAST(:source_id AS uuid)`.
+
+**That same regex scans SQL *comments*, so `:name` inside a `--` line
+declares a real bind parameter.** Same family as the trap above, opposite
+direction: there the bind is silently skipped, here one is silently created.
+A comment reading `-- lower(t.name), not lower(:name) against t.name` made
+every single call to that statement raise
+`sqlalchemy.exc.InvalidRequestError: A value is required for bind parameter
+'name'` — with the offending token visible only in the echoed SQL, inside a
+comment nobody reads when debugging a bind error. Found by running it
+(M4 group C2, `usher/db/repositories/matching.py`). Write a placeholder that
+is not colon-prefixed when a comment needs to quote a parameter spelling.
+
+**`now()` is `transaction_timestamp()` and is frozen for the life of a
+transaction; `clock_timestamp()` is the instant the statement runs.** Both
+appear in this schema and the difference is load-bearing in two places:
+
+- `usher.db.repositories.jobs` uses `clock_timestamp()` in all four of its
+  statements. `requeue_running`'s `updated_at <= clock_timestamp() -
+  interval` cannot match a claim made in the same transaction if both sides
+  read the same frozen `now()`, and a job that failed twenty minutes into a
+  long transaction must back off from *now* rather than from when that
+  transaction opened. The mutation back to `now()` fails three cases.
+- The `set_updated_at()` trigger the core schema installs assigns `now()`,
+  so **two updates to the same row inside one transaction read back the
+  identical `updated_at`**. `tests/integration/`'s per-test fixture is one
+  long transaction, which makes "the second write is later than the first"
+  unobservable there — `tests/integration/test_episode_repository.py::
+  test_the_update_trigger_owns_updated_at` backdates the row with a raw
+  `INSERT` (the trigger is `BEFORE UPDATE`, so an `INSERT` dodges it; a plain
+  `UPDATE` does not) to give the stamp something to move away from.
+
+**`UPDATE … RETURNING` promises no row order, and at real queue depth it is
+not the order you selected.** `PostgresJobQueue`'s claim is a locking,
+`LIMIT`ed `SELECT` in a CTE plus an `UPDATE … FROM` it. Measured on
+`pgvector/pgvector:pg17` at 2,000 / 50,000 / 300,000 pending rows: the
+selection stage is `Index Scan using ix_jobs_claim` at every size, while the
+*update* stage moves from `Hash Join` over a `Seq Scan` (2,000 rows, where a
+seq scan really is cheaper — cost 45) to `Nested Loop` + `Index Scan using
+pk_jobs` from 50,000 up. So `RETURNING` hands rows back in heap order on a
+small table, and an outer `ORDER BY` over the data-modifying CTE is what makes
+a documented claim ordering true rather than incidental. It also means an
+unscoped "no `Seq Scan` anywhere" plan assertion fails on a small fixture for
+a plan that is correct at scale — scope it to the stage that has an ordering
+to serve.
+
+**A second `ORDER BY` key that the chosen index already carries is
+unobservable.** `ix_jobs_claim` is `(priority DESC, created_at) WHERE status =
+'pending'`, so deleting `created_at` from the claim's own `ORDER BY` survives
+every ordinary test: the index supplies it. Forcing `SET LOCAL
+enable_indexscan = off` is what makes it observable, and only in combination
+with two other things — a row re-written by an `UPDATE` (so heap order and
+`created_at` order disagree at all) and a `LIMIT` smaller than the candidate
+set (so the key decides *which* rows are kept, not just how they are
+returned). Worth knowing before writing a plan-independent ordering test.
+
+**A test that commits through `usher.db.staging` leaves its staging table
+behind.** `stage_records` creates the table with DDL, Postgres DDL is
+transactional, and the integration suite's usual isolation is a rolled-back
+transaction — so only a test that *commits* (the job queue's concurrency
+harness, which needs two real backends) leaks one. It surfaces as
+`test_migration_matches_the_orm_metadata` reporting schema drift in a *later*
+file, so the queue suite passes alone and takes the migration test down in
+combination. Such a fixture must `DROP TABLE IF EXISTS stg_*` in its cleanup.
+
+**A staged `COPY` does not fire the destination's CHECK constraints**, on
+this project's path, because `usher.db.staging`'s staging tables are
+declared without constraints. The violation surfaces one statement later, at
+the `INSERT … SELECT`, which goes through SQLAlchemy and is therefore a
+`sqlalchemy.exc.IntegrityError` a repository can translate. Had the
+constraint been on the staging table, `copy_records_to_table` runs on the
+raw asyncpg connection, outside SQLAlchemy's error translation, and would
+raise `asyncpg.exceptions.CheckViolationError` straight past any
+`except IntegrityError`. Do not add constraints to a staging DDL without
+giving its caller a second `except`.
 
 **`tmdb_id` is unique per `kind`.** TMDb's movie and series id spaces overlap
 on 26,968 ids (measured against Wikidata, 2026-07-30 — 47.3% of all series
@@ -273,6 +592,594 @@ only "the caller didn't crash" passed both before and after either bug —
 it needs a real winner row seeded first, and an assertion that it comes
 back byte-for-byte unchanged.
 
+**An episode must never walk the match ladder, and the reason is in the
+payload.** A live Emby episode carries the *episode's* own provider ids —
+`{"Imdb": "tt2178782", "Tvdb": "4517466"}` on `tests/fixtures/emby/
+episode_item.json` — not its series'. Two consequences, both catastrophic at
+999,827 episodes. TVDb numbers episodes and series in different, numerically
+overlapping namespaces and `usher.db.repositories.matching`'s TVDb statement
+deliberately does not filter on kind, so an episode run through the provider
+tiers resolves to whichever unrelated series holds that integer. And no
+episode's IMDb id is in the catalog at all (`tvEpisode` is excluded from M2's
+bootstrap by design), so the stub tier mints one junk `Title` per episode —
+a catalog of rubbish roughly the size of the real one. `MatchService` returns
+`UNMATCHED` for an episode with no lookups and **no remote-search job** (one
+per episode is a queue the size of the library, and a TMDb title search for
+an episode name is not a resolution path); `IngestService` attaches it to its
+series' `Title`, labelled `MatchMethod.SERIES_PARENT`.
+
+**Nothing a source can put in a payload may abort a walk.** `Title.imdb_id`
+is pattern-validated (`^tt\d{7,8}$`) and `year` is `ge=0`, and a pydantic
+`ValidationError` is **not** a `UsherPortError` — so `ReconcileService`, which
+re-raises anything that is not one, would let a single stray
+`ProviderIds.Imdb` in 1,126,674 items abort that source's sync permanently.
+Filter every value to the shape the model accepts *before* the constructor.
+**Verified live 2026-07-31: 11 of 885 real `Imdb` values in a 900-item sample
+are bare digits with no `tt` prefix, so this is a live defect rather than a
+defensive one.** The two filters are layered and only the inner one is
+load-bearing: `_usable_ids` drops unusable refs, and `_create_stub` calls
+`_as_imdb`/`_as_int` *again* on what survives. Removing `_usable_ids`'
+filtering alone raises nothing on those exact payloads; removing `_as_imdb`'s
+pattern check raises `ValidationError` on them immediately. So
+`usher.services.matching._as_imdb` is the guard, and a mutation of
+`_usable_ids` alone is an equivalent mutant.
+
+**`sorted()` over a set of `ProviderRef`/`NameYearProbe` raises.** Both are
+`@dataclass(frozen=True, slots=True)` without `order=True`, so there is no
+`__lt__` — `TypeError: '<' not supported`. `dict.fromkeys` is the idiom used
+throughout: it deduplicates *and* keeps the batch's own order, which is what
+makes a failure read in the order the page arrived.
+
+**A service that saves a frozen checkpoint per batch must not evolve its own
+stale copy in the failure handler.** `ReconcileService._flush` saves an
+evolved `SyncRun` after each batch, so when the walk raises, `reconcile`'s
+binding is the pre-walk value — and `run.evolve(status=FAILED)` on it writes
+`items_seen = 0` over a checkpoint that recorded eight. Same trap
+`BootstrapService.import_dataset` documents; here there is no re-fetch to
+recover from (`SyncRunRepository` is a history, not a per-source checkpoint),
+so a small mutable holder carries the latest run across the `try`.
+
+**Moving the availability sweep into a `finally:` really does retract a
+healthy library, and the obvious test shape hides why.** Measured. Seed seven
+items, fail the walk immediately, one batch: nothing is written before the
+failure, so the sweep would retract 7 of 7 — 100%, refused by ADR-0015's
+ceiling, and `AvailabilitySweepRefused` then escapes the `finally:` and
+propagates out of `reconcile`. The case fails, but on an uncaught exception
+rather than on its own assertion, and it never exercises a sweep that
+*succeeds* after a failed walk. The shape that does is a walk that commits
+eight of ten items and then raises: two stale rows, 20%, under the ceiling,
+no refusal, two available items silently retracted. **The ceiling is not a
+second line of defence for the success-path gate** — it fires on a fraction,
+so it catches the catastrophe and misses the quiet one. Reproduced against
+real Postgres as well as the fakes.
+
+**`observed_at=now()` instead of the run's start instant is a *semantic*
+break, not a race.** A per-row write instant is always later than
+`run.started_at`, so the sweep's `last_seen_at < seen_since` still spares
+everything the run saw and no retraction test fails. What breaks is the
+meaning of the column. Assert `stored.last_seen_at == run.started_at`
+directly; no frozen clock is needed.
+
+**`FakeTitleRepository` and `FakeTitleMatchRepository` are one table and are
+now wired together.** `TitleRepository.add` flushes, so a stub the match
+stage just wrote is visible to the very next `TitleMatchRepository` read.
+Keeping two independent dicts made a *correct* service fail rather than a
+wrong one pass: `IngestService`'s second walk of a series it had itself
+stubbed missed the ladder, re-created the stub, conflicted on
+`ix_titles_tvdb_id`, and had nothing left to look the winner up with. Pass a
+`FakeTitleRepository` to the constructor; leaving it out is still meaningful
+and models a read that missed another worker's committed write, which is the
+only deterministic way to produce the race `MatchService`'s conflict handler
+exists for.
+
+**An episode's `MediaItem` carries two ids and its `WatchState` may carry
+one, and the collapse between them is the whole of M4's episode watch
+state.** `IngestService` writes the series' `title_id` *and* the
+`episode_id` on an episode's row (a client browsing a season wants both);
+`watch_states` has a `num_nonnulls(title_id, episode_id) = 1` CHECK. So
+`WatchStateSyncService` collapses the pair with the episode winning
+(`usher.services.watch_sync._watch_target`). Passing both through raises
+`PortDataMalformed` by contract, which aborts a batch of five thousand
+states over 89% of this library; passing the *title* through merges every
+episode of a show onto one row and violates nothing. The same asymmetry
+runs the other way in `MediaItemRepository.resolve_external_ids`, whose
+title branch needs `episode_id IS NULL` or a series' own watch state
+resolves to whichever of its episodes the planner reached first.
+
+**A history backfill must carry its own fresh `observed_at`, and both
+test layers are blind to why.** PRD 03's "latest `updated_at` wins" covers
+the whole record, and `trg_watch_states_set_updated_at` stamps the *write*
+instant — so a backfill carrying the walk's instant is refused by the very
+row it exists to repair, writes nothing, and leaves that row matching
+`played AND play_count = 0` forever. `FakeWatchStateRepository` stores
+`observed_at` as `updated_at`, so it accepts what Postgres refuses; and the
+integration suite cannot reproduce the production form either, because
+`now()` is frozen per transaction and each test *is* one transaction.
+`tests/integration/test_services_watch_sync.py` stages the row with
+`clock_timestamp()` through a raw `INSERT` (the trigger is `BEFORE UPDATE`,
+so an insert is the only way to own the column), which is as close as one
+transaction allows.
+
+**The bounded backfill terminates, measured.** Seven rows matching
+`played AND play_count = 0`, drained three at a time, empty in exactly
+three passes — against the fakes and against real Postgres, with the loop
+bounded so a non-converging predicate fails the case rather than hanging
+the suite. The honest half: convergence is a property of the *source*. A
+source whose single-item route also cannot count leaves rows matching
+forever, bounded at one request per row per pass and rotating rather than
+starving, because `list_needing_history` is oldest-first and a merge moves
+`updated_at`.
+
+**`Job.key` is the source's own `external_id` for `match` and
+`watch_history`, and `(kind, key)` is therefore unique across *sources*.**
+Every enqueue site is inside a walk, which holds the external id and would
+need a round trip per item to turn it into a `MediaItem.id` — 1,126,674 of
+them a walk. The cost is that two servers addressing different items by the
+same string collapse into one job; Emby and Jellyfin both mint per-server
+GUIDs, so it is currently unreachable rather than merely unlikely. Recorded
+on `usher.domain.jobs.Job`.
+
+**`depth()` cannot see a job a worker forgot to complete.** It counts
+`pending`, so a `running` row left behind by a `JobWorker` that ran the
+handler and never called `complete` reads back as an empty queue —
+deleting that call fails nothing in `tests/unit/test_services_jobs.py`
+unless the case asserts through `startup()`/`requeue_running`, which is the
+only thing that can see it.
+
+**Two guards in M4's services are unreachable through their own port's
+contract, and are pinned by direct unit cases rather than deleted.**
+`_watch_target`'s "matched to nothing" branch (`resolve_targets` omits an
+unmatched item rather than answering with an empty pair) and `_links_for`'s
+`is_valid` check (the OTel SDK also drops an invalid `Link` on the way into
+a span, so a worker that built one records the same empty `links` tuple).
+Both mutations survived the whole suite until the direct case existed.
+
+**No test in this repository makes a network request, and that is measured
+rather than asserted.** Verified 2026-07-31, **re-verified 2026-08-01 after
+the live TMDb run**, and **again 2026-08-01 after the fixture scrub and the
+CLI/deps changes**, by running the whole suite under a
+`sitecustomize.py` that patches `socket.socket.connect`, `connect_ex` and
+`socket.getaddrinfo` to raise on anything that is not loopback (`AF_UNIX` is
+left alone, so Docker's socket still works and `testcontainers` still reaches
+`127.0.0.1`). **1,319 unit + 425 integration passed (1 unit case skipped), zero blocks.** The
+guard lives outside the tree — it is a check to re-run, not a dependency to
+add, because `PYTHONPATH`-injecting a socket monkeypatch into every developer's
+suite costs more than it catches.
+
+**Prove the guard is installed before believing a green run.** A
+`sitecustomize.py` that is not on `PYTHONPATH` produces exactly the same
+output as one that is and blocks nothing — the same family as the
+venv-shebang trap. The 2026-08-01 re-run printed `[netguard] installed` from
+the module itself and then, in the same environment,
+`socket.getaddrinfo("api.themoviedb.org", 443)` raised
+`RuntimeError: NETWORK BLOCKED`. Both checks, or the run proves nothing.
+
+**M4's final mutation sweep: 39 mutations, one survivor, and the survivor is
+an equivalent mutant the code comment predicted.** Run 2026-07-31 in place,
+each mutation against the **whole** 1,713-test suite rather than its own
+task's selection — which is the point of a final sweep, since a per-task
+sweep cannot see collateral in another file. Baseline green before,
+restored green after, `/tmp/mutate.py`'s rules enforced throughout (a run
+that did not run is `DID-NOT-RUN`, never `KILLED`; the target must appear
+exactly once; `cp` backups, never `git checkout --`). **38/39 killed.**
+
+The survivor is `priority = GREATEST(jobs.priority, excluded.priority)` →
+`priority = excluded.priority` in `_ENQUEUE`, and it survives because the
+same statement's `WHERE jobs.status <> 'parked' AND jobs.priority <
+excluded.priority` already guarantees `excluded.priority` is the larger.
+`jobs.py`'s own comment says exactly this and keeps both anyway ("one is
+*when* to write, the other *what* to write"). Verified rather than assumed:
+removing **both** together fails 2 cases, so PRD 03's no-demotion property is
+covered — by the `WHERE` clause. So
+`test_re_enqueueing_at_a_lower_priority_does_not_demote` passes against a
+`SET` clause that would demote, and is really a test of the predicate. Worth
+knowing before anyone "simplifies" the `WHERE` on the strength of that case's
+name.
+
+Two other results worth carrying forward. `claim-without-skip-locked` is the
+only mutation whose run is measurably slower (57.2 s against a ~41.6 s
+baseline) — that is `asyncio.wait_for` bounding the blocked claim rather than
+the suite hanging, which is why `pytest-timeout` is deliberately not a
+dependency. And `usable-ids-filters-nothing` **is** caught (2 cases), by
+`test_a_malformed_imdb_id_does_not_abort_the_batch`'s *second* item, whose
+only id is unusable — the first item survives the mutation intact, so a
+version of that case carrying one item would have ratified it.
+
+**Mutation sweeps on this host: the shell is zsh, and it does not
+word-split an unquoted `$VAR`.** A selection passed as `$C="path1 path2"`
+reaches pytest as one bogus path, nothing runs, the exit code is non-zero,
+and a naive harness records the mutation as caught having measured nothing.
+Three were, before the harness started requiring that a run actually ran.
+Same family as the venv-shebang trap: the sweep proves nothing and looks
+like it proved something.
+
+**Two `IngestService` defects are invisible to every port fake and only real
+Postgres catches them.** Skipping `resolve_seasons` or `resolve_episodes` and
+trusting the freshly-minted UUIDv7 leaves all 24 unit cases green — a dict has
+no foreign keys — and fails on `fk_episodes_season_id_seasons` /
+`fk_media_items_episode_id_episodes` on the *second* walk, when that id names
+no row. `tests/integration/test_services_ingest.py` and
+`tests/integration/test_services_reconcile.py` are the paired runs; the latter
+also pins "a refused sweep leaves the session usable for the `FAILED` row that
+explains it", which no fake can express (the guard is evaluated in Python
+after a successful `SELECT`, so Postgres never aborts the transaction).
+
+**The TMDb half of M4's live verification: ten open guesses, eight
+settled, and the two corrections both went the same way — TMDb is more
+silent than the code assumed, not louder.** Run 2026-08-01 against
+`api.themoviedb.org/3` with a real v3 key, driving the shipped
+`TmdbClient`/`TmdbMetadataProvider`/`usher.adapters.tmdb.mapping`/
+`usher.services.matching._confident` from a throwaway script outside the
+working tree. **712 requests total**, GET only, no write route of any
+kind touched. Before this run **no request had ever been made** from this
+repository and every TMDb fixture was a transcription of documentation.
+The whole status distribution, since it is the evidence for half the table
+below: **699 × 200, 7 × 404, 2 × 401, 2 × 422, 2 × 400 — and no 429 and no
+5xx at all.** Every one of the thirteen non-200s was deliberately provoked
+and is accounted for in the table below.
+
+| # | Guess | Verdict | Evidence |
+|---|---|---|---|
+| 1 | TMDb sends `Retry-After` on a 429 | **still unverified** | Zero 429s in 712 requests at 25 rps, and no `retry-after` header on *any* response including the 401s and 422s. Deliberately not provoked. |
+| 2 | An invalid `append_to_response` namespace errors | **refuted** | `200`, key silently absent — for a wrong-space namespace *and* for `zzz_not_a_namespace`. |
+| 3 | The 404 body shape | **confirmed & recorded** | `{"success": false, "status_code": 34, "status_message": "The resource you requested could not be found."}`, `application/json;charset=utf-8`, on `/movie`, `/tv` and `/tv/{id}/season/{n}` alike. |
+| 4 | A v4 read access token is JWT-shaped | **unverifiable here, cost bounded** | The configured credential is a classic 32-hex v3 key; `_is_v4_token` correctly says no. A false positive was measured instead: the v3 key sent as `Authorization: Bearer` answers **401** (`status_code: 7`), i.e. loud and immediate, never a wrong answer. |
+| 5 | The changes window's inclusivity and its 14-day cap | **confirmed, and it is the boundary** | `start == end` is a valid one-day window (4,278 results); `[d, d+1]` covers both days deduplicated; `[today-14, today]` → 200; `[today-15, today]` → **422**, `"Invalid date range: Should be a range no longer than 14 days."` The shipped clamp sits exactly on it with nothing spare. |
+| 6 | `credits` is a valid TV append namespace | **confirmed** | Present with 14 cast entries. `aggregate_credits` is *also* valid — a second view, not a replacement. |
+| 7 | `append_to_response=season/N` works | **confirmed — see below** | It does, and it collapses a series from 1+N requests to 1. |
+| 8 | A season the series lists that 404s on its own route | **still unverified** | 320 listed seasons across 30 series, **zero** absent. The propagate-and-park branch has still never met a real occurrence. Sample skews popular, so it is weak evidence of absence. |
+| 9 | Search orders by relevance with the obvious answer first | **confirmed** | 263 of 266 confident resolutions were TMDb's **first** result (max rank 3; series 126/126 at rank 0), and the top result was an exact normalised name match on 269 of 320 probes. |
+| 10 | `spoken_languages[].iso_639_1` and `origin_country` are well-formed | **confirmed** | Zero anomalies over 59 detail payloads; `origin_country` present on 29/29 movies and 30/30 series, always a list of strings. |
+
+**Two things live TMDb contradicted, both now fixed with a failing test
+first.**
+
+- **A 4xx that is not a 429 is `PortDataMalformed`, not `PortUnavailable`.**
+  Observed: **422** for a 15-day change window (`status_code: 20`) and
+  **400** for a 21-item `append_to_response` (`status_code: 27`, *"the
+  maximum number of remote calls is 20"*). Both were classified as outages,
+  so `JobWorker` would spend five rate-limited retries and a backoff
+  schedule reaching the identical answer and then park with the wrong
+  reason. 408 is excluded and stays retryable — TMDb has never been
+  observed sending one, but `Settings.tmdb_base_url` exists so a household
+  can front TMDb with a proxy.
+- **TMDb's year filter is exact where the match ladder's is ±1.** All 294
+  candidates returned across 320 probes carried *exactly* the year asked
+  for, so `_confident`'s own `abs(candidate.year - item.year) <= 1` never
+  fired once and tier 4 silently ran at ±0. 26 of 320 came back empty
+  rather than one year off; re-asking those without the year resolves
+  **13**, every one a title TMDb dates a year away from IMDb (Danny Phantom
+  2003/2004, Toast of London 2012/2013, …). `TmdbMetadataProvider._search_one`
+  now retries yearless when the filtered search finds nothing. A *fallback*
+  and not a widening, because dropping the filter outright was measured too
+  and is worse: 6 of 133 already-resolving names stop resolving, since
+  "exactly one survivor" across every year at once is a harder test than
+  within one.
+
+**`_confident` against TMDb's own search: 83.1%, and 87.2% with the
+yearless fallback.** The number the Emby half explicitly could not take.
+320 IMDb names (160 movies / 160 series) stratified into four `numVotes`
+bands, each searched through the shipped provider and judged by the shipped
+rule: **87.5% of movies**, **78.8% of series**; by band, 90.0% / 91.3% /
+81.3% / 70.0% descending, so a real library — which sits at the popular end
+— should expect the high eighties to low nineties. Failures decompose as 26
+zero-result, 22 results-but-no-exact-name, 6 ambiguous. Compare tier 3's
+72.2%/75.3% for the identical predicate over the local 1.27M-row catalog:
+**different candidate sets and different name samples, so these are
+counterparts, not a before/after.** The IMDb-derived names are a proxy for
+Emby names, which were not available to this run — stated rather than
+implied.
+
+**`append_to_response=season/N` works, and it is worth ~10x on the series
+half of the enrichment path.** One request carrying
+`credits,keywords,images,videos,external_ids,content_ratings` plus
+`season/0…season/13` — **exactly** TMDb's 20-item ceiling — returned Game of
+Thrones' entire hierarchy, **all 373 episodes across 9 seasons**, in place
+of the ten requests the shipped path costs. Four supporting facts, each
+measured because the change rests on it:
+
+- The ceiling is **enforced**: 21 items is a **400**, `status_code: 27`.
+  Six namespaces already appended leaves exactly 14 season slots.
+- `season/0` (specials) appends like any other, 300 episodes on GoT.
+- An unlisted season number is **silently omitted**, not an error — which
+  is also the cheap detector guess 8 was scanned with.
+- The appended block is identical to the season's own detail response
+  **but for a missing top-level `id`**, and the series' own `seasons[]`
+  summary carries that same id (3627/3624/107971 on GoT, byte-identical to
+  the season route's). So `_compose_seasons`' existing merge-over-the-summary
+  would lose nothing.
+
+**Not implemented.** It changes PRD 03's request table, PRD 04's crawl
+arithmetic and `TmdbMetadataProvider.fetch`, and belongs in its own change
+rather than folded into a verification run.
+
+**The arithmetic, corrected 2026-08-01 — it was internally inconsistent
+when first recorded, and the wrong number was the headline one.** The
+shipped path costs `1 + N` requests for a series (one detail, one per
+season); the appended path costs 1. At **32,409 series** and a **median of
+9 seasons** that is 32,409 × 10 = **~324k requests** against **~32k**, i.e.
+**~10x** — not the "~190k → ~35k, ~5x" first written here. `~190k` was
+[PRD 04](docs/prd/04-catalog-bootstrap.md)'s Phase-3 tier-1 line, "~189k
+titles with ≥100 IMDb votes", borrowed one section over: a *whole-catalog
+title* count read as a *series request* count. Nothing measured it. The two
+figures cannot both be right — 32,409 × 10 is 324k, and ~190k would need a
+median of ~4.9 seasons.
+
+**The median is measured, and its sample is not a library.** 320 listed
+seasons across the 30 series the 2026-08-01 run walked, which is also the
+sample guess 8 is scanned against and which that entry already calls
+popular-skewed and weak evidence. Popular series have many seasons, so a
+real 32,409-series library's median is very likely *lower* and ~324k is an
+upper bound on the measurement taken rather than a prediction. Recorded
+with its sample instead of laundered into a constant — the same treatment
+`_confident`'s 72–75% and 83.1% get, and for the same reason.
+
+**~32k, not ~35k, and the difference is the ceiling.** One request per
+series is 32,409 exactly. Six namespaces leave 14 season slots, so a series
+with more than 14 seasons needs a second request; that is a small tail, so
+~32k is the figure and ~35k a generous allowance for it. Both are the same
+number to one significant figure; the ~10x is what matters and it holds
+either way.
+
+**TMDb's movie/TV divergence runs through three layers of its API, not
+one, and all three are now measured rather than read.** The field-name and
+endpoint rows were read from `developer.themoviedb.org` on 2026-07-31 and
+**every one was confirmed live on 2026-08-01** over 29 movie and 30 series
+detail responses.
+
+- **Field names.** `title`/`name`, `original_title`/`original_name`,
+  `release_date`/`first_air_date`, `runtime` (minutes) against
+  `episode_run_time` (an array), `keywords.keywords` against
+  `keywords.results`, a top-level `imdb_id` against `external_ids.imdb_id`.
+  Tabulated in `usher.adapters.tmdb.mapping`'s docstring. Live: 29/29
+  movies carried the whole movie column and **none** of the series column;
+  30/30 series the mirror, with `external_ids.tvdb_id` non-null on all 30.
+- **Endpoints.** `/movie/{id}` against `/tv/{id}`; `/search/movie` with
+  `primary_release_year` against `/search/tv` with `first_air_date_year`;
+  `/movie/changes` against `/tv/changes`; and a series' episodes live
+  behind `/tv/{id}/season/{n}`, which has no movie counterpart at all.
+- **`append_to_response` vocabularies.** `release_dates` is a movie-only
+  namespace and `content_ratings` is the TV-only equivalent. **The
+  consequence was stated wrongly and is corrected**: a shared list does not
+  ask for a namespace that does not exist and get an error, it gets `200`
+  with the key absent. So the failure is silent — half the catalog loses
+  its certification on a response that looks entirely successful — which is
+  a *stronger* reason for the split than the one previously recorded.
+
+**`episode_run_time` is empty on 86.7% of series** — `[]` on 26 of 30 live
+detail responses, Game of Thrones among them. `Title.runtime_minutes` is
+simply not a fact TMDb still holds about most television, and `None` is the
+answer rather than a mapping gap. The committed `series.json` fixture
+carries the rarer populated shape, so the common one needed its own case
+(`test_an_empty_episode_run_time_is_the_common_case_and_is_not_a_failure`).
+
+**ADR-0011 is not a theoretical hazard: 12 of 14 small ids probed are live
+in both id spaces, and every pair is an unrelated work.** Live 2026-08-01 —
+`550` is *Fight Club* and *Till Death Us Do Part*; `238` is *The Godfather*
+and *Star Cops*; `680` is *Pulp Fiction* and *Shaquille*; `605` is *The
+Matrix Revolutions* and *Sabrina, the Teenage Witch*. No movie payload
+carried a `name` key and no series payload a `title` key, so
+`kind_of_payload`'s exactly-one rule resolved all 24 correctly and
+`title_from_payload` produced two unrelated canonical titles per id with no
+possibility of conflation.
+
+**A kind-less TMDb reference is `PortDataMalformed`, never a guess.**
+ADR-0011 at the request layer: 26,968 ids are live in both spaces, so
+`GET /movie/{id}` for a ref that meant a series returns a **real payload
+for an unrelated film**, which is then written onto the title as enriched
+metadata with no error anywhere. Verified live through the real provider.
+
+**A TMDb 404 is `PortDataMalformed`, not `PortUnavailable`.** The catalog
+holds 291,737 TMDb ids from a bulk export that ages, and TMDb answers 404
+for an id it has merged away. Retrying cannot turn any of them into an
+answer, so this is the branch that makes `JobWorker`'s park-immediately
+path fire in production rather than only in a test. Confirmed live, body
+shape and all, and now generalised to the whole 4xx range above.
+
+**The committed TMDb fixtures were transcriptions and they held up.** The
+first shape diff any of them has ever had (2026-08-01, via
+`scripts/capture_tmdb_fixture.py`) found **not one key in any fixture that
+the live response lacks** — every field the mapper reads was transcribed
+correctly from documentation. The live API carried six the fixtures did
+not, all now added shape-only so the *next* diff is empty and a real drift
+is visible: `softcore` (a boolean, on movie details, series details, search
+results and the change feed), `iso_3166_1` on every `images.*` entry, and
+**`networks` on the season detail**, which the `tv-season-details`
+reference page does not show. Two differences are deliberately left open
+because they are value-level, not shape-level, and closing them would make
+a fixture claim something false — see `tests/fixtures/tmdb/README.md`.
+
+**Still not verified after this run, named rather than implied:** a real
+429 and whether one carries `Retry-After`; a v4 read access token in any
+form (so `_is_v4_token`'s positive branch has never been exercised against
+a real credential); a season TMDb lists that its own route refuses; TMDb's
+behaviour under sustained concurrency (this run was sequential through one
+token bucket at 25 rps); and any of it against a non-`US` `tmdb_region`.
+
+**A TMDb v3 API key in the query string lands in every trace.**
+`HTTPXClientInstrumentor` (wired in `configure_tracing`) records the full
+URL as a span attribute, and TMDb v3 has no header form for a v3 key. So
+`TmdbClient` sends an `Authorization: Bearer` header whenever the
+configured secret is JWT-shaped (a v4 "API Read Access Token", which
+TMDb's own docs say works on v3 endpoints and gives "the same level of
+access") and falls back to `api_key` otherwise. For the same reason no
+exception message in that module may carry a URL — `EmbySession`
+interpolates the httpx exception into its own message and explains why
+that is safe *there*; it is not safe here.
+
+**`EnrichmentState.ENRICHED > EnrichmentState.STUB` is `False`, and the
+consequence is not the one you would guess.** A tier guard spelled as a
+direct comparison does not "sometimes downgrade" — it never promotes
+anything at all, silently, because `ENRICHED` is lexicographically below
+both other rungs. So a test asserting "an enriched title stays enriched"
+passes against the bug (`ENRICHED` is the top rung, so nothing moves
+either way) and the case that catches it is **promoting a stub**. The M4
+plan's own mutation table pointed at the wrong one.
+
+**A failure handler that resets the tier is invisible to a test seeded at
+that tier.** `enrichment_state=SKELETON` alongside the error is exactly
+what a careless handler reaches for, and a case seeded with a skeleton
+cannot see it — the write is a no-op. Found by mutation on
+`EnrichService`; `tests/unit/test_services_enrich.py` parametrizes over
+all three rungs now. Same family as "a concurrency test must assert on
+observed overlap, not on a count".
+
+**Enrichment must read season ids back before writing episodes.**
+`MetadataProvider.to_result` mints a fresh UUIDv7 per `Season`, and a
+season the catalog already holds keeps the id it was inserted with — so
+an episode carrying the minted id names no row and fails on
+`fk_episodes_season_id_seasons`, on the **second** enrichment rather than
+the first. `IngestService._ensure_seasons` re-reads for exactly this
+reason; `EnrichService._store_hierarchy` now does too, and no port fake
+can see either (a dict has no foreign keys).
+
+**A job key that does not parse must become a `UsherPortError` inside the
+handler.** `uuid.UUID("not-a-uuid")` raises `ValueError`, and `JobWorker`
+deliberately lets anything that is not a `UsherPortError` propagate — "a
+bug in a handler is not an upstream failure". So one corrupted `enrich`
+key would take the worker process down instead of parking its own job.
+`usher.services.handlers` converts every key, once.
+
+**`SQLAlchemyInstrumentor` was wired and produced no spans at all, for
+three milestones.** `instrument()` patches the *module attribute*
+`sqlalchemy.ext.asyncio.create_async_engine` with `wrapt`; `usher.db.base`
+did `from sqlalchemy.ext.asyncio import create_async_engine` at module
+scope, which is evaluated long before `configure_tracing` ever runs and
+binds the **original, unwrapped** function into that namespace forever.
+Verified directly: after `instrument()`, `usher.db.base.create_async_engine`
+and `sqlalchemy.ext.asyncio.create_async_engine` are different objects. The
+failure is silent in the worst way — the package is installed, the wiring
+reports success, `connect` spans still appear (`_wrap_connect` patches
+`Engine.connect` on the *class*, so it fires however the engine was built),
+and not one `SELECT`/`INSERT`/`UPDATE` span is ever produced. `build_engine`
+now calls `sa_asyncio.create_async_engine` through the module. A test that
+accepts a `connect` span is not enough; assert on a *statement* span.
+
+**Pipeline spans nest under the request's server span, asserted as
+parentage.** `tests/integration/test_pipeline_spans.py` walks the parent
+chain `match.title → ingest.item → sync.reconcile → GET …` on a real
+`create_app()` through a real request, with SQLAlchemy statement spans
+under the pipeline span that issued them. A pipeline that started its own
+*root* spans passes every other assertion in this repository — valid ids,
+exporting traces, PRD 10's span names all present — and fails only this.
+A worker's `job.*` span is the deliberate exception: a root with a `Link`.
+
+**`set_meter_provider` is set-once and `_ProxyMeter` caches, exactly like
+the tracer.** Every `usher` module calls `metrics.get_meter(...)` at import
+time, so each holds a `_ProxyMeter` whose instruments are `_Proxy*` shells
+that cache the first real instrument they are handed. Without
+`tests/conftest.py::reset_otel_meter_provider`, three rounds of "install a
+`MeterProvider` with an `InMemoryMetricReader`, record through
+`usher.services.jobs._job_duration`, read the reader" print the metric once
+and then raise `AttributeError: 'NoneType' object has no attribute
+'resource_metrics'` — the second `set_meter_provider` is refused and the
+second reader is never registered with any provider.
+
+`SQLAlchemyInstrumentor` needs the same treatment and the shared reset
+cannot give it: it resolves its tracer *once*, eagerly, into a `wrapt`
+closure, so it is a real `Tracer` rather than a `ProxyTracer` and nothing
+in `usher.*` holds it. `tests/integration/test_pipeline_spans.py`'s own
+fixture calls `SQLAlchemyInstrumentor().uninstrument()` before installing
+its provider; without that line its database-span case passes alone and
+finds an empty exporter when it runs third in its own file.
+
+**An observable OTel callback cannot query this database.** OTel invokes it
+from the metric reader's *background thread* and every database call here is
+a coroutine on asyncpg, so a callback that queried would have to bounce a
+coroutine onto the event loop (`run_coroutine_threadsafe`) and block the
+exporter thread on it — a deadlock whenever the loop is itself blocked.
+`usher.telemetry.register_queue_gauges` therefore takes a **synchronous**
+reader returning the caller's most recent *complete* re-read of the `jobs`
+table (`usher work` refreshes it after every pass), which is stale but never
+wrong — unlike the counter-incremented-on-enqueue the plan was guarding
+against. The SDK also keeps only the **first** observable gauge registered
+under a name and silently discards the rest (verified directly), so the
+reader is a module global that is replaced rather than a closure captured at
+instrument-creation time.
+
+**The ingest pipeline's measured cost, 2026-07-31 against
+`pgvector/pgvector:pg17`** (`scripts/measure_ingest.py --items 50000`,
+50,000 items in the measured library's proportions — 88.7% episodes — at
+batch size 1,000):
+
+| | statements | per item | items/s |
+|---|---|---|---|
+| first walk, cold catalog | 17,722 | 0.3544 | 1,933 |
+| the nightly walk | 1,356 | **0.0271** | 2,135 |
+
+**16,950 of the first walk's 17,722 statements are stub-on-sight**, and that
+is the one path in the pipeline that is not set-based:
+`MatchService._create_stub` calls `TitleRepository.add` per item, and that
+add is SAVEPOINT-wrapped, so a new title costs three statements. It is
+bounded by **new titles** (94,438 movies + 32,409 series), never by items —
+an episode never walks the ladder, so the other 999,827 items cost nothing
+there — and a second walk creates none. Batch-level cost is 772 statements,
+0.0154 per item. Throughput is against a local database with no network in
+the way; a real walk is bounded by Emby's 5,634 pages at 1–5 s each.
+
+**Four scale risks, planned against the statement the repository actually
+issued** (`scripts/measure_ingest.py --scale 1126674`; captured off
+`before_cursor_execute`, never transcribed — a hand-copied lookalike drifts
+and then reads like coverage, and two earlier tasks here were replaced for
+exactly that):
+
+- **`merge_from_source` at 1,126,674 `watch_states` with a 1,000-row batch:
+  refuted.** `Nested Loop` + `Index Scan using ix_watch_states_title_id`,
+  1,000 loops, 14.5 ms. No hash join, no seq scan.
+- **The claim scan behind a wall of backed-off jobs: confirmed, unfixed.**
+  216 ms with `Rows Removed by Filter: 1126674`. `ix_jobs_claim` is
+  `(priority DESC, created_at) WHERE status = 'pending'` and a backed-off
+  job is *still* `pending`, so every poll walks past all of them.
+  `run_after <= clock_timestamp()` is not an indexable partial predicate
+  (`clock_timestamp()` is not immutable), and putting `run_after` first
+  destroys the priority ordering — so this is recorded rather than solved.
+  It only bites when a large fraction of the queue is backed off, i.e. when
+  an upstream is broken.
+- **`list_unmatched`'s `OFFSET`: confirmed.** 43.7 ms at offset 0, 388.9 ms
+  at offset 1,126,574 — linear per page, quadratic to drain. Fine for an
+  operator reading the first few pages, wrong for a client paging the whole
+  review queue; a keyset cursor is the fix when something needs one.
+- **The availability sweep: half.** `ix_media_items_sweep`
+  (`source_id, available, last_seen_at`) takes the sweep's `UPDATE` from
+  `Seq Scan` (`Rows Removed by Filter: 1,126,474`, 173 ms) to `Index Scan`
+  with an `Index Cond` on all three columns, 102 ms. It does **not** help
+  the guard's `count(*)`, a `Parallel Seq Scan` with the index (87 ms) and
+  without it (86 ms) — ADR-0015's ceiling is a *fraction*, so the
+  denominator is unavoidable and a source that *is* the whole table gives
+  `source_id` no selectivity. Both numbers are in migration
+  `f1a7d3c9e824`, not the flattering one alone.
+
+**`ON CONFLICT DO UPDATE` with no `WHERE` rewrites every row it touches.**
+`_ENQUEUE`'s update clause fired for every job a nightly walk re-saw —
+1,126,674 dead-weight row versions a night, plus the WAL and the vacuum, on
+a table whose entire purpose is to stay small, for no state change at all
+(`priority` was already `GREATEST` of itself and `created_at` is
+deliberately untouched). `AND jobs.priority < excluded.priority` makes a
+re-seen job cost one index probe and zero writes, and `enqueue` then reports
+0 rows written, which is the honest number. A promotion still writes.
+
+**A statement-count assertion needs the right thing held fixed.** "20
+episodes and 200 cost the same statements" is hollow when they share one
+series: `IngestService._series_titles` only queries for series the page does
+*not* carry, so with the whole library in one batch that list is empty and a
+per-item spelling of it issues zero statements. Measured — the mutation
+survived. Hold the **batch count** fixed and vary the page instead (nine
+batches of 5 against nine batches of 50), across many series and many
+titles, which is also the production shape: at 32,409 series among
+1,126,674 items an episode's series nearly always arrived in an earlier
+page.
+
+**A route-driven test commits for real.** `get_session` is the request's
+commit boundary, so an integration test that drives a walk through a
+*route* writes durably against the session-scoped container — unlike every
+rolled-back test in the suite. Leaving `tests/integration/
+test_pipeline_spans.py`'s stubbed `titles` and enqueued `jobs` behind took
+down four tests in three other files (a duplicate `ix_titles_tmdb_id_kind`,
+a queue depth of 2 where 0 was expected, a claim that found 3 jobs instead
+of 1, and a global `count_by_state`), each of which passed in isolation.
+`media_items` and `sync_runs` go with the source's `ON DELETE CASCADE`;
+`titles` and `jobs` do not.
+
 ## Commands
 
 Verified working as of Group A (scaffold + config):
@@ -319,6 +1226,17 @@ just by running it:**
   the first migration). These aren't SQLAlchemy `Table` metadata at all, so
   autogenerate never sees them, in either direction — adding, dropping, or
   changing one is always a hand-written `op.execute(...)` migration.
+
+**Import `testcontainers.community.postgres`, not `testcontainers.postgres`.**
+The latter is a shim that raises a `DeprecationWarning` at import time and
+was the only warning this suite emitted; the community module is the same
+class with the same behaviour (confirmed by running the whole integration
+suite against it). Changed 2026-08-01 — a shim that announces its own
+removal eventually takes it, and a suite with one permanently-expected
+warning is a suite where the next real warning is invisible. Still imported
+*inside* the `postgres_url` fixture rather than at module scope: `pytest -m
+"not integration"` imports that conftest even though it filters every test
+in it back out, and `testcontainers` drags in `docker`.
 
 Verified working as of Group E (title repository, first integration tests) —
 `tests/integration/` runs against a real PostgreSQL, started and torn down
@@ -644,8 +1562,9 @@ and interrogated over HTTP, and the suite is 865 tests (733 unit / 132
 integration), mypy strict clean over `src` and `tests`, 6 import contracts:
 
 ```bash
-uv run pytest                                    # 865 tests, needs Docker for the 132 integration ones
-uv run pytest tests/unit                         # 733 tests, no Docker and no network
+uv run usher --help                              # the CLI, also installed as `python -m usher`
+uv run pytest                                    # 1744 passed + 1 skipped (1320 unit / 425 integration)
+uv run pytest tests/unit                         # 1319 passed + 1 skipped, no Docker and no network
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .
@@ -661,15 +1580,200 @@ curl -sS http://localhost:8000/admin/sources/<id>/status
 # and its output is deliberately never committed -- see the module docstring.
 export USHER_EMBY_URL=... USHER_EMBY_USER=... USHER_EMBY_PASSWORD=...
 uv run python scripts/capture_emby_fixture.py --type Episode > /tmp/shape.json
+
+# The same thing for TMDb. Verified working against the live API 2026-08-01;
+# `set -a; . ./.env; set +a` rather than a literal key, so no credential ever
+# reaches a shell history or a recorded command.
+set -a; . ./.env; set +a
+uv run python scripts/capture_tmdb_fixture.py --kind movie  --id 550   > /tmp/shape.json
+uv run python scripts/capture_tmdb_fixture.py --kind series --id 1399  > /tmp/shape.json
+uv run python scripts/capture_tmdb_fixture.py --kind season --id 1399 --season 1
+uv run python scripts/capture_tmdb_fixture.py --kind search --query Dune --year 2021
+uv run python scripts/capture_tmdb_fixture.py --kind changes
 ```
 
-**Fixtures under `tests/fixtures/emby/` are shape-recorded and
-value-synthetic, and that is a licensing constraint, not a style.** A real
-Emby response embeds TMDb-sourced metadata, which TMDb's terms forbid
-redistributing and which "ship importers, never data" above already
-forbids committing; it also identifies a real library and carries real
-server and user ids. Regenerate a scrubbed *shape* with the script above
-and diff that; never paste a capture in.
+**`--kind search` sends `primary_release_year` whatever it is given**, so it
+records the `/search/movie` shape and never `/search/tv`'s. Fine for a shape
+diff (the two pages are the same shape but for `title`/`name` and
+`release_date`/`first_air_date`), worth knowing before reading its output as
+evidence about TV search.
+
+Verified working as of M4 group F1 (the CLI, telemetry, and the end-to-end
+measurement) — the ingest pipeline is runnable by an operator, not just by a
+test:
+
+```bash
+export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:5432/usher"
+export USHER_SECRET_KEY="<32+ char secret>"
+uv run alembic upgrade head
+uv run usher --help                          # every command and flag
+uv run usher sync --source "Living Room Emby"   # items, then watch state
+uv run usher sync --kind delta                  # every enabled source
+uv run usher sync --allow-full-retraction       # ADR-0015's ceiling off
+uv run usher sync-status                        # runs, queue depth, parked
+uv run usher unmatched --limit 50               # the review queue
+uv run usher unmatched --resolve <media_item_id> --title <title_id>
+uv run usher work --once                        # one pass over the queue
+uv run usher work                               # a worker daemon
+
+# NOT tests -- they write to a real database. See each module's docstring.
+uv run python scripts/measure_ingest.py --items 50000
+uv run python scripts/measure_ingest.py --scale 1126674
+```
+
+**A live end-to-end run needs a real catalog, and building one costs three
+minutes and no API key.** `bootstrap --phase all` pulls IMDb's
+`title.basics`/`title.ratings` dumps, TMDb's *public daily id export files*
+(not the API — no key), and Wikidata's public SPARQL endpoint. Re-run
+2026-07-31 against a scratch `pgvector/pgvector:pg17`: **1,271,314 titles,
+291,772 with a `tmdb_id`, 539,006 with a community rating**, in 2 min 59 s
+wall clock end to end. That is the catalog M4's match ladder has to be
+measured against — an empty one sends everything to tier 5 and measures
+nothing.
+
+**`usher` is a console script (`[project.scripts]`, added 2026-08-01) and
+`python -m usher` is the same code path.** Both land on `usher.cli.main`.
+The container's `CMD` stays `alembic upgrade head && exec python -m usher` —
+the module form is the one whose `exec`/SIGTERM behaviour was verified
+against a running container, and there is nothing to gain by re-verifying an
+equivalent spelling. Verified from a clean `uv sync`.
+
+**A console script calls `main()` with *no arguments*, which is why `main`
+reads `sys.argv` itself.** Before that it treated `argv is None` as "no
+arguments at all" and substituted `["serve"]`, so `usher sync-status` would
+have silently started the HTTP server — an entry point that ignores
+everything it is given and looks like it works, because the server does
+start. `argv or ["serve"]` still applies once `sys.argv[1:]` is empty, which
+is the property the container's `CMD` depends on. Both halves pinned in
+`tests/unit/test_main.py`.
+
+`--source` is optional: omitted, `sync` walks every *enabled* source, and a
+source whose credential row has gone missing is skipped with a message
+rather than taking the other two down. `--kind` offers `full` and `delta`
+only — `watch_state` is a real `SyncRunKind` and is a lane `sync` always
+runs *after* the item walk (it resolves each state against a `MediaItem`),
+never an alternative to it. `--resolve` and `--title` are used together, and
+`parse_args` refuses one without the other: `attach_title` writes what it is
+given, so `--resolve` alone would blank a link instead of creating one.
+
+`usher.db.users.ensure_default_user` creates the row nothing ever had.
+`usher.domain.watch.User` documents a singleton `is_default` user as what
+stands in PRD 01's authentication seam and `watch_states.user_id` is a real
+foreign key, so the watch lane and the `watch_history` handler were both
+unrunnable without it. Deliberately not a repository port — no *service*
+needs it (`WatchStateSyncService` takes a `user_id` per call), and an ABC
+plus a fake plus a contract suite for one `SELECT` is a port with nothing on
+the other side.
+
+**It was reachable only from `usher.cli`, so a server-only deployment had an
+empty `users` table** — `docker compose up` against a healthy Postgres left
+`watch_states.user_id` with nothing to reference, and the row appeared only
+once `work --once` ran. Not a live bug in M4 (no route writes a watch state;
+the three admin routes are M9's) and a live bug the moment M5 adds one.
+Fixed as `usher.api.deps.get_default_user_id`/`DefaultUserIdDep`, a
+**request-scoped dependency and deliberately not a lifespan call**:
+`create_app`'s lifespan builds an engine and opens no connection, which is
+what makes `/health` answer 200 with Postgres down while `/health/ready`
+reports 503 — verified live against a real container. A write at startup
+turns a database outage into a crash loop and an unmigrated schema into a
+failure to boot, trading a documented, tested degradation for a worse one,
+for a row only a request ever needs. It also would have broken
+`tests/unit/test_api_health.py` and `test_telemetry.py`, which build a real
+app against no Postgres at all. Nothing routes over it yet, for the same
+reason nothing routes over the pipeline services beside it;
+`tests/integration/test_pipeline_deps.py` drives it through a real request
+and asserts the row is *committed*, read back on a second session.
+
+`api/deps.py` carries all eight new repositories plus `MatchService`/
+`IngestService`/`ReconcileService`/`WatchStateSyncService`, so M9 adds
+routers over finished wiring. **`EnrichService` is deliberately absent**:
+its provider owns the token bucket that keeps this deployment under TMDb's
+~40 rps ceiling, and a request-scoped `TmdbClient` gives every concurrent
+request a *fresh* bucket — N in-flight requests get N × 30 rps, a rate
+limiter that limits nothing. It belongs on `app.state` at lifespan, and
+nothing in PRD 07's surface calls enrichment directly (M5's demand
+promotion enqueues a job; `usher work` runs it).
+
+**Every fixture is shape-recorded and value-synthetic, and that is a
+licensing constraint, not a style.** A real Emby response embeds
+TMDb-sourced metadata, which TMDb's terms forbid redistributing and which
+"ship importers, never data" above already forbids committing; it also
+identifies a real library and carries real server and user ids. Regenerate
+a scrubbed *shape* with the script above and diff that; never paste a
+capture in.
+
+**That rule was broken from M1 to M4 and nothing noticed, which is the more
+useful half of the finding.** `tests/fixtures/bulk/` held verbatim IMDb
+rows — real ids, titles, years, runtimes, genres, and two `title.ratings`
+rows *with their vote counts*, the most licence-restricted part of that
+dataset — under a `README.md` asserting the rows were "typed by hand" and
+therefore only "recognisable identifiers". Hand-typing a real value does
+not make it synthetic, and **the false assurance was worse than the data**:
+it is what stopped three milestones of readers from checking. The TMDb and
+Emby fixtures had invented prose but kept real ids, air dates, runtimes,
+season/episode counts and `credit_id` ObjectIds — including, on
+`movie.json`, a real IMDb id belonging to a *different film* than the rest
+of the record was shaped after. Root cause is benign and worth knowing:
+**TMDb's reference pages illustrate their endpoints with real responses**,
+so "transcribed from published documentation" was transcribing a real
+payload. `scripts/capture_tmdb_fixture.py` was never the problem — it
+replaces every leaf with its type name — though its `--id 550` *default*
+was, and is now required.
+
+All of it was replaced on 2026-08-01, preserving every shape and format
+edge case (`\N`, tab separation, the header row, the movie/series `kind`
+split, the no-quoting-mechanism row, Emby's `VideoRange` vocabulary, every
+TMDb key and type). The one that needed care: the quoted-title row only
+pins the `csv.reader` trap if the invented title **opens and closes** with
+`"` — `csv` treats `"` as a quote character only at the start of a field,
+so a title with *interior* quotes survives both parsers and tests nothing.
+Verified both ways before committing.
+
+**`tests/unit/test_no_third_party_data.py` is the control, because a
+convention nothing checks is not one.** Three checks over `src/` and
+`tests/` — every IMDb id in a reserved `tt99`/`nm99` band; every id inside
+a committed fixture at or above a 90,000,000 floor (two orders of magnitude
+above TMDb's own daily-export id space); and a **hashed** regression list of
+the identifiers this repository once committed, hashed so the guard is not
+itself the last file holding them. `docs/` and `CLAUDE.md` are deliberately
+outside those three: neither ships, and naming a real row as the *specimen*
+for a measurement is a claim about a dataset rather than a copy of one —
+which is why this file still names one and
+`src/usher/adapters/bulk/imdb.py` no longer does.
+
+**A fourth check scans the whole repository, `docs/` included, for a
+dataset *row* rather than an identifier — and that location-independent one
+is what caught the two the other three missed.** `docs/plans/2026-07-30-m2-
+bootstrap.md` prescribed the original fixture verbatim, ratings rows and
+vote counts included: data, *and* the instruction that recreates it, which
+is the worse half and is why "docs are just notes" does not hold for a row.
+And `usher.adapters.bulk.tmdb_ids`' module docstring carried two real TMDb
+id-export records — in the wheel. Both are corrected. Matching on shape (a
+tconst followed by a tab; a JSON object carrying `original_title`/
+`original_name`) is what makes scanning prose free of noise: no sentence
+looks like that.
+
+Plus two cases that fail if the scans stop scanning — a guard that globs
+nothing passes exactly like a guard that passes, the same family as the
+`sitecustomize.py` installation proof. **Mutation-verified 11/11:** a real
+tconst back in a TSV fixture, a real TMDb id back in a JSON fixture, a real
+TVDb id back in an Emby fixture, a real TMDb id back in a `.py` test, a
+real dataset row back in a plan document, a real export record back in a
+shipped docstring, `_SCANNED_ROOTS` narrowed to `("src",)`, the repo-wide
+walk emptied, and each of the three matchers made to match nothing.
+`tests/fixtures/README.md` holds the bands and the allocation table.
+
+**A live run against this Emby server must be bounded, and the bound has to
+be in the *iterator*, not in `max_pages`.** Exhausting `max_pages` raises
+`PortDataMalformed` — it is the walk's dead-man's switch — so a reconcile
+bounded that way records `FAILED` and never reaches the sweep, which is the
+half of the pipeline the run exists to exercise. Truncate the async
+generator instead. Learned the expensive way in the same run: a probe that
+walked `adapter.watch_state()` *looking for one known item id* is a walk of
+1,126,789 items to reach something a filtered listing already had, and it
+issued several hundred requests against a shared server before it was
+killed. Any "find the item where X" over a walk is a full walk; ask the
+server with a filter.
 
 **Live-verification runs must not write a credential, a token, a user id or
 a host into the repo.** M3's run was driven from a throwaway script outside

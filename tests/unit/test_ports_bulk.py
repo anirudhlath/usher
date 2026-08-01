@@ -26,9 +26,9 @@ from usher.ports.errors import PortDataMalformed, UsherPortError
 
 _CURSOR = BulkCursor(revision="etag-1", position=0, rows_seen=0)
 _TITLE = ImdbTitle(
-    imdb_id="tt0111161",
+    imdb_id="tt99000020",
     kind=TitleKind.MOVIE,
-    name="The Shawshank Redemption",
+    name="A Synthetic Feature",
     original_name=None,
     year=1994,
     end_year=None,
@@ -43,14 +43,14 @@ _SAMPLES: tuple[object, ...] = (
     _CURSOR,
     BulkBatch[ImdbTitle](rows=(_TITLE,), cursor=_CURSOR),
     _TITLE,
-    ImdbRating(imdb_id="tt0111161", community_rating=9.3, vote_count=2_900_000),
+    ImdbRating(imdb_id="tt99000020", community_rating=7.4, vote_count=12_345),
     TmdbId(
-        tmdb_id=278,
+        tmdb_id=90000020,
         kind=TitleKind.MOVIE,
-        original_name="The Shawshank Redemption",
-        popularity=45.5,
+        original_name="A Synthetic Feature",
+        popularity=12.5,
     ),
-    IdCrosswalkPair(imdb_id="tt0111161", tmdb_movie_id=278),
+    IdCrosswalkPair(imdb_id="tt99000020", tmdb_movie_id=90000020),
 )
 
 
@@ -98,7 +98,7 @@ def test_imdb_title_genres_default_to_an_empty_tuple() -> None:
     """A tuple, not a list, for the same reason `Title.genres` is one: an
     otherwise-frozen record with a `list` field is still mutable in place."""
     title = ImdbTitle(
-        imdb_id="tt0000001",
+        imdb_id="tt99000001",
         kind=TitleKind.MOVIE,
         name="A",
         original_name=None,
@@ -112,7 +112,7 @@ def test_imdb_title_genres_default_to_an_empty_tuple() -> None:
 def test_crosswalk_pair_columns_are_independently_optional() -> None:
     """The three SPARQL joins each fill exactly one, so a pair carrying only
     a series id is normal, not a partially-constructed error."""
-    pair = IdCrosswalkPair(imdb_id="tt0944947", tmdb_series_id=1399)
+    pair = IdCrosswalkPair(imdb_id="tt99000030", tmdb_series_id=90001399)
     assert pair.tmdb_movie_id is None
     assert pair.tvdb_series_id is None
 
@@ -127,9 +127,9 @@ def test_port_data_malformed_is_in_the_shared_taxonomy() -> None:
 def test_port_data_malformed_carries_a_locator_not_a_payload() -> None:
     """`detail` names the offending row so an operator can find it; it must
     never be the row itself, which could be arbitrarily large."""
-    error = PortDataMalformed("bad row", detail="tt0000001.startYear")
-    assert error.detail == "tt0000001.startYear"
-    assert "tt0000001.startYear" in str(error)
+    error = PortDataMalformed("bad row", detail="tt99000001.startYear")
+    assert error.detail == "tt99000001.startYear"
+    assert "tt99000001.startYear" in str(error)
 
 
 def test_port_data_malformed_detail_is_optional() -> None:

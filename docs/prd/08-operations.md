@@ -96,9 +96,55 @@ local state can answer.**
 
 Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
 
-- Exponential backoff with jitter; per-job attempt counter.
+- Exponential backoff with jitter; per-job attempt counter. The jitter is
+  **equal jitter** — the delay is a uniform draw from
+  `[base/2, base) × 2^attempts` — not the more commonly cited *full* jitter,
+  which draws from `[0, base) × 2^attempts`. Full jitter's minimum draw is
+  arbitrarily close to zero, so a share of failures against a broken upstream
+  retry effectively immediately: the hot loop the backoff exists to prevent,
+  merely rationed. The spread is what breaks a thundering herd, and a
+  half-interval floor keeps all of it while making "a failed job is not
+  instantly re-claimable" a property rather than a probability. Implemented in
+  `usher.db.repositories.jobs`, one `CASE` inside the failure statement;
+  `job_backoff_seconds` is the base.
+- **Malformed data does not back off at all — it parks on the first attempt.**
+  `PortDataMalformed` means the upstream answered and the answer was wrong, so
+  five identical retries only delay a human seeing it by the whole backoff
+  schedule. `JobQueue.fail(retryable=False)` is that path, and it is distinct
+  from the poison threshold below: this one reports `attempts == 1`.
 - **Poison threshold** — after N attempts a job is *parked* with its error, not
-  retried forever and not silently dropped.
+  retried forever and not silently dropped. `job_max_attempts` is N, and
+  "after N attempts" means exactly N.
+- **Work that has become impossible *completes*, and does not park.** A job
+  naming an item its source has since deleted, or one no configured source
+  addresses, is not poison — parking it fills the review list with things that
+  are simply gone, and a parked job needs a human to release it. Parking is
+  reserved for work a human has to look at. The three handlers
+  (`usher.services.handlers`) are where this is decided; a job whose *key* is
+  unparseable is the opposite case and does park, because that is a real
+  defect somebody has to see.
+- **Re-enqueueing does not un-park.** Poison a human has not looked at is not
+  fixed by asking for it again, and a parked job's priority is not promoted
+  behind their back either.
+- **Re-enqueueing work that has not changed writes nothing.** A nightly walk
+  enqueues a job for every item it saw, so an `ON CONFLICT DO UPDATE` with no
+  `WHERE` rewrites a row per job per night — 1,126,674 dead-weight row
+  versions at the one measured deployment, plus the WAL and the vacuum, on a
+  table whose entire purpose is to stay small — while changing nothing
+  anybody can observe. The update fires only on a genuine promotion
+  (`jobs.priority < excluded.priority`), and `enqueue` reports 0 rows written
+  otherwise, which is the honest number.
+- **A backed-off job is still `pending`, and nothing bounds the claim scan
+  over them.** `ix_jobs_claim` is `(priority DESC, created_at) WHERE status =
+  'pending'`, and `run_after <= clock_timestamp()` cannot be an indexed
+  predicate (`clock_timestamp()` is not immutable) — so a queue whose jobs
+  have all backed off against a broken upstream makes every claim walk past
+  all of them. Measured against `pgvector/pgvector:pg17`: 1,126,674
+  backed-off jobs plus one runnable one is a 216 ms claim with `Rows Removed
+  by Filter: 1126674`. Recorded rather than solved: putting `run_after`
+  first destroys the priority ordering the queue exists for, and the
+  condition only arises when an upstream is broken — at which point a slow
+  claim is not the problem.
 - Parked jobs are listed in the admin API and counted in metrics. Silent failure
   is the thing worth engineering against; visible failure is fine.
 - Jobs are idempotent by construction, so redelivery is always safe.
@@ -122,9 +168,9 @@ dashboard can distinguish "down" from "running without Emby".
 | Layer | Approach |
 |---|---|
 | **Unit** | Services against port fakes. No network, ever. Fakes are trivial because ports are ABCs. |
-| **Integration** | Real Postgres (testcontainers). Recorded provider payloads committed as fixtures — never live API calls in CI. |
+| **Integration** | Real Postgres (testcontainers). Provider payloads committed as fixtures — *shape*-recorded and value-synthetic, never a capture; never live API calls in CI. |
 | **Adapter contract suite** | One parametrised test class every `SourceAdapter` must pass. |
-| **Bootstrap** | Small committed slices of each dataset. Never a full download in tests. |
+| **Bootstrap** | Small committed slices in each dataset's real *format*, with every value invented. Never a real dataset file, never a full download in tests. |
 | **API** | Schema-validated request/response round-trips against the OpenAPI contract. |
 
 **The contract suite is the load-bearing one.** It is what proves the
@@ -163,6 +209,18 @@ M1 `compose.yml` — nothing before M6 (embeddings) writes there.
 - First run detects an empty catalog and offers bootstrap through the admin API
   — it does not start a multi-hour download unprompted.
 - Bootstrap is resumable and checkpointed; a restart mid-import continues.
+- **The operator trigger is `usher` (also `python -m usher`), and it exists
+  before the HTTP surface does.** `bootstrap` / `bootstrap-status` (M2) and
+  `sync` / `sync-status` / `unmatched` / `work` (M4) are the CLI composition
+  root, documented command by command in `README.md`;
+  [07](07-client-api.md)'s `POST /admin/sources/{id}/sync` and the two
+  `/admin/unmatched` routes are M9's and are built over the same services.
+  Every one of them has to work against an *empty* database — a command an
+  operator can only run after a successful sync is no use for diagnosing
+  why the sync did not happen.
+- **`--allow-full-retraction` is the only way past ADR-0015's ceiling**, and
+  it is a flag rather than a configuration default because it is the one
+  input that can mark a whole library unavailable.
 
 ### Backup — the asymmetry is the point
 

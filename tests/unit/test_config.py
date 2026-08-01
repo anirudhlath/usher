@@ -198,3 +198,98 @@ def test_bulk_user_agent_cannot_be_blank(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("USHER_BULK_USER_AGENT", "")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_ingest_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PRD 03's pipeline knobs. Constructor arguments on the repositories and
+    services that read them -- `db/` must not import `config` (ADR-0009) --
+    so the composition roots are what wire these through."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    settings = Settings()
+    assert settings.sync_batch_size == 1_000
+    assert settings.sync_max_retract_fraction == 0.25
+    assert settings.job_batch_size == 20
+    assert settings.job_max_attempts == 5
+    assert settings.job_backoff_seconds == 30.0
+
+
+def test_job_max_attempts_must_be_at_least_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ceiling of zero parks every job on its first failure, which takes
+    the retry out of a retry queue -- PRD 08 asks for "after N attempts",
+    and N is at least one."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_JOB_MAX_ATTEMPTS", "0")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_job_backoff_seconds_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zero base collapses the whole exponential schedule to "retry
+    immediately", which is the hot loop against a broken upstream that the
+    backoff exists to prevent."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_JOB_BACKOFF_SECONDS", "0")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_sync_max_retract_fraction_is_a_fraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0015's guard is a fraction of a source, so 1.0 is "disabled" and
+    anything above it is a typo that would silently disable the guard rather
+    than loosen it."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_SYNC_MAX_RETRACT_FRACTION", "1.5")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_metadata_provider_settings_have_usable_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PRD 03's enrich stage. `tmdb_region` is genuinely configuration rather
+    than a constant: TMDb returns every country's certification and showing a
+    household outside the US somebody else's rating is worse than showing
+    none."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    settings = Settings()
+    assert settings.tmdb_base_url == "https://api.themoviedb.org/3"
+    assert settings.tmdb_requests_per_second == 30.0
+    assert settings.tmdb_region == "US"
+
+
+def test_tmdb_requests_per_second_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero is not "unthrottled", it is a token bucket that never refills --
+    the first request would wait forever."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_TMDB_REQUESTS_PER_SECOND", "0")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_tmdb_region_must_be_a_two_letter_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ISO 3166-1 alpha-2, which is what TMDb keys `iso_3166_1` on. A longer
+    value matches nothing and silently produces no content rating at all."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_TMDB_REGION", "USA")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_the_enrichment_cache_window_stays_inside_tmdbs_term(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TMDb's caching term is a six-month ceiling, so the bound is a
+    compliance constraint expressed as a type rather than a tuning range --
+    and zero is not "always fresh", it is "refetch on every retry"."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    assert Settings().enrich_cache_max_age_days == 30
+    for bad in ("0", "365"):
+        monkeypatch.setenv("USHER_ENRICH_CACHE_MAX_AGE_DAYS", bad)
+        with pytest.raises(ValidationError):
+            Settings()

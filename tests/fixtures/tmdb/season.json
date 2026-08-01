@@ -1,0 +1,54 @@
+{
+  "_id": "000000000000000000000005",
+  "air_date": "2004-09-22",
+  "episodes": [
+    {
+      "air_date": "2004-09-22",
+      "episode_number": 1,
+      "episode_type": "standard",
+      "id": 97000001,
+      "name": "An Invented Pilot",
+      "overview": "The first synthetic episode.",
+      "production_code": "101",
+      "runtime": 51,
+      "season_number": 1,
+      "show_id": 90001399,
+      "still_path": "/synthetic-still-1.jpg",
+      "vote_average": 5.2,
+      "vote_count": 33,
+      "crew": [],
+      "guest_stars": []
+    },
+    {
+      "air_date": "2004-09-29",
+      "episode_number": 2,
+      "episode_type": "standard",
+      "id": 97000002,
+      "name": "A Second Invented Episode",
+      "overview": "The second synthetic episode.",
+      "production_code": "102",
+      "runtime": 47,
+      "season_number": 1,
+      "show_id": 90001399,
+      "still_path": "/synthetic-still-2.jpg",
+      "vote_average": 5.4,
+      "vote_count": 29,
+      "crew": [],
+      "guest_stars": []
+    }
+  ],
+  "name": "Season 1",
+  "overview": "The first invented season.",
+  "id": 96000001,
+  "networks": [
+    {
+      "id": 94000003,
+      "logo_path": "/synthetic-network.png",
+      "name": "An Invented Network",
+      "origin_country": "US"
+    }
+  ],
+  "poster_path": "/synthetic-season-1.jpg",
+  "season_number": 1,
+  "vote_average": 5.1
+}

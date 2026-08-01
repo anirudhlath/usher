@@ -38,11 +38,12 @@ transport does. Two consequences:
 - **A failing *status* is not something a harness can arrange.**
   `go_offline` is a transport failure by design, so nothing here
   distinguishes "a 500 is not a deletion" from "a 404 is". Verified by
-  mutation: making `EmbyAdapter._fetch` report every `>= 400` as `None`
-  passes all 40 cases and is caught only by
+  mutation, and re-verified at 43 cases in M4: making `EmbyAdapter._fetch`
+  report every `>= 400` as `None` passes every case here and is caught only
+  by the two per-implementation tests written for it,
   `tests/unit/test_adapters_emby_adapter.py::test_get_item_raises_rather_
-  than_returning_none_on_a_server_error`. Status-level behaviour stays a
-  per-implementation test.
+  than_returning_none_on_a_server_error` and its `get_watch_state`
+  counterpart. Status-level behaviour stays a per-implementation test.
 """
 
 import asyncio
@@ -70,7 +71,7 @@ MOVIE = SourceItem(
     name="Example Movie",
     kind=SourceItemKind.MOVIE,
     year=2021,
-    provider_ids={"tmdb": "438631", "imdb": "tt1160419"},
+    provider_ids={"tmdb": "90000100", "imdb": "tt99000100"},
     container="mkv",
     video_codec="hevc",
     audio_codec="truehd",
@@ -87,14 +88,14 @@ SERIES = SourceItem(
     name="Example Series",
     kind=SourceItemKind.SERIES,
     year=2011,
-    provider_ids={"tmdb": "1399", "imdb": "tt0944947", "tvdb": "121361"},
+    provider_ids={"tmdb": "90001399", "imdb": "tt99000030", "tvdb": "91000030"},
 )
 EPISODE = SourceItem(
     external_id="episode-1",
     name="Example Episode",
     kind=SourceItemKind.EPISODE,
     year=2013,
-    provider_ids={"imdb": "tt2178782", "tvdb": "4517466"},
+    provider_ids={"imdb": "tt99000110", "tvdb": "91000110"},
     container="mkv",
     video_codec="h264",
     audio_codec="eac3",
@@ -237,8 +238,8 @@ class SourceAdapterContract:
         await harness.given_item(MOVIE, changed_at=T0)
         item = await harness.adapter.get_item("movie-1")
         assert item is not None
-        assert item.provider_ids.get("tmdb") == "438631"
-        assert item.provider_ids.get("imdb") == "tt1160419"
+        assert item.provider_ids.get("tmdb") == "90000100"
+        assert item.provider_ids.get("imdb") == "tt99000100"
         assert all(key == key.lower() for key in item.provider_ids)
 
     async def test_added_at_is_timezone_aware(self, harness: SourceHarness) -> None:
@@ -471,28 +472,49 @@ class SourceAdapterContract:
         assert states["movie-1"].position_seconds == 1840
         assert states["movie-1"].played is False
 
-    async def test_watch_state_carries_the_play_history_too(self, harness: SourceHarness) -> None:
-        """`SourceWatchState` carries four facts, and `watch_states` has a
-        column for each: an adapter that reported only position and played
-        would leave `play_count` at 0 and `last_played_at` NULL for every
-        item in the catalogue, forever, with nothing anywhere reporting a
-        failure. The two assertions above are satisfied by exactly such an
-        adapter, which is why this one is separate rather than folded into
-        them."""
+    async def test_a_walk_never_reports_play_history_it_cannot_know(
+        self, harness: SourceHarness
+    ) -> None:
+        """The measured failure, expressed so it cannot be passed by lying.
+
+        Emby's listing route reports `PlayCount: 0` and omits
+        `LastPlayedDate` for an item whose single-item route reports
+        `PlayCount: 2` and a real date (verified 2026-07-31 against 4.9.5.0).
+        An adapter that passed the listing's zeros through would report `0`
+        here and the merge downstream would write it over real history.
+
+        So the assertion is not "the walk reports 7" (which would force an
+        honest-but-lossy source to fabricate) and not "the walk reports
+        None" (which would forbid a source whose listing is complete). It is
+        **either the truth or an explicit absence, never a third number** --
+        which is exactly the guarantee `SourceWatchState`'s docstring makes
+        and the only one a caller can build a `COALESCE` on.
+
+        `FakeSourceAdapter` passes this on the `== 7` branch (it stores what
+        the harness seeded); `EmbyAdapter` passes it on the `is None`
+        branch. Both branches being live across the two runs is what makes
+        this a contract rather than a restatement of one implementation.
+        """
         await harness.given_item(MOVIE, changed_at=T0)
         last_played = datetime(2026, 7, 20, 21, 4, 0, tzinfo=UTC)
         await harness.given_watch_state(
             SourceWatchState(
                 external_id="movie-1",
                 position_seconds=1840,
-                played=False,
+                played=True,
                 play_count=7,
                 last_played_at=last_played,
             )
         )
         states = {state.external_id: state async for state in harness.adapter.watch_state()}
-        assert states["movie-1"].play_count == 7
-        assert states["movie-1"].last_played_at == last_played
+        walked = states["movie-1"]
+        assert walked.position_seconds == 1840
+        assert walked.played is True
+        assert walked.play_count in (None, 7), (
+            f"a walk reported play_count={walked.play_count!r} for an item played 7 times; "
+            "the port permits None (this read cannot say) or the true value, and nothing else"
+        )
+        assert walked.last_played_at in (None, last_played)
 
     async def test_watch_state_reports_a_played_item(self, harness: SourceHarness) -> None:
         await harness.given_item(EPISODE, changed_at=T0)
@@ -530,6 +552,56 @@ class SourceAdapterContract:
             async for state in harness.adapter.watch_state():
                 seen.append(state)
         assert len(seen) >= 3
+
+    async def test_get_watch_state_is_authoritative_about_play_history(
+        self, harness: SourceHarness
+    ) -> None:
+        """The other half of the same contract. `watch_state` may decline;
+        this may not. An adapter that implements this by delegating to its
+        own walk -- the obvious lazy implementation, and the one that is
+        exactly wrong on Emby -- reports `None` here and the household's
+        play history is unrecoverable at any price."""
+        await harness.given_item(MOVIE, changed_at=T0)
+        last_played = datetime(2026, 7, 20, 21, 4, 0, tzinfo=UTC)
+        await harness.given_watch_state(
+            SourceWatchState(
+                external_id="movie-1",
+                position_seconds=1840,
+                played=True,
+                play_count=7,
+                last_played_at=last_played,
+            )
+        )
+        state = await harness.adapter.get_watch_state("movie-1")
+        assert state is not None
+        assert state.play_count == 7
+        assert state.last_played_at == last_played
+        assert state.position_seconds == 1840
+        assert state.played is True
+
+    async def test_get_watch_state_returns_none_for_an_item_the_source_does_not_have(
+        self, harness: SourceHarness
+    ) -> None:
+        """An adapter that fabricates an all-zero state for an unknown id
+        hands the merge a positive claim of "never played" about something
+        it knows nothing about. `None` is the only honest answer, and it is
+        the same answer `get_item` gives, so a caller never learns to tell
+        the two apart."""
+        assert await harness.adapter.get_watch_state("never-existed") is None
+
+    async def test_get_watch_state_raises_when_the_source_is_unreachable(
+        self, harness: SourceHarness
+    ) -> None:
+        """`get_item`'s most dangerous wrong implementation, one method
+        over. Seeded first on purpose: against an empty source an adapter
+        that answered `None` for a transport failure would look correct."""
+        await harness.given_item(MOVIE, changed_at=T0)
+        await harness.given_watch_state(
+            SourceWatchState(external_id="movie-1", position_seconds=1840, played=True)
+        )
+        await harness.go_offline()
+        with pytest.raises(PortUnavailable):
+            await harness.adapter.get_watch_state("movie-1")
 
     async def test_push_watch_state_is_visible_to_the_source(self, harness: SourceHarness) -> None:
         """Read back from the source's own state, not from a record of the

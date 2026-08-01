@@ -37,18 +37,35 @@ Auto-instrumentation for FastAPI, SQLAlchemy, and httpx, plus explicit spans on
 the pipeline — the flow most worth explaining when it is slow:
 
 ```
-ingest.item
-├── match.title
-│   ├── match.provider_id · match.local_lookup · match.tmdb_search
-├── enrich.title
-│   ├── tmdb.fetch · enrich.persist
-└── index.title
-    ├── index.fulltext · index.embed
+sync.reconcile                    ← one per SyncRun (M4)
+└── ingest.item                   ← one per batch
+    └── match.title               ← the five-tier ladder, batched
+
+sync.watch_state                  ← the watch-state lane (M4)
+
+job.enrich · job.match · job.watch_history   ← a worker's root span,
+└── enrich.title                     Linked (never parented) to whatever
+    └── metadata.request             enqueued it
+index.title                       ← M6
+├── index.fulltext · index.embed
 
 bootstrap.import
 ├── bootstrap.batch
 └── bootstrap.link_crosswalk
 ```
+
+**Everything a request triggers nests under that request's server span.**
+`FastAPIInstrumentor` (wired in `create_app`) opens it; `sync.reconcile` and
+everything below it are its descendants, and `SQLAlchemyInstrumentor`'s
+statement spans hang off the pipeline span that issued them. A pipeline that
+started its own *root* spans would still produce valid ids and still export,
+so this is asserted as parentage rather than existence
+(`tests/integration/test_pipeline_spans.py`).
+
+A worker's `job.*` span is the deliberate exception: a **root with a `Link`**
+back to the enqueueing span, because the request that enqueued it has
+usually already returned and a child span of a finished parent misstates
+causality.
 
 `bootstrap.import` spans (one per dataset, per `BootstrapService.import_dataset`
 call) and their child `bootstrap.batch` spans carry `usher.dataset` and
@@ -60,30 +77,61 @@ attributes, so "why did the title I just opened take 45 seconds" is one query.
 
 ### Metrics — OpenTelemetry → Prometheus
 
-| Metric | Type | Labels |
-|---|---|---|
-| `usher.http.server.duration` | histogram | route, status |
-| `usher.search.duration` | histogram | mode |
-| `usher.search.results` | histogram | mode |
-| `usher.home.compose.duration` | histogram | — |
-| `usher.row.build.duration` | histogram | provider |
-| `usher.jobs.queued` | gauge | priority |
-| `usher.jobs.duration` | histogram | kind |
-| `usher.jobs.parked` | gauge | kind |
-| `usher.enrichment.latency` | histogram | trigger |
-| `usher.ingest.items` | counter | source, result |
-| `usher.match.result` | counter | method, confident |
-| `usher.source.request.duration` | histogram | source, op |
-| `usher.source.push.connected` | gauge | source |
-| `usher.source.push.reconnects` | counter | source |
-| `usher.provider.requests` | counter | provider, status |
-| `usher.embedding.duration` | histogram | — |
-| `usher.cache.hits` / `.misses` | counter | cache |
-| `usher.sse.connections` | gauge | — |
-| `usher.bootstrap.rows` | counter | dataset |
-| `usher.bootstrap.batch.duration` | histogram | dataset |
-| `usher.bootstrap.phase.duration` | histogram | dataset |
-| `usher.bootstrap.failures` | counter | dataset, kind |
+Emitted today (✅) or owned by a later milestone (the milestone is named).
+A documented metric nothing emits is a dashboard panel that is permanently
+empty, and nothing distinguishes that from a healthy zero — so this column
+is maintained rather than aspirational.
+
+| Metric | Type | Labels | Emitted |
+|---|---|---|---|
+| `usher.http.server.duration` | histogram | route, status | M9 |
+| `usher.search.duration` | histogram | mode | M6 |
+| `usher.search.results` | histogram | mode | M6 |
+| `usher.home.compose.duration` | histogram | — | M7 |
+| `usher.row.build.duration` | histogram | provider | M7 |
+| `usher.jobs.queued` | gauge | kind | ✅ M4 |
+| `usher.jobs.duration` | histogram | kind | ✅ M4 |
+| `usher.jobs.parked` | gauge | kind | ✅ M4 |
+| `usher.enrichment.latency` | histogram | outcome | ✅ M4 |
+| `usher.enrich.result` | counter | outcome | ✅ M4 |
+| `usher.ingest.items` | counter | source, result | ✅ M4 |
+| `usher.match.result` | counter | method, confident | ✅ M4 |
+| `usher.sync.run.duration` | histogram | source, kind, status | ✅ M4 |
+| `usher.watch_state.run.duration` | histogram | source, status | ✅ M4 |
+| `usher.watch_state.backfilled` | counter | source | ✅ M4 |
+| `usher.source.request.duration` | histogram | source, op | ✅ M3 |
+| `usher.source.push.connected` | gauge | source | M5 |
+| `usher.source.push.reconnects` | counter | source | M5 |
+| `usher.provider.requests` | counter | provider, status | ✅ M4 |
+| `usher.metadata.request.duration` | histogram | status | ✅ M4 |
+| `usher.embedding.duration` | histogram | — | M6 |
+| `usher.cache.hits` / `.misses` | counter | cache | M9 |
+| `usher.sse.connections` | gauge | — | M5 |
+| `usher.bootstrap.rows` | counter | dataset | ✅ M2 |
+| `usher.bootstrap.batch.duration` | histogram | dataset | ✅ M2 |
+| `usher.bootstrap.phase.duration` | histogram | dataset | ✅ M2 |
+| `usher.bootstrap.failures` | counter | dataset, kind | ✅ M2 |
+
+Three label corrections M4 made, each because the code that emits the metric
+can only answer the question it actually has:
+
+- **`usher.jobs.queued` is labelled `kind`, not `priority`.** `JobQueue.depth()`
+  counts pending rows per kind, which is what "which lane is backed up"
+  asks. A priority band needs a second `GROUP BY` on the port, and it would
+  carry two constant values in M4 anyway — nothing here enqueues at
+  `DEMAND` or `VISIBLE`. M5 introduces demand promotion and is where the
+  band becomes a real series.
+- **`usher.enrichment.latency` is labelled `outcome`, not `trigger`.** Same
+  reason: `trigger` (`demand` vs `background`) has one value until M5, while
+  a failed enrichment's latency and a successful one's are genuinely
+  different populations. It was also emitted under the name
+  `usher.enrich.duration` until M4 — a near-miss name that would have left
+  this row's panel and the "enrichment SLA missed" alert permanently blank.
+- **`usher.provider.requests` counts failures too**, labelled
+  `status="error"`. A transport failure never reaches a status line, and the
+  "provider degraded" alert divides 429s and 5xxs by the total — a
+  denominator that omitted the failures would read *low* exactly during an
+  outage.
 
 ## Analytics tables
 
@@ -148,6 +196,17 @@ and duration · **push connection uptime and reconnect count** — the direct
 health signal for the WebSocket risk in
 [ADR-0004](decisions/0004-push-over-polling.md) · Emby request latency · TMDb
 requests/sec against the ~40 ceiling with 429 count.
+
+**Queue depth, parked jobs, sync run outcomes and duration are backed by real
+data as of M4** — `jobs`, `sync_runs` and `usher.sync.run.duration` all exist
+and are written by a live walk. Promotion latency, enrichment throughput and
+push uptime are not: the first two need M5's demand path and a configured TMDb
+key, the third needs M5's socket. Dashboard 1's **unmatched review-queue
+depth** is likewise real — `ix_media_items_unmatched` and
+`list_unmatched` ship in M4 — with the caveat that `list_unmatched` pages by
+`OFFSET`, measured at 43.7 ms at offset 0 against 388.9 ms at offset
+1,126,574, so a panel that drains the whole queue is quadratic and wants a
+keyset cursor first.
 
 ### 4 — Performance
 

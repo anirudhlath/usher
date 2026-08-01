@@ -69,6 +69,37 @@ class ProductionStatus(StrEnum):
     PILOT = "pilot"  # series
 
 
+class MatchMethod(StrEnum):
+    """How a source item was resolved to a canonical Title.
+
+    PRD 03's stage-2 ladder, plus the two outcomes that ladder implies but
+    does not name: creating a stub from a trusted provider id the catalog
+    does not yet hold, and giving up.
+
+    A label on PRD 10's `usher.match.result` counter, so these values are
+    wire identifiers and stable. Ordered here by descending confidence,
+    which is the order `MatchService` tries them in -- but nothing compares
+    members, so unlike `EnrichmentState` there is no rank map and no trap.
+    """
+
+    TMDB_ID = "tmdb_id"
+    IMDB_ID = "imdb_id"
+    TVDB_ID = "tvdb_id"
+    NAME_YEAR = "name_year"
+    PROVIDER_SEARCH = "provider_search"
+    CREATED_STUB = "created_stub"
+    # An episode, attached to the Title its series resolved to. Episodes
+    # never walk the ladder above: a source addresses them directly and the
+    # ids it reports are the *episode's* (TVDb numbers episodes and series
+    # in different, numerically overlapping namespaces; no episode's IMDb id
+    # is in the catalog at all), so running one through the ladder resolves
+    # it to an unrelated series or mints a junk Title. 999,827 of one
+    # measured source's 1,126,674 items are episodes, so this is the single
+    # most common value on the counter.
+    SERIES_PARENT = "series_parent"
+    UNMATCHED = "unmatched"
+
+
 class HdrFormat(StrEnum):
     """Canonical HDR formats. A source's own vocabulary (Emby, for
     instance, emits strings like "DolbyVision") is translated into one of

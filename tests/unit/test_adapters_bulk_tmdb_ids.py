@@ -47,10 +47,10 @@ async def test_parses_the_movie_export(tmp_path: Path) -> None:
         dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
         rows = [row async for batch in dataset.batches() for row in batch.rows]
     by_id = {row.tmdb_id: row for row in rows}
-    assert by_id[278].original_name == "The Shawshank Redemption"
-    assert by_id[278].popularity == 45.5
-    assert by_id[278].kind is TitleKind.MOVIE
-    assert by_id[99991].adult is True
+    assert by_id[90000020].original_name == "A Synthetic Feature"
+    assert by_id[90000020].popularity == 12.5
+    assert by_id[90000020].kind is TitleKind.MOVIE
+    assert by_id[90000071].adult is True
 
 
 async def test_missing_popularity_defaults_to_zero(tmp_path: Path) -> None:
@@ -62,7 +62,7 @@ async def test_missing_popularity_defaults_to_zero(tmp_path: Path) -> None:
     ) as client:
         dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
         rows = {r.tmdb_id: r async for batch in dataset.batches() for r in batch.rows}
-    assert rows[99992].popularity == 0.0
+    assert rows[90000072].popularity == 0.0
 
 
 async def test_the_tv_export_uses_original_name_and_has_no_adult_field(
@@ -78,9 +78,9 @@ async def test_the_tv_export_uses_original_name_and_has_no_adult_field(
     ) as client:
         dataset = TMDbIdDataset(client, cache, kind=TitleKind.SERIES, batch_size=10, today=_TODAY)
         rows = {r.tmdb_id: r async for batch in dataset.batches() for r in batch.rows}
-    assert rows[1399].original_name == "Game of Thrones"
-    assert rows[1399].adult is False
-    assert rows[45].kind is TitleKind.SERIES
+    assert rows[90000030].original_name == "A Synthetic Series"
+    assert rows[90000030].adult is False
+    assert rows[90000045].kind is TitleKind.SERIES
 
 
 async def test_walks_back_to_the_newest_export_that_exists(tmp_path: Path) -> None:
@@ -229,9 +229,9 @@ async def test_position_counts_lines_consumed_not_rows_kept(tmp_path: Path) -> N
     cache = tmp_path / "bulk"
     cache.mkdir(parents=True)
     body = (
-        b'{"adult":false,"id":1,"original_title":"A","popularity":1.0,"video":false}\n'
+        b'{"adult":false,"id":90000001,"original_title":"A","popularity":1.0,"video":false}\n'
         b"\n"
-        b'{"adult":false,"id":2,"original_title":"B","popularity":2.0,"video":false}\n'
+        b'{"adult":false,"id":90000002,"original_title":"B","popularity":2.0,"video":false}\n'
     )
     (cache / "movie_ids_07_30_2026.json.gz").write_bytes(gzip.compress(body))
     async with httpx.AsyncClient(
@@ -240,7 +240,7 @@ async def test_position_counts_lines_consumed_not_rows_kept(tmp_path: Path) -> N
         dataset = TMDbIdDataset(client, cache, kind=TitleKind.MOVIE, batch_size=10, today=_TODAY)
         batches = [batch async for batch in dataset.batches()]
     assert len(batches) == 1
-    assert [row.tmdb_id for row in batches[0].rows] == [1, 2]
+    assert [row.tmdb_id for row in batches[0].rows] == [90000001, 90000002]
     # 3 raw lines (id=1, blank, id=2); only 2 are kept.
     assert batches[0].cursor.position == 3
     assert batches[0].cursor.rows_seen == 2
@@ -296,16 +296,16 @@ async def test_a_same_day_republish_does_not_silently_skip_records(tmp_path: Pat
     cache.mkdir(parents=True)
     name = "movie_ids_07_30_2026.json.gz"
     body_a = (
-        b'{"adult":false,"id":1,"original_title":"A-1","popularity":1.0,"video":false}\n'
-        b'{"adult":false,"id":2,"original_title":"A-2","popularity":2.0,"video":false}\n'
-        b'{"adult":false,"id":3,"original_title":"A-3","popularity":3.0,"video":false}\n'
-        b'{"adult":false,"id":4,"original_title":"A-4","popularity":4.0,"video":false}\n'
+        b'{"adult":false,"id":90000001,"original_title":"A-1","popularity":1.0,"video":false}\n'
+        b'{"adult":false,"id":90000002,"original_title":"A-2","popularity":2.0,"video":false}\n'
+        b'{"adult":false,"id":90000003,"original_title":"A-3","popularity":3.0,"video":false}\n'
+        b'{"adult":false,"id":90000004,"original_title":"A-4","popularity":4.0,"video":false}\n'
     )
     body_b = (
-        b'{"adult":false,"id":11,"original_title":"B-1","popularity":1.0,"video":false}\n'
-        b'{"adult":false,"id":12,"original_title":"B-2","popularity":2.0,"video":false}\n'
-        b'{"adult":false,"id":13,"original_title":"B-3","popularity":3.0,"video":false}\n'
-        b'{"adult":false,"id":14,"original_title":"B-4","popularity":4.0,"video":false}\n'
+        b'{"adult":false,"id":90000011,"original_title":"B-1","popularity":1.0,"video":false}\n'
+        b'{"adult":false,"id":90000012,"original_title":"B-2","popularity":2.0,"video":false}\n'
+        b'{"adult":false,"id":90000013,"original_title":"B-3","popularity":3.0,"video":false}\n'
+        b'{"adult":false,"id":90000014,"original_title":"B-4","popularity":4.0,"video":false}\n'
     )
     # Single-element lists, not a dict: a dict mixing str/bytes values loses
     # per-key type narrowing under mypy strict.

@@ -22,12 +22,12 @@ def repo(session: AsyncSession) -> PostgresTitleRepository:
 async def test_add_then_get_round_trips_the_domain_model(
     repo: PostgresTitleRepository,
 ) -> None:
-    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", year=2021, tmdb_id=438631)
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", year=2021, tmdb_id=90000100)
     await repo.add(title)
     fetched = await repo.get(title.id)
     assert fetched is not None
     assert fetched.name == "Dune"
-    assert fetched.tmdb_id == 438631
+    assert fetched.tmdb_id == 90000100
     assert fetched.enrichment_state is EnrichmentState.SKELETON
 
 
@@ -43,9 +43,9 @@ async def test_get_returns_none_for_unknown_id(repo: PostgresTitleRepository) ->
 
 
 async def test_get_by_tmdb_id_finds_the_title(repo: PostgresTitleRepository) -> None:
-    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=438631)
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", tmdb_id=90000100)
     await repo.add(title)
-    found = await repo.get_by_tmdb_id(438631, TitleKind.MOVIE)
+    found = await repo.get_by_tmdb_id(90000100, TitleKind.MOVIE)
     assert found is not None and found.id == title.id
 
 
@@ -236,10 +236,10 @@ async def test_get_by_imdb_id_does_not_leak_integrity_error_from_pending_state(
     repo: PostgresTitleRepository, session: AsyncSession
 ) -> None:
     title_id = await _insert_bypassing_the_identity_map(
-        session, name="Dune", sort_name="Dune", imdb_id="tt1160419", tmdb_id=103
+        session, name="Dune", sort_name="Dune", imdb_id="tt99000100", tmdb_id=103
     )
     _stage_conflicting_pending_row(session, tmdb_id=103)
-    found = await repo.get_by_imdb_id("tt1160419")
+    found = await repo.get_by_imdb_id("tt99000100")
     assert found is not None
     assert found.id == title_id
 

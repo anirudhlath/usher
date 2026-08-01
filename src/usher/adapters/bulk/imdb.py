@@ -6,10 +6,15 @@ Four TSV quirks, and exactly how each is handled:
    data. `_optional` maps it to `None`; every numeric field goes through it
    before `int()`/`float()`.
 2. **There is no quoting mechanism.** IMDb's TSVs are raw tab-separated
-   values, and title fields contain literal `"` characters (21 in the first
-   553,395 rows of `title.basics.tsv.gz`, e.g. `tt0073045` ->
-   `"Giliap"`). `csv.reader` with its default `QUOTE_MINIMAL` **silently
-   strips them**, turning `"Giliap"` into `Giliap` -- verified directly. This
+   values, and a title field may both open and close with a literal `"`
+   character (21 such titles in the first 553,395 rows of
+   `title.basics.tsv.gz` -- measured directly; `CLAUDE.md` names the
+   specimen, which is not repeated here because nothing shipped in this
+   package quotes a real row). `csv.reader` with its default
+   `QUOTE_MINIMAL` **silently strips both quotes** off such a field --
+   verified directly, and pinned by
+   `tests/unit/test_adapters_bulk_imdb.py::test_preserves_embedded_double_quotes`
+   against an invented title of the same shape. This
    module therefore uses `line.split("\\t")` and never the `csv` module.
    `csv.reader(..., quoting=csv.QUOTE_NONE)` also preserves them, but a plain
    split has nothing to misconfigure.

@@ -152,6 +152,19 @@ class FakeTitleRepository(TitleRepository):
                 return title
         return None
 
+    def stored(self) -> list[Title]:
+        """Every title held, for `FakeTitleMatchRepository` to read through.
+
+        Not a port method. The two fakes model *one* table -- a real
+        `TitleRepository.add` flushes, so the row is visible to the next
+        `TitleMatchRepository` read on the same session -- and keeping two
+        independent dicts made a correct `MatchService` fail on the second
+        walk of a series it had itself stubbed: the ladder missed, the
+        re-create conflicted, and nothing could look the winner up. See that
+        fake's own docstring.
+        """
+        return list(self._titles.values())
+
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         counts: dict[EnrichmentState, int] = dict.fromkeys(EnrichmentState, 0)
         for title in self._titles.values():

@@ -7,7 +7,8 @@ import sys
 from collections.abc import Iterator
 
 import pytest
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.metrics._internal import _ProxyMeter
 
 from usher.config import Settings, get_settings
 
@@ -95,6 +96,55 @@ def reset_otel_tracer_provider() -> Iterator[None]:
             for value in vars(module).values():
                 if isinstance(value, trace.ProxyTracer):
                     value._real_tracer = None
+
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
+def reset_otel_meter_provider() -> Iterator[None]:
+    """`reset_otel_tracer_provider`'s twin, for metrics, and it fails in a
+    louder way than the tracer one does.
+
+    `metrics.set_meter_provider()` is set-once exactly like its tracing
+    counterpart -- `configure_metrics`'s own `isinstance` guard depends on
+    that (see its docstring) -- and every `usher` module that emits a metric
+    calls `metrics.get_meter(...)` at *import* time, when no real provider
+    exists yet, so each holds a `_ProxyMeter` whose instruments are
+    `_Proxy*` shells. A `_ProxyMeter` caches the first real meter it is ever
+    handed, and each proxy instrument caches the first real instrument, so
+    whichever test installs a real `MeterProvider` first owns every
+    module-level instrument in the process for the rest of the session.
+
+    Verified directly, and the failure is not a subtle one: three rounds of
+    "install a `MeterProvider` with an `InMemoryMetricReader`, record
+    through `usher.services.jobs._job_duration`, read the reader" print the
+    metric once and then raise `AttributeError: 'NoneType' object has no
+    attribute 'resource_metrics'` -- the SDK logs "Overriding of current
+    MeterProvider is not allowed", the second `set_meter_provider` is a
+    no-op, and the second reader is never registered with any provider at
+    all so `get_metrics_data()` answers `None`. With this reset in place the
+    same three rounds each report `['usher.jobs.duration']`.
+
+    There is no public unset API, for the same reason there is none for
+    tracing: a real deployment installs one provider per process.
+    """
+
+    def _reset() -> None:
+        metrics._internal._METER_PROVIDER = None
+        metrics._internal._METER_PROVIDER_SET_ONCE = type(
+            metrics._internal._METER_PROVIDER_SET_ONCE
+        )()
+        for name, module in list(sys.modules.items()):
+            if not name.startswith("usher"):
+                continue
+            for value in vars(module).values():
+                if not isinstance(value, _ProxyMeter):
+                    continue
+                value._real_meter = None
+                for instrument in value._instruments:
+                    instrument._real_instrument = None
 
     _reset()
     yield

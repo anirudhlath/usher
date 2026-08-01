@@ -20,6 +20,17 @@ Without those, `test_operations_recover_from_an_expired_credential` and
 `test_rejected_credentials_do_not_produce_a_request_storm` would pass here
 against an adapter that did nothing at all, and a reviewer would have no
 signal that the assertions mean anything.
+
+**Where this fake is more forgiving than a real source, on purpose.** Its
+walk returns the *true* `play_count`/`last_played_at`, because it yields
+back the very `SourceWatchState` the harness seeded. So
+`test_a_walk_never_reports_play_history_it_cannot_know` passes here on its
+`== 7` branch and never exercises the `is None` branch -- the branch that
+matters, and the branch the measured Emby behaviour lands on. That case has
+teeth only in `EmbyHarness`, where the fake server's *listing* renderer
+omits the two fields exactly as Emby 4.9.5.0 does. The fake's job is to
+prove the assertion is expressible without reference to Emby; it is not
+evidence that any adapter needed it.
 """
 
 import asyncio
@@ -97,6 +108,13 @@ class FakeSourceAdapter(SourceAdapter):
 
     def fail_after(self, count: int) -> None:
         self._fail_after = count
+
+    def clear_failure(self) -> None:
+        """Undo `fail_after`. `ReconcileService`'s cursor case needs a run
+        that failed *followed by* one that succeeds, which is the only way to
+        show that a delta walk resumes from the last run that completed
+        rather than from the last run that happened."""
+        self._fail_after = None
 
     def reject_credentials(self) -> None:
         self._credentials_valid = False
@@ -211,12 +229,34 @@ class FakeSourceAdapter(SourceAdapter):
             )
             yielded += 1
 
+    async def get_watch_state(self, external_id: str) -> SourceWatchState | None:
+        """Authoritative, which for a fake means "the same thing the walk
+        returns" -- see the module docstring. `None` for an unknown id,
+        matching `get_item`, and `_ready()` first so a closed or offline
+        adapter raises `PortUnavailable` rather than answering."""
+        await self._ready()
+        if external_id not in self._items:
+            return None
+        return self._states.get(external_id) or SourceWatchState(
+            external_id=external_id, position_seconds=0, played=False
+        )
+
     async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
         await self._ready()
+        # Preserve whatever history is already recorded rather than
+        # rebuilding the state from scratch: a real source's write-back does
+        # not reset `PlayCount` (verified on Emby -- marking played advances
+        # it to 1 idempotently, and a position write leaves it alone), so a
+        # fake that zeroed it would make
+        # `test_get_watch_state_is_authoritative_about_play_history`
+        # order-dependent.
+        existing = self._states.get(external_id)
         self._states[external_id] = SourceWatchState(
             external_id=external_id,
             position_seconds=state.position_seconds,
             played=state.played,
+            play_count=None if existing is None else existing.play_count,
+            last_played_at=None if existing is None else existing.last_played_at,
         )
 
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
