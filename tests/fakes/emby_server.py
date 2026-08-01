@@ -54,6 +54,7 @@ restate the case that drives them.
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -715,3 +716,116 @@ class FakeEmbyServer:
             # in the catalogue, with nothing anywhere reporting it.
             user_data["LastPlayedDate"] = _emby_stamp(state.last_played_at)
         return user_data
+
+    # -- push frames ---------------------------------------------------
+    #
+    # Rendered from the committed `push_*.json` fixtures with the seeded
+    # values substituted in, exactly as `_payload` renders an item: the
+    # *shape* comes from a file M5's live verification will diff against a
+    # real capture, and the *values* come from the test. Building the dicts
+    # inline here instead -- which is what the plan's own code did, one
+    # paragraph after its prose said otherwise -- would let this file and
+    # `tests/fixtures/emby/push_*.json` drift apart silently, and the
+    # fixtures are the only half of the pair anything independent
+    # (`tests/unit/test_adapters_emby_push.py`, and the live capture) ever
+    # looks at.
+    #
+    # **The provenance here is weaker than anywhere else in this file, and
+    # it is stated rather than implied.** An item fixture was diffed field
+    # by field against a live 4.9.5.0 response on 2026-07-31. These three
+    # message shapes have never met a real message: ADR-0004's live run
+    # recorded *which message types arrived* and not one byte of any
+    # payload, so everything below the `MessageType` line is transcribed
+    # from Emby's own `UserItemDataDto`/`LibraryUpdateInfo`/`SessionInfoDto`
+    # and from the decompilation of `SessionWebSocketListener`. A wrong
+    # envelope is therefore invisible from both sides of this file, which is
+    # exactly the failure M3's live run found in the watch-state write-back.
+    # `tests/fixtures/emby/README.md` tabulates every specific guess; M5's
+    # live verification captures real messages and diffs them.
+
+    def user_data_changed_frame(self, external_ids: Sequence[str]) -> str:
+        """A `UserDataChanged` envelope for these items' current state.
+
+        Every entry is the fixture's own entry with the identity and state
+        fields overwritten, and `LastPlayedDate` **popped** when the seeded
+        state carries none -- otherwise the fixture's invented date shows
+        through for every item, which is the same trap `given_item`'s
+        docstring names and which an earlier renderer here fell into for
+        `SeriesId`/`IndexNumber`.
+
+        `PlayCount` and `LastPlayedDate` are rendered from the seeded state
+        as *true* values, and the adapter is required to report `None` for
+        both (ADR-0014: a `UserDataChanged` entry is a third payload shape
+        and no run here has parsed one). That is deliberately the same
+        three-valued shape `test_a_walk_never_reports_play_history_it_
+        cannot_know` asserts on: either the truth or an explicit absence,
+        never a third number -- so a mapper that fabricated a `0` is caught
+        and one that reads the real value is not forbidden.
+        """
+        message = load_emby_fixture("push_user_data_changed")
+        template: dict[str, Any] = message["Data"]["UserDataList"][0]
+        entries: list[dict[str, Any]] = []
+        for external_id in external_ids:
+            state = self._state_of(external_id)
+            entry = dict(template)
+            entry["Key"] = external_id
+            entry["ItemId"] = external_id
+            entry["PlaybackPositionTicks"] = state.position_seconds * _TICKS_PER_SECOND
+            entry["IsFavorite"] = False
+            entry["Played"] = state.played
+            if state.play_count is None:
+                entry.pop("PlayCount", None)
+            else:
+                entry["PlayCount"] = state.play_count
+            if state.last_played_at is None:
+                entry.pop("LastPlayedDate", None)
+            else:
+                entry["LastPlayedDate"] = _emby_stamp(state.last_played_at)
+            entries.append(entry)
+        message["Data"]["UserId"] = USER_ID
+        message["Data"]["UserDataList"] = entries
+        return json.dumps(message)
+
+    def library_changed_frame(
+        self,
+        *,
+        added: Sequence[str] = (),
+        updated: Sequence[str] = (),
+        removed: Sequence[str] = (),
+    ) -> str:
+        """A `LibraryChanged` envelope naming exactly the ids it was given.
+
+        The three arrays it is *not* given are emptied rather than left at
+        the fixture's values: a frame that always announced the fixture's
+        own `ItemsAdded` would make every push case see an `ITEM_ADDED`
+        event nobody arranged, and the mapper emits one event per non-empty
+        array.
+        """
+        message = load_emby_fixture("push_library_changed")
+        data: dict[str, Any] = message["Data"]
+        data["FoldersAddedTo"] = []
+        data["FoldersRemovedFrom"] = []
+        data["CollectionFolders"] = []
+        data["ItemsAdded"] = list(added)
+        data["ItemsRemoved"] = list(removed)
+        data["ItemsUpdated"] = list(updated)
+        # A guess about a field nothing reads: `LibraryUpdateInfo.IsEmpty`
+        # is assumed to mean "no arrays carry anything", and this ignores
+        # the folder arrays above because they are always empty here.
+        data["IsEmpty"] = not (added or updated or removed)
+        return json.dumps(message)
+
+    def sessions_frame(self) -> str:
+        """The periodic message. It maps to no event and is the reason an
+        idle library's channel stays measurably alive.
+
+        ADR-0004 observed `Sessions` arriving "periodically" and **not at
+        what interval**, which is the single assumption
+        `DEFAULT_STALE_AFTER_SECONDS = 90.0` rests on. Nothing here can
+        model an interval nobody measured, so this renders one frame on
+        demand and the cadence stays a live-verification question.
+        """
+        message = load_emby_fixture("push_sessions")
+        for session in message["Data"]:
+            session["UserId"] = USER_ID
+        return json.dumps(message)
