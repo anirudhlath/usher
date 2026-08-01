@@ -101,6 +101,70 @@ earlier negative findings were both wrong — see
 Health-check caveat: a handshake against *any* path succeeds, so a successful
 upgrade is not a health signal. Assert on received messages instead.
 
+**A supervisor that resets its failure counter on connection is caught only
+if the fake it is tested against has an *unbounded* supply of connections.**
+`PushSupervisor` resets on delivery, and the mutation that moves the reset to
+the connection is exactly the failure ADR-0004's caveat predicts: a proxy
+that upgrades and buffers connects perfectly every time, so the ceiling is
+never reached and PRD 08's "after N failures mark `supports_push = false`"
+silently never fires. A scripted adapter whose list of connections *runs out*
+terminates that mutated loop for the wrong reason and lets it pass. The fake
+in `tests/unit/test_services_push.py` therefore hands out empty connections
+forever and caps its own attempts with a plain `AssertionError` — never a
+`UsherPortError`, so the supervisor cannot catch it — and the mutation fails
+**4 cases in 0.43 s** with "the supervisor opened 41 channels; it is not
+counting failures". Without that cap it would *hang*: `asyncio.wait_for`
+cannot bound a loop that never yields, and the injected sleep therefore also
+`await asyncio.sleep(0)`s.
+
+**"Connect, then close the gap" is a concurrency claim and an ordering
+assertion does not test it.** `order == ["connected", "gap"]` is what a
+serialised run produces too, and it passes against an implementation that
+connects, closes the socket, and then walks. The case that has teeth forces a
+real 40 ms gap walk against a producer emitting on the open socket for ~30 ms
+and asserts on measured intersection-over-union of the two windows —
+**62.6% on this host, stable over five runs** (compare `JobQueueContract`'s
+76.2% and M5 group B1's 80.3–85.4%) — plus "every event produced during the
+walk was still delivered".
+
+**Three obvious assertions about `SourceNotSupported` all survive its own
+mutation.** Deleting the supervisor's `except SourceNotSupported` arm and
+letting it fall through to `except UsherPortError` ends with
+`push_available == [False]`, `push_connections == 0` and `gaps == 0` — the
+ceiling is reached instead of the method returning, so every visible end
+state is identical and only the five wasted attempts and four backoff sleeps
+differ. Measured; the M5 plan's own draft asserted exactly those three and
+the mutation survived it. Assert on `attempts == 1` and `sleeps == []`.
+
+**`PushHealth.record_reconnect` was a method nothing in `src/` ever called**,
+so PRD 10's `usher.source.push.reconnects` would have plotted a flat zero for
+every source forever. The increment belongs in `record_open`, guarded on
+`opened_at is not None` — on the second and later *open*, not on a failure,
+because a lane that failed to connect five times and then succeeded
+reconnected *once*. Both the unguarded version (every source starts at 1) and
+the absent version are pinned.
+
+**A push merge's `observed_at` mutation survives the whole unit file and is
+killed only by real Postgres.** Measured 2026-08-01: replacing
+`PushApplyService`'s `datetime.now(UTC)` with a plausible earlier instant —
+the event's own timestamp, the last walk's `started_at` — passes all of
+`tests/unit/test_services_push.py` and fails
+`tests/integration/test_services_push.py`, because
+`FakeWatchStateRepository` stores `observed_at` as `updated_at` while
+`trg_watch_states_set_updated_at` owns that column in Postgres. Same trap
+`backfill_one` documents, one lane over, and the reason that integration file
+exists at all.
+
+**The M5 plan's own self-review found a real bug and it is worth the general
+form.** `_publish_watch_states` zipped the *matched subset* of targets
+against the whole batch of states, so one unmatched item — which PRD 02
+guarantees there will always be — shifted every pair by one and published
+item A's resume position under item B's title id. Recovering a pairing
+outside the loop that built it is the failure; `WatchStateSyncService`
+therefore returns `MergedState(external_id, target)` and the pairing cannot
+be reconstructed wrongly. Same rule `SourceEvent.watch_states` states one
+layer up: keyed, never aligned by position.
+
 **M4's live verification: the design's central measurement holds, the
 matcher's exact-name tier was expected to match "almost nothing" and matches
 about three quarters, and the defect the plan called hypothetical is real in
