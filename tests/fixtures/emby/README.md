@@ -3,7 +3,7 @@
 Read [`../README.md`](../README.md) first: it states the licensing rule, the
 reserved identifier bands, and the guard that enforces them.
 
-**Every value in these four files is invented**, including the `ProviderIds`,
+**Every value in these seven files is invented**, including the `ProviderIds`,
 which until 2026-08-01 carried real TMDb/IMDb/TVDb ids for four real works.
 That is a licensing constraint, not a style, and a doubled one: a real Emby
 response *embeds TMDb-sourced metadata*, which TMDb's terms forbid
@@ -34,6 +34,62 @@ over disjoint slices totalling 1,400 movies, and has never met a real
 payload — every one carried exactly one `MediaSource`. It stays: another
 deployment will have them and the rule is cheap. `CLAUDE.md` records both
 searches.
+
+## Push messages (M5)
+
+`push_user_data_changed.json`, `push_library_changed.json` and
+`push_sessions.json` are the `/embywebsocket` envelope
+(`{"MessageId", "MessageType", "Data"}`) for the three types
+`usher.adapters.emby.push` reads. Every value is invented and every id is
+inside the reserved bands above.
+
+**These three have a far weaker provenance than the item fixtures beside
+them, and it is stated rather than implied.** An item fixture was diffed
+field by field against a live 4.9.5.0 response on 2026-07-31. These have
+never met a real message, and what
+[ADR-0004](../../../docs/prd/decisions/0004-push-over-polling.md)'s live run
+of 2026-07-29 actually recorded is *which message types arrived* — `Sessions`
+periodically, `UserDataChanged` twice on a played/unplayed toggle — and **not
+one byte of any payload**. Everything below the `MessageType` line here is
+transcribed from Emby's own `UserItemDataDto`, `LibraryUpdateInfo` and
+`SessionInfoDto` and from the decompilation of `SessionWebSocketListener`,
+which is documentation-grade evidence rather than measurement. Specifically
+unverified, and named so M5's live verification has a list to work from:
+
+| Guess | Why it is a guess |
+|---|---|
+| The envelope carries `MessageId` at all | Never observed; the run recorded types, not frames |
+| `UserDataChanged.Data` is an object with `UserId` and `UserDataList` | Could be a bare list, as `Sessions`' `Data` is |
+| A `UserDataList` entry is a `UserItemDataDto` (`ItemId`, `PlaybackPositionTicks`, `Played`, …) | The DTO's *shape* is documented; that this message carries it is inferred |
+| `LibraryChanged.Data`'s five arrays hold **ids** rather than item objects | `LibraryUpdateInfo` declares `List<string>`; no capture confirms it, and `LibraryChanged` was never observed arriving at all |
+| `Sessions.Data` is a list of session DTOs | Same |
+| `Key` equals the item id | A field the mapper never reads, filled in for shape only |
+
+**The ids here are short numeric strings, and the item fixtures beside them
+use 32-hex GUIDs.** That is deliberate and it is the *push* files that are
+right: `src/usher/adapters/emby/mapping.py`'s module docstring records, from
+the 2026-07-31 live diff, that "this server's item ids are short numeric
+strings rather than 32-hex GUIDs" — the older fixtures get that wrong in a
+way nothing depends on, and a new file had no reason to inherit it. They are
+still inside the reserved band (≥ 90,000,000), so
+`tests/unit/test_no_third_party_data.py` covers them as it covers every
+other id here.
+
+**The one thing that is verified live is the subscription frame**,
+`{"MessageType":"SessionsStart","Data":"0,1000"}`, which ADR-0004's
+end-to-end session sent before anything started arriving. It lives in
+`usher.adapters.emby.push.SUBSCRIBE_FRAME`, not here.
+
+`PlayCount` and `LastPlayedDate` appear on `push_user_data_changed.json`
+**and the adapter deliberately ignores both**
+([ADR-0014](../../../docs/prd/decisions/0014-absence-is-not-zero.md): a
+`UserDataChanged` entry is a third payload shape and no run here has parsed
+one), so their presence is a record of what the DTO is documented to carry
+rather than a claim about what this server sends. They are in the fixture
+precisely so that a mapper which started reading them fails a test.
+
+Capturing real messages and diffing their shape against these three is a
+named step of M5's live verification.
 
 ## Regenerating
 

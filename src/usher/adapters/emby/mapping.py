@@ -81,7 +81,7 @@ a real multi-version payload.
 """
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -492,3 +492,69 @@ def to_watch_state(
         last_played_at=last_played_at,
         source_user_id=source_user_id,
     )
+
+
+def user_data_states(
+    entries: Sequence[Any], *, source_user_id: str | None
+) -> tuple[list[str], list[SourceWatchState]]:
+    """A `UserDataChanged` message's `UserDataList` into ids and states.
+
+    Returns both, because they are not the same list: an entry with no
+    `ItemId` cannot be keyed and is dropped from *both*, while an entry that
+    keys but whose fields are unreadable still names an item the caller must
+    resolve some other way. `SourceEvent` documents that asymmetry as the
+    reason it does not align the two by position, and refuses at
+    construction any pair that disagrees -- which is why both are built from
+    one pass over one list here rather than by two comprehensions that could
+    drift apart.
+
+    **`play_count` and `last_played_at` are always `None`, and that is
+    ADR-0014 rather than an omission.** A `UserDataChanged` entry is a third
+    payload shape -- a listing is one, a single-item route is another -- and
+    no run in this repository has ever parsed a real one. The rule is that a
+    reported number must be true, never that it be present, so the honest
+    report of a field nobody has measured is absence. `WatchStateSyncService`
+    then enqueues a `watch_history` job for every played item whose count it
+    could not determine, at background priority, and that job asks the route
+    the live run *did* measure.
+
+    Position is derived from `PlaybackPositionTicks` exactly as
+    `to_watch_state` does. `Played` defaults to `False` when absent for the
+    same reason it does there: an absent flag is not a claim that something
+    was watched.
+    """
+    ids: list[str] = []
+    states: list[SourceWatchState] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        external_id = as_text(entry.get("ItemId"))
+        if external_id is None:
+            continue
+        ids.append(external_id)
+        ticks = as_int(entry.get("PlaybackPositionTicks")) or 0
+        states.append(
+            SourceWatchState(
+                external_id=external_id,
+                position_seconds=max(ticks, 0) // TICKS_PER_SECOND,
+                played=bool(entry.get("Played", False)),
+                play_count=None,
+                last_played_at=None,
+                source_user_id=source_user_id,
+            )
+        )
+    return ids, states
+
+
+def library_ids(raw: object) -> tuple[str, ...]:
+    """One `LibraryChanged` array into external ids.
+
+    Non-string and empty entries are dropped rather than raising: this
+    message arrives on a long-lived channel with no job behind it, so a
+    malformed entry that took the lane down would cost a reconnect and a
+    gap-closing delta walk, where dropping it costs one id the nightly
+    reconcile picks up anyway.
+    """
+    if not isinstance(raw, list):
+        return ()
+    return tuple(text for value in raw if (text := as_text(value)) is not None)

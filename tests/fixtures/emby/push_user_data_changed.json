@@ -1,0 +1,27 @@
+{
+  "MessageId": "00000000000000000000000000009001",
+  "MessageType": "UserDataChanged",
+  "Data": {
+    "UserId": "0000000000000000000000000000c0de",
+    "UserDataList": [
+      {
+        "Key": "90000100",
+        "ItemId": "90000100",
+        "PlaybackPositionTicks": 18400000000,
+        "PlayCount": 3,
+        "IsFavorite": false,
+        "Played": false,
+        "LastPlayedDate": "2026-08-01T09:14:02.0000000Z",
+        "UnplayedItemCount": 0
+      },
+      {
+        "Key": "90000101",
+        "ItemId": "90000101",
+        "PlaybackPositionTicks": 0,
+        "PlayCount": 1,
+        "IsFavorite": true,
+        "Played": true
+      }
+    ]
+  }
+}

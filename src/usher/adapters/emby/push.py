@@ -36,7 +36,12 @@ Three seams, each with a reason:
 
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
+
+from usher.adapters.emby.mapping import library_ids, user_data_states
+from usher.ports.source import SourceEvent, SourceEventKind
 
 
 @dataclass(slots=True)
@@ -175,3 +180,66 @@ class PushConnection(ABC):
 
 
 _clock = time.monotonic
+
+
+# Emby's `LibraryChanged` arrays, and the event each becomes. `ItemsRemoved`
+# is mapped and then deliberately does nothing downstream: ADR-0015 says
+# availability is retracted only by a walk that provably finished, and an
+# Emby library refresh emits `ItemsRemoved` for items that have not gone
+# anywhere. `PushApplyService` counts it and leaves the row available for the
+# nightly sweep -- PRD 08 prices that as "availability goes stale, not
+# wrong". The mapping exists so the *event* is expressible and countable
+# rather than being invisible in the message.
+_LIBRARY_ARRAYS: tuple[tuple[str, SourceEventKind], ...] = (
+    ("ItemsAdded", SourceEventKind.ITEM_ADDED),
+    ("ItemsUpdated", SourceEventKind.ITEM_UPDATED),
+    ("ItemsRemoved", SourceEventKind.ITEM_REMOVED),
+)
+
+
+def to_source_events(
+    message: Mapping[str, Any], *, source_user_id: str | None
+) -> tuple[SourceEvent, ...]:
+    """One decoded Emby message into zero or more `SourceEvent`s.
+
+    **Never raises**, and every branch that could is spelled as a drop.
+    There is no job behind this call and no caller that could park anything:
+    a raise here reaches `PushSupervisor`'s `UsherPortError` arm, which
+    reconnects and runs a gap-closing delta walk. Spending that on one
+    malformed frame is worse than dropping the frame, and the nightly
+    reconcile covers what a dropped frame would have carried.
+
+    **A message that maps to nothing is still a message.** `Sessions` -- the
+    periodic one ADR-0004 observed -- produces no event by design, because
+    deriving anything from it would mean tracking play sessions Usher never
+    starts. Its value is that it arrives, and the counting happens in
+    `EmbyPushChannel` on every frame, before this function is consulted. An
+    unknown `MessageType` behaves identically, so a future Emby build's new
+    message costs nothing rather than taking a lane down.
+    """
+    kind = message.get("MessageType")
+    data = message.get("Data")
+    if kind == "UserDataChanged":
+        entries = data.get("UserDataList") if isinstance(data, Mapping) else None
+        if not isinstance(entries, list):
+            return ()
+        ids, states = user_data_states(entries, source_user_id=source_user_id)
+        if not ids:
+            return ()
+        return (
+            SourceEvent(
+                kind=SourceEventKind.WATCH_STATE_CHANGED,
+                external_ids=tuple(ids),
+                watch_states=tuple(states),
+            ),
+        )
+    if kind == "LibraryChanged" and isinstance(data, Mapping):
+        # `named`, not `ids`: the `UserDataChanged` branch above binds `ids`
+        # to a `list[str]` in this same function scope, and a walrus reusing
+        # the name is a mypy-strict error rather than a shadow.
+        return tuple(
+            SourceEvent(kind=event_kind, external_ids=named)
+            for key, event_kind in _LIBRARY_ARRAYS
+            if (named := library_ids(data.get(key)))
+        )
+    return ()

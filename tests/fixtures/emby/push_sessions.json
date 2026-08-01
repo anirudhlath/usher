@@ -1,0 +1,14 @@
+{
+  "MessageId": "00000000000000000000000000009003",
+  "MessageType": "Sessions",
+  "Data": [
+    {
+      "Id": "00000000000000000000000000009100",
+      "UserId": "0000000000000000000000000000c0de",
+      "Client": "Usher",
+      "DeviceName": "Living Room Emby",
+      "SupportsRemoteControl": false,
+      "PlayState": {"CanSeek": false, "IsPaused": false, "IsMuted": false}
+    }
+  ]
+}
