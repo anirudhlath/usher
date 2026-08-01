@@ -9,6 +9,7 @@ endpoints a write-back uses and in which order, and how `verify` tells
 
 import asyncio
 import io
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -23,18 +24,21 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import SecretStr
 
+from tests.fakes.emby_fixtures import load_emby_fixture
 from tests.fakes.emby_server import SERVER_VERSION, USER_ID, FakeEmbyServer
+from tests.fakes.push_connection import FakePushConnection, FakePushConnector
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.adapter import MAX_PAGES, EmbyAdapter
+from usher.adapters.emby.push import SUBSCRIBE_FRAME
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable
 from usher.ports.source import (
+    SourceEventKind,
     SourceItem,
     SourceItemKind,
-    SourceNotSupported,
     SourceWatchState,
     WatchStateUpdate,
 )
@@ -42,6 +46,11 @@ from usher.ports.source import (
 T0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
 T1 = T0 + timedelta(days=1)
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
+# Every `async for` over a push channel is bounded, so an iterator that
+# stopped yielding instead of raising fails its own case rather than hanging
+# the suite -- `pytest-timeout` is deliberately not a dependency and the
+# bound belongs to the cases that need it.
+BOUND = 5.0
 SOURCE = Source(
     id=new_id(),
     kind=SourceKind.EMBY,
@@ -1233,17 +1242,361 @@ async def test_the_role_probe_reads_the_users_route_for_the_authenticated_user()
 # --- push, lifecycle, concurrency ------------------------------------
 
 
-async def test_push_is_not_supported_yet_and_says_so() -> None:
-    """PRD 03's documented fallback: an adapter with no socket reports
-    `supports_push = False` and the reconciler covers the gap. M5 builds
-    the socket; nothing here pretends to."""
+class _Now:
+    """A clock a test moves by hand.
+
+    Frozen by default: `supports_push`, `verify()` and the channel's own
+    staleness watchdog all read it, and a clock that advanced on its own
+    would make a case about the *ledger* fail for a reason about time.
+    """
+
+    def __init__(self, value: float = 0.0) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+
+def _push_adapter(
+    server: FakeEmbyServer,
+    connector: FakePushConnector,
+    *,
+    clock: Callable[[], float] | None = None,
+    stale_after: float = 90.0,
+) -> EmbyAdapter:
+    """The real adapter with a fake socket connector, and a real
+    `EmbyPushChannel` in between -- so the ledger, the subscribe frame and
+    the watchdog are all the shipped ones."""
+    return EmbyAdapter(
+        SOURCE,
+        CREDENTIALS,
+        client=httpx.AsyncClient(transport=server.transport(), base_url=SOURCE.base_url),
+        push_connect=connector,
+        push_stale_after_seconds=stale_after,
+        push_poll_seconds=0.001,
+        clock=clock or _Now(),
+    )
+
+
+async def test_supports_push_is_false_before_anything_is_opened() -> None:
+    """PRD 03's documented fallback, now reached through the ledger rather
+    than through a hardcoded `False`: an adapter with no live channel is
+    covered by the reconciler's nightly walk."""
     server = FakeEmbyServer()
-    adapter = _adapter(server)
+    adapter = _push_adapter(server, FakePushConnector())
     try:
         assert adapter.supports_push is False
-        with pytest.raises(SourceNotSupported):
-            async with adapter.events():
-                pass
+    finally:
+        await adapter.aclose()
+
+
+async def test_events_yields_what_arrives_and_flips_supports_push() -> None:
+    """**The milestone's central rule at the adapter boundary.**
+
+    The socket is open and the subscription is sent, and `supports_push` is
+    still `False` -- ADR-0004's control handshake against a nonexistent path
+    produced exactly this state, and PRD 03's reconciler skips a source that
+    answers `True` here.
+    """
+    server = FakeEmbyServer()
+    connection = FakePushConnection()
+    connection.deliver(json.dumps(load_emby_fixture("push_user_data_changed")))
+    adapter = _push_adapter(server, FakePushConnector([connection]))
+    try:
+        async with adapter.events() as events:
+            assert adapter.supports_push is False, (
+                "the socket is open and nothing has arrived; ADR-0004's control "
+                "handshake against a nonexistent path produced exactly this state"
+            )
+            assert connection.sent == [SUBSCRIBE_FRAME]
+            event = await asyncio.wait_for(anext(aiter(events)), timeout=BOUND)
+            assert event.kind is SourceEventKind.WATCH_STATE_CHANGED
+            assert adapter.supports_push is True
+    finally:
+        await adapter.aclose()
+
+
+async def test_supports_push_is_false_again_once_the_channel_closes() -> None:
+    """A message counted on a socket nobody is holding is not evidence about
+    a socket. `PushHealth.connected` is the clause that says so, and the
+    channel's own `finally` is what clears it."""
+    server = FakeEmbyServer()
+    connection = FakePushConnection()
+    connection.deliver(json.dumps(load_emby_fixture("push_sessions")))
+    adapter = _push_adapter(server, FakePushConnector([connection]))
+    try:
+        async with adapter.events() as events:
+            # `Sessions` maps to no event, so the iterator never yields --
+            # and the frame is still counted, which is the whole reason an
+            # idle library's channel reads as alive.
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(anext(aiter(events)), timeout=0.05)
+            assert adapter.supports_push is True
+        assert adapter.supports_push is False
+        assert adapter.push_health.messages_received == 1
+    finally:
+        await adapter.aclose()
+
+
+async def test_events_opens_a_fresh_connection_per_call_and_keeps_one_ledger() -> None:
+    """A channel is one connection, and `PushSupervisor` calls `events()`
+    once per reconnect -- so the connector must be asked again rather than a
+    live socket reused. The *ledger* is shared deliberately, which is what
+    makes `messages_received` and `reconnects` the lane's history rather
+    than one connection's.
+
+    Named for the connection rather than the channel on purpose: caching the
+    `EmbyPushChannel` object is measurably equivalent (it holds no
+    per-connection state; `open()` connects afresh either way), so a case
+    claiming to pin a fresh *channel* would be claiming something no
+    assertion here can see. See `EmbyAdapter.events`.
+    """
+    server = FakeEmbyServer()
+    first, second = FakePushConnection(), FakePushConnection()
+    first.deliver(json.dumps(load_emby_fixture("push_sessions")))
+    second.deliver(json.dumps(load_emby_fixture("push_sessions")))
+    connector = FakePushConnector([first, second])
+    adapter = _push_adapter(server, connector)
+    try:
+        for connection in (first, second):
+            async with adapter.events() as events:
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(anext(aiter(events)), timeout=0.05)
+            assert connection.closed is True
+        assert connector.attempts == 2
+        assert connector.handed_out == [first, second]
+        assert adapter.push_health.messages_received == 2
+    finally:
+        await adapter.aclose()
+
+
+async def test_verify_reports_push_as_not_probed_before_a_channel_has_opened() -> None:
+    """`False` is a claim and `None` is an absence, and a fresh adapter has
+    only the second to offer.
+
+    The obvious spelling -- `push_available=self._health.is_delivering(...)`
+    -- turns "nobody has looked" into "push is broken" on every status
+    screen for every source with no lane running, which is every source
+    until the composition root injects one.
+    """
+    server = FakeEmbyServer()
+    adapter = _push_adapter(server, FakePushConnector())
+    try:
+        assert (await adapter.verify()).push_available is None
+    finally:
+        await adapter.aclose()
+
+
+async def test_verify_reports_the_running_channels_health_and_opens_no_socket() -> None:
+    """`verify()` never opens a channel of its own -- a status screen a
+    dashboard polls must not cost a socket per poll against a server PRD 01
+    measures at 1-5 s per request. It reports the health of the channel that
+    is *actually running*."""
+    server = FakeEmbyServer()
+    connection = FakePushConnection()
+    connection.deliver(json.dumps(load_emby_fixture("push_sessions")))
+    connector = FakePushConnector([connection])
+    adapter = _push_adapter(server, connector)
+    try:
+        async with adapter.events() as events:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(anext(aiter(events)), timeout=0.05)
+            assert (await adapter.verify()).push_available is True
+            # One connection, and `verify()` is not the thing that made it.
+            assert connector.attempts == 1
+        assert (await adapter.verify()).push_available is False
+        assert connector.attempts == 1
+    finally:
+        await adapter.aclose()
+
+
+async def test_supports_push_decays_on_a_channel_that_stopped_delivering() -> None:
+    """The staleness clause read through `supports_push` itself, which is
+    what the reconciler and `PushSupervisor` call.
+
+    `verify()` reaches `is_delivering` by its own route, so a case that only
+    went through the status screen leaves this property untested -- measured:
+    dropping the staleness clause from `supports_push` survived every other
+    case here. A socket that delivered once and nothing since is not a push
+    channel, and `websockets`' own `ping_timeout` cannot tell: a peer that
+    answers pongs while delivering nothing passes the keepalive and fails
+    this.
+    """
+    server = FakeEmbyServer()
+    connection = FakePushConnection()
+    connection.deliver(json.dumps(load_emby_fixture("push_sessions")))
+    now = _Now()
+    adapter = _push_adapter(server, FakePushConnector([connection]), clock=now, stale_after=90.0)
+    try:
+        async with adapter.events() as events:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(anext(aiter(events)), timeout=0.05)
+            assert adapter.supports_push is True
+            now.value = 90.0
+            assert adapter.supports_push is True
+            now.value = 90.1
+            assert adapter.supports_push is False
+            assert adapter.push_health.connected is True, (
+                "the socket is still open and still counted -- staleness is the "
+                "only reason this reads False, which is the clause under test"
+            )
+    finally:
+        await adapter.aclose()
+
+
+async def test_verify_reports_a_stale_channel_as_unavailable() -> None:
+    """The staleness clause, read through `verify()` rather than through the
+    ledger: a socket that delivered once an hour ago and nothing since is
+    not a push channel a status screen may call available."""
+    server = FakeEmbyServer()
+    connection = FakePushConnection()
+    connection.deliver(json.dumps(load_emby_fixture("push_sessions")))
+    connector = FakePushConnector([connection])
+    now = _Now()
+    adapter = _push_adapter(server, connector, clock=now, stale_after=90.0)
+    try:
+        async with adapter.events() as events:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(anext(aiter(events)), timeout=0.05)
+            assert (await adapter.verify()).push_available is True
+            now.value = 91.0
+            assert (await adapter.verify()).push_available is False
+    finally:
+        await adapter.aclose()
+
+
+async def test_closing_the_adapter_closes_a_channel_that_is_still_open() -> None:
+    """`aclose()` resets the ledger, and the only state that can show it is
+    a channel that is **still open** -- a lane mid-`async for` when the
+    source is deleted.
+
+    The plan's version of this case closed the channel first and then called
+    `aclose()`, by which point `EmbyPushChannel.open`'s own `finally` has
+    already cleared `connected` -- so `supports_push` reads `False` with or
+    without `record_close()` and the mutation it names survives. Measured.
+    Without the reset here, a status screen reads `push_available: true` for
+    a source that was deleted thirty seconds ago.
+    """
+    server = FakeEmbyServer()
+    connection = FakePushConnection()
+    connection.deliver(json.dumps(load_emby_fixture("push_sessions")))
+    adapter = _push_adapter(server, FakePushConnector([connection]))
+    async with adapter.events() as events:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(anext(aiter(events)), timeout=0.05)
+        assert adapter.supports_push is True
+        await adapter.aclose()
+        assert adapter.supports_push is False
+    assert connection.closed is True
+
+
+async def test_events_after_close_raises_port_unavailable() -> None:
+    """`aclose`'s port contract: "afterwards every other method raises
+    `PortUnavailable` rather than whatever the underlying client happens to
+    raise". A closed adapter that handed out a channel would have that
+    channel authenticate against a closed `httpx.AsyncClient`, which raises
+    a bare `RuntimeError`."""
+    server = FakeEmbyServer()
+    adapter = _push_adapter(server, FakePushConnector())
+    await adapter.aclose()
+    with pytest.raises(PortUnavailable):
+        async with adapter.events():
+            pass
+
+
+async def test_probe_push_reports_what_arrived_not_that_it_connected() -> None:
+    """ADR-0004's caveat as an operator-facing answer. A probe that reported
+    the handshake would report success against a nonexistent path -- which
+    is the *measured* behaviour of this server, not a hypothetical."""
+    server = FakeEmbyServer()
+    silent = FakePushConnection()
+    talkative = FakePushConnection()
+    talkative.deliver(json.dumps(load_emby_fixture("push_library_changed")))
+    adapter = _push_adapter(server, FakePushConnector([silent, talkative]))
+    try:
+        probe = await adapter.probe_push(timeout_seconds=0.05)
+        assert probe.upgraded is True
+        assert probe.delivering is False
+        assert probe.events == ()
+        assert probe.detail is None
+
+        probe = await adapter.probe_push(timeout_seconds=0.05)
+        assert probe.upgraded is True
+        assert probe.delivering is True
+        # Arrival order, deduplicated -- `dict.fromkeys`, not a set, so an
+        # operator reads what the channel produced in the order it produced
+        # it.
+        assert probe.events == (
+            SourceEventKind.ITEM_ADDED,
+            SourceEventKind.ITEM_UPDATED,
+            SourceEventKind.ITEM_REMOVED,
+        )
+    finally:
+        await adapter.aclose()
+
+
+async def test_probe_push_counts_a_message_that_maps_to_no_event() -> None:
+    """`delivering=True` with `events=()` is the **common** case on an idle
+    library: Emby's periodic `Sessions` maps to nothing and is exactly what
+    keeps the channel measurably alive. A probe that reported delivery from
+    its own event list would call a healthy idle source dead."""
+    server = FakeEmbyServer()
+    connection = FakePushConnection()
+    connection.deliver(json.dumps(load_emby_fixture("push_sessions")))
+    adapter = _push_adapter(server, FakePushConnector([connection]))
+    try:
+        probe = await adapter.probe_push(timeout_seconds=0.05)
+        assert (probe.upgraded, probe.delivering, probe.events) == (True, True, ())
+    finally:
+        await adapter.aclose()
+
+
+async def test_probe_push_reports_a_failed_upgrade_rather_than_raising() -> None:
+    """Its callers are an operator's diagnostic and a status screen, and
+    both exist to render a failure rather than handle one -- the same reason
+    `verify()` returns a `SourceStatus` instead of raising."""
+    server = FakeEmbyServer()
+    connector = FakePushConnector()
+    connector.fail_next("no route to host")
+    adapter = _push_adapter(server, connector)
+    try:
+        probe = await adapter.probe_push(timeout_seconds=0.05)
+        assert probe.upgraded is False
+        assert probe.delivering is False
+        assert probe.detail is not None
+        assert "no route to host" in probe.detail
+        assert "session-token" not in probe.detail
+        assert "api_key" not in probe.detail
+    finally:
+        await adapter.aclose()
+
+
+async def test_probe_push_reports_a_channel_that_went_stale_as_upgraded() -> None:
+    """A channel that opened and then went silent past `stale_after` raises
+    `PortUnavailable` out of its own iterator, and that raise arrives at the
+    probe's `except UsherPortError` arm.
+
+    Reporting `upgraded=False` there would be the dishonesty this whole
+    milestone is about, pointing the other way: the handshake plainly
+    succeeded and the operator needs to know it did, because "the upgrade
+    failed" and "the upgrade worked and nothing came" are different
+    problems with different fixes.
+    """
+    server = FakeEmbyServer()
+    connection = FakePushConnection()
+    connection.stall()
+    # Open at 0, first watchdog tick at 100, ceiling 90.
+    ticks = iter([0.0, 100.0, 200.0])
+    adapter = _push_adapter(
+        server, FakePushConnector([connection]), clock=lambda: next(ticks), stale_after=90.0
+    )
+    try:
+        probe = await adapter.probe_push(timeout_seconds=BOUND)
+        assert probe.upgraded is True
+        assert probe.delivering is False
+        assert probe.detail is not None
+        assert "delivered no message" in probe.detail
+        assert "api_key" not in probe.detail
     finally:
         await adapter.aclose()
 

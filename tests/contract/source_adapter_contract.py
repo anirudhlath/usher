@@ -670,19 +670,40 @@ class SourceAdapterContract:
         status = await harness.adapter.verify()
         assert status.push_available is not True
 
-    async def test_events_is_offered_exactly_when_supports_push_says_so(
+    async def test_supports_push_never_claims_a_channel_events_would_refuse(
         self, harness: SourceHarness
     ) -> None:
         """An adapter that advertises push it does not have makes the
-        reconciler skip the only source it is cover for; one that has push
-        and denies it doubles the load on a slow upstream forever."""
+        reconciler skip the only source it is cover for.
+
+        **The implication is one-way, and this case used to assert it both
+        ways.** It read `assert offered is harness.adapter.supports_push`,
+        which is right for M3's world -- where every adapter either had a
+        channel and said so, or had none -- and is *wrong* once an adapter
+        grounds its answer in messages: one with a perfectly good channel
+        reports `supports_push =
+        False` from the moment it opens until the first message arrives on
+        it, because a socket that upgraded and delivers nothing is the
+        failure this milestone is built around. The old assertion forbids
+        exactly the honest implementation, and `EmbyAdapter` fails it the
+        day `events()` starts working.
+
+        So: `supports_push` may not be `True` for a channel `events()`
+        refuses, and an adapter with no channel may not report `True`.
+        Whether a *silent* channel reads `False` is a stronger claim and
+        belongs to the health cases rather than here.
+        """
         offered: bool
         try:
             async with harness.adapter.events():
                 offered = True
         except SourceNotSupported:
             offered = False
-        assert offered is harness.adapter.supports_push
+        if not offered:
+            assert harness.adapter.supports_push is False
+        # And the converse is deliberately not asserted: `offered` with
+        # `supports_push is False` is the normal state of a channel that has
+        # not yet delivered.
 
     # --- lifecycle -----------------------------------------------------
 

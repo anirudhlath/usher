@@ -31,6 +31,7 @@ from pydantic import AwareDatetime, SecretStr
 
 from tests.contract.source_harness import SourceHarness
 from tests.fakes.emby_server import FakeEmbyServer
+from tests.fakes.push_connection import FakePushConnector
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.domain.enums import SourceKind
@@ -55,6 +56,16 @@ class EmbyHarness(SourceHarness):
         )
         self._transport = SlowTransport(self._server.handle)
         self._client = httpx.AsyncClient(transport=self._transport, base_url=self._source.base_url)
+        # A fake connector, because from M5 `events()` really opens
+        # something. Without it the contract's push case resolves
+        # `emby.invalid` for real -- measured, it reached DNS and came back
+        # `gaierror` -- which is both a network call the suite forbids and a
+        # `PortUnavailable` where the case expected either a channel or
+        # `SourceNotSupported`. `FakePushConnector` with no queue mints a
+        # fresh `FakePushConnection` per call, which is the "upgraded and
+        # silent" state ADR-0004 measured and the one the contract's health
+        # cases care about.
+        self._push_connector = FakePushConnector()
         self._adapter = EmbyAdapter(
             self._source,
             SourceCredentials(
@@ -62,6 +73,8 @@ class EmbyHarness(SourceHarness):
             ),
             client=self._client,
             page_size=PAGE_SIZE,
+            push_connect=self._push_connector,
+            push_poll_seconds=0.001,
         )
 
     @property

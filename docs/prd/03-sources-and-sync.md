@@ -77,7 +77,18 @@ Verified against Emby 4.9.5.0 binaries (the version this deployment runs):
 |---|---|---|
 | `LibraryChanged` | Per-user, payload-filtered | Items added / updated / removed |
 | `UserDataChanged` | Own data only | Watch position, played flags |
-| `Sessions` (subscribe) | Per-user row-filtered | Playback events |
+| `Sessions` (subscribe) | Per-user row-filtered | **Nothing is derived from it. Its whole value is that it arrives.** |
+
+**That last row said "Playback events", and it read as though Usher derived
+something from them. It does not, and the correction matters.** `Sessions`
+carries playback state for sessions Usher is not part of; deriving anything
+from it would mean tracking play sessions Usher never starts. It maps to zero
+`SourceEvent`s by design, and it is counted anyway — before it is parsed —
+because a received frame is evidence the socket is alive whatever it says. On
+an idle library, which is most libraries most of the time, `Sessions` is the
+*only* thing keeping `push_available` true. Counting only mapped events would
+make a library nobody touched for a day read as a dead channel and reconnect it
+forever.
 
 **No admin privileges are required** — a normal user token works, and there is
 no role check in Emby's subscription path. (Note: guidance derived from Jellyfin
@@ -218,10 +229,33 @@ field, never a refusal, and `null` means the check did not run — see the
 paragraph above and
 [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md).
 
-`push_available` is deliberately three-valued, and `null` ("not probed") is what
-every adapter reports until M5. See the health-check caveat above: a handshake
-against a nonexistent path also upgrades, so an upgrade is not evidence and only
-received messages are.
+`push_available` is deliberately three-valued, and **M5 fills it from a message
+ledger rather than from a probe**. `verify()` opens no socket at all — a status
+screen a dashboard polls must not cost a socket per poll against a server
+measured at 1–5 s per request, and it would still be answering a question about
+a socket that is not the one doing the work. It reports `null` ("not probed")
+for an adapter that has never had a channel, and the live answer — a connection
+*and* at least one received message *and* a recent one — for the adapter a push
+lane is running. `GET /admin/sources/{id}/status` reads the lane's, injected by
+the composition root.
+
+The on-demand answer is `usher push --probe`, which opens a channel on purpose
+because an operator asked it to, and reports **what arrived** — the event kinds
+and whether the channel is delivering — rather than that the handshake
+succeeded. `SourceAdapter.probe_push` is a *concrete* method on the port whose
+body is calls to `events()` and `supports_push` and nothing else, so a second
+adapter inherits that rule instead of re-deriving it; re-deriving it wrongly is
+one line. See the health-check caveat above: a handshake against a nonexistent
+path also upgrades, so an upgrade is not evidence and only received messages
+are.
+
+**`supports_push` and `events()` are related one way only.** `supports_push` is
+a health signal grounded in messages; `SourceNotSupported` from `events()` is a
+capability answer. An adapter reporting `true` must offer a channel, and one
+with no channel must report `false` — but an adapter that *has* a channel
+reports `false` from the moment it opens until the first message arrives on it,
+which is the whole point. A contract asserting the two agree in both directions
+would forbid exactly the honest implementation.
 
 ## Reconciliation is not optional
 

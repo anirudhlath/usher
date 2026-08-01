@@ -20,6 +20,7 @@ from usher.domain.enums import HdrFormat
 from usher.ports.credentials import CredentialStore, SourceCredentials
 from usher.ports.source import (
     CANONICAL_PROVIDER_IDS,
+    PushProbe,
     SourceAdapter,
     SourceAdapterFactory,
     SourceEvent,
@@ -490,3 +491,51 @@ def test_get_watch_state_is_on_the_port() -> None:
     signature = inspect.signature(SourceAdapter.get_watch_state, eval_str=True)
     assert list(signature.parameters) == ["self", "external_id"]
     assert signature.return_annotation == SourceWatchState | None
+
+
+def test_probe_push_is_a_concrete_method_every_adapter_inherits() -> None:
+    """**The rule that must not be re-derived per adapter.**
+
+    `probe_push`'s body is calls to `events()` and `supports_push` and
+    nothing else, so an adapter gets "a probe reports what arrived, never
+    that it connected" for free -- and there is one place the deadline
+    lives rather than one per source kind. Re-deriving it wrongly is a
+    one-line mistake (`return PushProbe(upgraded=True, delivering=True)`)
+    that no test of that adapter's own would obviously catch, which is
+    exactly the shape of the ADR-0004 caveat this milestone exists for.
+    """
+    assert "probe_push" not in SourceAdapter.__abstractmethods__
+    assert "probe_push" in vars(SourceAdapter)
+
+
+async def test_an_adapter_with_no_push_channel_inherits_an_honest_probe() -> None:
+    """Inheritance demonstrated against a *second* implementation that
+    wrote nothing: `FakeSourceAdapter.events()` raises `SourceNotSupported`
+    and it has no probe of its own, and it still reports the right answer.
+
+    `SourceNotSupported` is a `UsherPortError`, so it lands on the same arm
+    a refused connection does -- which is correct: from an operator's side
+    "this adapter has no socket" and "this socket would not open" are both
+    "no channel", told apart by `detail`.
+    """
+    from tests.fakes.source_adapter import FakeSourceHarness
+
+    harness = FakeSourceHarness()
+    probe = await harness.adapter.probe_push(timeout_seconds=0.01)
+    assert probe.upgraded is False
+    assert probe.delivering is False
+    assert probe.events == ()
+    assert probe.detail is not None
+
+
+def test_a_push_probe_defaults_to_having_learned_nothing() -> None:
+    """`events` and `detail` default to "nothing arrived" and "nothing to
+    say" rather than to a claim, for the reason `SourceStatus.push_available`
+    defaults to `None`: an unperformed probe must not render as a performed
+    one."""
+    probe = PushProbe(upgraded=True, delivering=False)
+    assert probe.events == ()
+    assert probe.detail is None
+    assert dataclasses.is_dataclass(probe)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        probe.delivering = True  # type: ignore[misc]
