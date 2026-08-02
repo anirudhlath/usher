@@ -2126,9 +2126,27 @@ tests). Full suite with coverage, exactly as CI runs it: `uv run pytest
 --cov=usher --cov-report=term-missing` → 237 passed, 98% coverage.
 
 CI (`.github/workflows/ci.yml`) pins `actions/checkout@v7` and
-`astral-sh/setup-uv@v9` — the plan's `@v4`/`@v5` were several majors
+`astral-sh/setup-uv@v9.0.0` — the plan's `@v4`/`@v5` were several majors
 stale by the time this ran (checked against each action's own GitHub
-releases). A new `.python-version` file (`3.13`) at the repo root exists
+releases).
+
+**`@v9` was wrong and the first real CI run is what said so.** Checking an
+action's *releases* answers whether a version exists, not whether the
+**floating major tag** does, and those are different objects:
+`astral-sh/setup-uv` publishes `v9.0.0` as a release but its moving major
+tags stop at `v7` (`v1`…`v7` exist; `v8` and `v9` do not). So `@v9`
+resolved to nothing and the job failed in 2 s at *Set up job* —
+`Unable to resolve action astral-sh/setup-uv@v9, unable to find version v9`
+— before `checkout` ran, before `uv` existed, and before one line of this
+project's code was executed. Every `run:` step below had been verified
+locally, which is exactly the half that failure is blind to. Verify a
+floating tag with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`, not
+against the releases page; an exact release tag needs no such check and is
+the stronger pin anyway. Found 2026-08-02, on the first push to a real
+GitHub remote — which is to say the workflow was unexecuted for five
+milestones and the note below saying so was the accurate part.
+
+A new `.python-version` file (`3.13`) at the repo root exists
 because of a real gap found by running the install step, not by
 inspection: `pyproject.toml`'s `requires-python = ">=3.13"` has no upper
 bound, and a bare `uv sync --frozen` on a machine with no Python

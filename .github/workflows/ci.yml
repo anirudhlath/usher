@@ -18,7 +18,7 @@ jobs:
       # not the 3.13.14 every group so far has actually developed and
       # verified against). enable-cache keys off pyproject.toml/uv.lock by
       # default -- no cache-dependency-glob override needed for this repo.
-      - uses: astral-sh/setup-uv@v9
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
 
