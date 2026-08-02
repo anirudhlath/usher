@@ -873,15 +873,19 @@ Both mutations survived the whole suite until the direct case existed.
 **No test in this repository makes a network request, and that is measured
 rather than asserted.** Verified 2026-07-31, **re-verified 2026-08-01 after
 the live TMDb run**, **again after the fixture scrub and the CLI/deps
-changes**, and **again after M5 group E added an SSE route and a streaming
-ASGI transport**, by running the whole suite under a
+changes**, **again after M5 group E added an SSE route and a streaming
+ASGI transport**, and **again after group F added `GET /titles/{id}`**, by
+running the whole suite under a
 `sitecustomize.py` that patches `socket.socket.connect`, `connect_ex` and
 `socket.getaddrinfo` to raise on anything that is not loopback (`AF_UNIX` is
 left alone, so Docker's socket still works and `testcontainers` still reaches
 `127.0.0.1`). **1,549 unit + 429 integration passed (2 unit cases skipped), zero blocks**, with
 `[netguard] installed` printed by the module itself in the same run and
 `socket.getaddrinfo("api.themoviedb.org", 443)` raising
-`RuntimeError: NETWORK BLOCKED` in the same environment. The
+`RuntimeError: NETWORK BLOCKED` in the same environment. Group F's re-run:
+**1,586 unit + 442 integration passed (2 unit cases skipped), zero blocks**,
+`[netguard] installed` on stderr, and the same `getaddrinfo` probe raising in
+the same `uv run` environment. The
 guard lives outside the tree — it is a check to re-run, not a dependency to
 add, because `PYTHONPATH`-injecting a socket monkeypatch into every developer's
 suite costs more than it catches.
@@ -1319,6 +1323,75 @@ a queue depth of 2 where 0 was expected, a claim that found 3 jobs instead
 of 1, and a global `count_by_state`), each of which passed in isolation.
 `media_items` and `sync_runs` go with the source's `ON DELETE CASCADE`;
 `titles` and `jobs` do not.
+
+**A read on `media_items.title_id` alone is a read of the whole show, and
+`AND episode_id IS NULL` is the whole of the bound.** `IngestService` writes
+an episode's row with its series' `title_id` **and** its own `episode_id`,
+deliberately — a client browsing a season wants both — so
+`WHERE title_id = :id` answers a *series* with one row per episode file, and
+999,827 of the one measured source's 1,126,789 items are episodes. Measured
+2026-08-01 on the statement `PostgresMediaItemRepository.list_for_title`
+actually issues (captured off `before_cursor_execute`, then `EXPLAIN
+(ANALYZE, BUFFERS)`'d verbatim; 80,201 `media_items` rows, one 20,000-episode
+series): **1 row, 0.251 ms, 21 buffers** with the clause — `Sort ← Bitmap
+Heap Scan ← BitmapAnd(ix_media_items_episode_id, ix_media_items_title_id)` —
+against **20,001 rows, 22.901 ms, 402 buffers, 3.4 MB of sort memory**
+without it. The wrong half is linear in the episode count and the right half
+is flat, which is the difference between a response shape and a design
+defect. `resolve_external_ids`' title branch carries the identical clause for
+the identical reason. `ix_media_items_episode_id` earns its keep twice: M4
+added it for the FK's `SET NULL` scan, and the planner reads `IS NULL`
+straight out of it.
+
+**A trailing `UPDATE` only separates heap order from id order if it is
+*non-HOT*.** The idiom for making a missing `ORDER BY` tiebreak observable —
+re-write a row so physical order and the answer disagree — silently does not
+work when the update touches no indexed column: Postgres performs a
+heap-only-tuple update, the existing index entry keeps pointing at the
+original TID, and an `Index Scan` still arrives in the original order.
+Measured on `media_items`: re-upserting a row unchanged left `ORDER BY
+available DESC, last_seen_at DESC` (no `id`) answering `[a, b, c]` — already
+sorted, already passing. Moving `last_seen_at`, which is in
+`ix_media_items_sweep`, forces a new index entry and the same read answers
+`[b, c, a]`. Every id here is a UUIDv7 minted at insert time, so a run of
+plain inserts has id order and storage order as one sequence and no seeding
+separates them.
+
+**`FakeJobQueue.enqueue` counts a no-op re-enqueue as a row written, and
+Postgres answers 0.** The fake takes its update branch and increments
+whatever it changed; `_ENQUEUE`'s `AND jobs.priority < excluded.priority`
+matches nothing for work already at that priority. So anything whose
+behaviour turns on the *count* rather than on the stored row is untestable
+against the fake: `TitleReadService._promote` returns whether an enqueue was
+*attempted*, and the version that returned "a row changed" passes all 18
+cases in `tests/unit/test_services_titles.py` and then reports
+`promoted = False` for every second open of the same stub — telling a client
+that an already-promoted title declined to be promoted. Killed only by
+`tests/integration/test_services_titles.py`. Recorded as the fake's seventh
+divergence rather than fixed, because a fake that modelled the whole
+promotion predicate would be a second implementation rather than a stand-in.
+
+**`TitleReadService` holds no `SourceAdapter`, and that is asserted on its
+imports rather than on its behaviour.** PRD 08's "a degraded subsystem
+narrows functionality; it never fails a request local state can answer" is
+only a property of the code if the failing call is *absent* rather than
+caught — "it did not raise" is also what a service that swallowed everything
+would produce. Two things the obvious check misses, both measured: a
+signature check spelled `parameter.annotation in (SourceAdapter, ...)` (or
+via `annotation.__name__`) does not see a **string** annotation, which is the
+one form needing no import at all; and an `ast.ImportFrom`-only scan does not
+see `import usher.ports.source`. Read the annotation as text and walk both
+node types. This is what makes M5's deferral of PRD 07's RFC 9457 envelope a
+structural claim: with no adapter reachable there is no 503 to give a `code`
+to, and the first route whose honest answer is "the source is down and I
+cannot serve this from local state" is M9's `POST /titles/{id}/play`.
+
+**A `GET /titles/{id}` leak check may not forbid the word "emby".** The
+availability badge carries the name an *operator* typed, and "Living Room
+Emby" is a correct value for it — PRD 07's own example spells it that way. A
+rule that forbids the substring forbids the feature. What must not escape is
+the source's own **item id**, so the assertion is against a distinctive
+`external_id` and against the key `external_id`, not against a vendor name.
 
 ## Commands
 
