@@ -388,6 +388,48 @@ def _push_observations(select: Callable[[PushSnapshot], int]) -> Iterable[Observ
     ]
 
 
+SseReader = Callable[[], int]
+
+# Module global, replaced rather than captured, for the reason `_queue_reader`
+# and `_push_reader` above both state: the SDK keeps only the *first*
+# observable instrument registered under a name and silently discards the
+# rest, so a second `create_app()` in one process would otherwise leave the
+# first, now-dead reader reporting forever.
+_sse_reader: SseReader | None = None
+
+
+def register_sse_gauge(read: SseReader) -> None:
+    """PRD 10's `usher.sse.connections`.
+
+    **The one observable callback in this project that really is a live
+    read.** `register_queue_gauges` explains at length why the queue's
+    equivalent cannot be -- OTel invokes the callback from the metric
+    reader's background thread and every database call here is a coroutine on
+    asyncpg -- and none of that applies to `len()` on an in-memory set. So
+    this reader is the bus itself, not a snapshot somebody remembered to
+    refresh.
+    """
+    global _sse_reader
+    _sse_reader = read
+    metrics.get_meter("usher.api").create_observable_gauge(
+        "usher.sse.connections",
+        callbacks=[_observe_sse_connections],
+        unit="1",
+        description="Open SSE client connections",
+    )
+
+
+def _observe_sse_connections(options: CallbackOptions) -> Iterable[Observation]:
+    """No reader means no observation, never a zero.
+
+    Same argument `_push_observations` makes: a fabricated zero is
+    indistinguishable from a real one, and a process that reported 0 open
+    connections from start-up until the first `create_app` finished would be
+    reporting a fact it does not have.
+    """
+    return [] if _sse_reader is None else [Observation(_sse_reader())]
+
+
 def configure_telemetry(settings: Settings) -> None:
     configure_logging(settings)
     configure_tracing(settings)

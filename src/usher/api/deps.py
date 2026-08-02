@@ -26,6 +26,7 @@ from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunR
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
+from usher.ports.events import EventPublisher
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import (
     EpisodeRepository,
@@ -37,6 +38,7 @@ from usher.ports.repository import (
     WatchStateRepository,
 )
 from usher.ports.source import SourceAdapterFactory
+from usher.services.events import InMemoryEventBus
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
@@ -72,6 +74,47 @@ def get_app_settings(request: Request) -> Settings:
 
 
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+
+
+def get_event_bus(request: Request) -> InMemoryEventBus:
+    """The process-wide client event bus, built by `create_app`'s lifespan.
+
+    On `app.state` rather than request-scoped for the reason `EnrichService`
+    is absent from this module: a per-request bus would give every SSE
+    connection its own, and a publisher would fan out to nobody. Same
+    defensive `getattr`/`cast` shape as `get_session_factory` below, and for
+    the same reason -- `app.state` is typed `Any`.
+
+    Typed as the concrete bus rather than as `EventPublisher` because
+    `GET /events` needs `subscribe`, which is deliberately not on the port
+    (a `LISTEN/NOTIFY` implementation subscribes on a dedicated connection
+    whose lifecycle has nothing in common with an in-memory queue's). Use
+    `get_event_publisher` anywhere that only publishes, so nothing but this
+    one function depends on the wider surface.
+    """
+    bus = getattr(request.app.state, "events", None)
+    if bus is None:
+        raise RuntimeError(
+            "app.state.events is not set -- create_app's lifespan has not run. "
+            "If this is a test using a bare ASGI transport, wrap the app in "
+            "asgi_lifespan.LifespanManager first."
+        )
+    return cast(InMemoryEventBus, bus)
+
+
+EventBusDep = Annotated[InMemoryEventBus, Depends(get_event_bus)]
+
+
+def get_event_publisher(bus: EventBusDep) -> EventPublisher:
+    """The same object, as the port.
+
+    Routes and services that only publish take this, so nothing outside
+    `get_event_bus` depends on the bus offering `subscribe`.
+    """
+    return bus
+
+
+EventPublisherDep = Annotated[EventPublisher, Depends(get_event_publisher)]
 
 
 def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:

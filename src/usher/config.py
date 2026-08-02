@@ -122,6 +122,22 @@ class Settings(BaseSettings):
     # retry storm into the rate limit it is meant to avoid.
     enrich_cache_max_age_days: int = Field(default=30, ge=1, le=180)
 
+    # The client event channel (PRD 07's SSE surface). Same reasoning as
+    # every block above: PRD 08's TOML config layer does not exist yet.
+    # Deliberately named `sse_*` rather than `events_*` -- the knob is about
+    # the wire protocol's own idle behaviour, not about the bus.
+    #
+    # A comment line every this many seconds on an otherwise idle stream.
+    # nginx closes an idle connection at 60 s and Cloudflare at ~100 s
+    # (ADR-0004's operational facts, which are about an idle HTTP connection
+    # and apply to a long-lived response exactly as they apply to a
+    # WebSocket), so `lt=60` is a compliance bound expressed as a type. Read
+    # by `usher.api.routers.events`; the bus's own `sse_buffer_size` /
+    # `sse_queue_size` arrive with the composition root that constructs it,
+    # because a setting nothing reads is one that validates and then
+    # influences nothing.
+    sse_heartbeat_seconds: float = Field(default=20.0, gt=0, lt=60.0)
+
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
 

@@ -8,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from usher.api.errors import validation_error_without_the_request_body
-from usher.api.routers import health, sources
+from usher.api.routers import events, health, sources
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.telemetry import configure_telemetry
@@ -62,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # preference, and it is registered here so it covers every route rather
     # than only the one that made it necessary.
     app.add_exception_handler(RequestValidationError, validation_error_without_the_request_body)
+    app.include_router(events.router)
     app.include_router(health.router)
     app.include_router(sources.router)
     return app

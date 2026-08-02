@@ -184,13 +184,13 @@ subsystem narrows functionality, it never fails a request local state can answer
 
 `GET /events` — the channel that makes read-through visible to clients.
 
-| Event | Payload | Client action |
-|---|---|---|
-| `title.updated` | Title id + changed fields | Patch in place |
-| `watchstate.updated` | Title/episode id, position, played | Update progress |
-| `row.invalidated` | Row slug | Refetch that row |
-| `sync.progress` | Source, counts, phase | Admin UI only |
-| `bootstrap.progress` | Phase, percent | Admin UI only |
+| Event | Payload | Client action | |
+|---|---|---|---|
+| `title.updated` | Title id + changed fields | Patch in place | M5 — see below |
+| `watchstate.updated` | Title/episode id, position, played | Update progress | M5 — see below |
+| `row.invalidated` | Row slug | Refetch that row | M7 |
+| `sync.progress` | Source, counts, phase | Admin UI only | M5 — see below |
+| `bootstrap.progress` | Phase, percent | Admin UI only | — |
 
 - Subscriptions are scoped by query (`?titles=id1,id2`) so a detail screen isn't
   woken by unrelated churn.
@@ -201,6 +201,68 @@ subsystem narrows functionality, it never fails a request local state can answer
 
 SSE over WebSocket because the channel is server→client only, it survives
 proxies that mangle upgrades, and it reconnects natively in browsers.
+
+> **Settled in M5.** The route, the wire format, the bus and the three
+> publishers all ship, each pinned by tests. The three rows above are marked
+> "see below" rather than ✅ for one reason: nothing in a running process
+> builds the bus or registers a subscriber until `create_app`'s lifespan
+> grows its lanes, so no deployment emits any of them today. Tick them in the
+> change that starts the lanes.
+>
+> **`resync_required` is a fifth event and the channel's own.** It answers a
+> subscriber whose buffer overflowed, a `Last-Event-ID` older than the replay
+> ring, and one minted by a previous process — the ring is in-memory, so ids
+> restart with it, and the id a client sees is `<epoch>-<n>` for exactly that
+> reason. Without the epoch the third is undetectable: a bus whose ids
+> restarted at 1 would replay "everything after 40" to a client that saw
+> forty events of a *different* sequence, which is a plausible-looking stream
+> that is silently wrong.
+>
+> **A stream's failure vocabulary is not the RFC 9457 envelope above, and
+> does not force it.** RFC 9457 formats a response *body*; once `GET /events`
+> has answered `200 text/event-stream` there is no status code left, and
+> every later failure is an event or a closed connection. So the four event
+> names plus `resync_required` are pinned as a `StrEnum` in
+> `api/dto/events.py` — versioned independently of the internal vocabulary,
+> with no member nothing emits — and that enum is the SSE analogue of the
+> envelope rather than a substitute for it. The failure that *would* force
+> the envelope is a 503 the client asked for and Usher genuinely cannot
+> serve; neither M5 route can produce one, because neither touches a
+> `SourceAdapter`. `POST /titles/{id}/play` is the named trigger, in M9.
+>
+> **The one ordinary HTTP failure**, `GET /events?titles=not-a-uuid`, is
+> `422 {"detail": "titles must be a comma-separated list of uuids"}` — M3's
+> shipped shape, naming the rule and never the submitted value. A malformed
+> id is rejected rather than dropped: a filter built from the half that
+> parsed is *narrower* than the client asked for, so a detail screen would
+> silently never update.
+>
+> **A heartbeat comment (`: keepalive`) is sent first and every
+> `USHER_SSE_HEARTBEAT_SECONDS` after**, default 20 s, bounded `< 60` by the
+> type. nginx closes an idle connection at 60 s and Cloudflare at ~100 s
+> ([ADR-0004](decisions/0004-push-over-polling.md)'s operational facts, which
+> are about an idle HTTP connection and apply to a long-lived response
+> unchanged), and an SSE stream on a library nobody touched sends nothing for
+> hours. The response also carries `Cache-Control: no-cache` and
+> `X-Accel-Buffering: no` — the second is nginx's own opt-out from buffering
+> a proxied body, which would otherwise hold every event until a buffer
+> filled.
+>
+> **`bootstrap.progress` is not emitted**, and the reason is structural
+> rather than an omission: `usher bootstrap` is a separate process and M5's
+> bus is in-process, so there is no channel from one to the other. Emitting a
+> type nothing publishes would be a client handler that waits forever — the
+> same argument [10](10-telemetry-and-dashboards.md) makes for a metric
+> nothing records. A cross-process transport is the named second
+> implementation of the `EventPublisher` port and is what would make it
+> emittable.
+>
+> **The nightly watch-state walk publishes nothing**, deliberately, and it is
+> a scale decision rather than an omission: a walk merges up to 1,126,789
+> states, and one `watchstate.updated` per merged row is a fan-out per row
+> per night to every connected client — every one of them the source echoing
+> back state that has not changed since the last walk. The push lane
+> publishes because a push event *is* a change.
 
 ## Images
 

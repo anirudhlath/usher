@@ -13,8 +13,9 @@ subscribers, and a suite it "passed" by having nothing to check would ratify
 a bus that never delivered.
 
 **Neither class asserts that `publish` never *suspends*.** It is async
-because a transport can be, and the named second implementation (a Postgres
-`LISTEN/NOTIFY` bus, ADR-0019's seam) genuinely would await a connection.
+because a transport can be, and the named second implementation -- a Postgres
+`LISTEN/NOTIFY` bus, for a deployment that splits the worker from the server
+-- genuinely would await a connection.
 What every implementation owes is that a subscriber which stopped reading
 cannot slow, block or fail the publisher -- which is a statement about the
 *subscriber*, not about the transport. `tests/unit/test_services_events.py`

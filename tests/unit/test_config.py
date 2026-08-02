@@ -293,3 +293,22 @@ def test_the_enrichment_cache_window_stays_inside_tmdbs_term(
         monkeypatch.setenv("USHER_ENRICH_CACHE_MAX_AGE_DAYS", bad)
         with pytest.raises(ValidationError):
             Settings()
+
+
+def test_the_sse_heartbeat_is_under_every_proxy_idle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nginx closes an idle connection at 60 s and Cloudflare at ~100 s
+    (ADR-0004's operational facts, which apply to a long-lived HTTP response
+    exactly as they apply to a WebSocket). A default at or above 60 would
+    make an idle SSE stream drop on every proxied deployment, so `lt=60` is
+    a compliance bound expressed as a type rather than a tuning range -- and
+    zero is not "no heartbeat", it is a comment line per event-loop turn."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    assert Settings().sse_heartbeat_seconds == 20.0
+    assert Settings().sse_heartbeat_seconds < 60.0
+    for bad in ("0", "60", "90"):
+        monkeypatch.setenv("USHER_SSE_HEARTBEAT_SECONDS", bad)
+        with pytest.raises(ValidationError):
+            Settings()

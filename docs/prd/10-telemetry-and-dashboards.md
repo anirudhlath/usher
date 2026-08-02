@@ -107,7 +107,7 @@ is maintained rather than aspirational.
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
 | `usher.embedding.duration` | histogram | — | M6 |
 | `usher.cache.hits` / `.misses` | counter | cache | M9 |
-| `usher.sse.connections` | gauge | — | M5 |
+| `usher.sse.connections` | gauge | — | M5 — see below |
 | `usher.bootstrap.rows` | counter | dataset | ✅ M2 |
 | `usher.bootstrap.batch.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.phase.duration` | histogram | dataset | ✅ M2 |
@@ -136,14 +136,14 @@ can only answer the question it actually has:
 
 Four more M5 made, in the same spirit — and one honest caveat first.
 
-**The three push rows are not ticked, and the instruments exist.** The
-gauges, the counter and their reader hook all ship, each pinned by a test
-that drives the emitting code and reads the value back out of an in-memory
-metric reader. What does not exist yet is the *lane*: nothing in a running
-process registers a push reader or applies a push event until `create_app`
-grows its supervised lanes, so no deployment emits these today and a ✅ would
-be the exact claim this column's rule forbids. Tick all three in the change
-that starts the lanes.
+**The four M5 rows are not ticked, and the instruments exist.** The gauges,
+the counters and their reader hooks all ship, each pinned by a test that
+drives the emitting code and reads the value back out of an in-memory metric
+reader. What does not exist yet is the *caller*: nothing in a running process
+registers a push reader, applies a push event, or builds the SSE bus until
+`create_app` grows its supervised lanes, so no deployment emits these today
+and a ✅ would be the exact claim this column's rule forbids. Tick all four in
+the change that starts the lanes.
 
 - **`usher.source.push.connected` reports *delivery*, not connection.** A
   gauge fed by the socket's state would read 1 for the failure
@@ -172,6 +172,16 @@ that starts the lanes.
   event answered with a delta walk is still counted — a series that dropped
   those would read as a quiet source during exactly the library scan that
   produced them.
+- **`usher.sse.connections` is the one observable callback in this project
+  that really is a live read.** The rule stated above for
+  `usher.jobs.queued` -- an observable callback runs on the metric reader's
+  background thread and every database call here is a coroutine on asyncpg,
+  so the reader must be a *snapshot* -- turns entirely on there being a
+  query. There is none: this is `len()` on an in-memory set of subscribers,
+  so the registered reader is the bus itself and the value can never be
+  stale. A process with no bus reports *no observation* rather than a zero,
+  for the reason the push gauges do: a fabricated zero is a claim the process
+  does not have.
 - **Queue depth by priority (dashboard 3) is a Postgres query, not a
   metric.** M4 recorded that `usher.jobs.queued` is labelled `kind` and that
   "M5 introduces demand promotion and is where the band becomes a real
