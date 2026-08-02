@@ -1,8 +1,16 @@
-"""The CLI's argument surface and its default. No database, no network."""
+"""The CLI's argument surface and its default. No database, no network.
+
+Plus one case that is not about arguments: `usher push` with no `--probe`
+is a composition root nothing else calls, and wiring nothing calls is
+wiring nothing checks.
+"""
+
+import asyncio
 
 import pytest
 
-from usher.cli import PHASES, SYNC_KINDS, build_parser, parse_args
+from usher.cli import PHASES, SYNC_KINDS, _run_lanes, build_parser, parse_args
+from usher.config import Settings
 
 
 def test_no_arguments_still_means_serve() -> None:
@@ -129,3 +137,46 @@ def test_push_is_not_the_default_command() -> None:
     all", which made `usher sync-status` silently start the server."""
     assert build_parser().parse_args([]).command is None
     assert build_parser().parse_args(["push"]).command == "push"
+
+
+async def test_running_the_lanes_in_the_foreground_stops_them_on_the_way_out() -> None:
+    """`usher push` with no `--probe` is a daemon, so the two things a test
+    can assert about it are that it *stays up* and that it *lets go*:
+    Ctrl-C reaches `asyncio.run`, which cancels the task, and the `finally`
+    has to stop the lanes, close the TMDb client and dispose the engine on
+    the way out.
+
+    Both lanes **on**, against a database that is not there. `start()`
+    creates tasks and opens no connection, so this costs nothing and it is
+    the only arrangement in which "stopped them" is observable: with the
+    lanes off there is nothing to leave running, and the cleanup mutation
+    survives. Asserted on the loop's own task set rather than on the
+    supervisor, which `_run_lanes` deliberately does not expose.
+
+    Without this case `_run_lanes` is a composition root nothing calls,
+    which is what `tests/integration/test_pipeline_deps.py` exists to stop
+    happening to the other one.
+    """
+    settings = Settings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
+        secret_key="0" * 32,
+        push_enabled=True,
+        worker_enabled=True,
+    )
+    task = asyncio.create_task(_run_lanes(settings))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not task.done(), "usher push returned instead of staying up"
+    assert _lane_tasks(), "usher push started no lanes at all"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _lane_tasks() == [], "usher push left its lanes running"
+
+
+def _lane_tasks() -> list[str]:
+    return sorted(
+        name
+        for task in asyncio.all_tasks()
+        if (name := task.get_name()).startswith("usher.lane.") and not task.done()
+    )
