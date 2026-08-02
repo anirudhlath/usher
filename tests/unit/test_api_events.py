@@ -156,12 +156,56 @@ async def test_a_partly_malformed_titles_filter_is_also_a_422(
     assert response.status_code == 422
 
 
+async def test_a_stream_that_has_heartbeat_still_delivers_events(
+    client: httpx.AsyncClient, bus: InMemoryEventBus
+) -> None:
+    """**The heartbeat must not kill the subscription it is keeping alive.**
+
+    `asyncio.wait_for(anext(iterator), timeout)` cancels the `__anext__` it
+    is waiting on, and cancelling `__anext__` **closes the async generator**
+    -- so the *next* `anext` raises `StopAsyncIteration` and this route
+    returns. Six lines with no Usher code in them reproduce it:
+
+        it = aiter(gen())
+        await asyncio.wait_for(anext(it), 0.05)   # TimeoutError
+        await asyncio.wait_for(anext(it), 0.05)   # StopAsyncIteration
+
+    The consequence in production is that every SSE client is disconnected
+    one `sse_heartbeat_seconds` (20 s by default) after the last event it
+    received, forever -- an `EventSource` reconnects, so the symptom is a
+    reconnect storm and a replay per client per 20 s rather than a dead
+    channel, which is exactly the kind of failure that hides.
+
+    **The case beside this one passed against it**, and that is the reason
+    this one is written the way it is: reading three heartbeat *lines* is
+    satisfied by a route that greets, heartbeats once and then ends. What
+    cannot be satisfied is delivering an event **after** the heartbeats.
+    """
+    await _wait_for_no_subscribers(bus)
+    async with client.stream("GET", "/events") as response:
+        lines = aiter(response.aiter_lines())
+        await _wait_for_subscriber(bus)
+        # Several heartbeat intervals with nothing published at all.
+        await asyncio.sleep(_HEARTBEAT_SECONDS * 5)
+        assert bus.subscribers == 1, "the stream unsubscribed itself while idling"
+        await bus.publish(ClientEvent(kind=ClientEventKind.TITLE_UPDATED, data={"fields": ["x"]}))
+        frame = await asyncio.wait_for(_read_frame(lines), timeout=2.0)
+    assert "event: title.updated" in frame
+
+
 async def test_a_heartbeat_keeps_an_idle_stream_open(client: httpx.AsyncClient) -> None:
     """nginx closes an idle connection at 60 s and Cloudflare at ~100 s. An
     SSE stream on a library nobody touched sends nothing for hours, so the
     server generates the traffic -- the same requirement PRD 03 states for
     the WebSocket lane, in the other direction. A `:` comment line is one an
-    SSE client is required to ignore."""
+    SSE client is required to ignore.
+
+    **This case alone is not enough**, and it is worth knowing which half it
+    covers: it passed for the whole of M5 against a route that closed the
+    connection immediately after this second heartbeat, because three lines
+    is what a route that greets, heartbeats once and returns also produces.
+    `test_a_stream_that_has_heartbeat_still_delivers_events` above is the
+    half with teeth."""
     async with client.stream("GET", "/events") as response:
         lines = aiter(response.aiter_lines())
         first = await asyncio.wait_for(anext(lines), timeout=2.0)
@@ -215,6 +259,18 @@ async def test_a_disconnect_unsubscribes(client: httpx.AsyncClient, bus: InMemor
             break
         await asyncio.sleep(0.01)
     assert bus.subscribers == 0
+
+
+async def _wait_for_no_subscribers(bus: InMemoryEventBus) -> None:
+    """A previous case's disconnect is not instantaneous -- Starlette
+    cancels the body iterator on `http.disconnect` -- so a case that asserts
+    on a subscriber *count* has to start from a known zero rather than from
+    whatever the last case left behind."""
+    for _ in range(200):
+        if bus.subscribers == 0:
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("a previous stream never unsubscribed")
 
 
 async def _wait_for_subscriber(bus: InMemoryEventBus, *, expected: int = 1) -> None:

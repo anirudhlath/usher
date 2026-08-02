@@ -22,6 +22,7 @@ from fastapi.responses import StreamingResponse
 
 from usher.api.deps import EventBusDep, SettingsDep
 from usher.api.dto.events import encode_sse, parse_titles
+from usher.services.events import SentEvent
 
 router = APIRouter(tags=["events"])
 
@@ -67,20 +68,55 @@ async def events(
         # for the life of the process.
         async with bus.subscribe(titles=wanted, last_event_id=last_event_id) as sent_events:
             iterator = aiter(sent_events)
-            while True:
-                try:
-                    sent = await asyncio.wait_for(
-                        anext(iterator), timeout=settings.sse_heartbeat_seconds
+            # **The pending `__anext__` is kept across heartbeats, never
+            # cancelled and re-issued, and that is not a style choice.**
+            # `asyncio.wait_for(anext(iterator), timeout)` cancels the
+            # `__anext__` it is waiting on when the timeout fires, and
+            # cancelling `__anext__` *closes the async generator* -- so the
+            # next `anext` raises `StopAsyncIteration` and this route
+            # returns. Reproducible in six lines with nothing of Usher's in
+            # them:
+            #
+            #     it = aiter(gen())
+            #     await asyncio.wait_for(anext(it), 0.05)  # TimeoutError
+            #     await asyncio.wait_for(anext(it), 0.05)  # StopAsyncIteration
+            #
+            # In production that disconnects every SSE client one
+            # `sse_heartbeat_seconds` after the last event it received -- an
+            # `EventSource` reconnects, so the symptom is a reconnect and a
+            # replay per client per 20 s rather than a dead channel, which is
+            # precisely the shape of failure this milestone exists to refuse
+            # to be quiet about. `asyncio.wait` does not cancel what it waits
+            # on, so the task outlives the heartbeat and is still there --
+            # holding the same `__anext__` -- when the next event arrives.
+            pending: asyncio.Task[SentEvent] | None = None
+            try:
+                while True:
+                    if pending is None:
+                        pending = asyncio.ensure_future(anext(iterator))
+                    done, _ = await asyncio.wait(
+                        {pending}, timeout=settings.sse_heartbeat_seconds
                     )
-                except TimeoutError:
-                    # nginx closes an idle connection at 60 s and Cloudflare
-                    # at ~100 s, and this stream sends nothing on a quiet
-                    # library.
-                    yield _HEARTBEAT
-                    continue
-                except StopAsyncIteration:
-                    return
-                yield encode_sse(sent)
+                    if not done:
+                        # nginx closes an idle connection at 60 s and
+                        # Cloudflare at ~100 s, and this stream sends nothing
+                        # on a quiet library.
+                        yield _HEARTBEAT
+                        continue
+                    finished, pending = pending, None
+                    try:
+                        sent = finished.result()
+                    except StopAsyncIteration:
+                        return
+                    yield encode_sse(sent)
+            finally:
+                # A client that goes away leaves one `__anext__` parked on a
+                # queue nobody will ever fill. Without this, CPython reports
+                # "Task was destroyed but it is pending!" on stderr per
+                # disconnected client, and this suite deliberately runs with
+                # no expected warnings.
+                if pending is not None:
+                    pending.cancel()
 
     return StreamingResponse(
         stream(),
