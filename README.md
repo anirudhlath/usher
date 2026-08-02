@@ -10,12 +10,13 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 ## Status
 
 Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
-adapter) and M4 (ingest pipeline) are complete — see
-[`docs/plans/`](docs/plans/) for the task breakdowns and
+adapter), M4 (ingest pipeline) and M5 (push and read-through) are complete —
+see [`docs/plans/`](docs/plans/) for the task breakdowns and
 [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's next.
 
-M3 and M4 are both verified against a live Emby server, and M4's metadata
-half against the live TMDb API.
+M3, M4 and M5 are each verified against a live Emby server, and M4's metadata
+half against the live TMDb API. M5's run is the first in this repository to
+have parsed a real `/embywebsocket` message.
 
 **The HTTP surface is deliberately small so far**: `/health`,
 `/health/ready`, `/titles/{id}`, `/events` (SSE) and the `/admin/sources`
@@ -98,7 +99,7 @@ against a media item.
 
 `--allow-full-retraction` lifts the safety ceiling that refuses to mark a
 whole library unavailable in one run
-([ADR-0015](docs/prd/decisions/0015-availability-is-swept-not-diffed.md)).
+([ADR-0015](docs/prd/decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)).
 Only use it for a library the operator really did remove.
 
 **Inspect and repair**

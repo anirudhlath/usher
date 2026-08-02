@@ -131,7 +131,11 @@ be added if a client turns out to need flexible field selection.
 > **Built in M3: four of the five rows above.** `GET`/`POST`/`DELETE
 > /admin/sources` and `GET /admin/sources/{id}/status` are live
 > (`usher.api.routers.sources`). `POST /admin/sources/{id}/sync` is not —
-> it triggers a reconcile, and there is no reconciler until M5. The status
+> **and the reason recorded here was wrong by M4 and is corrected**: it said
+> "there is no reconciler until M5", but M4 built `ReconcileService` and both
+> its lanes. The route is M9's, exactly as [09](09-roadmap.md)'s boundary
+> call 4 states, and M4's `usher sync` already delivers the capability. The
+> status
 > route answers **200 for every state a configured source can be in** —
 > rejected credentials, an unreachable host, a credential row that has gone
 > missing, and one that no longer decrypts because `USHER_SECRET_KEY` was

@@ -15,11 +15,11 @@ direct Emby access, for both movies and television.
 | **M2 — Bootstrap** ✅ | IMDb skeleton, TMDb ID export, Wikidata crosswalk; resumable importers |
 | **M3 — Emby adapter** ✅ | Durable-client auth, item listing, watch-state read/write, stream targets; adapter contract tests, run against both a pure in-memory adapter and the real one, plus a live-server verification pass |
 | **M4 — Ingest pipeline** ✅ | Ingest → match → enrich; priority queue; stub-on-sight; unmatched review; the availability sweep and its refusal. **The `index` stage is M6's** — see the boundary calls below |
-| **M5 — Push and read-through** | WebSocket events, reconnect/reconcile, demand promotion, SSE to clients |
-| **M6 — Search** | **The `index` stage of [03](03-sources-and-sync.md)'s pipeline**; full-text, autocomplete path, embeddings, RRF fusion, similarity, neighbour precompute |
+| **M5 — Push and read-through** ✅ | WebSocket events with health grounded in a message ledger ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)), supervised reconnect with a gap-closing delta, demand promotion, `GET /titles/{id}`, SSE to clients over an `EventPublisher` port ([ADR-0019](decisions/0019-the-client-event-channel-is-a-port.md)), and two supervised lanes in the server process |
+| **M6 — Search** | **The `index` stage of [03](03-sources-and-sync.md)'s pipeline**; full-text, autocomplete path, embeddings, RRF fusion, similarity, neighbour precompute. Publishes `title.updated` through the `EventPublisher` port M5 built rather than inventing a channel |
 | **M7 — Rows** | Row and RowProvider hierarchy, system rows, similarity rows, taste centroid |
 | **M8 — Curation** | LLM row generation, validation, persistence, regeneration job |
-| **M9 — API surface** | Full HTTP surface, image proxy, playback resolution, **the playback ticket that succeeds [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)**, attribution |
+| **M9 — API surface** | Full HTTP surface, image proxy, playback resolution, **the playback ticket that succeeds [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)**, **outbound watch state (`PUT /watch/titles/{id}` and the source write-back retry job)**, **[07](07-client-api.md)'s RFC 9457 error envelope**, attribution |
 | **M10 — Hardening** | Observability, failure modes, backup/restore, docs, public release |
 
 TV is in scope throughout, not deferred — series/season/episode modelling,
@@ -81,6 +81,43 @@ requests against ~32k, i.e. **~10x** on the series half of a full pass. (The
 the wrong figure came from.) It changes [03](03-sources-and-sync.md)'s
 request table and [04](04-catalog-bootstrap.md)'s crawl arithmetic and
 belongs in its own change.
+
+**M5's boundary was ambiguous in six places, and each was decided
+deliberately rather than drifted into.**
+
+1. **Exactly two client-facing routes: `GET /titles/{id}` and `GET /events`.**
+   Demand promotion is *defined* by [03](03-sources-and-sync.md) as a
+   property of requesting a title, so without a title route it is a
+   mechanism with no caller. Everything else on [07](07-client-api.md)'s
+   surface stays where this roadmap puts it.
+2. **`GET /titles/{id}` returns metadata, availability and watch state** —
+   not credits, images, similar titles or the season/episode hierarchy, each
+   of which belongs to a milestone that has not run. `"credits": []` for a
+   title whose credits have not been derived is indistinguishable, to a
+   client, from a title with no cast.
+3. **Outbound watch state is not built; M9 owns it.**
+   `SourceAdapter.push_watch_state` exists and is live-verified; what is
+   missing is the caller, a fourth `JobKind`, and a conflict rule against
+   inbound push arriving in the same second.
+4. **A push `ITEM_REMOVED` retracts nothing.**
+   [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
+   is unambiguous, and an Emby library refresh emits `ItemsRemoved` for
+   items that have not gone anywhere. M5 counts and logs it.
+5. **The client event bus is in-memory and in-process, so the server
+   process runs the job worker** (`worker_enabled`), which is what closes
+   PRD 03's read-through loop in the shipped deployment.
+   [ADR-0019](decisions/0019-the-client-event-channel-is-a-port.md).
+6. **[07](07-client-api.md)'s RFC 9457 envelope stays deferred to M9.** A
+   stream's failure vocabulary is a format for an *event*, not a response
+   body, and M5 has no request whose honest answer is a domain-level
+   failure — `GET /titles/{id}` is answerable entirely from local state.
+
+**M5 was live-verified against the same Emby 4.9.5.0 server on 2026-08-02**,
+and it is the first run in this repository ever to have parsed a real
+`/embywebsocket` message: every push fixture before it was transcribed from
+Emby's DTOs. It confirmed the `UserDataChanged` envelope and payload, refuted
+three guesses about it, and measured the `Sessions` interval that
+`push_stale_after_seconds` rests on. `CLAUDE.md` carries it guess by guess.
 
 **M9 owes ADR-0012 a successor.** In v1, `POST /titles/{id}/play` returns a
 target URL carrying the source's session token, because M3 has no HTTP surface

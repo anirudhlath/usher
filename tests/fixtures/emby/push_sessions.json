@@ -1,14 +1,35 @@
 {
-  "MessageId": "00000000000000000000000000009003",
   "MessageType": "Sessions",
   "Data": [
     {
       "Id": "00000000000000000000000000009100",
       "UserId": "0000000000000000000000000000c0de",
+      "UserName": "someone",
       "Client": "Usher",
       "DeviceName": "Living Room Emby",
+      "DeviceId": "00000000000000000000000000009101",
+      "InternalDeviceId": 90000001,
+      "ApplicationVersion": "0.0.0",
+      "LastActivityDate": "2026-08-01T09:14:02.0000000Z",
+      "Protocol": "Http",
+      "RemoteEndPoint": "203.0.113.1",
+      "ServerId": "00000000000000000000000000009102",
       "SupportsRemoteControl": false,
-      "PlayState": {"CanSeek": false, "IsPaused": false, "IsMuted": false}
+      "SupportedCommands": [],
+      "PlayableMediaTypes": [],
+      "AdditionalUsers": [],
+      "PlaylistIndex": -1,
+      "PlaylistLength": 0,
+      "PlayState": {
+        "CanSeek": false,
+        "IsPaused": false,
+        "IsMuted": false,
+        "PlaybackRate": 1,
+        "RepeatMode": "RepeatNone",
+        "Shuffle": false,
+        "SleepTimerMode": "None",
+        "SubtitleOffset": 0
+      }
     }
   ]
 }

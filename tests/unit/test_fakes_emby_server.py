@@ -684,7 +684,12 @@ async def test_a_user_data_changed_frame_leaves_no_template_value_showing_throug
     `IndexNumber`: rendering a field only when it is set leaves the
     fixture's own invented value in place, and a test then asserts happily
     on a fact the harness never supplied. `push_user_data_changed.json`'s
-    first entry carries a `LastPlayedDate` and a `PlayCount` of 3."""
+    first entry carries a `LastPlayedDate` and a `PlayCount` of 3.
+
+    `ItemId` is the only identity field asserted here, because it is the
+    only one a real entry carries: M5's live run found **no `Key`** on any
+    `UserDataList` entry, so the fixture and this renderer both stopped
+    inventing one."""
     driver.server.add_item(MOVIE, T0)
     template = load_emby_fixture("push_user_data_changed")["Data"]["UserDataList"][0]
     assert "LastPlayedDate" in template
@@ -695,7 +700,7 @@ async def test_a_user_data_changed_frame_leaves_no_template_value_showing_throug
     assert "LastPlayedDate" not in entry
     assert entry["PlayCount"] == 0
     assert entry["ItemId"] == "movie-1"
-    assert entry["Key"] == "movie-1"
+    assert "Key" not in entry
 
 
 def test_a_library_changed_frame_names_only_the_arrays_it_was_given() -> None:

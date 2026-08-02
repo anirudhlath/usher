@@ -73,11 +73,11 @@ refresh-token flow; this pattern *is* the refresh mechanism.
 Emby exposes a WebSocket at `/embywebsocket?api_key=<token>&deviceId=<id>`.
 Verified against Emby 4.9.5.0 binaries (the version this deployment runs):
 
-| Message | Scope | Use |
-|---|---|---|
-| `LibraryChanged` | Per-user, payload-filtered | Items added / updated / removed |
-| `UserDataChanged` | Own data only | Watch position, played flags |
-| `Sessions` (subscribe) | Per-user row-filtered | **Nothing is derived from it. Its whole value is that it arrives.** |
+| Message | Scope | Use | Becomes |
+|---|---|---|---|
+| `LibraryChanged` | Per-user, payload-filtered | Items added / updated / removed | One `SourceEvent` per non-empty array: `ITEM_ADDED`, `ITEM_UPDATED`, `ITEM_REMOVED`. A removal **retracts nothing** — see below |
+| `UserDataChanged` | Own data only | Watch position, played flags | One `WATCH_STATE_CHANGED` carrying the ids *and* the states the message itself contained |
+| `Sessions` (subscribe) | Per-user row-filtered | **Nothing is derived from it. Its whole value is that it arrives.** | Nothing. Counted before it is parsed |
 
 **That last row said "Playback events", and it read as though Usher derived
 something from them. It does not, and the correction matters.** `Sessions`
@@ -89,6 +89,19 @@ an idle library, which is most libraries most of the time, `Sessions` is the
 *only* thing keeping `push_available` true. Counting only mapped events would
 make a library nobody touched for a day read as a dead channel and reconnect it
 forever.
+
+**Its cadence is measured, and it is not the interval it looks like.**
+`SessionsStart`'s `"0,1000"` really is `initialDelayMs,intervalMs` — an
+*unauthenticated* socket receives `Sessions` at ~1 Hz — but the
+row-filtered stream an authenticated socket receives arrives only when the
+filtered view changes: **median 34.7 s, p90 46.3 s, max 60.1 s** over 133
+intervals in 70 minutes, 2026-08-02. So `push_stale_after_seconds`' 90 s
+default survives, with **1.5x** headroom over the worst gap seen — and the
+worst gap grew with the window (52.6 s at 26 minutes, 60.1 s at 70), on one
+household at one hour, against a signal that is change-driven rather than
+periodic. It is a setting for exactly that reason, and
+`usher.source.push.reconnects` is how a household where 90 s is too tight
+becomes visible rather than silent.
 
 **No admin privileges are required** — a normal user token works, and there is
 no role check in Emby's subscription path. (Note: guidance derived from Jellyfin
@@ -142,6 +155,43 @@ Operational requirements:
 > **Health-check caveat:** a handshake against a nonexistent path also upgrades
 > and receives `Sessions`, so a successful upgrade proves nothing. The adapter
 > must assert on *received messages* to consider push healthy.
+> [ADR-0018](decisions/0018-push-health-is-a-message-ledger.md) is the whole
+> of M5 built on this sentence.
+
+> **Re-measured live 2026-08-02, and the first run in this repository ever to
+> parse a real `/embywebsocket` message.** Five things it settled, each of
+> which the code had been guessing at:
+>
+> - **`LibraryChanged` arrives, and its five arrays hold *ids*.** Never once
+>   observed before this run; **seven** arrived unprompted in 70 minutes,
+>   with all seven documented keys and every array a list of id strings
+>   rather than of item objects. The shipped mapper produced 5 `ITEM_ADDED`,
+>   3 `ITEM_UPDATED` and 1 `ITEM_REMOVED` from them. One frame carried a
+>   real `ItemsRemoved` **on a library from which nothing was removed** —
+>   which is [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)'s
+>   central argument, observed rather than reasoned. One `ItemsUpdated`
+>   carried **42** ids against `push_max_items_per_event`'s default of 50.
+> - **The envelope is not uniform.** `UserDataChanged` carries
+>   `{MessageId, MessageType, Data}` with a distinct 32-hex `MessageId` per
+>   *message*; `Sessions` carries `{MessageType, Data}` and **no `MessageId`
+>   at all**, on every frame observed.
+> - **`UserDataChanged.Data` is an object** with `UserId` and `UserDataList`,
+>   and an entry carries `ItemId`, `PlaybackPositionTicks`, `Played`,
+>   `PlayCount`, `IsFavorite`, plus `PlayedPercentage` when the position is
+>   non-zero and `LastPlayedDate` when it is played. There is **no `Key`**.
+> - **A pushed entry agreed with `GET /Users/{u}/Items/{item}` field for
+>   field**, in the same second, across three transitions of one item —
+>   including `PlayCount` and `LastPlayedDate`. So this third payload shape
+>   is *not* the partly-honest one the listing route is. The adapter still
+>   reports `play_count`/`last_played_at` as `None`; see the ADR-0014 note
+>   below for why that is a deliberate lag rather than an oversight.
+> - **The handshake proves even less than ADR-0004 recorded.** A socket with
+>   **no credential at all** also upgrades, also accepts `SessionsStart`, and
+>   then delivers `Sessions` roughly once a second carrying the *whole
+>   server's* session list, where the authenticated socket receives a
+>   row-filtered view at a median of one frame per ~24 s. So neither an
+>   upgrade nor arriving messages establish that a channel is the
+>   authenticated one.
 
 > **Settled in M5.** `SourceEvent` carries the states the upstream's own
 > message already contained (`watch_states`, keyed by `external_id`), and an
@@ -158,10 +208,21 @@ Operational requirements:
 >
 > **A carried state's `play_count`/`last_played_at` are `None` on Emby**, and
 > that is [ADR-0014](decisions/0014-absence-is-not-zero.md) rather than
-> laziness: a `UserDataChanged` message is a third payload shape, no run has
-> parsed one, and absence is the only honest report of a field nobody has
-> measured. The `watch_history` backfill recovers the pair from the
-> single-item route, which is the chain M4 already built.
+> laziness: a `UserDataChanged` message is a third payload shape, and absence
+> is the only honest report of a field nobody had measured. The
+> `watch_history` backfill recovers the pair from the single-item route,
+> which is the chain M4 already built.
+>
+> **The 2026-08-02 live run measured it, and it was truthful** — a pushed
+> entry's `PlayCount` and `LastPlayedDate` matched the single-item route
+> exactly. That makes reading them a **measured opportunity**, worth roughly
+> one `watch_history` job per played item, and it is deliberately **not
+> taken here**: the evidence is one item across three transitions, all of
+> them writes Usher itself made, and ADR-0014's rule is that a reported
+> number must be *true* rather than merely present. Writing a `0` over a real
+> `13` is permanent, so the bar for turning that field on is a measurement
+> over items with real history that Usher did not author. Recorded so the
+> next run has one thing to check rather than a design to redo.
 
 ### Walking the library
 
@@ -230,7 +291,9 @@ paragraph above and
 [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md).
 
 `push_available` is deliberately three-valued, and **M5 fills it from a message
-ledger rather than from a probe**. `verify()` opens no socket at all — a status
+ledger rather than from a probe**
+([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). `verify()`
+opens no socket at all — a status
 screen a dashboard polls must not cost a socket per poll against a server
 measured at 1–5 s per request, and it would still be answering a question about
 a socket that is not the one doing the work. It reports `null` ("not probed")
@@ -264,11 +327,24 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 
 | Lane | Trigger | Work |
 |---|---|---|
-| **Push** | WebSocket event | Enqueue affected items at high priority |
-| **Reconnect delta** | Socket re-established | Items changed since last cursor |
+| **Push** | WebSocket event | **Apply it inline when it is small; defer to a delta when it is large.** A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk instead, because a request per item against a 1,126,789-item library is a design defect rather than a slow path |
+| **Reconnect delta** | Socket re-established | Items changed since the last cursor. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds |
 | **Full reconcile** | Nightly | Walk the source; upsert everything; mark unseen items `available = false` |
 
 Polling is the backstop, not the design.
+
+**A push `ITEM_REMOVED` retracts nothing.**
+[ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
+is unambiguous — only a walk that provably finished sweeps — and an Emby
+library refresh emits `ItemsRemoved` for items that have not gone anywhere.
+**Observed 2026-08-02**: one arrived during a 70-minute listen on a server
+where nothing was deleted. The event is counted and logged; the row stays
+available until the nightly
+walk sweeps it, which [08](08-operations.md) already prices as "availability
+goes stale, not wrong". **Emby does not re-deliver what a disconnected client
+missed** — measured 2026-08-02, over a 61 s outage with a real change made
+inside it and 90 s of listening afterwards — so the gap-closing delta is not
+belt-and-braces, it is the only cover there is.
 
 **Retraction is a separate step, and it can decline.** Marking unseen items
 unavailable is a distinct call the reconciler makes only after the walk

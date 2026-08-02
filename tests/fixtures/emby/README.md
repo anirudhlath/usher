@@ -43,33 +43,40 @@ searches.
 `usher.adapters.emby.push` reads. Every value is invented and every id is
 inside the reserved bands above.
 
-**These three have a far weaker provenance than the item fixtures beside
-them, and it is stated rather than implied.** An item fixture was diffed
-field by field against a live 4.9.5.0 response on 2026-07-31. These have
-never met a real message, and what
+**These three had a far weaker provenance than the item fixtures beside
+them until 2026-08-02.** An item fixture was diffed field by field against a
+live 4.9.5.0 response on 2026-07-31; these had never met a real message, and
+what
 [ADR-0004](../../../docs/prd/decisions/0004-push-over-polling.md)'s live run
 of 2026-07-29 actually recorded is *which message types arrived* — `Sessions`
 periodically, `UserDataChanged` twice on a played/unplayed toggle — and **not
-one byte of any payload**. Everything below the `MessageType` line here is
+one byte of any payload**. Everything below the `MessageType` line was
 transcribed from Emby's own `UserItemDataDto`, `LibraryUpdateInfo` and
-`SessionInfoDto` and from the decompilation of `SessionWebSocketListener`,
-which is documentation-grade evidence rather than measurement. Specifically
-unverified, and named so M5's live verification has a list to work from:
+`SessionInfoDto` and from the decompilation of `SessionWebSocketListener`.
 
-| Guess | Why it is a guess |
-|---|---|
-| The envelope carries `MessageId` at all | Never observed; the run recorded types, not frames |
-| `UserDataChanged.Data` is an object with `UserId` and `UserDataList` | Could be a bare list, as `Sessions`' `Data` is |
-| A `UserDataList` entry is a `UserItemDataDto` (`ItemId`, `PlaybackPositionTicks`, `Played`, …) | The DTO's *shape* is documented; that this message carries it is inferred |
-| `LibraryChanged.Data`'s five arrays hold **ids** rather than item objects | `LibraryUpdateInfo` declares `List<string>`; no capture confirms it, and `LibraryChanged` was never observed arriving at all |
-| `Sessions.Data` is a list of session DTOs | Same |
-| `Key` equals the item id | A field the mapper never reads, filled in for shape only |
-| **A `UserDataChanged` entry is *correct* about `PlaybackPositionTicks` and `Played`** | Measured for the two payload shapes that exist: the item route is correct about all four fields and the **listing route is only partly** correct — right position and played flag, `PlayCount: 0`, no `LastPlayedDate` (2026-07-31). Nothing has measured the push entry, which is a *third* shape, so "it is correct about the two fields the adapter does read" is the same class of assumption the listing route already violated for the two it does not. `tests/fakes/emby_server.py`'s `user_data_changed_frame` renders the item's true position and played flag, and `SourceAdapterContract::test_events_yields_what_the_source_pushed` asserts on the position that comes back — so if a real entry zeroes the position, that case is green against an adapter that reports a wrong resume point. Capturing one entry for an item with a known non-zero position settles it. |
-| `LibraryUpdateInfo.IsEmpty` means "no array carries anything" | Nothing reads it; `library_changed_frame` computes it from the three item arrays and ignores the three folder ones. A guess about a field with no consumer, recorded so the capture can settle it cheaply rather than so anything depends on it |
-| One `MessageId` per message *type* | `tests/fakes/emby_server.py` reuses each fixture's `MessageId` for every frame it renders of that type, so nothing in this repository could catch a channel that deduplicated on it. Real Emby presumably mints one per message; nothing depends on either answer today |
-| **`Sessions` arrives at least every 90 seconds on an idle library** | ADR-0004's run recorded that it arrives "periodically" and **not at what interval**. `DEFAULT_STALE_AFTER_SECONDS = 90.0` is the staleness watchdog's ceiling, so this is now the assumption a healthy idle lane depends on: if the real interval is longer, the watchdog tears down working sockets every 90 s forever. Mitigated rather than removed — reconnecting is cheap and correct (the gap-closing delta returns 0 items) and `usher.source.push.reconnects` makes it visible — and `push_stale_after_seconds` is a setting so an operator can raise it. Measuring the interval is a named step of M5's live verification. |
-| **`"0,1000"` in `SessionsStart` is `initialDelayMs,intervalMs`, i.e. a one-second cadence** | The frame itself is verified (ADR-0004's session sent it and messages followed); the *reading* of its two numbers comes from the decompiled `SessionWebSocketListener` and no run has confirmed that the observed interval matches. If it is really seconds rather than milliseconds the guess above is far less comfortable. The same capture that measures the interval settles this. |
-| **A working channel says something within 15 seconds** | `SourceAdapter.probe_push`'s default `timeout_seconds`. It is an operator-facing default rather than a correctness property — a probe that reports `delivering=False` on a healthy source is a misleading diagnostic, not a broken lane — and it rests on the same unmeasured interval. |
+**M5's live verification captured all three and settled the table below.**
+One socket held 70 minutes against the same 4.9.5.0 build, driving the
+shipped `EmbyPushChannel` over the real `websockets` client: **146 frames —
+134 `Sessions`, 5 `UserDataChanged`** (three of them from one restorative
+write to a real account, two from the outage test) **and, for the first time
+in this project's history, 7 `LibraryChanged`**. Four guesses were
+**refuted** and the fixtures here now carry the measured shape.
+
+| Guess | Verdict | Evidence |
+|---|---|---|
+| The envelope carries `MessageId` at all | **half confirmed, half refuted** | `UserDataChanged` and `LibraryChanged` carry one; **`Sessions` carries none**, on 65 of 65 frames. `push_sessions.json` no longer has one. |
+| One `MessageId` per message *type* | **refuted** | A distinct 32-hex value (no dashes) per *message*: 3 messages, 3 ids. Nothing depends on either answer, and the fake still reuses the fixture's — recorded rather than fixed, because a channel that deduplicated on it is not a failure this repository can reach. |
+| `UserDataChanged.Data` is an object with `UserId` and `UserDataList` | **confirmed** | Exactly those two keys, on every frame. |
+| A `UserDataList` entry is a `UserItemDataDto` (`ItemId`, `PlaybackPositionTicks`, `Played`, …) | **confirmed, with two corrections** | Observed keys: `ItemId`, `PlaybackPositionTicks`, `Played`, `PlayCount`, `IsFavorite`, plus `PlayedPercentage` (a float, when the position is non-zero) and `LastPlayedDate` (when played). |
+| `Key` equals the item id | **refuted — there is no `Key`** | Absent from every entry. Removed from the fixture, from `user_data_changed_frame`, and from the case that asserted it. |
+| `UnplayedItemCount` on an entry | **not observed** | Absent from all five, all of them movies. Removed; a *series* entry is where it would plausibly appear and none was captured. |
+| `LibraryChanged.Data`'s five arrays hold **ids** rather than item objects | **confirmed** | Seven real messages, all seven keys present on each, every array a list of id strings. One carried all six arrays non-empty at once (including a real `ItemsRemoved` on a library nothing was deleted from — ADR-0015's argument, observed) and one carried **42** `ItemsUpdated` ids against `push_max_items_per_event`'s default of 50. The shipped `to_source_events` produced 5 `ITEM_ADDED`, 3 `ITEM_UPDATED` and 1 `ITEM_REMOVED`: one event per non-empty array, live. |
+| `Sessions.Data` is a list of session DTOs | **confirmed** | A list; entry keys are a superset of this fixture's, and the fixture now carries all of them (`AdditionalUsers`, `ApplicationVersion`, `DeviceId`, `InternalDeviceId`, `LastActivityDate`, `PlayableMediaTypes`, `PlaylistIndex`, `PlaylistLength`, `Protocol`, `RemoteEndPoint`, `ServerId`, `SupportedCommands`, `UserName`, and five more on `PlayState`) so the next diff is empty. |
+| **A `UserDataChanged` entry is *correct* about `PlaybackPositionTicks` and `Played`** | **confirmed — and about `PlayCount` and `LastPlayedDate` too** | Compared against `GET /Users/{u}/Items/{item}` in the same second, across three transitions of one item: 613 s written → `PlaybackPositionTicks: 6130000000` with `Played: false`; marked played → `PlayCount: 1`, `Played: true`, and the *same* `LastPlayedDate` string the item route returned; restored → all zero. So this third shape is **not** the partly-honest one the listing route is, and the failure this row was written to catch — a zeroed position behind a green contract case — does not occur. The adapter still reports `play_count`/`last_played_at` as `None`; `usher.adapters.emby.mapping.user_data_states` says why. |
+| `LibraryUpdateInfo.IsEmpty` means "no array carries anything" | **still unverified** | `false` on all seven, every one of which carried something. Consistent with the guess and not discriminating. Nothing reads it. |
+| **`Sessions` arrives at least every 90 seconds on an idle library** | **confirmed for this deployment, and the mechanism is not what it looked like** | Median **34.7 s**, mean 31.6 s, p90 46.3 s, **max 60.1 s** over 133 intervals in 70 minutes, so `DEFAULT_STALE_AFTER_SECONDS = 90.0` holds with **1.5x** headroom. The worst gap grew with the window (52.6 s at 26 minutes), it is **change-driven, not periodic** (next row), and a 75-second probe earlier the same evening saw exactly one frame — so this is a measurement of one household at one hour rather than a protocol guarantee. `push_stale_after_seconds` stays a setting. |
+| **`"0,1000"` in `SessionsStart` is `initialDelayMs,intervalMs`, i.e. a one-second cadence** | **confirmed, and it does not apply to an authenticated socket** | An *unauthenticated* connection receives `Sessions` at ~1 Hz (53 and 55 frames in 45 s) carrying the whole server's 83 sessions; the authenticated one received **one** in the same 45 s, carrying a 5-session row-filtered view. The timer is real; the filtered stream is sent when the filtered view changes. |
+| **A working channel says something within 15 seconds** | **too tight on this deployment** | `SourceAdapter.probe_push`'s default `timeout_seconds`, against a median gap of 23.3 s, so `usher push --probe` will report `delivering=False` on a healthy idle source more often than not. It is a diagnostic default rather than a correctness property and the CLI takes an override; recorded here rather than changed, because raising it makes an operator wait longer for every answer including the true negatives. |
 
 **The ids here are short numeric strings, and the item fixtures beside them
 use 32-hex GUIDs.** That is deliberate and it is the *push* files that are
@@ -88,14 +95,20 @@ end-to-end session sent before anything started arriving. It lives in
 
 `PlayCount` and `LastPlayedDate` appear on `push_user_data_changed.json`
 **and the adapter deliberately ignores both**
-([ADR-0014](../../../docs/prd/decisions/0014-absence-is-not-zero.md): a
-`UserDataChanged` entry is a third payload shape and no run here has parsed
-one), so their presence is a record of what the DTO is documented to carry
-rather than a claim about what this server sends. They are in the fixture
-precisely so that a mapper which started reading them fails a test.
+([ADR-0014](../../../docs/prd/decisions/0014-absence-is-not-zero.md)). Their
+presence is now a record of what this server really sends — both were
+measured truthful on 2026-08-02 — and they are in the fixture precisely so
+that a mapper which started reading them fails a test. The reason the
+adapter still does not is in
+`usher.adapters.emby.mapping.user_data_states`: one movie, three
+transitions, every one of them a write Usher itself made, is not a
+measurement that a real entry never under-reports a history it did not
+create, and writing a zero over one is permanent.
 
-Capturing real messages and diffing their shape against these three is a
-named step of M5's live verification.
+**What is still unmeasured, named rather than implied:** a `LibraryChanged`
+with `IsEmpty: true`, and a `UserDataChanged` for a **series** entry — which
+is where `UnplayedItemCount` would plausibly appear, and the reason it was
+removed rather than kept with a note.
 
 ## Regenerating
 

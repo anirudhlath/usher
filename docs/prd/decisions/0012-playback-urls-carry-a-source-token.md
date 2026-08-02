@@ -272,6 +272,19 @@ accepted:
   Whether `/embywebsocket` requires the `deviceId` to match the token's
   session is still unverified and no longer load-bearing here, since the
   parameter is not published either way.
+- **Move the token out of the socket URL and into a header** — **asked and
+  refuted, 2026-08-02.** This would have removed the credential from
+  `request.path`, from the library's own logging and from any proxy access
+  log, i.e. narrowed the risk this ADR accepts rather than mitigating it.
+  Measured: a socket sending `X-Emby-Token` as a header and no `api_key`
+  **upgrades and delivers messages**, which looks like success and is not —
+  it behaves identically to a socket carrying **no credential at all**,
+  receiving the server's whole unfiltered session list at ~1 Hz where the
+  authenticated socket receives a five-row filtered view. `/embywebsocket`
+  reads the query string and nothing else. So the token stays in the URL,
+  and the mitigations in the handling rules above stay load-bearing rather
+  than transitional. Recorded here so the next reader does not re-derive a
+  positive result from "it connected".
 
 ## Why not now
 

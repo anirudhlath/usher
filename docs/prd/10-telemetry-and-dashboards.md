@@ -262,11 +262,17 @@ sorted by age) · rewatches · **row effectiveness**: plays attributed per
 ### 3 — Pipeline
 
 Queue depth by priority · enrichment throughput and p50/p99 · **promotion
-latency against the 5 s read-through target** · parked jobs · sync run outcomes
+latency against the 5 s read-through target** — backed by real data as of M5,
+which added the first caller of the promotion clause and puts the requesting
+span's `traceparent` on the promoted job, so the panel is a join rather than
+an estimate · parked jobs · sync run outcomes
 and duration · **push connection uptime and reconnect count** — the direct
 health signal for the WebSocket risk in
-[ADR-0004](decisions/0004-push-over-polling.md) · **push events applied, by
-kind**, which separates "the lane is up" from "the lane is doing anything"
+[ADR-0004](decisions/0004-push-over-polling.md), reported from a message
+ledger rather than a socket
+([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)) · **push
+events applied, by kind**, which separates "the lane is up" from "the lane is
+doing anything"
 · Emby request latency · TMDb requests/sec against the ~40 ceiling with 429
 count.
 

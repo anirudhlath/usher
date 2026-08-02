@@ -7,7 +7,7 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M4 complete.** The project scaffold, environment
+**Status: M5 complete.** The project scaffold, environment
 config, domain models, port ABCs, persistence (SQLAlchemy schema + Alembic
 migrations + title repository), the telemetry bootstrap, a FastAPI app
 with liveness/readiness endpoints, the container image + compose stack + CI
@@ -22,16 +22,19 @@ Postgres priority queue, the TMDb metadata provider, the `sync`/
 `sync-status`/`unmatched`/`work` CLI, and the pipeline's span tree and
 metrics (M4) — all exist and are verified working, M3 and M4 including
 against a live Emby 4.9.5.0 server and, as of 2026-08-01, against the live
-TMDb v3 API. See
+TMDb v3 API — and the push lane, the supervised reconnect with its
+gap-closing delta, `GET /titles/{id}` with demand promotion, `GET /events`
+over SSE, and the two supervised lanes `create_app` now runs (M5), verified
+2026-08-02 against the same live Emby server in the first run this
+repository has ever made that parsed a real `/embywebsocket` message. See
 `docs/plans/2026-07-28-m1-foundation.md`,
 `docs/plans/2026-07-30-m2-bootstrap.md`,
-`docs/plans/2026-07-30-m3-emby-adapter.md` and
-`docs/plans/2026-07-31-m4-ingest.md` for the task breakdowns and
-`docs/prd/09-roadmap.md` for what's next (M5 — push, reconnect delta, demand
-promotion, SSE; in progress on `milestone/m5-push`, where `create_app` now
-runs a push lane per source and a job-worker lane). Do not invent commands
-for tooling that does not exist yet — check the Commands section below
-before assuming something runs.
+`docs/plans/2026-07-30-m3-emby-adapter.md`,
+`docs/plans/2026-07-31-m4-ingest.md` and
+`docs/plans/2026-08-01-m5-push.md` for the task breakdowns and
+`docs/prd/09-roadmap.md` for what's next (M6 — search). Do not invent
+commands for tooling that does not exist yet — check the Commands section
+below before assuming something runs.
 
 **M4's four deliberate boundary calls**, each stated with its reason in the
 M4 plan's Scope section and in PRD 09: the **index** stage is M6's (no
@@ -101,6 +104,12 @@ earlier negative findings were both wrong — see
 
 Health-check caveat: a handshake against *any* path succeeds, so a successful
 upgrade is not a health signal. Assert on received messages instead.
+**Re-measured 2026-08-02 and it is worse than that**: a socket carrying **no
+credential at all** upgrades, accepts the subscription, and then delivers
+`Sessions` *more* often than an authenticated one. So neither an upgrade nor
+arriving messages establish that a channel is the one you think it is —
+[ADR-0018](docs/prd/decisions/0018-push-health-is-a-message-ledger.md), and
+the whole M5 live section below.
 
 **A supervisor that resets its failure counter on connection is caught only
 if the fake it is tested against has an *unbounded* supply of connections.**
@@ -165,6 +174,181 @@ outside the loop that built it is the failure; `WatchStateSyncService`
 therefore returns `MergedState(external_id, target)` and the pairing cannot
 be reconstructed wrongly. Same rule `SourceEvent.watch_states` states one
 layer up: keyed, never aligned by position.
+
+**M5's live verification: the first real `/embywebsocket` message this
+repository has ever parsed, and four of thirteen documented guesses were
+wrong.** Run 2026-08-02 against the same live Emby **4.9.5.0** server,
+driving the shipped `EmbyAdapter` → `EmbyPushChannel` → `connect_websocket`
+→ real `websockets`, and for the long hold the shipped `PushSupervisor` with
+recording callables in place of the three unit-of-work ones. From a
+throwaway script outside the working tree, holding the operator's existing
+token (no password, so `AuthenticateByName` was again not exercised).
+**Bounded deliberately: one long-lived socket held 70 minutes, eight
+short-lived probe sockets, and 14 HTTP requests in total** — no walk of any
+kind, because the library is 1,126,789 items. The long socket received
+**146 frames — 134 `Sessions`, 7 `LibraryChanged`, 5 `UserDataChanged` —
+with zero reconnects, zero unforced failures, and `supports_push` true
+throughout**, and the shipped mapper turned them into 14 `SourceEvent`s.
+
+- **The envelope is not uniform, and that is the first correction.**
+  `UserDataChanged` and `LibraryChanged` carry
+  `{MessageId, MessageType, Data}` with a **distinct 32-hex `MessageId` per
+  message** (not per type); **`Sessions` carries `{MessageType, Data}` and
+  no `MessageId` at all**, on 59 of 59 frames. `tests/fixtures/emby/
+  push_sessions.json` claimed one and no longer does.
+- **A real `UserDataChanged` entry is honest, including about play
+  history.** One item, three transitions, each compared against
+  `GET /Users/{u}/Items/{item}` in the same second: `PlaybackPositionTicks`
+  6,130,000,000 (the 613 s written) with `Played: false`; then
+  `PlayCount: 1`, `Played: true`, `LastPlayedDate` — *the same timestamp the
+  item route returned*; then all-zero after the restore. **So the pushed
+  shape is not the partly-honest one the listing route is**, and the
+  M5-blocking failure this run existed to look for — an entry that zeroes
+  the position, so the adapter reports a wrong resume point while the
+  contract case stays green — **did not happen**. Through the shipped
+  mapper, the first event carried `position_seconds=613`.
+- **`play_count`/`last_played_at` stay `None` anyway, and that is a
+  deliberate lag rather than an oversight.** ADR-0014's rule is that a
+  reported number must be *true*, and the evidence here is one item across
+  three transitions, all of them writes Usher itself made, on an item whose
+  history was zero to begin with. The failure it guards against needs an
+  entry reporting `0` for an item whose true count is 13, which this run
+  could not produce without touching real history. Turning the field on is a
+  measured opportunity worth one `watch_history` job per played item;
+  recorded, not taken.
+- **`LibraryChanged` arrives, its arrays hold ids, and one of them arrived
+  carrying all six at once.** Never observed before this run; **seven**
+  arrived unprompted during the hold, with all seven documented keys
+  (`ItemsAdded`/`ItemsUpdated`/`ItemsRemoved`,
+  `FoldersAddedTo`/`FoldersRemovedFrom`, `CollectionFolders`, `IsEmpty`) and
+  every array a **list of id strings** rather than of item objects. The
+  committed fixture's shape was already right, field for field. The shipped
+  `to_source_events` produced 5 `ITEM_ADDED`, 3 `ITEM_UPDATED` and 1
+  `ITEM_REMOVED` from them — one event per non-empty array, live.
+- **`ItemsRemoved` fires on a library from which nothing was removed, and
+  that is ADR-0015's argument arriving as a measurement rather than as an
+  argument.** Nobody deleted anything from this server during the hold, and
+  one frame still named an item in `ItemsRemoved` (alongside
+  `FoldersRemovedFrom`, `ItemsAdded`, `FoldersAddedTo`, `CollectionFolders`
+  and ten `ItemsUpdated`). M5 counts it and retracts nothing; had it
+  retracted, one ordinary library refresh would have marked a present file
+  unavailable.
+- **A real `ItemsUpdated` batch reached 42 ids**, against
+  `push_max_items_per_event`'s default of **50**. So the ceiling is not
+  theoretical headroom over a hypothetical event — real traffic on an
+  otherwise idle server comes within 16% of it, and the batch below it costs
+  42 `get_item` calls applied inline. Raising the default would buy little
+  and the deferral path (a delta walk) is the cheaper answer above it, which
+  is the shape M5 already ships; recorded so the number is chosen against
+  data next time it is chosen.
+- **`Key` and `UnplayedItemCount` are not on a real `UserDataList` entry,
+  and `PlayedPercentage` is.** Observed entry keys: `ItemId`,
+  `PlaybackPositionTicks`, `Played`, `PlayCount`, `IsFavorite`, plus
+  `PlayedPercentage` (a float, when the position is non-zero) and
+  `LastPlayedDate` (when played). The fixture and `FakeEmbyServer` both
+  rendered a `Key`; both stopped.
+- **The `Sessions` interval, which `DEFAULT_STALE_AFTER_SECONDS = 90.0`
+  rests on: median 34.7 s, mean 31.6 s, p90 46.3 s, max 60.1 s** over 133
+  intervals in 70 minutes on an authenticated socket. **The 90 s default
+  survives — but the headroom is 1.5x, not the comfortable margin the
+  constant reads like, and it shrank as the window grew**: at 26 minutes the
+  worst gap was 52.6 s and nothing exceeded 60; by 70 minutes exactly one
+  gap had. This is a measurement of *this* household at *this* hour, not a
+  constant. Two things make it fragile enough to keep the setting: a
+  75-second smoke run earlier the same evening saw exactly **one** frame,
+  and the cadence is not an interval at all (below). The failure is bounded
+  and visible rather than silent — a reconnect, a delta that returns 0
+  items, and a counter that climbs — which is the whole reason the ledger
+  design tolerates being wrong about it.
+- **`"0,1000"` really is `initialDelayMs,intervalMs`, and an authenticated
+  socket does not honour it.** An *unauthenticated* socket receives
+  `Sessions` at ~1 Hz — 53 and 55 frames in 45 s, with sub-second gaps —
+  while the authenticated one on the same server in the same minute received
+  **one**. The difference is the payload: the unauthenticated stream carries
+  the **whole server's 83 sessions**, the authenticated one a 5-session
+  row-filtered view. The natural reading, and the one that fits every
+  number: the 1 s timer fires either way and the filtered stream is only
+  *sent* when the filtered view changes. **So Usher's liveness signal is
+  change-driven, not periodic**, and a genuinely quiet server could exceed
+  any fixed `stale_after`. `push_stale_after_seconds` is the knob, and
+  `usher.source.push.reconnects` is how the condition is seen.
+- **`/embywebsocket` does not accept `X-Emby-Token` as a header, and the
+  test that looks like it says otherwise is the trap.** A header-only socket
+  upgrades and delivers — identically to one with **no credential at all**:
+  53 frames of 83 sessions against 55 frames of 83 sessions. It is not
+  authenticated; it is anonymous. So the token cannot be moved out of the
+  URL this way and **ADR-0012's accepted risk stands unnarrowed**. A check
+  written as "did it connect and receive messages" passes this. The only
+  discriminator is the row-filtered payload, or a `UserDataChanged` that
+  never comes.
+- **A dropped socket raises rather than hanging, and Emby re-delivers
+  nothing.** Aborting the TCP transport under a live channel raised
+  `PortUnavailable` out of the iterator in **0.0 s** — not a hang, not the
+  quiet end the port forbids — and `connected` went false. Over a **61 s**
+  outage, a real played toggle and its restore were made out of band; the
+  reconnected channel then listened for **90 s** and received three
+  `Sessions` and **not one** `UserDataChanged`. The control is decisive: a
+  *second* socket that stayed up throughout received both changes at the
+  time they happened. **The gap-closing delta is not belt-and-braces, it is
+  the only cover there is**, which is exactly what PRD 03 puts on the
+  reconnect.
+- **The `websockets` DEBUG token leak is real, and the fix holds against the
+  real library and the real server.** Two runs at `USHER_LOG_LEVEL=DEBUG`
+  with `configure_logging` installed exactly as `create_app` does, each
+  writing to a real stdout captured to a file: the shipped path produced
+  **804 bytes / 2 lines** with **no token, no `api_key=`, no `> GET`
+  request line** and a channel that genuinely delivered
+  (`messages_received == 1`); the control — the same URL with the library's
+  own logger left alone — produced **16,857 bytes / 24 lines** with the
+  token in it, `api_key=` in it, and the request line logged twice. Both
+  halves, or the run proves nothing; the same discipline the network guard
+  gets.
+- **`permessage-deflate` is not negotiated.** `websockets` offers it by
+  default and the handshake response carries no `Sec-WebSocket-Extensions`
+  at all, on every connection made in this run. So nothing in this project
+  is relying on compression, and a frame is a frame.
+- **A client that stops reading loses the connection, which is what
+  `max_queue=256` is buying.** With `max_queue=1` and no application read
+  for 150 s, the socket came back **CLOSED** with a `ConnectionClosedError`
+  and only two buffered `Sessions` behind it — so Emby's listener does not
+  queue indefinitely for a stalled consumer. **The confound is named rather
+  than glossed:** `websockets` services pings on the same reader task that
+  backpressure stalls, so this measurement cannot separate a server-side
+  close from the client's own pong timeout. Either way the operational
+  conclusion is the same and it is the one `connect_websocket` was already
+  written for: do not let the queue fill during the gap-closing walk.
+- **The nonexistent path still upgrades**, ADR-0004's quirk re-measured on
+  the same build: `/embywebsocket-nope` → 101, `Upgrade: websocket`,
+  `Sessions` delivered.
+- **`supports_push` is `False` before the first message and `True` after**,
+  measured through the shipped adapter against the real server rather than
+  against a fake — the contract's pre-message assertion, live.
+- **The one write to a real account, and its restoration.** The same
+  discipline M4's run set: an item whose complete `UserData` was already
+  `{PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played:
+  false}` with no `LastPlayedDate`, found with **one** 50-item listing plus
+  one single-item read (never a search over a walk). `push_watch_state`
+  wrote a 613 s position, then marked it played (`PlayCount: 1`,
+  `LastPlayedDate`, position cleared — M3's ordering finding, re-confirmed),
+  then `DELETE /Users/{u}/PlayedItems/{item}` restored it **byte-for-byte**
+  (`after == before`). A second toggle and restore during the outage test
+  ran on the same item and ended the same way; the final read-back matches
+  the recorded `before` exactly.
+- **`PlayedPercentage` appears on the item route too** when a position is
+  set, and disappears when it is cleared. Nothing reads it; recorded because
+  it is the one key the fixture was missing.
+- **Not verified in this run, and named rather than implied:** `POST
+  /Users/AuthenticateByName` and whether its response carries
+  `User.Policy.IsAdministrator` (this run held a token, not a password —
+  so Task 3's extra `GET /Users/{userId}` remains the verified path);
+  silent 401 re-authentication end to end; durable-device registration
+  across restarts; a socket held for four hours (**70 minutes** is what this
+  run covers, with zero reconnects and zero unforced failures in it); a
+  `LibraryChanged` with `IsEmpty: true` (all seven observed carried
+  something, so what that field means is still a guess about a field nothing
+  reads); a `UserDataChanged` for a **series** entry, which is where
+  `UnplayedItemCount` would plausibly appear; and whether a real entry is
+  honest about play history for an item Usher did not itself write.
 
 **M4's live verification: the design's central measurement holds, the
 matcher's exact-name tier was expected to match "almost nothing" and matches
@@ -888,7 +1072,15 @@ left alone, so Docker's socket still works and `testcontainers` still reaches
 and group G's, after `create_app` grew its two supervised lanes:
 **1,623 unit + 450 integration passed (2 unit cases skipped), zero blocks**,
 `[netguard] installed` on stderr, and the same `getaddrinfo` probe raising in
-the same `uv run` environment. The
+the same `uv run` environment. **Re-verified a sixth time on 2026-08-02, at
+the end of M5 and after a live run that really did open sockets to a real
+Emby server from a throwaway script outside the tree: 1,624 unit + 474
+integration passed (2 unit cases skipped), zero blocks**, with
+`[netguard] installed` printed by the module itself in the same run, both
+`getaddrinfo("api.themoviedb.org", 443)` and `connect(("1.1.1.1", 443))`
+raising `RuntimeError: NETWORK BLOCKED` in that same environment, and the
+in-process case (`/tmp/netguard/test_guard_is_live_in_pytest.py`) passing
+under the same `PYTHONPATH`. The
 guard lives outside the tree — it is a check to re-run, not a dependency to
 add, because `PYTHONPATH`-injecting a socket monkeypatch into every developer's
 suite costs more than it catches.
@@ -900,6 +1092,55 @@ venv-shebang trap. The 2026-08-01 re-run printed `[netguard] installed` from
 the module itself and then, in the same environment,
 `socket.getaddrinfo("api.themoviedb.org", 443)` raised
 `RuntimeError: NETWORK BLOCKED`. Both checks, or the run proves nothing.
+
+**M5's final mutation sweep: 56 mutations, 50 killed, and every one of the
+six survivors was predicted.** Run 2026-08-02 in place, each mutation
+against the **whole** 2,098-test suite rather than its own task's selection.
+Baseline green before (`2098 passed, 2 skipped in 47.20s`), restored green
+after, the group-G harness's rules enforced throughout — target must appear
+exactly once, `cp` backups never `git checkout --`, a run that did not run is
+`DID-NOT-RUN`, a syntax error is `BROKEN-MUTATION`, a hang is `HUNG`.
+**Zero HUNG, zero DID-NOT-RUN, zero BROKEN**, and every mutation was
+dry-run through `ast.parse` before the sweep started so an `IndentationError`
+could not be scored as a kill.
+
+The six survivors, and the one prediction that was wrong in the *other*
+direction:
+
+- **Five are the plan's own named equivalent mutants, each surviving for
+  the stated reason**: the `stale_after` boundary (`<=` → `<`; the clocks in
+  those cases step past the boundary rather than onto it), the
+  `except asyncio.CancelledError: raise` arm (a `BaseException` in 3.13, so
+  the `UsherPortError` arm would not catch it anyway), `list(self._subscribers)`
+  (`publish` does not await, so nothing can be removed mid-iteration),
+  `rpartition` → `partition` (the epoch is hex and holds no `-`), and
+  `is ENRICHED` in place of the rank comparison (both agree on all three
+  rungs today).
+- **The sixth is `_write_push_available`'s "nothing changed" guard**, which
+  is not on the plan's list but *is* already recorded above as an equivalent
+  mutant against today's repository: SQLAlchemy emits no `UPDATE` when no
+  attribute actually changed, so the `set_updated_at` trigger never fires
+  either way.
+- **The plan's sixth named survivor was killed, and for a different reason
+  than the plan reasoned about.** `socket_logger`'s `propagate = False` was
+  predicted to survive because "the level alone is sufficient", which is
+  true *as a security property* — and it dies anyway, on
+  `test_the_socket_logger_is_re_silenced_on_every_call`, which pins all
+  three fields directly rather than asserting the leak. Worth knowing before
+  anyone reads that kill as evidence the propagate flag is load-bearing for
+  the token.
+
+Three results worth carrying forward. The milestone's headline mutation —
+moving `failures = 0` from delivery to connection — **fails 4 cases**, so
+PRD 08's "after N failures mark `supports_push = false`" cannot silently
+stop firing against a buffering proxy. Deleting the watchdog call fails 4,
+and `is_delivering` returning `self.connected` fails **11**, the largest
+blast radius in the sweep. And the ADR-0014 mutation on the *third* payload
+shape (`play_count=as_int(entry.get("PlayCount"))` in `user_data_states`)
+fails 2 — which matters more now that the live run has shown that field
+would be *telling the truth*: the test suite forbids reading it on the
+strength of a rule about evidence, not on the strength of the value being
+wrong.
 
 **M4's final mutation sweep: 39 mutations, one survivor, and the survivor is
 an equivalent mutant the code comment predicted.** Run 2026-07-31 in place,

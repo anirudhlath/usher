@@ -510,13 +510,22 @@ def user_data_states(
 
     **`play_count` and `last_played_at` are always `None`, and that is
     ADR-0014 rather than an omission.** A `UserDataChanged` entry is a third
-    payload shape -- a listing is one, a single-item route is another -- and
-    no run in this repository has ever parsed a real one. The rule is that a
-    reported number must be true, never that it be present, so the honest
-    report of a field nobody has measured is absence. `WatchStateSyncService`
-    then enqueues a `watch_history` job for every played item whose count it
-    could not determine, at background priority, and that job asks the route
-    the live run *did* measure.
+    payload shape -- a listing is one, a single-item route is another.
+    `WatchStateSyncService` enqueues a `watch_history` job for every played
+    item whose count it could not determine, at background priority, and
+    that job asks the single-item route.
+
+    **The live run of 2026-08-02 parsed a real entry for the first time and
+    it was truthful**: `PlayCount` and `LastPlayedDate` matched
+    `GET /Users/{u}/Items/{item}` exactly, across three transitions of one
+    item, in the same second. Reading them would save one `watch_history`
+    job per played item and it is still **not done here**, deliberately.
+    ADR-0014's rule is that a reported number must be *true*, and the
+    evidence is one movie whose history started at zero and every transition
+    of which Usher itself wrote; the failure it guards against -- an entry
+    reporting `0` for an item whose true count is 13 -- is not reachable
+    from that sample. Turning it on needs a measurement over items with real
+    history, and writing a zero over one is permanent.
 
     Position is derived from `PlaybackPositionTicks` exactly as
     `to_watch_state` does. `Played` defaults to `False` when absent for the

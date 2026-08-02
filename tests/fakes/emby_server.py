@@ -730,18 +730,26 @@ class FakeEmbyServer:
     # (`tests/unit/test_adapters_emby_push.py`, and the live capture) ever
     # looks at.
     #
-    # **The provenance here is weaker than anywhere else in this file, and
-    # it is stated rather than implied.** An item fixture was diffed field
-    # by field against a live 4.9.5.0 response on 2026-07-31. These three
-    # message shapes have never met a real message: ADR-0004's live run
-    # recorded *which message types arrived* and not one byte of any
-    # payload, so everything below the `MessageType` line is transcribed
-    # from Emby's own `UserItemDataDto`/`LibraryUpdateInfo`/`SessionInfoDto`
-    # and from the decompilation of `SessionWebSocketListener`. A wrong
-    # envelope is therefore invisible from both sides of this file, which is
-    # exactly the failure M3's live run found in the watch-state write-back.
-    # `tests/fixtures/emby/README.md` tabulates every specific guess; M5's
-    # live verification captures real messages and diffs them.
+    # **The provenance here was weaker than anywhere else in this file until
+    # 2026-08-02, and what is left of the gap is stated rather than
+    # implied.** These three message shapes had never met a real message:
+    # ADR-0004's live run recorded *which message types arrived* and not one
+    # byte of any payload, so everything below the `MessageType` line was
+    # transcribed from Emby's own `UserItemDataDto`/`LibraryUpdateInfo`/
+    # `SessionInfoDto` and from the decompilation of
+    # `SessionWebSocketListener` -- and a wrong envelope is invisible from
+    # both sides of this file, which is exactly the failure M3's live run
+    # found in the watch-state write-back.
+    #
+    # M5's live run captured all three against Emby 4.9.5.0 and the
+    # fixtures now carry the measured shape: `Sessions` has **no
+    # `MessageId`** (the other two do, one per message), a `UserDataList`
+    # entry has **no `Key`** and no `UnplayedItemCount` but does carry
+    # `PlayedPercentage` when the position is non-zero, and
+    # `LibraryChanged`'s arrays really are lists of id strings. What is
+    # *still* unmeasured is narrower and named in
+    # `tests/fixtures/emby/README.md`: a `LibraryChanged` carrying
+    # `ItemsRemoved`/`ItemsUpdated`, and a `UserDataChanged` for a series.
 
     def user_data_changed_frame(self, external_ids: Sequence[str]) -> str:
         """A `UserDataChanged` envelope for these items' current state.
@@ -768,7 +776,6 @@ class FakeEmbyServer:
         for external_id in external_ids:
             state = self._state_of(external_id)
             entry = dict(template)
-            entry["Key"] = external_id
             entry["ItemId"] = external_id
             entry["PlaybackPositionTicks"] = state.position_seconds * _TICKS_PER_SECOND
             entry["IsFavorite"] = False
@@ -821,9 +828,16 @@ class FakeEmbyServer:
 
         ADR-0004 observed `Sessions` arriving "periodically" and **not at
         what interval**, which is the single assumption
-        `DEFAULT_STALE_AFTER_SECONDS = 90.0` rests on. Nothing here can
-        model an interval nobody measured, so this renders one frame on
-        demand and the cadence stays a live-verification question.
+        `DEFAULT_STALE_AFTER_SECONDS = 90.0` rested on. M5's live run
+        measured it -- median 34.7 s, max 60.1 s over 133 intervals -- and
+        found it is **not an interval at all**: an authenticated socket
+        receives a frame when its row-filtered view changes, where an
+        unauthenticated one receives the literal 1 s cadence
+        `SessionsStart`'s `"0,1000"` asks for. Nothing here models either,
+        deliberately: a fake that emitted on a timer would be asserting a
+        cadence that is a property of a household rather than of the
+        protocol. This renders one frame on demand, and the watchdog's own
+        cases drive an injected clock instead.
         """
         message = load_emby_fixture("push_sessions")
         for session in message["Data"]:

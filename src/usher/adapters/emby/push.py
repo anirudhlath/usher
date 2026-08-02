@@ -66,8 +66,11 @@ WEBSOCKET_PATH = "/embywebsocket"
 # sent before `Sessions` and `UserDataChanged` started arriving, and the one
 # thing about this channel's protocol that was measured against the live
 # server rather than read. `"0,1000"` is the listener's
-# `initialDelayMs,intervalMs` pair. Without it Emby holds the socket open
-# and sends nothing -- which is indistinguishable from every other
+# `initialDelayMs,intervalMs` pair -- **confirmed 2026-08-02**, by the one
+# socket that honours it literally: an *unauthenticated* connection receives
+# `Sessions` at ~1 Hz. An authenticated one does not (see
+# `DEFAULT_STALE_AFTER_SECONDS`). Without this frame Emby holds the socket
+# open and sends nothing -- which is indistinguishable from every other
 # upgraded-but-silent failure this module exists to detect, arrived at by
 # forgetting one line.
 SUBSCRIBE_FRAME = '{"MessageType": "SessionsStart", "Data": "0,1000"}'
@@ -79,10 +82,21 @@ SUBSCRIBE_FRAME = '{"MessageType": "SessionsStart", "Data": "0,1000"}'
 DEFAULT_POLL_SECONDS = 5.0
 
 # How long a channel may deliver nothing at all before it is treated as
-# dead. Emby's own `Sessions` messages arrive on the subscription interval
-# above, so silence past several of those is a real signal rather than an
-# idle library. A setting (`push_stale_after_seconds`) rather than a
-# constant, because the interval is a property of the server.
+# dead. A setting (`push_stale_after_seconds`) rather than a constant,
+# because the cadence it is measured against is a property of the
+# deployment rather than of the protocol.
+#
+# **Measured 2026-08-02 against the live server, and it is not the interval
+# the frame above asks for.** An authenticated socket's `Sessions` arrives
+# when its row-filtered view changes, not on the 1 s timer: **median 34.7 s,
+# p90 46.3 s, max 60.1 s** over 133 intervals in 70 minutes. So 90.0
+# survives -- with **1.5x** headroom over the worst gap seen, and the worst
+# gap grew as the window did (52.6 s at 26 minutes). One household, one
+# hour, a change-driven signal; a 75-second probe earlier the same evening
+# saw exactly one frame, which is what the headroom is for. A quieter server
+# can exceed any fixed ceiling, and the consequence is bounded and visible
+# rather than silent: the lane reconnects, the gap-closing delta returns 0
+# items, and `usher.source.push.reconnects` climbs.
 DEFAULT_STALE_AFTER_SECONDS = 90.0
 
 # The `websockets` client logs its own request line at DEBUG --
