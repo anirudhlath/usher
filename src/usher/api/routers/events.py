@@ -94,9 +94,7 @@ async def events(
                 while True:
                     if pending is None:
                         pending = asyncio.ensure_future(anext(iterator))
-                    done, _ = await asyncio.wait(
-                        {pending}, timeout=settings.sse_heartbeat_seconds
-                    )
+                    done, _ = await asyncio.wait({pending}, timeout=settings.sse_heartbeat_seconds)
                     if not done:
                         # nginx closes an idle connection at 60 s and
                         # Cloudflare at ~100 s, and this stream sends nothing
