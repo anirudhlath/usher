@@ -37,6 +37,7 @@ failure handler that evolves its own pre-walk binding writes `items_seen =
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from loguru import logger
@@ -61,6 +62,54 @@ _run_duration = _meter.create_histogram(
 _backfilled = _meter.create_counter(
     "usher.watch_state.backfilled", unit="1", description="Play histories recovered by a backfill"
 )
+
+
+@dataclass(frozen=True, slots=True)
+class MergedState:
+    """One state a merge was built for, and where it landed.
+
+    **The pair travels together because separating it is a real bug, found
+    by the M5 plan's own self-review.** The push lane publishes one client
+    event per merged state, carrying that state's position and played flag
+    against that state's target. Recovering the pairing outside this service
+    -- by zipping the targets against the batch the caller handed in --
+    mis-pairs the moment the batch contains one unmatched item, because the
+    targets are only the matched subset and `zip` aligns by position. It
+    then publishes item A's resume position under item B's title id, which
+    a client renders.
+
+    Same rule `SourceEvent` states for `watch_states` one layer up, arrived
+    at from the other side: keyed, never aligned by position.
+    """
+
+    external_id: str
+    target: MediaItemTarget
+
+
+@dataclass(frozen=True, slots=True)
+class MergeOutcome:
+    """What one batch of inbound watch state did.
+
+    `merged` is what a merge was *built* for, not the rows the repository
+    changed -- the two differ whenever PRD 03's "latest `updated_at` wins"
+    refuses one, and `SyncRun.items_matched` has always meant the first.
+    Returning the repository's count in its place would silently change what
+    every existing `sync_runs` row means and what PRD 10's dashboard plots.
+
+    `rows_written` is the second, and is what the push lane publishes on:
+    telling a client its watch state changed when nothing did is a
+    re-render per echo of a position it set itself.
+
+    `needing_history` is the ids already enqueued for the `WATCH_HISTORY`
+    backfill, reported rather than re-derived -- a caller that recomputed
+    `played and play_count is None` would be a second copy of ADR-0014's
+    predicate, and two copies is how they come to disagree.
+    """
+
+    merged: tuple[MergedState, ...]
+    unmatched: int
+    rows_written: int
+    needing_history: tuple[str, ...]
 
 
 class _Progress:
@@ -293,22 +342,46 @@ class WatchStateSyncService:
             # resume positions.
             progress.run = await self._flush(progress.run, source_id, batch, user_id)
 
-    async def _flush(
+    async def apply_states(
         self,
-        run: SyncRun,
         source_id: uuid.UUID,
-        batch: Sequence[SourceWatchState],
+        states: Sequence[SourceWatchState],
+        *,
         user_id: uuid.UUID,
-    ) -> SyncRun:
+        observed_at: AwareDatetime,
+    ) -> MergeOutcome:
+        """Merge a batch of inbound watch state. **Does not commit.**
+
+        Extracted from `_flush` with no behaviour change, because the push
+        lane needs exactly this chain and reimplementing any link of it
+        would reimplement the failure ADR-0014 exists to prevent: one
+        batched `resolve_targets`, the episode-wins collapse, unmatched
+        counted rather than raised, `play_count`/`last_played_at` copied as
+        they are with `None` included, and a `WATCH_HISTORY` job for every
+        played item whose count the read could not determine.
+
+        `observed_at` is the caller's: a walk passes its run's start instant
+        (so the sweep's arithmetic and PRD 03's conflict rule both hold over
+        a walk that takes hours), and the push lane passes the instant the
+        event arrived. Neither may pass `now()` from inside this method -- a
+        per-row write instant is a different quantity that happens to
+        compare the same way, and nothing downstream can recover the first
+        from it.
+
+        The commit is the caller's too, for the reason it is everywhere else
+        in `services/`: a walk commits per batch and the push lane commits
+        per event, and those are different units of work.
+        """
         # One resolve for the batch, never one per state: `watch_state()`
         # yields one record per item and this deployment has 1,126,674.
         targets = await self._media_items.resolve_targets(
-            source_id, [state.external_id for state in batch]
+            source_id, [state.external_id for state in states]
         )
         merges: list[WatchStateMerge] = []
+        applied: list[MergedState] = []
         needing_history: list[str] = []
         unmatched = 0
-        for state in batch:
+        for state in states:
             stored = targets.get(state.external_id)
             target = None if stored is None else _watch_target(stored)
             if target is None:
@@ -316,19 +389,42 @@ class WatchStateSyncService:
                 # on: `merge_from_source` answers a target-less merge with
                 # `PortDataMalformed`, which would abort the whole batch
                 # over one unresolved item -- and PRD 02's "unmatched items
-                # are never dropped" means there will always be some.
+                # are never dropped" means there will always be some. On the
+                # push lane the same raise costs a reconnect and a
+                # gap-closing delta walk.
                 unmatched += 1
                 continue
-            merges.append(self._merge_for(state, target, user_id, run.started_at))
+            merges.append(self._merge_for(state, target, user_id, observed_at))
+            applied.append(MergedState(external_id=state.external_id, target=target))
             if state.played and state.play_count is None:
                 needing_history.append(state.external_id)
-        if merges:
-            await self._watch_states.merge_from_source(merges)
+        rows_written = await self._watch_states.merge_from_source(merges) if merges else 0
         await self._enqueue_backfills(needing_history)
+        return MergeOutcome(
+            merged=tuple(applied),
+            unmatched=unmatched,
+            rows_written=rows_written,
+            needing_history=tuple(needing_history),
+        )
+
+    async def _flush(
+        self,
+        run: SyncRun,
+        source_id: uuid.UUID,
+        batch: Sequence[SourceWatchState],
+        user_id: uuid.UUID,
+    ) -> SyncRun:
+        outcome = await self.apply_states(
+            source_id, batch, user_id=user_id, observed_at=run.started_at
+        )
         run = run.evolve(
             items_seen=run.items_seen + len(batch),
-            items_matched=run.items_matched + len(batch) - unmatched,
-            items_unmatched=run.items_unmatched + unmatched,
+            # `len(outcome.merged)`, never `outcome.rows_written`: this
+            # column has always meant "states this walk had somewhere to
+            # put", and a merge refused by "latest `updated_at` wins" is
+            # still one of those.
+            items_matched=run.items_matched + len(outcome.merged),
+            items_unmatched=run.items_unmatched + outcome.unmatched,
         )
         await self._runs.save(run)
         # One commit per batch, exactly like `ReconcileService`: a crash

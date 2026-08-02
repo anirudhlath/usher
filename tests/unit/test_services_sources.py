@@ -7,6 +7,7 @@ dependency here is either a domain object or a port fake.
 """
 
 import uuid
+from collections.abc import Callable
 
 import pytest
 from pydantic import SecretStr
@@ -68,11 +69,12 @@ def _service(
     repo: FakeSourceRepository | None = None,
     store: FakeCredentialStore | None = None,
     factory: RecordingFactory | None = None,
+    push_health: Callable[[uuid.UUID], bool | None] | None = None,
 ) -> tuple[SourceService, FakeSourceRepository, FakeCredentialStore, RecordingFactory]:
     repo = repo or FakeSourceRepository()
     store = store or FakeCredentialStore()
     factory = factory or RecordingFactory()
-    return SourceService(repo, store, factory), repo, store, factory
+    return SourceService(repo, store, factory, push_health), repo, store, factory
 
 
 async def test_register_persists_a_source_and_its_credentials() -> None:
@@ -339,3 +341,81 @@ async def test_a_rejected_credential_is_reported_not_raised() -> None:
     assert status is not None
     assert status.reachable is True
     assert status.authenticated is False
+
+
+async def test_status_reports_the_running_lanes_push_health() -> None:
+    """`verify()` opens no socket, so a freshly built adapter can only ever
+    answer `None` here -- a status screen a dashboard polls must not cost a
+    WebSocket handshake per poll. The **running lane's** adapter has a real,
+    message-grounded answer, and this route is where an operator reads it.
+    """
+    service, _, _, _ = _service(push_health=lambda _: True)
+    source = await service.register(
+        kind=SourceKind.EMBY, name="A", base_url="https://a.invalid", credentials=CREDENTIALS
+    )
+    status = await service.status(source.id)
+    assert status is not None
+    assert status.push_available is True
+
+
+async def test_status_reports_null_when_no_lane_is_running() -> None:
+    """ "Not probed", which is a different answer from "push is broken" and
+    is the honest one for a source whose lane has not started -- rendering
+    it as `False` would show an unperformed check as a performed one."""
+    service, _, _, _ = _service(push_health=lambda _: None)
+    source = await service.register(
+        kind=SourceKind.EMBY, name="A", base_url="https://a.invalid", credentials=CREDENTIALS
+    )
+    status = await service.status(source.id)
+    assert status is not None
+    assert status.push_available is None
+
+
+async def test_status_without_a_lane_reader_leaves_verifys_own_answer_alone() -> None:
+    """The default, and what `usher.cli` gets: no lanes in this process, so
+    nothing to report, and the adapter's own `None` stands."""
+    service, _, _, _ = _service()
+    source = await service.register(
+        kind=SourceKind.EMBY, name="A", base_url="https://a.invalid", credentials=CREDENTIALS
+    )
+    status = await service.status(source.id)
+    assert status is not None
+    assert status.push_available is None
+
+
+async def test_a_lane_reporting_push_on_an_unauthenticated_source_is_not_a_500() -> None:
+    """`SourceStatus.__post_init__` refuses "push available without being
+    authenticated", and `dataclasses.replace` re-runs it -- so the obvious
+    one-liner raises `ValueError` out of the admin status route for a state
+    a real deployment reaches: a lane that was delivering a second ago
+    against a source whose password has just been rotated.
+
+    The honest answer is the adapter's own: the operator's problem is the
+    authentication, and claiming a working push channel on a source that
+    cannot authenticate would be the more misleading of the two.
+    """
+    service, _, _, _ = _service(factory=RecordingFactory(reject=True), push_health=lambda _: True)
+    source = await service.register(
+        kind=SourceKind.EMBY, name="A", base_url="https://a.invalid", credentials=CREDENTIALS
+    )
+    status = await service.status(source.id)
+    assert status is not None
+    assert status.authenticated is False
+    assert status.push_available is None
+
+
+async def test_status_asks_the_lane_about_the_source_it_was_asked_about() -> None:
+    """A reader keyed on the wrong id answers about a different server, and
+    with one source configured every other case here would still pass."""
+    seen: list[uuid.UUID] = []
+
+    def record(source_id: uuid.UUID) -> bool | None:
+        seen.append(source_id)
+        return True
+
+    service, _, _, _ = _service(push_health=record)
+    source = await service.register(
+        kind=SourceKind.EMBY, name="A", base_url="https://a.invalid", credentials=CREDENTIALS
+    )
+    await service.status(source.id)
+    assert seen == [source.id]

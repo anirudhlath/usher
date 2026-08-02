@@ -92,3 +92,40 @@ access, but requires the server operator to enable "Notifications" under the
 account's Feature Access, and Emby Premiere on the server), then polling. The
 adapter reports `supports_push` accordingly and the reconciler covers the gap,
 so no other layer changes.
+
+## Implemented in M5, and what the second live run settled — 2026-08-02
+
+This ADR's own run recorded *which message types arrived* and not one byte of
+any payload. M5's run parsed them, against the same 4.9.5.0 build, driving
+the shipped `EmbyPushChannel` over the real `websockets` client. Six results
+that change what this document asserted:
+
+- **The envelope is not uniform.** `UserDataChanged` and `LibraryChanged`
+  carry `MessageId` — a distinct 32-hex value per *message* — and `Sessions`
+  carries none at all.
+- **`Sessions` is not periodic on the socket Usher actually uses.**
+  `"0,1000"` is `initialDelayMs,intervalMs` and an *unauthenticated* socket
+  really does receive one frame a second; the authenticated, row-filtered
+  stream arrives when the filtered view changes — median 38.7 s, max 72.9 s
+  over 182 intervals in 100 minutes. The table above should be read as
+  "periodically, because something on the server keeps changing", not as a
+  heartbeat.
+- **`LibraryChanged` was observed for the first time** — twelve of them —
+  and its arrays hold id strings rather than item objects. One carried a
+  real `ItemsRemoved` on a library from which nothing was deleted, which is
+  [ADR-0015](0015-availability-is-retracted-only-by-a-finished-walk.md)'s
+  argument as a measurement.
+- **A `UserDataChanged` entry is honest**, matching `GET /Users/{u}/Items/
+  {item}` field for field including `PlayCount` and `LastPlayedDate` — which
+  the *listing* route is not
+  ([ADR-0014](0014-absence-is-not-zero.md)). Usher still reports both as
+  absent; the reasoning is in [03](../03-sources-and-sync.md).
+- **Emby re-delivers nothing after a disconnect.** Measured over a 61 s
+  outage with a real change inside it: the reconnected channel received no
+  `UserDataChanged` for it in 90 s of listening, while a second socket that
+  stayed up received it at the time. The delta reconcile on reconnect, which
+  this ADR lists as an "accepted cost", is the only cover there is.
+- **The quirk below is worse than recorded.** A socket with no credential at
+  all also upgrades and also receives `Sessions` — see
+  [ADR-0018](0018-push-health-is-a-message-ledger.md), which this section is
+  the evidence for.

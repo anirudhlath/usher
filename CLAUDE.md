@@ -7,7 +7,7 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M4 complete.** The project scaffold, environment
+**Status: M5 complete.** The project scaffold, environment
 config, domain models, port ABCs, persistence (SQLAlchemy schema + Alembic
 migrations + title repository), the telemetry bootstrap, a FastAPI app
 with liveness/readiness endpoints, the container image + compose stack + CI
@@ -22,15 +22,19 @@ Postgres priority queue, the TMDb metadata provider, the `sync`/
 `sync-status`/`unmatched`/`work` CLI, and the pipeline's span tree and
 metrics (M4) — all exist and are verified working, M3 and M4 including
 against a live Emby 4.9.5.0 server and, as of 2026-08-01, against the live
-TMDb v3 API. See
+TMDb v3 API — and the push lane, the supervised reconnect with its
+gap-closing delta, `GET /titles/{id}` with demand promotion, `GET /events`
+over SSE, and the two supervised lanes `create_app` now runs (M5), verified
+2026-08-02 against the same live Emby server in the first run this
+repository has ever made that parsed a real `/embywebsocket` message. See
 `docs/plans/2026-07-28-m1-foundation.md`,
 `docs/plans/2026-07-30-m2-bootstrap.md`,
-`docs/plans/2026-07-30-m3-emby-adapter.md` and
-`docs/plans/2026-07-31-m4-ingest.md` for the task breakdowns and
-`docs/prd/09-roadmap.md` for what's next (M5 — push, reconnect delta, demand
-promotion, SSE). Do not invent commands for
-tooling that does not exist yet — check the Commands section below before
-assuming something runs.
+`docs/plans/2026-07-30-m3-emby-adapter.md`,
+`docs/plans/2026-07-31-m4-ingest.md` and
+`docs/plans/2026-08-01-m5-push.md` for the task breakdowns and
+`docs/prd/09-roadmap.md` for what's next (M6 — search). Do not invent
+commands for tooling that does not exist yet — check the Commands section
+below before assuming something runs.
 
 **M4's four deliberate boundary calls**, each stated with its reason in the
 M4 plan's Scope section and in PRD 09: the **index** stage is M6's (no
@@ -100,6 +104,263 @@ earlier negative findings were both wrong — see
 
 Health-check caveat: a handshake against *any* path succeeds, so a successful
 upgrade is not a health signal. Assert on received messages instead.
+**Re-measured 2026-08-02 and it is worse than that**: a socket carrying **no
+credential at all** upgrades, accepts the subscription, and then delivers
+`Sessions` *more* often than an authenticated one. So neither an upgrade nor
+arriving messages establish that a channel is the one you think it is —
+[ADR-0018](docs/prd/decisions/0018-push-health-is-a-message-ledger.md), and
+the whole M5 live section below.
+
+**A supervisor that resets its failure counter on connection is caught only
+if the fake it is tested against has an *unbounded* supply of connections.**
+`PushSupervisor` resets on delivery, and the mutation that moves the reset to
+the connection is exactly the failure ADR-0004's caveat predicts: a proxy
+that upgrades and buffers connects perfectly every time, so the ceiling is
+never reached and PRD 08's "after N failures mark `supports_push = false`"
+silently never fires. A scripted adapter whose list of connections *runs out*
+terminates that mutated loop for the wrong reason and lets it pass. The fake
+in `tests/unit/test_services_push.py` therefore hands out empty connections
+forever and caps its own attempts with a plain `AssertionError` — never a
+`UsherPortError`, so the supervisor cannot catch it — and the mutation fails
+**4 cases in 0.43 s** with "the supervisor opened 41 channels; it is not
+counting failures". Without that cap it would *hang*: `asyncio.wait_for`
+cannot bound a loop that never yields, and the injected sleep therefore also
+`await asyncio.sleep(0)`s.
+
+**"Connect, then close the gap" is a concurrency claim and an ordering
+assertion does not test it.** `order == ["connected", "gap"]` is what a
+serialised run produces too, and it passes against an implementation that
+connects, closes the socket, and then walks. The case that has teeth forces a
+real 40 ms gap walk against a producer emitting on the open socket for ~30 ms
+and asserts on measured intersection-over-union of the two windows —
+**62.6% on this host, stable over five runs** (compare `JobQueueContract`'s
+76.2% and M5 group B1's 80.3–85.4%) — plus "every event produced during the
+walk was still delivered".
+
+**Three obvious assertions about `SourceNotSupported` all survive its own
+mutation.** Deleting the supervisor's `except SourceNotSupported` arm and
+letting it fall through to `except UsherPortError` ends with
+`push_available == [False]`, `push_connections == 0` and `gaps == 0` — the
+ceiling is reached instead of the method returning, so every visible end
+state is identical and only the five wasted attempts and four backoff sleeps
+differ. Measured; the M5 plan's own draft asserted exactly those three and
+the mutation survived it. Assert on `attempts == 1` and `sleeps == []`.
+
+**`PushHealth.record_reconnect` was a method nothing in `src/` ever called**,
+so PRD 10's `usher.source.push.reconnects` would have plotted a flat zero for
+every source forever. The increment belongs in `record_open`, guarded on
+`opened_at is not None` — on the second and later *open*, not on a failure,
+because a lane that failed to connect five times and then succeeded
+reconnected *once*. Both the unguarded version (every source starts at 1) and
+the absent version are pinned.
+
+**A push merge's `observed_at` mutation survives the whole unit file and is
+killed only by real Postgres.** Measured 2026-08-01: replacing
+`PushApplyService`'s `datetime.now(UTC)` with a plausible earlier instant —
+the event's own timestamp, the last walk's `started_at` — passes all of
+`tests/unit/test_services_push.py` and fails
+`tests/integration/test_services_push.py`, because
+`FakeWatchStateRepository` stores `observed_at` as `updated_at` while
+`trg_watch_states_set_updated_at` owns that column in Postgres. Same trap
+`backfill_one` documents, one lane over, and the reason that integration file
+exists at all.
+
+**The M5 plan's own self-review found a real bug and it is worth the general
+form.** `_publish_watch_states` zipped the *matched subset* of targets
+against the whole batch of states, so one unmatched item — which PRD 02
+guarantees there will always be — shifted every pair by one and published
+item A's resume position under item B's title id. Recovering a pairing
+outside the loop that built it is the failure; `WatchStateSyncService`
+therefore returns `MergedState(external_id, target)` and the pairing cannot
+be reconstructed wrongly. Same rule `SourceEvent.watch_states` states one
+layer up: keyed, never aligned by position.
+
+**M5's live verification: the first real `/embywebsocket` message this
+repository has ever parsed, and four of thirteen documented guesses were
+wrong.** Run 2026-08-02 against the same live Emby **4.9.5.0** server,
+driving the shipped `EmbyAdapter` → `EmbyPushChannel` → `connect_websocket`
+→ real `websockets`, and for the long hold the shipped `PushSupervisor` with
+recording callables in place of the three unit-of-work ones. From a
+throwaway script outside the working tree, holding the operator's existing
+token (no password, so `AuthenticateByName` was again not exercised).
+**Bounded deliberately: one long-lived socket held 100 minutes, eight
+short-lived probe sockets, and 14 HTTP requests in total** — no walk of any
+kind, because the library is 1,126,789 items. The long socket received
+**200 frames — 183 `Sessions`, 12 `LibraryChanged`, 5 `UserDataChanged` —
+with zero reconnects, zero unforced failures, and `supports_push` true
+throughout**, and the shipped mapper turned them into 20 `SourceEvent`s.
+
+- **The envelope is not uniform, and that is the first correction.**
+  `UserDataChanged` and `LibraryChanged` carry
+  `{MessageId, MessageType, Data}` with a **distinct 32-hex `MessageId` per
+  message** (not per type — 17 carried one, 17 distinct); **`Sessions`
+  carries `{MessageType, Data}` and no `MessageId` at all**, on 183 of 183
+  frames. `tests/fixtures/emby/
+  push_sessions.json` claimed one and no longer does.
+- **A real `UserDataChanged` entry is honest, including about play
+  history.** One item, three transitions, each compared against
+  `GET /Users/{u}/Items/{item}` in the same second: `PlaybackPositionTicks`
+  6,130,000,000 (the 613 s written) with `Played: false`; then
+  `PlayCount: 1`, `Played: true`, `LastPlayedDate` — *the same timestamp the
+  item route returned*; then all-zero after the restore. **So the pushed
+  shape is not the partly-honest one the listing route is**, and the
+  M5-blocking failure this run existed to look for — an entry that zeroes
+  the position, so the adapter reports a wrong resume point while the
+  contract case stays green — **did not happen**. Through the shipped
+  mapper, the first event carried `position_seconds=613`.
+- **`play_count`/`last_played_at` stay `None` anyway, and that is a
+  deliberate lag rather than an oversight.** ADR-0014's rule is that a
+  reported number must be *true*, and the evidence here is one item across
+  three transitions, all of them writes Usher itself made, on an item whose
+  history was zero to begin with. The failure it guards against needs an
+  entry reporting `0` for an item whose true count is 13, which this run
+  could not produce without touching real history. Turning the field on is a
+  measured opportunity worth one `watch_history` job per played item;
+  recorded, not taken.
+- **`LibraryChanged` arrives, its arrays hold ids, and one of them arrived
+  carrying all six at once.** Never observed before this run; **twelve**
+  arrived unprompted during the hold, with all seven documented keys
+  (`ItemsAdded`/`ItemsUpdated`/`ItemsRemoved`,
+  `FoldersAddedTo`/`FoldersRemovedFrom`, `CollectionFolders`, `IsEmpty`) and
+  every array a **list of id strings** rather than of item objects. The
+  committed fixture's shape was already right, field for field. The shipped
+  `to_source_events` produced 7 `ITEM_ADDED`, 7 `ITEM_UPDATED` and 1
+  `ITEM_REMOVED` from them — one event per non-empty array, live.
+- **`ItemsRemoved` fires on a library from which nothing was removed, and
+  that is ADR-0015's argument arriving as a measurement rather than as an
+  argument.** Nobody deleted anything from this server during the 100-minute hold, and
+  one frame still named an item in `ItemsRemoved` (alongside
+  `FoldersRemovedFrom`, `ItemsAdded`, `FoldersAddedTo`, `CollectionFolders`
+  and ten `ItemsUpdated`). M5 counts it and retracts nothing; had it
+  retracted, one ordinary library refresh would have marked a present file
+  unavailable.
+- **A real `ItemsUpdated` batch reached 42 ids**, against
+  `push_max_items_per_event`'s default of **50**. So the ceiling is not
+  theoretical headroom over a hypothetical event — real traffic on an
+  otherwise idle server comes within 16% of it, and the batch below it costs
+  42 `get_item` calls applied inline. Raising the default would buy little
+  and the deferral path (a delta walk) is the cheaper answer above it, which
+  is the shape M5 already ships; recorded so the number is chosen against
+  data next time it is chosen.
+- **`Key` and `UnplayedItemCount` are not on a real `UserDataList` entry,
+  and `PlayedPercentage` is.** Observed entry keys: `ItemId`,
+  `PlaybackPositionTicks`, `Played`, `PlayCount`, `IsFavorite`, plus
+  `PlayedPercentage` (a float, when the position is non-zero) and
+  `LastPlayedDate` (when played). The fixture and `FakeEmbyServer` both
+  rendered a `Key`; both stopped.
+- **The `Sessions` interval, which `DEFAULT_STALE_AFTER_SECONDS = 90.0`
+  rests on: median 38.7 s, mean 32.8 s, p90 46.5 s, max 72.9 s** over 182
+  intervals in 100 minutes on an authenticated socket. **The 90 s default
+  survives — but the headroom is 1.23x, not the comfortable margin the
+  constant reads like, and it shrank monotonically as the window grew**: the
+  worst gap was 52.6 s at 26 minutes, 60.1 s at 70 and **72.9 s at 96**, and
+  only two of 182 intervals exceeded 60 s at all. So
+  a longer hold would plausibly have crossed 90, and this is a bound that
+  has **not been falsified** rather than one shown to be safe — on one
+  household, on one evening. A 75-second smoke run earlier the same evening
+  saw exactly **one** frame, and the cadence is not an interval at all
+  (below).
+
+  **The default is left at 90 anyway, and the reasoning is worth keeping.**
+  A bigger constant chosen from a 96-minute sample would be just as
+  unprincipled as this one was, and it costs detection time for the failure
+  the whole milestone exists to catch. The real finding is that the constant
+  is wrong *in kind*: there is no application-level heartbeat on this
+  channel at all, so any fixed ceiling is a guess against a change-driven
+  signal. The one genuinely periodic signal available is the WebSocket
+  pong — and ADR-0018 deliberately refuses to count it, because a pong is
+  not delivery. That tension is the honest statement of what this design
+  costs. When it bites, it bites bounded and visible: a reconnect, a delta
+  that returns 0 items, and `usher.source.push.reconnects` climbing.
+- **`"0,1000"` really is `initialDelayMs,intervalMs`, and an authenticated
+  socket does not honour it.** An *unauthenticated* socket receives
+  `Sessions` at ~1 Hz — 53 and 55 frames in 45 s, with sub-second gaps —
+  while the authenticated one on the same server in the same minute received
+  **one**. The difference is the payload: the unauthenticated stream carries
+  the **whole server's 83 sessions**, the authenticated one a 5-session
+  row-filtered view. The natural reading, and the one that fits every
+  number: the 1 s timer fires either way and the filtered stream is only
+  *sent* when the filtered view changes. **So Usher's liveness signal is
+  change-driven, not periodic**, and a genuinely quiet server could exceed
+  any fixed `stale_after`. `push_stale_after_seconds` is the knob, and
+  `usher.source.push.reconnects` is how the condition is seen.
+- **`/embywebsocket` does not accept `X-Emby-Token` as a header, and the
+  test that looks like it says otherwise is the trap.** A header-only socket
+  upgrades and delivers — identically to one with **no credential at all**:
+  53 frames of 83 sessions against 55 frames of 83 sessions. It is not
+  authenticated; it is anonymous. So the token cannot be moved out of the
+  URL this way and **ADR-0012's accepted risk stands unnarrowed**. A check
+  written as "did it connect and receive messages" passes this. The only
+  discriminator is the row-filtered payload, or a `UserDataChanged` that
+  never comes.
+- **A dropped socket raises rather than hanging, and Emby re-delivers
+  nothing.** Aborting the TCP transport under a live channel raised
+  `PortUnavailable` out of the iterator in **0.0 s** — not a hang, not the
+  quiet end the port forbids — and `connected` went false. Over a **61 s**
+  outage, a real played toggle and its restore were made out of band; the
+  reconnected channel then listened for **90 s** and received three
+  `Sessions` and **not one** `UserDataChanged`. The control is decisive: a
+  *second* socket that stayed up throughout received both changes at the
+  time they happened. **The gap-closing delta is not belt-and-braces, it is
+  the only cover there is**, which is exactly what PRD 03 puts on the
+  reconnect.
+- **The `websockets` DEBUG token leak is real, and the fix holds against the
+  real library and the real server.** Two runs at `USHER_LOG_LEVEL=DEBUG`
+  with `configure_logging` installed exactly as `create_app` does, each
+  writing to a real stdout captured to a file: the shipped path produced
+  **804 bytes / 2 lines** with **no token, no `api_key=`, no `> GET`
+  request line** and a channel that genuinely delivered
+  (`messages_received == 1`); the control — the same URL with the library's
+  own logger left alone — produced **16,857 bytes / 24 lines** with the
+  token in it, `api_key=` in it, and the request line logged twice. Both
+  halves, or the run proves nothing; the same discipline the network guard
+  gets.
+- **`permessage-deflate` is not negotiated.** `websockets` offers it by
+  default and the handshake response carries no `Sec-WebSocket-Extensions`
+  at all, on every connection made in this run. So nothing in this project
+  is relying on compression, and a frame is a frame.
+- **A client that stops reading loses the connection, which is what
+  `max_queue=256` is buying.** With `max_queue=1` and no application read
+  for 150 s, the socket came back **CLOSED** with a `ConnectionClosedError`
+  and only two buffered `Sessions` behind it — so Emby's listener does not
+  queue indefinitely for a stalled consumer. **The confound is named rather
+  than glossed:** `websockets` services pings on the same reader task that
+  backpressure stalls, so this measurement cannot separate a server-side
+  close from the client's own pong timeout. Either way the operational
+  conclusion is the same and it is the one `connect_websocket` was already
+  written for: do not let the queue fill during the gap-closing walk.
+- **The nonexistent path still upgrades**, ADR-0004's quirk re-measured on
+  the same build: `/embywebsocket-nope` → 101, `Upgrade: websocket`,
+  `Sessions` delivered.
+- **`supports_push` is `False` before the first message and `True` after**,
+  measured through the shipped adapter against the real server rather than
+  against a fake — the contract's pre-message assertion, live.
+- **The one write to a real account, and its restoration.** The same
+  discipline M4's run set: an item whose complete `UserData` was already
+  `{PlaybackPositionTicks: 0, PlayCount: 0, IsFavorite: false, Played:
+  false}` with no `LastPlayedDate`, found with **one** 50-item listing plus
+  one single-item read (never a search over a walk). `push_watch_state`
+  wrote a 613 s position, then marked it played (`PlayCount: 1`,
+  `LastPlayedDate`, position cleared — M3's ordering finding, re-confirmed),
+  then `DELETE /Users/{u}/PlayedItems/{item}` restored it **byte-for-byte**
+  (`after == before`). A second toggle and restore during the outage test
+  ran on the same item and ended the same way; the final read-back matches
+  the recorded `before` exactly.
+- **`PlayedPercentage` appears on the item route too** when a position is
+  set, and disappears when it is cleared. Nothing reads it; recorded because
+  it is the one key the fixture was missing.
+- **Not verified in this run, and named rather than implied:** `POST
+  /Users/AuthenticateByName` and whether its response carries
+  `User.Policy.IsAdministrator` (this run held a token, not a password —
+  so Task 3's extra `GET /Users/{userId}` remains the verified path);
+  silent 401 re-authentication end to end; durable-device registration
+  across restarts; a socket held for four hours (**100 minutes** is what this
+  run covers, with zero reconnects and zero unforced failures in it); a
+  `LibraryChanged` with `IsEmpty: true` (all twelve observed carried
+  something, so what that field means is still a guess about a field nothing
+  reads); a `UserDataChanged` for a **series** entry, which is where
+  `UnplayedItemCount` would plausibly appear; and whether a real entry is
+  honest about play history for an item Usher did not itself write.
 
 **M4's live verification: the design's central measurement holds, the
 matcher's exact-name tier was expected to match "almost nothing" and matches
@@ -382,6 +643,78 @@ releases N claimers through an `asyncio.Barrier` and records the wall-clock
 interval each claim occupied; `overlapping()` fails unless those intervals
 genuinely intersect. Measured on this host: the two windows share **76.2%** of
 their union.
+
+**A concurrency claim whose failure mode is a *deadlock* needs a second kind
+of case, and every burst around it needs a bound.** M5's `InMemoryEventBus`
+exists to make "a slow subscriber never blocks a publisher" true, and the
+one-line mutation that breaks it — `await queue.put(...)` for `put_nowait` —
+does not answer wrongly, it hangs. Three consequences, all measured:
+
+- **A timing case can only ever report a timeout against it**, so the M5
+  plan's instruction to "confirm it fails on the interval assertion and not
+  on a timeout" is unachievable. What has teeth is driving the coroutine
+  **one step by hand**: `coro.send(None)` raises `StopIteration` for a
+  coroutine that never awaited and hands back a future for one that parked.
+  No scheduler, no clock, no timeout; it fails on its own assertion in
+  microseconds, and it cannot be satisfied by a serialised run because it
+  never involves two tasks. Fill the queue first — `asyncio.Queue.put` on a
+  queue with room does not await either.
+- **An unbounded burst turns that mutation from KILLED into HUNG**, which in
+  a sweep log reads like a mutation nothing observed rather than one
+  everything caught. It happened twice on this milestone, in two files, which
+  is why `tests/contract/event_publisher_contract.publish_all` exists and
+  every burst goes through it. Whole-suite, the mutation now fails 5 cases in
+  46.7 s against a 42.8 s baseline, and the 4 s difference *is* the bounds
+  firing.
+- **The operational case is still worth keeping, and its harness has to
+  subscribe before it publishes.** `asyncio.create_task` only schedules, so
+  the first publish in the plan's draft reached an empty subscriber set and
+  the reader parked forever — the case timed out on its own harness rather
+  than on the bus. With the reader signalling first: the publisher's window
+  sits inside the window a subscriber spent parked and unread for **99.3–99.6%
+  of their union over five runs** (publish 4.3 ms, parked 4.4 ms), against
+  `JobQueueContract`'s 76.2% and group D's 62.6%.
+
+**A mutation can survive because CPython collected it, not because the code
+is right.** "Subscribe outside the generator so the `finally` never runs"
+survived the whole SSE suite when spelled as
+`await bus.subscribe(...).__aenter__()` with the context manager left
+unreferenced: refcounting destroys the `_AsyncGeneratorContextManager`
+immediately, the async generator's finalizer closes it, and the `finally`
+runs anyway. Spelled with a strong reference retained, the same mutation
+fails `test_a_disconnect_unsubscribes` at once. A leak test only tests a leak
+if the mutation actually leaks.
+
+**`httpx.ASGITransport` buffers the whole response and therefore cannot test
+SSE at all.** Its `handle_async_request` runs `await self.app(scope, receive,
+send)` to *completion*, collects every `http.response.body` into a list, and
+only then builds a `Response` over the joined bytes — so
+`client.stream("GET", "/events")` against a route whose whole purpose is not
+to complete blocks inside the transport forever, and every case written
+against it would hang rather than fail. `tests/fakes/
+streaming_asgi_transport.py` is the replacement: the app runs in a task,
+`http.response.start` resolves a future, chunks go on a queue, and
+`aclose()` sends `http.disconnect`. Its scope carries
+`spec_version: "2.3"`, matching uvicorn 0.51's own, and that is load-bearing
+— `StreamingResponse.__call__` only runs `listen_for_disconnect` below spec
+2.4, so at 2.4+ a client going away would not cancel the body iterator and
+the route's `finally` would never run.
+
+**`status.HTTP_422_UNPROCESSABLE_ENTITY` is deprecated behind a Starlette 1.3
+module `__getattr__`, so it warns once per *request*, not once per import.**
+Use `HTTP_422_UNPROCESSABLE_CONTENT`; both are 422. This suite deliberately
+runs with no expected warnings, for the reason the `testcontainers` shim was
+replaced: a suite with one permanent warning is a suite where the next real
+one is invisible.
+
+**A replay ring and a per-subscriber queue are fed by the same `publish`
+calls, so a lazily-resolved replay duplicates.** `InMemoryEventBus.subscribe`
+snapshots the ring *before* it adds the subscriber, with no `await` in
+between. Resolved lazily at the first `__anext__` instead — which is what the
+M5 plan's draft did — everything published in the window between is in both
+halves and the client sees it twice. The window is real: `api/routers/
+events.py` reaches its first `anext` through an `asyncio.wait_for`, which
+yields to the loop, and the push lane publishes from another task.
 
 **Bulk loading bypasses the repository, and the SQL has three traps.**
 Verified against `pgvector/pgvector:pg17` on 2026-07-30, all three of which
@@ -736,12 +1069,30 @@ Both mutations survived the whole suite until the direct case existed.
 
 **No test in this repository makes a network request, and that is measured
 rather than asserted.** Verified 2026-07-31, **re-verified 2026-08-01 after
-the live TMDb run**, and **again 2026-08-01 after the fixture scrub and the
-CLI/deps changes**, by running the whole suite under a
+the live TMDb run**, **again after the fixture scrub and the CLI/deps
+changes**, **again after M5 group E added an SSE route and a streaming
+ASGI transport**, and **again after group F added `GET /titles/{id}`**, by
+running the whole suite under a
 `sitecustomize.py` that patches `socket.socket.connect`, `connect_ex` and
 `socket.getaddrinfo` to raise on anything that is not loopback (`AF_UNIX` is
 left alone, so Docker's socket still works and `testcontainers` still reaches
-`127.0.0.1`). **1,319 unit + 425 integration passed (1 unit case skipped), zero blocks.** The
+`127.0.0.1`). **1,549 unit + 429 integration passed (2 unit cases skipped), zero blocks**, with
+`[netguard] installed` printed by the module itself in the same run and
+`socket.getaddrinfo("api.themoviedb.org", 443)` raising
+`RuntimeError: NETWORK BLOCKED` in the same environment. Group F's re-run:
+**1,586 unit + 442 integration passed (2 unit cases skipped), zero blocks**,
+and group G's, after `create_app` grew its two supervised lanes:
+**1,623 unit + 450 integration passed (2 unit cases skipped), zero blocks**,
+`[netguard] installed` on stderr, and the same `getaddrinfo` probe raising in
+the same `uv run` environment. **Re-verified a sixth time on 2026-08-02, at
+the end of M5 and after a live run that really did open sockets to a real
+Emby server from a throwaway script outside the tree: 1,624 unit + 474
+integration passed (2 unit cases skipped), zero blocks**, with
+`[netguard] installed` printed by the module itself in the same run, both
+`getaddrinfo("api.themoviedb.org", 443)` and `connect(("1.1.1.1", 443))`
+raising `RuntimeError: NETWORK BLOCKED` in that same environment, and the
+in-process case (`/tmp/netguard/test_guard_is_live_in_pytest.py`) passing
+under the same `PYTHONPATH`. The
 guard lives outside the tree — it is a check to re-run, not a dependency to
 add, because `PYTHONPATH`-injecting a socket monkeypatch into every developer's
 suite costs more than it catches.
@@ -753,6 +1104,142 @@ venv-shebang trap. The 2026-08-01 re-run printed `[netguard] installed` from
 the module itself and then, in the same environment,
 `socket.getaddrinfo("api.themoviedb.org", 443)` raised
 `RuntimeError: NETWORK BLOCKED`. Both checks, or the run proves nothing.
+
+**`.env` has two readers with different vocabularies, and that broke the
+README's own first step for four milestones.** Docker Compose reads `.env`
+to substitute `${...}` into `compose.yml`; pydantic-settings reads the same
+file as a settings source with `extra="forbid"`. So a compose-only variable
+is an *extra* input to `Settings` — and `USHER_HOST_PORT`, the host-side
+publish port shipped in `.env.example` since M1, made `cp .env.example .env`
+fail **every** entry point: `uv run pytest` at 1637 passed / 461 errors,
+`usher bootstrap-status` and `usher push --probe` with a raw traceback and
+exit 1. Found by M5's smoke test on 2026-08-02, present on `origin/main`
+since M1, and invisible to 2,098 passing tests for the reason
+`tests/conftest.py::clean_environment` exists at all: it neutralises the
+`env_file` source so a developer's own `.env` cannot fail the suite. **The
+461 errors that did appear came from the one path that fixture cannot
+reach** — `tests/integration/conftest.py::_upgrade_head`, session-scoped,
+which saves and restores `os.environ` but has no way to hide a file.
+
+- **`extra="forbid"` is worth keeping and is why the fix is a namespace.**
+  It is what turns `USHER_LOG_LEVL=DEBUG` into a startup failure rather than
+  a line in `.env` that silently does nothing. `extra="ignore"` fixes the
+  crash by breaking that; splitting the files leaves compose nothing to read
+  (compose substitutes from `.env` and nowhere else, short of `--env-file`
+  on every invocation); renaming the one key fixes today and lets the next
+  compose variable reintroduce it. So the two readings are separated by
+  **name**: `USHER_COMPOSE_*` is dropped before validation, everything else
+  under `USHER_` is a setting or a typo.
+- **The test that matters is not the one that copies the file.** A case
+  building `Settings` from `.env.example` passes against a fix that
+  special-cases `usher_host_port`. What fails if a *future* compose variable
+  reintroduces the outage is `test_every_variable_compose_substitutes_is_a_
+  setting_or_compose_reserved`, which regex-scans the whole of `compose.yml`
+  for `${...}` — over the whole file, not just `ports:`, because a variable
+  added to a `volumes:` or an `image:` line is the same hazard — plus its
+  twin over `.env.example`. Both are needed: the M1 commit that introduced
+  `USHER_HOST_PORT` touched both files.
+- **Any case written for this must pass `_env_file=` explicitly.** The
+  autouse fixture neutralises the class-level `env_file`, so a case that
+  relies on it proves nothing. Same shape as the `sitecustomize.py`
+  installation proof.
+
+**`env_file:` and `environment:` are different mechanisms, and picking the
+second forwarded 5 of 30 settings into the container.** `printenv` inside
+the running container showed `USHER_DATABASE_URL`, `USHER_SECRET_KEY`,
+`USHER_TMDB_API_KEY` and the two `OTEL_*` — nothing else. 24 documented
+settings were unreachable, **12 of them M5's own** (`USHER_PUSH_*`,
+`USHER_SSE_*`, both lane switches). `environment:` names one variable at a
+time and compose substitutes its value; `env_file:` hands the file over. The
+first needs a line somebody remembers to write, which is why the count drifts
+by a milestone's worth of settings at a time.
+
+- **`USHER_WORKER_ENABLED` is the one with teeth.** It is documented
+  (`README.md`, `.env.example`) and it *works* when delivered directly —
+  `/health/ready` reports `"worker": false` and the lane stops. Set in
+  `.env`, the only place the docs point at, it was silently ignored, so an
+  operator following the README leaves `worker: true` and then starts
+  `usher work` in a second container: two workers, and `JobWorker.startup()`
+  requeues everything `running`, so each steals the other's live claims.
+- **`environment:` still wins over `env_file:`, so what is left in it is
+  what the compose *topology* owns**, four keys, each with its reason in the
+  file: `USHER_DATABASE_URL` (`postgres`, not `localhost`),
+  `USHER_HOST`/`USHER_PORT` (bind-all and 8000 — what `ports:`, `EXPOSE` and
+  the healthcheck all assume), and `USHER_SECRET_KEY` (kept as `${...:?}`
+  purely for the guard that fails at `docker compose up` with a sentence).
+- **Measured with `docker compose config`, not argued**: 5 `USHER_*`/`OTEL_*`
+  keys rendered into the container before, **39 after** (38 `Settings` fields
+  plus `USHER_COMPOSE_HOST_PORT`, which the app ignores by design — the
+  namespace proving itself), with `published: "8100"` → `target: 8000`
+  unchanged. `env_file:` uses the long form with `required: false` so a
+  checkout with no `.env` still parses and fails on the secret-key guard
+  rather than on a missing file.
+
+**A per-process fact logged in a per-pass function is ~17,280 warnings a
+day.** `build_worker` logged `no TMDb API key configured; enrich jobs will
+not be claimed` unconditionally, and `usher.api.lanes._run_worker` calls it
+once per pass at `IDLE_SLEEP_SECONDS = 5.0` — measured at exact 5 s
+intervals in the default no-key deployment, and in `usher push` too. The
+information is worth surfacing; at that rate it trains an operator to ignore
+warnings, which is the failure a log level exists to prevent. It moved to
+`composition.metadata_provider`, which is where the decision is *made* and
+which each of the three composition roots calls exactly once per process —
+and which a push-only deployment never reaches at all, correctly, since with
+no worker there are no enrich jobs to leave unclaimed. `usher work` was
+already calling `build_worker` once outside its loop, so that root saw one
+warning either way; the lane was the one at 5 s. The case that has teeth
+drains **three** worker passes and asserts the sink is empty — asserting
+after one pass cannot tell "once" from "per pass", the same shape
+`test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass` needed.
+
+**M5's final mutation sweep: 56 mutations, 50 killed, and every one of the
+six survivors was predicted.** Run 2026-08-02 in place, each mutation
+against the **whole** 2,098-test suite rather than its own task's selection.
+Baseline green before (`2098 passed, 2 skipped in 47.20s`), restored green
+after, the group-G harness's rules enforced throughout — target must appear
+exactly once, `cp` backups never `git checkout --`, a run that did not run is
+`DID-NOT-RUN`, a syntax error is `BROKEN-MUTATION`, a hang is `HUNG`.
+**Zero HUNG, zero DID-NOT-RUN, zero BROKEN**, and every mutation was
+dry-run through `ast.parse` before the sweep started so an `IndentationError`
+could not be scored as a kill.
+
+The six survivors, and the one prediction that was wrong in the *other*
+direction:
+
+- **Five are the plan's own named equivalent mutants, each surviving for
+  the stated reason**: the `stale_after` boundary (`<=` → `<`; the clocks in
+  those cases step past the boundary rather than onto it), the
+  `except asyncio.CancelledError: raise` arm (a `BaseException` in 3.13, so
+  the `UsherPortError` arm would not catch it anyway), `list(self._subscribers)`
+  (`publish` does not await, so nothing can be removed mid-iteration),
+  `rpartition` → `partition` (the epoch is hex and holds no `-`), and
+  `is ENRICHED` in place of the rank comparison (both agree on all three
+  rungs today).
+- **The sixth is `_write_push_available`'s "nothing changed" guard**, which
+  is not on the plan's list but *is* already recorded above as an equivalent
+  mutant against today's repository: SQLAlchemy emits no `UPDATE` when no
+  attribute actually changed, so the `set_updated_at` trigger never fires
+  either way.
+- **The plan's sixth named survivor was killed, and for a different reason
+  than the plan reasoned about.** `socket_logger`'s `propagate = False` was
+  predicted to survive because "the level alone is sufficient", which is
+  true *as a security property* — and it dies anyway, on
+  `test_the_socket_logger_is_re_silenced_on_every_call`, which pins all
+  three fields directly rather than asserting the leak. Worth knowing before
+  anyone reads that kill as evidence the propagate flag is load-bearing for
+  the token.
+
+Three results worth carrying forward. The milestone's headline mutation —
+moving `failures = 0` from delivery to connection — **fails 4 cases**, so
+PRD 08's "after N failures mark `supports_push = false`" cannot silently
+stop firing against a buffering proxy. Deleting the watchdog call fails 4,
+and `is_delivering` returning `self.connected` fails **11**, the largest
+blast radius in the sweep. And the ADR-0014 mutation on the *third* payload
+shape (`play_count=as_int(entry.get("PlayCount"))` in `user_data_states`)
+fails 2 — which matters more now that the live run has shown that field
+would be *telling the truth*: the test suite forbids reading it on the
+strength of a rule about evidence, not on the strength of the value being
+wrong.
 
 **M4's final mutation sweep: 39 mutations, one survivor, and the survivor is
 an equivalent mutant the code comment predicted.** Run 2026-07-31 in place,
@@ -1180,6 +1667,169 @@ of 1, and a global `count_by_state`), each of which passed in isolation.
 `media_items` and `sync_runs` go with the source's `ON DELETE CASCADE`;
 `titles` and `jobs` do not.
 
+**A read on `media_items.title_id` alone is a read of the whole show, and
+`AND episode_id IS NULL` is the whole of the bound.** `IngestService` writes
+an episode's row with its series' `title_id` **and** its own `episode_id`,
+deliberately — a client browsing a season wants both — so
+`WHERE title_id = :id` answers a *series* with one row per episode file, and
+999,827 of the one measured source's 1,126,789 items are episodes. Measured
+2026-08-01 on the statement `PostgresMediaItemRepository.list_for_title`
+actually issues (captured off `before_cursor_execute`, then `EXPLAIN
+(ANALYZE, BUFFERS)`'d verbatim; 80,201 `media_items` rows, one 20,000-episode
+series): **1 row, 0.251 ms, 21 buffers** with the clause — `Sort ← Bitmap
+Heap Scan ← BitmapAnd(ix_media_items_episode_id, ix_media_items_title_id)` —
+against **20,001 rows, 22.901 ms, 402 buffers, 3.4 MB of sort memory**
+without it. The wrong half is linear in the episode count and the right half
+is flat, which is the difference between a response shape and a design
+defect. `resolve_external_ids`' title branch carries the identical clause for
+the identical reason. `ix_media_items_episode_id` earns its keep twice: M4
+added it for the FK's `SET NULL` scan, and the planner reads `IS NULL`
+straight out of it.
+
+**A trailing `UPDATE` only separates heap order from id order if it is
+*non-HOT*.** The idiom for making a missing `ORDER BY` tiebreak observable —
+re-write a row so physical order and the answer disagree — silently does not
+work when the update touches no indexed column: Postgres performs a
+heap-only-tuple update, the existing index entry keeps pointing at the
+original TID, and an `Index Scan` still arrives in the original order.
+Measured on `media_items`: re-upserting a row unchanged left `ORDER BY
+available DESC, last_seen_at DESC` (no `id`) answering `[a, b, c]` — already
+sorted, already passing. Moving `last_seen_at`, which is in
+`ix_media_items_sweep`, forces a new index entry and the same read answers
+`[b, c, a]`. Every id here is a UUIDv7 minted at insert time, so a run of
+plain inserts has id order and storage order as one sequence and no seeding
+separates them.
+
+**`FakeJobQueue.enqueue` counts a no-op re-enqueue as a row written, and
+Postgres answers 0.** The fake takes its update branch and increments
+whatever it changed; `_ENQUEUE`'s `AND jobs.priority < excluded.priority`
+matches nothing for work already at that priority. So anything whose
+behaviour turns on the *count* rather than on the stored row is untestable
+against the fake: `TitleReadService._promote` returns whether an enqueue was
+*attempted*, and the version that returned "a row changed" passes all 18
+cases in `tests/unit/test_services_titles.py` and then reports
+`promoted = False` for every second open of the same stub — telling a client
+that an already-promoted title declined to be promoted. Killed only by
+`tests/integration/test_services_titles.py`. Recorded as the fake's seventh
+divergence rather than fixed, because a fake that modelled the whole
+promotion predicate would be a second implementation rather than a stand-in.
+
+**`TitleReadService` holds no `SourceAdapter`, and that is asserted on its
+imports rather than on its behaviour.** PRD 08's "a degraded subsystem
+narrows functionality; it never fails a request local state can answer" is
+only a property of the code if the failing call is *absent* rather than
+caught — "it did not raise" is also what a service that swallowed everything
+would produce. Two things the obvious check misses, both measured: a
+signature check spelled `parameter.annotation in (SourceAdapter, ...)` (or
+via `annotation.__name__`) does not see a **string** annotation, which is the
+one form needing no import at all; and an `ast.ImportFrom`-only scan does not
+see `import usher.ports.source`. Read the annotation as text and walk both
+node types. This is what makes M5's deferral of PRD 07's RFC 9457 envelope a
+structural claim: with no adapter reachable there is no 503 to give a `code`
+to, and the first route whose honest answer is "the source is down and I
+cannot serve this from local state" is M9's `POST /titles/{id}/play`.
+
+**A `GET /titles/{id}` leak check may not forbid the word "emby".** The
+availability badge carries the name an *operator* typed, and "Living Room
+Emby" is a correct value for it — PRD 07's own example spells it that way. A
+rule that forbids the substring forbids the feature. What must not escape is
+the source's own **item id**, so the assertion is against a distinctive
+`external_id` and against the key `external_id`, not against a vendor name.
+
+**The server process runs the lanes, and that is proved by a job
+disappearing rather than by an assertion about wiring.** `create_app`'s
+lifespan builds a `LaneSupervisor` and starts a push lane per enabled source
+plus one job worker (both settings-gated, PRD 01's `--worker` flag as
+configuration). A unit test of the supervisor proves it does what it is
+told; it says nothing about whether the lifespan tells it anything.
+`tests/integration/test_lanes_in_the_server_process.py` commits a real
+`match` job, starts nothing but `LifespanManager(create_app(settings))`, and
+asserts the row is gone before the app stops — with the mirror case
+(`worker_enabled=False`, the row survives) as the control that makes it
+evidence. The mutation `await lanes.start()` → `pass` fails exactly that one
+case out of 2,072.
+
+**Both lane switches default on, so every test that builds an app has to say
+it does not want them.** Nine fixtures now pass
+`push_enabled=False, worker_enabled=False`. Without it a worker lane polls
+the real `jobs` table under `tests/integration/test_pipeline_spans.py`, which
+enqueues jobs through its own probe route and asserts on them; and a push
+lane in `tests/integration/test_admin_sources.py` builds the **real**
+`EmbyAdapter` against `https://emby.invalid` and opens a socket, because
+`dependency_overrides` do not reach the lifespan. Stated per fixture rather
+than defaulted in `conftest.py`, so it is greppable.
+
+**`start()` creates tasks and awaits nothing, and the case with teeth drives
+the coroutine by hand.** `coro.send(None)` must raise `StopIteration`; a
+`start()` that read the source list inline hands back a future instead. That
+is what keeps `/health` answering 200 with Postgres down while
+`/health/ready` reports 503 — the M5 plan's own draft did
+`await self.refresh()` there, which opens a connection, and its own Step 4
+then asserted the opposite. The first refresh happens *inside* the refresher
+task, which refreshes and then sleeps, so nothing waits `USHER_PUSH_SOURCE_REFRESH_SECONDS`
+for its first lane either.
+
+**Per-lane crash isolation comes from one task per lane, not from the
+`except`.** Measured: deleting `_guard`'s `except` survives the whole suite,
+while removing `return_exceptions=True` from `stop()`'s gather fails **11**
+cases on its own — so the two are not the belt-and-braces pair a comment
+claimed. What `_guard` buys is that a crashed lane is not silent (without it
+CPython reports an unretrieved task exception at GC time, to stderr, with no
+source name in it), which needs a log assertion to see. And
+`running_sources() == ["B"]` is not a test of isolation: a supervisor whose
+second lane was created and never scheduled reports the same thing. The case
+asserts B ingests an item pushed *after* A's task is already `done()`.
+Two lanes genuinely overlapping is its own measurement — **99.3–99.4% of
+their union over five runs**, against a serialised supervisor's 0.0.
+
+**A guard can be right and unobservable, and `_write_push_available`'s is.**
+Deleting its "nothing changed" check does not move `sources.updated_at`,
+because `PostgresSourceRepository.update` sets attributes on a *loaded ORM
+row* and SQLAlchemy's unit of work emits no `UPDATE` when none actually
+changed — so the `set_updated_at` trigger never fires either way. Recorded
+as an equivalent mutant against today's repository and kept, because the day
+that repository issues a bare `UPDATE … SET` a flapping lane moves a column
+an operator reads, once per reconnect. Same treatment M4 gave `_ENQUEUE`'s
+`GREATEST`.
+
+**`JobWorker.startup()` requeues everything left `running`, so there is one
+worker per deployment, not per process.** `requeue_running`'s default
+`older_than_seconds=0.0` is correct at exactly one worker and at two steals
+the other's live claims. The server now runs one, so a deployment that also
+runs `usher work` must set `USHER_WORKER_ENABLED=false` on the server.
+`LaneSupervisor` calls `startup()` once rather than per pass, which was
+untestable until `idle_seconds` became a constructor argument nothing in
+`src/` passes: the case asserts one requeue over three passes.
+
+**Readiness reports the lanes and never gates on them, and the case that
+proves it cannot live in the unit file.** `tests/unit/test_api_health.py`'s
+app points at an unreachable database, so readiness is *already* 503 there
+and both mutations — `all(checks) and lanes.running_sources()`, and moving
+`push` inside `ReadinessChecks` where `all(...)` picks it up automatically —
+survive every case in it. Against a **reachable** database with no lanes
+running, both turn a 200 into a 503 and both die, so that case lives in
+`tests/integration/test_health.py`. `LaneReport` is a separate model from
+`ReadinessChecks` for exactly this reason: every field of the latter is part
+of the status code by construction.
+
+**`SourceStatus` refuses "push available without being authenticated", and
+`dataclasses.replace` re-runs `__post_init__`.** So the obvious one-liner
+for reporting a running lane's push health —
+`replace(status, push_available=self._push_health(source_id))` — raises
+`ValueError` out of `GET /admin/sources/{id}/status` for a state a rotated
+password produces, on the screen an operator opens to diagnose it. The
+lane's answer is taken only when the status is authenticated.
+
+**`usher.composition` is the wiring both roots share, and it needs no
+seventh import-linter contract.** `usher.cli` carries one saying nothing may
+import it, so shared code cannot live there. The new module sits outside
+every contract's source list — and that hole is closed by what it imports
+rather than by a rule: it imports `usher.db` and `usher.adapters`, so a core
+module reaching it breaks contracts two and three, which report indirect
+chains by default (unlike contract six's `allow_indirect_imports = true`).
+Verified by planting `from usher.composition import Pipeline` in
+`usher/services/push.py`: **4 kept, 2 broken.**
+
 ## Commands
 
 Verified working as of Group A (scaffold + config):
@@ -1373,12 +2023,13 @@ curl -sf http://localhost:8100/health/ready   # {"status":"ready","checks":{"dat
 docker compose down                           # data/ bind mounts survive -- not removed by down, -v or not
 ```
 
-`USHER_HOST_PORT` (`.env`, defaults to `8100`) is the *host*-side publish
-port for `usher`'s container port `8000` — deliberately not a bare
+`USHER_COMPOSE_HOST_PORT` (`.env`, defaults to `8100`) is the *host*-side
+publish port for `usher`'s container port `8000` — deliberately not a bare
 `"8000:8000"`, since this host already publishes an unrelated container's
 app on host port 8000. Postgres's own port is never published to the host
 at all, only reachable from `usher` over the compose network as
-`postgres:5432`, matching PRD 08's deployment shape.
+`postgres:5432`, matching PRD 08's deployment shape. It was `USHER_HOST_PORT`
+until 2026-08-02, which is the bug below.
 
 The image is genuinely multi-stage: a `builder` stage has `uv` and builds
 the venv, a `runtime` stage copies only `.venv/` and `src/` across. No

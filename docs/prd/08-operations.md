@@ -14,6 +14,52 @@ Sources live in the database because they are added through the admin API. A
 deployment that needs a compose edit and a restart to connect a media server is
 the wrong shape for this.
 
+Until the TOML layer exists, everything in the first two rows is an
+environment setting on `usher.config.Settings` and is documented in
+`.env.example` — completeness in both directions, so a setting an operator
+cannot discover and a documented key that is not a setting are both test
+failures (`tests/unit/test_deployment_config.py`).
+
+### `.env` has two readers, and that is what the `USHER_COMPOSE_` namespace is for
+
+Docker Compose reads `.env` to substitute `${...}` into `compose.yml`;
+pydantic-settings reads the same file as a settings source with
+`extra="forbid"`. The two vocabularies overlap, so a variable meaningful only
+to compose is an *extra* input to `Settings` — and one such key
+(`USHER_HOST_PORT`, the host-side publish port) made `cp .env.example .env`,
+the documented first step, fail every entry point with
+`ValidationError: usher_host_port` from M1 until it was found by M5's smoke
+test.
+
+`extra="forbid"` stays, because it is what turns `USHER_LOG_LEVL=DEBUG` into
+a startup failure instead of a line in `.env` that silently does nothing. The
+two readings are separated by **name** instead: `USHER_COMPOSE_*` belongs to
+`compose.yml` and the application drops it before validation; every other
+`USHER_*` key is a setting or a typo. That is a rule the next compose variable
+can satisfy rather than a list somebody has to remember to extend.
+
+### A documented setting has to reach the container
+
+`compose.yml` gives the `usher` service the whole `.env` (`env_file:`), not a
+hand-maintained `environment:` list. The two are different mechanisms:
+`environment:` names one variable at a time and compose substitutes its value;
+`env_file:` hands the file over. The list form forwarded 5 of 30 documented
+keys, so 24 — `USHER_WORKER_ENABLED` among them — were documented, worked when
+delivered directly, and were silently ignored when set where the docs point.
+**A setting that is documented but unreachable is dead config that looks like
+a control**, and this one had teeth: an operator who sets
+`USHER_WORKER_ENABLED=false` and then runs `usher work` in a second container
+gets two workers, and `JobWorker.startup()` requeues everything `running`, so
+each steals the other's live claims.
+
+`environment:` still wins over `env_file:`, so what is left in it is exactly
+the four the compose *topology* owns rather than the operator:
+`USHER_DATABASE_URL` (the service's hostname on the compose network),
+`USHER_HOST`/`USHER_PORT` (what `ports:`, the Dockerfile's `EXPOSE` and the
+healthcheck all assume) and `USHER_SECRET_KEY` (substituted as `${...:?}` so a
+missing key fails at `docker compose up` with a sentence rather than as a
+container that starts and dies on validation).
+
 ### Secrets
 
 Source credentials are **encrypted at rest in Postgres**, using a key supplied
@@ -74,6 +120,18 @@ Rules:
 - At the config layer, `database_url`, `secret_key`, and `tmdb_api_key` are
   held as `pydantic.SecretStr` and unwrapped only at the point of use, so the
   rules above are enforced by the type system, not just convention.
+- **"Never logged" has to cover libraries Usher hands a credential to, not
+  just Usher's own log lines.** From M5 the source token is also the query
+  string of a `websockets` URL, and that client debug-logs its own request
+  line — so at `USHER_LOG_LEVEL=DEBUG` the rule was broken by code this
+  project does not own. Measured against the real library before it was
+  fixed. The guard is a logger whose *level* is above `CRITICAL`, because
+  `configure_logging` clears `handlers` and re-forces `propagate = True` on
+  every logger and never touches `level`; it is re-asserted on every
+  connect, and it costs the library's own handshake and frame diagnostics.
+  [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) records
+  the reproduction and the two other lines through that logger that could
+  carry the same URL.
 
 ## Failure and degradation
 
@@ -84,7 +142,7 @@ local state can answer.**
 |---|---|
 | Source unreachable | Catalog fully browsable. Playback → 503 `source_unavailable`. Availability goes stale, not wrong. |
 | Source credentials rejected | `GET /admin/sources/{id}/status` reports `authenticated: false`; re-authentication is retried after a cooldown rather than on every call. Catalog unaffected. |
-| Push socket drops | Backoff reconnect; delta reconcile on reconnect; after N failures mark `supports_push = false` and lean on the nightly walk. |
+| Push socket drops | Backoff reconnect; delta reconcile on reconnect; after N failures mark `supports_push = false` and lean on the nightly walk. **The failure counter resets on delivery, not on connection** — a proxy that upgrades and then buffers connects perfectly every time, so a counter reset by connecting never reaches the ceiling and this row silently never fires ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). |
 | TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs; every other subsystem is unaffected. |
 | TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades. |
 | LLM call fails | Previous curated rows persist. Home composes without them. |
@@ -159,9 +217,30 @@ specified in [10](10-telemetry-and-dashboards.md).
 Telemetry is optional: with no OTLP endpoint configured the exporters are
 no-ops and Usher runs normally.
 
-`GET /health` is liveness; `GET /health/ready` reports Postgres, migration
-state, and per-source connectivity — degraded rather than binary, so a
-dashboard can distinguish "down" from "running without Emby".
+`GET /health` is liveness; `GET /health/ready` reports Postgres and
+migration state — and **gates its status code on those two alone**. Lane
+state is reported in the body (`lanes.push`, `lanes.worker`) and per-source
+push health at `GET /admin/sources/{id}/status`'s `push_available`, never in
+the code. That is a correction to what this section said before M5 built the
+lanes: a readiness probe that failed because a source was unreachable would
+take the process out of a load balancer for a reason restarting it cannot
+fix, which is the same argument that keeps liveness off the database. The
+failure table above already prices an unreachable source as "catalog fully
+browsable"; a 503 would contradict it.
+
+The report is still degraded rather than binary, so a dashboard can
+distinguish "down" from "running without Emby" — it just does so by reading
+the body, which is what a dashboard does and what Kubernetes, Docker
+`healthcheck` and a load balancer never do.
+
+Lane state is free to report — `lanes.push` is the set of running lane
+*tasks*, and `push_available` is an in-memory ledger of messages received,
+not a probe — so readiness makes **no upstream request at all**. The shipped
+compose healthcheck polls this endpoint every 2 s against a source
+[01](01-architecture.md) measures at 1–5 s per request. The on-demand probe
+that *does* open a socket is `usher push --probe`, and it reports what
+arrived rather than that the handshake succeeded
+([ADR-0004](decisions/0004-push-over-polling.md)).
 
 ## Testing
 
@@ -186,7 +265,12 @@ Development follows TDD — failing test first, then implementation.
 services:
   usher:
     build: .
-    environment: [DATABASE_URL, USHER_SECRET_KEY, TMDB_API_KEY]
+    env_file: [{ path: .env, required: false }]
+    environment:   # only what the topology owns -- this wins over env_file
+      USHER_DATABASE_URL: postgresql+asyncpg://usher:usher@postgres:5432/usher
+      USHER_HOST: 0.0.0.0
+      USHER_PORT: "8000"
+      USHER_SECRET_KEY: ${USHER_SECRET_KEY:?set it in .env}
     volumes: ["./data/images:/data/images", "./data/models:/data/models"]
     depends_on: { postgres: { condition: service_healthy } }
   postgres:
@@ -203,6 +287,13 @@ server on a fresh volume and reports ready roughly a second before the
 real server is (verified directly, including against a false-positive
 window reproduced twice). `./data/models` is not yet mounted by the actual
 M1 `compose.yml` — nothing before M6 (embeddings) writes there.
+
+The `env_file`/`environment` split above **is** literal, and it is the one
+part of this snippet that should be read as normative: see "A documented
+setting has to reach the container" at the top of this document. An earlier
+version of this snippet showed `environment: [DATABASE_URL, USHER_SECRET_KEY,
+TMDB_API_KEY]`, which is the shape that left 24 documented settings
+unreachable.
 
 - Alembic migrations run on startup; the app refuses to serve on a schema
   mismatch rather than guessing.

@@ -261,6 +261,114 @@ async def test_a_refused_sweep_issues_no_update_at_all(
     assert not any("UPDATE media_items" in statement for statement in statement_counter)
 
 
+async def _seed_a_series_with_episodes(
+    session: AsyncSession, source_id: uuid.UUID, *, episodes: int
+) -> uuid.UUID:
+    """One series, one season, `episodes` real episodes, and a `media_items`
+    row for each -- plus one for the series itself, which is what a real Emby
+    walk produces (a `Series` item has no `MediaSource`, so its row carries no
+    quality facts, and M4's live run counted exactly 20 such rows among 601).
+
+    Raw `INSERT ... SELECT generate_series` rather than the repository,
+    because the point is to make the *episode count* large cheaply; the read
+    under test is the only thing being measured.
+    """
+    series = Title(kind=TitleKind.SERIES, name="Bounded Series", sort_name="Bounded Series")
+    await PostgresTitleRepository(session).add(series)
+    season = new_id()
+    await session.execute(
+        text("INSERT INTO seasons (id, title_id, season_number) VALUES (:id, :title_id, 1)"),
+        {"id": season, "title_id": series.id},
+    )
+    await session.execute(
+        text(
+            """
+            INSERT INTO episodes (id, title_id, season_id, season_number, episode_number)
+            SELECT gen_random_uuid(), :title_id, :season_id, 1, n
+            FROM generate_series(1, :count) AS n
+            """
+        ),
+        {"title_id": series.id, "season_id": season, "count": episodes},
+    )
+    await session.execute(
+        text(
+            """
+            INSERT INTO media_items (id, source_id, title_id, episode_id, external_id, last_seen_at)
+            SELECT gen_random_uuid(), :source_id, :title_id, e.id,
+                   'ep-' || e.id, :last_seen_at
+            FROM episodes e WHERE e.title_id = :title_id
+            """
+        ),
+        {"source_id": source_id, "title_id": series.id, "last_seen_at": RUN_AT},
+    )
+    await session.execute(
+        text(
+            """
+            INSERT INTO media_items (id, source_id, title_id, external_id, last_seen_at)
+            VALUES (gen_random_uuid(), :source_id, :title_id, :external_id, :last_seen_at)
+            """
+        ),
+        {
+            "source_id": source_id,
+            "title_id": series.id,
+            "external_id": f"series-{series.id}",
+            "last_seen_at": RUN_AT,
+        },
+    )
+    return series.id
+
+
+async def test_list_for_title_does_not_grow_with_a_series_episode_count(
+    repository: PostgresMediaItemRepository,
+    session: AsyncSession,
+    source_id: uuid.UUID,
+    statement_counter: list[str],
+) -> None:
+    """The bound, measured rather than asserted about a lookalike.
+
+    999,827 of the one measured source's 1,126,789 items are episodes, and an
+    episode's `media_items` row carries its series' `title_id` as well as its
+    own `episode_id`. So the natural read -- `WHERE title_id = :id` -- answers
+    a *series* with one row per episode file, which puts a badge per episode
+    in PRD 07's `availability` array and makes the response length a property
+    of the show rather than of the household. "Fine for a ten-season series,
+    unbounded by contract" is what M4 recorded about the neighbouring
+    `EpisodeRepository.list_for_title`; this is where the media-item one is
+    settled.
+
+    Held fixed: the series, the source, the row shape. Varied: the episode
+    count, by two orders of magnitude. Both the rows returned and the
+    statements issued must be flat -- a count that tracked the episodes would
+    be the defect, and a *statement* count that tracked them would be a
+    different one.
+
+    500 episodes is enough to fail the assertion and cheap enough to keep in
+    the suite; the cost of getting it wrong was measured separately, at a
+    scale a test should not pay for. On 80,201 `media_items` rows with one
+    20,000-episode series, EXPLAIN (ANALYZE, BUFFERS) on the statement this
+    repository actually issued -- captured off `before_cursor_execute`, never
+    transcribed -- reports **1 row in 0.251 ms over 21 buffers** as shipped
+    and **20,001 rows in 22.901 ms over 402 buffers** with the `episode_id IS
+    NULL` clause deleted. The numbers and the plans are recorded on
+    `_FOR_TITLE` in `usher.db.repositories.media_item`.
+    """
+    small = await _seed_a_series_with_episodes(session, source_id, episodes=5)
+    large = await _seed_a_series_with_episodes(session, source_id, episodes=500)
+
+    statement_counter.clear()
+    few = await repository.list_for_title(small)
+    statements_for_few = len(statement_counter)
+
+    statement_counter.clear()
+    many = await repository.list_for_title(large)
+    statements_for_many = len(statement_counter)
+
+    assert [row.external_id for row in few] == [f"series-{small}"]
+    assert [row.external_id for row in many] == [f"series-{large}"]
+    assert len(few) == len(many) == 1, "the answer is copies of the title, not of its episodes"
+    assert statements_for_few == statements_for_many == 1
+
+
 async def test_upsert_many_never_hard_deletes_across_sources(
     repository: PostgresMediaItemRepository,
     source_id: uuid.UUID,

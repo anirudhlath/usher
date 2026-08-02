@@ -51,6 +51,45 @@ be added if a client turns out to need flexible field selection.
 | `GET /people/{id}` | Filmography grouped by role |
 | `GET /collections/{id}` | Franchise contents with ownership completeness |
 
+> **Built in M5: `GET /titles/{id}`, narrowed.** ✅ It carries metadata,
+> `enrichment_state`, `enrichment_error`, `availability` and `watch_state` —
+> every field backed by a table [M4](09-roadmap.md) fills. `credits`, `images`,
+> `similar` and the season/episode hierarchy are **absent rather than empty**:
+> `Person`/`Credit` land with M7 and `Image` with M9, each re-derived from
+> `raw_payloads` with no second network call ([09](09-roadmap.md)'s M4 boundary
+> call 2), `GET /titles/{id}/similar` is M6's with its own row above, and an
+> empty list would be indistinguishable from a film with no cast.
+>
+> **`availability` is one badge per copy of the title, never per episode.** An
+> episode's `MediaItem` carries its series' `title_id` as well as its own
+> `episode_id`, so the read that backs this field excludes rows with an
+> `episode_id` — otherwise a series answers with one entry per episode file
+> and the response length is a property of the show rather than of the
+> household. Measured on the shipped statement: at 80,201 `media_items` rows
+> with one 20,000-episode series, 1 row in 0.251 ms with the clause and 20,001
+> rows in 22.901 ms without it. A retracted copy is still returned, with
+> `available: false` — [02](02-data-model.md)'s soft-delete availability, and
+> the only place a degraded source is visible on this route.
+>
+> **A copy carries no `external_id`.** A source's own item id is a source
+> concept escaping its adapter and a value no client has a use for; every
+> route a client calls takes a `Title.id`. The source *name* is present,
+> because it is what an operator typed.
+>
+> Opening a `skeleton` or `stub` enqueues its enrichment at
+> `JobPriority.DEMAND` — the first caller of the promotion clause M4 built —
+> and returns immediately. A second open writes zero rows, which is that
+> clause's own `WHERE` and the honest number. A **parked** enrichment is not
+> promoted ([08](08-operations.md): re-enqueueing does not un-park, and a
+> parked job's priority is not raised behind a human's back); the client is
+> told through `enrichment_error` instead.
+>
+> **The route never calls a source.** Every field is local, so there is no
+> path from an unreachable Emby to a failed title read — which is
+> [08](08-operations.md)'s "never fails a request local state can answer" as a
+> structural property rather than a caught exception. `TitleReadService` holds
+> no `SourceAdapter` and a test asserts that on its imports.
+
 ### Actions
 
 | Endpoint | Effect |
@@ -81,10 +120,22 @@ be added if a client turns out to need flexible field selection.
 > the adapter's own translated `usher.ports.errors` exceptions, never a
 > credential. `GET /admin/sources/{id}/status` renders this directly.
 >
+> **M5 adds `is_administrator`**, `bool | None` on the same three-valued
+> pattern, where `null` means the check did not run. It reports whether the
+> configured account is an Emby administrator — the risk
+> [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) accepts and
+> whose recorded mitigation was operator guidance rather than code.
+> [03](03-sources-and-sync.md)'s "configure a normal user" is guidance an
+> operator can only follow if they can see which they did.
+>
 > **Built in M3: four of the five rows above.** `GET`/`POST`/`DELETE
 > /admin/sources` and `GET /admin/sources/{id}/status` are live
 > (`usher.api.routers.sources`). `POST /admin/sources/{id}/sync` is not —
-> it triggers a reconcile, and there is no reconciler until M5. The status
+> **and the reason recorded here was wrong by M4 and is corrected**: it said
+> "there is no reconciler until M5", but M4 built `ReconcileService` and both
+> its lanes. The route is M9's, exactly as [09](09-roadmap.md)'s boundary
+> call 4 states, and M4's `usher sync` already delivers the capability. The
+> status
 > route answers **200 for every state a configured source can be in** —
 > rejected credentials, an unreachable host, a credential row that has gone
 > missing, and one that no longer decrypts because `USHER_SECRET_KEY` was
@@ -171,18 +222,33 @@ subsystem narrows functionality, it never fails a request local state can answer
 > is the part of the error path that could not wait: a 422 never echoes the
 > submitted request body, because that body carries a source credential.
 > See [08](08-operations.md)'s secrets rules.
+>
+> **Still deferred after M5, and now for a sharper reason.** M5 adds a
+> streaming surface and two client routes, and neither forces the envelope.
+> RFC 9457 is a format for a response *body*; once `GET /events` has answered
+> `200 text/event-stream` there is no further status code to carry a problem
+> document, so the in-stream vocabulary is an SSE event (`resync_required`)
+> rather than a document. And the failure that *would* force it — the worked
+> example above, `503 source_unavailable` — is unreachable on `GET
+> /titles/{id}` by design: the service behind it holds no `SourceAdapter`, so
+> there is no request Usher can be asked to answer and genuinely cannot. The
+> first route whose honest answer is "the source is down and I cannot serve
+> this from local state" is `POST /titles/{id}/play`, in M9, alongside the
+> playback ticket [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)
+> owes. M5's two ordinary failures are the shapes M3 already ships: a 404 for
+> an unknown title and a 422 for a malformed id or `?titles=`.
 
 ## Streaming updates (SSE)
 
 `GET /events` — the channel that makes read-through visible to clients.
 
-| Event | Payload | Client action |
-|---|---|---|
-| `title.updated` | Title id + changed fields | Patch in place |
-| `watchstate.updated` | Title/episode id, position, played | Update progress |
-| `row.invalidated` | Row slug | Refetch that row |
-| `sync.progress` | Source, counts, phase | Admin UI only |
-| `bootstrap.progress` | Phase, percent | Admin UI only |
+| Event | Payload | Client action | |
+|---|---|---|---|
+| `title.updated` | Title id + changed fields | Patch in place | ✅ M5 |
+| `watchstate.updated` | Title/episode id, position, played | Update progress | ✅ M5 |
+| `row.invalidated` | Row slug | Refetch that row | M7 |
+| `sync.progress` | Source, counts, phase | Admin UI only | ✅ M5 |
+| `bootstrap.progress` | Phase, percent | Admin UI only | — |
 
 - Subscriptions are scoped by query (`?titles=id1,id2`) so a detail screen isn't
   woken by unrelated churn.
@@ -193,6 +259,81 @@ subsystem narrows functionality, it never fails a request local state can answer
 
 SSE over WebSocket because the channel is server→client only, it survives
 proxies that mangle upgrades, and it reconnects natively in browsers.
+
+> **Settled in M5.** The route, the wire format, the bus and the three
+> publishers all ship, each pinned by tests. The three rows above were held
+> at "see below" until a running process could actually emit them: the bus
+> alone is not enough, because every publisher sits behind a lane. They are
+> ticked now that `create_app`'s lifespan runs both — the push lane's
+> `PushApplyService` emits `title.updated` and `watchstate.updated`, its
+> gap-closing delta emits `sync.progress` through `ReconcileService`, and
+> the worker lane's `EnrichService` emits `title.updated` on the enrichment
+> a client's own `GET /titles/{id}` promoted. That last one is PRD
+> [03](03-sources-and-sync.md)'s read-through loop closing inside one
+> process, which is the reason the worker runs here at all.
+>
+> **`usher work` as a separate process publishes to `NullEventPublisher`**,
+> and that is a stated consequence rather than an oversight: the bus is
+> in-memory, so an enrichment finished in another process reaches no
+> subscriber. A client that refetches still gets the enriched title —
+> degradation rather than breakage, [08](08-operations.md)'s own principle —
+> and the fix is the named second implementation of the port rather than a
+> branch in a service.
+>
+> **`resync_required` is a fifth event and the channel's own.** It answers a
+> subscriber whose buffer overflowed, a `Last-Event-ID` older than the replay
+> ring, and one minted by a previous process — the ring is in-memory, so ids
+> restart with it, and the id a client sees is `<epoch>-<n>` for exactly that
+> reason. Without the epoch the third is undetectable: a bus whose ids
+> restarted at 1 would replay "everything after 40" to a client that saw
+> forty events of a *different* sequence, which is a plausible-looking stream
+> that is silently wrong.
+>
+> **A stream's failure vocabulary is not the RFC 9457 envelope above, and
+> does not force it.** RFC 9457 formats a response *body*; once `GET /events`
+> has answered `200 text/event-stream` there is no status code left, and
+> every later failure is an event or a closed connection. So the four event
+> names plus `resync_required` are pinned as a `StrEnum` in
+> `api/dto/events.py` — versioned independently of the internal vocabulary,
+> with no member nothing emits — and that enum is the SSE analogue of the
+> envelope rather than a substitute for it. The failure that *would* force
+> the envelope is a 503 the client asked for and Usher genuinely cannot
+> serve; neither M5 route can produce one, because neither touches a
+> `SourceAdapter`. `POST /titles/{id}/play` is the named trigger, in M9.
+>
+> **The one ordinary HTTP failure**, `GET /events?titles=not-a-uuid`, is
+> `422 {"detail": "titles must be a comma-separated list of uuids"}` — M3's
+> shipped shape, naming the rule and never the submitted value. A malformed
+> id is rejected rather than dropped: a filter built from the half that
+> parsed is *narrower* than the client asked for, so a detail screen would
+> silently never update.
+>
+> **A heartbeat comment (`: keepalive`) is sent first and every
+> `USHER_SSE_HEARTBEAT_SECONDS` after**, default 20 s, bounded `< 60` by the
+> type. nginx closes an idle connection at 60 s and Cloudflare at ~100 s
+> ([ADR-0004](decisions/0004-push-over-polling.md)'s operational facts, which
+> are about an idle HTTP connection and apply to a long-lived response
+> unchanged), and an SSE stream on a library nobody touched sends nothing for
+> hours. The response also carries `Cache-Control: no-cache` and
+> `X-Accel-Buffering: no` — the second is nginx's own opt-out from buffering
+> a proxied body, which would otherwise hold every event until a buffer
+> filled.
+>
+> **`bootstrap.progress` is not emitted**, and the reason is structural
+> rather than an omission: `usher bootstrap` is a separate process and M5's
+> bus is in-process, so there is no channel from one to the other. Emitting a
+> type nothing publishes would be a client handler that waits forever — the
+> same argument [10](10-telemetry-and-dashboards.md) makes for a metric
+> nothing records. A cross-process transport is the named second
+> implementation of the `EventPublisher` port and is what would make it
+> emittable.
+>
+> **The nightly watch-state walk publishes nothing**, deliberately, and it is
+> a scale decision rather than an omission: a walk merges up to 1,126,789
+> states, and one `watchstate.updated` per merged row is a fan-out per row
+> per night to every connected client — every one of them the source echoing
+> back state that has not changed since the last walk. The push lane
+> publishes because a push event *is* a change.
 
 ## Images
 

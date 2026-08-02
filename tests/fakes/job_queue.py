@@ -37,6 +37,21 @@ the first is not a nuance -- it is the whole point of the port:
   keys, so a claim ordering that looks total here is partial there. The
   contract's age case enqueues in separate calls specifically so the two
   orderings are comparable.
+- **`enqueue` reports a no-op re-enqueue as a row written, and Postgres does
+  not.** The update branch below adds one to its count whatever it changed;
+  the real `_ENQUEUE`'s conflict clause carries
+  `AND jobs.priority < excluded.priority`, so re-enqueueing work that is
+  already at that priority matches nothing and answers **0** -- which M4
+  added deliberately, to stop a nightly walk rewriting 1,126,674 unchanged
+  rows. Anything whose behaviour turns on the *count* rather than on the
+  stored row is therefore untestable here: `TitleReadService._promote`
+  returns whether an enqueue was attempted, and the version that returned
+  "a row changed" passes every case in `tests/unit/test_services_titles.py`
+  and fails `tests/integration/test_services_titles.py`. Measured
+  2026-08-01. Not fixed here, because the fake would then have to model the
+  whole promotion predicate to stay honest about the parked and
+  higher-priority branches too, and a fake that reimplements the statement
+  is a second implementation rather than a stand-in.
 """
 
 import uuid

@@ -43,6 +43,7 @@ from sqlalchemy import Connection, Engine, event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fakes.emby_server import FakeEmbyServer
+from tests.fakes.event_publisher import FakeEventPublisher
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
@@ -235,6 +236,7 @@ def reconcile(
             queue=queue,
         ),
         media_items=media_items,
+        events=FakeEventPublisher(),
         runs=runs,
         commit=session.flush,
         batch_size=1_000,
@@ -841,6 +843,7 @@ async def test_statements_do_not_grow_with_the_page(
                 queue=queue,
             ),
             media_items=media_items,
+            events=FakeEventPublisher(),
             runs=runs,
             commit=session.flush,
             batch_size=batch_size,

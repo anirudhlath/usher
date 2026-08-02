@@ -38,12 +38,25 @@ transport does. Two consequences:
 - **A failing *status* is not something a harness can arrange.**
   `go_offline` is a transport failure by design, so nothing here
   distinguishes "a 500 is not a deletion" from "a 404 is". Verified by
-  mutation, and re-verified at 43 cases in M4: making `EmbyAdapter._fetch`
-  report every `>= 400` as `None` passes every case here and is caught only
-  by the two per-implementation tests written for it,
+  mutation, and re-verified at **49** cases in M5: making
+  `EmbyAdapter._fetch` report every `>= 400` as `None` still passes every
+  case here (98 passed, 1 skipped across both runs) and is caught only by
+  the two per-implementation tests written for it,
   `tests/unit/test_adapters_emby_adapter.py::test_get_item_raises_rather_
   than_returning_none_on_a_server_error` and its `get_watch_state`
   counterpart. Status-level behaviour stays a per-implementation test.
+
+- **The six push cases are the third thing this suite cannot see on its
+  own.** They run against `FakeSourceAdapter`'s hand-driven channel and
+  against a real `EmbyPushChannel` over `tests/fakes/push_connection.py`,
+  which performs no handshake and has no close code -- and the Emby side's
+  *messages* come from `FakeEmbyServer`, which renders them from committed
+  fixtures no run has ever compared to a real Emby frame (ADR-0004's live
+  run recorded which message types arrived and not one byte of any
+  payload). So a green run here is evidence that the port's health rule is
+  statable and satisfiable by two independent implementations, and it is
+  **not** evidence about Emby's envelope. `tests/fixtures/emby/README.md`
+  lists what is still a guess; M5's live capture is what settles it.
 """
 
 import asyncio
@@ -55,6 +68,8 @@ from tests.contract.source_harness import SourceHarness
 from usher.domain.enums import HdrFormat
 from usher.ports.errors import PortAuthFailed, PortUnavailable
 from usher.ports.source import (
+    SourceEvent,
+    SourceEventKind,
     SourceItem,
     SourceItemKind,
     SourceNotSupported,
@@ -339,17 +354,22 @@ class SourceAdapterContract:
         - Over `httpx.MockTransport`, `<= 1` never discriminates. With
           *both* of `EmbySession`'s locks deleted *and* the generation
           short-circuit removed, four concurrent expired sessions still
-          produce exactly one authentication and all 41 tests in the Emby
-          run pass. `MockTransport` never actually awaits on the way to its
-          handler, so the event loop tends to run one gathered call all the
-          way through its own re-auth before starting the next; every other
-          call then reads an already-fresh token without racing for it.
+          produce exactly one authentication and the whole Emby run stays
+          green (**re-measured in M5 at 49 cases: 49 passed, 1 skipped**,
+          rather than renumbered from the 41 this said -- a count inside a
+          mutation result is part of the measurement). `MockTransport`
+          never actually awaits on the way to its handler, so the event
+          loop tends to run one gathered call all the way through its own
+          re-auth before starting the next; every other call then reads an
+          already-fresh token without racing for it.
         - Over `tests/fakes/slow_transport.py`, which is what `EmbyHarness`
           uses, it discriminates. Each of those three mutations fails this
           case -- deleting `_refresh`'s lock raises `PortAuthFailed`,
-          deleting both locks and the short-circuit raises `PortAuthFailed`,
-          and deleting the short-circuit alone trips the `<= 1` assertion
-          with four authentications.
+          deleting both locks and the short-circuit raises `PortAuthFailed`
+          (re-confirmed in M5 alongside the `MockTransport` run above: same
+          mutation, same suite, `1 failed, 48 passed, 1 skipped`), and
+          deleting the short-circuit alone trips the `<= 1` assertion with
+          four authentications.
 
         **What this case still does not reach, on any harness:**
         `EmbySession.user_id()`'s own `_raise_if_closed`. Removing it leaves
@@ -634,6 +654,174 @@ class SourceAdapterContract:
                 "movie-1", WatchStateUpdate(position_seconds=600, played=False)
             )
 
+    # --- push ----------------------------------------------------------
+    #
+    # **The asymmetry these six are written around.** `supports_push` is a
+    # *health* signal and `SourceNotSupported` is a *capability* one, and
+    # the implication between them runs one way only: an adapter with a
+    # perfectly good channel reports `False` from the moment it opens until
+    # the first message arrives on it. So no case here asserts
+    # "`events()` was offered ⟹ `supports_push`". The two directions that
+    # do hold are asserted, one each: a channel that has delivered reads
+    # `True` (and a silent one reads `False`), and an adapter that refuses
+    # to offer a channel at all reads `False`.
+
+    async def test_events_yields_what_the_source_pushed(self, harness: SourceHarness) -> None:
+        """PRD 03's fast path, at its narrowest: something changed on the
+        source and the channel said so, naming the item.
+
+        The play-history assertion is deliberately the same three-valued
+        shape `test_a_walk_never_reports_play_history_it_cannot_know` uses,
+        and for the same reason: a push message is a *third* payload shape
+        (a listing is one, a single-item route is another), so an adapter
+        may carry the numbers or decline them -- and may not invent a
+        `0`, which `merge_from_source` would write over real history
+        permanently (ADR-0014). `EmbyAdapter` passes on the absence branch
+        and `FakeSourceAdapter` on the true-value branch, which is what
+        makes it a contract rather than a restatement of one of them.
+        """
+        await harness.given_item(MOVIE, changed_at=T0)
+        last_played = datetime(2026, 7, 20, 21, 4, 0, tzinfo=UTC)
+        await harness.given_watch_state(
+            SourceWatchState(
+                external_id="movie-1",
+                position_seconds=91,
+                played=False,
+                play_count=7,
+                last_played_at=last_played,
+            )
+        )
+        async with harness.adapter.events() as events:
+            await harness.push_event(
+                SourceEvent(kind=SourceEventKind.WATCH_STATE_CHANGED, external_ids=("movie-1",))
+            )
+            event = await asyncio.wait_for(anext(aiter(events)), timeout=2.0)
+        assert event.kind is SourceEventKind.WATCH_STATE_CHANGED
+        assert event.external_ids == ("movie-1",)
+        carried = {state.external_id: state for state in event.watch_states}
+        if carried:
+            # An adapter is permitted to carry the payload its upstream sent
+            # and permitted not to; what it may not do is report a *wrong*
+            # position. Same shape as the walk's play-history assertion.
+            assert carried["movie-1"].position_seconds == 91
+            assert carried["movie-1"].play_count in (None, 7), (
+                f"a push event carried play_count="
+                f"{carried['movie-1'].play_count!r} for an item played 7 times; the port "
+                "permits None (this message cannot say) or the true value, and nothing else"
+            )
+            assert carried["movie-1"].last_played_at in (None, last_played)
+
+    async def test_supports_push_is_false_until_a_message_arrives(
+        self, harness: SourceHarness
+    ) -> None:
+        """**The rule this milestone exists for**, stated where every future
+        adapter has to satisfy it. ADR-0004: a WebSocket handshake against a
+        *nonexistent path* also upgrades and also receives `Sessions`, so an
+        open connection is not evidence of anything -- and PRD 03's
+        reconciler skips a source whose adapter says `True` here.
+        """
+        assert harness.adapter.supports_push is False
+        async with harness.adapter.events() as events:
+            assert harness.adapter.supports_push is False, (
+                "the channel is open and nothing has arrived; an adapter that "
+                "reports push available here is reporting a socket, not a channel"
+            )
+            await harness.push_event(
+                SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("movie-1",))
+            )
+            await asyncio.wait_for(anext(aiter(events)), timeout=2.0)
+            assert harness.adapter.supports_push is True
+
+    async def test_supports_push_goes_false_when_the_channel_stops_delivering(
+        self, harness: SourceHarness
+    ) -> None:
+        """A channel that worked and then stopped is not a working channel.
+        The failure `websockets`' own `ping_timeout` cannot see: a peer
+        answering pongs while delivering nothing passes the keepalive."""
+        if not harness.can_advance_push_clock():
+            pytest.skip("this harness cannot advance its adapter's push clock")
+        async with harness.adapter.events() as events:
+            await harness.push_event(
+                SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("movie-1",))
+            )
+            await asyncio.wait_for(anext(aiter(events)), timeout=2.0)
+            assert harness.adapter.supports_push is True
+            await harness.push_silence()
+            await harness.advance_push_clock(harness.push_stale_after() + 1.0)
+            assert harness.adapter.supports_push is False
+
+    async def test_a_stalled_channel_raises_rather_than_hanging(
+        self, harness: SourceHarness
+    ) -> None:
+        """The enforcement half. Reporting unhealthy is not enough: a lane
+        holding a socket that will never deliver again has to be told to let
+        go of it, or the reconnect that closes the gap never happens.
+
+        **An event is pushed first and then silenced**, without ever being
+        consumed. Without that, `push_silence` has nothing to suppress on a
+        channel nobody has pushed to, so a harness could implement it as
+        `pass` and both cases that call it would still pass -- and the
+        arrangement this case is named for would never actually be
+        arranged. Nothing is *received*, so the watchdog still measures
+        silence from the open, which is the branch that catches a channel
+        that has never delivered at all.
+
+        Bounded by `asyncio.wait_for` rather than by `pytest-timeout`, which
+        is deliberately not a dependency -- the bound belongs to the two
+        cases that need it. The assertion is `PortUnavailable` and not
+        `TimeoutError`, so the bound cannot satisfy the thing it protects: a
+        hanging implementation fails this case rather than passing it. The
+        elapsed check is the other half -- an adapter whose watchdog ran on
+        wall time rather than on the injected clock would raise the right
+        error after ninety real seconds, and only the interval says so.
+        """
+        if not harness.can_advance_push_clock():
+            pytest.skip("this harness cannot advance its adapter's push clock")
+        async with harness.adapter.events() as events:
+            await harness.push_event(
+                SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("movie-1",))
+            )
+            await harness.push_silence()
+            await harness.advance_push_clock(harness.push_stale_after() + 1.0)
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            with pytest.raises(PortUnavailable):
+                await asyncio.wait_for(anext(aiter(events)), timeout=5.0)
+            elapsed = loop.time() - started
+        assert elapsed < 1.0, (
+            f"the channel took {elapsed:.1f}s to give up on a staleness window of "
+            f"{harness.push_stale_after():.0f}s; the window is a duration on an injected "
+            "clock, so a watchdog measuring real time would be untestable and this suite "
+            "would be sleeping through one per case"
+        )
+
+    async def test_a_dropped_channel_raises_rather_than_ending_quietly(
+        self, harness: SourceHarness
+    ) -> None:
+        """`list_items`' guarantee, one channel over. An iterator that
+        *stopped* is indistinguishable from a source with nothing more to
+        say, and a supervisor would record a clean shutdown and never
+        reconnect -- so the source silently stops pushing until somebody
+        notices by hand."""
+        async with harness.adapter.events() as events:
+            await harness.push_drop()
+            with pytest.raises(PortUnavailable):
+                await asyncio.wait_for(anext(aiter(events)), timeout=5.0)
+
+    async def test_events_raises_source_not_supported_when_push_is_unavailable(
+        self, harness: SourceHarness
+    ) -> None:
+        """The port's own "must agree with `supports_push`", in the one
+        direction that holds. An adapter that advertises push it does not
+        have makes the reconciler skip a source it is the only cover for."""
+        if not harness.can_disable_push():
+            pytest.skip("this harness cannot arrange an adapter with no push channel")
+        await harness.disable_push()
+        assert harness.adapter.supports_push is False
+        with pytest.raises(SourceNotSupported):
+            async with harness.adapter.events():
+                pass
+
     # --- status --------------------------------------------------------
 
     async def test_verify_reports_a_healthy_source(self, harness: SourceHarness) -> None:
@@ -670,19 +858,40 @@ class SourceAdapterContract:
         status = await harness.adapter.verify()
         assert status.push_available is not True
 
-    async def test_events_is_offered_exactly_when_supports_push_says_so(
+    async def test_supports_push_never_claims_a_channel_events_would_refuse(
         self, harness: SourceHarness
     ) -> None:
         """An adapter that advertises push it does not have makes the
-        reconciler skip the only source it is cover for; one that has push
-        and denies it doubles the load on a slow upstream forever."""
+        reconciler skip the only source it is cover for.
+
+        **The implication is one-way, and this case used to assert it both
+        ways.** It read `assert offered is harness.adapter.supports_push`,
+        which is right for M3's world -- where every adapter either had a
+        channel and said so, or had none -- and is *wrong* once an adapter
+        grounds its answer in messages: one with a perfectly good channel
+        reports `supports_push =
+        False` from the moment it opens until the first message arrives on
+        it, because a socket that upgraded and delivers nothing is the
+        failure this milestone is built around. The old assertion forbids
+        exactly the honest implementation, and `EmbyAdapter` fails it the
+        day `events()` starts working.
+
+        So: `supports_push` may not be `True` for a channel `events()`
+        refuses, and an adapter with no channel may not report `True`.
+        Whether a *silent* channel reads `False` is a stronger claim and
+        belongs to the health cases rather than here.
+        """
         offered: bool
         try:
             async with harness.adapter.events():
                 offered = True
         except SourceNotSupported:
             offered = False
-        assert offered is harness.adapter.supports_push
+        if not offered:
+            assert harness.adapter.supports_push is False
+        # And the converse is deliberately not asserted: `offered` with
+        # `supports_push is False` is the normal state of a channel that has
+        # not yet delivered.
 
     # --- lifecycle -----------------------------------------------------
 

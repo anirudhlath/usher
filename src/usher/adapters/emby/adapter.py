@@ -15,6 +15,13 @@ end-to-end session used it -- and was *not* re-exercised here, because the
 live run held a token rather than a password. Silent re-authentication on
 401 is therefore still unverified end to end against the real server.
 
+`GET /Users/{userId}` (added in M5 for `_is_administrator`) is verified
+against that same server and date, but by a throwaway probe rather than by
+driving this class -- the method did not exist then. What the probe
+established: 200 to the user's *own* non-admin token, carrying a 45-key
+`Policy` object with `IsAdministrator` on it. `GET /Users/Me` answers **500**
+on this build, so the id is interpolated rather than shortcut.
+
 That run found one route simply wrong: `push_watch_state` reported
 positions to `POST /Users/{user}/PlayingItems/{item}/Progress`, which
 answers **400** on this server for every body and parameter set tried. See
@@ -98,13 +105,15 @@ source's session token (ADR-0012), and a span attribute is one of the four
 places that token must never appear.
 """
 
+import time
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 from urllib.parse import quote
 
 import httpx
+from loguru import logger
 from opentelemetry import trace
 from pydantic import AwareDatetime
 
@@ -115,6 +124,14 @@ from usher.adapters.emby.mapping import (
     to_watch_state,
 )
 from usher.adapters.emby.playback import build_stream_targets
+from usher.adapters.emby.push import (
+    DEFAULT_POLL_SECONDS,
+    DEFAULT_STALE_AFTER_SECONDS,
+    EmbyPushChannel,
+    PushConnector,
+    PushHealth,
+    connect_websocket,
+)
 from usher.adapters.emby.session import (
     PUBLIC_INFO_PATH,
     SYSTEM_INFO_PATH,
@@ -133,7 +150,6 @@ from usher.ports.source import (
     SourceAdapter,
     SourceEvent,
     SourceItem,
-    SourceNotSupported,
     SourceStatus,
     SourceWatchState,
     StreamTarget,
@@ -172,6 +188,12 @@ USER_DATA_SINCE_PARAM = "MinDateLastSavedForUser"
 # Paging section of this module's docstring for how, and for what that run
 # could and could not demonstrate.
 SORT_BY = "DateCreated,SortName"
+
+# `GET /Users/{userId}` carries the account's `Policy`, which is where
+# `IsAdministrator` lives. Verified 2026-07-31: it answers 200 to the user's
+# *own* non-admin token, so this needs no elevated rights. `GET /Users/Me`
+# answers 500 on that build and is not a usable shortcut.
+USER_PATH = "/Users"
 
 # The walk's dead-man's switch. Neither of its two termination conditions
 # fires against a server that ignores `StartIndex` -- a reverse proxy
@@ -229,6 +251,10 @@ class EmbyAdapter(SourceAdapter):
         max_pages: int = MAX_PAGES,
         timeout_seconds: float = 30.0,
         reauth_cooldown_seconds: float = 60.0,
+        push_connect: PushConnector = connect_websocket,
+        push_stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
+        push_poll_seconds: float = DEFAULT_POLL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._source = source
         self._page_size = page_size
@@ -248,6 +274,16 @@ class EmbyAdapter(SourceAdapter):
             device_id=source.device_id,
             reauth_cooldown_seconds=reauth_cooldown_seconds,
         )
+        self._clock = clock
+        # One ledger for the adapter's whole life, handed to every channel
+        # it opens. `reconnects` and `messages_received` are the *lane's*
+        # history rather than one connection's, which is what makes
+        # `usher.source.push.reconnects` a series worth alerting on and what
+        # keeps a lane that has been delivering for hours from reading as
+        # one that never has.
+        self._health = PushHealth(stale_after=push_stale_after_seconds)
+        self._push_connector = push_connect
+        self._push_poll_seconds = push_poll_seconds
         self._closed = False
 
     @property
@@ -256,14 +292,30 @@ class EmbyAdapter(SourceAdapter):
 
     @property
     def supports_push(self) -> bool:
-        """`False` until M5 builds the WebSocket listener.
+        """Whether this adapter has a live push channel **right now**, and
+        the answer comes from messages.
 
-        Not a placeholder: PRD 03 specifies exactly this as the fallback for
-        a source whose socket cannot be established, and the reconciler's
-        nightly walk covers it. Push itself is verified working (ADR-0004);
-        it is sequenced, not blocked.
+        `self._health.is_delivering` requires a connection, at least one
+        received message, and a recent one. **There is no path from "a
+        socket object exists" to `True`** — ADR-0004 measured a handshake
+        against a nonexistent path upgrading and being held open, and PRD
+        03's reconciler skips a source that says `True` here.
         """
-        return False
+        return self._health.is_delivering(now=self._clock())
+
+    @property
+    def push_reconnects(self) -> int:
+        """The ledger's own count, which is the lane's history rather than
+        this connection's — one `PushHealth` outlives every channel this
+        adapter opens."""
+        return self._health.reconnects
+
+    @property
+    def push_health(self) -> PushHealth:
+        """The ledger, for the lane supervisor and for
+        `GET /admin/sources/{id}/status`. Read-only by convention; nothing
+        outside `adapters/emby` writes it."""
+        return self._health
 
     async def verify(self) -> SourceStatus:
         with _tracer.start_as_current_span("source.verify") as span:
@@ -287,17 +339,84 @@ class EmbyAdapter(SourceAdapter):
                     detail=str(exc),
                 )
             span.set_attribute("usher.authenticated", True)
+            is_administrator = await self._is_administrator()
+            if is_administrator:
+                # A log line, not a refusal. PRD 03's "no admin privileges
+                # are required" is a permission; nothing enforces it, and
+                # ADR-0012 records why refusing here would be worse than
+                # saying so (an operator whose only working account is an
+                # admin account still needs a catalog).
+                logger.warning(
+                    "source {source} is configured with an Emby administrator account; "
+                    "a captured playback URL or push socket then grants administrator "
+                    "access -- configure a normal user (ADR-0012)",
+                    source=self._source.name,
+                )
             return SourceStatus(
                 reachable=True,
                 authenticated=True,
-                # `None`, never `True`. ADR-0004: a WebSocket handshake
-                # against a *nonexistent* path also upgrades and also
-                # receives `Sessions`, so an upgrade is not evidence of
-                # anything. Only received messages are, and M5 builds the
-                # probe that asserts on them.
-                push_available=None,
+                # **`verify()` opens no socket.** A status screen a
+                # dashboard polls must not cost a socket per poll against a
+                # server PRD 01 measures at 1-5 s per request -- and it
+                # would still be answering a question about a socket that is
+                # not the one doing the work. This reports the health of the
+                # channel *actually running*, if this adapter is the one a
+                # push lane is running.
+                #
+                # `None` ("not probed") rather than `False` ("probed and
+                # broken") when no channel has ever opened. The obvious
+                # spelling -- the boolean, unconditionally -- turns "nobody
+                # has looked" into "push is broken" on every status screen
+                # for every source with no lane. ADR-0004: only received
+                # messages are evidence, and an upgrade is not; absence of a
+                # probe is not evidence either.
+                push_available=(
+                    None
+                    if self._health.opened_at is None
+                    else self._health.is_delivering(now=self._clock())
+                ),
+                is_administrator=is_administrator,
                 server_version=_version_of(info) or version,
             )
+
+    async def _is_administrator(self) -> bool | None:
+        """`Policy.IsAdministrator` for the authenticated account, or `None`.
+
+        `GET /Users/{userId}` answers 200 to the user's own non-admin token
+        and carries a 45-key `Policy` object -- verified 2026-07-31 against
+        Emby 4.9.5.0. `GET /Users/Me` answers **500** on that build and is
+        not a usable shortcut, so the id is interpolated.
+
+        Never raises. This is one extra request on a status screen, and a
+        failure to read a role is not a failure to reach or authenticate
+        against a source -- reporting it as one would take
+        `GET /admin/sources/{id}/status` from "renders every state a source
+        can be in" to "500s on a build that spells this route differently".
+
+        `user_id()` is inside the `try` rather than passed in by the caller,
+        which is where the plan put it: it is a `UsherPortError`-raising call
+        on the same session, and `verify()` returns rather than raises for
+        every expected failure. Unreachable today (the `/System/Info` probe
+        above has already authenticated by the time this runs, so the id is
+        cached) and one refactor away from not being.
+
+        Three-valued all the way down. A build with no `Policy`, or one whose
+        `IsAdministrator` is not a bool, is "not determined" -- `bool(...)`
+        of a missing key is `False`, which would render an unperformed check
+        as a performed one.
+        """
+        try:
+            user_id = await self._session.user_id()
+            body = await self._session.json_body(
+                "GET", f"{USER_PATH}/{_segment(user_id)}", op="verify_policy"
+            )
+        except UsherPortError:
+            return None
+        policy = body.get("Policy")
+        if not isinstance(policy, Mapping):
+            return None
+        value = policy.get("IsAdministrator")
+        return value if isinstance(value, bool) else None
 
     async def _walk(
         self, *, since_param: str, since: AwareDatetime | None
@@ -530,14 +649,67 @@ class EmbyAdapter(SourceAdapter):
                 )
 
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
-        raise SourceNotSupported(
-            "the Emby push channel lands in M5; until then this source is covered by the reconciler"
+        """One `/embywebsocket` connection.
+
+        **A fresh connection per call**, which is what `PushSupervisor`'s
+        reconnect needs, and the *ledger* is shared, which is what makes the
+        lane's history survive across them.
+
+        A fresh `EmbyPushChannel` per call as well — but that half is a
+        local rather than a guarantee, and saying so is worth more than
+        implying otherwise. The plan predicted a cached channel would hand
+        back a closed socket and be caught by the supervisor's reconnect
+        case; **measured, caching it changes nothing observable**, because
+        the channel holds no per-connection state at all — the connection
+        lives inside `open()`'s own scope and `open()` connects afresh every
+        time. So the load-bearing property is `open()`'s connect, which is
+        pinned on the connector's attempt count, and the local here is
+        simply the spelling with no dead instance attribute in it.
+
+        Never raises `SourceNotSupported` -- this adapter has a push channel
+        -- but `supports_push` still reads `False` until a message arrives
+        on it. The port documents that relationship as one-way for exactly
+        this reason.
+        """
+        if self._closed:
+            # The port's `aclose` contract: afterwards every method raises
+            # `PortUnavailable` rather than whatever the underlying client
+            # happens to raise.
+            #
+            # **Layered, and currently an equivalent mutant -- measured, and
+            # kept for the reason `jobs.py` keeps its `GREATEST` alongside
+            # its `WHERE`.** `EmbySession._raise_if_closed` is the guard
+            # that carries this today: `open()`'s first act is
+            # `_socket_url()`, whose first act is `access_token()`, which
+            # checks it and raises this same error. So deleting the line
+            # below fails nothing. What it buys is the raise happening at
+            # the *call* rather than at `__aenter__` -- a supervisor that
+            # builds the context manager before entering it learns sooner --
+            # and it stops being redundant the moment `events()` does
+            # anything before touching the session.
+            raise PortUnavailable("this source adapter has been closed")
+        channel = EmbyPushChannel(
+            self._session,
+            base_url=self._source.base_url,
+            device_id=self._source.device_id,
+            health=self._health,
+            connect=self._push_connector,
+            clock=self._clock,
+            poll_seconds=self._push_poll_seconds,
         )
+        return channel.open()
 
     async def aclose(self) -> None:
         if self._closed:
             return
         self._closed = True
+        # A closed adapter has no channel, whatever the ledger last saw.
+        # `EmbyPushChannel.open`'s own `finally` already clears `connected`
+        # when the block exits -- this is for the case where it has *not*:
+        # a lane parked mid-`async for` when the source is deleted. Without
+        # it a status screen reads `push_available: true` for a source that
+        # was deleted thirty seconds ago.
+        self._health.record_close()
         await self._session.aclose()
         if self._owns_client:
             await self._client.aclose()

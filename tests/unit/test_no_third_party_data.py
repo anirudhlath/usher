@@ -106,6 +106,11 @@ _ID_KEYS = frozenset(
         "tvrage_id",
         "credit_id",
         "Id",
+        # An Emby push message keys its entries on `ItemId` rather than
+        # `Id`, so without this the only ids in `emby/push_*.json` sit
+        # outside every scan -- a fixture that is covered by the parametrized
+        # "the guard reads what it claims to read" list and by nothing else.
+        "ItemId",
         "ServerId",
         "SeriesId",
         "SeasonId",
@@ -397,6 +402,9 @@ def test_no_dataset_row_is_committed_anywhere() -> None:
         "tests/fixtures/emby/series_item.json",
         "tests/fixtures/emby/episode_item.json",
         "tests/fixtures/emby/multi_version_movie.json",
+        "tests/fixtures/emby/push_user_data_changed.json",
+        "tests/fixtures/emby/push_library_changed.json",
+        "tests/fixtures/emby/push_sessions.json",
         "tests/fixtures/tmdb/movie.json",
         "tests/fixtures/tmdb/series.json",
         "tests/fixtures/tmdb/season.json",

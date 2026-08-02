@@ -36,7 +36,7 @@ any source produces.
 `tests/unit/test_fakes_emby_server.py` pins everything on the other side
 of that line -- this file is the entire basis for running the source
 contract against the real adapter, so a divergence here is a place a
-wrong adapter passes all 43 of its assertions.
+wrong adapter passes all 49 of its assertions.
 
 **The listing route and the item route render different `UserData`, and
 that asymmetry is a measurement, not a convenience** -- see `_user_data`.
@@ -54,6 +54,7 @@ restate the case that drives them.
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -114,6 +115,10 @@ _DEVICE_ID = re.compile(r'DeviceId="([^"]*)"')
 _DEVICE = re.compile(r'Device="([^"]*)"')
 _CLIENT = re.compile(r'Client="([^"]*)"')
 _VERSION = re.compile(r'Version="([^"]*)"')
+# One segment only, so it cannot swallow `/Users/{user}/Items` or any of the
+# write routes below -- each of those needs a second segment. Matched after
+# `/Users/AuthenticateByName`, which `handle` answers before the token gate.
+_USER = re.compile(r"^/Users/(?P<user>[^/]+)$")
 _ITEMS = re.compile(r"^/Users/(?P<user>[^/]+)/Items$")
 _ITEM = re.compile(r"^/Users/(?P<user>[^/]+)/Items/(?P<item>[^/]+)$")
 _USER_DATA = re.compile(r"^/Users/(?P<user>[^/]+)/Items/(?P<item>[^/]+)/UserData$")
@@ -201,6 +206,14 @@ class FakeEmbyServer:
         self.password = password
         self.credentials_valid = True
         self.offline = False
+        # `Policy.IsAdministrator` for the seeded account. `False` is the
+        # configuration ADR-0012 assumes and the live 2026-07-31 probe
+        # observed; `True` is the one nothing enforces and M5 reports.
+        self.is_administrator = False
+        # `GET /Users/Me` answers 500 on Emby 4.9.5.0. This models a build
+        # that did the same for `GET /Users/{id}`, which must narrow the
+        # answer rather than fail `verify()`.
+        self.user_route_fails = False
         self.fail_after: int | None = None
         self.authentications = 0
         # Read by `_ordered` as well as by tests: it is what rotates a group
@@ -346,6 +359,9 @@ class FakeEmbyServer:
                     "OperatingSystem": "Linux",
                 },
             )
+        user_match = _USER.match(path)
+        if request.method == "GET" and user_match:
+            return self._user(user_match.group("user"))
         if request.method == "GET" and _ITEMS.match(path):
             return self._list(request)
         item_match = _ITEM.match(path)
@@ -394,6 +410,39 @@ class FakeEmbyServer:
                 "AccessToken": self._session_token,
                 "ServerId": SERVER_ID,
                 "User": {"Id": USER_ID, "Name": self.username},
+            },
+        )
+
+    def _user(self, user: str) -> httpx.Response:
+        """`GET /Users/{userId}` -- the account's own `UserDto`.
+
+        Verified 2026-07-31 against Emby 4.9.5.0: this answers **200 to the
+        user's own non-admin token** and carries a 45-key `Policy` object
+        with `IsAdministrator` on it.
+
+        **`Me` is a 500, not a shortcut**, on that same build -- modelled
+        here rather than left to this regex's `[^/]+`, which would otherwise
+        make `GET /Users/Me` work perfectly against a server on which it
+        does not. That is the wrong-but-self-consistent-endpoint gap this
+        module's docstring names, and it is the one an adapter reaching for
+        the obvious shortcut would fall straight into.
+
+        `user_route_fails` models a build that answers 500 for the *real*
+        route as well, which must narrow the reported role rather than fail
+        `verify()`.
+
+        Two `Policy` keys, not 45. The other 43 were not recorded, and
+        rendering invented ones would be this fake stating a shape nobody
+        measured -- the failure mode its own module docstring is about.
+        """
+        if self.user_route_fails or user == "Me":
+            return httpx.Response(500, json={"Error": "Internal Server Error"})
+        return httpx.Response(
+            200,
+            json={
+                "Id": USER_ID,
+                "Name": self.username,
+                "Policy": {"IsAdministrator": self.is_administrator, "IsDisabled": False},
             },
         )
 
@@ -667,3 +716,130 @@ class FakeEmbyServer:
             # in the catalogue, with nothing anywhere reporting it.
             user_data["LastPlayedDate"] = _emby_stamp(state.last_played_at)
         return user_data
+
+    # -- push frames ---------------------------------------------------
+    #
+    # Rendered from the committed `push_*.json` fixtures with the seeded
+    # values substituted in, exactly as `_payload` renders an item: the
+    # *shape* comes from a file M5's live verification will diff against a
+    # real capture, and the *values* come from the test. Building the dicts
+    # inline here instead -- which is what the plan's own code did, one
+    # paragraph after its prose said otherwise -- would let this file and
+    # `tests/fixtures/emby/push_*.json` drift apart silently, and the
+    # fixtures are the only half of the pair anything independent
+    # (`tests/unit/test_adapters_emby_push.py`, and the live capture) ever
+    # looks at.
+    #
+    # **The provenance here was weaker than anywhere else in this file until
+    # 2026-08-02, and what is left of the gap is stated rather than
+    # implied.** These three message shapes had never met a real message:
+    # ADR-0004's live run recorded *which message types arrived* and not one
+    # byte of any payload, so everything below the `MessageType` line was
+    # transcribed from Emby's own `UserItemDataDto`/`LibraryUpdateInfo`/
+    # `SessionInfoDto` and from the decompilation of
+    # `SessionWebSocketListener` -- and a wrong envelope is invisible from
+    # both sides of this file, which is exactly the failure M3's live run
+    # found in the watch-state write-back.
+    #
+    # M5's live run captured all three against Emby 4.9.5.0 and the
+    # fixtures now carry the measured shape: `Sessions` has **no
+    # `MessageId`** (the other two do, one per message), a `UserDataList`
+    # entry has **no `Key`** and no `UnplayedItemCount` but does carry
+    # `PlayedPercentage` when the position is non-zero, and
+    # `LibraryChanged`'s arrays really are lists of id strings. What is
+    # *still* unmeasured is narrower and named in
+    # `tests/fixtures/emby/README.md`: a `LibraryChanged` carrying
+    # `ItemsRemoved`/`ItemsUpdated`, and a `UserDataChanged` for a series.
+
+    def user_data_changed_frame(self, external_ids: Sequence[str]) -> str:
+        """A `UserDataChanged` envelope for these items' current state.
+
+        Every entry is the fixture's own entry with the identity and state
+        fields overwritten, and `LastPlayedDate` **popped** when the seeded
+        state carries none -- otherwise the fixture's invented date shows
+        through for every item, which is the same trap `given_item`'s
+        docstring names and which an earlier renderer here fell into for
+        `SeriesId`/`IndexNumber`.
+
+        `PlayCount` and `LastPlayedDate` are rendered from the seeded state
+        as *true* values, and the adapter is required to report `None` for
+        both (ADR-0014: a `UserDataChanged` entry is a third payload shape
+        and no run here has parsed one). That is deliberately the same
+        three-valued shape `test_a_walk_never_reports_play_history_it_
+        cannot_know` asserts on: either the truth or an explicit absence,
+        never a third number -- so a mapper that fabricated a `0` is caught
+        and one that reads the real value is not forbidden.
+        """
+        message = load_emby_fixture("push_user_data_changed")
+        template: dict[str, Any] = message["Data"]["UserDataList"][0]
+        entries: list[dict[str, Any]] = []
+        for external_id in external_ids:
+            state = self._state_of(external_id)
+            entry = dict(template)
+            entry["ItemId"] = external_id
+            entry["PlaybackPositionTicks"] = state.position_seconds * _TICKS_PER_SECOND
+            entry["IsFavorite"] = False
+            entry["Played"] = state.played
+            if state.play_count is None:
+                entry.pop("PlayCount", None)
+            else:
+                entry["PlayCount"] = state.play_count
+            if state.last_played_at is None:
+                entry.pop("LastPlayedDate", None)
+            else:
+                entry["LastPlayedDate"] = _emby_stamp(state.last_played_at)
+            entries.append(entry)
+        message["Data"]["UserId"] = USER_ID
+        message["Data"]["UserDataList"] = entries
+        return json.dumps(message)
+
+    def library_changed_frame(
+        self,
+        *,
+        added: Sequence[str] = (),
+        updated: Sequence[str] = (),
+        removed: Sequence[str] = (),
+    ) -> str:
+        """A `LibraryChanged` envelope naming exactly the ids it was given.
+
+        The three arrays it is *not* given are emptied rather than left at
+        the fixture's values: a frame that always announced the fixture's
+        own `ItemsAdded` would make every push case see an `ITEM_ADDED`
+        event nobody arranged, and the mapper emits one event per non-empty
+        array.
+        """
+        message = load_emby_fixture("push_library_changed")
+        data: dict[str, Any] = message["Data"]
+        data["FoldersAddedTo"] = []
+        data["FoldersRemovedFrom"] = []
+        data["CollectionFolders"] = []
+        data["ItemsAdded"] = list(added)
+        data["ItemsRemoved"] = list(removed)
+        data["ItemsUpdated"] = list(updated)
+        # A guess about a field nothing reads: `LibraryUpdateInfo.IsEmpty`
+        # is assumed to mean "no arrays carry anything", and this ignores
+        # the folder arrays above because they are always empty here.
+        data["IsEmpty"] = not (added or updated or removed)
+        return json.dumps(message)
+
+    def sessions_frame(self) -> str:
+        """The periodic message. It maps to no event and is the reason an
+        idle library's channel stays measurably alive.
+
+        ADR-0004 observed `Sessions` arriving "periodically" and **not at
+        what interval**, which is the single assumption
+        `DEFAULT_STALE_AFTER_SECONDS = 90.0` rested on. M5's live run
+        measured it -- median 38.7 s, max 72.9 s over 182 intervals -- and
+        found it is **not an interval at all**: an authenticated socket
+        receives a frame when its row-filtered view changes, where an
+        unauthenticated one receives the literal 1 s cadence
+        `SessionsStart`'s `"0,1000"` asks for. Nothing here models either,
+        deliberately: a fake that emitted on a timer would be asserting a
+        cadence that is a property of a household rather than of the
+        protocol. This renders one frame on demand, and the watchdog's own
+        cases drive an injected clock instead.
+        """
+        message = load_emby_fixture("push_sessions")
+        for session in message["Data"]:
+            session["UserId"] = USER_ID
+        return json.dumps(message)

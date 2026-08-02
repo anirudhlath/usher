@@ -1,7 +1,11 @@
 # ADR-0012 — A playback URL carries a source token, in v1
 
 **Status:** Accepted for v1, with a named successor in M9. Implemented in M3
-([plan](../../plans/2026-07-30-m3-emby-adapter.md), Task 7).
+([plan](../../plans/2026-07-30-m3-emby-adapter.md), Task 7). Both of the
+mitigations recorded below as "recommended, not implemented" have since
+shipped — dropping `DeviceId` from a playback URL in M3, and the
+administrator check in M5 — so the accepted risk is now *observable* rather
+than merely documented. It is still accepted.
 
 ## Context
 
@@ -53,8 +57,12 @@ out of `AuthenticateByName`'s response. `POST /admin/sources` (PRD 07, M9)
 is specified with no role constraint either. Admin credentials pasted into
 it therefore put an admin token into every playback URL, and the list above
 becomes "everything an Emby administrator can do". **This is an accepted
-risk, not a solved one** — the mitigation today is the operator guidance in
-PRD 03, not code. See "Recommended, not implemented" below.
+risk, not a solved one** — nothing refuses such an account, because an
+operator whose only working account is an administrator account still needs
+a catalog. What changed in M5 is that it is no longer *unobservable*:
+`verify()` reads `Policy.IsAdministrator` and `GET /admin/sources/{id}/status`
+reports it, so PRD 03's "configure a normal user" is guidance an operator can
+check they followed. See "Recommended, not implemented" below.
 
 **`DeviceId` rode along, and it cost the attribution argument. It no longer
 does.** PRD 03's push channel is opened at
@@ -152,6 +160,40 @@ included — and it is not bounded in *time* by anything Usher controls.
   `credentials_ref`.
 - `verify()`'s `SourceStatus.detail` is built from translated port errors
   for the same reason.
+- **A third-party client can log the URL for you, and one does.** Every
+  rule above governs Usher's own code. From M5 the same token is also
+  handed to `websockets`, and `websockets/client.py:294` is
+  `logger.debug("> GET %s HTTP/1.1", request.path)` — the whole path *and
+  query*, which for `/embywebsocket` is the token.
+  `usher.telemetry.configure_logging` forces `propagate = True` on every
+  logger that exists when it runs and installs an intercept handler on root
+  at level 0, so at `USHER_LOG_LEVEL=DEBUG` — the level an operator sets
+  precisely when a source is misbehaving — that line is a structured log
+  record on stdout, and from there in Loki.
+
+  **Measured before it was fixed**, against the real library with a real
+  client and a real server on `127.0.0.1`: one handshake put the token on
+  stdout **twice** — once from `websockets.client:send_request:294` and
+  once from `websockets.server:parse:561`, which logs the same request line
+  on the receiving side. Only the first is reachable in production (Usher
+  runs no WebSocket server), and the second is what a loopback *test* leaks
+  if only the client is silenced.
+
+  `usher.adapters.emby.push.socket_logger` closes it, **at the level**,
+  because that is the only part `configure_logging` does not undo: it
+  clears `handlers` and re-forces `propagate = True` on every logger it
+  finds, and never touches `level`. `logging.basicConfig(level=0)` sets
+  *root*'s level rather than that logger's, and `isEnabledFor` consults
+  `getEffectiveLevel()`. Re-asserted per connect, since a socket outlives
+  the call that opened it and `create_app`/`usher.cli.main` each call
+  `configure_logging` at times import order says nothing about. Two other
+  paths through that same logger could carry the URL and are closed by the
+  same line: `websockets/client.py:296` logs every request *header*, which
+  includes the `Authorization: Basic` one the library synthesises when a
+  URL carries userinfo; and `websockets/asyncio/client.py:641` logs
+  `traceback.format_exception_only(exc)` at **INFO** in the reconnecting
+  `async for` form, where an `InvalidURI` renders as
+  `f"{self.uri} isn't a valid URI: …"`.
 
 ## The successor, in M9
 
@@ -185,33 +227,64 @@ named only inside the document that defers it is not a plan.
 
 ## Recommended, not implemented
 
-Two of the accepted risks above have a cheap code answer that M3 does not
-build, recorded here so the choice is visible rather than forgotten:
+Two of the accepted risks above had a cheap code answer that M3 did not
+build, recorded here so the choice stayed visible rather than forgotten.
+**Both have since shipped** — the second in M3's own live-verification pass,
+the first in M5 — and both are kept here with their reasoning rather than
+deleted, because the reasoning is what says why the residual risk is still
+accepted:
 
-- **Detect an administrator account and say so.**
+- ~~**Detect an administrator account and say so.**~~ — **done, M5.**
   `_authenticate_locked` already parses the `User` object out of
   `AuthenticateByName`'s response for `User.Id`; Emby's `UserDto` carries
-  `Policy.IsAdministrator` alongside it. Reading it would let Usher warn at
-  source registration, or surface it on `SourceStatus`, turning PRD 03's
-  "no admin privileges are required" from a permission into something
-  observable.
+  `Policy.IsAdministrator` alongside it. Reading it turns PRD 03's "no admin
+  privileges are required" from a permission into something observable.
 
-  **The readability half is now verified** (2026-07-31): `GET
+  **The readability half was verified first** (2026-07-31): `GET
   /Users/{userId}` answers 200 to the user's own non-admin token and
   carries a 45-key `Policy` object with `IsAdministrator` on it — `false`
   for the account used, which is the configuration this ADR assumes and
   nothing enforces. `GET /Users/Me` answers **500** on this build and is
-  not a usable shortcut. Still not implemented: whether the same `Policy`
-  rides on `AuthenticateByName`'s own response was not checked (the run
-  held a token, not a password), so a first implementation should either
-  read it there or spend one extra request on `GET /Users/{userId}` during
-  `verify()`.
+  not a usable shortcut.
+
+  **The reason it stopped being optional is worth stating:** until M5 the
+  token reached exactly one place a third party could hold it, a direct-play
+  URL. From M5 it is also what a long-lived push socket is opened with,
+  rebuilt on every reconnect and held in memory for the life of the lane.
+  The grant did not change — the token was always the whole of it — but the
+  number of places it is materialised did, and the mitigation recorded here
+  was guidance rather than code.
+
+  `EmbyAdapter.verify()` now spends one request on `GET /Users/{userId}`,
+  reports `SourceStatus.is_administrator` (three-valued; `None` means the
+  check did not run), logs a warning, and **refuses nothing** — an operator
+  whose only working account is an administrator account still needs a
+  catalog. A failure to read the role narrows the answer to `None` rather
+  than failing `verify()`, which must render every state a source can be in
+  rather than 500 on a build that spells this route differently. A
+  fabricated `false` would be worse than the unknown it replaced: it would
+  make an unperformed check look performed. Whether the same `Policy` rides
+  on `AuthenticateByName`'s own response is **still unverified** (the run
+  held a token, not a password) and would save the request.
 - ~~**Stop sending Usher's own `DeviceId` in a playback URL**~~ —
   **done**, 2026-07-31. The question that blocked it (does
   `/Videos/{id}/stream` need it?) was answered by measurement: it does not.
   Whether `/embywebsocket` requires the `deviceId` to match the token's
   session is still unverified and no longer load-bearing here, since the
   parameter is not published either way.
+- **Move the token out of the socket URL and into a header** — **asked and
+  refuted, 2026-08-02.** This would have removed the credential from
+  `request.path`, from the library's own logging and from any proxy access
+  log, i.e. narrowed the risk this ADR accepts rather than mitigating it.
+  Measured: a socket sending `X-Emby-Token` as a header and no `api_key`
+  **upgrades and delivers messages**, which looks like success and is not —
+  it behaves identically to a socket carrying **no credential at all**,
+  receiving the server's whole unfiltered session list at ~1 Hz where the
+  authenticated socket receives a five-row filtered view. `/embywebsocket`
+  reads the query string and nothing else. So the token stays in the URL,
+  and the mitigations in the handling rules above stay load-bearing rather
+  than transitional. Recorded here so the next reader does not re-derive a
+  positive result from "it connected".
 
 ## Why not now
 

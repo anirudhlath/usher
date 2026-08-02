@@ -31,13 +31,20 @@ from pydantic import AwareDatetime, SecretStr
 
 from tests.contract.source_harness import SourceHarness
 from tests.fakes.emby_server import FakeEmbyServer
+from tests.fakes.push_connection import FakePushConnection, FakePushConnector
 from tests.fakes.slow_transport import SlowTransport
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
-from usher.ports.source import SourceAdapter, SourceItem, SourceWatchState
+from usher.ports.source import (
+    SourceAdapter,
+    SourceEvent,
+    SourceEventKind,
+    SourceItem,
+    SourceWatchState,
+)
 
 PAGE_SIZE = 2
 
@@ -55,6 +62,24 @@ class EmbyHarness(SourceHarness):
         )
         self._transport = SlowTransport(self._server.handle)
         self._client = httpx.AsyncClient(transport=self._transport, base_url=self._source.base_url)
+        # A fake connector, because from M5 `events()` really opens
+        # something. Without it the contract's push case resolves
+        # `emby.invalid` for real -- measured, it reached DNS and came back
+        # `gaierror` -- which is both a network call the suite forbids and a
+        # `PortUnavailable` where the case expected either a channel or
+        # `SourceNotSupported`. A connection is queued rather than left to
+        # the connector's own mint-on-demand so that `push_event` works
+        # before the channel has been opened; `_live_push` below prefers
+        # whatever was handed out most recently, so a reconnect is followed
+        # rather than arranged against a dead object.
+        self._push = FakePushConnection()
+        self._push_connector = FakePushConnector([self._push])
+        # Frozen at zero and moved only by `advance_push_clock`. This is the
+        # adapter's *push* clock and nothing else reads it: `PushHealth`'s
+        # three instants are the only consumers, so freezing it costs the
+        # rest of the contract nothing and buys a ninety-second staleness
+        # window in under a millisecond, twice per run.
+        self._push_now = 0.0
         self._adapter = EmbyAdapter(
             self._source,
             SourceCredentials(
@@ -62,6 +87,13 @@ class EmbyHarness(SourceHarness):
             ),
             client=self._client,
             page_size=PAGE_SIZE,
+            push_connect=self._push_connector,
+            push_poll_seconds=0.001,
+            # A closure over the attribute, not a captured value, so
+            # `advance_push_clock` really moves the adapter's own clock --
+            # the trick `EmbySession`'s injected clock already allows, one
+            # object over.
+            clock=lambda: self._push_now,
         )
 
     @property
@@ -127,6 +159,76 @@ class EmbyHarness(SourceHarness):
         quietly certifying a sequential run as single flight.
         """
         return self._transport.max_in_flight
+
+    # -- push --------------------------------------------------------------
+
+    @property
+    def _live_push(self) -> FakePushConnection:
+        """The connection the adapter is actually holding.
+
+        `handed_out[-1]` rather than the queued one, because `events()`
+        connects afresh on every call and a harness that kept arranging
+        against the first object would silently stop affecting the channel
+        the moment anything reconnected -- a `push_drop` that dropped
+        nothing, which reads as a passing case.
+
+        **A known equivalent mutant against the contract suite as it stands,
+        and kept anyway**, the way `jobs.py` keeps its `GREATEST` alongside
+        its `WHERE`. Measured: collapsing this to `return self._push` leaves
+        all 49 cases green on both subclasses, because no case opens
+        `events()` twice, so the queued connection *is* the one handed out.
+        What it buys is the first reconnect case (`services/push.py`) not
+        having to discover this, and it costs one indexing expression.
+        """
+        return (
+            self._push_connector.handed_out[-1] if self._push_connector.handed_out else self._push
+        )
+
+    async def push_event(self, event: SourceEvent) -> None:
+        """Render a `SourceEvent` into the message Emby would have sent.
+
+        The translation ADR-0013 exists for: the contract speaks
+        `SourceEvent` and this turns it into a wire frame, so the same
+        assertions run against a second source by writing a second harness
+        rather than a second suite.
+
+        A `WATCH_STATE_CHANGED` renders `UserDataChanged` **from the
+        server's current state for those ids**, not from the event's own
+        `watch_states`, so a case that seeded a state through
+        `given_watch_state` and then pushed sees the seeded values -- and an
+        adapter that fabricated them instead of parsing the frame would
+        fail rather than agree with the harness by construction.
+        """
+        if event.kind is SourceEventKind.WATCH_STATE_CHANGED:
+            frame = self._server.user_data_changed_frame(event.external_ids)
+        elif event.kind is SourceEventKind.ITEM_ADDED:
+            frame = self._server.library_changed_frame(added=event.external_ids)
+        elif event.kind is SourceEventKind.ITEM_UPDATED:
+            frame = self._server.library_changed_frame(updated=event.external_ids)
+        else:
+            frame = self._server.library_changed_frame(removed=event.external_ids)
+        self._live_push.deliver(frame)
+
+    async def push_silence(self) -> None:
+        self._live_push.stall()
+
+    async def push_drop(self) -> None:
+        self._live_push.drop("connection closed by peer")
+
+    async def advance_push_clock(self, seconds: float) -> None:
+        self._push_now += seconds
+
+    def can_advance_push_clock(self) -> bool:
+        return True
+
+    def push_stale_after(self) -> float:
+        return self._adapter.push_health.stale_after
+
+    # `can_disable_push` is deliberately left at the base's `False`.
+    # `EmbyAdapter` has no state in which `events()` raises
+    # `SourceNotSupported` -- it always has a channel to offer and finds out
+    # afterwards whether it delivers -- so implementing it would mean
+    # inventing one, and the contract case skips instead.
 
     async def aclose(self) -> None:
         await self._adapter.aclose()

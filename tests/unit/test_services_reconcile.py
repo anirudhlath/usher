@@ -40,6 +40,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.fakes.episode_repository import FakeEpisodeRepository
+from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.source_adapter import FakeSourceAdapter
@@ -51,6 +52,7 @@ from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind, SyncRunStatus
 from usher.ports.errors import PortUnavailable, UsherPortError
+from usher.ports.events import ClientEventKind
 from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
@@ -93,6 +95,7 @@ class _Fixture:
         self.queue = FakeJobQueue()
         self.media_items = FakeMediaItemRepository()
         self.runs = FakeSyncRunRepository()
+        self.events = FakeEventPublisher()
         self.commits = 0
         self.service = ReconcileService(
             ingest=IngestService(
@@ -104,6 +107,7 @@ class _Fixture:
             ),
             media_items=self.media_items,
             runs=self.runs,
+            events=self.events,
             commit=self._commit,
             batch_size=batch_size,
             max_retract_fraction=max_retract_fraction,
@@ -567,3 +571,61 @@ async def test_the_sweep_window_is_the_runs_own_start_instant(
     run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
     assert seen == [run.started_at]
     assert run.started_at < datetime.now(UTC) + timedelta(seconds=1)
+
+
+# -- what a walk tells a client --------------------------------------------
+
+
+async def test_each_batch_publishes_sync_progress() -> None:
+    """Per batch, not per run. A nightly walk of the one measured library
+    flushes 1,127 of these and an admin UI's progress bar is the point of
+    them; one at the end is a bar that jumps from 0% to 100%.
+
+    Batch size 2 against 3 items, so a per-run publisher reports 1 where a
+    per-batch one reports 2 -- the count is only evidence because the
+    denominator is held fixed."""
+    fixture = _Fixture(batch_size=2)
+    for index in range(3):
+        fixture.adapter.seed(_item(f"m{index}"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    progress = [
+        event for event in fixture.events.published if event.kind is ClientEventKind.SYNC_PROGRESS
+    ]
+    assert len(progress) == 2
+    assert progress[-1].data["items_seen"] == 3
+    assert progress[-1].data["source"] == fixture.source.name
+    assert progress[-1].data["kind"] == SyncRunKind.FULL.value
+
+
+async def test_sync_progress_is_scoped_to_no_title(fixture: _Fixture) -> None:
+    """PRD 07 marks it "Admin UI only", and the scoping is what implements
+    that: a `?titles=` subscriber never sees one. A detail screen that
+    re-rendered on each of a walk's 1,127 batches is the failure the filter
+    exists for."""
+    fixture.adapter.seed(_item("m0"), T0)
+    await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    progress = [
+        event for event in fixture.events.published if event.kind is ClientEventKind.SYNC_PROGRESS
+    ]
+    assert progress
+    assert all(event.title_id is None and event.episode_id is None for event in progress)
+
+
+async def test_a_failed_walk_still_reported_the_batches_it_did_finish(
+    fixture: _Fixture,
+) -> None:
+    """The events are published per *flush*, so a walk that dies halfway has
+    already told the admin UI how far it got -- which is the same reason
+    `_flush` commits per batch. Nothing announces the failure itself: PRD
+    07's SSE table has no such event, and `sync_runs` is where a failure is
+    recorded."""
+    fixture.service._batch_size = 2
+    for index in range(4):
+        fixture.adapter.seed(_item(f"m{index}"), T0)
+    fixture.adapter.fail_after(3)
+    run = await fixture.service.reconcile(fixture.source, SyncRunKind.FULL, fixture.adapter)
+    assert run.status is SyncRunStatus.FAILED
+    progress = [
+        event for event in fixture.events.published if event.kind is ClientEventKind.SYNC_PROGRESS
+    ]
+    assert [event.data["items_seen"] for event in progress] == [2]

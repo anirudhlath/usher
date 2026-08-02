@@ -1,0 +1,13 @@
+{
+  "MessageId": "00000000000000000000000000009002",
+  "MessageType": "LibraryChanged",
+  "Data": {
+    "FoldersAddedTo": [],
+    "FoldersRemovedFrom": [],
+    "ItemsAdded": ["90000200", "90000201"],
+    "ItemsRemoved": ["90000202"],
+    "ItemsUpdated": ["90000203"],
+    "CollectionFolders": [],
+    "IsEmpty": false
+  }
+}

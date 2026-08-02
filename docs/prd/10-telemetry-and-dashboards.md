@@ -100,13 +100,14 @@ is maintained rather than aspirational.
 | `usher.watch_state.run.duration` | histogram | source, status | ✅ M4 |
 | `usher.watch_state.backfilled` | counter | source | ✅ M4 |
 | `usher.source.request.duration` | histogram | source, op | ✅ M3 |
-| `usher.source.push.connected` | gauge | source | M5 |
-| `usher.source.push.reconnects` | counter | source | M5 |
+| `usher.source.push.connected` | gauge | source | ✅ M5 |
+| `usher.source.push.reconnects` | counter | source | ✅ M5 |
+| `usher.source.push.events` | counter | source, kind | ✅ M5 |
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
 | `usher.embedding.duration` | histogram | — | M6 |
 | `usher.cache.hits` / `.misses` | counter | cache | M9 |
-| `usher.sse.connections` | gauge | — | M5 |
+| `usher.sse.connections` | gauge | — | ✅ M5 |
 | `usher.bootstrap.rows` | counter | dataset | ✅ M2 |
 | `usher.bootstrap.batch.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.phase.duration` | histogram | dataset | ✅ M2 |
@@ -132,6 +133,76 @@ can only answer the question it actually has:
   "provider degraded" alert divides 429s and 5xxs by the total — a
   denominator that omitted the failures would read *low* exactly during an
   outage.
+
+Four more M5 made, in the same spirit — and one note on what ticking the
+three push rows required.
+
+**The three push rows were held at "see below" until a lane actually ran.**
+The gauges, the counter and their reader hook shipped early in M5, each
+pinned by a test that drives the emitting code and reads the value back out
+of an in-memory metric reader — but an instrument nothing feeds is a panel
+that is permanently blank, so a ✅ would have been the exact claim this
+column's rule forbids. They are ticked now because `create_app`'s lifespan
+builds a `LaneSupervisor`, registers `push_snapshots` as the reader, and
+runs a push lane per enabled source; `usher.source.push.events` is emitted
+by `PushApplyService`, which that lane calls. `usher.sse.connections` was
+ticked first, and the difference is the point: it needs no lane, only the
+bus, which `create_app` builds unconditionally.
+
+**`reconnects` is read through the port, not off a ledger.** The supervisor
+holds a `SourceAdapter` and nothing more, so `SourceAdapter.push_reconnects`
+is where the count lives — concrete on the port, defaulting to `0`, which is
+the *true* answer for an adapter with no channel rather than the fabricated
+zero the reader below refuses to emit. An adapter that has a channel
+overrides it, and that is checked structurally, because a forgotten override
+is indistinguishable from "it has not reconnected yet" in every behavioural
+test.
+
+- **`usher.source.push.connected` reports *delivery*, not connection.** A
+  gauge fed by the socket's state would read 1 for the failure
+  [ADR-0004](decisions/0004-push-over-polling.md) measured — a handshake
+  against a nonexistent path, upgraded and held open, delivering nothing —
+  which is precisely the condition the "Push down" alert below exists to
+  catch. The series keeps its name, because a metric renamed is a dashboard
+  panel silently blank, and reports the honest quantity: the adapter's
+  message ledger, not its connection object.
+- **`usher.source.push.reconnects` is an *asynchronous* counter, and it
+  counts on the second and later `open`.** Asynchronous because the value is
+  a cumulative total read out of an in-memory ledger rather than something
+  incremented at an event — the one place in this project where an
+  observable callback is unambiguously safe, since there is no query to
+  bounce onto the event loop. On the second open rather than on a failure
+  because a lane that failed to connect five times and then succeeded
+  reconnected *once*; a counter on the failure reports five and makes an
+  unreachable source look like a flapping one, which is a different
+  diagnosis with a different fix.
+- **`usher.source.push.events` is new to this table, labelled `source` and
+  `kind`.** It is what separates "the lane is up" from "the lane is doing
+  anything", and the `kind` label is what separates an event that cost a
+  merge from one that
+  [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
+  forbids acting on at all. Counted on the way *out* of applying, so an
+  event answered with a delta walk is still counted — a series that dropped
+  those would read as a quiet source during exactly the library scan that
+  produced them.
+- **`usher.sse.connections` is the one observable callback in this project
+  that really is a live read.** The rule stated above for
+  `usher.jobs.queued` -- an observable callback runs on the metric reader's
+  background thread and every database call here is a coroutine on asyncpg,
+  so the reader must be a *snapshot* -- turns entirely on there being a
+  query. There is none: this is `len()` on an in-memory set of subscribers,
+  so the registered reader is the bus itself and the value can never be
+  stale. A process with no bus reports *no observation* rather than a zero,
+  for the reason the push gauges do: a fabricated zero is a claim the process
+  does not have.
+- **Queue depth by priority (dashboard 3) is a Postgres query, not a
+  metric.** M4 recorded that `usher.jobs.queued` is labelled `kind` and that
+  "M5 introduces demand promotion and is where the band becomes a real
+  series". M5 introduces demand promotion and the label stays `kind`: a
+  priority band needs a second `GROUP BY` on `JobQueue`, and this document's
+  own first principle puts "what is in the queue right now, broken down
+  however you like" on the datasource that can answer it exactly. The panel
+  reads `jobs` directly.
 
 ## Analytics tables
 
@@ -191,11 +262,19 @@ sorted by age) · rewatches · **row effectiveness**: plays attributed per
 ### 3 — Pipeline
 
 Queue depth by priority · enrichment throughput and p50/p99 · **promotion
-latency against the 5 s read-through target** · parked jobs · sync run outcomes
+latency against the 5 s read-through target** — backed by real data as of M5,
+which added the first caller of the promotion clause and puts the requesting
+span's `traceparent` on the promoted job, so the panel is a join rather than
+an estimate · parked jobs · sync run outcomes
 and duration · **push connection uptime and reconnect count** — the direct
 health signal for the WebSocket risk in
-[ADR-0004](decisions/0004-push-over-polling.md) · Emby request latency · TMDb
-requests/sec against the ~40 ceiling with 429 count.
+[ADR-0004](decisions/0004-push-over-polling.md), reported from a message
+ledger rather than a socket
+([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)) · **push
+events applied, by kind**, which separates "the lane is up" from "the lane is
+doing anything"
+· Emby request latency · TMDb requests/sec against the ~40 ceiling with 429
+count.
 
 **Queue depth, parked jobs, sync run outcomes and duration are backed by real
 data as of M4** — `jobs`, `sync_runs` and `usher.sync.run.duration` all exist

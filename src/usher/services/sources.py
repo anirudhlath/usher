@@ -16,6 +16,8 @@ nothing *leaks*: every adapter this service builds is closed in a `finally`.
 
 import secrets
 import uuid
+from collections.abc import Callable
+from dataclasses import replace
 
 from loguru import logger
 
@@ -40,10 +42,19 @@ class SourceService:
         sources: SourceRepository,
         credentials: CredentialStore,
         adapters: SourceAdapterFactory,
+        push_health: Callable[[uuid.UUID], bool | None] | None = None,
     ) -> None:
         self._sources = sources
         self._credentials = credentials
         self._adapters = adapters
+        # The *running lane's* push health, injected by the composition root
+        # rather than probed here. Optional, and `None` means "this process
+        # runs no lanes": `usher.cli` builds this service too, and a CLI that
+        # answered `False` would be reporting a check it never performed.
+        # A plain callable rather than a port because there is one
+        # implementation, it lives in `api/` (which `services/` may not
+        # import), and the whole of it is `uuid -> bool | None`.
+        self._push_health = push_health
 
     async def register(
         self,
@@ -147,9 +158,37 @@ class SourceService:
         # one connection pool, and a status endpoint a dashboard polls would
         # otherwise leak one per call.
         try:
-            return await adapter.verify()
+            status = await adapter.verify()
         finally:
             await adapter.aclose()
+        return self._with_lane_push_health(source_id, status)
+
+    def _with_lane_push_health(self, source_id: uuid.UUID, status: SourceStatus) -> SourceStatus:
+        """Replace `verify()`'s `push_available` with the running lane's.
+
+        `verify()` opens no socket -- a status screen a dashboard polls must
+        not cost a WebSocket handshake per poll -- so a freshly built adapter
+        can only ever answer `None`. The lane's adapter has a real,
+        message-grounded answer, and `None` from the lane means the same
+        thing, "not probed", for a source whose lane has not started.
+
+        **Only when the status is authenticated.** `SourceStatus` refuses
+        "push available without being authenticated" in `__post_init__`, and
+        `dataclasses.replace` re-runs it -- so the obvious one-liner raises
+        `ValueError` out of the admin route for a state a real deployment
+        reaches: a lane that was delivering a second ago against a source
+        whose password has just been rotated. The adapter's own answer
+        stands there, because the operator's problem is the authentication
+        and claiming a working channel on a source that cannot authenticate
+        is the more misleading of the two.
+
+        `dataclasses.replace` is the write path here rather than `.evolve()`:
+        the frozen-model rule is about `usher.domain`'s `DomainModel`
+        subclasses, and `SourceStatus` is a port DTO.
+        """
+        if self._push_health is None or not status.authenticated:
+            return status
+        return replace(status, push_available=self._push_health(source_id))
 
     async def remove(self, source_id: uuid.UUID) -> bool:
         """Delete a source and its credentials. Returns whether it existed.

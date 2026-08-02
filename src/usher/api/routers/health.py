@@ -9,8 +9,13 @@ from loguru import logger
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.api.deps import SessionDep
-from usher.api.dto.health import LivenessResponse, ReadinessChecks, ReadinessResponse
+from usher.api.deps import LaneSupervisorDep, SessionDep
+from usher.api.dto.health import (
+    LaneReport,
+    LivenessResponse,
+    ReadinessChecks,
+    ReadinessResponse,
+)
 from usher.db.migrations.status import code_head_revision, database_revision
 
 router = APIRouter(tags=["meta"])
@@ -67,7 +72,9 @@ async def _check_migrations(session: AsyncSession) -> bool:
 
 
 @router.get("/health/ready", response_model=ReadinessResponse)
-async def ready(session: SessionDep, response: Response) -> ReadinessResponse:
+async def ready(
+    session: SessionDep, lanes: LaneSupervisorDep, response: Response
+) -> ReadinessResponse:
     """Readiness. Reports each dependency separately.
 
     Sets the response status to 503 when degraded rather than leaving the
@@ -98,4 +105,20 @@ async def ready(session: SessionDep, response: Response) -> ReadinessResponse:
     # every construction site if forgotten, not a silent gap.
     is_ready = all(checks.model_dump().values())
     response.status_code = 200 if is_ready else 503
-    return ReadinessResponse(status="ready" if is_ready else "degraded", checks=checks)
+    # `checks` alone, exactly as before. The lanes are reported below and
+    # are deliberately not in this expression -- see `LaneReport`. PRD 08
+    # said readiness "reports Postgres, migration state, and per-source
+    # connectivity"; the third is corrected to reported-in-the-body, never
+    # in the status code, because probing there is one upstream request per
+    # 2 s Docker poll against a server measured at 1-5 s per request, and
+    # because a 503 for an unreachable Emby takes this process out of a load
+    # balancer for a reason restarting it cannot fix.
+    #
+    # Free to report and therefore worth reporting: `running_sources()` and
+    # `worker_running()` read task state off an in-memory supervisor, so
+    # this endpoint still makes **no upstream request at all**.
+    return ReadinessResponse(
+        status="ready" if is_ready else "degraded",
+        checks=checks,
+        lanes=LaneReport(push=lanes.running_sources(), worker=lanes.worker_running()),
+    )

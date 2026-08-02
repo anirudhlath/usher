@@ -24,6 +24,7 @@ wrote `state.play_count or 0` would look correct against it for the walk
 """
 
 import dataclasses
+import inspect
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -35,10 +36,14 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import AwareDatetime
 
+from tests.fakes.episode_repository import FakeEpisodeRepository
+from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
+from tests.fakes.title_match_repository import FakeTitleMatchRepository
+from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
@@ -46,9 +51,19 @@ from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind, SyncRunStatus
 from usher.ports.errors import PortUnavailable, UsherPortError
+from usher.ports.events import ClientEventKind
 from usher.ports.ingest import MediaItemTarget, MediaItemUpsert, WatchStateMerge
-from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
-from usher.services.watch_sync import WatchStateSyncService, _watch_target
+from usher.ports.source import (
+    SourceEvent,
+    SourceEventKind,
+    SourceItem,
+    SourceItemKind,
+    SourceWatchState,
+)
+from usher.services.ingest import IngestService
+from usher.services.matching import MatchService
+from usher.services.push import PushApplyService
+from usher.services.watch_sync import MergedState, WatchStateSyncService, _watch_target
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
 LATER = datetime(2099, 1, 1, tzinfo=UTC)
@@ -399,6 +414,147 @@ async def test_a_walk_never_retracts_a_watch_state(fixture: _Fixture) -> None:
     await fixture.given_matched("movie-1")
     await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
     assert swept == []
+
+
+# -- the split: one merge chain, two callers ---------------------------------
+
+
+async def test_apply_states_merges_a_batch_and_reports_its_targets(fixture: _Fixture) -> None:
+    """The push lane's entry point. The same chain as a walk's, minus the
+    run bookkeeping -- because a push event is not a run, and inventing a
+    `sync_runs` row per `UserDataChanged` would put a row per few seconds of
+    playback into a table an operator reads."""
+    await fixture.given_matched("movie-1")
+    outcome = await fixture.service.apply_states(
+        fixture.source.id,
+        [SourceWatchState(external_id="movie-1", position_seconds=61, played=False)],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    assert outcome.merged == (
+        MergedState(
+            external_id="movie-1",
+            target=MediaItemTarget(title_id=fixture.titles["movie-1"], episode_id=None),
+        ),
+    )
+    assert (outcome.unmatched, outcome.rows_written) == (0, 1)
+    stored = await fixture.stored("movie-1")
+    assert stored is not None
+    assert stored.position_seconds == 61  # type: ignore[attr-defined]
+
+
+async def test_apply_states_pairs_every_target_with_the_state_it_came_from(
+    fixture: _Fixture,
+) -> None:
+    """**The pairing, and the reason it is reported rather than recovered.**
+    The M5 plan's own self-review found a caller zipping `merged` against
+    the batch it handed in; `merged` is the *matched subset*, so one
+    unmatched item at the front shifts every pair by one and the push lane
+    publishes item A's resume position under item B's title.
+
+    An unmatched item first, then two matched ones, is the smallest batch
+    that shows it -- with the unmatched item last, a positional zip agrees
+    with the truth and ratifies the bug."""
+    await fixture.given_matched("movie-1")
+    await fixture.given_matched("movie-2")
+    outcome = await fixture.service.apply_states(
+        fixture.source.id,
+        [
+            SourceWatchState(external_id="orphan-1", position_seconds=11, played=False),
+            SourceWatchState(external_id="movie-1", position_seconds=22, played=False),
+            SourceWatchState(external_id="movie-2", position_seconds=33, played=False),
+        ],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    assert [entry.external_id for entry in outcome.merged] == ["movie-1", "movie-2"]
+    assert [entry.target.title_id for entry in outcome.merged] == [
+        fixture.titles["movie-1"],
+        fixture.titles["movie-2"],
+    ]
+
+
+async def test_apply_states_does_not_commit(fixture: _Fixture) -> None:
+    """The commit is the caller's, and the two callers disagree about what
+    a unit of work is: a walk commits per batch of a thousand, the push lane
+    per event. A commit in here would make the second impossible to state."""
+    await fixture.given_matched("movie-1")
+    before = fixture.commits
+    await fixture.service.apply_states(
+        fixture.source.id,
+        [SourceWatchState(external_id="movie-1", position_seconds=61, played=False)],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    assert fixture.commits == before
+
+
+async def test_apply_states_counts_an_unmatched_item_without_raising(fixture: _Fixture) -> None:
+    """PRD 02: unmatched items are never dropped, and there will always be
+    some. `merge_from_source` answers a target-less merge with
+    `PortDataMalformed`, which on the push lane would take the channel down
+    and cost a reconnect plus a gap-closing delta walk."""
+    outcome = await fixture.service.apply_states(
+        fixture.source.id,
+        [SourceWatchState(external_id="unknown", position_seconds=1, played=False)],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    assert outcome.merged == ()
+    assert outcome.unmatched == 1
+
+
+async def test_apply_states_enqueues_a_history_backfill_for_a_played_unknown_count(
+    fixture: _Fixture,
+) -> None:
+    """ADR-0014's chain, reached from the push lane exactly as it is from a
+    walk. A `UserDataChanged` entry carries no trustworthy `PlayCount`, so
+    every played item pushed produces one of these."""
+    await fixture.given_matched("movie-1")
+    outcome = await fixture.service.apply_states(
+        fixture.source.id,
+        [SourceWatchState(external_id="movie-1", position_seconds=0, played=True, play_count=None)],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    queued = await fixture.queue.claim([JobKind.WATCH_HISTORY], limit=10)
+    assert [(job.kind, job.key) for job in queued] == [(JobKind.WATCH_HISTORY, "movie-1")]
+    assert outcome.needing_history == ("movie-1",)
+
+
+async def test_apply_states_reports_merges_built_not_rows_changed(fixture: _Fixture) -> None:
+    """`items_matched` on a `SyncRun` is the number of merges *built*.
+    `merge_from_source` returns rows *changed*, and the two differ whenever
+    PRD 03's "latest `updated_at` wins" refuses one -- a client set a resume
+    position thirty seconds ago and a walk that started an hour ago must not
+    stomp it. Returning the repository's count in `items_matched`'s place
+    silently changes what every stored `sync_runs` row means and what
+    PRD 10's dashboard plots."""
+    await fixture.given_matched("movie-1")
+    fixture.watch_states.refuse_next_merge()
+    outcome = await fixture.service.apply_states(
+        fixture.source.id,
+        [SourceWatchState(external_id="movie-1", position_seconds=61, played=False)],
+        user_id=fixture.user_id,
+        observed_at=T0,
+    )
+    assert len(outcome.merged) == 1
+    assert outcome.rows_written == 0
+
+
+async def test_a_walk_still_reports_the_same_counters_after_the_split(
+    fixture: _Fixture,
+) -> None:
+    """The refactor's own regression test. `_flush` used to compute
+    `items_matched` as `len(batch) - unmatched` inline; if the split starts
+    reporting rows-written instead, every existing `sync_runs` row means
+    something different -- and the two agree on every batch where nothing is
+    refused, which is nearly all of them."""
+    await fixture.given_matched("movie-1")
+    fixture.adapter.seed(_item("orphan-1"), T0)
+    fixture.watch_states.refuse_next_merge()
+    run = await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert (run.items_seen, run.items_matched, run.items_unmatched) == (2, 1, 1)
 
 
 # -- the enqueue, which is what bounds the backfill --------------------------
@@ -879,3 +1035,73 @@ async def test_the_walk_is_the_only_thing_that_needs_a_source_user_map(
     stored = await fixture.stored("movie-1")
     assert stored is not None
     assert stored.user_id == fixture.user_id  # type: ignore[attr-defined]
+
+
+# -- the deliberate silence ------------------------------------------------
+
+
+async def test_the_walk_publishes_nothing_and_the_push_lane_through_the_same_chain_does(
+    fixture: _Fixture,
+) -> None:
+    """**Deliberate, and it is a scale decision rather than an omission.**
+
+    A walk merges up to 1,126,789 states; one `watchstate.updated` per merged
+    row is a fan-out per row per night to every connected client, and every
+    one of them is the source echoing back state that has not changed since
+    the last walk. The push lane publishes because a push event *is* a
+    change.
+
+    The reachable version of this defect is the *shared chain*:
+    `apply_states` has exactly two callers -- this walk and
+    `PushApplyService` -- and moving the publish down into it is the obvious
+    de-duplication. So this drives the walk with the very publisher the push
+    lane uses. Verified by doing it: a publish added to `apply_states` fails
+    this case on its first assertion.
+
+    The second half is not decoration. Without it the case passes against a
+    harness that could not observe a publish at all, which is the shape a
+    "publishes nothing" assertion fails silently in.
+    """
+    await fixture.given_matched("i1")
+    fixture.adapter.seed_state(SourceWatchState(external_id="i1", position_seconds=5, played=False))
+    events = FakeEventPublisher()
+    applier = PushApplyService(
+        ingest=_no_ingest(),
+        watch=fixture.service,
+        events=events,
+        commit=fixture._commit,
+    )
+
+    await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert events.published == [], "the nightly walk published a client event"
+
+    await applier.apply(
+        fixture.source,
+        fixture.adapter,
+        SourceEvent(kind=SourceEventKind.WATCH_STATE_CHANGED, external_ids=("i1",)),
+        user_id=fixture.user_id,
+    )
+    assert [event.kind for event in events.published] == [ClientEventKind.WATCHSTATE_UPDATED]
+
+
+def test_the_walk_has_no_event_publisher_to_publish_through() -> None:
+    """The tripwire on the first step of the change above. There is no
+    publisher on this service at all, so a reader who wanted a
+    `watchstate.updated` per merged row has to add one here before anything
+    else -- and this is the line that says why not to."""
+    assert "events" not in inspect.signature(WatchStateSyncService.__init__).parameters
+
+
+def _no_ingest() -> IngestService:
+    """`PushApplyService` needs one and this case never reaches an item
+    event; built rather than stubbed so the service is the real one."""
+    titles = FakeTitleRepository()
+    matching = FakeTitleMatchRepository(titles)
+    queue = FakeJobQueue()
+    return IngestService(
+        matcher=MatchService(titles=titles, matching=matching, queue=queue),
+        matching=matching,
+        media_items=FakeMediaItemRepository(),
+        episodes=FakeEpisodeRepository(),
+        queue=queue,
+    )

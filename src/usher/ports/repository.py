@@ -582,6 +582,40 @@ class MediaItemRepository(ABC):
         """
 
     @abstractmethod
+    async def list_for_title(self, title_id: uuid.UUID) -> list[MediaItem]:
+        """Every copy of one title, across every source. PRD 07's
+        `availability` array.
+
+        **Unavailable copies are returned**, with `available = false`, rather
+        than filtered: PRD 02 is "soft-delete availability, hard-delete
+        nothing", and a client rendering "not on any source" for a film on a
+        temporarily unmounted drive is showing a different fact than the one
+        stored. The client decides what a retracted copy means.
+
+        **A series' episodes are not its copies, and that is what bounds
+        this read.** An episode's row carries its series' `title_id` as well
+        as its own `episode_id`, so a read on `title_id` alone answers a
+        series with one row per episode file -- 999,827 of the one measured
+        source's 1,126,789 items are episodes, and one long-running serial
+        would put thousands of entries in a response whose whole content is
+        "which sources hold this". Rows with an `episode_id` are therefore
+        excluded, exactly as `resolve_external_ids`' title branch excludes
+        them and for the same reason. What is left is bounded by copies of
+        the title *itself* -- sources times versions, single digits in a
+        household -- so nothing here pages. `list_unmatched` is the method on
+        this port that needed an `OFFSET`, and it is measured at 388.9 ms at
+        offset 1,126,574 for exactly the reason this one must not need one.
+
+        Ordered `available` first, then most recently seen, then by `id` --
+        a total order, so a detail screen does not shuffle its badges between
+        refreshes. Nothing about a `SELECT` promises an order otherwise.
+
+        Empty is the common answer, not a missing row: the catalog holds
+        1,271,138 titles and the one measured source holds 1,126,789 items,
+        so the great majority of titles are on no source at all.
+        """
+
+    @abstractmethod
     async def list_unmatched(
         self, source_id: uuid.UUID | None = None, *, limit: int = 100, offset: int = 0
     ) -> list[MediaItem]:

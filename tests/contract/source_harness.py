@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from pydantic import AwareDatetime
 
 from usher.domain.source import Source
-from usher.ports.source import SourceAdapter, SourceItem, SourceWatchState
+from usher.ports.source import SourceAdapter, SourceEvent, SourceItem, SourceWatchState
 
 
 class SourceHarness(ABC):
@@ -164,6 +164,106 @@ class SourceHarness(ABC):
         and does not prove for each.
         """
         return None
+
+    # -- push ------------------------------------------------------------
+
+    @abstractmethod
+    async def push_event(self, event: SourceEvent) -> None:
+        """Make the source's push channel deliver this event.
+
+        The arrangement half of every push case. An implementation renders
+        the event into whatever its upstream actually sends -- for Emby that
+        is a `UserDataChanged` or `LibraryChanged` envelope -- so the
+        contract can speak `SourceEvent` and stay source-agnostic, exactly
+        as `given_item` lets it speak `SourceItem`.
+
+        **Rendered from the source's own state, not from the event.** A
+        `WATCH_STATE_CHANGED` event names ids; what the channel then carries
+        for those ids is whatever `given_watch_state` seeded. An
+        implementation that echoed the event's own `watch_states` back would
+        agree with the contract by construction and could never catch an
+        adapter that fabricated them, which is the whole failure mode
+        `recorded_watch_state`'s "read back from the source's own state,
+        never from a log of calls" rule exists for one method over.
+
+        **Must also count as a received message on the adapter's own health
+        ledger**, because that is what `supports_push` reads. A harness that
+        delivered the event out of band would make
+        `test_supports_push_is_false_until_a_message_arrives` pass against
+        an adapter whose ledger is never written.
+        """
+
+    @abstractmethod
+    async def push_silence(self) -> None:
+        """Deliver nothing from here on, without closing the channel.
+
+        The failure this milestone is built around: the connection is open,
+        the subscription was accepted, and nothing arrives. ADR-0004 measured
+        exactly this against a nonexistent path. An implementation that
+        closed the connection instead would be arranging a *different*
+        failure -- one every WebSocket library already detects.
+
+        **Whatever is already queued must also stop arriving.** Otherwise
+        this is a no-op in the only case that reads it -- nothing is in
+        flight on a channel a case has not pushed to -- and a harness could
+        implement it as `pass` with the suite still green.
+        `test_a_stalled_channel_raises_rather_than_hanging` pushes an event
+        *first* for exactly that reason.
+        """
+
+    @abstractmethod
+    async def push_drop(self) -> None:
+        """Break the channel as a peer disconnect does.
+
+        Distinct from `push_silence`: this one must surface as a raise
+        promptly rather than after a staleness window.
+        """
+
+    @abstractmethod
+    async def advance_push_clock(self, seconds: float) -> None:
+        """Move the adapter's push clock forward.
+
+        A staleness window is a duration, and a contract case that slept
+        through one would add it to every run of this suite, twice. A
+        harness that cannot control its adapter's clock returns `False` from
+        `can_advance_push_clock` below, and the two staleness cases skip --
+        the same shape `observed_overlap` uses, and for the same reason:
+        claiming a capability you do not have ratifies an implementation
+        this suite never exercised.
+        """
+
+    def can_advance_push_clock(self) -> bool:
+        """Whether `advance_push_clock` does anything. Default `False`."""
+        return False
+
+    def push_stale_after(self) -> float:
+        """The adapter's staleness window, so a case can step past it
+        without hard-coding a constant that belongs to the implementation.
+
+        Only ever called by a case that has already checked
+        `can_advance_push_clock`, which is why this may raise rather than
+        returning a number a harness would have to invent.
+        """
+        raise NotImplementedError
+
+    def can_disable_push(self) -> bool:
+        """Whether this harness can arrange an adapter with no push channel
+        at all. Default `False`."""
+        return False
+
+    async def disable_push(self) -> None:
+        """Leave the adapter with no push channel, so `events()` raises
+        `SourceNotSupported`.
+
+        Not every adapter has such a state and `EmbyAdapter` is one that
+        does not -- it always has a channel to offer and finds out
+        afterwards whether it delivers. So this is the `observed_overlap`
+        shape rather than an abstract method: a capability declined, with
+        the case skipping, rather than a capability faked. The
+        implementation it exists for is a Jellyfin adapter behind a proxy
+        that strips `Upgrade`.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     async def aclose(self) -> None:

@@ -14,7 +14,8 @@ from typing import Annotated, cast
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from usher.adapters.factory import ConfiguredSourceAdapterFactory
+from usher.api.lanes import LaneSupervisor
+from usher.composition import adapter_factory
 from usher.config import Settings
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.episode import PostgresEpisodeRepository
@@ -26,21 +27,25 @@ from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunR
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
+from usher.ports.events import EventPublisher
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import (
     EpisodeRepository,
     MediaItemRepository,
     RawPayloadStore,
+    SourceRepository,
     SyncRunRepository,
     TitleMatchRepository,
     TitleRepository,
     WatchStateRepository,
 )
 from usher.ports.source import SourceAdapterFactory
+from usher.services.events import InMemoryEventBus
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
 from usher.services.sources import SourceService
+from usher.services.titles import TitleReadService
 from usher.services.watch_sync import WatchStateSyncService
 
 
@@ -72,6 +77,71 @@ def get_app_settings(request: Request) -> Settings:
 
 
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+
+
+def get_event_bus(request: Request) -> InMemoryEventBus:
+    """The process-wide client event bus, built by `create_app`'s lifespan.
+
+    On `app.state` rather than request-scoped for the reason `EnrichService`
+    is absent from this module: a per-request bus would give every SSE
+    connection its own, and a publisher would fan out to nobody. Same
+    defensive `getattr`/`cast` shape as `get_session_factory` below, and for
+    the same reason -- `app.state` is typed `Any`.
+
+    Typed as the concrete bus rather than as `EventPublisher` because
+    `GET /events` needs `subscribe`, which is deliberately not on the port
+    (a `LISTEN/NOTIFY` implementation subscribes on a dedicated connection
+    whose lifecycle has nothing in common with an in-memory queue's). Use
+    `get_event_publisher` anywhere that only publishes, so nothing but this
+    one function depends on the wider surface.
+    """
+    bus = getattr(request.app.state, "events", None)
+    if bus is None:
+        raise RuntimeError(
+            "app.state.events is not set -- create_app's lifespan has not run. "
+            "If this is a test using a bare ASGI transport, wrap the app in "
+            "asgi_lifespan.LifespanManager first."
+        )
+    return cast(InMemoryEventBus, bus)
+
+
+EventBusDep = Annotated[InMemoryEventBus, Depends(get_event_bus)]
+
+
+def get_event_publisher(bus: EventBusDep) -> EventPublisher:
+    """The same object, as the port.
+
+    Routes and services that only publish take this, so nothing outside
+    `get_event_bus` depends on the bus offering `subscribe`.
+    """
+    return bus
+
+
+EventPublisherDep = Annotated[EventPublisher, Depends(get_event_publisher)]
+
+
+def get_lane_supervisor(request: Request) -> LaneSupervisor:
+    """The process's background lanes, started by `create_app`'s lifespan.
+
+    Read by `/health/ready`, which **reports** what it finds here and never
+    gates its status code on it, and by `GET /admin/sources/{id}/status`,
+    which takes the *running lane's* push health rather than opening a
+    socket of its own. Same defensive `getattr`/`cast` shape as
+    `get_session_factory` below, and for the same reason -- `app.state` is
+    typed `Any`, so without the `cast` mypy would accept this returning
+    anything at all.
+    """
+    lanes = getattr(request.app.state, "lanes", None)
+    if lanes is None:
+        raise RuntimeError(
+            "app.state.lanes is not set -- create_app's lifespan has not run. "
+            "If this is a test using a bare ASGI transport, wrap the app in "
+            "asgi_lifespan.LifespanManager first."
+        )
+    return cast(LaneSupervisor, lanes)
+
+
+LaneSupervisorDep = Annotated[LaneSupervisor, Depends(get_lane_supervisor)]
 
 
 def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
@@ -160,6 +230,19 @@ async def get_default_user_id(session: SessionDep) -> uuid.UUID:
 DefaultUserIdDep = Annotated[uuid.UUID, Depends(get_default_user_id)]
 
 
+def get_source_repository(session: SessionDep) -> SourceRepository:
+    """Its own provider rather than being constructed inside
+    `get_source_service`, because `get_title_read_service` needs the same one.
+
+    Two callers each building their own would be two chances for one of them
+    to drift onto a different session and quietly leave the request's
+    transaction -- the failure `tests/integration/test_pipeline_deps.py`
+    exists to make observable. Declared here, above its first user, because
+    `Depends(...)` is evaluated when the `def` below executes.
+    """
+    return PostgresSourceRepository(session)
+
+
 def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:
     """The composition root's adapter registry.
 
@@ -168,22 +251,30 @@ def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:
     in-memory server -- without also replacing the repository, the
     credential store, or the service.
     """
-    return ConfiguredSourceAdapterFactory(
-        page_size=settings.source_page_size,
-        timeout_seconds=settings.source_timeout_seconds,
-        reauth_cooldown_seconds=settings.source_reauth_cooldown_seconds,
-    )
+    return adapter_factory(settings)
 
 
 def get_source_service(
     session: SessionDep,
     settings: SettingsDep,
+    sources: Annotated[SourceRepository, Depends(get_source_repository)],
     adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
+    lanes: LaneSupervisorDep,
 ) -> SourceService:
+    """The service, plus the *running lane's* push health.
+
+    `SourceStatus.push_available` is never a probe of a throwaway socket
+    (ADR-0004: a handshake against a nonexistent path also upgrades, so the
+    handshake is not the answer). `verify()` opens none, and this is what
+    fills the gap: the lane's own adapter holds a message ledger, and its
+    answer is the one an operator reads. `None` when no lane is running for
+    that source, which is "not probed" rather than "push is broken".
+    """
     return SourceService(
-        PostgresSourceRepository(session),
+        sources,
         PostgresCredentialStore(session, settings.secret_key),
         adapters,
+        lanes.push_available,
     )
 
 
@@ -291,6 +382,7 @@ def get_reconcile_service(
     ingest: Annotated[IngestService, Depends(get_ingest_service)],
     media_items: MediaItemRepositoryDep,
     runs: SyncRunRepositoryDep,
+    events: EventPublisherDep,
 ) -> ReconcileService:
     """`commit` is `session.commit`, the same callable `get_session` calls
     at the end of a successful request.
@@ -306,6 +398,7 @@ def get_reconcile_service(
         ingest=ingest,
         media_items=media_items,
         runs=runs,
+        events=events,
         commit=session.commit,
         batch_size=settings.sync_batch_size,
         max_retract_fraction=settings.sync_max_retract_fraction,
@@ -343,3 +436,32 @@ def get_watch_state_sync_service(
 IngestServiceDep = Annotated[IngestService, Depends(get_ingest_service)]
 ReconcileServiceDep = Annotated[ReconcileService, Depends(get_reconcile_service)]
 WatchStateSyncServiceDep = Annotated[WatchStateSyncService, Depends(get_watch_state_sync_service)]
+
+
+# ---------------------------------------------------------------------------
+# The read-through surface (M5). `GET /titles/{id}` is the one route that
+# routes over any of the providers above.
+# ---------------------------------------------------------------------------
+
+
+def get_title_read_service(
+    titles: Annotated[TitleRepository, Depends(get_title_repository)],
+    media_items: MediaItemRepositoryDep,
+    sources: Annotated[SourceRepository, Depends(get_source_repository)],
+    watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
+    queue: JobQueueDep,
+) -> TitleReadService:
+    """Four repositories and the queue, and deliberately no adapter factory.
+
+    The absence is the design (PRD 08: "a degraded subsystem narrows
+    functionality; it never fails a request local state can answer"), not an
+    omission that a later route should fill in: with no `SourceAdapter` in the
+    graph there is no path from an unreachable Emby to a failed title read,
+    and therefore no 503 for M5 to invent an error `code` for.
+    `tests/unit/test_services_titles.py` asserts it on the service's own
+    imports so that adding one here would fail rather than pass review.
+    """
+    return TitleReadService(titles, media_items, sources, watch_states, queue)
+
+
+TitleReadServiceDep = Annotated[TitleReadService, Depends(get_title_read_service)]

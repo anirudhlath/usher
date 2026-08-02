@@ -16,7 +16,6 @@ import sys
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 
 import httpx
 from loguru import logger
@@ -25,44 +24,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from usher.adapters.bulk.imdb import IMDbRatingDataset, IMDbTitleDataset
 from usher.adapters.bulk.tmdb_ids import TMDbIdDataset
 from usher.adapters.bulk.wikidata import WikidataCrosswalkDataset
-from usher.adapters.factory import ConfiguredSourceAdapterFactory
-from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
+from usher.api.lanes import LaneSupervisor
+from usher.composition import (
+    NO_CREDENTIALS,
+    DefaultUserId,
+    Pipeline,
+    QueueGauges,
+    SourceRegistry,
+    build_pipeline,
+    build_worker,
+    metadata_provider,
+    open_adapter,
+    selected_sources,
+    unit_of_work,
+)
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
-from usher.db.repositories.credentials import PostgresCredentialStore
-from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
-from usher.db.repositories.jobs import PostgresJobQueue
-from usher.db.repositories.matching import PostgresTitleMatchRepository
-from usher.db.repositories.media_item import PostgresMediaItemRepository
-from usher.db.repositories.source import PostgresSourceRepository
-from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
-from usher.db.repositories.title import PostgresTitleRepository
-from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
 from usher.domain.enums import TitleKind
 from usher.domain.jobs import JobKind
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
 from usher.ports.bulk import ImdbTitle
-from usher.ports.metadata import MetadataProvider
+from usher.ports.events import NullEventPublisher
 from usher.ports.repository import BulkCatalogRepository
 from usher.ports.source import SourceAdapter
 from usher.services.bootstrap import BootstrapService
-from usher.services.enrich import EnrichService
-from usher.services.handlers import (
-    SourceBinding,
-    enrich_handler,
-    match_handler,
-    watch_history_handler,
-)
-from usher.services.ingest import IngestService
-from usher.services.jobs import Handler, JobWorker
-from usher.services.matching import MatchService
-from usher.services.reconcile import ReconcileService
-from usher.services.watch_sync import WatchStateSyncService
-from usher.telemetry import QueueSnapshot, configure_telemetry, register_queue_gauges
+from usher.telemetry import configure_telemetry, register_queue_gauges
 
 PHASES = ("imdb", "tmdb-ids", "crosswalk", "all")
 # The two lanes `ReconcileService` walks `list_items` for. `watch_state` is a
@@ -174,137 +164,19 @@ async def _status(settings: Settings) -> None:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class _Pipeline:
-    """Every M4 service and the repositories behind them, on one session.
+async def _open_adapter(pipeline: Pipeline, source: Source) -> SourceAdapter | None:
+    """`composition.open_adapter`, with the operator told at a terminal.
 
-    This is what a composition root *is*: the one place allowed to know that
-    `ReconcileService`'s `MediaItemRepository` and `WatchStateSyncService`'s
-    are the same table. `services/` may not import `db/` (ADR-0009), so
-    nothing below this line could assemble itself.
-
-    Held as ports rather than as the `Postgres*` classes that fill them, so
-    the assembly reads as the wiring diagram rather than as a second copy of
-    the implementation list.
+    The wrapper exists for the *reporting*, not for the wiring: an operator
+    who ran `usher sync` and got nothing needs the reason on stdout, and the
+    shared helper logs it -- which is what the lane supervisor needs, since
+    a lane has no terminal. `NO_CREDENTIALS` is one string so the two
+    surfaces cannot drift into two explanations of one thing.
     """
-
-    sources: PostgresSourceRepository
-    credentials: PostgresCredentialStore
-    media_items: PostgresMediaItemRepository
-    runs: PostgresSyncRunRepository
-    queue: PostgresJobQueue
-    adapters: ConfiguredSourceAdapterFactory
-    matcher: MatchService
-    reconcile: ReconcileService
-    watch: WatchStateSyncService
-
-
-def _build_pipeline(
-    session: AsyncSession,
-    settings: Settings,
-    *,
-    max_retract_fraction: float | None = None,
-    provider: MetadataProvider | None = None,
-) -> _Pipeline:
-    """Wire one session into the whole ingest pipeline.
-
-    `max_retract_fraction` overrides `settings.sync_max_retract_fraction`;
-    `usher sync --allow-full-retraction` is the only caller that passes one,
-    and it passes `1.0` (ADR-0015).
-
-    `provider` is `None` for every path that runs *inside a walk*. That is
-    not an omission: `MatchService`'s batch path must never make a network
-    call per unmatched item, and its constructor takes the provider as
-    optional for exactly that reason. Only `work` -- which runs the queued
-    `match` and `enrich` handlers -- passes one.
-    """
-    sources = PostgresSourceRepository(session)
-    credentials = PostgresCredentialStore(session, settings.secret_key)
-    media_items = PostgresMediaItemRepository(session)
-    runs = PostgresSyncRunRepository(session)
-    matching = PostgresTitleMatchRepository(session)
-    queue = PostgresJobQueue(
-        session,
-        max_attempts=settings.job_max_attempts,
-        backoff_seconds=settings.job_backoff_seconds,
-    )
-    matcher = MatchService(
-        titles=PostgresTitleRepository(session),
-        matching=matching,
-        queue=queue,
-        provider=provider,
-    )
-    return _Pipeline(
-        sources=sources,
-        credentials=credentials,
-        media_items=media_items,
-        runs=runs,
-        queue=queue,
-        adapters=_adapter_factory(settings),
-        matcher=matcher,
-        reconcile=ReconcileService(
-            ingest=IngestService(
-                matcher=matcher,
-                matching=matching,
-                media_items=media_items,
-                episodes=PostgresEpisodeRepository(session),
-                queue=queue,
-            ),
-            media_items=media_items,
-            runs=runs,
-            commit=session.commit,
-            batch_size=settings.sync_batch_size,
-            max_retract_fraction=(
-                settings.sync_max_retract_fraction
-                if max_retract_fraction is None
-                else max_retract_fraction
-            ),
-        ),
-        watch=WatchStateSyncService(
-            media_items=media_items,
-            watch_states=PostgresWatchStateRepository(session),
-            runs=runs,
-            queue=queue,
-            commit=session.commit,
-            batch_size=settings.sync_batch_size,
-        ),
-    )
-
-
-def _adapter_factory(settings: Settings) -> ConfiguredSourceAdapterFactory:
-    return ConfiguredSourceAdapterFactory(
-        page_size=settings.source_page_size,
-        timeout_seconds=settings.source_timeout_seconds,
-        reauth_cooldown_seconds=settings.source_reauth_cooldown_seconds,
-    )
-
-
-async def _open_adapter(pipeline: _Pipeline, source: Source) -> SourceAdapter | None:
-    """Build the adapter for one source, or explain why not.
-
-    `None` rather than a raise: an operator running `usher sync` across three
-    sources needs the second and third to run when the first's credential row
-    has gone missing -- exactly the reasoning `ReconcileService.reconcile`
-    applies one layer down to an unreachable server.
-    """
-    credentials = await pipeline.credentials.get(source.credentials_ref)
-    if credentials is None:
-        print(f"{source.name}: no stored credentials; re-enter them to reconnect")
-        return None
-    return pipeline.adapters.build(source, credentials)
-
-
-async def _selected_sources(pipeline: _Pipeline, name: str | None) -> list[Source]:
-    """Every enabled source, or the one named.
-
-    A disabled source is skipped even when named explicitly: `enabled` is how
-    an operator parks a server that is being rebuilt, and honouring the name
-    over the flag would walk it anyway.
-    """
-    sources = [source for source in await pipeline.sources.list_all() if source.enabled]
-    if name is None:
-        return sources
-    return [source for source in sources if source.name == name]
+    adapter = await open_adapter(pipeline, source)
+    if adapter is None:
+        print(f"{source.name}: {NO_CREDENTIALS}")
+    return adapter
 
 
 @asynccontextmanager
@@ -336,10 +208,10 @@ async def _sync(
     count every state unmatched and merge nothing.
     """
     async with _session_for(settings) as session:
-        pipeline = _build_pipeline(
+        pipeline = build_pipeline(
             session, settings, max_retract_fraction=1.0 if allow_full_retraction else None
         )
-        sources = await _selected_sources(pipeline, source_name)
+        sources = await selected_sources(pipeline, source_name)
         if not sources:
             print("no enabled source matched" if source_name else "no enabled sources configured")
             return
@@ -380,7 +252,7 @@ async def _sync_status(settings: Settings) -> None:
     happen.
     """
     async with _session_for(settings) as session:
-        pipeline = _build_pipeline(session, settings)
+        pipeline = build_pipeline(session, settings)
         sources = await pipeline.sources.list_all()
         report: list[str] = []
         for source in sources:
@@ -418,7 +290,7 @@ async def _unmatched(
     the next.
     """
     async with _session_for(settings) as session:
-        pipeline = _build_pipeline(session, settings)
+        pipeline = build_pipeline(session, settings)
         if resolve is not None and title is not None:
             attached = await pipeline.media_items.attach_title(
                 _as_uuid(resolve, "media item id"),
@@ -447,163 +319,125 @@ async def _work(settings: Settings, *, once: bool) -> None:
     bucket that keeps this deployment under TMDb's ~40 rps ceiling lives on
     the client. A client per job would give every job its own budget, which
     is a rate limiter that limits nothing.
+
+    **Publishes to `NullEventPublisher`, and that is a stated consequence
+    rather than an oversight.** `usher work` is a separate process and M5's
+    bus is in-memory, so an enrichment finished here reaches no SSE client;
+    a client that refetches still gets the enriched title, which is PRD 08's
+    own degradation rather than breakage. The server process runs the same
+    worker as a lane (`usher.api.lanes`) so PRD 03's read-through loop
+    closes there, and `EventPublisher` is a port precisely so the fix for
+    the split deployment is a second implementation rather than a branch.
     """
     async with _session_for(settings) as session:
-        provider, aclose = await _metadata_provider(settings)
-        pipeline = _build_pipeline(session, settings, provider=provider)
-        registry = _SourceRegistry(pipeline)
-        gauges = _QueueGauges(pipeline.queue)
+        provider, aclose = await metadata_provider(settings)
+        pipeline = build_pipeline(session, settings, provider=provider)
+        registry = SourceRegistry(pipeline)
+        gauges = QueueGauges()
         register_queue_gauges(gauges.read)
         try:
-            worker = JobWorker(pipeline.queue, session.commit, batch_size=settings.job_batch_size)
-            worker.register(
-                JobKind.MATCH,
-                match_handler(pipeline.matcher, pipeline.media_items, registry.resolve),
+            worker = build_worker(
+                pipeline,
+                settings,
+                provider=provider,
+                resolve=registry.resolve,
+                user_id=await ensure_default_user(session),
             )
-            worker.register(
-                JobKind.WATCH_HISTORY,
-                watch_history_handler(
-                    pipeline.watch, registry.resolve, user_id=await ensure_default_user(session)
-                ),
-            )
-            if provider is not None:
-                worker.register(JobKind.ENRICH, _enrich_handler(session, settings, provider))
-            else:
-                # Not a silent skip: PRD 08's "TMDb key missing" degradation
-                # is a *narrowed* deployment, and an operator whose enrich
-                # queue never drains has to be able to see why.
-                logger.warning("no TMDb API key configured; enrich jobs will not be claimed")
             # PRD 08: "startup requeues anything left in_progress". Before
             # the first claim, so a previous process's abandoned claims are
             # this one's work rather than nobody's.
             await worker.startup()
             ran = await worker.run_once()
-            await gauges.refresh()
+            await gauges.refresh(pipeline.queue)
             print(f"{ran} jobs")
             while not once:
                 if ran == 0:
                     await asyncio.sleep(_IDLE_SLEEP_SECONDS)
                 ran = await worker.run_once()
-                await gauges.refresh()
+                await gauges.refresh(pipeline.queue)
         finally:
             await registry.aclose()
             await aclose()
 
 
-class _QueueGauges:
-    """The `jobs` table as PRD 10's two gauges see it.
+async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
+    """Probe a source's push channel once, or run the lanes in the foreground.
 
-    A held snapshot, refreshed after every pass, because an OTel observable
-    callback runs on the reader's background thread and cannot await an
-    asyncpg query -- `register_queue_gauges`' docstring has the whole
-    argument. Refreshing after each pass rather than before it means the
-    reported depth is the depth *left over*, which is the number "ingest
-    stalled" (PRD 10's alert) is actually about.
+    `--probe` is the operator-facing form of ADR-0004's caveat: it reports
+    the **messages and events that arrived**, never that the handshake
+    succeeded, because a handshake against a nonexistent path also upgrades
+    and also receives `Sessions`. It is the one thing in this project that
+    opens a socket on purpose to answer a question, which is why `verify()`
+    does not have to.
+
+    Bare `usher push` runs exactly the lanes `create_app` would, honouring
+    `USHER_PUSH_ENABLED`/`USHER_WORKER_ENABLED`, with no HTTP server -- the
+    other side of PRD 01's "`--worker` entrypoint flag ... so lanes can be
+    moved to a separate container later by editing compose". It publishes to
+    a `NullEventPublisher` for the reason `usher work` does: the bus is
+    in-memory and there is no SSE client in this process.
     """
-
-    __slots__ = ("_queue", "_snapshot")
-
-    def __init__(self, queue: PostgresJobQueue) -> None:
-        self._queue = queue
-        self._snapshot = QueueSnapshot()
-
-    def read(self) -> QueueSnapshot:
-        return self._snapshot
-
-    async def refresh(self) -> None:
-        depth = await self._queue.depth()
-        parked = await self._queue.parked(limit=1000)
-        counts = dict.fromkeys((kind.value for kind in JobKind), 0)
-        for job in parked:
-            counts[job.kind.value] += 1
-        self._snapshot = QueueSnapshot(
-            queued={kind.value: count for kind, count in depth.items()}, parked=counts
-        )
-
-
-def _enrich_handler(
-    session: AsyncSession, settings: Settings, provider: MetadataProvider
-) -> Handler:
-    return enrich_handler(
-        EnrichService(
-            titles=PostgresTitleRepository(session),
-            episodes=PostgresEpisodeRepository(session),
-            payloads=PostgresRawPayloadStore(session),
-            provider=provider,
-            commit=session.commit,
-            cache_max_age_days=settings.enrich_cache_max_age_days,
-        )
-    )
-
-
-async def _metadata_provider(
-    settings: Settings,
-) -> tuple[MetadataProvider | None, Callable[[], Awaitable[None]]]:
-    """The TMDb provider and the callable that closes its transport.
-
-    Returns `(None, no-op)` when no key is configured, rather than raising:
-    `match` and `watch_history` jobs need no provider at all, and a worker
-    that refused to start without a TMDb key would take two working lanes
-    down with the third.
-    """
-    if settings.tmdb_api_key is None:
-
-        async def _nothing() -> None:
-            return None
-
-        return None, _nothing
-    client = httpx.AsyncClient(timeout=settings.source_timeout_seconds)
-    provider = TmdbMetadataProvider(
-        TmdbClient(
-            client,
-            settings.tmdb_api_key,
-            base_url=settings.tmdb_base_url,
-            requests_per_second=settings.tmdb_requests_per_second,
-        ),
-        region=settings.tmdb_region,
-    )
-    return provider, client.aclose
-
-
-class _SourceRegistry:
-    """`external_id` -> the configured source that addresses it.
-
-    `Job.key` for `match` and `watch_history` is a source's own
-    `external_id` (`usher.domain.jobs.Job` says why: turning it into a
-    `MediaItem.id` at enqueue time would cost a round trip per item, 1.1M a
-    walk). So a handler has to find *which* source that string belongs to,
-    and a household with two servers means a worker bound to one of them
-    silently drops the other's jobs.
-
-    Adapters are built lazily and cached for the life of the worker: one
-    adapter is one connection pool, and building one per job would
-    re-authenticate against the upstream every time.
-    """
-
-    def __init__(self, pipeline: _Pipeline) -> None:
-        self._pipeline = pipeline
-        self._adapters: dict[uuid.UUID, SourceAdapter] = {}
-
-    async def resolve(self, external_id: str) -> SourceBinding | None:
-        for source in await self._pipeline.sources.list_all():
-            if not source.enabled:
-                continue
-            stored = await self._pipeline.media_items.get_by_external_id(source.id, external_id)
-            if stored is None:
-                continue
-            adapter = self._adapters.get(source.id)
+    if not probe:
+        await _run_lanes(settings)
+        return
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        sources = await selected_sources(pipeline, source_name)
+        if not sources:
+            print("no enabled source matched" if source_name else "no enabled sources configured")
+            return
+        for source in sources:
+            adapter = await _open_adapter(pipeline, source)
             if adapter is None:
-                adapter = await _open_adapter(self._pipeline, source)
-                if adapter is None:
-                    return None
-                self._adapters[source.id] = adapter
-            return SourceBinding(source=source, adapter=adapter)
-        return None
+                continue
+            try:
+                result = await adapter.probe_push(timeout_seconds=settings.push_stale_after_seconds)
+                print(
+                    f"{source.name}: upgraded={result.upgraded} "
+                    f"delivering={result.delivering} "
+                    f"events={[kind.value for kind in result.events] or 'none'}"
+                    + (f" detail={result.detail}" if result.detail else "")
+                )
+            finally:
+                await adapter.aclose()
 
-    async def aclose(self) -> None:
-        for adapter in self._adapters.values():
-            await adapter.aclose()
-        self._adapters.clear()
+
+async def _run_lanes(settings: Settings) -> None:
+    """`create_app`'s lanes, with no app around them.
+
+    The engine and the session factory are built here rather than by the
+    supervisor, for the same reason the lifespan builds them: a lane holds
+    one unit of work at a time and the engine outlives all of them. Stops on
+    Ctrl-C -- `KeyboardInterrupt` reaches `asyncio.run`, which cancels the
+    task, and `stop()` runs in the `finally`.
+    """
+    engine = build_engine(settings.database_url.get_secret_value())
+    sessions = build_session_factory(engine)
+    provider, close_provider = (
+        await metadata_provider(settings) if settings.worker_enabled else (None, _no_provider)
+    )
+    events = NullEventPublisher()
+    lanes = LaneSupervisor(
+        settings,
+        unit_of_work(sessions, settings, events=events, provider=provider),
+        events,
+        user_id=DefaultUserId(sessions),
+        provider=provider,
+    )
+    await lanes.start()
+    try:
+        # Nothing to serve, so the process is the lanes. `asyncio.Event()`
+        # that nothing sets rather than a sleep loop: it costs no wakeups
+        # and it cancels cleanly.
+        await asyncio.Event().wait()
+    finally:
+        await lanes.stop()
+        await close_provider()
+        await engine.dispose()
+
+
+async def _no_provider() -> None:
+    return None
 
 
 def _as_uuid(value: str, what: str) -> uuid.UUID:
@@ -645,6 +479,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     work = sub.add_parser("work", help="run queued jobs")
     work.add_argument("--once", action="store_true", help="one pass, then exit")
+
+    push = sub.add_parser("push", help="run the push lane, or probe a source's push channel")
+    push.add_argument("--source", default=None, help="source name; omit for every enabled source")
+    push.add_argument(
+        "--probe",
+        action="store_true",
+        help="connect, wait, and report what arrived, then exit",
+    )
     return parser
 
 
@@ -715,6 +557,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     elif args.command == "work":
         asyncio.run(_work(settings, once=args.once))
+    elif args.command == "push":
+        asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
     else:
         # Imported here, not at module scope: uvicorn.run blocks, and nothing
         # about the bootstrap path should pay for importing the server.

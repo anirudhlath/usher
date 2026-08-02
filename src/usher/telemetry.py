@@ -296,6 +296,140 @@ def _observations(
     return [Observation(count, {"kind": kind}) for kind, count in select(_queue_reader()).items()]
 
 
+@dataclass(frozen=True, slots=True)
+class PushSnapshot:
+    """One source's push lane, as PRD 10's two series see it.
+
+    **`delivering`, not `connected`.** Dashboard 3's panel is "push
+    connection uptime" and its alert is `push.connected == 0` for 15
+    minutes, and a series fed by the socket's *state* would be permanently
+    green against the failure ADR-0004 measured — a channel that upgraded,
+    is held open, and delivers nothing. `usher.source.push.connected` keeps
+    PRD 10's name (a metric renamed is a dashboard panel silently blank) and
+    reports the honest quantity.
+
+    `reconnects` is cumulative for the lane rather than per connection,
+    which is what `PushHealth` being one object across reconnects buys.
+    """
+
+    delivering: bool
+    reconnects: int
+
+
+PushReader = Callable[[], Mapping[str, PushSnapshot]]
+
+# A module global, replaced rather than captured -- the SDK keeps only the
+# first observable instrument registered under a name and silently discards
+# the rest, so a second `create_app()` in one process would otherwise leave
+# the first, now-dead reader reporting forever. Same shape, same reason, as
+# `_queue_reader` above.
+_push_reader: PushReader | None = None
+
+
+def register_push_gauges(read: PushReader) -> None:
+    """PRD 10's `usher.source.push.connected` / `usher.source.push.reconnects`.
+
+    Observable, and this is the one place in this project where that is
+    unambiguously safe: the value is an in-memory integer on a `PushHealth`
+    ledger, so there is no coroutine to bounce onto the event loop from the
+    metric reader's background thread and no exporter thread to block on it.
+    `register_queue_gauges` explains at length why the queue's equivalent
+    cannot be live; nothing in that argument applies here, and the shape is
+    kept identical anyway so a reader meets one pattern rather than two.
+
+    **Two instrument *types*, because PRD 10 documents two.** `connected` is
+    a gauge -- 1 or 0, now. `reconnects` is a counter, and an *asynchronous*
+    counter is precisely the instrument for a cumulative total read out of a
+    ledger rather than incremented at the event. Registering it as a gauge
+    would put a different instrument type on the wire under a documented
+    name, which is the same class of failure as a near-miss name: the panel
+    is there, the series is wrong, and nothing says so.
+    """
+    global _push_reader
+    _push_reader = read
+    meter = metrics.get_meter("usher.push")
+    meter.create_observable_gauge(
+        "usher.source.push.connected",
+        callbacks=[_observe_push_connected],
+        unit="1",
+        description="1 when a source's push channel is delivering messages, 0 otherwise",
+    )
+    meter.create_observable_counter(
+        "usher.source.push.reconnects",
+        callbacks=[_observe_push_reconnects],
+        unit="1",
+        description="Cumulative push reconnects for a source's lane",
+    )
+
+
+def _observe_push_connected(options: CallbackOptions) -> Iterable[Observation]:
+    return _push_observations(lambda snapshot: 1 if snapshot.delivering else 0)
+
+
+def _observe_push_reconnects(options: CallbackOptions) -> Iterable[Observation]:
+    return _push_observations(lambda snapshot: snapshot.reconnects)
+
+
+def _push_observations(select: Callable[[PushSnapshot], int]) -> Iterable[Observation]:
+    """No reader means no observation, never a zero.
+
+    A fabricated zero on `usher.source.push.connected` is indistinguishable
+    from a source whose channel is down, and PRD 10's "Push down" alert
+    fires on exactly that value for fifteen minutes -- so a process that
+    reported 0 from start-up until the first lane registered would page
+    somebody about a source that was never configured. Same argument
+    `_observations` already makes for the queue gauges.
+    """
+    if _push_reader is None:
+        return []
+    return [
+        Observation(select(snapshot), {"source": source})
+        for source, snapshot in _push_reader().items()
+    ]
+
+
+SseReader = Callable[[], int]
+
+# Module global, replaced rather than captured, for the reason `_queue_reader`
+# and `_push_reader` above both state: the SDK keeps only the *first*
+# observable instrument registered under a name and silently discards the
+# rest, so a second `create_app()` in one process would otherwise leave the
+# first, now-dead reader reporting forever.
+_sse_reader: SseReader | None = None
+
+
+def register_sse_gauge(read: SseReader) -> None:
+    """PRD 10's `usher.sse.connections`.
+
+    **The one observable callback in this project that really is a live
+    read.** `register_queue_gauges` explains at length why the queue's
+    equivalent cannot be -- OTel invokes the callback from the metric
+    reader's background thread and every database call here is a coroutine on
+    asyncpg -- and none of that applies to `len()` on an in-memory set. So
+    this reader is the bus itself, not a snapshot somebody remembered to
+    refresh.
+    """
+    global _sse_reader
+    _sse_reader = read
+    metrics.get_meter("usher.api").create_observable_gauge(
+        "usher.sse.connections",
+        callbacks=[_observe_sse_connections],
+        unit="1",
+        description="Open SSE client connections",
+    )
+
+
+def _observe_sse_connections(options: CallbackOptions) -> Iterable[Observation]:
+    """No reader means no observation, never a zero.
+
+    Same argument `_push_observations` makes: a fabricated zero is
+    indistinguishable from a real one, and a process that reported 0 open
+    connections from start-up until the first `create_app` finished would be
+    reporting a fact it does not have.
+    """
+    return [] if _sse_reader is None else [Observation(_sse_reader())]
+
+
 def configure_telemetry(settings: Settings) -> None:
     configure_logging(settings)
     configure_tracing(settings)

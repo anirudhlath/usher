@@ -1,5 +1,6 @@
 """Port for media sources, and the DTOs that cross that boundary."""
 
+import asyncio
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
@@ -145,23 +146,63 @@ class WatchStateUpdate:
 
 @dataclass(frozen=True)
 class SourceEvent:
-    """🔶 Provisional — carries no payload, so a `WATCH_STATE_CHANGED`
-    event forces the push lane to re-walk `watch_state(since=...)` to
-    discover what changed, even though Emby's own `UserDataChanged`
-    message already carries the position and played flag. Settle in M5,
-    when the push lane is actually built and the cost of re-walking is
-    measurable against just carrying the payload through.
+    """One thing a source's push channel said changed.
 
-    Reviewed in M3 and deliberately left alone: M3 builds no push lane, so
-    the measurement this marker is waiting for is still not available.
+    **Settled in M5** — this DTO used to carry a 🔶 asking whether a
+    `WATCH_STATE_CHANGED` event should re-walk `watch_state(since=...)` to
+    discover what changed, or carry the payload the upstream already sent.
+    It carries the payload, and the two candidates were never close:
+    `watch_state(since=...)` is a paged listing walk whose only knob is the
+    cursor, measured at 29,027 items over a 30-day `MinDateLastSavedForUser`
+    window against the one real deployment. Per event, on a lane PRD 01
+    budgets at one connection per source.
+
+    `external_ids` is the authoritative list of affected items.
+    `watch_states` is the subset the adapter was able to parse out of the
+    upstream's own message, **keyed by `external_id` rather than aligned by
+    position** — an id in the first and not the second is a state the caller
+    must fetch with `get_watch_state`, and aligning by position would let
+    one unparseable entry write every later state onto the wrong item.
+    `__post_init__` makes that a property of the DTO rather than a sentence
+    here: a state naming an item the event did not is refused, so an adapter
+    that built the two tuples out of different sets of message entries fails
+    at construction instead of merging one item's state onto another's row.
+    Unreachable from any payload on the Emby path — `UserDataChanged` has
+    one `UserDataList` and both tuples come from its entries — so this
+    refuses adapter bugs, not sources.
+
+    **A carried state's `play_count`/`last_played_at` obey ADR-0014 exactly
+    as a walk's do.** An adapter reports a number only if it is true. On
+    Emby they are `None`: a `UserDataChanged` message is a third payload
+    shape (a listing is one, an item route is another) and no run in this
+    repository has ever parsed one, so absence is the honest answer and the
+    `WATCH_HISTORY` backfill recovers the pair from the single-item route.
+    A reported `0` is a positive claim that `merge_from_source` writes, so
+    guessing one here overwrites real play history permanently.
+
+    The item kinds carry no payload at all — Emby's `LibraryChanged` sends
+    ids, not items — so `ITEM_ADDED`/`ITEM_UPDATED` are resolved with
+    `get_item` per id, bounded by the caller.
     """
 
     kind: SourceEventKind
     external_ids: tuple[str, ...] = field(default_factory=tuple)
+    watch_states: tuple[SourceWatchState, ...] = ()
+
+    def __post_init__(self) -> None:
+        named = set(self.external_ids)
+        unnamed = [
+            state.external_id for state in self.watch_states if state.external_id not in named
+        ]
+        if unnamed:
+            raise ValueError(
+                "a carried watch state must name an item the event listed in external_ids; "
+                f"unlisted: {sorted(unnamed)}"
+            )
 
 
-def _redacted(url: str) -> str:
-    """A playback URL cut at its query string, for rendering in a `repr`.
+def redact_query(url: str) -> str:
+    """A URL cut at its query string, for rendering in a `repr` or a log line.
 
     Everything from the first `?` or `#` onward, gone. Not a search for
     `api_key=`: the deep-link target hides the whole direct URL, token and
@@ -175,6 +216,14 @@ def _redacted(url: str) -> str:
     Enough is kept (scheme, host, path) to identify the item in a log line;
     the query carries no fact a reader needs that the target's own typed
     fields do not already state.
+
+    **Public, and it has two callers.** `StreamTarget.__repr__` below, and
+    `usher.adapters.emby.push`, whose socket URL is
+    `/embywebsocket?api_key=<token>&deviceId=<id>` — the same token, in the
+    same shape, one milestone later. One rule rather than two that can
+    disagree; ADR-0012 records why it is spelled this way. It stays in this
+    module rather than moving to a utility package because it is a property
+    of this port's DTOs, and adapters may import `ports`.
     """
     cut = min((index for index in (url.find("?"), url.find("#")) if index != -1), default=-1)
     return url if cut < 0 else f"{url[:cut]}<redacted>"
@@ -239,9 +288,14 @@ class StreamTarget:
         `repr=False` back to `repr=True` does not silently restore the
         leaking one either. Only deleting *both* re-opens it, which is what
         `tests/unit/test_ports_source.py` is there to catch.
+
+        The cut itself is `redact_query` above and is deliberately *not*
+        inlined here: from M5 the push channel's socket URL carries the same
+        token in the same shape, and two copies of one rule is how the two
+        come to disagree.
         """
         rendered = {item.name: getattr(self, item.name) for item in fields(self)}
-        rendered["url"] = _redacted(self.url)
+        rendered["url"] = redact_query(self.url)
         body = ", ".join(f"{name}={value!r}" for name, value in rendered.items())
         return f"{type(self).__name__}({body})"
 
@@ -273,13 +327,58 @@ class SourceStatus:
     authenticated: bool
     push_available: bool | None = None
     server_version: str | None = None
+    # `None` means "not determined", exactly as `push_available` does, and
+    # for a stronger reason: ADR-0012 accepts the risk that an operator
+    # configures an administrator account, and its recorded mitigation is
+    # guidance rather than code. A fabricated `False` here would make an
+    # unperformed check look like a performed one, which is worse than the
+    # unknown it replaces. From M5 the same token also opens a long-lived
+    # push socket, which is why the check ships now rather than staying a
+    # recommendation.
+    is_administrator: bool | None = None
     detail: str | None = None
 
     def __post_init__(self) -> None:
+        # Deliberately no clause for `is_administrator`. The two above refuse
+        # states no upstream produces; an administrator account is a state a
+        # real deployment is in right now, and the screen that exists to
+        # report it must be able to construct a status for it.
         if self.authenticated and not self.reachable:
             raise ValueError("a source cannot be authenticated without being reachable")
         if self.push_available and not self.authenticated:
             raise ValueError("push cannot be available without being authenticated")
+
+
+@dataclass(frozen=True)
+class PushProbe:
+    """What an on-demand push probe learned.
+
+    `upgraded` says a channel opened. **It is deliberately not the answer**
+    — ADR-0004 measured a handshake against a *nonexistent path* upgrading
+    and receiving `Sessions`, so an upgrade proves nothing about the path,
+    the subscription, or a proxy in between. `delivering` is
+    `supports_push` read after a bounded wait, which every honest
+    implementation grounds in received messages; that is the answer. The
+    two are reported separately rather than collapsed because "the upgrade
+    failed" and "the upgrade worked and nothing came" are different
+    problems with different fixes, and an operator needs to know which.
+
+    `events` is the kinds that arrived, for an operator who wants to know
+    *what* the channel is carrying rather than only that it is carrying.
+    Empty with `delivering=True` is normal and is the common case on an
+    idle library: Emby's periodic `Sessions` message maps to no event and
+    is exactly what keeps the channel measurably alive.
+
+    `detail` is a short operator-facing string built from a translated
+    `UsherPortError`, never a URL and never a credential — the same rule
+    `SourceStatus.detail` carries, and it matters more here because the
+    channel's own URL holds a session token (ADR-0012).
+    """
+
+    upgraded: bool
+    delivering: bool
+    events: tuple[SourceEventKind, ...] = ()
+    detail: str | None = None
 
 
 class SourceNotSupported(UsherPortError):
@@ -300,16 +399,36 @@ class SourceAdapter(ABC):
     @property
     @abstractmethod
     def supports_push(self) -> bool:
-        """Whether this adapter has a live push channel right now. PRD 03:
-        when the socket can't be established (or drops and stays down
-        after N reconnect attempts), the adapter reports this `False` and
-        the reconciler's nightly walk covers the gap. Mirrors
+        """Whether this adapter has a live push channel right now, **and the
+        answer must be grounded in messages received rather than in a socket
+        being open.**
+
+        PRD 03: when the socket can't be established (or drops and stays
+        down after N reconnect attempts), the adapter reports this `False`
+        and the reconciler's nightly walk covers the gap. Mirrors
         `usher.domain.source.Source.supports_push`, which this populates.
 
-        Must agree with `events()`: if this is `False`, `events()` raises
-        `SourceNotSupported`; if it is `True`, `events()` yields a channel.
-        An adapter that advertises push it does not have makes the
-        reconciler skip a source it is the only cover for.
+        ADR-0004 measured a WebSocket handshake against a *nonexistent path*
+        upgrading and being held open, so "the connection object exists" is
+        a state this must answer `False` for. A reverse proxy that forwards
+        `Upgrade` and then buffers produces the same state without any help
+        from the source.
+
+        **The relationship to `events()` is one-way, and stating it the
+        other way round was wrong.** This property is a *health* signal and
+        `SourceNotSupported` is a *capability* one:
+
+        - `True` here ⟹ `events()` yields a channel. An adapter that
+          advertises push it does not have makes the reconciler skip a
+          source it is the only cover for.
+        - `events()` raising `SourceNotSupported` ⟹ this is `False`, and
+          stays `False`; that adapter has no push channel at all.
+        - **The converse does not hold.** An adapter that *has* a channel
+          reports `False` from the moment it is opened until the first
+          message arrives on it, which is the whole of the rule ADR-0004's
+          caveat forces. A contract that asserted
+          `events()-was-offered is supports_push` would forbid exactly the
+          honest implementation.
         """
 
     @abstractmethod
@@ -437,8 +556,116 @@ class SourceAdapter(ABC):
 
     @abstractmethod
     def events(self) -> AbstractAsyncContextManager[AsyncIterator[SourceEvent]]:
-        """Push channel. Adapters without one raise SourceNotSupported; the
-        reconciler covers them. Must agree with `supports_push`."""
+        """Push channel. Adapters without one raise `SourceNotSupported`;
+        the reconciler covers them. See `supports_push` for the one-way
+        relationship between the two — offering a channel is not a claim
+        that it is delivering.
+
+        One connection per call, not a cached one: a supervisor calls this
+        once per reconnect, and a cached channel hands back a closed socket
+        forever.
+
+        Same must-raise-never-truncate rule as `list_items`: an iterator
+        that *stops* because the connection died is indistinguishable from a
+        source with nothing more to say, and a supervisor would read that as
+        a clean shutdown and never reconnect. A channel that has stopped
+        delivering raises rather than sitting there looking well.
+        """
+
+    @property
+    def push_reconnects(self) -> int:
+        """How many times this adapter's push channel has re-**opened**.
+
+        PRD 10's `usher.source.push.reconnects`, and it is on the port
+        rather than on a ledger the lane supervisor reaches into because
+        the supervisor holds a `SourceAdapter` and nothing more — reading
+        an attribute the port does not promise would report a silent zero
+        the day it is renamed.
+
+        Concrete rather than abstract for the reason `probe_push` is, plus
+        one this property has of its own: an adapter with **no** push
+        channel has never reconnected, so `0` is its true answer rather
+        than the fabricated zero `usher.telemetry._push_observations`
+        refuses to emit. An adapter that *has* a channel must override it;
+        `tests/unit/test_ports_source.py` checks structurally that both
+        implementations do, because a forgotten override is indistinguishable
+        from "it has not reconnected yet" in every behavioural test.
+
+        Counted on the second and later **open**, never on a failure: a
+        lane that failed to connect five times and then succeeded
+        reconnected *once*, and a counter on the failure reports five and
+        makes an unreachable source look like a flapping one — a different
+        diagnosis with a different fix. Cumulative for the lane rather than
+        per connection, which is what an adapter holding one ledger across
+        reconnects buys.
+        """
+        return 0
+
+    async def probe_push(self, *, timeout_seconds: float = 15.0) -> PushProbe:
+        """Open the push channel, wait, and report **what arrived**.
+
+        Concrete rather than abstract, and that is the point: the body below
+        is calls to `events()` and `supports_push` and nothing else, so
+        every adapter inherits ADR-0004's rule instead of re-deriving it —
+        and re-deriving it wrongly is a one-line mistake
+        (`return PushProbe(upgraded=True, delivering=True)`) that no test of
+        that adapter's own would obviously catch.
+
+        Never raises. Its callers are an operator's diagnostic
+        (`usher push --probe`) and a status screen, and both exist to render
+        a failure rather than to handle one — the same reason `verify()`
+        returns a `SourceStatus` instead of raising.
+
+        Bounded by wall time rather than by a message count: a channel that
+        is working may legitimately deliver nothing during the probe if
+        nothing changed, and the source's own periodic traffic is what
+        separates that from a dead one.
+
+        `dict.fromkeys` rather than a `set`, for the reason M4 uses it
+        everywhere: it deduplicates *and* keeps arrival order, so a probe's
+        output reads in the order the channel produced it.
+        """
+        collected: list[SourceEventKind] = []
+        upgraded = False
+        try:
+            async with self.events() as events:
+                # Set *inside* the block: a failed upgrade must report
+                # `upgraded=False`, and a channel that opened and then went
+                # stale must not — the second is the failure ADR-0004
+                # warns about and the operator's next move differs.
+                upgraded = True
+                stream = aiter(events)
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + timeout_seconds
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        event = await asyncio.wait_for(anext(stream), timeout=remaining)
+                    except (TimeoutError, StopAsyncIteration):
+                        break
+                    collected.append(event.kind)
+                return PushProbe(
+                    upgraded=True,
+                    # Read from the adapter, never from `collected`: an
+                    # idle library's channel delivers messages that map to
+                    # no event at all, and that is precisely what keeps it
+                    # measurably alive.
+                    delivering=self.supports_push,
+                    events=tuple(dict.fromkeys(collected)),
+                )
+        except UsherPortError as exc:
+            # `False`, not `self.supports_push`: the channel's context
+            # manager has already exited by the time this runs, so the
+            # ledger reports closed anyway — spelled as the constant so a
+            # reader does not have to reason about that to trust it.
+            return PushProbe(
+                upgraded=upgraded,
+                delivering=False,
+                events=tuple(dict.fromkeys(collected)),
+                detail=str(exc),
+            )
 
     @abstractmethod
     async def aclose(self) -> None:

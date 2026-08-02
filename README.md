@@ -10,16 +10,18 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 ## Status
 
 Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
-adapter) and M4 (ingest pipeline) are complete — see
-[`docs/plans/`](docs/plans/) for the task breakdowns and
+adapter), M4 (ingest pipeline) and M5 (push and read-through) are complete —
+see [`docs/plans/`](docs/plans/) for the task breakdowns and
 [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's next.
 
-M3 and M4 are both verified against a live Emby server, and M4's metadata
-half against the live TMDb API.
+M3, M4 and M5 are each verified against a live Emby server, and M4's metadata
+half against the live TMDb API. M5's run is the first in this repository to
+have parsed a real `/embywebsocket` message.
 
-**The HTTP surface is deliberately small so far**: `/health`, `/health/ready`
-and the `/admin/sources` routes. Everything the ingest pipeline does is
-driven from the command line until M9 adds the admin API — see below.
+**The HTTP surface is deliberately small so far**: `/health`,
+`/health/ready`, `/titles/{id}`, `/events` (SSE) and the `/admin/sources`
+routes. Everything the ingest pipeline does is driven from the command line
+until M9 adds the admin API — see below.
 
 ## Requirements
 
@@ -34,7 +36,8 @@ openssl rand -hex 32          # paste this into USHER_SECRET_KEY= in .env
 docker compose up -d --build
 
 curl -sf http://localhost:8100/health        # {"status":"ok"}
-curl -sf http://localhost:8100/health/ready  # adds database + migration state
+curl -sf http://localhost:8100/health/ready  # adds database + migration state,
+                                             # and reports the background lanes
 ```
 
 `USHER_SECRET_KEY` is the one value you must fill in: `.env.example` ships it
@@ -48,7 +51,20 @@ does work — but it leaves a file with two `USHER_SECRET_KEY` lines, which
 nobody can read confidently and which behaves differently under tools that
 take the first.
 
-`USHER_HOST_PORT` defaults to `8100`.
+`USHER_COMPOSE_HOST_PORT` defaults to `8100`. It is the *host*-side publish
+port, not a setting — compose substitutes it into the `ports:` mapping and the
+application never sees it. `USHER_COMPOSE_*` is the one namespace reserved for
+variables like that; every other `USHER_*` key is a real setting, and an
+unknown one is refused at startup rather than ignored, so a typo is loud.
+
+**Every key in `.env` reaches the container**, because compose hands it the
+whole file (`env_file:`). The four exceptions are marked `[compose-owned]` in
+`.env.example` and listed in `compose.yml`'s `environment:` block with the
+reason each belongs to the container topology rather than to you:
+`USHER_DATABASE_URL` (the hostname on the compose network),
+`USHER_HOST`/`USHER_PORT` (what the published port, the `EXPOSE` and the
+healthcheck all assume) and `USHER_SECRET_KEY` (substituted so a missing one
+fails at `docker compose up` rather than in a container log).
 
 Migrations run automatically on container start.
 
@@ -96,7 +112,7 @@ against a media item.
 
 `--allow-full-retraction` lifts the safety ceiling that refuses to mark a
 whole library unavailable in one run
-([ADR-0015](docs/prd/decisions/0015-availability-is-swept-not-diffed.md)).
+([ADR-0015](docs/prd/decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)).
 Only use it for a library the operator really did remove.
 
 **Inspect and repair**
@@ -118,6 +134,24 @@ set).
 uv run usher work --once   # one pass over the queue, then exit
 uv run usher work          # stay up, polling
 ```
+
+**The server process already runs a worker lane**, and a push lane per
+enabled source, so a normal deployment needs neither command. They are for
+splitting the lanes across containers, and there is one rule: **do not run
+`usher work` against a server that also has `USHER_WORKER_ENABLED=true`.**
+A worker requeues everything left `running` at startup — correct at exactly
+one worker, and at two it steals the other's live claims. Set
+`USHER_WORKER_ENABLED=false` on the server first.
+
+```bash
+uv run usher push --probe                    # open each source's channel, report what arrived
+uv run usher push --probe --source "Living Room Emby"
+uv run usher push                            # run the lanes in the foreground, no HTTP server
+```
+
+`--probe` reports **messages received**, never that the handshake succeeded:
+a WebSocket handshake against a nonexistent path also upgrades and also
+receives traffic, so "it connected" is not a health signal.
 
 Exit codes: `0` success, `1` a malformed id or an unhandled error, `2` any
 argument error (including `--resolve` without `--title`).

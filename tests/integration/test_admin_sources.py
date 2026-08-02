@@ -29,7 +29,9 @@ hard way earlier in this project:
    them.
 """
 
+import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -49,13 +51,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tests.fakes.emby_server import SERVER_VERSION, FakeEmbyServer
 from usher.adapters.emby.adapter import EmbyAdapter
 from usher.api.app import create_app
-from usher.api.deps import get_source_adapter_factory
+from usher.api.deps import get_lane_supervisor, get_source_adapter_factory
+from usher.api.lanes import LaneSupervisor
+from usher.composition import Pipeline
 from usher.config import Settings
 from usher.db.base import build_engine
 from usher.db.models.source import SourceCredentialRow, SourceRow
 from usher.db.repositories.credentials import build_cipher
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
+from usher.ports.events import NullEventPublisher
 from usher.ports.source import SourceAdapter, SourceAdapterFactory
 
 # Distinctive, and deliberately not the fixtures' usual "usher" /
@@ -160,7 +165,18 @@ async def app(
         await conn.execute(text("TRUNCATE sources CASCADE"))
     await engine.dispose()
 
-    application = create_app(Settings(database_url=postgres_url, secret_key=SECRET_KEY))
+    application = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key=SECRET_KEY,
+            # `dependency_overrides` do not reach the lifespan, so a push
+            # lane here would build the *real* adapter against
+            # `https://emby.invalid` and try to open a socket -- a network
+            # request from a test, which this suite does not make.
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
     factory = _FakeServerFactory(server)
     application.dependency_overrides[get_source_adapter_factory] = lambda: factory
     try:
@@ -298,7 +314,68 @@ async def test_status_reports_a_healthy_source(client: AsyncClient) -> None:
     assert body["reachable"] is True
     assert body["authenticated"] is True
     assert body["push_available"] is None
+    # ADR-0012's accepted risk, made observable rather than assumed. `false`
+    # is the configuration the ADR assumes and nothing enforces; `null` would
+    # mean the probe never ran, and rendering that as `false` would show an
+    # unperformed check as a performed one.
+    assert body["is_administrator"] is False
     assert body["server_version"] == SERVER_VERSION
+
+
+async def test_status_reports_the_running_lanes_push_health(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """The route's `push_available` comes from the **lane's** adapter, not
+    from the throwaway one `verify()` built -- which opens no socket and can
+    therefore only ever answer `null`. This is the wiring end to end:
+    `get_source_service` -> `SourceService._with_lane_push_health` ->
+    response body.
+
+    Overridden rather than started, because a real lane here would open a
+    WebSocket to `https://emby.invalid`; the case above already pins the
+    `null` a process with no lane reports.
+    """
+    created = (await client.post("/admin/sources", json=_payload())).json()
+    app.dependency_overrides[get_lane_supervisor] = lambda: _DeliveringLanes()
+    try:
+        body = (await client.get(f"/admin/sources/{created['id']}/status")).json()
+    finally:
+        del app.dependency_overrides[get_lane_supervisor]
+    assert body["push_available"] is True
+
+
+class _DeliveringLanes(LaneSupervisor):
+    """A supervisor that reports one delivering channel for every source.
+
+    A subclass so the override really is a `LaneSupervisor`; its unit of
+    work raises, because a status read must not open one.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            Settings(
+                database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
+                secret_key=SECRET_KEY,
+                push_enabled=False,
+                worker_enabled=False,
+            ),
+            _no_work,
+            NullEventPublisher(),
+            user_id=_no_user,
+        )
+
+    def push_available(self, source_id: uuid.UUID) -> bool | None:
+        return True
+
+
+@asynccontextmanager
+async def _no_work() -> AsyncIterator[Pipeline]:
+    raise AssertionError("a status read must not open a unit of work")
+    yield  # pragma: no cover  -- unreachable; makes this a generator
+
+
+async def _no_user() -> uuid.UUID:
+    raise AssertionError("a status read must not resolve the default user")
 
 
 async def test_status_distinguishes_bad_credentials_from_unreachable(

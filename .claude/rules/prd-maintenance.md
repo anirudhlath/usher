@@ -74,16 +74,30 @@ done.
 
 ## Housekeeping
 
-After editing docs, check that internal links still resolve:
+After editing docs, check that internal links still resolve — over `docs/prd/`
+plus the two documents at the repo root, and **not** over `docs/plans/`:
 
 ```bash
 python3 - <<'EOF'
 import re, pathlib
+roots = list(pathlib.Path("docs/prd").rglob("*.md"))
+roots += [pathlib.Path("CLAUDE.md"), pathlib.Path("README.md")]
 bad = []
-for md in pathlib.Path("docs").rglob("*.md"):
+for md in roots:
     for link in re.findall(r'\]\(([^)#][^)]*\.md)\)', md.read_text()):
         if not (md.parent / link).resolve().exists():
             bad.append(f"{md}: {link}")
 print("\n".join(bad) if bad else "OK")
 EOF
 ```
+
+**The exclusion is a correction, not a convenience.** This check was scoped to
+all of `docs/` for four milestones and **never once printed `OK`** — M2, M3 and
+M4 each embed PRD and ADR text whose links are relative to where the snippet
+will *live* (`docs/prd/`), not to where it is quoted, so every one of them
+reports as broken from the plan's own directory and always has. M4's final gate
+recorded `Expected: … OK` against a command that could not produce it, which is
+the failure mode a gate exists to prevent: a red that everyone learns to
+ignore is not a check. Scoped to the files whose links have to resolve, a green
+result means something — and the first genuine break it found on being rescoped
+(2026-08-02) was `README.md` pointing at an ADR renamed during M4.

@@ -33,6 +33,16 @@ run is what actually closes:
   `resolve_external_ids` picks a winner among two copies of one film the
   same way and inherits the same caveat -- a `DISTINCT ON` whose `ORDER BY`
   ran out of keys returns an arbitrary row there and insertion order here.
+- **`list_for_title`'s `id` tiebreak is unobservable here, and not by
+  omission -- by construction.** This fake mints each item's id with
+  `new_id()` at the moment it stores it, and a `dict` keeps a key's original
+  position when the value is reassigned, so its id order and its storage
+  order are the same sequence and no amount of seeding can separate them.
+  Against Postgres they separate as soon as an update touches an indexed
+  column: `test_list_for_title_breaks_ties_on_id` moves `last_seen_at`
+  specifically to force a non-HOT update, and the read then arrives in heap
+  order rather than id order. Measured: dropping the tiebreak fails that
+  case in `tests/integration/` and passes every case here.
 - No transaction, so nothing here can leave a session poisoned and
   `test_a_caught_conflict_leaves_the_session_usable` is a Postgres-only
   case. A fake cannot express `PendingRollbackError` and pretending
@@ -223,6 +233,27 @@ class FakeMediaItemRepository(MediaItemRepository):
             candidates.sort(key=lambda entry: (-entry.last_seen_at.timestamp(), entry.external_id))
             resolved[target] = candidates[0].external_id
         return resolved
+
+    async def list_for_title(self, title_id: uuid.UUID) -> list[MediaItem]:
+        # `episode_id is None` is the same clause the real one spells
+        # `episode_id IS NULL`, and it is what bounds the answer: an
+        # episode's row carries its series' `title_id` too, so without it a
+        # series answers with one entry per episode file.
+        copies = [
+            entry
+            for entry in self._items.values()
+            if entry.title_id == title_id and entry.episode_id is None
+        ]
+        # Available first, then freshest, then a total order on `id`.
+        # `list.sort` is stable, so the final key is invisible here and is a
+        # real shuffle against Postgres -- the divergence this module's
+        # docstring names, and why the contract asserts the tiebreak as an
+        # ordering property rather than by seeding enough rows to provoke a
+        # reorder.
+        copies.sort(
+            key=lambda entry: (not entry.available, -entry.last_seen_at.timestamp(), entry.id)
+        )
+        return copies
 
     async def list_unmatched(
         self, source_id: uuid.UUID | None = None, *, limit: int = 100, offset: int = 0

@@ -2,20 +2,61 @@ services:
   usher:
     build: .
     restart: unless-stopped
+    # `env_file:`, not a hand-maintained `environment:` list -- and the two
+    # are different mechanisms rather than two spellings of one. An
+    # `environment:` entry names one variable and compose substitutes its
+    # value from `.env`; `env_file:` hands the whole file to the container.
+    #
+    # This started as the second form and forwarded five of the thirty
+    # documented keys, so the other 24 -- twelve of them M5's own, including
+    # USHER_WORKER_ENABLED -- were documented in `.env.example` and README.md
+    # and reached nothing. A setting an operator can set and the container
+    # never sees is dead config that looks like a control, and this one has
+    # teeth: an operator who sets USHER_WORKER_ENABLED=false and then runs
+    # `usher work` in a second container gets two workers, and
+    # `JobWorker.startup()` requeues everything `running`, so each steals the
+    # other's live claims.
+    #
+    # `required: false` so a checkout with no `.env` yet still parses, and
+    # fails on USHER_SECRET_KEY below with a sentence instead of on a missing
+    # file. `tests/unit/test_deployment_config.py` pins both this and the
+    # `environment:` list below.
+    env_file:
+      - path: .env
+        required: false
     environment:
+      # Only what the compose *topology* owns. `environment:` wins over
+      # `env_file:`, so every line here is a setting an operator cannot
+      # change from `.env` -- which is why there are four of them and each
+      # says why.
+      #
+      # The service's hostname on the compose network. `.env` ships
+      # `localhost`, which is right for a dev shell and for `alembic`, and
+      # wrong inside the container.
       USHER_DATABASE_URL: postgresql+asyncpg://usher:usher@postgres:5432/usher
+      # Bind-all, or the published port below reaches nothing.
+      USHER_HOST: 0.0.0.0
+      # Settings.port's own default (src/usher/config.py), and what the
+      # `ports:` mapping, the Dockerfile's EXPOSE and the healthcheck below
+      # all assume. The knob an operator actually wants is the *host* side,
+      # which is USHER_COMPOSE_HOST_PORT.
+      USHER_PORT: "8000"
+      # Substituted rather than inherited from `env_file:` purely for the
+      # `:?` guard: a missing or blank key fails at `docker compose up` with
+      # this sentence, instead of as a container that starts and dies on a
+      # validation error the operator has to go and read the logs for.
       USHER_SECRET_KEY: ${USHER_SECRET_KEY:?set USHER_SECRET_KEY in .env, e.g. openssl rand -hex 32}
-      USHER_TMDB_API_KEY: ${USHER_TMDB_API_KEY:-}
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      OTEL_SERVICE_NAME: usher
     ports:
-      # Host-side port is overridable (USHER_HOST_PORT in .env) rather than
-      # a bare "8000:8000" -- this host already has another container
-      # publishing 8000, and a hardcoded collision is exactly the kind of
-      # thing an override exists to avoid. Container-side stays 8000: that
-      # is Settings.port's own default (src/usher/config.py) and what
-      # usher's healthcheck below and the Dockerfile's EXPOSE both assume.
-      - "${USHER_HOST_PORT:-8100}:8000"
+      # Host-side port is overridable (USHER_COMPOSE_HOST_PORT in .env)
+      # rather than a bare "8000:8000" -- this host already has another
+      # container publishing 8000, and a hardcoded collision is exactly the
+      # kind of thing an override exists to avoid. `USHER_COMPOSE_` is the
+      # namespace `Settings` deliberately ignores (src/usher/config.py):
+      # `.env` is read both by compose and by pydantic-settings, and this
+      # variable is meaningful only to the first. Named `USHER_HOST_PORT`
+      # until M5, which made `cp .env.example .env` -- the README's own
+      # first step -- fail every entry point with `extra_forbidden`.
+      - "${USHER_COMPOSE_HOST_PORT:-8100}:8000"
     volumes:
       - ./data/images:/data/images
     depends_on:

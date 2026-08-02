@@ -33,6 +33,7 @@ through `EmbyAdapter`, so a bug in the adapter cannot make a bug in the
 fake look like correct behaviour.
 """
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -43,13 +44,15 @@ import pytest
 import pytest_asyncio
 from pydantic import SecretStr
 
+from tests.fakes.emby_fixtures import load_emby_fixture
 from tests.fakes.emby_server import USER_ID, FakeEmbyServer
 from usher.adapters.emby.mapping import TICKS_PER_SECOND, to_source_item, to_watch_state
+from usher.adapters.emby.push import to_source_events
 from usher.adapters.emby.session import EmbySession
 from usher.domain.enums import HdrFormat
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import PortUnavailable
-from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
+from usher.ports.source import SourceEventKind, SourceItem, SourceItemKind, SourceWatchState
 
 T0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
 # Microseconds on purpose: `added_at` and `last_played_at` both carry them,
@@ -604,3 +607,128 @@ async def test_an_unrouted_path_is_a_404_not_a_cheerful_200(driver: _Driver) -> 
     catch-all."""
     with pytest.raises(PortUnavailable, match="404"):
         await driver.session.json_body("GET", "/Users/x/NoSuchThing", op="probe")
+
+
+# --- the push frames, and where their provenance runs out ------------------
+#
+# These four are the *only* independent check on this file's push side. The
+# six contract push cases drive the same renderers through the real mapper,
+# so the fake sends what the mapper expects and the mapper parses what the
+# fake sends -- which is precisely the shape that let M3 ship a write-back
+# that had never worked. What narrows it here is that each frame is rendered
+# from the committed fixture rather than built inline, so this file cannot
+# drift away from the file M5's live verification diffs against a real
+# capture; and `tests/unit/test_adapters_emby_push.py` parses those same
+# fixtures with no fake server involved. Neither closes the gap. Only the
+# live capture does, and `tests/fixtures/emby/README.md` lists what is
+# still a guess.
+
+
+def test_the_push_frames_keep_the_committed_fixtures_shape() -> None:
+    """A renderer that invented its own envelope would make the committed
+    fixtures decorative -- and those fixtures are the only artefact the
+    live capture has to diff against. Asserted on key sets rather than on
+    values, because the values here are deliberately the test's."""
+    server = FakeEmbyServer()
+    for name, frame in (
+        ("push_user_data_changed", server.user_data_changed_frame(["90000100"])),
+        ("push_library_changed", server.library_changed_frame(added=["90000200"])),
+        ("push_sessions", server.sessions_frame()),
+    ):
+        fixture = load_emby_fixture(name)
+        rendered = json.loads(frame)
+        assert rendered.keys() == fixture.keys(), name
+        assert rendered["MessageType"] == fixture["MessageType"]
+        if isinstance(fixture["Data"], dict):
+            assert rendered["Data"].keys() == fixture["Data"].keys(), name
+    entry = json.loads(server.user_data_changed_frame(["90000100"]))["Data"]["UserDataList"][0]
+    template = load_emby_fixture("push_user_data_changed")["Data"]["UserDataList"][0]
+    # `LastPlayedDate` is popped for an item with no seeded history -- see
+    # the next test, which is what that pop exists for.
+    assert entry.keys() <= template.keys()
+
+
+async def test_a_user_data_changed_frame_carries_the_seeded_state(driver: _Driver) -> None:
+    """The arrangement half of every push contract case, checked against
+    the real mapper rather than only through the adapter."""
+    driver.server.add_item(MOVIE, T0)
+    driver.server.set_watch_state(
+        SourceWatchState(
+            external_id="movie-1",
+            position_seconds=91,
+            played=True,
+            play_count=7,
+            last_played_at=LAST_PLAYED,
+        )
+    )
+    frame = driver.server.user_data_changed_frame(["movie-1"])
+    events = to_source_events(json.loads(frame), source_user_id=USER_ID)
+    assert len(events) == 1
+    assert events[0].kind is SourceEventKind.WATCH_STATE_CHANGED
+    assert events[0].external_ids == ("movie-1",)
+    carried = events[0].watch_states[0]
+    assert carried.position_seconds == 91
+    assert carried.played is True
+    # ADR-0014, on the third payload shape: the frame states 7 and the
+    # adapter still reports absence, because no run here has parsed a real
+    # `UserDataChanged` and a number it guessed would be merged as a fact.
+    assert json.loads(frame)["Data"]["UserDataList"][0]["PlayCount"] == 7
+    assert carried.play_count is None
+    assert carried.last_played_at is None
+
+
+async def test_a_user_data_changed_frame_leaves_no_template_value_showing_through(
+    driver: _Driver,
+) -> None:
+    """The trap this file already fell into once, for `SeriesId` and
+    `IndexNumber`: rendering a field only when it is set leaves the
+    fixture's own invented value in place, and a test then asserts happily
+    on a fact the harness never supplied. `push_user_data_changed.json`'s
+    first entry carries a `LastPlayedDate` and a `PlayCount` of 3.
+
+    `ItemId` is the only identity field asserted here, because it is the
+    only one a real entry carries: M5's live run found **no `Key`** on any
+    `UserDataList` entry, so the fixture and this renderer both stopped
+    inventing one."""
+    driver.server.add_item(MOVIE, T0)
+    template = load_emby_fixture("push_user_data_changed")["Data"]["UserDataList"][0]
+    assert "LastPlayedDate" in template
+    assert template["PlayCount"] == 3
+    entry = json.loads(driver.server.user_data_changed_frame(["movie-1"]))["Data"]["UserDataList"][
+        0
+    ]
+    assert "LastPlayedDate" not in entry
+    assert entry["PlayCount"] == 0
+    assert entry["ItemId"] == "movie-1"
+    assert "Key" not in entry
+
+
+def test_a_library_changed_frame_names_only_the_arrays_it_was_given() -> None:
+    """One event per non-empty array is the mapper's rule, so a frame that
+    left the fixture's own `ItemsAdded` in place would hand every push case
+    an `ITEM_ADDED` nobody arranged."""
+    server = FakeEmbyServer()
+    fixture = load_emby_fixture("push_library_changed")["Data"]
+    assert fixture["ItemsAdded"] and fixture["ItemsRemoved"] and fixture["ItemsUpdated"]
+    events = to_source_events(
+        json.loads(server.library_changed_frame(updated=["movie-1"])), source_user_id=USER_ID
+    )
+    assert [(event.kind, event.external_ids) for event in events] == [
+        (SourceEventKind.ITEM_UPDATED, ("movie-1",))
+    ]
+    empty = json.loads(server.library_changed_frame())
+    assert empty["Data"]["IsEmpty"] is True
+    assert to_source_events(empty, source_user_id=USER_ID) == ()
+
+
+def test_a_sessions_frame_is_a_message_that_maps_to_no_event() -> None:
+    """The property the whole staleness scheme rests on: an idle library's
+    channel stays measurably alive because `Sessions` keeps arriving, and
+    it produces no event at all. ADR-0004 measured that it arrives
+    *periodically* and never at what interval -- so this renders one frame
+    on demand and the cadence stays a live-verification question."""
+    server = FakeEmbyServer()
+    message = json.loads(server.sessions_frame())
+    assert message["MessageType"] == "Sessions"
+    assert message["Data"][0]["UserId"] == USER_ID
+    assert to_source_events(message, source_user_id=USER_ID) == ()

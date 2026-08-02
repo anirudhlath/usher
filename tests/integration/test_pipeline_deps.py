@@ -34,8 +34,10 @@ from usher.api.deps import (
     get_media_item_repository,
     get_raw_payload_store,
     get_reconcile_service,
+    get_source_repository,
     get_sync_run_repository,
     get_title_match_repository,
+    get_title_read_service,
     get_title_repository,
     get_watch_state_repository,
     get_watch_state_sync_service,
@@ -57,11 +59,25 @@ _PROVIDERS = {
     "ingest_service": get_ingest_service,
     "reconcile_service": get_reconcile_service,
     "watch_sync_service": get_watch_state_sync_service,
+    # M5's read-through surface. The one provider here that a shipped
+    # route actually resolves -- `GET /titles/{id}` -- and therefore the
+    # one whose graph a 500 at request time would be a real outage.
+    "sources_repository": get_source_repository,
+    "title_read_service": get_title_read_service,
 }
 
 
 def _probe_app(postgres_url: str) -> FastAPI:
-    app = create_app(Settings(database_url=postgres_url, secret_key="0" * 32))
+    app = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key="0" * 32,
+            # This file resolves providers; lanes would only add a worker
+            # polling the same database. See `usher.api.lanes`.
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
     for name, provider in _PROVIDERS.items():
 
         def route(built: Annotated[Any, Depends(provider)]) -> dict[str, str]:
@@ -87,7 +103,7 @@ async def test_every_pipeline_provider_resolves_in_a_request(probe: AsyncClient)
         response = await probe.get(f"/_probe/{name}")
         assert response.status_code == 200, f"{name}: {response.text}"
         assert response.json()["built"].startswith(
-            ("Postgres", "Match", "Ingest", "Reconcile", "Watch")
+            ("Postgres", "Match", "Ingest", "Reconcile", "Watch", "Title")
         )
 
 
@@ -131,7 +147,16 @@ async def test_a_request_resolves_the_default_user_and_writes_the_row(
     session-scoped container -- hence the cleanup. Same rule
     `tests/integration/test_cli_pipeline.py` follows.
     """
-    app = create_app(Settings(database_url=postgres_url, secret_key="0" * 32))
+    app = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key="0" * 32,
+            # This file resolves providers; lanes would only add a worker
+            # polling the same database. See `usher.api.lanes`.
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
 
     @app.get("/_probe/default_user")
     def _default_user(
@@ -180,6 +205,8 @@ async def test_the_reconcile_service_carries_this_deployments_tuning(
         secret_key="0" * 32,
         sync_batch_size=7,
         sync_max_retract_fraction=0.5,
+        push_enabled=False,
+        worker_enabled=False,
     )
     app = create_app(settings)
 

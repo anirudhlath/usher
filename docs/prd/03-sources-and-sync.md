@@ -73,11 +73,37 @@ refresh-token flow; this pattern *is* the refresh mechanism.
 Emby exposes a WebSocket at `/embywebsocket?api_key=<token>&deviceId=<id>`.
 Verified against Emby 4.9.5.0 binaries (the version this deployment runs):
 
-| Message | Scope | Use |
-|---|---|---|
-| `LibraryChanged` | Per-user, payload-filtered | Items added / updated / removed |
-| `UserDataChanged` | Own data only | Watch position, played flags |
-| `Sessions` (subscribe) | Per-user row-filtered | Playback events |
+| Message | Scope | Use | Becomes |
+|---|---|---|---|
+| `LibraryChanged` | Per-user, payload-filtered | Items added / updated / removed | One `SourceEvent` per non-empty array: `ITEM_ADDED`, `ITEM_UPDATED`, `ITEM_REMOVED`. A removal **retracts nothing** — see below |
+| `UserDataChanged` | Own data only | Watch position, played flags | One `WATCH_STATE_CHANGED` carrying the ids *and* the states the message itself contained |
+| `Sessions` (subscribe) | Per-user row-filtered | **Nothing is derived from it. Its whole value is that it arrives.** | Nothing. Counted before it is parsed |
+
+**That last row said "Playback events", and it read as though Usher derived
+something from them. It does not, and the correction matters.** `Sessions`
+carries playback state for sessions Usher is not part of; deriving anything
+from it would mean tracking play sessions Usher never starts. It maps to zero
+`SourceEvent`s by design, and it is counted anyway — before it is parsed —
+because a received frame is evidence the socket is alive whatever it says. On
+an idle library, which is most libraries most of the time, `Sessions` is the
+*only* thing keeping `push_available` true. Counting only mapped events would
+make a library nobody touched for a day read as a dead channel and reconnect it
+forever.
+
+**Its cadence is measured, and it is not the interval it looks like.**
+`SessionsStart`'s `"0,1000"` really is `initialDelayMs,intervalMs` — an
+*unauthenticated* socket receives `Sessions` at ~1 Hz — but the
+row-filtered stream an authenticated socket receives arrives only when the
+filtered view changes: **median 38.7 s, p90 46.5 s, max 72.9 s** over 182
+intervals in 100 minutes, 2026-08-02. So `push_stale_after_seconds`' 90 s
+default survives, with **1.23x** headroom over the worst gap seen — and the
+worst gap grew monotonically with the window (52.6 s at 26 minutes, 60.1 s
+at 70, 72.9 s at 96), on one household on one evening, against a signal that
+is change-driven rather than periodic. Read it as a bound that has not been
+falsified rather than one shown to be safe: there is no application-level
+heartbeat on this channel, so any fixed ceiling is a guess. It is a setting for exactly that reason, and
+`usher.source.push.reconnects` is how a household where 90 s is too tight
+becomes visible rather than silent.
 
 **No admin privileges are required** — a normal user token works, and there is
 no role check in Emby's subscription path. (Note: guidance derived from Jellyfin
@@ -87,12 +113,22 @@ restrictions Emby does not have.)
 **Not required is not the same as prevented, and nothing prevents it.**
 `POST /admin/sources` ([07](07-client-api.md)) takes whatever account an
 operator supplies, and nothing in the adapter inspects its role, so admin
-credentials work — and put an admin token into every direct-play URL, which
-widens what a captured URL grants from "this user's library and watch state"
-to "everything an Emby administrator can do". Configure a normal user. This is
-an accepted risk, recorded in
-[ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md) along with the
-check that would make it observable.
+credentials work — and put an admin token into every direct-play URL, and
+(from M5) into a long-lived push socket, which widens what a captured URL or
+socket grants from "this user's library and watch state" to "everything an
+Emby administrator can do". Configure a normal user. This is an accepted
+risk, recorded in
+[ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md).
+
+**It is now observable, and still not refused.** `verify()` reads
+`Policy.IsAdministrator` off `GET /Users/{userId}` — which answers 200 to the
+user's own non-admin token; `GET /Users/Me` answers 500 on Emby 4.9.5.0 and is
+not a shortcut — and `GET /admin/sources/{id}/status`
+([07](07-client-api.md)) reports `is_administrator`. Three-valued, like
+`push_available`: `null` means the check did not run, and a failure to read
+the role narrows the answer rather than failing the status request. An
+administrator account logs a warning and is served anyway, because an operator
+whose only working account is an administrator account still needs a catalog.
 
 **Both of this socket's parameters are also carried by a direct-play URL.**
 `api_key` and `deviceId` are exactly what a `direct` `StreamTarget`'s query
@@ -121,20 +157,74 @@ Operational requirements:
 > **Health-check caveat:** a handshake against a nonexistent path also upgrades
 > and receives `Sessions`, so a successful upgrade proves nothing. The adapter
 > must assert on *received messages* to consider push healthy.
+> [ADR-0018](decisions/0018-push-health-is-a-message-ledger.md) is the whole
+> of M5 built on this sentence.
 
-> 🔶 **Provisional.** `SourceEvent`, the push channel's own DTO, carries no
-> payload beyond `kind` and the affected `external_ids`. That forces a
-> `WATCH_STATE_CHANGED` event to re-walk `watch_state(since=...)` to
-> discover what actually changed, even though Emby's own `UserDataChanged`
-> message already carries the position and played flag. Settle in **M5**,
-> when the push lane is built and the cost of re-walking is measurable
-> against just carrying the payload through.
+> **Re-measured live 2026-08-02, and the first run in this repository ever to
+> parse a real `/embywebsocket` message.** Five things it settled, each of
+> which the code had been guessing at:
 >
-> **Reviewed in M3, deliberately left alone.** M3 settled the other two 🔶
-> markers this section and 07 named for it (`SourceAdapter.verify()`,
-> `StreamTarget`) but builds no push lane itself, so the re-walk-cost
-> measurement this marker is waiting for is still not available. Still
-> M5's to settle.
+> - **`LibraryChanged` arrives, and its five arrays hold *ids*.** Never once
+>   observed before this run; **twelve** arrived unprompted in 100 minutes,
+>   with all seven documented keys and every array a list of id strings
+>   rather than of item objects. The shipped mapper produced 7 `ITEM_ADDED`,
+>   7 `ITEM_UPDATED` and 1 `ITEM_REMOVED` from them. One frame carried a
+>   real `ItemsRemoved` **on a library from which nothing was removed** —
+>   which is [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)'s
+>   central argument, observed rather than reasoned. One `ItemsUpdated`
+>   carried **42** ids against `push_max_items_per_event`'s default of 50.
+> - **The envelope is not uniform.** `UserDataChanged` carries
+>   `{MessageId, MessageType, Data}` with a distinct 32-hex `MessageId` per
+>   *message*; `Sessions` carries `{MessageType, Data}` and **no `MessageId`
+>   at all**, on 183 of 183 frames.
+> - **`UserDataChanged.Data` is an object** with `UserId` and `UserDataList`,
+>   and an entry carries `ItemId`, `PlaybackPositionTicks`, `Played`,
+>   `PlayCount`, `IsFavorite`, plus `PlayedPercentage` when the position is
+>   non-zero and `LastPlayedDate` when it is played. There is **no `Key`**.
+> - **A pushed entry agreed with `GET /Users/{u}/Items/{item}` field for
+>   field**, in the same second, across three transitions of one item —
+>   including `PlayCount` and `LastPlayedDate`. So this third payload shape
+>   is *not* the partly-honest one the listing route is. The adapter still
+>   reports `play_count`/`last_played_at` as `None`; see the ADR-0014 note
+>   below for why that is a deliberate lag rather than an oversight.
+> - **The handshake proves even less than ADR-0004 recorded.** A socket with
+>   **no credential at all** also upgrades, also accepts `SessionsStart`, and
+>   then delivers `Sessions` roughly once a second carrying the *whole
+>   server's* session list, where the authenticated socket receives a
+>   row-filtered view at a median of one frame per ~24 s. So neither an
+>   upgrade nor arriving messages establish that a channel is the
+>   authenticated one.
+
+> **Settled in M5.** `SourceEvent` carries the states the upstream's own
+> message already contained (`watch_states`, keyed by `external_id`), and an
+> id it could not parse falls back to `get_watch_state` — one authoritative
+> request. The alternative the marker named, re-walking
+> `watch_state(since=...)`, was never close: that walk's only knob is the
+> cursor, and over a 30-day `MinDateLastSavedForUser` window it returns
+> 29,027 items, per event, on a lane budgeted at one connection per source.
+>
+> The two lists may differ in length and are never aligned by position — a
+> state names its own item, and one the event did not list is refused at
+> construction. Position-aligning them would let a single unparseable entry
+> write every later state onto the wrong item.
+>
+> **A carried state's `play_count`/`last_played_at` are `None` on Emby**, and
+> that is [ADR-0014](decisions/0014-absence-is-not-zero.md) rather than
+> laziness: a `UserDataChanged` message is a third payload shape, and absence
+> is the only honest report of a field nobody had measured. The
+> `watch_history` backfill recovers the pair from the single-item route,
+> which is the chain M4 already built.
+>
+> **The 2026-08-02 live run measured it, and it was truthful** — a pushed
+> entry's `PlayCount` and `LastPlayedDate` matched the single-item route
+> exactly. That makes reading them a **measured opportunity**, worth roughly
+> one `watch_history` job per played item, and it is deliberately **not
+> taken here**: the evidence is one item across three transitions, all of
+> them writes Usher itself made, and ADR-0014's rule is that a reported
+> number must be *true* rather than merely present. Writing a `0` over a real
+> `13` is permanent, so the bar for turning that field on is a measurement
+> over items with real history that Usher did not author. Recorded so the
+> next run has one thing to check rather than a design to redo.
 
 ### Walking the library
 
@@ -194,10 +284,43 @@ the `Version` that becomes `server_version`, while `/System/Info` answers
 **401** without a token. A live `verify()` returned `reachable: true`,
 `authenticated: true`, `push_available: null`, `server_version: "4.9.5.0"`.
 
-`push_available` is deliberately three-valued, and `null` ("not probed") is what
-every adapter reports until M5. See the health-check caveat above: a handshake
-against a nonexistent path also upgrades, so an upgrade is not evidence and only
-received messages are.
+**`verify()` also spends one request on the account's own role.** `GET
+/Users/{userId}` carries `Policy.IsAdministrator` and answers 200 to the
+user's own non-admin token, so `is_administrator` reports the configuration
+this section calls "not required but not prevented". It is a warning and a
+field, never a refusal, and `null` means the check did not run — see the
+paragraph above and
+[ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md).
+
+`push_available` is deliberately three-valued, and **M5 fills it from a message
+ledger rather than from a probe**
+([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). `verify()`
+opens no socket at all — a status
+screen a dashboard polls must not cost a socket per poll against a server
+measured at 1–5 s per request, and it would still be answering a question about
+a socket that is not the one doing the work. It reports `null` ("not probed")
+for an adapter that has never had a channel, and the live answer — a connection
+*and* at least one received message *and* a recent one — for the adapter a push
+lane is running. `GET /admin/sources/{id}/status` reads the lane's, injected by
+the composition root.
+
+The on-demand answer is `usher push --probe`, which opens a channel on purpose
+because an operator asked it to, and reports **what arrived** — the event kinds
+and whether the channel is delivering — rather than that the handshake
+succeeded. `SourceAdapter.probe_push` is a *concrete* method on the port whose
+body is calls to `events()` and `supports_push` and nothing else, so a second
+adapter inherits that rule instead of re-deriving it; re-deriving it wrongly is
+one line. See the health-check caveat above: a handshake against a nonexistent
+path also upgrades, so an upgrade is not evidence and only received messages
+are.
+
+**`supports_push` and `events()` are related one way only.** `supports_push` is
+a health signal grounded in messages; `SourceNotSupported` from `events()` is a
+capability answer. An adapter reporting `true` must offer a channel, and one
+with no channel must report `false` — but an adapter that *has* a channel
+reports `false` from the moment it opens until the first message arrives on it,
+which is the whole point. A contract asserting the two agree in both directions
+would forbid exactly the honest implementation.
 
 ## Reconciliation is not optional
 
@@ -206,11 +329,24 @@ Push is the fast path, never the only path. Sockets drop, events are missed, and
 
 | Lane | Trigger | Work |
 |---|---|---|
-| **Push** | WebSocket event | Enqueue affected items at high priority |
-| **Reconnect delta** | Socket re-established | Items changed since last cursor |
+| **Push** | WebSocket event | **Apply it inline when it is small; defer to a delta when it is large.** A `WATCH_STATE_CHANGED` carrying its own payload merges with no request at all; one naming more than `push_max_items_per_event` items with no payload becomes a delta walk instead, because a request per item against a 1,126,789-item library is a design defect rather than a slow path |
+| **Reconnect delta** | Socket re-established | Items changed since the last cursor. **The walk runs *after* the socket is up**, so anything that changes during it arrives on a connection that is already buffering (`max_queue=256`); the reverse order leaves the window between the walk and the handshake silently uncovered. Rate-limited, so a flapping socket cannot turn into one delta per few seconds |
 | **Full reconcile** | Nightly | Walk the source; upsert everything; mark unseen items `available = false` |
 
 Polling is the backstop, not the design.
+
+**A push `ITEM_REMOVED` retracts nothing.**
+[ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
+is unambiguous — only a walk that provably finished sweeps — and an Emby
+library refresh emits `ItemsRemoved` for items that have not gone anywhere.
+**Observed 2026-08-02**: one arrived during a 100-minute listen on a server
+where nothing was deleted. The event is counted and logged; the row stays
+available until the nightly
+walk sweeps it, which [08](08-operations.md) already prices as "availability
+goes stale, not wrong". **Emby does not re-deliver what a disconnected client
+missed** — measured 2026-08-02, over a 61 s outage with a real change made
+inside it and 90 s of listening afterwards — so the gap-closing delta is not
+belt-and-braces, it is the only cover there is.
 
 **Retraction is a separate step, and it can decline.** Marking unseen items
 unavailable is a distinct call the reconciler makes only after the walk

@@ -117,7 +117,17 @@ def span_exporter() -> InMemorySpanExporter:
 async def probe(
     postgres_url: str, span_exporter: InMemorySpanExporter
 ) -> AsyncIterator[AsyncClient]:
-    app: FastAPI = create_app(Settings(database_url=postgres_url, secret_key="0" * 32))
+    app: FastAPI = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key="0" * 32,
+            # A worker lane here would claim the `match` jobs this file's
+            # own probe route enqueues, and run them under a span tree it
+            # is not asserting about. See `usher.api.lanes`.
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
 
     @app.get("/_probe/sync")
     async def _sync(
