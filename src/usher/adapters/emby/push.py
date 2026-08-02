@@ -88,11 +88,12 @@ DEFAULT_POLL_SECONDS = 5.0
 #
 # **Measured 2026-08-02 against the live server, and it is not the interval
 # the frame above asks for.** An authenticated socket's `Sessions` arrives
-# when its row-filtered view changes, not on the 1 s timer: **median 34.7 s,
-# p90 46.3 s, max 60.1 s** over 133 intervals in 70 minutes. So 90.0
-# survives -- with **1.5x** headroom over the worst gap seen, and the worst
-# gap grew as the window did (52.6 s at 26 minutes). One household, one
-# hour, a change-driven signal; a 75-second probe earlier the same evening
+# when its row-filtered view changes, not on the 1 s timer: **median 37.7 s,
+# p90 47.2 s, max 72.9 s** over 176 intervals in 96 minutes. So 90.0
+# survives -- with **1.23x** headroom over the worst gap seen, and the worst
+# gap grew monotonically as the window did (52.6 s at 26 minutes, 60.1 s at
+# 70, 72.9 s at 96), so a longer hold would plausibly cross it. One
+# household, one evening, a change-driven signal; a 75-second probe earlier the same evening
 # saw exactly one frame, which is what the headroom is for. A quieter server
 # can exceed any fixed ceiling, and the consequence is bounded and visible
 # rather than silent: the lane reconnects, the gap-closing delta returns 0

@@ -78,7 +78,7 @@ on 2026-08-02 and it still holds** — `/embywebsocket-nope` returned 101 with
 evidence for this decision.** A socket carrying **no credential of any
 kind** — no `api_key`, no header — also upgrades, also accepts
 `SessionsStart`, and then delivers `Sessions` *more often* than the
-authenticated one: ~1 frame per second against a median of one per ~35 s,
+authenticated one: ~1 frame per second against a median of one per ~38 s,
 carrying the **whole server's** session list rather than the row-filtered
 view the authenticated socket receives. So on this build:
 

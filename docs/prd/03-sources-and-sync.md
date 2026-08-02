@@ -94,12 +94,14 @@ forever.
 `SessionsStart`'s `"0,1000"` really is `initialDelayMs,intervalMs` — an
 *unauthenticated* socket receives `Sessions` at ~1 Hz — but the
 row-filtered stream an authenticated socket receives arrives only when the
-filtered view changes: **median 34.7 s, p90 46.3 s, max 60.1 s** over 133
-intervals in 70 minutes, 2026-08-02. So `push_stale_after_seconds`' 90 s
-default survives, with **1.5x** headroom over the worst gap seen — and the
-worst gap grew with the window (52.6 s at 26 minutes, 60.1 s at 70), on one
-household at one hour, against a signal that is change-driven rather than
-periodic. It is a setting for exactly that reason, and
+filtered view changes: **median 37.7 s, p90 47.2 s, max 72.9 s** over 176
+intervals in 96 minutes, 2026-08-02. So `push_stale_after_seconds`' 90 s
+default survives, with **1.23x** headroom over the worst gap seen — and the
+worst gap grew monotonically with the window (52.6 s at 26 minutes, 60.1 s
+at 70, 72.9 s at 96), on one household on one evening, against a signal that
+is change-driven rather than periodic. Read it as a bound that has not been
+falsified rather than one shown to be safe: there is no application-level
+heartbeat on this channel, so any fixed ceiling is a guess. It is a setting for exactly that reason, and
 `usher.source.push.reconnects` is how a household where 90 s is too tight
 becomes visible rather than silent.
 
@@ -163,10 +165,10 @@ Operational requirements:
 > which the code had been guessing at:
 >
 > - **`LibraryChanged` arrives, and its five arrays hold *ids*.** Never once
->   observed before this run; **seven** arrived unprompted in 70 minutes,
+>   observed before this run; **twelve** arrived unprompted in 96 minutes,
 >   with all seven documented keys and every array a list of id strings
->   rather than of item objects. The shipped mapper produced 5 `ITEM_ADDED`,
->   3 `ITEM_UPDATED` and 1 `ITEM_REMOVED` from them. One frame carried a
+>   rather than of item objects. The shipped mapper produced 7 `ITEM_ADDED`,
+>   7 `ITEM_UPDATED` and 1 `ITEM_REMOVED` from them. One frame carried a
 >   real `ItemsRemoved` **on a library from which nothing was removed** —
 >   which is [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)'s
 >   central argument, observed rather than reasoned. One `ItemsUpdated`
@@ -174,7 +176,7 @@ Operational requirements:
 > - **The envelope is not uniform.** `UserDataChanged` carries
 >   `{MessageId, MessageType, Data}` with a distinct 32-hex `MessageId` per
 >   *message*; `Sessions` carries `{MessageType, Data}` and **no `MessageId`
->   at all**, on every frame observed.
+>   at all**, on 177 of 177 frames.
 > - **`UserDataChanged.Data` is an object** with `UserId` and `UserDataList`,
 >   and an entry carries `ItemId`, `PlaybackPositionTicks`, `Played`,
 >   `PlayCount`, `IsFavorite`, plus `PlayedPercentage` when the position is
@@ -337,7 +339,7 @@ Polling is the backstop, not the design.
 [ADR-0015](decisions/0015-availability-is-retracted-only-by-a-finished-walk.md)
 is unambiguous — only a walk that provably finished sweeps — and an Emby
 library refresh emits `ItemsRemoved` for items that have not gone anywhere.
-**Observed 2026-08-02**: one arrived during a 70-minute listen on a server
+**Observed 2026-08-02**: one arrived during a 96-minute listen on a server
 where nothing was deleted. The event is counted and logged; the row stays
 available until the nightly
 walk sweeps it, which [08](08-operations.md) already prices as "availability

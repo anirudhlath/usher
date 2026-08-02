@@ -106,11 +106,11 @@ that change what this document asserted:
 - **`Sessions` is not periodic on the socket Usher actually uses.**
   `"0,1000"` is `initialDelayMs,intervalMs` and an *unauthenticated* socket
   really does receive one frame a second; the authenticated, row-filtered
-  stream arrives when the filtered view changes — median 34.7 s, max 60.1 s
-  over 133 intervals in 70 minutes. The table above should be read as
+  stream arrives when the filtered view changes — median 37.7 s, max 72.9 s
+  over 176 intervals in 96 minutes. The table above should be read as
   "periodically, because something on the server keeps changing", not as a
   heartbeat.
-- **`LibraryChanged` was observed for the first time** — seven of them —
+- **`LibraryChanged` was observed for the first time** — twelve of them —
   and its arrays hold id strings rather than item objects. One carried a
   real `ItemsRemoved` on a library from which nothing was deleted, which is
   [ADR-0015](0015-availability-is-retracted-only-by-a-finished-walk.md)'s

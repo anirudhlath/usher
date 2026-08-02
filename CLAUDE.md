@@ -183,18 +183,19 @@ driving the shipped `EmbyAdapter` → `EmbyPushChannel` → `connect_websocket`
 recording callables in place of the three unit-of-work ones. From a
 throwaway script outside the working tree, holding the operator's existing
 token (no password, so `AuthenticateByName` was again not exercised).
-**Bounded deliberately: one long-lived socket held 70 minutes, eight
+**Bounded deliberately: one long-lived socket held 96 minutes, eight
 short-lived probe sockets, and 14 HTTP requests in total** — no walk of any
 kind, because the library is 1,126,789 items. The long socket received
-**146 frames — 134 `Sessions`, 7 `LibraryChanged`, 5 `UserDataChanged` —
+**194 frames — 177 `Sessions`, 12 `LibraryChanged`, 5 `UserDataChanged` —
 with zero reconnects, zero unforced failures, and `supports_push` true
-throughout**, and the shipped mapper turned them into 14 `SourceEvent`s.
+throughout**, and the shipped mapper turned them into 20 `SourceEvent`s.
 
 - **The envelope is not uniform, and that is the first correction.**
   `UserDataChanged` and `LibraryChanged` carry
   `{MessageId, MessageType, Data}` with a **distinct 32-hex `MessageId` per
-  message** (not per type); **`Sessions` carries `{MessageType, Data}` and
-  no `MessageId` at all**, on 59 of 59 frames. `tests/fixtures/emby/
+  message** (not per type — 17 carried one, 17 distinct); **`Sessions`
+  carries `{MessageType, Data}` and no `MessageId` at all**, on 177 of 177
+  frames. `tests/fixtures/emby/
   push_sessions.json` claimed one and no longer does.
 - **A real `UserDataChanged` entry is honest, including about play
   history.** One item, three transitions, each compared against
@@ -217,17 +218,17 @@ throughout**, and the shipped mapper turned them into 14 `SourceEvent`s.
   measured opportunity worth one `watch_history` job per played item;
   recorded, not taken.
 - **`LibraryChanged` arrives, its arrays hold ids, and one of them arrived
-  carrying all six at once.** Never observed before this run; **seven**
+  carrying all six at once.** Never observed before this run; **twelve**
   arrived unprompted during the hold, with all seven documented keys
   (`ItemsAdded`/`ItemsUpdated`/`ItemsRemoved`,
   `FoldersAddedTo`/`FoldersRemovedFrom`, `CollectionFolders`, `IsEmpty`) and
   every array a **list of id strings** rather than of item objects. The
   committed fixture's shape was already right, field for field. The shipped
-  `to_source_events` produced 5 `ITEM_ADDED`, 3 `ITEM_UPDATED` and 1
+  `to_source_events` produced 7 `ITEM_ADDED`, 7 `ITEM_UPDATED` and 1
   `ITEM_REMOVED` from them — one event per non-empty array, live.
 - **`ItemsRemoved` fires on a library from which nothing was removed, and
   that is ADR-0015's argument arriving as a measurement rather than as an
-  argument.** Nobody deleted anything from this server during the hold, and
+  argument.** Nobody deleted anything from this server during the 96-minute hold, and
   one frame still named an item in `ItemsRemoved` (alongside
   `FoldersRemovedFrom`, `ItemsAdded`, `FoldersAddedTo`, `CollectionFolders`
   and ten `ItemsUpdated`). M5 counts it and retracts nothing; had it
@@ -248,18 +249,28 @@ throughout**, and the shipped mapper turned them into 14 `SourceEvent`s.
   `LastPlayedDate` (when played). The fixture and `FakeEmbyServer` both
   rendered a `Key`; both stopped.
 - **The `Sessions` interval, which `DEFAULT_STALE_AFTER_SECONDS = 90.0`
-  rests on: median 34.7 s, mean 31.6 s, p90 46.3 s, max 60.1 s** over 133
-  intervals in 70 minutes on an authenticated socket. **The 90 s default
-  survives — but the headroom is 1.5x, not the comfortable margin the
-  constant reads like, and it shrank as the window grew**: at 26 minutes the
-  worst gap was 52.6 s and nothing exceeded 60; by 70 minutes exactly one
-  gap had. This is a measurement of *this* household at *this* hour, not a
-  constant. Two things make it fragile enough to keep the setting: a
-  75-second smoke run earlier the same evening saw exactly **one** frame,
-  and the cadence is not an interval at all (below). The failure is bounded
-  and visible rather than silent — a reconnect, a delta that returns 0
-  items, and a counter that climbs — which is the whole reason the ledger
-  design tolerates being wrong about it.
+  rests on: median 37.7 s, mean 32.5 s, p90 47.2 s, max 72.9 s** over 176
+  intervals in 96 minutes on an authenticated socket. **The 90 s default
+  survives — but the headroom is 1.23x, not the comfortable margin the
+  constant reads like, and it shrank monotonically as the window grew**: the
+  worst gap was 52.6 s at 26 minutes, 60.1 s at 70 and **72.9 s at 96**. So
+  a longer hold would plausibly have crossed 90, and this is a bound that
+  has **not been falsified** rather than one shown to be safe — on one
+  household, on one evening. A 75-second smoke run earlier the same evening
+  saw exactly **one** frame, and the cadence is not an interval at all
+  (below).
+
+  **The default is left at 90 anyway, and the reasoning is worth keeping.**
+  A bigger constant chosen from a 96-minute sample would be just as
+  unprincipled as this one was, and it costs detection time for the failure
+  the whole milestone exists to catch. The real finding is that the constant
+  is wrong *in kind*: there is no application-level heartbeat on this
+  channel at all, so any fixed ceiling is a guess against a change-driven
+  signal. The one genuinely periodic signal available is the WebSocket
+  pong — and ADR-0018 deliberately refuses to count it, because a pong is
+  not delivery. That tension is the honest statement of what this design
+  costs. When it bites, it bites bounded and visible: a reconnect, a delta
+  that returns 0 items, and `usher.source.push.reconnects` climbing.
 - **`"0,1000"` really is `initialDelayMs,intervalMs`, and an authenticated
   socket does not honour it.** An *unauthenticated* socket receives
   `Sessions` at ~1 Hz — 53 and 55 frames in 45 s, with sub-second gaps —
@@ -342,9 +353,9 @@ throughout**, and the shipped mapper turned them into 14 `SourceEvent`s.
   `User.Policy.IsAdministrator` (this run held a token, not a password —
   so Task 3's extra `GET /Users/{userId}` remains the verified path);
   silent 401 re-authentication end to end; durable-device registration
-  across restarts; a socket held for four hours (**70 minutes** is what this
+  across restarts; a socket held for four hours (**96 minutes** is what this
   run covers, with zero reconnects and zero unforced failures in it); a
-  `LibraryChanged` with `IsEmpty: true` (all seven observed carried
+  `LibraryChanged` with `IsEmpty: true` (all twelve observed carried
   something, so what that field means is still a guess about a field nothing
   reads); a `UserDataChanged` for a **series** entry, which is where
   `UnplayedItemCount` would plausibly appear; and whether a real entry is
