@@ -292,12 +292,24 @@ async def test_the_ledger_reports_delivering_only_once_a_real_frame_has_arrived(
     an implementation reading health off the connection object answers
     `True` here -- against a peer that has said nothing. Only the message
     clause makes that read `False`.
+
+    **And the silence is long enough to matter**, which makes this the push
+    lane's answer to the defect `GET /events` had: several `poll_seconds`
+    elapse before the frame is sent, so the channel's `asyncio.wait_for`
+    around `recv()` has cancelled and re-issued a pending receive at least
+    three times, and the message that arrives afterwards still arrives.
+    `websockets` documents cancelling `recv` as safe ("the next invocation
+    will return the next message") and a coroutine method is not an async
+    generator's `__anext__`, so the failure the SSE route had is not
+    reachable here -- but that is an argument, and this is the measurement.
     """
     channel = _channel(server.base_url)
     async with _consuming(channel):
         await _until(lambda: bool(server.received), what="the handshake to complete")
         assert channel.health.connected is True
         assert channel.health.is_delivering(now=time.monotonic()) is False
+        await asyncio.sleep(POLL_SECONDS * 3)
+        assert channel.health.messages_received == 0, "the poll ticks counted as messages"
         await server.connections[0].send(_SESSIONS)
         await _until(lambda: channel.health.messages_received >= 1, what="a frame")
         assert channel.health.is_delivering(now=time.monotonic()) is True
