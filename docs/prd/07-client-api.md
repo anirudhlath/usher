@@ -240,10 +240,10 @@ subsystem narrows functionality, it never fails a request local state can answer
 
 | Event | Payload | Client action | |
 |---|---|---|---|
-| `title.updated` | Title id + changed fields | Patch in place | M5 — see below |
-| `watchstate.updated` | Title/episode id, position, played | Update progress | M5 — see below |
+| `title.updated` | Title id + changed fields | Patch in place | ✅ M5 |
+| `watchstate.updated` | Title/episode id, position, played | Update progress | ✅ M5 |
 | `row.invalidated` | Row slug | Refetch that row | M7 |
-| `sync.progress` | Source, counts, phase | Admin UI only | M5 — see below |
+| `sync.progress` | Source, counts, phase | Admin UI only | ✅ M5 |
 | `bootstrap.progress` | Phase, percent | Admin UI only | — |
 
 - Subscriptions are scoped by query (`?titles=id1,id2`) so a detail screen isn't
@@ -257,11 +257,24 @@ SSE over WebSocket because the channel is server→client only, it survives
 proxies that mangle upgrades, and it reconnects natively in browsers.
 
 > **Settled in M5.** The route, the wire format, the bus and the three
-> publishers all ship, each pinned by tests. The three rows above are marked
-> "see below" rather than ✅ for one reason: nothing in a running process
-> builds the bus or registers a subscriber until `create_app`'s lifespan
-> grows its lanes, so no deployment emits any of them today. Tick them in the
-> change that starts the lanes.
+> publishers all ship, each pinned by tests. The three rows above were held
+> at "see below" until a running process could actually emit them: the bus
+> alone is not enough, because every publisher sits behind a lane. They are
+> ticked now that `create_app`'s lifespan runs both — the push lane's
+> `PushApplyService` emits `title.updated` and `watchstate.updated`, its
+> gap-closing delta emits `sync.progress` through `ReconcileService`, and
+> the worker lane's `EnrichService` emits `title.updated` on the enrichment
+> a client's own `GET /titles/{id}` promoted. That last one is PRD
+> [03](03-sources-and-sync.md)'s read-through loop closing inside one
+> process, which is the reason the worker runs here at all.
+>
+> **`usher work` as a separate process publishes to `NullEventPublisher`**,
+> and that is a stated consequence rather than an oversight: the bus is
+> in-memory, so an enrichment finished in another process reaches no
+> subscriber. A client that refetches still gets the enriched title —
+> degradation rather than breakage, [08](08-operations.md)'s own principle —
+> and the fix is the named second implementation of the port rather than a
+> branch in a service.
 >
 > **`resync_required` is a fifth event and the channel's own.** It answers a
 > subscriber whose buffer overflowed, a `Last-Event-ID` older than the replay

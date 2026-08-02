@@ -160,7 +160,18 @@ async def app(
         await conn.execute(text("TRUNCATE sources CASCADE"))
     await engine.dispose()
 
-    application = create_app(Settings(database_url=postgres_url, secret_key=SECRET_KEY))
+    application = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key=SECRET_KEY,
+            # `dependency_overrides` do not reach the lifespan, so a push
+            # lane here would build the *real* adapter against
+            # `https://emby.invalid` and try to open a socket -- a network
+            # request from a test, which this suite does not make.
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
     factory = _FakeServerFactory(server)
     application.dependency_overrides[get_source_adapter_factory] = lambda: factory
     try:

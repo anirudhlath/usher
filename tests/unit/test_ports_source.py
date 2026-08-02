@@ -546,3 +546,33 @@ def test_a_push_probe_defaults_to_having_learned_nothing() -> None:
     assert dataclasses.is_dataclass(probe)
     with pytest.raises(dataclasses.FrozenInstanceError):
         probe.delivering = True  # type: ignore[misc]
+
+
+def test_push_reconnects_is_concrete_and_defaults_to_a_true_zero() -> None:
+    """PRD 10's `usher.source.push.reconnects`, reachable through the port.
+
+    Concrete rather than abstract for the reason `probe_push` is, and for
+    one more: an adapter with **no** push channel has never reconnected, so
+    `0` is that adapter's true answer rather than the fabricated zero
+    `usher.telemetry._push_observations` refuses to emit. An adapter that
+    *has* a channel must override it -- and both that exist do, which is
+    what the case below checks, because a lane supervisor reading this
+    through the port has no other way to tell an honest zero from a
+    forgotten override.
+    """
+    assert "push_reconnects" not in SourceAdapter.__abstractmethods__
+    assert "push_reconnects" in vars(SourceAdapter)
+
+
+async def test_every_adapter_with_a_channel_answers_reconnects_for_itself() -> None:
+    """The default is a claim only an adapter with no channel may make.
+
+    Asserted structurally rather than behaviourally because the failure it
+    guards is a *missing* override, which every behavioural case would read
+    as "it has not reconnected yet".
+    """
+    from tests.fakes.source_adapter import FakeSourceAdapter
+    from usher.adapters.emby.adapter import EmbyAdapter
+
+    for implementation in (EmbyAdapter, FakeSourceAdapter):
+        assert "push_reconnects" in vars(implementation), implementation.__name__

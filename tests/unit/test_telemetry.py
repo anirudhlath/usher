@@ -62,6 +62,13 @@ async def test_a_request_through_the_app_produces_a_valid_span() -> None:
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@localhost:5432/usher",
         secret_key="0" * 32,
+        # No lanes: this app exists for the span its request produces, and a
+        # push lane would build a real adapter while a worker lane polled a
+        # database that is not there. See `usher.api.lanes`' module
+        # docstring -- said per fixture rather than defaulted in
+        # `conftest.py`, so it is greppable.
+        push_enabled=False,
+        worker_enabled=False,
     )
     app = create_app(settings)
 

@@ -68,7 +68,16 @@ _PROVIDERS = {
 
 
 def _probe_app(postgres_url: str) -> FastAPI:
-    app = create_app(Settings(database_url=postgres_url, secret_key="0" * 32))
+    app = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key="0" * 32,
+            # This file resolves providers; lanes would only add a worker
+            # polling the same database. See `usher.api.lanes`.
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
     for name, provider in _PROVIDERS.items():
 
         def route(built: Annotated[Any, Depends(provider)]) -> dict[str, str]:
@@ -138,7 +147,16 @@ async def test_a_request_resolves_the_default_user_and_writes_the_row(
     session-scoped container -- hence the cleanup. Same rule
     `tests/integration/test_cli_pipeline.py` follows.
     """
-    app = create_app(Settings(database_url=postgres_url, secret_key="0" * 32))
+    app = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key="0" * 32,
+            # This file resolves providers; lanes would only add a worker
+            # polling the same database. See `usher.api.lanes`.
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
 
     @app.get("/_probe/default_user")
     def _default_user(
@@ -187,6 +205,8 @@ async def test_the_reconcile_service_carries_this_deployments_tuning(
         secret_key="0" * 32,
         sync_batch_size=7,
         sync_max_retract_fraction=0.5,
+        push_enabled=False,
+        worker_enabled=False,
     )
     app = create_app(settings)
 

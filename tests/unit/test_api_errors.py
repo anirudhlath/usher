@@ -93,6 +93,8 @@ async def test_create_app_registers_the_handler_on_the_real_admin_route() -> Non
         Settings(
             database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
             secret_key="0" * 32,
+            push_enabled=False,
+            worker_enabled=False,
         )
     )
     async with LifespanManager(app) as manager:

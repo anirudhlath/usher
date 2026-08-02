@@ -304,6 +304,13 @@ class EmbyAdapter(SourceAdapter):
         return self._health.is_delivering(now=self._clock())
 
     @property
+    def push_reconnects(self) -> int:
+        """The ledger's own count, which is the lane's history rather than
+        this connection's — one `PushHealth` outlives every channel this
+        adapter opens."""
+        return self._health.reconnects
+
+    @property
     def push_health(self) -> PushHealth:
         """The ledger, for the lane supervisor and for
         `GET /admin/sources/{id}/status`. Read-only by convention; nothing

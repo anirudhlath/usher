@@ -128,6 +128,7 @@ class FakeSourceAdapter(SourceAdapter):
         self._push_dropped = False
         self._push_silent = False
         self._push_now = 0.0
+        self._push_reconnects = 0
         self.push_stale_after = 90.0
 
     # -- harness-facing state ------------------------------------------
@@ -213,6 +214,18 @@ class FakeSourceAdapter(SourceAdapter):
     @property
     def source_id(self) -> uuid.UUID:
         return self._source.id
+
+    @property
+    def push_reconnects(self) -> int:
+        """A second, independently written count of the same quantity.
+
+        Overridden rather than inherited from the port's honest `0`, for
+        the reason every other clause of this fake's health rule is spelled
+        out here: a fake that inherited the default could not disagree with
+        an adapter that forgot to override it, and disagreement is the only
+        thing a contract suite is for.
+        """
+        return self._push_reconnects
 
     @property
     def supports_push(self) -> bool:
@@ -370,6 +383,12 @@ class FakeSourceAdapter(SourceAdapter):
 
     @asynccontextmanager
     async def _events(self) -> AsyncIterator[AsyncIterator[SourceEvent]]:
+        # On the second and later *open*, guarded on the previous instant
+        # rather than incremented unconditionally -- `PushHealth.record_open`
+        # states the whole argument, and a fake that started every source's
+        # dashboard at 1 would ratify the version that does.
+        if self._push_opened_at is not None:
+            self._push_reconnects += 1
         self._push_open = True
         self._push_opened_at = self._push_now
         # Cleared, and `_push_messages` deliberately not: the count is the

@@ -14,7 +14,8 @@ from typing import Annotated, cast
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from usher.adapters.factory import ConfiguredSourceAdapterFactory
+from usher.api.lanes import LaneSupervisor
+from usher.composition import adapter_factory
 from usher.config import Settings
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.episode import PostgresEpisodeRepository
@@ -117,6 +118,30 @@ def get_event_publisher(bus: EventBusDep) -> EventPublisher:
 
 
 EventPublisherDep = Annotated[EventPublisher, Depends(get_event_publisher)]
+
+
+def get_lane_supervisor(request: Request) -> LaneSupervisor:
+    """The process's background lanes, started by `create_app`'s lifespan.
+
+    Read by `/health/ready`, which **reports** what it finds here and never
+    gates its status code on it, and by `GET /admin/sources/{id}/status`,
+    which takes the *running lane's* push health rather than opening a
+    socket of its own. Same defensive `getattr`/`cast` shape as
+    `get_session_factory` below, and for the same reason -- `app.state` is
+    typed `Any`, so without the `cast` mypy would accept this returning
+    anything at all.
+    """
+    lanes = getattr(request.app.state, "lanes", None)
+    if lanes is None:
+        raise RuntimeError(
+            "app.state.lanes is not set -- create_app's lifespan has not run. "
+            "If this is a test using a bare ASGI transport, wrap the app in "
+            "asgi_lifespan.LifespanManager first."
+        )
+    return cast(LaneSupervisor, lanes)
+
+
+LaneSupervisorDep = Annotated[LaneSupervisor, Depends(get_lane_supervisor)]
 
 
 def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
@@ -226,13 +251,7 @@ def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:
     in-memory server -- without also replacing the repository, the
     credential store, or the service.
     """
-    return ConfiguredSourceAdapterFactory(
-        page_size=settings.source_page_size,
-        timeout_seconds=settings.source_timeout_seconds,
-        reauth_cooldown_seconds=settings.source_reauth_cooldown_seconds,
-        push_stale_after_seconds=settings.push_stale_after_seconds,
-        push_poll_seconds=settings.push_poll_seconds,
-    )
+    return adapter_factory(settings)
 
 
 def get_source_service(

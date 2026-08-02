@@ -572,6 +572,35 @@ class SourceAdapter(ABC):
         delivering raises rather than sitting there looking well.
         """
 
+    @property
+    def push_reconnects(self) -> int:
+        """How many times this adapter's push channel has re-**opened**.
+
+        PRD 10's `usher.source.push.reconnects`, and it is on the port
+        rather than on a ledger the lane supervisor reaches into because
+        the supervisor holds a `SourceAdapter` and nothing more — reading
+        an attribute the port does not promise would report a silent zero
+        the day it is renamed.
+
+        Concrete rather than abstract for the reason `probe_push` is, plus
+        one this property has of its own: an adapter with **no** push
+        channel has never reconnected, so `0` is its true answer rather
+        than the fabricated zero `usher.telemetry._push_observations`
+        refuses to emit. An adapter that *has* a channel must override it;
+        `tests/unit/test_ports_source.py` checks structurally that both
+        implementations do, because a forgotten override is indistinguishable
+        from "it has not reconnected yet" in every behavioural test.
+
+        Counted on the second and later **open**, never on a failure: a
+        lane that failed to connect five times and then succeeded
+        reconnected *once*, and a counter on the failure reports five and
+        makes an unreachable source look like a flapping one — a different
+        diagnosis with a different fix. Cumulative for the lane rather than
+        per connection, which is what an adapter holding one ledger across
+        reconnects buys.
+        """
+        return 0
+
     async def probe_push(self, *, timeout_seconds: float = 15.0) -> PushProbe:
         """Open the push channel, wait, and report **what arrived**.
 

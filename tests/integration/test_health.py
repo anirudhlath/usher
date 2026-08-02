@@ -30,6 +30,13 @@ def app(postgres_url: str) -> FastAPI:
     settings = Settings(
         database_url=postgres_url,
         secret_key="0123456789abcdef0123456789abcdef",
+        # Reported by `/health/ready` either way; off here so this file's
+        # subject stays the two checks the status code *is* gated on, and so
+        # a worker lane does not claim jobs another file is asserting on.
+        # `tests/integration/test_lanes_in_the_server_process.py` is where
+        # they are turned on against this same real database.
+        push_enabled=False,
+        worker_enabled=False,
     )
     return create_app(settings)
 

@@ -34,15 +34,8 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.cli import (
-    _build_pipeline,
-    _open_adapter,
-    _selected_sources,
-    _session_for,
-    _sync_status,
-    _unmatched,
-    _work,
-)
+from usher.cli import _open_adapter, _session_for, _sync_status, _unmatched, _work
+from usher.composition import build_pipeline, selected_sources
 from usher.config import Settings, get_settings
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.users import DEFAULT_USER_NAME, ensure_default_user
@@ -169,10 +162,10 @@ async def test_work_completes_a_job_for_an_item_no_source_addresses(
     """A `match` job for an item no configured source addresses completes
     rather than parks (PRD 08 reserves parking for work a human must look
     at), so the worker's loop is exercised end to end without a network
-    call: `_SourceRegistry.resolve` answers `None` from local state alone.
+    call: `SourceRegistry.resolve` answers `None` from local state alone.
     """
     async with _session_for(cli_settings) as session:
-        pipeline = _build_pipeline(session, cli_settings)
+        pipeline = build_pipeline(session, cli_settings)
         await pipeline.queue.enqueue(
             [JobRequest(kind=JobKind.MATCH, key="nobody-has-this", priority=JobPriority.NEW)]
         )
@@ -211,7 +204,7 @@ async def test_unmatched_lists_and_resolves_through_the_real_repository(
             ),
             {"id": title_id},
         )
-        pipeline = _build_pipeline(own, cli_settings)
+        pipeline = build_pipeline(own, cli_settings)
         await pipeline.media_items.upsert_many(
             [
                 MediaItemUpsert(
@@ -276,7 +269,7 @@ async def test_a_disabled_source_is_never_walked(session: AsyncSession) -> None:
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@localhost:5432/usher", secret_key="0" * 32
     )
-    pipeline = _build_pipeline(session, settings)
+    pipeline = build_pipeline(session, settings)
     disabled = Source(
         kind=SourceKind.EMBY,
         name="cli-disabled",
@@ -286,8 +279,8 @@ async def test_a_disabled_source_is_never_walked(session: AsyncSession) -> None:
         enabled=False,
     )
     await PostgresSourceRepository(session).add(disabled)
-    assert await _selected_sources(pipeline, None) == []
-    assert await _selected_sources(pipeline, "cli-disabled") == []
+    assert await selected_sources(pipeline, None) == []
+    assert await selected_sources(pipeline, "cli-disabled") == []
 
 
 async def test_a_source_with_no_credential_row_is_skipped_not_crashed(
@@ -301,7 +294,7 @@ async def test_a_source_with_no_credential_row_is_skipped_not_crashed(
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@localhost:5432/usher", secret_key="0" * 32
     )
-    pipeline = _build_pipeline(session, settings)
+    pipeline = build_pipeline(session, settings)
     source = Source(
         kind=SourceKind.EMBY,
         name="cli-uncredentialed",
@@ -324,7 +317,7 @@ def test_allow_full_retraction_is_the_only_way_past_the_ceiling(session: AsyncSe
         secret_key="0" * 32,
         sync_max_retract_fraction=0.1,
     )
-    guarded = _build_pipeline(session, settings)
-    opened = _build_pipeline(session, settings, max_retract_fraction=1.0)
+    guarded = build_pipeline(session, settings)
+    opened = build_pipeline(session, settings, max_retract_fraction=1.0)
     assert guarded.reconcile._max_retract_fraction == 0.1
     assert opened.reconcile._max_retract_fraction == 1.0

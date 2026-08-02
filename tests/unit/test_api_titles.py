@@ -100,6 +100,8 @@ def app(service: TitleReadService) -> FastAPI:
         Settings(
             database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
             secret_key="0123456789abcdef0123456789abcdef",
+            push_enabled=False,
+            worker_enabled=False,
         )
     )
     built.dependency_overrides[get_title_read_service] = lambda: service

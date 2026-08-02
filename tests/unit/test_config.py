@@ -422,3 +422,23 @@ def test_the_backoff_and_the_failure_ceiling_cannot_be_switched_off(
         monkeypatch.delenv(name)
     monkeypatch.setenv("USHER_PUSH_GAP_MIN_INTERVAL_SECONDS", "0")
     assert Settings().push_gap_min_interval_seconds == 0.0
+
+
+def test_every_setting_is_read_by_something(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`config.py`'s own comment: "none is a field that validates and then
+    influences nothing". Asserted rather than trusted.
+
+    A setting nothing reads is a knob an operator turns with no effect --
+    the same shape M4 found three times in PRD 10's metric table (two
+    gauges that did not exist, one emitted under a different name). Scans
+    `src/` for the attribute access, excluding `config.py` itself, which is
+    where the field is *declared*.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    src = Path(__file__).resolve().parents[2] / "src" / "usher"
+    read = "\n".join(
+        path.read_text() for path in sorted(src.rglob("*.py")) if path.name != "config.py"
+    )
+    unread = [name for name in Settings.model_fields if f".{name}" not in read]
+    assert unread == []

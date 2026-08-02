@@ -100,9 +100,9 @@ is maintained rather than aspirational.
 | `usher.watch_state.run.duration` | histogram | source, status | ✅ M4 |
 | `usher.watch_state.backfilled` | counter | source | ✅ M4 |
 | `usher.source.request.duration` | histogram | source, op | ✅ M3 |
-| `usher.source.push.connected` | gauge | source | M5 — see below |
-| `usher.source.push.reconnects` | counter | source | M5 — see below |
-| `usher.source.push.events` | counter | source, kind | M5 — see below |
+| `usher.source.push.connected` | gauge | source | ✅ M5 |
+| `usher.source.push.reconnects` | counter | source | ✅ M5 |
+| `usher.source.push.events` | counter | source, kind | ✅ M5 |
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
 | `usher.embedding.duration` | histogram | — | M6 |
@@ -134,18 +134,29 @@ can only answer the question it actually has:
   denominator that omitted the failures would read *low* exactly during an
   outage.
 
-Four more M5 made, in the same spirit — and one honest caveat first.
+Four more M5 made, in the same spirit — and one note on what ticking the
+three push rows required.
 
-**The three push rows are not ticked, and the instruments exist.** The
-gauges, the counter and their reader hook all ship, each pinned by a test
-that drives the emitting code and reads the value back out of an in-memory
-metric reader. What does not exist yet is the *lane*: nothing in a running
-process registers a push reader or applies a push event until `create_app`
-grows its supervised lanes, so no deployment emits these today and a ✅ would
-be the exact claim this column's rule forbids. Tick all three in the change
-that starts the lanes. `usher.sse.connections` **is** ticked, and the
-difference is the point: it needs no lane, only the bus, which `create_app`
-builds unconditionally -- so every running server emits it.
+**The three push rows were held at "see below" until a lane actually ran.**
+The gauges, the counter and their reader hook shipped early in M5, each
+pinned by a test that drives the emitting code and reads the value back out
+of an in-memory metric reader — but an instrument nothing feeds is a panel
+that is permanently blank, so a ✅ would have been the exact claim this
+column's rule forbids. They are ticked now because `create_app`'s lifespan
+builds a `LaneSupervisor`, registers `push_snapshots` as the reader, and
+runs a push lane per enabled source; `usher.source.push.events` is emitted
+by `PushApplyService`, which that lane calls. `usher.sse.connections` was
+ticked first, and the difference is the point: it needs no lane, only the
+bus, which `create_app` builds unconditionally.
+
+**`reconnects` is read through the port, not off a ledger.** The supervisor
+holds a `SourceAdapter` and nothing more, so `SourceAdapter.push_reconnects`
+is where the count lives — concrete on the port, defaulting to `0`, which is
+the *true* answer for an adapter with no channel rather than the fabricated
+zero the reader below refuses to emit. An adapter that has a channel
+overrides it, and that is checked structurally, because a forgotten override
+is indistinguishable from "it has not reconnected yet" in every behavioural
+test.
 
 - **`usher.source.push.connected` reports *delivery*, not connection.** A
   gauge fed by the socket's state would read 1 for the failure

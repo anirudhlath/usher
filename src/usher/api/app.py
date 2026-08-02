@@ -8,11 +8,19 @@ from fastapi.exceptions import RequestValidationError
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from usher.api.errors import validation_error_without_the_request_body
+from usher.api.lanes import LaneSupervisor
 from usher.api.routers import events, health, sources, titles
+from usher.composition import DefaultUserId, metadata_provider, unit_of_work
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.services.events import InMemoryEventBus
-from usher.telemetry import configure_telemetry, register_sse_gauge
+from usher.telemetry import configure_telemetry, register_push_gauges, register_sse_gauge
+
+
+async def _nothing() -> None:
+    """The `close_provider` a push-only deployment gets, so the lifespan's
+    `finally` has one shape rather than an `if`."""
+    return None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -22,7 +30,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = build_engine(settings.database_url.get_secret_value())
-        app.state.session_factory = build_session_factory(engine)
+        session_factory = build_session_factory(engine)
+        app.state.session_factory = session_factory
+        # The TMDb provider, and the one place its token bucket can live:
+        # `api/deps.py` says why it cannot be request-scoped ("N in-flight
+        # requests get N x 30 rps"), and the worker lane is the only thing
+        # in this process that needs it. Not built at all when no worker
+        # runs here -- an idle `httpx.AsyncClient` in a push-only
+        # deployment is a resource with no reader.
+        provider, close_provider = (
+            await metadata_provider(settings) if settings.worker_enabled else (None, _nothing)
+        )
+        lanes = LaneSupervisor(
+            settings,
+            unit_of_work(session_factory, settings, events=bus, provider=provider),
+            bus,
+            user_id=DefaultUserId(session_factory),
+            provider=provider,
+        )
+        app.state.lanes = lanes
+        # PRD 10's `usher.source.push.connected` / `.reconnects`. Registered
+        # unconditionally, because the reader answering "no lane, no
+        # observation" is what keeps a push-disabled process from reporting
+        # a fabricated zero on a series whose alert fires on exactly that.
+        register_push_gauges(lanes.push_snapshots)
+        # Creates tasks and opens no connection -- see `LaneSupervisor.start`.
+        # That is what keeps `/health` answering 200 with Postgres down.
+        await lanes.start()
         try:
             yield
         finally:
@@ -30,11 +64,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # no try/finally skips this call entirely if the task running
             # the lifespan is cancelled while suspended at yield (as
             # opposed to __aexit__ being called normally) -- exactly the
-            # shape ASGI shutdown uses. Harmless today (M1 has nothing
-            # else in the lifespan to leak), but M5 onward adds websocket
-            # connections, job workers, and HTTP clients to this same
-            # lifespan, where a skipped cleanup call is a real leak, not a
-            # theoretical one.
+            # shape ASGI shutdown uses. The M1 comment here said "M5 onward
+            # adds websocket connections, job workers, and HTTP clients to
+            # this same lifespan, where a skipped cleanup call is a real
+            # leak, not a theoretical one". This is that milestone; the
+            # comment stops being a prediction.
+            #
+            # `stop()` first, then the client, then the engine: an engine
+            # disposed under a live lane makes that lane's next statement
+            # raise into a task that is about to be cancelled anyway.
+            await lanes.stop()
+            await close_provider()
             await engine.dispose()
 
     app = FastAPI(

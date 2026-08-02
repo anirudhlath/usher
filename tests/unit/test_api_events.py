@@ -40,6 +40,8 @@ def app() -> FastAPI:
             database_url="postgresql+asyncpg://u:p@localhost/db",
             secret_key="0123456789abcdef0123456789abcdef",
             sse_heartbeat_seconds=_HEARTBEAT_SECONDS,
+            push_enabled=False,
+            worker_enabled=False,
         )
     )
 

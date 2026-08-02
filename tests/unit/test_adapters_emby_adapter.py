@@ -1366,6 +1366,10 @@ async def test_events_opens_a_fresh_connection_per_call_and_keeps_one_ledger() -
         assert connector.attempts == 2
         assert connector.handed_out == [first, second]
         assert adapter.push_health.messages_received == 2
+        # The port's own accessor, which is what a lane supervisor holding
+        # a `SourceAdapter` can reach -- one reconnect for two opens, never
+        # two, because the first open is not a reconnect.
+        assert adapter.push_reconnects == 1
     finally:
         await adapter.aclose()
 
