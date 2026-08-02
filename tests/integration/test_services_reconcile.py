@@ -25,6 +25,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.fakes.event_publisher import FakeEventPublisher
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
@@ -96,6 +97,7 @@ def service(
             queue=queue,
         ),
         media_items=media_items,
+        events=FakeEventPublisher(),
         runs=runs,
         commit=session.flush,
         batch_size=2,

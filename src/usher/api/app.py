@@ -11,7 +11,8 @@ from usher.api.errors import validation_error_without_the_request_body
 from usher.api.routers import events, health, sources
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
-from usher.telemetry import configure_telemetry
+from usher.services.events import InMemoryEventBus
+from usher.telemetry import configure_telemetry, register_sse_gauge
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -56,6 +57,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # the app runs on the settings it was handed, not on whatever the
     # environment says at the moment a request arrives.
     app.state.settings = settings
+    # The process-wide client event bus (PRD 07's SSE channel). Here rather
+    # than in the lifespan for the reason `settings` is: it is not a resource
+    # with a lifetime -- no connection, no thread, nothing to dispose -- and
+    # `get_reconcile_service` needs one on every request that walks a source.
+    # One per app, never per request: a request-scoped bus would give every
+    # SSE connection its own and a publisher would fan out to nobody.
+    bus = InMemoryEventBus(buffer_size=settings.sse_buffer_size, queue_size=settings.sse_queue_size)
+    app.state.events = bus
+    # PRD 10's `usher.sse.connections`, and the one observable callback in
+    # this project that is a live read rather than a snapshot -- `len()` on an
+    # in-memory set has no coroutine to bounce onto the event loop from the
+    # metric reader's background thread. Re-registering on a second
+    # `create_app()` in one process is deliberate and is why the reader is a
+    # module global rather than a captured closure.
+    register_sse_gauge(lambda: bus.subscribers)
     # Replaces FastAPI's default 422 body, which echoes the submitted
     # request -- and `POST /admin/sources` submits a source credential. See
     # usher.api.errors; this is a security control, not a response-shape

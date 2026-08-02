@@ -48,6 +48,7 @@ from usher.domain.enums import ENRICHMENT_RANK, EnrichmentState
 from usher.domain.episode import Episode
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, UsherPortError
+from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.ingest import ProviderRef
 from usher.ports.metadata import EnrichmentResult, MetadataProvider
 from usher.ports.repository import EpisodeRepository, RawPayloadStore, TitleRepository
@@ -132,6 +133,7 @@ class EnrichService:
         payloads: RawPayloadStore,
         provider: MetadataProvider,
         commit: Callable[[], Awaitable[None]],
+        events: EventPublisher,
         *,
         cache_max_age_days: int = 30,
         now: Callable[[], AwareDatetime] = lambda: datetime.now(UTC),
@@ -141,6 +143,12 @@ class EnrichService:
         self._payloads = payloads
         self._provider = provider
         self._commit = commit
+        # Required, never a default. A shared `NullEventPublisher()` sitting
+        # in a signature is a mutable-looking default that happens to be
+        # stateless today, and every other collaborator here is required --
+        # the two composition roots supply `NullEventPublisher()` where they
+        # mean it, and say why.
+        self._events = events
         self._max_age = timedelta(days=cache_max_age_days)
         # Injected, the way `EmbySession`, `TmdbClient` and `TMDbIdDataset`
         # all inject theirs: the cache-expiry branch is otherwise only
@@ -184,10 +192,33 @@ class EnrichService:
         ref = self._ref_for(title)
         payload = await self._payload_for(ref)
         result = self._provider.to_result(payload, title.id)
-        enriched = self._merged(title, result)
+        changed = self._changes(result)
+        enriched = self._merged(title, result, changed)
         await self._titles.update(enriched)
         await self._store_hierarchy(result)
         await self._commit()
+        # PRD 03's read-through loop, closed: "Completion publishes a
+        # `title.updated` event on a Server-Sent Events channel; clients patch
+        # in place."
+        #
+        # **After the commit**, because a client patches by refetching the
+        # fields named below and would otherwise read the row this
+        # transaction has not written yet. On the success path only: a
+        # failure records `enrichment_error` and leaves the tier exactly
+        # where it was (ADR-0008), so "this changed" would send a client to
+        # refetch an identical stub -- once per attempt of a backoff
+        # schedule.
+        await self._events.publish(
+            ClientEvent(
+                kind=ClientEventKind.TITLE_UPDATED,
+                title_id=enriched.id,
+                # The fields a client can patch without refetching the whole
+                # title (PRD 07: "Title id + changed fields | Patch in
+                # place"). `["*"]` turns "patch in place" back into
+                # "refetch", one request later.
+                data={"fields": [*sorted(changed), "enrichment_state"]},
+            )
+        )
         return enriched
 
     def _ref_for(self, title: Title) -> ProviderRef:
@@ -229,13 +260,12 @@ class EnrichService:
         await self._payloads.put(ref.provider, space, ref.value, payload)
         return payload
 
-    def _merged(self, title: Title, result: EnrichmentResult) -> Title:
-        """The stored title with what the provider supplied written over it.
+    def _changes(self, result: EnrichmentResult) -> dict[str, Any]:
+        """What the provider actually supplied, keyed by field.
 
-        `.evolve()`, never `model_copy(update=)`: every `usher.domain` model
-        is frozen and `model_copy` skips validation entirely, so it can hand
-        back a `Title` carrying an out-of-range `community_rating` that
-        pydantic then serialises without complaint.
+        Hoisted out of `_merged` rather than recomputed, because it is also
+        what `title.updated` names on the wire -- and two copies of "which
+        fields moved" is how the event comes to disagree with the row.
         """
         changes: dict[str, Any] = {}
         for field in _ENRICHABLE:
@@ -246,6 +276,16 @@ class EnrichService:
             if value is None or value == ():
                 continue
             changes[field] = value
+        return changes
+
+    def _merged(self, title: Title, result: EnrichmentResult, changes: dict[str, Any]) -> Title:
+        """The stored title with what the provider supplied written over it.
+
+        `.evolve()`, never `model_copy(update=)`: every `usher.domain` model
+        is frozen and `model_copy` skips validation entirely, so it can hand
+        back a `Title` carrying an out-of-range `community_rating` that
+        pydantic then serialises without complaint.
+        """
         return title.evolve(
             **changes,
             # `ENRICHMENT_RANK`, never a direct comparison. `ENRICHED` is the

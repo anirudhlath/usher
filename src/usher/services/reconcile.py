@@ -55,6 +55,7 @@ from pydantic import AwareDatetime
 from usher.domain.source import Source
 from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.ports.errors import UsherPortError
+from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.ingest import AvailabilitySweepRefused
 from usher.ports.repository import MediaItemRepository, SyncRunRepository
 from usher.ports.source import SourceAdapter, SourceItem
@@ -108,6 +109,7 @@ class ReconcileService:
         ingest: IngestService,
         media_items: MediaItemRepository,
         runs: SyncRunRepository,
+        events: EventPublisher,
         commit: Callable[[], Awaitable[None]],
         *,
         batch_size: int = 1_000,
@@ -116,6 +118,11 @@ class ReconcileService:
         self._ingest = ingest
         self._media_items = media_items
         self._runs = runs
+        # Required, never a default: a shared `NullEventPublisher()` in a
+        # signature is a mutable-looking default that is stateless only by
+        # accident, and every other collaborator here is required. The two
+        # composition roots supply one where they mean it.
+        self._events = events
         self._commit = commit
         self._batch_size = batch_size
         self._max_retract_fraction = max_retract_fraction
@@ -143,7 +150,7 @@ class ReconcileService:
             await self._commit()
             progress = _Progress(run)
             try:
-                await self._walk(progress, adapter, cursor)
+                await self._walk(source, progress, adapter, cursor)
                 # Reached only when the walk returned normally. The whole
                 # safety argument is one `try` boundary wide.
                 run = await self._sweep(progress.run, kind)
@@ -201,22 +208,26 @@ class ReconcileService:
         return max(cursors) if cursors else None
 
     async def _walk(
-        self, progress: _Progress, adapter: SourceAdapter, cursor: AwareDatetime | None
+        self,
+        source: Source,
+        progress: _Progress,
+        adapter: SourceAdapter,
+        cursor: AwareDatetime | None,
     ) -> None:
         batch: list[SourceItem] = []
         async for item in adapter.list_items(since=cursor):
             batch.append(item)
             if len(batch) >= self._batch_size:
-                progress.run = await self._flush(progress.run, batch)
+                progress.run = await self._flush(source, progress.run, batch)
                 batch = []
         if batch:
             # The trailing partial batch. A walk's item count is almost never
             # a multiple of the batch size, so omitting this drops the last
             # page of nearly every walk -- and the sweep then retracts exactly
             # those items on the next run.
-            progress.run = await self._flush(progress.run, batch)
+            progress.run = await self._flush(source, progress.run, batch)
 
-    async def _flush(self, run: SyncRun, batch: Sequence[SourceItem]) -> SyncRun:
+    async def _flush(self, source: Source, run: SyncRun, batch: Sequence[SourceItem]) -> SyncRun:
         # `run.started_at`, not `now()`: `last_seen_at` means "the run that
         # saw this item", which is the quantity the sweep's
         # `last_seen_at < started_at` comparison is about. A per-row write
@@ -232,7 +243,39 @@ class ReconcileService:
         # One commit per batch, exactly like BootstrapService: a crash costs
         # the batch in flight, never the walk.
         await self._commit()
+        await self._publish_progress(source, run)
         return run
+
+    async def _publish_progress(self, source: Source, run: SyncRun) -> None:
+        """One `sync.progress` per batch, scoped to no title.
+
+        **Per batch rather than per run**, because an admin UI's progress bar
+        is the whole point of the event and one at the end is a bar that
+        jumps from 0% to 100%. A nightly walk of the one measured library
+        flushes 1,127 of these.
+
+        **Scoped to no title**, which is what makes PRD 07's "Admin UI only"
+        true rather than advisory: a `?titles=` subscriber never sees one, and
+        a detail screen that re-rendered on each of those 1,127 is the failure
+        the filter exists for.
+
+        The *name*, not the id: a payload a client renders should carry the
+        name an operator configured, and `run.source_id` is a UUID nothing
+        outside this process has a use for. That is why `Source` is threaded
+        down here rather than re-read from a repository.
+        """
+        await self._events.publish(
+            ClientEvent(
+                kind=ClientEventKind.SYNC_PROGRESS,
+                data={
+                    "source": source.name,
+                    "kind": run.kind.value,
+                    "items_seen": run.items_seen,
+                    "items_matched": run.items_matched,
+                    "items_unmatched": run.items_unmatched,
+                },
+            )
+        )
 
     async def _sweep(self, run: SyncRun, kind: SyncRunKind) -> SyncRun:
         """Retract availability -- full walks only, and only after one

@@ -312,3 +312,21 @@ def test_the_sse_heartbeat_is_under_every_proxy_idle_timeout(
         monkeypatch.setenv("USHER_SSE_HEARTBEAT_SECONDS", bad)
         with pytest.raises(ValidationError):
             Settings()
+
+
+def test_the_sse_ring_and_queue_are_bounded_both_ways(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both are read by `create_app`, which is what builds the bus. Bounded
+    above as well as below because each is an in-memory allocation *per
+    process* and *per connection* respectively -- a queue an operator could
+    set to a million is one browser tab holding a million events."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    assert (Settings().sse_buffer_size, Settings().sse_queue_size) == (256, 64)
+    for name in ("USHER_SSE_BUFFER_SIZE", "USHER_SSE_QUEUE_SIZE"):
+        for bad in ("0", "100000"):
+            monkeypatch.setenv(name, bad)
+            with pytest.raises(ValidationError):
+                Settings()
+        monkeypatch.delenv(name)

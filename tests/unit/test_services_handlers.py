@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 import pytest
 
 from tests.fakes.episode_repository import FakeEpisodeRepository
+from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.metadata_provider import FakeMetadataProvider
@@ -90,7 +91,12 @@ async def test_the_enrich_handler_enriches_the_title_its_key_names() -> None:
     title = Title(kind=TitleKind.MOVIE, tmdb_id=90000550, name="Stub", sort_name="Stub")
     await titles.add(title)
     service = EnrichService(
-        titles, FakeEpisodeRepository(), FakeRawPayloadStore(), FakeMetadataProvider(), _noop
+        titles,
+        FakeEpisodeRepository(),
+        FakeRawPayloadStore(),
+        FakeMetadataProvider(),
+        _noop,
+        FakeEventPublisher(),
     )
     await enrich_handler(service)(Job(kind=JobKind.ENRICH, key=str(title.id)))
     stored = await titles.get(title.id)
@@ -110,6 +116,7 @@ async def test_an_enrich_key_that_is_not_a_uuid_parks_rather_than_killing_the_wo
         FakeRawPayloadStore(),
         FakeMetadataProvider(),
         _noop,
+        FakeEventPublisher(),
     )
     with pytest.raises(PortDataMalformed):
         await enrich_handler(service)(Job(kind=JobKind.ENRICH, key="not-a-uuid"))

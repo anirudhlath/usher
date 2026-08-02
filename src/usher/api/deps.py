@@ -334,6 +334,7 @@ def get_reconcile_service(
     ingest: Annotated[IngestService, Depends(get_ingest_service)],
     media_items: MediaItemRepositoryDep,
     runs: SyncRunRepositoryDep,
+    events: EventPublisherDep,
 ) -> ReconcileService:
     """`commit` is `session.commit`, the same callable `get_session` calls
     at the end of a successful request.
@@ -349,6 +350,7 @@ def get_reconcile_service(
         ingest=ingest,
         media_items=media_items,
         runs=runs,
+        events=events,
         commit=session.commit,
         batch_size=settings.sync_batch_size,
         max_retract_fraction=settings.sync_max_retract_fraction,

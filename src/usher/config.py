@@ -132,11 +132,18 @@ class Settings(BaseSettings):
     # (ADR-0004's operational facts, which are about an idle HTTP connection
     # and apply to a long-lived response exactly as they apply to a
     # WebSocket), so `lt=60` is a compliance bound expressed as a type. Read
-    # by `usher.api.routers.events`; the bus's own `sse_buffer_size` /
-    # `sse_queue_size` arrive with the composition root that constructs it,
-    # because a setting nothing reads is one that validates and then
-    # influences nothing.
+    # by `usher.api.routers.events`; the two below by `create_app`, which is
+    # what builds the bus.
     sse_heartbeat_seconds: float = Field(default=20.0, gt=0, lt=60.0)
+    # How many events the replay ring holds, for `Last-Event-ID`. A client
+    # offline for longer than this is answered `resync_required` rather than
+    # replayed a partial stream, because replaying what is left and calling
+    # it a resume loses the events that fell off the front silently.
+    sse_buffer_size: int = Field(default=256, ge=1, le=10_000)
+    # Per-subscriber queue depth. On overflow the subscriber's queue is
+    # emptied and replaced with one `resync_required` (PRD 07), so this is a
+    # tolerance for a slow client rather than a delivery guarantee.
+    sse_queue_size: int = Field(default=64, ge=1, le=10_000)
 
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")

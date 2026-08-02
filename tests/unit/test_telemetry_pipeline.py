@@ -32,6 +32,7 @@ from opentelemetry.trace import Link, SpanContext, TraceFlags
 from pydantic import SecretStr
 
 from tests.fakes.episode_repository import FakeEpisodeRepository
+from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.metadata_provider import FakeMetadataProvider
@@ -199,6 +200,7 @@ async def test_enrichment_records_prd_10s_latency_metric(
         payloads=FakeRawPayloadStore(),
         provider=FakeMetadataProvider(),
         commit=_no_commit,
+        events=FakeEventPublisher(),
     )
     await service.enrich(title.id)
     recorded = _recorded(meter_reader)

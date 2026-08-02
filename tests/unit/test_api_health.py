@@ -19,6 +19,7 @@ from httpx import ASGITransport, AsyncClient
 
 from usher.api.app import create_app
 from usher.config import Settings
+from usher.services.events import InMemoryEventBus
 
 
 @pytest.fixture
@@ -54,3 +55,26 @@ async def test_health_stays_ok_even_when_database_unreachable(
     response = await client_against_unreachable_database.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+async def test_create_app_builds_the_client_event_bus() -> None:
+    """`get_reconcile_service` resolves `EventPublisher` off `app.state.events`
+    on every request that walks a source, so an app without one 500s at
+    request time rather than at start-up. Built in `create_app` rather than in
+    the lifespan for the reason `settings` is: it holds no connection, no
+    thread, and nothing to dispose.
+    """
+    settings = Settings(
+        database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
+        secret_key="0123456789abcdef0123456789abcdef",
+        sse_buffer_size=8,
+        sse_queue_size=4,
+    )
+    app = create_app(settings)
+    bus = app.state.events
+    assert isinstance(bus, InMemoryEventBus)
+    assert bus.subscribers == 0
+    # The two settings are read rather than defaulted -- a knob that
+    # validates and then influences nothing is the thing config.py's own
+    # comment forbids.
+    assert (bus._buffer.maxlen, bus._queue_size) == (8, 4)

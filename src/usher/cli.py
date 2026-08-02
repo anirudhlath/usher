@@ -46,6 +46,7 @@ from usher.domain.jobs import JobKind
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
 from usher.ports.bulk import ImdbTitle
+from usher.ports.events import NullEventPublisher
 from usher.ports.metadata import MetadataProvider
 from usher.ports.repository import BulkCatalogRepository
 from usher.ports.source import SourceAdapter
@@ -252,6 +253,14 @@ def _build_pipeline(
             ),
             media_items=media_items,
             runs=runs,
+            # `NullEventPublisher`, deliberately. `usher sync` and `usher
+            # work` are separate processes and M5's bus is in-process, so
+            # there is no SSE client on the other side of one of these. A
+            # client that refetches still gets the reconciled catalog --
+            # degradation rather than breakage, PRD 08's own principle -- and
+            # the fix is the named second implementation of the port rather
+            # than a branch here.
+            events=NullEventPublisher(),
             commit=session.commit,
             batch_size=settings.sync_batch_size,
             max_retract_fraction=(
@@ -531,6 +540,9 @@ def _enrich_handler(
             payloads=PostgresRawPayloadStore(session),
             provider=provider,
             commit=session.commit,
+            # Same reason `_build_pipeline` passes one: a completion here
+            # reaches no SSE client, because this is another process.
+            events=NullEventPublisher(),
             cache_max_age_days=settings.enrich_cache_max_age_days,
         )
     )

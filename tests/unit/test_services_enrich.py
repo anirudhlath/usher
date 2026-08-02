@@ -16,12 +16,14 @@ from typing import Any
 import pytest
 
 from tests.fakes.episode_repository import FakeEpisodeRepository
+from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, PortUnavailable
+from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.services.enrich import EnrichService
 
 _MOVIE_TMDB_ID = 90000550
@@ -54,17 +56,23 @@ def commits() -> list[int]:
 
 
 @pytest.fixture
+def events() -> FakeEventPublisher:
+    return FakeEventPublisher()
+
+
+@pytest.fixture
 def service(
     titles: FakeTitleRepository,
     episodes: FakeEpisodeRepository,
     payloads: FakeRawPayloadStore,
     provider: FakeMetadataProvider,
     commits: list[int],
+    events: FakeEventPublisher,
 ) -> EnrichService:
     async def commit() -> None:
         commits.append(1)
 
-    return EnrichService(titles, episodes, payloads, provider, commit)
+    return EnrichService(titles, episodes, payloads, provider, commit, events)
 
 
 async def _given(
@@ -340,6 +348,7 @@ async def test_a_payload_older_than_the_ceiling_is_refetched(
         payloads,
         provider,
         commit,
+        FakeEventPublisher(),
         cache_max_age_days=1,
         now=lambda: datetime.now(UTC) + timedelta(days=2),
     )
@@ -428,3 +437,98 @@ async def test_a_movie_writes_no_seasons_or_episodes(
     episodes.reset_calls()
     await service.enrich(title.id)
     assert episodes.calls == 0
+
+
+# -- the read-through loop's last step -------------------------------------
+
+
+async def test_a_successful_enrichment_publishes_title_updated(
+    service: EnrichService, titles: FakeTitleRepository, events: FakeEventPublisher
+) -> None:
+    """PRD 03's read-through loop, closed: "Completion publishes a
+    `title.updated` event on a Server-Sent Events channel; clients patch in
+    place. No polling on either side of the system."
+    """
+    title = await _given(titles, state=EnrichmentState.STUB)
+    await service.enrich(title.id)
+    assert [(event.kind, event.title_id) for event in events.published] == [
+        (ClientEventKind.TITLE_UPDATED, title.id)
+    ]
+
+
+async def test_a_failed_enrichment_publishes_nothing(
+    service: EnrichService,
+    titles: FakeTitleRepository,
+    provider: FakeMetadataProvider,
+    events: FakeEventPublisher,
+) -> None:
+    """A failure records `enrichment_error` and leaves the tier exactly where
+    it was (ADR-0008). Telling a client "this changed" would make it refetch
+    an identical stub, and it would do so on every attempt of a backoff
+    schedule."""
+    title = await _given(titles, state=EnrichmentState.STUB)
+    provider.fail_with(PortUnavailable("TMDb is down"))
+    with pytest.raises(PortUnavailable):
+        await service.enrich(title.id)
+    assert events.published == []
+
+
+async def test_the_published_event_names_the_fields_that_changed(
+    service: EnrichService, titles: FakeTitleRepository, events: FakeEventPublisher
+) -> None:
+    """PRD 07: "`title.updated` | Title id + changed fields | Patch in
+    place." A client that had to refetch the whole title to find out what
+    moved is a client polling, one request later -- so `["*"]` is the answer
+    this case exists to reject."""
+    title = await _given(titles, state=EnrichmentState.STUB)
+    await service.enrich(title.id)
+    fields = events.published[0].data["fields"]
+    assert "enrichment_state" in fields
+    assert "overview" in fields
+    assert "*" not in fields
+    # Only what the provider actually supplied. A field it left `None` is
+    # "this response did not say", and naming it would send a client to
+    # refetch a value that did not move.
+    assert "end_year" not in fields
+
+
+async def test_a_title_that_does_not_exist_publishes_nothing(
+    service: EnrichService, events: FakeEventPublisher
+) -> None:
+    """The one failure that happens *before* a `Title` is loaded, so it
+    cannot even name an id. Parked rather than retried (`PortDataMalformed`),
+    and silent."""
+    with pytest.raises(PortDataMalformed):
+        await service.enrich(uuid.uuid4())
+    assert events.published == []
+
+
+async def test_the_event_is_published_after_the_commit(
+    titles: FakeTitleRepository,
+    episodes: FakeEpisodeRepository,
+    payloads: FakeRawPayloadStore,
+    provider: FakeMetadataProvider,
+) -> None:
+    """A client patches by refetching the fields the event names, so a
+    publish that preceded the commit races it to a row this transaction has
+    not written.
+
+    Asserted as an *order*, not as a read, and the difference is worth
+    stating: a port fake has no transaction, so the data consequence is
+    genuinely invisible here and only real Postgres can show it. The order is
+    the property the transaction makes matter, and it is observable -- which
+    is one more than the plan expected the unit suite to manage.
+    """
+    order: list[str] = []
+
+    async def commit() -> None:
+        order.append("commit")
+
+    class _Recording(EventPublisher):
+        async def publish(self, event: ClientEvent) -> None:
+            order.append("publish")
+
+    service = EnrichService(titles, episodes, payloads, provider, commit, _Recording())
+    title = await _given(titles, state=EnrichmentState.STUB)
+    await service.enrich(title.id)
+    assert order == ["commit", "publish"]

@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
+from fastapi import FastAPI
 
 from tests.fakes.streaming_asgi_transport import StreamingASGITransport
 from usher.api.app import create_app
@@ -33,20 +34,32 @@ _HEARTBEAT_SECONDS = 0.05
 
 
 @pytest.fixture
-def bus() -> InMemoryEventBus:
-    return InMemoryEventBus()
-
-
-@pytest.fixture
-async def client(bus: InMemoryEventBus) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_app(
+def app() -> FastAPI:
+    return create_app(
         Settings(
             database_url="postgresql+asyncpg://u:p@localhost/db",
             secret_key="0123456789abcdef0123456789abcdef",
             sse_heartbeat_seconds=_HEARTBEAT_SECONDS,
         )
     )
-    app.state.events = bus
+
+
+@pytest.fixture
+def bus(app: FastAPI) -> InMemoryEventBus:
+    """The bus `create_app` built, not one this file made and installed.
+
+    Reading it back is the assertion: a fixture that set `app.state.events`
+    itself would pass against a `create_app` that never built one, and
+    `get_reconcile_service` -- which publishes `sync.progress` -- resolves
+    through exactly that attribute on every request that walks a source.
+    """
+    built = app.state.events
+    assert isinstance(built, InMemoryEventBus)
+    return built
+
+
+@pytest.fixture
+async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     async with LifespanManager(app) as manager:
         transport = StreamingASGITransport(manager.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as connected:

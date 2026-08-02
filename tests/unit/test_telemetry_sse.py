@@ -6,10 +6,10 @@ every case here drives the real bus rather than a stub reader, and reads the
 value back out of an `InMemoryMetricReader` -- asserting that the instrument
 *exists* would pass against a `create_observable_gauge` nobody ever feeds.
 
-The row is deliberately *not* ticked in PRD 10. The instrument ships and is
-pinned here; what does not exist yet is the caller -- nothing in a running
-process registers this reader until `create_app` builds the bus and starts
-its lanes, so no deployment emits it today.
+This is the one of PRD 10's four M5 rows that **is** ticked, and the
+difference is that it needs no lane: `create_app` builds the bus and
+registers this reader unconditionally, so every running server emits it. The
+three push rows still wait on the lanes.
 """
 
 from collections.abc import Iterator

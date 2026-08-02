@@ -24,6 +24,7 @@ wrote `state.play_count or 0` would look correct against it for the walk
 """
 
 import dataclasses
+import inspect
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -35,10 +36,14 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import AwareDatetime
 
+from tests.fakes.episode_repository import FakeEpisodeRepository
+from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
+from tests.fakes.title_match_repository import FakeTitleMatchRepository
+from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
@@ -46,8 +51,18 @@ from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind, SyncRunStatus
 from usher.ports.errors import PortUnavailable, UsherPortError
+from usher.ports.events import ClientEventKind
 from usher.ports.ingest import MediaItemTarget, MediaItemUpsert, WatchStateMerge
-from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
+from usher.ports.source import (
+    SourceEvent,
+    SourceEventKind,
+    SourceItem,
+    SourceItemKind,
+    SourceWatchState,
+)
+from usher.services.ingest import IngestService
+from usher.services.matching import MatchService
+from usher.services.push import PushApplyService
 from usher.services.watch_sync import MergedState, WatchStateSyncService, _watch_target
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
@@ -1020,3 +1035,73 @@ async def test_the_walk_is_the_only_thing_that_needs_a_source_user_map(
     stored = await fixture.stored("movie-1")
     assert stored is not None
     assert stored.user_id == fixture.user_id  # type: ignore[attr-defined]
+
+
+# -- the deliberate silence ------------------------------------------------
+
+
+async def test_the_walk_publishes_nothing_and_the_push_lane_through_the_same_chain_does(
+    fixture: _Fixture,
+) -> None:
+    """**Deliberate, and it is a scale decision rather than an omission.**
+
+    A walk merges up to 1,126,789 states; one `watchstate.updated` per merged
+    row is a fan-out per row per night to every connected client, and every
+    one of them is the source echoing back state that has not changed since
+    the last walk. The push lane publishes because a push event *is* a
+    change.
+
+    The reachable version of this defect is the *shared chain*:
+    `apply_states` has exactly two callers -- this walk and
+    `PushApplyService` -- and moving the publish down into it is the obvious
+    de-duplication. So this drives the walk with the very publisher the push
+    lane uses. Verified by doing it: a publish added to `apply_states` fails
+    this case on its first assertion.
+
+    The second half is not decoration. Without it the case passes against a
+    harness that could not observe a publish at all, which is the shape a
+    "publishes nothing" assertion fails silently in.
+    """
+    await fixture.given_matched("i1")
+    fixture.adapter.seed_state(SourceWatchState(external_id="i1", position_seconds=5, played=False))
+    events = FakeEventPublisher()
+    applier = PushApplyService(
+        ingest=_no_ingest(),
+        watch=fixture.service,
+        events=events,
+        commit=fixture._commit,
+    )
+
+    await fixture.service.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+    assert events.published == [], "the nightly walk published a client event"
+
+    await applier.apply(
+        fixture.source,
+        fixture.adapter,
+        SourceEvent(kind=SourceEventKind.WATCH_STATE_CHANGED, external_ids=("i1",)),
+        user_id=fixture.user_id,
+    )
+    assert [event.kind for event in events.published] == [ClientEventKind.WATCHSTATE_UPDATED]
+
+
+def test_the_walk_has_no_event_publisher_to_publish_through() -> None:
+    """The tripwire on the first step of the change above. There is no
+    publisher on this service at all, so a reader who wanted a
+    `watchstate.updated` per merged row has to add one here before anything
+    else -- and this is the line that says why not to."""
+    assert "events" not in inspect.signature(WatchStateSyncService.__init__).parameters
+
+
+def _no_ingest() -> IngestService:
+    """`PushApplyService` needs one and this case never reaches an item
+    event; built rather than stubbed so the service is the real one."""
+    titles = FakeTitleRepository()
+    matching = FakeTitleMatchRepository(titles)
+    queue = FakeJobQueue()
+    return IngestService(
+        matcher=MatchService(titles=titles, matching=matching, queue=queue),
+        matching=matching,
+        media_items=FakeMediaItemRepository(),
+        episodes=FakeEpisodeRepository(),
+        queue=queue,
+    )
