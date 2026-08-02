@@ -184,8 +184,35 @@ class InMemoryEventBus(EventPublisher):
             yield await subscriber.queue.get()
 
     def _replay(self, subscriber: _Subscriber, last_event_id: str | None) -> Iterator[SentEvent]:
-        """Everything after `last_event_id`. Task 19's; empty until then."""
-        return iter(())
+        """Everything after `last_event_id`, or one `resync_required`.
+
+        Three holes, one answer, and the third is invisible without the
+        epoch: a ring that restarted with the process would replay
+        "everything after 40" to a client that saw forty events of a
+        *different* sequence, which is a plausible stream that is silently
+        wrong.
+        """
+        if last_event_id is None:
+            return
+        parsed = _parse_event_id(last_event_id)
+        if parsed is None:
+            yield self._resync("malformed_last_event_id")
+            return
+        epoch, seen = parsed
+        if epoch != self._epoch:
+            yield self._resync("unknown_epoch")
+            return
+        if self._buffer and self._buffer[0].id > seen + 1:
+            # The oldest thing still held is *after* the next one the client
+            # needs, so the gap is unrecoverable. Replaying what is left and
+            # calling it a resume is the failure this branch exists for: the
+            # client silently misses what fell off the front and has no way
+            # to learn it.
+            yield self._resync("buffer_expired")
+            return
+        for sent in list(self._buffer):
+            if sent.id > seen and subscriber.wants(sent.event):
+                yield sent
 
     def _resync(self, reason: str) -> SentEvent:
         """A statement about the stream rather than an event in it.
@@ -200,3 +227,24 @@ class InMemoryEventBus(EventPublisher):
             epoch=self._epoch,
             event=ClientEvent(kind=ClientEventKind.RESYNC_REQUIRED, data={"reason": reason}),
         )
+
+
+def _parse_event_id(raw: str) -> tuple[str, int] | None:
+    """`"<epoch>-<n>"` into its parts, or `None`.
+
+    A client sends back whatever it last saw and a proxy can mangle it, so
+    this returns rather than raising: answering a reconnect with a 500 is
+    the one response worse than answering it with `resync_required`.
+
+    `rpartition`, not `partition`. Unobservable today -- the epoch is hex and
+    holds no `-` -- and kept because an epoch format that ever gained one
+    would start parsing wrong silently, which is the same class of failure as
+    the unknown-epoch branch above and costs nothing to rule out.
+    """
+    epoch, separator, number = raw.rpartition("-")
+    if not separator or not epoch:
+        return None
+    try:
+        return epoch, int(number)
+    except ValueError:
+        return None

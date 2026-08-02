@@ -28,7 +28,11 @@ from typing import Any
 
 import pytest
 
-from tests.contract.event_publisher_contract import EventPublisherContract
+from tests.contract.event_publisher_contract import (
+    BusFactory,
+    EventBusContract,
+    EventPublisherContract,
+)
 from usher.ports.events import ClientEvent, ClientEventKind
 from usher.services.events import InMemoryEventBus
 
@@ -246,10 +250,82 @@ async def test_a_subscriber_removed_by_an_exception_is_still_removed() -> None:
     assert bus.subscribers == 0
 
 
-class TestInMemoryEventBus(EventPublisherContract):
+async def test_an_overflowed_subscriber_gets_exactly_one_resync() -> None:
+    """A queue that re-filled behind the resync would hand the client a
+    second one the moment it read the first, forever."""
+    bus = InMemoryEventBus(queue_size=2)
+    async with bus.subscribe() as stream:
+        for index in range(50):
+            await bus.publish(_event(index))
+        first = await asyncio.wait_for(anext(aiter(stream)), timeout=1.0)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(anext(aiter(stream)), timeout=0.05)
+    assert first.event.kind is ClientEventKind.RESYNC_REQUIRED
+
+
+async def test_replay_honours_the_subscribers_title_filter() -> None:
+    wanted = uuid.uuid4()
+    bus = InMemoryEventBus()
+    await bus.publish(_event(1, title_id=uuid.uuid4()))
+    await bus.publish(_event(2, title_id=wanted))
+    async with bus.subscribe(titles=frozenset({wanted}), last_event_id=f"{bus.epoch}-0") as stream:
+        sent = await asyncio.wait_for(anext(aiter(stream)), timeout=1.0)
+    assert sent.event.data == {"seen": 2}
+
+
+async def test_an_unparseable_last_event_id_is_told_to_resync() -> None:
+    """A client sends back whatever it last saw, and a proxy or a bad client
+    can mangle it. Raising would answer a reconnect with a 500."""
+    bus = InMemoryEventBus()
+    async with bus.subscribe(last_event_id="not-an-id") as stream:
+        sent = await asyncio.wait_for(anext(aiter(stream)), timeout=1.0)
+    assert sent.event.kind is ClientEventKind.RESYNC_REQUIRED
+
+
+async def test_a_last_event_id_at_the_head_replays_nothing_and_waits() -> None:
+    """Also the off-by-one case: `>= seen` in place of `> seen` replays the
+    very event the client told us it already has, which is a duplicate on
+    every reconnect rather than a visible failure."""
+    bus = InMemoryEventBus()
+    await bus.publish(_event(1))
+    async with bus.subscribe(last_event_id=f"{bus.epoch}-1") as stream:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(anext(aiter(stream)), timeout=0.05)
+
+
+async def test_replay_does_not_redeliver_what_the_queue_already_holds() -> None:
+    """**A subscriber's two sources are the same `publish` calls, and the
+    plan's shape overlapped them.**
+
+    A replay resolved lazily, at the first `__anext__`, re-reads a ring that
+    has meanwhile grown -- and everything published since `subscribe`
+    returned is in *both* the ring and this subscriber's queue, so the client
+    sees it twice. The window is not theoretical: `api/routers/events.py`
+    reaches its first `anext` through an `asyncio.wait_for`, which yields to
+    the loop, and the push lane publishes from another task. Resolving the
+    replay inside `subscribe`, with no `await` between the snapshot and the
+    `add`, is what closes it.
+    """
+    bus = InMemoryEventBus()
+    await bus.publish(_event(1))
+    async with bus.subscribe(last_event_id=f"{bus.epoch}-0") as stream:
+        await bus.publish(_event(2))
+        iterator = aiter(stream)
+        first = await asyncio.wait_for(anext(iterator), timeout=1.0)
+        second = await asyncio.wait_for(anext(iterator), timeout=1.0)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(anext(iterator), timeout=0.05)
+    assert [first.event.data["seen"], second.event.data["seen"]] == [1, 2]
+
+
+class TestInMemoryEventBus(EventPublisherContract, EventBusContract):
     @pytest.fixture
     def publisher(self) -> InMemoryEventBus:
         return InMemoryEventBus()
+
+    @pytest.fixture
+    def make_bus(self) -> BusFactory:
+        return InMemoryEventBus
 
     @pytest.fixture(autouse=True)
     async def _one_subscriber_that_never_reads(

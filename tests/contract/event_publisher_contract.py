@@ -24,8 +24,13 @@ it.
 """
 
 import asyncio
+import uuid
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager
+from typing import Protocol
 
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
+from usher.services.events import SentEvent
 
 # Larger than any plausible per-subscriber buffer, so a bus that queued
 # unboundedly and a bus that overflows-and-diverts are both walked past
@@ -97,3 +102,115 @@ class EventPublisherContract:
             f"one publish took {elapsed:.3f}s; a publisher that waits on a subscriber is "
             "the failure this port's docstring forbids"
         )
+
+
+class SubscribingPublisher(Protocol):
+    """The shape `EventBusContract` is written against.
+
+    **A `Protocol`, and `EventPublisher` is an `ABC`.** Not ADR-0001 being
+    ignored, for the reason `usher.adapters.emby.push.SessionLike` already
+    states one package over: ADR-0001 governs *ports*, and this is neither a
+    port nor in `src/` at all. It cannot be an ABC: subscription is
+    deliberately absent from `EventPublisher` (a `LISTEN/NOTIFY`
+    implementation subscribes on a dedicated connection whose lifecycle has
+    nothing in common with an in-memory queue's), and a second ABC bolted on
+    here would put back exactly what that decision removed -- while living in
+    `tests/`, which `src/` may not import from and therefore may not inherit
+    from either.
+    """
+
+    @property
+    def epoch(self) -> str: ...
+
+    async def publish(self, event: ClientEvent) -> None: ...
+
+    def subscribe(
+        self,
+        *,
+        titles: frozenset[uuid.UUID] | None = ...,
+        last_event_id: str | None = ...,
+    ) -> AbstractAsyncContextManager[AsyncIterator[SentEvent]]: ...
+
+
+# Sizes are constructor arguments rather than fixed, because three of the
+# four cases below are *about* a bound being reached and a suite that had to
+# publish 64 events to reach one would be measuring patience.
+BusFactory = Callable[..., SubscribingPublisher]
+
+
+class EventBusContract:
+    """What an `EventPublisher` that *also* offers subscription must
+    guarantee to one client's stream.
+
+    Separate from `EventPublisherContract` because `FakeEventPublisher` has
+    no subscribers, and a suite it "passed" by having nothing to check would
+    ratify a bus that never delivered. Subclass and provide a `make_bus`
+    fixture.
+
+    Every case here is about a **single** subscriber's stream, deliberately:
+    that is the guarantee a Postgres `LISTEN/NOTIFY` transport could also
+    make, and a contract drawn around an in-process queue's ordering across
+    subscribers would be a contract only this implementation can satisfy.
+    """
+
+    async def test_a_subscriber_that_overflows_is_told_to_resync(
+        self, make_bus: BusFactory
+    ) -> None:
+        """PRD 07's exact requirement. Dropping events silently leaves a
+        client confidently stale, which is worse than telling it to refetch:
+        it has no way to find out."""
+        bus = make_bus(queue_size=3)
+        async with bus.subscribe() as stream:
+            for index in range(10):
+                await bus.publish(_progress(index))
+            sent = await asyncio.wait_for(anext(aiter(stream)), timeout=1.0)
+        assert sent.event.kind is ClientEventKind.RESYNC_REQUIRED
+        assert sent.event.data == {"reason": "buffer_overflow"}
+
+    async def test_replay_resumes_after_the_last_event_the_client_saw(
+        self, make_bus: BusFactory
+    ) -> None:
+        """The reconnect PRD 07 designed for. Without it a client that
+        dropped its connection for two seconds during a walk loses whatever
+        landed in them, with nothing to say so."""
+        bus = make_bus()
+        for index in (1, 2, 3):
+            await bus.publish(_progress(index))
+        async with bus.subscribe(last_event_id=f"{bus.epoch}-1") as stream:
+            iterator = aiter(stream)
+            second = await asyncio.wait_for(anext(iterator), timeout=1.0)
+            third = await asyncio.wait_for(anext(iterator), timeout=1.0)
+        assert [second.event.data["seen"], third.event.data["seen"]] == [2, 3]
+
+    async def test_a_last_event_id_older_than_the_buffer_is_told_to_resync(
+        self, make_bus: BusFactory
+    ) -> None:
+        """Replaying whatever is still in the ring and calling it a resume is
+        the failure: the client silently misses the events that fell off the
+        front and has no way to learn it."""
+        bus = make_bus(buffer_size=3)
+        for index in range(10):
+            await bus.publish(_progress(index))
+        async with bus.subscribe(last_event_id=f"{bus.epoch}-1") as stream:
+            sent = await asyncio.wait_for(anext(aiter(stream)), timeout=1.0)
+        assert sent.event.kind is ClientEventKind.RESYNC_REQUIRED
+        assert sent.event.data == {"reason": "buffer_expired"}
+
+    async def test_a_last_event_id_from_a_previous_process_is_told_to_resync(
+        self, make_bus: BusFactory
+    ) -> None:
+        """**The one that is impossible without the epoch.** The ring is
+        in-memory, so ids restart at 1 with the process. A client
+        reconnecting with `Last-Event-ID: 40` after a restart would be
+        replayed events 41+ of a completely different sequence -- a
+        plausible-looking stream that is silently wrong."""
+        bus = make_bus()
+        await bus.publish(_progress(1))
+        async with bus.subscribe(last_event_id="deadbeef-40") as stream:
+            sent = await asyncio.wait_for(anext(aiter(stream)), timeout=1.0)
+        assert sent.event.kind is ClientEventKind.RESYNC_REQUIRED
+        assert sent.event.data == {"reason": "unknown_epoch"}
+
+
+def _progress(index: int) -> ClientEvent:
+    return ClientEvent(kind=ClientEventKind.SYNC_PROGRESS, data={"seen": index})
