@@ -1231,7 +1231,8 @@ async def test_a_real_websockets_handshake_prints_no_token(
         port = server.sockets[0].getsockname()[1]
         configure_logging(_logging_settings(level="DEBUG"))
         connection = await connect_websocket(
-            f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}?api_key={LEAKY_TOKEN}&deviceId=d"
+            f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}?api_key={LEAKY_TOKEN}&deviceId=d",
+            proxy=None,
         )
         try:
             await connection.send(SUBSCRIBE_FRAME)
@@ -1266,7 +1267,8 @@ async def test_the_real_connection_translates_a_closed_socket_by_type(
     async with serve(handler, "127.0.0.1", 0, logger=socket_logger()) as server:
         port = server.sockets[0].getsockname()[1]
         connection = await connect_websocket(
-            f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}?api_key={LEAKY_TOKEN}&deviceId=d"
+            f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}?api_key={LEAKY_TOKEN}&deviceId=d",
+            proxy=None,
         )
         with pytest.raises(PortUnavailable) as caught:
             for _ in range(100):
@@ -1329,7 +1331,7 @@ async def test_the_real_connection_times_out_on_a_silent_socket_rather_than_hang
 
     async with serve(handler, "127.0.0.1", 0, logger=socket_logger()) as server:
         port = server.sockets[0].getsockname()[1]
-        connection = await connect_websocket(f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}")
+        connection = await connect_websocket(f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}", proxy=None)
         try:
             started = time.perf_counter()
             with pytest.raises(TimeoutError):
@@ -1364,7 +1366,7 @@ async def test_the_real_connection_decodes_a_binary_frame_rather_than_raising(
 
     async with serve(handler, "127.0.0.1", 0, logger=socket_logger()) as server:
         port = server.sockets[0].getsockname()[1]
-        connection = await connect_websocket(f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}")
+        connection = await connect_websocket(f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}", proxy=None)
         try:
             frame = await connection.recv(BOUND)
         finally:
@@ -1395,7 +1397,8 @@ async def test_the_real_connection_translates_a_failed_send_by_type(
     async with serve(handler, "127.0.0.1", 0, logger=socket_logger()) as server:
         port = server.sockets[0].getsockname()[1]
         connection = await connect_websocket(
-            f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}?api_key={LEAKY_TOKEN}&deviceId=d"
+            f"ws://127.0.0.1:{port}{WEBSOCKET_PATH}?api_key={LEAKY_TOKEN}&deviceId=d",
+            proxy=None,
         )
         with pytest.raises(PortUnavailable) as caught:
             for _ in range(100):

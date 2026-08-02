@@ -48,7 +48,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from loguru import logger
@@ -666,6 +666,7 @@ async def connect_websocket(
     ping_interval: float = 20.0,
     ping_timeout: float = 20.0,
     max_queue: int = 256,
+    proxy: str | Literal[True] | None = True,
 ) -> PushConnection:
     """The default `PushConnector`: a real `websockets` client, wrapped.
 
@@ -690,6 +691,20 @@ async def connect_websocket(
     **`logger=socket_logger()` is the only argument here that is a security
     control rather than a tuning knob.** See `socket_logger`.
 
+    **`proxy` is passed through with the library's own default, `True`,
+    which means "resolve one from the environment".** A household fronting
+    its Emby with a reverse proxy is a real deployment and
+    `HTTPS_PROXY`/`WS_PROXY` is how an operator says so, so the default
+    stays. It is a parameter rather than a constant because
+    `websockets.proxy.get_proxy` consults `urllib.request.proxy_bypass`,
+    which does **not** exempt loopback unless `no_proxy` names it -- so a
+    developer machine with `HTTP_PROXY` set would send a `127.0.0.1`
+    connection through it, and `tests/integration/test_push_loopback.py`
+    passes `proxy=None` for exactly that reason. Never logged and never
+    interpolated into an exception: `websockets.exceptions.InvalidProxy`
+    carries the proxy URL, which is a credential in the same way this
+    channel's own URL is.
+
     The import is **local**, not module-scope: `usher.adapters.emby` is
     imported by the factory on every composition-root build, and
     `websockets` is a dependency only the push lane needs.
@@ -703,5 +718,6 @@ async def connect_websocket(
         ping_timeout=ping_timeout,
         max_queue=max_queue,
         logger=socket_logger(),
+        proxy=proxy,
     )
     return _WebsocketsConnection(connection)
