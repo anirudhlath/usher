@@ -108,3 +108,24 @@ def test_work_runs_forever_unless_asked_for_one_pass() -> None:
     --once` needs to exit; without it the command is a daemon."""
     assert build_parser().parse_args(["work"]).once is False
     assert build_parser().parse_args(["work", "--once"]).once is True
+
+
+def test_push_probes_or_runs_the_lanes() -> None:
+    """`usher push --probe` is ADR-0004's caveat as an operator command: it
+    reports what *arrived*, never that the handshake succeeded. Bare `usher
+    push` runs the same lanes the server does, without the HTTP surface."""
+    args = build_parser().parse_args(["push"])
+    assert args.source is None
+    assert args.probe is False
+    args = build_parser().parse_args(["push", "--probe", "--source", "Living Room Emby"])
+    assert args.probe is True
+    assert args.source == "Living Room Emby"
+
+
+def test_push_is_not_the_default_command() -> None:
+    """`main` treats no arguments as `serve`, because that is exactly what
+    the container's CMD runs. A new subcommand must not change it -- the
+    failure M4 found was `main` treating `argv is None` as "no arguments at
+    all", which made `usher sync-status` silently start the server."""
+    assert build_parser().parse_args([]).command is None
+    assert build_parser().parse_args(["push"]).command == "push"

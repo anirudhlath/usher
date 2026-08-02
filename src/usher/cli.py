@@ -24,8 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from usher.adapters.bulk.imdb import IMDbRatingDataset, IMDbTitleDataset
 from usher.adapters.bulk.tmdb_ids import TMDbIdDataset
 from usher.adapters.bulk.wikidata import WikidataCrosswalkDataset
+from usher.api.lanes import LaneSupervisor
 from usher.composition import (
     NO_CREDENTIALS,
+    DefaultUserId,
     Pipeline,
     QueueGauges,
     SourceRegistry,
@@ -34,6 +36,7 @@ from usher.composition import (
     metadata_provider,
     open_adapter,
     selected_sources,
+    unit_of_work,
 )
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
@@ -45,6 +48,7 @@ from usher.domain.jobs import JobKind
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
 from usher.ports.bulk import ImdbTitle
+from usher.ports.events import NullEventPublisher
 from usher.ports.repository import BulkCatalogRepository
 from usher.ports.source import SourceAdapter
 from usher.services.bootstrap import BootstrapService
@@ -356,6 +360,86 @@ async def _work(settings: Settings, *, once: bool) -> None:
             await aclose()
 
 
+async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
+    """Probe a source's push channel once, or run the lanes in the foreground.
+
+    `--probe` is the operator-facing form of ADR-0004's caveat: it reports
+    the **messages and events that arrived**, never that the handshake
+    succeeded, because a handshake against a nonexistent path also upgrades
+    and also receives `Sessions`. It is the one thing in this project that
+    opens a socket on purpose to answer a question, which is why `verify()`
+    does not have to.
+
+    Bare `usher push` runs exactly the lanes `create_app` would, honouring
+    `USHER_PUSH_ENABLED`/`USHER_WORKER_ENABLED`, with no HTTP server -- the
+    other side of PRD 01's "`--worker` entrypoint flag ... so lanes can be
+    moved to a separate container later by editing compose". It publishes to
+    a `NullEventPublisher` for the reason `usher work` does: the bus is
+    in-memory and there is no SSE client in this process.
+    """
+    if not probe:
+        await _run_lanes(settings)
+        return
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        sources = await selected_sources(pipeline, source_name)
+        if not sources:
+            print("no enabled source matched" if source_name else "no enabled sources configured")
+            return
+        for source in sources:
+            adapter = await _open_adapter(pipeline, source)
+            if adapter is None:
+                continue
+            try:
+                result = await adapter.probe_push(timeout_seconds=settings.push_stale_after_seconds)
+                print(
+                    f"{source.name}: upgraded={result.upgraded} "
+                    f"delivering={result.delivering} "
+                    f"events={[kind.value for kind in result.events] or 'none'}"
+                    + (f" detail={result.detail}" if result.detail else "")
+                )
+            finally:
+                await adapter.aclose()
+
+
+async def _run_lanes(settings: Settings) -> None:
+    """`create_app`'s lanes, with no app around them.
+
+    The engine and the session factory are built here rather than by the
+    supervisor, for the same reason the lifespan builds them: a lane holds
+    one unit of work at a time and the engine outlives all of them. Stops on
+    Ctrl-C -- `KeyboardInterrupt` reaches `asyncio.run`, which cancels the
+    task, and `stop()` runs in the `finally`.
+    """
+    engine = build_engine(settings.database_url.get_secret_value())
+    sessions = build_session_factory(engine)
+    provider, close_provider = (
+        await metadata_provider(settings) if settings.worker_enabled else (None, _no_provider)
+    )
+    events = NullEventPublisher()
+    lanes = LaneSupervisor(
+        settings,
+        unit_of_work(sessions, settings, events=events, provider=provider),
+        events,
+        user_id=DefaultUserId(sessions),
+        provider=provider,
+    )
+    await lanes.start()
+    try:
+        # Nothing to serve, so the process is the lanes. `asyncio.Event()`
+        # that nothing sets rather than a sleep loop: it costs no wakeups
+        # and it cancels cleanly.
+        await asyncio.Event().wait()
+    finally:
+        await lanes.stop()
+        await close_provider()
+        await engine.dispose()
+
+
+async def _no_provider() -> None:
+    return None
+
+
 def _as_uuid(value: str, what: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
@@ -395,6 +479,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     work = sub.add_parser("work", help="run queued jobs")
     work.add_argument("--once", action="store_true", help="one pass, then exit")
+
+    push = sub.add_parser("push", help="run the push lane, or probe a source's push channel")
+    push.add_argument("--source", default=None, help="source name; omit for every enabled source")
+    push.add_argument(
+        "--probe",
+        action="store_true",
+        help="connect, wait, and report what arrived, then exit",
+    )
     return parser
 
 
@@ -465,6 +557,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     elif args.command == "work":
         asyncio.run(_work(settings, once=args.once))
+    elif args.command == "push":
+        asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
     else:
         # Imported here, not at module scope: uvicorn.run blocks, and nothing
         # about the bootstrap path should pay for importing the server.

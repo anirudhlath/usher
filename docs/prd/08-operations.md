@@ -171,9 +171,30 @@ specified in [10](10-telemetry-and-dashboards.md).
 Telemetry is optional: with no OTLP endpoint configured the exporters are
 no-ops and Usher runs normally.
 
-`GET /health` is liveness; `GET /health/ready` reports Postgres, migration
-state, and per-source connectivity — degraded rather than binary, so a
-dashboard can distinguish "down" from "running without Emby".
+`GET /health` is liveness; `GET /health/ready` reports Postgres and
+migration state — and **gates its status code on those two alone**. Lane
+state is reported in the body (`lanes.push`, `lanes.worker`) and per-source
+push health at `GET /admin/sources/{id}/status`'s `push_available`, never in
+the code. That is a correction to what this section said before M5 built the
+lanes: a readiness probe that failed because a source was unreachable would
+take the process out of a load balancer for a reason restarting it cannot
+fix, which is the same argument that keeps liveness off the database. The
+failure table above already prices an unreachable source as "catalog fully
+browsable"; a 503 would contradict it.
+
+The report is still degraded rather than binary, so a dashboard can
+distinguish "down" from "running without Emby" — it just does so by reading
+the body, which is what a dashboard does and what Kubernetes, Docker
+`healthcheck` and a load balancer never do.
+
+Lane state is free to report — `lanes.push` is the set of running lane
+*tasks*, and `push_available` is an in-memory ledger of messages received,
+not a probe — so readiness makes **no upstream request at all**. The shipped
+compose healthcheck polls this endpoint every 2 s against a source
+[01](01-architecture.md) measures at 1–5 s per request. The on-demand probe
+that *does* open a socket is `usher push --probe`, and it reports what
+arrived rather than that the handshake succeeded
+([ADR-0004](decisions/0004-push-over-polling.md)).
 
 ## Testing
 

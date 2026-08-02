@@ -17,9 +17,10 @@ adapter) and M4 (ingest pipeline) are complete — see
 M3 and M4 are both verified against a live Emby server, and M4's metadata
 half against the live TMDb API.
 
-**The HTTP surface is deliberately small so far**: `/health`, `/health/ready`
-and the `/admin/sources` routes. Everything the ingest pipeline does is
-driven from the command line until M9 adds the admin API — see below.
+**The HTTP surface is deliberately small so far**: `/health`,
+`/health/ready`, `/titles/{id}`, `/events` (SSE) and the `/admin/sources`
+routes. Everything the ingest pipeline does is driven from the command line
+until M9 adds the admin API — see below.
 
 ## Requirements
 
@@ -34,7 +35,8 @@ openssl rand -hex 32          # paste this into USHER_SECRET_KEY= in .env
 docker compose up -d --build
 
 curl -sf http://localhost:8100/health        # {"status":"ok"}
-curl -sf http://localhost:8100/health/ready  # adds database + migration state
+curl -sf http://localhost:8100/health/ready  # adds database + migration state,
+                                             # and reports the background lanes
 ```
 
 `USHER_SECRET_KEY` is the one value you must fill in: `.env.example` ships it
@@ -118,6 +120,24 @@ set).
 uv run usher work --once   # one pass over the queue, then exit
 uv run usher work          # stay up, polling
 ```
+
+**The server process already runs a worker lane**, and a push lane per
+enabled source, so a normal deployment needs neither command. They are for
+splitting the lanes across containers, and there is one rule: **do not run
+`usher work` against a server that also has `USHER_WORKER_ENABLED=true`.**
+A worker requeues everything left `running` at startup — correct at exactly
+one worker, and at two it steals the other's live claims. Set
+`USHER_WORKER_ENABLED=false` on the server first.
+
+```bash
+uv run usher push --probe                    # open each source's channel, report what arrived
+uv run usher push --probe --source "Living Room Emby"
+uv run usher push                            # run the lanes in the foreground, no HTTP server
+```
+
+`--probe` reports **messages received**, never that the handshake succeeded:
+a WebSocket handshake against a nonexistent path also upgrades and also
+receives traffic, so "it connected" is not a health signal.
 
 Exit codes: `0` success, `1` a malformed id or an unhandled error, `2` any
 argument error (including `--resolve` without `--title`).

@@ -23,7 +23,10 @@ that then fails only in combination.
 
 No test here reaches a network. `_open_adapter` is exercised on the branch
 where the credential row is missing, which answers before an adapter is
-built; anything that reached `EmbyAdapter` would resolve a hostname.
+built; anything that reached `EmbyAdapter` would resolve a hostname. The
+same holds for `usher push --probe`, whose whole job is opening a socket:
+the two cases below exercise "nothing to probe" and "no credential to probe
+with", both of which answer from local state.
 """
 
 import uuid
@@ -34,7 +37,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.cli import _open_adapter, _session_for, _sync_status, _unmatched, _work
+from usher.cli import _open_adapter, _push, _session_for, _sync_status, _unmatched, _work
 from usher.composition import build_pipeline, selected_sources
 from usher.config import Settings, get_settings
 from usher.db.repositories.source import PostgresSourceRepository
@@ -321,3 +324,39 @@ def test_allow_full_retraction_is_the_only_way_past_the_ceiling(session: AsyncSe
     opened = build_pipeline(session, settings, max_retract_fraction=1.0)
     assert guarded.reconcile._max_retract_fraction == 0.1
     assert opened.reconcile._max_retract_fraction == 1.0
+
+
+async def test_push_probe_reports_nothing_to_probe_before_it_opens_anything(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`usher push --probe` against an empty deployment must answer, not
+    crash -- the same rule `sync-status` follows: a command an operator can
+    only run *after* a working source is no use for diagnosing why the
+    source is not working."""
+    await _push(cli_settings, source_name=None, probe=True)
+    assert "no enabled sources configured" in capsys.readouterr().out
+    await _push(cli_settings, source_name="cli-nothing", probe=True)
+    assert "no enabled source matched" in capsys.readouterr().out
+
+
+async def test_push_probe_skips_a_source_whose_credential_row_is_gone(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Answered from local state, so no adapter is built and no hostname is
+    resolved -- which is what keeps this file's "no test here reaches a
+    network" claim true of a command whose whole job is opening a socket."""
+    async with _session_for(cli_settings) as session:
+        await PostgresSourceRepository(session).add(
+            Source(
+                kind=SourceKind.EMBY,
+                name="cli-probe-uncredentialed",
+                base_url="https://emby.invalid",
+                credentials_ref=f"ref-{new_id()}",
+                device_id=str(new_id()),
+            )
+        )
+        await session.commit()
+    await _push(cli_settings, source_name="cli-probe-uncredentialed", probe=True)
+    printed = capsys.readouterr().out
+    assert "no stored credentials" in printed
+    assert "upgraded=" not in printed

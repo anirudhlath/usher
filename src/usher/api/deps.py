@@ -259,11 +259,22 @@ def get_source_service(
     settings: SettingsDep,
     sources: Annotated[SourceRepository, Depends(get_source_repository)],
     adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
+    lanes: LaneSupervisorDep,
 ) -> SourceService:
+    """The service, plus the *running lane's* push health.
+
+    `SourceStatus.push_available` is never a probe of a throwaway socket
+    (ADR-0004: a handshake against a nonexistent path also upgrades, so the
+    handshake is not the answer). `verify()` opens none, and this is what
+    fills the gap: the lane's own adapter holds a message ledger, and its
+    answer is the one an operator reads. `None` when no lane is running for
+    that source, which is "not probed" rather than "push is broken".
+    """
     return SourceService(
         sources,
         PostgresCredentialStore(session, settings.secret_key),
         adapters,
+        lanes.push_available,
     )
 
 

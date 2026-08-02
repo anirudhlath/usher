@@ -36,6 +36,13 @@ source's lane must cost that source and nothing else; a task group cancels
 its siblings on the first escape, and if the group were awaited in the
 lifespan it would take the HTTP server with it.
 
+**One worker per deployment, not per process.** `JobWorker.startup()`
+requeues everything left `running`, which is correct at exactly one worker
+and at two steals the other's live claims. So a deployment that runs
+`usher work` in its own container must set `USHER_WORKER_ENABLED=false` on
+the server; that is what the switch is for, and the README says so where an
+operator will read it.
+
 **Tests that build an app but do not want lanes must say so.** Both switches
 default on, so `create_app(Settings(...))` under `LifespanManager` starts a
 worker that polls the real queue and a push lane per configured source. Every
