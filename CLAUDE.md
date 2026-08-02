@@ -28,9 +28,10 @@ TMDb v3 API. See
 `docs/plans/2026-07-30-m3-emby-adapter.md` and
 `docs/plans/2026-07-31-m4-ingest.md` for the task breakdowns and
 `docs/prd/09-roadmap.md` for what's next (M5 — push, reconnect delta, demand
-promotion, SSE). Do not invent commands for
-tooling that does not exist yet — check the Commands section below before
-assuming something runs.
+promotion, SSE; in progress on `milestone/m5-push`, where `create_app` now
+runs a push lane per source and a job-worker lane). Do not invent commands
+for tooling that does not exist yet — check the Commands section below
+before assuming something runs.
 
 **M4's four deliberate boundary calls**, each stated with its reason in the
 M4 plan's Scope section and in PRD 09: the **index** stage is M6's (no
@@ -884,6 +885,8 @@ left alone, so Docker's socket still works and `testcontainers` still reaches
 `socket.getaddrinfo("api.themoviedb.org", 443)` raising
 `RuntimeError: NETWORK BLOCKED` in the same environment. Group F's re-run:
 **1,586 unit + 442 integration passed (2 unit cases skipped), zero blocks**,
+and group G's, after `create_app` grew its two supervised lanes:
+**1,622 unit + 450 integration passed (2 unit cases skipped), zero blocks**,
 `[netguard] installed` on stderr, and the same `getaddrinfo` probe raising in
 the same `uv run` environment. The
 guard lives outside the tree — it is a check to re-run, not a dependency to
@@ -1392,6 +1395,100 @@ Emby" is a correct value for it — PRD 07's own example spells it that way. A
 rule that forbids the substring forbids the feature. What must not escape is
 the source's own **item id**, so the assertion is against a distinctive
 `external_id` and against the key `external_id`, not against a vendor name.
+
+**The server process runs the lanes, and that is proved by a job
+disappearing rather than by an assertion about wiring.** `create_app`'s
+lifespan builds a `LaneSupervisor` and starts a push lane per enabled source
+plus one job worker (both settings-gated, PRD 01's `--worker` flag as
+configuration). A unit test of the supervisor proves it does what it is
+told; it says nothing about whether the lifespan tells it anything.
+`tests/integration/test_lanes_in_the_server_process.py` commits a real
+`match` job, starts nothing but `LifespanManager(create_app(settings))`, and
+asserts the row is gone before the app stops — with the mirror case
+(`worker_enabled=False`, the row survives) as the control that makes it
+evidence. The mutation `await lanes.start()` → `pass` fails exactly that one
+case out of 2,072.
+
+**Both lane switches default on, so every test that builds an app has to say
+it does not want them.** Nine fixtures now pass
+`push_enabled=False, worker_enabled=False`. Without it a worker lane polls
+the real `jobs` table under `tests/integration/test_pipeline_spans.py`, which
+enqueues jobs through its own probe route and asserts on them; and a push
+lane in `tests/integration/test_admin_sources.py` builds the **real**
+`EmbyAdapter` against `https://emby.invalid` and opens a socket, because
+`dependency_overrides` do not reach the lifespan. Stated per fixture rather
+than defaulted in `conftest.py`, so it is greppable.
+
+**`start()` creates tasks and awaits nothing, and the case with teeth drives
+the coroutine by hand.** `coro.send(None)` must raise `StopIteration`; a
+`start()` that read the source list inline hands back a future instead. That
+is what keeps `/health` answering 200 with Postgres down while
+`/health/ready` reports 503 — the M5 plan's own draft did
+`await self.refresh()` there, which opens a connection, and its own Step 4
+then asserted the opposite. The first refresh happens *inside* the refresher
+task, which refreshes and then sleeps, so nothing waits `USHER_PUSH_SOURCE_REFRESH_SECONDS`
+for its first lane either.
+
+**Per-lane crash isolation comes from one task per lane, not from the
+`except`.** Measured: deleting `_guard`'s `except` survives the whole suite,
+while removing `return_exceptions=True` from `stop()`'s gather fails **11**
+cases on its own — so the two are not the belt-and-braces pair a comment
+claimed. What `_guard` buys is that a crashed lane is not silent (without it
+CPython reports an unretrieved task exception at GC time, to stderr, with no
+source name in it), which needs a log assertion to see. And
+`running_sources() == ["B"]` is not a test of isolation: a supervisor whose
+second lane was created and never scheduled reports the same thing. The case
+asserts B ingests an item pushed *after* A's task is already `done()`.
+Two lanes genuinely overlapping is its own measurement — **99.3–99.4% of
+their union over five runs**, against a serialised supervisor's 0.0.
+
+**A guard can be right and unobservable, and `_write_push_available`'s is.**
+Deleting its "nothing changed" check does not move `sources.updated_at`,
+because `PostgresSourceRepository.update` sets attributes on a *loaded ORM
+row* and SQLAlchemy's unit of work emits no `UPDATE` when none actually
+changed — so the `set_updated_at` trigger never fires either way. Recorded
+as an equivalent mutant against today's repository and kept, because the day
+that repository issues a bare `UPDATE … SET` a flapping lane moves a column
+an operator reads, once per reconnect. Same treatment M4 gave `_ENQUEUE`'s
+`GREATEST`.
+
+**`JobWorker.startup()` requeues everything left `running`, so there is one
+worker per deployment, not per process.** `requeue_running`'s default
+`older_than_seconds=0.0` is correct at exactly one worker and at two steals
+the other's live claims. The server now runs one, so a deployment that also
+runs `usher work` must set `USHER_WORKER_ENABLED=false` on the server.
+`LaneSupervisor` calls `startup()` once rather than per pass, which was
+untestable until `idle_seconds` became a constructor argument nothing in
+`src/` passes: the case asserts one requeue over three passes.
+
+**Readiness reports the lanes and never gates on them, and the case that
+proves it cannot live in the unit file.** `tests/unit/test_api_health.py`'s
+app points at an unreachable database, so readiness is *already* 503 there
+and both mutations — `all(checks) and lanes.running_sources()`, and moving
+`push` inside `ReadinessChecks` where `all(...)` picks it up automatically —
+survive every case in it. Against a **reachable** database with no lanes
+running, both turn a 200 into a 503 and both die, so that case lives in
+`tests/integration/test_health.py`. `LaneReport` is a separate model from
+`ReadinessChecks` for exactly this reason: every field of the latter is part
+of the status code by construction.
+
+**`SourceStatus` refuses "push available without being authenticated", and
+`dataclasses.replace` re-runs `__post_init__`.** So the obvious one-liner
+for reporting a running lane's push health —
+`replace(status, push_available=self._push_health(source_id))` — raises
+`ValueError` out of `GET /admin/sources/{id}/status` for a state a rotated
+password produces, on the screen an operator opens to diagnose it. The
+lane's answer is taken only when the status is authenticated.
+
+**`usher.composition` is the wiring both roots share, and it needs no
+seventh import-linter contract.** `usher.cli` carries one saying nothing may
+import it, so shared code cannot live there. The new module sits outside
+every contract's source list — and that hole is closed by what it imports
+rather than by a rule: it imports `usher.db` and `usher.adapters`, so a core
+module reaching it breaks contracts two and three, which report indirect
+chains by default (unlike contract six's `allow_indirect_imports = true`).
+Verified by planting `from usher.composition import Pipeline` in
+`usher/services/push.py`: **4 kept, 2 broken.**
 
 ## Commands
 
