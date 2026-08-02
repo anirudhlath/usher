@@ -886,7 +886,7 @@ left alone, so Docker's socket still works and `testcontainers` still reaches
 `RuntimeError: NETWORK BLOCKED` in the same environment. Group F's re-run:
 **1,586 unit + 442 integration passed (2 unit cases skipped), zero blocks**,
 and group G's, after `create_app` grew its two supervised lanes:
-**1,622 unit + 450 integration passed (2 unit cases skipped), zero blocks**,
+**1,623 unit + 450 integration passed (2 unit cases skipped), zero blocks**,
 `[netguard] installed` on stderr, and the same `getaddrinfo` probe raising in
 the same `uv run` environment. The
 guard lives outside the tree — it is a check to re-run, not a dependency to
