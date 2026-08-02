@@ -183,6 +183,42 @@ WHERE source_id = :source_id AND episode_id = ANY(:episode_ids)
 ORDER BY episode_id, last_seen_at DESC, external_id
 """
 
+# `ix_media_items_title_id` has existed since M4's migration with no query
+# behind it; this is the first.
+#
+# `episode_id IS NULL` is the bound, not tidiness -- the same clause, for the
+# same reason, as `_EXTERNAL_IDS_FOR_TITLES` above. An episode's row carries
+# its series' `title_id` too, so without it a series answers with one row per
+# episode file and PRD 07's `availability` array becomes a list the length of
+# the show. With it, the answer is bounded by copies of the title itself:
+# sources times versions, single digits.
+#
+# **Measured, on this statement rather than on a lookalike** (captured off
+# `before_cursor_execute` and EXPLAIN (ANALYZE, BUFFERS)'d verbatim; 2026-08-01,
+# `pgvector/pgvector:pg17`, 80,201 `media_items` rows, one series holding
+# 20,000 episodes):
+#
+#   as shipped   1 row, 0.251 ms, 21 buffers -- Sort <- Bitmap Heap Scan <-
+#                BitmapAnd(ix_media_items_episode_id, ix_media_items_title_id)
+#   filter gone  20,001 rows, 22.901 ms, 402 buffers, 3.4 MB of sort memory
+#
+# 91x, and the wrong half is linear in the episode count while the right half
+# is flat -- which is the difference between a response shape and a design
+# defect. `ix_media_items_episode_id` earns its keep a second time here: M4
+# added it for the FK's `SET NULL` scan and the planner reads `IS NULL`
+# straight out of it.
+#
+# No `NULLS LAST` on either descending key, and its absence is deliberate
+# rather than forgotten: `available` and `last_seen_at` are both `NOT NULL`
+# columns, so Postgres's NULLS-FIRST default for a DESC sort has nothing to
+# act on. `list_unmatched` sorts on the one nullable column here and spells
+# it out.
+_FOR_TITLE = """
+SELECT * FROM media_items
+WHERE title_id = :title_id AND episode_id IS NULL
+ORDER BY available DESC, last_seen_at DESC, id
+"""
+
 
 class PostgresMediaItemRepository(MediaItemRepository):
     def __init__(self, session: AsyncSession) -> None:
@@ -366,6 +402,15 @@ class PostgresMediaItemRepository(MediaItemRepository):
                         row.external_id
                     )
         return resolved
+
+    async def list_for_title(self, title_id: uuid.UUID) -> list[MediaItem]:
+        with self._session.no_autoflush:
+            rows = (
+                (await self._session.execute(text(_FOR_TITLE), {"title_id": title_id}))
+                .mappings()
+                .all()
+            )
+        return [MediaItem.model_validate(dict(row)) for row in rows]
 
     async def list_unmatched(
         self, source_id: uuid.UUID | None = None, *, limit: int = 100, offset: int = 0

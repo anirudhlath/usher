@@ -611,3 +611,173 @@ class MediaItemRepositoryContract:
         self, repository: MediaItemRepository, source_id: uuid.UUID
     ) -> None:
         assert await repository.resolve_external_ids(source_id, []) == {}
+
+    # -- what a title's detail screen renders as `availability` -------------
+
+    async def test_list_for_title_returns_every_copy_across_sources(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        other_source_id: uuid.UUID,
+        title_id: uuid.UUID,
+    ) -> None:
+        """PRD 07's `availability` array. A read keyed on
+        `(source_id, title_id)` makes a two-source household's detail screen
+        show one badge; a read that filtered on `available` makes a film on a
+        temporarily unmounted drive read as "not on any source", which is a
+        different fact than the one stored (PRD 02: soft-delete availability,
+        hard-delete nothing). The client decides what a retracted copy means.
+        """
+        await repository.upsert_many(
+            [
+                item(source_id, "mine", title_id=title_id),
+                item(other_source_id, "theirs", title_id=title_id, last_seen_at=EARLIER),
+                item(source_id, "unrelated", title_id=None),
+            ]
+        )
+        await repository.mark_unseen_unavailable(
+            other_source_id, seen_since=RUN_AT, max_retract_fraction=1.0
+        )
+        listed = await repository.list_for_title(title_id)
+        assert [(row.external_id, row.available) for row in listed] == [
+            ("mine", True),
+            ("theirs", False),
+        ]
+
+    async def test_list_for_title_puts_a_retracted_copy_last(
+        self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """An unordered read makes a detail screen shuffle its badges between
+        refreshes for no reason a user can see, and a bare `SELECT` promises
+        nothing about row order -- M4 measured exactly that against real
+        Postgres at three queue depths.
+
+        **The seeding is what gives this case teeth**, in three deliberate
+        ways, each of which a plainer version was measured to lack.
+
+        The retracted copy is the *fresher* of the two, so `available DESC`
+        is the only key that can put the available one first: with
+        `last_seen_at DESC` alone the answer reverses.
+
+        `stale` is stored **first**, so the answer disagrees with insertion
+        order -- which is what the fake returns with its sort deleted, and
+        what Postgres returns from a seq scan of a two-row table. Seeded the
+        other way round, a deleted `ORDER BY` is invisible to both.
+
+        And the surviving copy is re-upserted *after* the sweep, so its
+        `UPDATE` writes a new tuple past the retracted one's: physical order
+        and the answer disagree against Postgres too, not just in a dict.
+        """
+        await repository.upsert_many(
+            [item(source_id, "stale", title_id=title_id, last_seen_at=RUN_AT)]
+        )
+        await repository.upsert_many(
+            [item(source_id, "fresh", title_id=title_id, last_seen_at=EARLIER)]
+        )
+        await repository.mark_unseen_unavailable(
+            source_id, seen_since=RUN_AT + timedelta(days=1), max_retract_fraction=1.0
+        )
+        await repository.upsert_many(
+            [item(source_id, "fresh", title_id=title_id, last_seen_at=EARLIER)]
+        )
+        listed = await repository.list_for_title(title_id)
+        assert [(row.external_id, row.available) for row in listed] == [
+            ("fresh", True),
+            ("stale", False),
+        ]
+
+    async def test_list_for_title_puts_the_freshest_available_copy_first(
+        self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """The second key, on its own rows.
+
+        Two *available* copies is the ordinary shape -- a 4K and an HD file of
+        one film -- and the case above cannot see `last_seen_at DESC` at all,
+        because its two rows already differ on `available`. Measured:
+        deleting the freshness key survived the whole file until this case
+        existed. Stored oldest-first, so insertion order and the answer
+        disagree.
+        """
+        await repository.upsert_many(
+            [item(source_id, "old", title_id=title_id, last_seen_at=EARLIER)]
+        )
+        await repository.upsert_many([item(source_id, "new", title_id=title_id)])
+        listed = await repository.list_for_title(title_id)
+        assert [row.external_id for row in listed] == ["new", "old"]
+
+    async def test_list_for_title_breaks_ties_on_id(
+        self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID
+    ) -> None:
+        """One walk stamps every row it sees with the run's own start instant,
+        so two copies of one film tie on `last_seen_at` in the common case
+        rather than the rare one, and the tiebreak is then the only thing
+        making the answer stable between two refreshes of one screen.
+
+        **`copy-a` is re-upserted last, and its `last_seen_at` has to
+        *change*.** Every id here is a UUIDv7 minted at insert time, so id
+        order and storage order agree for a run of plain inserts and a
+        missing tiebreak is unobservable. A trailing `UPDATE` is what
+        separates them -- but only a **non-HOT** one: Postgres keeps the
+        original index entry for an update that touches no indexed column, so
+        the read still arrives in the old order and the mutation survives.
+        Measured: re-upserting `copy-a` unchanged left `ORDER BY available
+        DESC, last_seen_at DESC` (no `id`) answering `[a, b, c]` -- already
+        sorted, already passing. Moving `last_seen_at` off `EARLIER` puts the
+        row in `ix_media_items_sweep`'s key, forces a new index entry, and
+        the same read answers `[b, c, a]`, which is heap order and is not id
+        order. Same family as
+        `test_two_copies_seen_in_the_same_walk_break_their_tie_on_the_external_id`,
+        one level deeper.
+
+        **It is unobservable for the fake either way**, which is a divergence
+        rather than an oversight: that fake mints its ids in insertion order
+        and its dict preserves that order across an update, so its id order
+        and its storage order are the same sequence and no seeding can
+        separate them. Only the Postgres run can fail this.
+        """
+        await repository.upsert_many(
+            [item(source_id, "copy-a", title_id=title_id, last_seen_at=EARLIER)]
+        )
+        await repository.upsert_many([item(source_id, "copy-b", title_id=title_id)])
+        await repository.upsert_many([item(source_id, "copy-c", title_id=title_id)])
+        await repository.upsert_many([item(source_id, "copy-a", title_id=title_id)])
+        listed = await repository.list_for_title(title_id)
+        assert len(listed) == 3
+        assert [row.id for row in listed] == sorted(row.id for row in listed)
+
+    async def test_list_for_title_leaves_out_the_episodes_of_a_series(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """**This is what bounds the read**, and it is a correctness rule
+        before it is a scale one.
+
+        An episode's row carries its series' `title_id` as well as its own
+        `episode_id` (`IngestService` writes both, deliberately: a client
+        browsing a season wants each). So a read on `title_id` alone answers
+        a *series* with one row per episode file -- 999,827 of the one
+        measured source's 1,126,789 items are episodes -- and PRD 07's
+        `availability` array would carry a badge per episode instead of one
+        per source. Same asymmetry `resolve_external_ids`' title branch
+        already documents, one method over.
+        """
+        await repository.upsert_many(
+            [
+                item(source_id, "series-1", title_id=title_id),
+                item(source_id, "episode-1", title_id=title_id, episode_id=episode_id),
+            ]
+        )
+        listed = await repository.list_for_title(title_id)
+        assert [row.external_id for row in listed] == ["series-1"]
+
+    async def test_list_for_title_answers_empty_for_a_title_on_no_source(
+        self, repository: MediaItemRepository
+    ) -> None:
+        """The catalog holds 1,271,138 titles and the one measured source
+        holds 1,126,789 items, most of them episodes -- so the great majority
+        of titles are on no source at all. A normal answer, not a missing
+        row."""
+        assert await repository.list_for_title(new_id()) == []
