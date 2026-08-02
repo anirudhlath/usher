@@ -32,6 +32,7 @@ from tests.contract.event_publisher_contract import (
     BusFactory,
     EventBusContract,
     EventPublisherContract,
+    publish_all,
 )
 from usher.ports.events import ClientEvent, ClientEventKind
 from usher.services.events import InMemoryEventBus
@@ -209,13 +210,11 @@ async def test_publishing_does_not_block_on_a_subscriber_that_is_not_reading() -
         await bus.publish(_event(0))
         await asyncio.wait_for(reading.wait(), timeout=_BOUND_SECONDS)
 
-        async def burst() -> None:
-            published.append(loop.time())
-            for index in range(1, _BURST):
-                await bus.publish(_event(index))
-            published.append(loop.time())
-
-        await asyncio.wait_for(burst(), timeout=_BOUND_SECONDS)
+        published.append(loop.time())
+        await publish_all(
+            bus, (_event(index) for index in range(1, _BURST)), timeout=_BOUND_SECONDS
+        )
+        published.append(loop.time())
     finally:
         released.set()
         await asyncio.wait_for(reader, timeout=_BOUND_SECONDS)
@@ -255,8 +254,11 @@ async def test_an_overflowed_subscriber_gets_exactly_one_resync() -> None:
     second one the moment it read the first, forever."""
     bus = InMemoryEventBus(queue_size=2)
     async with bus.subscribe() as stream:
-        for index in range(50):
-            await bus.publish(_event(index))
+        # `publish_all`, never a bare loop: 50 publishes into a queue of two
+        # that nobody is reading is precisely where the awaiting spelling
+        # deadlocks, and an unbounded burst here turns the milestone's
+        # headline mutation from KILLED into HUNG. It did, twice.
+        await publish_all(bus, (_event(index) for index in range(50)))
         first = await asyncio.wait_for(anext(aiter(stream)), timeout=1.0)
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(anext(aiter(stream)), timeout=0.05)

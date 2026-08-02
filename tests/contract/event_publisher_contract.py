@@ -26,7 +26,7 @@ it.
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import AbstractAsyncContextManager
 from typing import Protocol
 
@@ -72,13 +72,7 @@ class EventPublisherContract:
         no case observed rather than one every case caught.
         """
 
-        async def burst() -> None:
-            for index in range(_BURST):
-                await publisher.publish(
-                    ClientEvent(kind=ClientEventKind.SYNC_PROGRESS, data={"seen": index})
-                )
-
-        await asyncio.wait_for(burst(), timeout=_NOT_BLOCKING_SECONDS)
+        await publish_all(publisher, (_progress(index) for index in range(_BURST)))
 
     async def test_publish_is_not_a_suspension_point_a_caller_can_be_starved_on(
         self, publisher: EventPublisher
@@ -103,6 +97,42 @@ class EventPublisherContract:
             f"one publish took {elapsed:.3f}s; a publisher that waits on a subscriber is "
             "the failure this port's docstring forbids"
         )
+
+
+class Publishing(Protocol):
+    """Anything with a `publish`, so `publish_all` serves both contracts.
+
+    A `Protocol` for the reason `SubscribingPublisher` below states at
+    length, plus one more: `EventPublisher` is an ABC and a Protocol accepts
+    it structurally, where the reverse is not true.
+    """
+
+    async def publish(self, event: ClientEvent) -> None: ...
+
+
+async def publish_all(
+    publisher: Publishing,
+    events: Iterable[ClientEvent],
+    *,
+    timeout: float = _NOT_BLOCKING_SECONDS,
+) -> None:
+    """A burst of publishes, bounded.
+
+    **Every burst in this suite goes through here, and that is structural
+    rather than tidy.** The one-line mutation these files exist to catch --
+    `await queue.put(...)` for `put_nowait` -- does not answer wrongly, it
+    *deadlocks*: the burst fills an unread subscriber's queue and nothing
+    will ever drain it. An unbounded burst therefore turns that mutation from
+    KILLED into HUNG, which reads like a mutation nothing observed. Measured
+    twice on this milestone, in two different files, which is why this is a
+    helper instead of a convention.
+    """
+
+    async def burst() -> None:
+        for event in events:
+            await publisher.publish(event)
+
+    await asyncio.wait_for(burst(), timeout=timeout)
 
 
 class SubscribingPublisher(Protocol):
@@ -162,8 +192,7 @@ class EventBusContract:
         it has no way to find out."""
         bus = make_bus(queue_size=3)
         async with bus.subscribe() as stream:
-            for index in range(10):
-                await bus.publish(_progress(index))
+            await publish_all(bus, (_progress(index) for index in range(10)))
             sent = await asyncio.wait_for(anext(aiter(stream)), timeout=1.0)
         assert sent.event.kind is ClientEventKind.RESYNC_REQUIRED
         assert sent.event.data == {"reason": "buffer_overflow"}
@@ -190,8 +219,7 @@ class EventBusContract:
         the failure: the client silently misses the events that fell off the
         front and has no way to learn it."""
         bus = make_bus(buffer_size=3)
-        for index in range(10):
-            await bus.publish(_progress(index))
+        await publish_all(bus, (_progress(index) for index in range(10)))
         async with bus.subscribe(last_event_id=f"{bus.epoch}-1") as stream:
             sent = await asyncio.wait_for(anext(aiter(stream)), timeout=1.0)
         assert sent.event.kind is ClientEventKind.RESYNC_REQUIRED
