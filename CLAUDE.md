@@ -1175,6 +1175,23 @@ by a milestone's worth of settings at a time.
   checkout with no `.env` still parses and fails on the secret-key guard
   rather than on a missing file.
 
+**A per-process fact logged in a per-pass function is ~17,280 warnings a
+day.** `build_worker` logged `no TMDb API key configured; enrich jobs will
+not be claimed` unconditionally, and `usher.api.lanes._run_worker` calls it
+once per pass at `IDLE_SLEEP_SECONDS = 5.0` — measured at exact 5 s
+intervals in the default no-key deployment, and in `usher push` too. The
+information is worth surfacing; at that rate it trains an operator to ignore
+warnings, which is the failure a log level exists to prevent. It moved to
+`composition.metadata_provider`, which is where the decision is *made* and
+which each of the three composition roots calls exactly once per process —
+and which a push-only deployment never reaches at all, correctly, since with
+no worker there are no enrich jobs to leave unclaimed. `usher work` was
+already calling `build_worker` once outside its loop, so that root saw one
+warning either way; the lane was the one at 5 s. The case that has teeth
+drains **three** worker passes and asserts the sink is empty — asserting
+after one pass cannot tell "once" from "per pass", the same shape
+`test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass` needed.
+
 **M5's final mutation sweep: 56 mutations, 50 killed, and every one of the
 six survivors was predicted.** Run 2026-08-02 in place, each mutation
 against the **whole** 2,098-test suite rather than its own task's selection.

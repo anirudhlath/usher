@@ -328,6 +328,15 @@ def build_worker(
     the *same* handlers: a lane that quietly lacked `enrich` would leave a
     demand-promoted job at the head of the queue forever, and the client
     that promoted it watching an SSE stream that never fires.
+
+    **`provider is None` is not reported here**, and the reason is that this
+    function is called once per worker *pass*: `usher.api.lanes._run_worker`
+    rebuilds the worker on each turn of a loop whose floor is
+    `IDLE_SLEEP_SECONDS`, so a `logger.warning` here was ~17,280 identical
+    lines a day in the default no-key deployment -- measured at exact 5 s
+    intervals. The degradation is still surfaced, once, by
+    `metadata_provider`, which is where the decision is made and which every
+    composition root calls exactly once per process.
     """
     worker = JobWorker(pipeline.queue, pipeline.commit, batch_size=settings.job_batch_size)
     worker.register(JobKind.MATCH, match_handler(pipeline.matcher, pipeline.media_items, resolve))
@@ -338,11 +347,6 @@ def build_worker(
         worker.register(
             JobKind.ENRICH, enrich_handler(build_enrich_service(pipeline, settings, provider))
         )
-    else:
-        # Not a silent skip: PRD 08's "TMDb key missing" degradation is a
-        # *narrowed* deployment, and an operator whose enrich queue never
-        # drains has to be able to see why.
-        logger.warning("no TMDb API key configured; enrich jobs will not be claimed")
     return worker
 
 
@@ -360,8 +364,19 @@ async def metadata_provider(
     bucket that keeps this deployment under TMDb's ~40 rps ceiling lives on
     the client. A client per job would give every job its own budget, which
     is a rate limiter that limits nothing.
+
+    **This is also where a missing key is reported**, for the same reason:
+    once per process. Not a silent skip -- PRD 08's "TMDb key missing"
+    degradation is a *narrowed* deployment, and an operator whose enrich
+    queue never drains has to be able to see why -- but not `build_worker`'s
+    either, which runs once per worker pass and made that one sentence
+    ~17,280 warnings a day. A push-only deployment never reaches this
+    function at all (`create_app` and `usher push` call it only when
+    `worker_enabled`), which is correct: with no worker there are no enrich
+    jobs to leave unclaimed.
     """
     if settings.tmdb_api_key is None:
+        logger.warning("no TMDb API key configured; enrich jobs will not be claimed")
 
         async def _nothing() -> None:
             return None

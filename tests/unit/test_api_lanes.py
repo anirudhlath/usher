@@ -18,6 +18,7 @@ established.
 """
 
 import asyncio
+import io
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -602,6 +603,39 @@ async def test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass(
     assert fakes.queue.requeues == 1, (
         f"the worker lane requeued {fakes.queue.requeues} times over {fakes.queue.claims} passes"
     )
+
+
+async def test_a_missing_tmdb_key_is_not_re_reported_on_every_pass(fakes: _Fakes) -> None:
+    """PRD 08's "TMDb key missing" degradation is worth surfacing once.
+
+    It used to be logged by `build_worker`, which the loop below calls once
+    per pass -- so the default no-key deployment produced a `WARNING` every
+    `IDLE_SLEEP_SECONDS`, measured at exact 5 s intervals, i.e. ~17,280 a day
+    forever. A warning at that rate trains an operator to ignore warnings,
+    which is the failure a log level exists to prevent. The line moved to
+    `composition.metadata_provider`, which is where the decision is actually
+    made and which every composition root calls exactly once per process.
+
+    Asserting after one pass could not tell "once" from "per pass", so this
+    drains three the way the requeue case above does -- and it counts *any*
+    warning rather than only the TMDb one, because a per-pass line about
+    anything else would be the same defect wearing a different sentence.
+    """
+    sink = io.StringIO()
+    supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
+    logger.remove()
+    try:
+        logger.add(sink, level="WARNING")
+        await supervisor.start()
+        await _drain(lambda: fakes.queue.claims >= 3, bound=2.0)
+        await supervisor.stop()
+    finally:
+        logger.remove()
+    logged = sink.getvalue()
+    assert "TMDb" not in logged, (
+        f"the worker lane re-reported the missing key over {fakes.queue.claims} passes: {logged}"
+    )
+    assert logged == "", f"the worker lane logged once per pass: {logged}"
 
 
 async def test_the_lanes_are_settings_gated(fakes: _Fakes) -> None:
