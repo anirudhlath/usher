@@ -106,8 +106,8 @@ that change what this document asserted:
 - **`Sessions` is not periodic on the socket Usher actually uses.**
   `"0,1000"` is `initialDelayMs,intervalMs` and an *unauthenticated* socket
   really does receive one frame a second; the authenticated, row-filtered
-  stream arrives when the filtered view changes — median 37.7 s, max 72.9 s
-  over 176 intervals in 96 minutes. The table above should be read as
+  stream arrives when the filtered view changes — median 38.7 s, max 72.9 s
+  over 182 intervals in 100 minutes. The table above should be read as
   "periodically, because something on the server keeps changing", not as a
   heartbeat.
 - **`LibraryChanged` was observed for the first time** — twelve of them —

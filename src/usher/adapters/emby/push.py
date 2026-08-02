@@ -88,8 +88,8 @@ DEFAULT_POLL_SECONDS = 5.0
 #
 # **Measured 2026-08-02 against the live server, and it is not the interval
 # the frame above asks for.** An authenticated socket's `Sessions` arrives
-# when its row-filtered view changes, not on the 1 s timer: **median 37.7 s,
-# p90 47.2 s, max 72.9 s** over 176 intervals in 96 minutes. So 90.0
+# when its row-filtered view changes, not on the 1 s timer: **median 38.7 s,
+# p90 46.5 s, max 72.9 s** over 182 intervals in 100 minutes. So 90.0
 # survives -- with **1.23x** headroom over the worst gap seen, and the worst
 # gap grew monotonically as the window did (52.6 s at 26 minutes, 60.1 s at
 # 70, 72.9 s at 96), so a longer hold would plausibly cross it. One

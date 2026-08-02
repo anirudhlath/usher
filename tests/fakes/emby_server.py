@@ -829,7 +829,7 @@ class FakeEmbyServer:
         ADR-0004 observed `Sessions` arriving "periodically" and **not at
         what interval**, which is the single assumption
         `DEFAULT_STALE_AFTER_SECONDS = 90.0` rested on. M5's live run
-        measured it -- median 37.7 s, max 72.9 s over 176 intervals -- and
+        measured it -- median 38.7 s, max 72.9 s over 182 intervals -- and
         found it is **not an interval at all**: an authenticated socket
         receives a frame when its row-filtered view changes, where an
         unauthenticated one receives the literal 1 s cadence

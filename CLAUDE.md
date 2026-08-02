@@ -183,10 +183,10 @@ driving the shipped `EmbyAdapter` → `EmbyPushChannel` → `connect_websocket`
 recording callables in place of the three unit-of-work ones. From a
 throwaway script outside the working tree, holding the operator's existing
 token (no password, so `AuthenticateByName` was again not exercised).
-**Bounded deliberately: one long-lived socket held 96 minutes, eight
+**Bounded deliberately: one long-lived socket held 100 minutes, eight
 short-lived probe sockets, and 14 HTTP requests in total** — no walk of any
 kind, because the library is 1,126,789 items. The long socket received
-**194 frames — 177 `Sessions`, 12 `LibraryChanged`, 5 `UserDataChanged` —
+**200 frames — 183 `Sessions`, 12 `LibraryChanged`, 5 `UserDataChanged` —
 with zero reconnects, zero unforced failures, and `supports_push` true
 throughout**, and the shipped mapper turned them into 20 `SourceEvent`s.
 
@@ -194,7 +194,7 @@ throughout**, and the shipped mapper turned them into 20 `SourceEvent`s.
   `UserDataChanged` and `LibraryChanged` carry
   `{MessageId, MessageType, Data}` with a **distinct 32-hex `MessageId` per
   message** (not per type — 17 carried one, 17 distinct); **`Sessions`
-  carries `{MessageType, Data}` and no `MessageId` at all**, on 177 of 177
+  carries `{MessageType, Data}` and no `MessageId` at all**, on 183 of 183
   frames. `tests/fixtures/emby/
   push_sessions.json` claimed one and no longer does.
 - **A real `UserDataChanged` entry is honest, including about play
@@ -228,7 +228,7 @@ throughout**, and the shipped mapper turned them into 20 `SourceEvent`s.
   `ITEM_REMOVED` from them — one event per non-empty array, live.
 - **`ItemsRemoved` fires on a library from which nothing was removed, and
   that is ADR-0015's argument arriving as a measurement rather than as an
-  argument.** Nobody deleted anything from this server during the 96-minute hold, and
+  argument.** Nobody deleted anything from this server during the 100-minute hold, and
   one frame still named an item in `ItemsRemoved` (alongside
   `FoldersRemovedFrom`, `ItemsAdded`, `FoldersAddedTo`, `CollectionFolders`
   and ten `ItemsUpdated`). M5 counts it and retracts nothing; had it
@@ -249,11 +249,12 @@ throughout**, and the shipped mapper turned them into 20 `SourceEvent`s.
   `LastPlayedDate` (when played). The fixture and `FakeEmbyServer` both
   rendered a `Key`; both stopped.
 - **The `Sessions` interval, which `DEFAULT_STALE_AFTER_SECONDS = 90.0`
-  rests on: median 37.7 s, mean 32.5 s, p90 47.2 s, max 72.9 s** over 176
-  intervals in 96 minutes on an authenticated socket. **The 90 s default
+  rests on: median 38.7 s, mean 32.8 s, p90 46.5 s, max 72.9 s** over 182
+  intervals in 100 minutes on an authenticated socket. **The 90 s default
   survives — but the headroom is 1.23x, not the comfortable margin the
   constant reads like, and it shrank monotonically as the window grew**: the
-  worst gap was 52.6 s at 26 minutes, 60.1 s at 70 and **72.9 s at 96**. So
+  worst gap was 52.6 s at 26 minutes, 60.1 s at 70 and **72.9 s at 96**, and
+  only two of 182 intervals exceeded 60 s at all. So
   a longer hold would plausibly have crossed 90, and this is a bound that
   has **not been falsified** rather than one shown to be safe — on one
   household, on one evening. A 75-second smoke run earlier the same evening
@@ -353,7 +354,7 @@ throughout**, and the shipped mapper turned them into 20 `SourceEvent`s.
   `User.Policy.IsAdministrator` (this run held a token, not a password —
   so Task 3's extra `GET /Users/{userId}` remains the verified path);
   silent 401 re-authentication end to end; durable-device registration
-  across restarts; a socket held for four hours (**96 minutes** is what this
+  across restarts; a socket held for four hours (**100 minutes** is what this
   run covers, with zero reconnects and zero unforced failures in it); a
   `LibraryChanged` with `IsEmpty: true` (all twelve observed carried
   something, so what that field means is still a guess about a field nothing
