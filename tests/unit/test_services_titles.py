@@ -397,7 +397,7 @@ async def test_a_parked_job_is_not_promoted_behind_a_humans_back(
     happened through `enrichment_error`, which PRD 07's wire contract carries
     for exactly this."""
     title = await _seed_title(
-        titles, EnrichmentState.STUB, error="TMDb answered 404 for tmdb_id=550"
+        titles, EnrichmentState.STUB, error="TMDb answered 404 for tmdb_id=90000550"
     )
     await queue.enqueue(
         [JobRequest(kind=JobKind.ENRICH, key=str(title.id), priority=JobPriority.NEW)]
@@ -408,7 +408,7 @@ async def test_a_parked_job_is_not_promoted_behind_a_humans_back(
     detail = await service.detail(title.id, user_id=USER_ID)
 
     assert detail is not None
-    assert detail.title.enrichment_error == "TMDb answered 404 for tmdb_id=550"
+    assert detail.title.enrichment_error == "TMDb answered 404 for tmdb_id=90000550"
     parked = await queue.parked()
     assert [(job.status, job.priority) for job in parked] == [(JobStatus.PARKED, JobPriority.NEW)]
 
