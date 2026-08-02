@@ -8,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from usher.api.errors import validation_error_without_the_request_body
-from usher.api.routers import events, health, sources
+from usher.api.routers import events, health, sources, titles
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.services.events import InMemoryEventBus
@@ -81,4 +81,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(events.router)
     app.include_router(health.router)
     app.include_router(sources.router)
+    app.include_router(titles.router)
     return app

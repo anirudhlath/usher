@@ -32,6 +32,7 @@ from usher.ports.repository import (
     EpisodeRepository,
     MediaItemRepository,
     RawPayloadStore,
+    SourceRepository,
     SyncRunRepository,
     TitleMatchRepository,
     TitleRepository,
@@ -43,6 +44,7 @@ from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
 from usher.services.sources import SourceService
+from usher.services.titles import TitleReadService
 from usher.services.watch_sync import WatchStateSyncService
 
 
@@ -203,6 +205,19 @@ async def get_default_user_id(session: SessionDep) -> uuid.UUID:
 DefaultUserIdDep = Annotated[uuid.UUID, Depends(get_default_user_id)]
 
 
+def get_source_repository(session: SessionDep) -> SourceRepository:
+    """Its own provider rather than being constructed inside
+    `get_source_service`, because `get_title_read_service` needs the same one.
+
+    Two callers each building their own would be two chances for one of them
+    to drift onto a different session and quietly leave the request's
+    transaction -- the failure `tests/integration/test_pipeline_deps.py`
+    exists to make observable. Declared here, above its first user, because
+    `Depends(...)` is evaluated when the `def` below executes.
+    """
+    return PostgresSourceRepository(session)
+
+
 def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:
     """The composition root's adapter registry.
 
@@ -221,10 +236,11 @@ def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:
 def get_source_service(
     session: SessionDep,
     settings: SettingsDep,
+    sources: Annotated[SourceRepository, Depends(get_source_repository)],
     adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
 ) -> SourceService:
     return SourceService(
-        PostgresSourceRepository(session),
+        sources,
         PostgresCredentialStore(session, settings.secret_key),
         adapters,
     )
@@ -388,3 +404,32 @@ def get_watch_state_sync_service(
 IngestServiceDep = Annotated[IngestService, Depends(get_ingest_service)]
 ReconcileServiceDep = Annotated[ReconcileService, Depends(get_reconcile_service)]
 WatchStateSyncServiceDep = Annotated[WatchStateSyncService, Depends(get_watch_state_sync_service)]
+
+
+# ---------------------------------------------------------------------------
+# The read-through surface (M5). `GET /titles/{id}` is the one route that
+# routes over any of the providers above.
+# ---------------------------------------------------------------------------
+
+
+def get_title_read_service(
+    titles: Annotated[TitleRepository, Depends(get_title_repository)],
+    media_items: MediaItemRepositoryDep,
+    sources: Annotated[SourceRepository, Depends(get_source_repository)],
+    watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
+    queue: JobQueueDep,
+) -> TitleReadService:
+    """Four repositories and the queue, and deliberately no adapter factory.
+
+    The absence is the design (PRD 08: "a degraded subsystem narrows
+    functionality; it never fails a request local state can answer"), not an
+    omission that a later route should fill in: with no `SourceAdapter` in the
+    graph there is no path from an unreachable Emby to a failed title read,
+    and therefore no 503 for M5 to invent an error `code` for.
+    `tests/unit/test_services_titles.py` asserts it on the service's own
+    imports so that adding one here would fail rather than pass review.
+    """
+    return TitleReadService(titles, media_items, sources, watch_states, queue)
+
+
+TitleReadServiceDep = Annotated[TitleReadService, Depends(get_title_read_service)]

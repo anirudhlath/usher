@@ -34,8 +34,10 @@ from usher.api.deps import (
     get_media_item_repository,
     get_raw_payload_store,
     get_reconcile_service,
+    get_source_repository,
     get_sync_run_repository,
     get_title_match_repository,
+    get_title_read_service,
     get_title_repository,
     get_watch_state_repository,
     get_watch_state_sync_service,
@@ -57,6 +59,11 @@ _PROVIDERS = {
     "ingest_service": get_ingest_service,
     "reconcile_service": get_reconcile_service,
     "watch_sync_service": get_watch_state_sync_service,
+    # M5's read-through surface. The one provider here that a shipped
+    # route actually resolves -- `GET /titles/{id}` -- and therefore the
+    # one whose graph a 500 at request time would be a real outage.
+    "sources_repository": get_source_repository,
+    "title_read_service": get_title_read_service,
 }
 
 
@@ -87,7 +94,7 @@ async def test_every_pipeline_provider_resolves_in_a_request(probe: AsyncClient)
         response = await probe.get(f"/_probe/{name}")
         assert response.status_code == 200, f"{name}: {response.text}"
         assert response.json()["built"].startswith(
-            ("Postgres", "Match", "Ingest", "Reconcile", "Watch")
+            ("Postgres", "Match", "Ingest", "Reconcile", "Watch", "Title")
         )
 
 

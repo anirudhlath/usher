@@ -51,6 +51,45 @@ be added if a client turns out to need flexible field selection.
 | `GET /people/{id}` | Filmography grouped by role |
 | `GET /collections/{id}` | Franchise contents with ownership completeness |
 
+> **Built in M5: `GET /titles/{id}`, narrowed.** ✅ It carries metadata,
+> `enrichment_state`, `enrichment_error`, `availability` and `watch_state` —
+> every field backed by a table [M4](09-roadmap.md) fills. `credits`, `images`,
+> `similar` and the season/episode hierarchy are **absent rather than empty**:
+> `Person`/`Credit` land with M7 and `Image` with M9, each re-derived from
+> `raw_payloads` with no second network call ([09](09-roadmap.md)'s M4 boundary
+> call 2), `GET /titles/{id}/similar` is M6's with its own row above, and an
+> empty list would be indistinguishable from a film with no cast.
+>
+> **`availability` is one badge per copy of the title, never per episode.** An
+> episode's `MediaItem` carries its series' `title_id` as well as its own
+> `episode_id`, so the read that backs this field excludes rows with an
+> `episode_id` — otherwise a series answers with one entry per episode file
+> and the response length is a property of the show rather than of the
+> household. Measured on the shipped statement: at 80,201 `media_items` rows
+> with one 20,000-episode series, 1 row in 0.251 ms with the clause and 20,001
+> rows in 22.901 ms without it. A retracted copy is still returned, with
+> `available: false` — [02](02-data-model.md)'s soft-delete availability, and
+> the only place a degraded source is visible on this route.
+>
+> **A copy carries no `external_id`.** A source's own item id is a source
+> concept escaping its adapter and a value no client has a use for; every
+> route a client calls takes a `Title.id`. The source *name* is present,
+> because it is what an operator typed.
+>
+> Opening a `skeleton` or `stub` enqueues its enrichment at
+> `JobPriority.DEMAND` — the first caller of the promotion clause M4 built —
+> and returns immediately. A second open writes zero rows, which is that
+> clause's own `WHERE` and the honest number. A **parked** enrichment is not
+> promoted ([08](08-operations.md): re-enqueueing does not un-park, and a
+> parked job's priority is not raised behind a human's back); the client is
+> told through `enrichment_error` instead.
+>
+> **The route never calls a source.** Every field is local, so there is no
+> path from an unreachable Emby to a failed title read — which is
+> [08](08-operations.md)'s "never fails a request local state can answer" as a
+> structural property rather than a caught exception. `TitleReadService` holds
+> no `SourceAdapter` and a test asserts that on its imports.
+
 ### Actions
 
 | Endpoint | Effect |
@@ -179,6 +218,21 @@ subsystem narrows functionality, it never fails a request local state can answer
 > is the part of the error path that could not wait: a 422 never echoes the
 > submitted request body, because that body carries a source credential.
 > See [08](08-operations.md)'s secrets rules.
+>
+> **Still deferred after M5, and now for a sharper reason.** M5 adds a
+> streaming surface and two client routes, and neither forces the envelope.
+> RFC 9457 is a format for a response *body*; once `GET /events` has answered
+> `200 text/event-stream` there is no further status code to carry a problem
+> document, so the in-stream vocabulary is an SSE event (`resync_required`)
+> rather than a document. And the failure that *would* force it — the worked
+> example above, `503 source_unavailable` — is unreachable on `GET
+> /titles/{id}` by design: the service behind it holds no `SourceAdapter`, so
+> there is no request Usher can be asked to answer and genuinely cannot. The
+> first route whose honest answer is "the source is down and I cannot serve
+> this from local state" is `POST /titles/{id}/play`, in M9, alongside the
+> playback ticket [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)
+> owes. M5's two ordinary failures are the shapes M3 already ships: a 404 for
+> an unknown title and a 422 for a malformed id or `?titles=`.
 
 ## Streaming updates (SSE)
 
