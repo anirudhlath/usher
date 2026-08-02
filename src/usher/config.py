@@ -122,6 +122,67 @@ class Settings(BaseSettings):
     # retry storm into the rate limit it is meant to avoid.
     enrich_cache_max_age_days: int = Field(default=30, ge=1, le=180)
 
+    # The push lane and the worker lane (PRD 03, PRD 01's concurrency
+    # model). Same reasoning as every block above: PRD 08's TOML config
+    # layer does not exist yet. Deliberately named `push_*` rather than
+    # `websocket_*` -- a WebSocket is how *Emby* implements push, and
+    # config.py is not an adapter.
+    #
+    # The two lane switches exist because PRD 01 promises "a `--worker`
+    # entrypoint flag ... so lanes can be moved to a separate container
+    # later by editing compose, with no code change". These are that flag,
+    # as configuration rather than as an argument, so one image serves an
+    # all-in-one deployment and a split one. Read by
+    # `usher.api.lanes.LaneSupervisor.start`.
+    push_enabled: bool = True
+    worker_enabled: bool = True
+    # How long a push channel may deliver *nothing at all* before it is torn
+    # down and reconnected. Not a socket timeout: `websockets`'
+    # ping_interval/ping_timeout already detect a dead TCP peer, and this
+    # detects a live one that has stopped delivering -- the failure ADR-0004
+    # measured when a handshake against a nonexistent path was upgraded and
+    # held open. `ge=5.0` rather than `gt=0`: Emby's own `Sessions` interval
+    # is the subscription's `0,1000` (one second), and a window shorter than
+    # that reconnects a healthy channel forever. Both defaults mirror
+    # `usher.adapters.emby.push`'s own constants, which are what an adapter
+    # built without them gets; `tests/unit/test_config.py` pins the pair
+    # together so they cannot drift.
+    push_stale_after_seconds: float = Field(default=90.0, ge=5.0)
+    # How long one `recv` waits before reporting "nothing yet", which is the
+    # tick the staleness watchdog runs on. Small enough that a channel
+    # crossing the window above is noticed within a tick of doing so.
+    push_poll_seconds: float = Field(default=5.0, gt=0)
+    # The base of the reconnect backoff, before jitter, and its ceiling.
+    # Equal jitter, the same shape `job_backoff_seconds` drives one lane
+    # over -- PRD 08's argument for it against full jitter transfers
+    # unchanged, and so does `gt=0`: a zero base collapses the schedule to
+    # "reconnect immediately", which is the hot loop it exists to prevent.
+    push_backoff_seconds: float = Field(default=5.0, gt=0)
+    push_max_backoff_seconds: float = Field(default=300.0, gt=0)
+    # PRD 08: "after N failures mark `supports_push = false` and lean on the
+    # nightly walk". `ge=1` for the reason `job_max_attempts` has one: a
+    # ceiling of zero disables push on the first blip, before one reconnect
+    # has been attempted.
+    push_max_consecutive_failures: int = Field(default=5, ge=1)
+    # How many items one push event may name before the lane stops resolving
+    # them one at a time and asks for a delta walk instead. Emby emits
+    # `LibraryChanged` during a library scan and it can name thousands;
+    # against 1,126,789 items at 1-5 s per request, a request per changed
+    # item is a design defect rather than a slow path. Bounded above at 500,
+    # because a value an operator could set to 100,000 turns the guard off
+    # while looking configured.
+    push_max_items_per_event: int = Field(default=50, ge=1, le=500)
+    # The floor between two gap-closing delta walks. A flapping socket plus
+    # one delta per reconnect is a paged walk of everything changed since
+    # the cursor, every few seconds. `ge=0` and not `gt=0`, the one
+    # deliberate exception in this block: zero means "close the gap on every
+    # reconnect", which is expensive and correct, unlike every other zero
+    # here.
+    push_gap_min_interval_seconds: float = Field(default=60.0, ge=0)
+    # How often the lane supervisor re-reads the source list, so a source
+    # added through `POST /admin/sources` gets a lane without a restart.
+    push_source_refresh_seconds: float = Field(default=60.0, gt=0)
+
     # The client event channel (PRD 07's SSE surface). Same reasoning as
     # every block above: PRD 08's TOML config layer does not exist yet.
     # Deliberately named `sse_*` rather than `events_*` -- the knob is about

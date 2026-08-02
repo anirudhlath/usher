@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from usher.adapters.emby.push import DEFAULT_POLL_SECONDS, DEFAULT_STALE_AFTER_SECONDS
 from usher.config import Settings, get_settings
 
 
@@ -330,3 +331,94 @@ def test_the_sse_ring_and_queue_are_bounded_both_ways(
             with pytest.raises(ValidationError):
                 Settings()
         monkeypatch.delenv(name)
+
+
+def test_the_push_lane_and_worker_settings_have_the_measured_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ten new fields, and the two lane switches are PRD 01's "--worker
+    entrypoint flag ... so lanes can be moved to a separate container later
+    by editing compose, with no code change" expressed as configuration --
+    one image serves an all-in-one deployment and a split one.
+
+    The plan called this task "eleven settings" and said eight were new;
+    both numbers are wrong. Its own field list holds ten, and with the three
+    `sse_*` fields Task 20 and 21 already landed the block is thirteen.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    settings = Settings()
+    assert settings.push_enabled is True
+    assert settings.worker_enabled is True
+    assert settings.push_stale_after_seconds == 90.0
+    assert settings.push_poll_seconds == 5.0
+    assert settings.push_backoff_seconds == 5.0
+    assert settings.push_max_backoff_seconds == 300.0
+    assert settings.push_max_consecutive_failures == 5
+    assert settings.push_max_items_per_event == 50
+    assert settings.push_gap_min_interval_seconds == 60.0
+    assert settings.push_source_refresh_seconds == 60.0
+
+
+def test_the_staleness_window_is_bounded_below_by_something_useful(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A window shorter than the source's own message interval reconnects a
+    healthy channel forever. `gt=0` alone would permit `0.001`; the floor is
+    a *documented* one rather than a guessed one -- Emby's `Sessions`
+    interval is the subscription's own `0,1000`, i.e. one second, and 5 s
+    leaves it real headroom.
+
+    The default must also match `usher.adapters.emby.push`'s own, because
+    the adapter's constructor default is what a caller that forgets to pass
+    one gets -- two numbers that mean the same thing and can drift apart."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    assert Settings().push_stale_after_seconds == DEFAULT_STALE_AFTER_SECONDS
+    assert Settings().push_poll_seconds == DEFAULT_POLL_SECONDS
+    for bad in ("0", "0.5", "4.9"):
+        monkeypatch.setenv("USHER_PUSH_STALE_AFTER_SECONDS", bad)
+        with pytest.raises(ValidationError):
+            Settings()
+
+
+def test_max_items_per_event_is_bounded_above(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cap exists because Emby emits `LibraryChanged` during a library
+    scan and it can name thousands, against a source measured at 1,126,789
+    items and 1-5 s per request. A ceiling an operator could set to 100,000
+    would turn the guard off while looking configured."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    for bad in ("0", "5000"):
+        monkeypatch.setenv("USHER_PUSH_MAX_ITEMS_PER_EVENT", bad)
+        with pytest.raises(ValidationError):
+            Settings()
+
+
+def test_the_backoff_and_the_failure_ceiling_cannot_be_switched_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`job_backoff_seconds`' argument, one lane over: a zero base collapses
+    the whole schedule to "retry immediately", which is the hot loop the
+    backoff exists to prevent. And `job_max_attempts`' argument for `ge=1`:
+    a ceiling of zero disables push on the first blip, before a single
+    reconnect has been attempted.
+
+    `push_gap_min_interval_seconds` is the deliberate exception at `ge=0` --
+    zero means "close the gap on every reconnect", which is expensive but
+    correct, unlike every other zero here."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    for name in (
+        "USHER_PUSH_POLL_SECONDS",
+        "USHER_PUSH_BACKOFF_SECONDS",
+        "USHER_PUSH_MAX_BACKOFF_SECONDS",
+        "USHER_PUSH_MAX_CONSECUTIVE_FAILURES",
+        "USHER_PUSH_SOURCE_REFRESH_SECONDS",
+    ):
+        monkeypatch.setenv(name, "0")
+        with pytest.raises(ValidationError):
+            Settings()
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("USHER_PUSH_GAP_MIN_INTERVAL_SECONDS", "0")
+    assert Settings().push_gap_min_interval_seconds == 0.0

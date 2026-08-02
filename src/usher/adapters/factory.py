@@ -15,6 +15,7 @@ what keeps that true rather than customary.
 """
 
 from usher.adapters.emby.adapter import EmbyAdapter
+from usher.adapters.emby.push import DEFAULT_POLL_SECONDS, DEFAULT_STALE_AFTER_SECONDS
 from usher.domain.enums import SourceKind
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
@@ -36,10 +37,20 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
         page_size: int = 200,
         timeout_seconds: float = 30.0,
         reauth_cooldown_seconds: float = 60.0,
+        push_stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
+        push_poll_seconds: float = DEFAULT_POLL_SECONDS,
     ) -> None:
         self._page_size = page_size
         self._timeout_seconds = timeout_seconds
         self._reauth_cooldown_seconds = reauth_cooldown_seconds
+        # The two push knobs travel the same route as the three above: from
+        # `Settings` at a composition root, through this registry, into the
+        # adapter that owns the message ledger. Defaulted from the adapter
+        # package's own constants rather than repeated as literals, so
+        # `usher.adapters.emby.push` stays the single definition of what a
+        # channel does when nobody configures it.
+        self._push_stale_after_seconds = push_stale_after_seconds
+        self._push_poll_seconds = push_poll_seconds
 
     def build(self, source: Source, credentials: SourceCredentials) -> SourceAdapter:
         """Construct the adapter for `source.kind`. The caller owns it.
@@ -59,5 +70,7 @@ class ConfiguredSourceAdapterFactory(SourceAdapterFactory):
                 page_size=self._page_size,
                 timeout_seconds=self._timeout_seconds,
                 reauth_cooldown_seconds=self._reauth_cooldown_seconds,
+                push_stale_after_seconds=self._push_stale_after_seconds,
+                push_poll_seconds=self._push_poll_seconds,
             )
         raise SourceNotSupported(f"no adapter is registered for source kind {source.kind}")

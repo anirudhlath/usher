@@ -230,6 +230,8 @@ def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:
         page_size=settings.source_page_size,
         timeout_seconds=settings.source_timeout_seconds,
         reauth_cooldown_seconds=settings.source_reauth_cooldown_seconds,
+        push_stale_after_seconds=settings.push_stale_after_seconds,
+        push_poll_seconds=settings.push_poll_seconds,
     )
 
 

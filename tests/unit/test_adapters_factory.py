@@ -63,7 +63,11 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
     would be a wider API for a narrower reason.
     """
     factory = ConfiguredSourceAdapterFactory(
-        page_size=17, timeout_seconds=3.5, reauth_cooldown_seconds=7.25
+        page_size=17,
+        timeout_seconds=3.5,
+        reauth_cooldown_seconds=7.25,
+        push_stale_after_seconds=11.5,
+        push_poll_seconds=0.75,
     )
     adapter = factory.build(SOURCE, CREDENTIALS)
     try:
@@ -71,6 +75,14 @@ async def test_the_deployment_tuning_reaches_the_adapter() -> None:
         assert adapter._page_size == 17
         assert adapter._client.timeout.read == 3.5
         assert adapter._session._reauth_cooldown == 7.25
+        # The two push knobs, and this is the whole of what makes
+        # `USHER_PUSH_STALE_AFTER_SECONDS` a setting rather than a field
+        # that validates and then influences nothing: the registry is the
+        # only thing between `Settings` and the adapter that owns the
+        # ledger, so a factory that dropped them would leave an operator
+        # who widened the staleness window still reconnecting at 90 s.
+        assert adapter._health.stale_after == 11.5
+        assert adapter._push_poll_seconds == 0.75
     finally:
         await adapter.aclose()
 
