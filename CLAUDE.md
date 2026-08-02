@@ -447,6 +447,78 @@ interval each claim occupied; `overlapping()` fails unless those intervals
 genuinely intersect. Measured on this host: the two windows share **76.2%** of
 their union.
 
+**A concurrency claim whose failure mode is a *deadlock* needs a second kind
+of case, and every burst around it needs a bound.** M5's `InMemoryEventBus`
+exists to make "a slow subscriber never blocks a publisher" true, and the
+one-line mutation that breaks it — `await queue.put(...)` for `put_nowait` —
+does not answer wrongly, it hangs. Three consequences, all measured:
+
+- **A timing case can only ever report a timeout against it**, so the M5
+  plan's instruction to "confirm it fails on the interval assertion and not
+  on a timeout" is unachievable. What has teeth is driving the coroutine
+  **one step by hand**: `coro.send(None)` raises `StopIteration` for a
+  coroutine that never awaited and hands back a future for one that parked.
+  No scheduler, no clock, no timeout; it fails on its own assertion in
+  microseconds, and it cannot be satisfied by a serialised run because it
+  never involves two tasks. Fill the queue first — `asyncio.Queue.put` on a
+  queue with room does not await either.
+- **An unbounded burst turns that mutation from KILLED into HUNG**, which in
+  a sweep log reads like a mutation nothing observed rather than one
+  everything caught. It happened twice on this milestone, in two files, which
+  is why `tests/contract/event_publisher_contract.publish_all` exists and
+  every burst goes through it. Whole-suite, the mutation now fails 5 cases in
+  46.7 s against a 42.8 s baseline, and the 4 s difference *is* the bounds
+  firing.
+- **The operational case is still worth keeping, and its harness has to
+  subscribe before it publishes.** `asyncio.create_task` only schedules, so
+  the first publish in the plan's draft reached an empty subscriber set and
+  the reader parked forever — the case timed out on its own harness rather
+  than on the bus. With the reader signalling first: the publisher's window
+  sits inside the window a subscriber spent parked and unread for **99.3–99.6%
+  of their union over five runs** (publish 4.3 ms, parked 4.4 ms), against
+  `JobQueueContract`'s 76.2% and group D's 62.6%.
+
+**A mutation can survive because CPython collected it, not because the code
+is right.** "Subscribe outside the generator so the `finally` never runs"
+survived the whole SSE suite when spelled as
+`await bus.subscribe(...).__aenter__()` with the context manager left
+unreferenced: refcounting destroys the `_AsyncGeneratorContextManager`
+immediately, the async generator's finalizer closes it, and the `finally`
+runs anyway. Spelled with a strong reference retained, the same mutation
+fails `test_a_disconnect_unsubscribes` at once. A leak test only tests a leak
+if the mutation actually leaks.
+
+**`httpx.ASGITransport` buffers the whole response and therefore cannot test
+SSE at all.** Its `handle_async_request` runs `await self.app(scope, receive,
+send)` to *completion*, collects every `http.response.body` into a list, and
+only then builds a `Response` over the joined bytes — so
+`client.stream("GET", "/events")` against a route whose whole purpose is not
+to complete blocks inside the transport forever, and every case written
+against it would hang rather than fail. `tests/fakes/
+streaming_asgi_transport.py` is the replacement: the app runs in a task,
+`http.response.start` resolves a future, chunks go on a queue, and
+`aclose()` sends `http.disconnect`. Its scope carries
+`spec_version: "2.3"`, matching uvicorn 0.51's own, and that is load-bearing
+— `StreamingResponse.__call__` only runs `listen_for_disconnect` below spec
+2.4, so at 2.4+ a client going away would not cancel the body iterator and
+the route's `finally` would never run.
+
+**`status.HTTP_422_UNPROCESSABLE_ENTITY` is deprecated behind a Starlette 1.3
+module `__getattr__`, so it warns once per *request*, not once per import.**
+Use `HTTP_422_UNPROCESSABLE_CONTENT`; both are 422. This suite deliberately
+runs with no expected warnings, for the reason the `testcontainers` shim was
+replaced: a suite with one permanent warning is a suite where the next real
+one is invisible.
+
+**A replay ring and a per-subscriber queue are fed by the same `publish`
+calls, so a lazily-resolved replay duplicates.** `InMemoryEventBus.subscribe`
+snapshots the ring *before* it adds the subscriber, with no `await` in
+between. Resolved lazily at the first `__anext__` instead — which is what the
+M5 plan's draft did — everything published in the window between is in both
+halves and the client sees it twice. The window is real: `api/routers/
+events.py` reaches its first `anext` through an `asyncio.wait_for`, which
+yields to the loop, and the push lane publishes from another task.
+
 **Bulk loading bypasses the repository, and the SQL has three traps.**
 Verified against `pgvector/pgvector:pg17` on 2026-07-30, all three of which
 `usher.db.repositories.bulk` is built around:
@@ -800,12 +872,16 @@ Both mutations survived the whole suite until the direct case existed.
 
 **No test in this repository makes a network request, and that is measured
 rather than asserted.** Verified 2026-07-31, **re-verified 2026-08-01 after
-the live TMDb run**, and **again 2026-08-01 after the fixture scrub and the
-CLI/deps changes**, by running the whole suite under a
+the live TMDb run**, **again after the fixture scrub and the CLI/deps
+changes**, and **again after M5 group E added an SSE route and a streaming
+ASGI transport**, by running the whole suite under a
 `sitecustomize.py` that patches `socket.socket.connect`, `connect_ex` and
 `socket.getaddrinfo` to raise on anything that is not loopback (`AF_UNIX` is
 left alone, so Docker's socket still works and `testcontainers` still reaches
-`127.0.0.1`). **1,319 unit + 425 integration passed (1 unit case skipped), zero blocks.** The
+`127.0.0.1`). **1,549 unit + 429 integration passed (2 unit cases skipped), zero blocks**, with
+`[netguard] installed` printed by the module itself in the same run and
+`socket.getaddrinfo("api.themoviedb.org", 443)` raising
+`RuntimeError: NETWORK BLOCKED` in the same environment. The
 guard lives outside the tree — it is a check to re-run, not a dependency to
 add, because `PYTHONPATH`-injecting a socket monkeypatch into every developer's
 suite costs more than it catches.
