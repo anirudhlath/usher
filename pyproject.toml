@@ -50,6 +50,7 @@ dev = [
     "import-linter>=2.1",
     "testcontainers[postgres]>=4.9",
     "asgi-lifespan>=2.1.0",
+    "pyyaml>=6.0",
 ]
 
 [build-system]
@@ -109,7 +110,11 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["uuid6", "testcontainers.*"]
+# `yaml` is here rather than as a `types-PyYAML` dev dependency: the one
+# consumer is tests/unit/test_deployment_config.py, which reads compose.yml
+# to check it against `Settings` and `.env.example`, and a stub package
+# bought only for a test file is more surface than the `Any` it removes.
+module = ["uuid6", "testcontainers.*", "yaml"]
 ignore_missing_imports = true
 
 [tool.importlinter]

@@ -51,7 +51,20 @@ does work — but it leaves a file with two `USHER_SECRET_KEY` lines, which
 nobody can read confidently and which behaves differently under tools that
 take the first.
 
-`USHER_HOST_PORT` defaults to `8100`.
+`USHER_COMPOSE_HOST_PORT` defaults to `8100`. It is the *host*-side publish
+port, not a setting — compose substitutes it into the `ports:` mapping and the
+application never sees it. `USHER_COMPOSE_*` is the one namespace reserved for
+variables like that; every other `USHER_*` key is a real setting, and an
+unknown one is refused at startup rather than ignored, so a typo is loud.
+
+**Every key in `.env` reaches the container**, because compose hands it the
+whole file (`env_file:`). The four exceptions are marked `[compose-owned]` in
+`.env.example` and listed in `compose.yml`'s `environment:` block with the
+reason each belongs to the container topology rather than to you:
+`USHER_DATABASE_URL` (the hostname on the compose network),
+`USHER_HOST`/`USHER_PORT` (what the published port, the `EXPOSE` and the
+healthcheck all assume) and `USHER_SECRET_KEY` (substituted so a missing one
+fails at `docker compose up` rather than in a container log).
 
 Migrations run automatically on container start.
 

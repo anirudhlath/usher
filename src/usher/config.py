@@ -2,9 +2,9 @@
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Not a credential -- a placeholder value kept only to detect and reject it.
@@ -16,6 +16,58 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _PLACEHOLDER_SECRET_KEY = "change-me-to-a-long-random-string"  # noqa: S105
 _ASYNCPG_DRIVER_PREFIX = "postgresql+asyncpg://"
 
+_ENV_PREFIX = "USHER_"
+
+# The one sub-namespace inside `USHER_` that `Settings` deliberately does not
+# claim, and the reason it has to exist.
+#
+# **`.env` has two readers with different vocabularies.** Docker Compose reads
+# it to substitute `${...}` into `compose.yml`; pydantic-settings reads the
+# same file as a settings source, with `extra="forbid"` below. So a variable
+# that is *only* meaningful to compose -- the host-side publish port, say --
+# is an extra input to `Settings`, and shipping one in `.env.example` made
+# `cp .env.example .env`, the README's own first step, fail every entry point
+# with `ValidationError: usher_host_port -- Extra inputs are not permitted`.
+# `uv run pytest`, `usher bootstrap-status` and `usher push --probe` alike.
+#
+# The obvious repairs are all worse. `extra="ignore"` would fix it by
+# discarding `USHER_LOG_LEVL=DEBUG` too, turning a typo from a startup failure
+# into a line in `.env` that silently does nothing -- the same "dead config
+# that looks like a control" shape one layer down. Splitting the file gives
+# compose no place to read from (compose substitutes from `.env` and nowhere
+# else, short of `--env-file` on every invocation). Renaming the one offending
+# key fixes today and leaves the next compose variable free to reintroduce it.
+#
+# So the two readings are separated by *name*: anything under
+# `USHER_COMPOSE_` belongs to `compose.yml` and is dropped before validation,
+# and everything else under `USHER_` is a setting or a typo. That is a rule a
+# future compose variable can satisfy rather than a list somebody has to
+# remember to extend -- and `tests/unit/test_deployment_config.py` fails if
+# one is added outside the namespace, from either `.env.example`'s side or
+# `compose.yml`'s.
+COMPOSE_ONLY_PREFIX = "USHER_COMPOSE_"
+
+
+def _is_compose_only(key: object) -> bool:
+    """Whether a settings-source key belongs to `compose.yml` rather than here.
+
+    Both spellings, deliberately. pydantic-settings' dotenv source hands an
+    unmatched variable back under its **full** lowercased name
+    (`usher_compose_host_port`, which is what the `extra_forbidden` error
+    named), while a matched field arrives with the prefix stripped. Accepting
+    the stripped form too costs nothing and means a future version of
+    pydantic-settings that normalises extras the other way cannot silently
+    re-break the README's first step. `test_no_setting_hides_inside_the_
+    reserved_namespace` is what keeps the second branch from ever swallowing
+    a real field.
+    """
+    if not isinstance(key, str):
+        return False
+    lowered = key.lower()
+    return lowered.startswith(COMPOSE_ONLY_PREFIX.lower()) or lowered.startswith(
+        COMPOSE_ONLY_PREFIX.removeprefix(_ENV_PREFIX).lower()
+    )
+
 
 class Settings(BaseSettings):
     """Runtime settings, read from the environment.
@@ -25,7 +77,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_prefix="USHER_",
+        env_prefix=_ENV_PREFIX,
         env_file=".env",
         env_file_encoding="utf-8",
         extra="forbid",
@@ -208,6 +260,19 @@ class Settings(BaseSettings):
 
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_compose_only_variables(cls, values: Any) -> Any:
+        """Compose's half of `.env` is not this model's business.
+
+        Before validation rather than as an `extra="ignore"`, so the keys
+        `Settings` *does* claim are still validated exhaustively -- see
+        `COMPOSE_ONLY_PREFIX` above for why the distinction is by name.
+        """
+        if not isinstance(values, dict):
+            return values
+        return {key: value for key, value in values.items() if not _is_compose_only(key)}
 
     @field_validator("tmdb_api_key", "otlp_endpoint", mode="before")
     @classmethod

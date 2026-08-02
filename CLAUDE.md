@@ -1105,6 +1105,76 @@ the module itself and then, in the same environment,
 `socket.getaddrinfo("api.themoviedb.org", 443)` raised
 `RuntimeError: NETWORK BLOCKED`. Both checks, or the run proves nothing.
 
+**`.env` has two readers with different vocabularies, and that broke the
+README's own first step for four milestones.** Docker Compose reads `.env`
+to substitute `${...}` into `compose.yml`; pydantic-settings reads the same
+file as a settings source with `extra="forbid"`. So a compose-only variable
+is an *extra* input to `Settings` — and `USHER_HOST_PORT`, the host-side
+publish port shipped in `.env.example` since M1, made `cp .env.example .env`
+fail **every** entry point: `uv run pytest` at 1637 passed / 461 errors,
+`usher bootstrap-status` and `usher push --probe` with a raw traceback and
+exit 1. Found by M5's smoke test on 2026-08-02, present on `origin/main`
+since M1, and invisible to 2,098 passing tests for the reason
+`tests/conftest.py::clean_environment` exists at all: it neutralises the
+`env_file` source so a developer's own `.env` cannot fail the suite. **The
+461 errors that did appear came from the one path that fixture cannot
+reach** — `tests/integration/conftest.py::_upgrade_head`, session-scoped,
+which saves and restores `os.environ` but has no way to hide a file.
+
+- **`extra="forbid"` is worth keeping and is why the fix is a namespace.**
+  It is what turns `USHER_LOG_LEVL=DEBUG` into a startup failure rather than
+  a line in `.env` that silently does nothing. `extra="ignore"` fixes the
+  crash by breaking that; splitting the files leaves compose nothing to read
+  (compose substitutes from `.env` and nowhere else, short of `--env-file`
+  on every invocation); renaming the one key fixes today and lets the next
+  compose variable reintroduce it. So the two readings are separated by
+  **name**: `USHER_COMPOSE_*` is dropped before validation, everything else
+  under `USHER_` is a setting or a typo.
+- **The test that matters is not the one that copies the file.** A case
+  building `Settings` from `.env.example` passes against a fix that
+  special-cases `usher_host_port`. What fails if a *future* compose variable
+  reintroduces the outage is `test_every_variable_compose_substitutes_is_a_
+  setting_or_compose_reserved`, which regex-scans the whole of `compose.yml`
+  for `${...}` — over the whole file, not just `ports:`, because a variable
+  added to a `volumes:` or an `image:` line is the same hazard — plus its
+  twin over `.env.example`. Both are needed: the M1 commit that introduced
+  `USHER_HOST_PORT` touched both files.
+- **Any case written for this must pass `_env_file=` explicitly.** The
+  autouse fixture neutralises the class-level `env_file`, so a case that
+  relies on it proves nothing. Same shape as the `sitecustomize.py`
+  installation proof.
+
+**`env_file:` and `environment:` are different mechanisms, and picking the
+second forwarded 5 of 30 settings into the container.** `printenv` inside
+the running container showed `USHER_DATABASE_URL`, `USHER_SECRET_KEY`,
+`USHER_TMDB_API_KEY` and the two `OTEL_*` — nothing else. 24 documented
+settings were unreachable, **12 of them M5's own** (`USHER_PUSH_*`,
+`USHER_SSE_*`, both lane switches). `environment:` names one variable at a
+time and compose substitutes its value; `env_file:` hands the file over. The
+first needs a line somebody remembers to write, which is why the count drifts
+by a milestone's worth of settings at a time.
+
+- **`USHER_WORKER_ENABLED` is the one with teeth.** It is documented
+  (`README.md`, `.env.example`) and it *works* when delivered directly —
+  `/health/ready` reports `"worker": false` and the lane stops. Set in
+  `.env`, the only place the docs point at, it was silently ignored, so an
+  operator following the README leaves `worker: true` and then starts
+  `usher work` in a second container: two workers, and `JobWorker.startup()`
+  requeues everything `running`, so each steals the other's live claims.
+- **`environment:` still wins over `env_file:`, so what is left in it is
+  what the compose *topology* owns**, four keys, each with its reason in the
+  file: `USHER_DATABASE_URL` (`postgres`, not `localhost`),
+  `USHER_HOST`/`USHER_PORT` (bind-all and 8000 — what `ports:`, `EXPOSE` and
+  the healthcheck all assume), and `USHER_SECRET_KEY` (kept as `${...:?}`
+  purely for the guard that fails at `docker compose up` with a sentence).
+- **Measured with `docker compose config`, not argued**: 5 `USHER_*`/`OTEL_*`
+  keys rendered into the container before, **39 after** (38 `Settings` fields
+  plus `USHER_COMPOSE_HOST_PORT`, which the app ignores by design — the
+  namespace proving itself), with `published: "8100"` → `target: 8000`
+  unchanged. `env_file:` uses the long form with `required: false` so a
+  checkout with no `.env` still parses and fails on the secret-key guard
+  rather than on a missing file.
+
 **M5's final mutation sweep: 56 mutations, 50 killed, and every one of the
 six survivors was predicted.** Run 2026-08-02 in place, each mutation
 against the **whole** 2,098-test suite rather than its own task's selection.
@@ -1936,12 +2006,13 @@ curl -sf http://localhost:8100/health/ready   # {"status":"ready","checks":{"dat
 docker compose down                           # data/ bind mounts survive -- not removed by down, -v or not
 ```
 
-`USHER_HOST_PORT` (`.env`, defaults to `8100`) is the *host*-side publish
-port for `usher`'s container port `8000` — deliberately not a bare
+`USHER_COMPOSE_HOST_PORT` (`.env`, defaults to `8100`) is the *host*-side
+publish port for `usher`'s container port `8000` — deliberately not a bare
 `"8000:8000"`, since this host already publishes an unrelated container's
 app on host port 8000. Postgres's own port is never published to the host
 at all, only reachable from `usher` over the compose network as
-`postgres:5432`, matching PRD 08's deployment shape.
+`postgres:5432`, matching PRD 08's deployment shape. It was `USHER_HOST_PORT`
+until 2026-08-02, which is the bug below.
 
 The image is genuinely multi-stage: a `builder` stage has `uv` and builds
 the venv, a `runtime` stage copies only `.venv/` and `src/` across. No
