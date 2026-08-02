@@ -93,12 +93,21 @@ class LaneSupervisor:
         *,
         user_id: Callable[[], Awaitable[uuid.UUID]],
         provider: MetadataProvider | None = None,
+        idle_seconds: float = IDLE_SLEEP_SECONDS,
     ) -> None:
         self._settings = settings
         self._work = unit_of_work
         self._events = events
         self._user_id = user_id
         self._provider = provider
+        # Injected only so a test can run several worker passes without
+        # spending five seconds each: `usher work`'s equivalent is a module
+        # constant for the reason stated above, and nothing in `src/` passes
+        # this. Without it "startup() runs once, not per pass" is a property
+        # no case can observe -- and it is a real one, because
+        # `requeue_running` at `older_than_seconds=0.0` requeues *everything*
+        # running and would steal another worker's live claims every poll.
+        self._idle_seconds = idle_seconds
         self._lanes: dict[uuid.UUID, asyncio.Task[None]] = {}
         self._names: dict[uuid.UUID, str] = {}
         self._open_adapters: dict[uuid.UUID, SourceAdapter] = {}
@@ -193,6 +202,13 @@ class LaneSupervisor:
     async def refresh(self) -> None:
         """Start a lane for every enabled source that has none, and drop the
         lanes of sources that have gone, been disabled, or crashed.
+
+        **Not re-entrant, and never called concurrently.** The refresher
+        task awaits one call before sleeping, and nothing else in `src/`
+        calls it -- two overlapping refreshes could each see a source with
+        no lane and start two, i.e. two sockets against one server. Left as
+        a stated precondition rather than a lock, because a lock here would
+        be guarding a caller that does not exist.
 
         A source added through `POST /admin/sources` gets a lane without a
         restart, which PRD 08 requires of everything else about a source and
@@ -302,11 +318,21 @@ class LaneSupervisor:
         async with self._work() as pipeline:
             stored = await pipeline.sources.get(source.id)
             if stored is None or stored.supports_push == available:
-                # No write when nothing changed. `sources` has a
-                # `set_updated_at` trigger, so an unconditional update would
-                # move `updated_at` on every reconnect of a flapping lane,
-                # on a row an operator reads to see when a source last
-                # changed.
+                # No write when nothing changed -- and **this guard is
+                # belt-and-braces against a repository it does not own, not
+                # the thing that makes the property true.** Measured by
+                # mutation: deleting it leaves `sources.updated_at` exactly
+                # where it was, because `PostgresSourceRepository.update`
+                # sets attributes on a loaded ORM row and SQLAlchemy's
+                # unit of work emits no `UPDATE` when no attribute actually
+                # changed, so the `set_updated_at` trigger never fires.
+                # The guard earns its keep the day that repository issues a
+                # bare `UPDATE ... SET` statement instead, at which point a
+                # flapping lane would move a column an operator reads to see
+                # when a source last changed, once per reconnect. Recorded
+                # as an equivalent mutant against today's repository rather
+                # than deleted, and rather than left with a comment claiming
+                # something the code does not do.
                 return
             await pipeline.sources.update(stored.evolve(supports_push=available))
             await pipeline.commit()
@@ -365,7 +391,7 @@ class LaneSupervisor:
                 # with nothing in `/health/ready` saying so.
                 logger.warning("the worker lane's pass failed: {error}", error=str(exc))
             if ran == 0:
-                await asyncio.sleep(IDLE_SLEEP_SECONDS)
+                await asyncio.sleep(self._idle_seconds)
 
 
 __all__ = ["IDLE_SLEEP_SECONDS", "LaneSupervisor"]

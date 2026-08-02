@@ -13,11 +13,12 @@ The three things a fake cannot express, all here:
   `FOR UPDATE SKIP LOCKED`, no `clock_timestamp()`, and no transaction --
   and the lane opens one session per pass, which is exactly the shape a
   rolled-back single-transaction fixture cannot model.
-- **`_write_push_available` writing nothing is invisible to a fake.**
-  `sources` has a `BEFORE UPDATE` trigger that owns `updated_at`, so an
-  unconditional `UPDATE` moves a column an operator reads. `now()` is frozen
-  per transaction and each call here opens its own, so the two instants
-  really are different and a no-op write is observable.
+- **What `_write_push_available` actually writes.** `sources` has a
+  `BEFORE UPDATE` trigger that owns `updated_at` and `now()` is frozen per
+  transaction, so two separate transactions really do produce two different
+  instants -- which is what lets the case below see a *real* change land and
+  a no-op one not. It also measured something the guard's own comment used
+  to claim wrongly: see that case's docstring.
 - **A push lane against a source row.** The lane's source list, credential
   decryption and adapter build all go through the real repositories.
 
@@ -297,16 +298,24 @@ async def test_a_push_lane_starts_for_a_real_source_row(
 async def test_writing_the_push_availability_it_already_has_writes_nothing(
     postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
 ) -> None:
-    """`sources` has a `BEFORE UPDATE` trigger that owns `updated_at`, so an
-    unconditional `UPDATE` moves a column an operator reads to see when a
-    source last changed -- once per reconnect of a flapping lane.
+    """`sources` has a `BEFORE UPDATE` trigger that owns `updated_at`, so a
+    lane that wrote unconditionally would move a column an operator reads to
+    see when a source last changed, once per reconnect of a flapping socket.
 
-    Only real Postgres can catch this: a fake repository has no trigger, so
-    a no-op write is a no-op there whatever the code does. Two separate
-    transactions, because `now()` is `transaction_timestamp()` and is frozen
-    for the life of one -- inside a single transaction the *unconditional*
-    version would also read back an unchanged instant and the case would
-    ratify it.
+    **And the guard is not what prevents that, measured.** Deleting
+    `_write_push_available`'s equality check leaves this case green:
+    `PostgresSourceRepository.update` sets attributes on a *loaded ORM row*
+    and SQLAlchemy's unit of work emits no `UPDATE` when no attribute
+    actually changed, so the trigger never fires either way. Recorded as an
+    equivalent mutant against today's repository rather than as a kill --
+    the same treatment M4 gave `_ENQUEUE`'s `GREATEST` -- and the guard is
+    kept, because the day that repository issues a bare `UPDATE ... SET`
+    the property stops being free.
+
+    What this case does pin is the other half, which is not free: a real
+    change still writes, and it writes the value the lane asked for. Two
+    separate transactions throughout, because `now()` is
+    `transaction_timestamp()` and is frozen for the life of one.
     """
     settings = Settings(
         database_url=postgres_url,

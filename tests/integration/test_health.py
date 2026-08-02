@@ -67,6 +67,29 @@ async def test_ready_reports_database_connectivity(client: AsyncClient) -> None:
     assert body["checks"]["migrations"] is True
 
 
+async def test_a_process_with_no_lanes_running_is_still_ready(client: AsyncClient) -> None:
+    """**The correction PRD 08 needs, and the only place it has teeth.**
+
+    A readiness check that failed because no push lane was up would take
+    this process out of a load balancer for a reason restarting it cannot
+    fix -- the exact argument M1's liveness/readiness split is built on, and
+    PRD 08's own failure table says an unreachable source leaves the catalog
+    "fully browsable".
+
+    It has to be *here* rather than in `tests/unit/test_api_health.py`,
+    because that file's app points at an unreachable database and is
+    therefore already 503: `all(checks) and lanes.running_sources()` and
+    `push` moved inside `ReadinessChecks` both leave it 503 and survive.
+    Against a reachable database with no lanes running, both turn a 200 into
+    a 503 and both die.
+    """
+    response = await client.get("/health/ready")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["lanes"] == {"push": [], "worker": False}
+
+
 async def test_openapi_schema_is_served(client: AsyncClient) -> None:
     response = await client.get("/openapi.json")
     assert response.status_code == 200

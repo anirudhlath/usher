@@ -20,12 +20,13 @@ established.
 import asyncio
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
+from loguru import logger
 from pydantic import SecretStr
 
 from tests.fakes.credential_store import FakeCredentialStore
@@ -45,6 +46,7 @@ from usher.composition import Pipeline
 from usher.config import Settings
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
+from usher.domain.jobs import Job, JobKind
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
 from usher.ports.repository import MediaItemRepository
@@ -141,6 +143,28 @@ class _Adapters(SourceAdapterFactory):
         return adapter
 
 
+class _CountingQueue(FakeJobQueue):
+    """A queue that remembers how often the worker lane asked it things.
+
+    Shared across every unit of work, because the lane builds a fresh
+    `Pipeline` per pass and a per-pass queue would reset the counters this
+    file's "once, not per pass" case is entirely about.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.claims = 0
+        self.requeues = 0
+
+    async def claim(self, kinds: Sequence[JobKind], *, limit: int = 1) -> list[Job]:
+        self.claims += 1
+        return await super().claim(kinds, limit=limit)
+
+    async def requeue_running(self, *, older_than_seconds: float = 0.0) -> int:
+        self.requeues += 1
+        return await super().requeue_running(older_than_seconds=older_than_seconds)
+
+
 @dataclass(slots=True)
 class _Fakes:
     """One set of repositories, shared across every unit of work.
@@ -153,6 +177,7 @@ class _Fakes:
     sources: FakeSourceRepository
     credentials: FakeCredentialStore
     media_items: FakeMediaItemRepository
+    queue: _CountingQueue
     adapters: _Adapters
     events: FakeEventPublisher
     commits: list[float]
@@ -161,7 +186,7 @@ class _Fakes:
 def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
     titles = FakeTitleRepository()
     matching = FakeTitleMatchRepository(titles)
-    queue = FakeJobQueue()
+    queue = fakes.queue
     episodes = FakeEpisodeRepository()
     watch_states = FakeWatchStateRepository()
     runs = FakeSyncRunRepository()
@@ -210,7 +235,9 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
     )
 
 
-def _supervisor(fakes: _Fakes, **overrides: object) -> LaneSupervisor:
+def _supervisor(
+    fakes: _Fakes, *, worker_idle_seconds: float = 5.0, **overrides: object
+) -> LaneSupervisor:
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
         secret_key="0" * 32,
@@ -225,7 +252,9 @@ def _supervisor(fakes: _Fakes, **overrides: object) -> LaneSupervisor:
         await asyncio.sleep(0)
         yield _pipeline(fakes, settings)
 
-    return LaneSupervisor(settings, work, fakes.events, user_id=_user_id)
+    return LaneSupervisor(
+        settings, work, fakes.events, user_id=_user_id, idle_seconds=worker_idle_seconds
+    )
 
 
 async def _user_id() -> uuid.UUID:
@@ -238,6 +267,7 @@ def fakes() -> _Fakes:
         sources=FakeSourceRepository(),
         credentials=FakeCredentialStore(),
         media_items=FakeMediaItemRepository(),
+        queue=_CountingQueue(),
         adapters=_Adapters(),
         events=FakeEventPublisher(),
         commits=[],
@@ -296,6 +326,26 @@ async def test_a_source_added_later_gets_a_lane_without_a_restart(fakes: _Fakes)
         await supervisor.stop()
 
 
+async def test_the_refresher_picks_a_source_up_on_its_own_interval(fakes: _Fakes) -> None:
+    """The case above calls `refresh()` by hand, so it passes against a
+    supervisor with **no refresh loop at all** -- and a lane set fixed at
+    startup is exactly what PRD 08 says a source must not need a restart
+    for. This one seeds after `start()` and never calls `refresh()`.
+
+    A real interval rather than zero: `push_source_refresh_seconds` is
+    `gt=0`, and a loop that slept for nothing would spin.
+    """
+    supervisor = _supervisor(fakes, push_source_refresh_seconds=0.01)
+    await supervisor.start()
+    await _settle()
+    try:
+        assert supervisor.running_sources() == []
+        await _seed(fakes, _source("A"))
+        await _drain(lambda: supervisor.running_sources() == ["A"], bound=2.0)
+    finally:
+        await supervisor.stop()
+
+
 async def test_a_disabled_source_has_its_lane_cancelled(fakes: _Fakes) -> None:
     """`enabled` is how an operator parks a server that is being rebuilt,
     and a lane that kept reconnecting to it would keep the backoff schedule
@@ -345,6 +395,30 @@ async def test_a_source_with_no_credentials_is_skipped_and_the_others_still_run(
         await supervisor.stop()
 
 
+async def test_push_availability_for_a_source_with_no_lane_is_not_probed(
+    fakes: _Fakes,
+) -> None:
+    """`None` is an absence and `False` is a claim, and a supervisor with no
+    lane for a source has only the first to offer.
+
+    `GET /admin/sources/{id}/status` renders this straight through, so a
+    `False` here turns "nobody has looked" into "push is broken" on every
+    admin screen for every source whose lane has not started -- which is
+    every source in a `USHER_PUSH_ENABLED=false` deployment.
+    """
+    supervisor = _supervisor(fakes)
+    assert supervisor.push_available(new_id()) is None
+    await _seed(fakes, _source("A"))
+    await supervisor.start()
+    await _settle()
+    try:
+        source = (await fakes.sources.list_all())[0]
+        assert supervisor.push_available(source.id) is False
+        assert supervisor.push_available(new_id()) is None
+    finally:
+        await supervisor.stop()
+
+
 # -- crash isolation ----------------------------------------------------
 
 
@@ -375,6 +449,13 @@ async def test_a_lane_that_crashes_does_not_take_the_others_down(fakes: _Fakes) 
         survivor.push(SourceEvent(kind=SourceEventKind.ITEM_UPDATED, external_ids=("b-1",)))
         await _drain(lambda: _stored(fakes.media_items) == ["b-1"])
     finally:
+        # And shutdown itself survives the crashed lane. Measured which half
+        # carries that: `stop()`'s `return_exceptions=True` alone fails 11
+        # cases when removed (every lane is cancelled at teardown, and a
+        # cancelled task raises `CancelledError` into `gather`), while
+        # `_guard`'s catch survives its own deletion -- the isolation comes
+        # from one task per lane, not from the `except`. What `_guard` buys
+        # is the log line, which is what the case below pins.
         await supervisor.stop()
 
 
@@ -430,6 +511,58 @@ def _intersection_over_union(a: tuple[float, float], b: tuple[float, float]) -> 
     return 0.0 if union <= 0 else overlap / union
 
 
+async def test_a_crashed_lane_says_so(fakes: _Fakes) -> None:
+    """`_guard`'s `except` is not what isolates the other lanes -- one task
+    per lane is, measured -- so what it must actually deliver is that the
+    crash is *not silent*.
+
+    Without it a crashed lane leaves an unretrieved task exception, which
+    CPython reports at garbage-collection time, to stderr, with no source
+    name in it. An operator whose second Emby stopped updating would have
+    nothing to search for. This is a log assertion on purpose: the log line
+    is the deliverable.
+    """
+    await _seed(fakes, _source("A"))
+    fakes.adapters.crash("A")
+    supervisor = _supervisor(fakes)
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="TRACE", serialize=True)
+    try:
+        await supervisor.start()
+        await _drain(lambda: supervisor.crashed_sources() == ["A"])
+    finally:
+        logger.remove(sink)
+        await supervisor.stop()
+    crash = [line for line in lines if "crashed" in line]
+    assert crash, lines
+    assert "A" in crash[0]
+    assert "ZeroDivisionError" in crash[0]
+
+
+async def test_push_snapshots_report_the_adapters_own_ledger(fakes: _Fakes) -> None:
+    """PRD 10's `usher.source.push.reconnects` is fed straight from here, so
+    a hard-coded `0` would plot a flat line for every source forever -- the
+    exact failure `PushHealth.record_reconnect` had one milestone ago.
+
+    Written against a ledger holding a *non-zero* count, because zero is the
+    true value on a first connect and a case that only ever saw one could
+    not tell the reader from the constant.
+    """
+    await _seed(fakes, _source("A"))
+    supervisor = _supervisor(fakes)
+    await supervisor.start()
+    await _settle()
+    try:
+        adapter = fakes.adapters.built["A"]
+        adapter._push_reconnects = 3
+        snapshots = supervisor.push_snapshots()
+        assert set(snapshots) == {"A"}
+        assert snapshots["A"].reconnects == 3
+        assert snapshots["A"].delivering is adapter.supports_push
+    finally:
+        await supervisor.stop()
+
+
 # -- the worker lane ----------------------------------------------------
 
 
@@ -443,6 +576,32 @@ async def test_the_worker_lane_runs_when_enabled(fakes: _Fakes) -> None:
     assert supervisor.worker_running() is True
     await supervisor.stop()
     assert supervisor.worker_running() is False
+
+
+async def test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass(
+    fakes: _Fakes,
+) -> None:
+    """PRD 08's "startup requeues anything left `in_progress`", and it is a
+    *startup* call rather than a per-pass one.
+
+    `JobQueue.requeue_running`'s default `older_than_seconds=0.0` requeues
+    **everything** currently running, which is correct at exactly one worker
+    -- so a lane that called it every poll would steal a second worker's
+    live claims every five seconds. `usher work` calls it once before its
+    loop for the same reason; this is the property that keeps the two
+    composition roots honest with each other.
+
+    `idle_seconds` is dialled down so several passes fit in milliseconds:
+    at the shipped five seconds this case would take fifteen, and a case
+    that asserted after one pass could not tell "once" from "per pass".
+    """
+    supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
+    await supervisor.start()
+    await _drain(lambda: fakes.queue.claims >= 3, bound=2.0)
+    await supervisor.stop()
+    assert fakes.queue.requeues == 1, (
+        f"the worker lane requeued {fakes.queue.requeues} times over {fakes.queue.claims} passes"
+    )
 
 
 async def test_the_lanes_are_settings_gated(fakes: _Fakes) -> None:
