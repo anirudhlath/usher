@@ -30,6 +30,11 @@ def test_media_item_repository_surface() -> None:
             "resolve_series_titles",
             "resolve_targets",
             "resolve_external_ids",
+            # M5's read-through surface: PRD 07's `availability` array. Named
+            # here as well as on the ABC because dropping it from the port
+            # would let a stale implementation type-check while
+            # `GET /titles/{id}` lost its badges.
+            "list_for_title",
             "list_unmatched",
             "attach_title",
             "count_for_source",
