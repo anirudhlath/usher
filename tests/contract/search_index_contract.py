@@ -24,11 +24,10 @@ Subclass and provide an `index` fixture plus the `given_title_row` hook:
         def index(self) -> FakeSearchIndex:
             return FakeSearchIndex()
 
-        async def given_title_row(self, title_id: uuid.UUID) -> None:
+        async def given_title_row(self, document: SearchDocument) -> None:
             return None
 """
 
-import uuid
 from collections.abc import Sequence
 from typing import Any
 
@@ -44,6 +43,28 @@ from usher.ports.search import (
     SearchMode,
     SearchRequest,
 )
+
+# Every vector in this file is this wide, and the reason is that a shared
+# contract has to be storable by every implementation running it.
+# `SearchDocument.vector` is `tuple[float, ...]` -- the port declares no
+# width, deliberately, because a width is a property of a model -- but
+# `title_embeddings.embedding` is `halfvec(384)` and pgvector rejects
+# anything else with `expected 384 dimensions, not 2`. So the two-component
+# vectors these cases are *arranged* around are zero-padded to the shipped
+# width, which changes no assertion in this file: padding both a document
+# and a query with zeros leaves every dot product, every norm and therefore
+# every cosine exactly as it was.
+#
+# The number lives here rather than being imported from
+# `usher.db.models.search`: a port-level contract that reached into `db/` to
+# learn how wide a vector is would be the contract knowing about one
+# backend, which is the thing this file exists not to do.
+_VECTOR_DIMENSIONS = 384
+
+
+def _vector(*components: float) -> tuple[float, ...]:
+    """One of this file's arranged vectors, widened to the shipped width."""
+    return components + (0.0,) * (_VECTOR_DIMENSIONS - len(components))
 
 
 def _document(
@@ -85,13 +106,34 @@ class SearchIndexContract:
     # keeps the skip honest about which one.
     unsupported_filter: str | None = None
 
-    async def given_title_row(self, title_id: uuid.UUID) -> None:
+    # Whether this backend owns the *document's* lifecycle as well as the
+    # vector's. `FakeSearchIndex` and any document store do: the document is
+    # a row they wrote and can delete. `PostgresSearchIndex` does not --
+    # `titles.search_document` is a generated column of a table the catalog
+    # owns, so a title that exists is full-text indexed by construction, and
+    # an index that deleted `titles` rows to satisfy `remove` would turn a
+    # reindex bug into data loss.
+    #
+    # Declared `True` by default so the *stronger* assertion is what a new
+    # driver gets for free and weakening it is a visible line in a subclass.
+    # The Postgres driver pays for the exemption with
+    # `test_deleting_the_title_removes_it_from_full_text`, which asserts the
+    # same property through the mechanism that really owns it.
+    owns_document_lifecycle: bool = True
+
+    async def given_title_row(self, document: SearchDocument) -> None:
         """Arrangement a real index constrains and a dict does not.
 
-        `PostgresSearchIndex` writes into a table whose `title_id` is a
-        foreign key onto `titles`, so its driver inserts a row first;
-        `FakeSearchIndex` is a dict and needs nothing. A hook rather than a
-        `titles` insert in every case, for the reason
+        **Takes the whole document, not just its id.** A hook handed an id
+        alone is one no real backend can satisfy: on Postgres the document's
+        text is a fact about the `titles` row -- `search_document` is
+        `GENERATED ALWAYS AS (...) STORED` over `name`, `overview`, `genres`
+        and `keywords` -- so a driver that could only insert an id would seed
+        an empty document and every retrieval case in this file would assert
+        against blank text.
+
+        `FakeSearchIndex` is a dict with no foreign keys and needs nothing.
+        A hook rather than a `titles` insert in every case, for the reason
         `CredentialStoreContract.owner` is a hook: the constraint belongs to
         one implementation, and writing it into the shared suite would make
         the suite know about Postgres.
@@ -104,7 +146,7 @@ class SearchIndexContract:
         fail against Postgres on a foreign key, which is a suite that only
         runs in one place."""
         for document in documents:
-            await self.given_title_row(document.title_id)
+            await self.given_title_row(document)
         await index.index_many(documents)
 
     # --- retrieval ---------------------------------------------------------
@@ -132,13 +174,25 @@ class SearchIndexContract:
         scores. The distractor is deliberately the *more popular* of the two,
         so an unweighted implementation breaking its tie on popularity
         ranks the wrong one first rather than coin-flipping into a pass.
+
+        **And it is minted first, which is the half a Postgres backend
+        needs.** Every id here is a UUIDv7, so creation order *is* id order,
+        and both drivers break a score tie on the id -- the fake in `_rank`,
+        the shipped statement in `ORDER BY score DESC, t.id`. With the
+        distractor created second, `mentioned.title_id` sorts after
+        `named.title_id` and the expected answer is also what a pure
+        `ORDER BY t.id` produces: measured, both `_WEIGHTS = (1, 1, 1, 1)`
+        and deleting `ORDER BY score DESC` outright *survived* this case in
+        that arrangement. Creating the distractor first is what makes id
+        order disagree with the right answer, which is the whole of "a
+        relevance assertion any ordering satisfies is not a relevance test".
         """
-        named = _document("Vacuum", overview="A study of harbour lights.", popularity=1.0)
         mentioned = _document(
             "Harbour Lights",
             overview="A study of the vacuum between two stars.",
             popularity=900.0,
         )
+        named = _document("Vacuum", overview="A study of harbour lights.", popularity=1.0)
         await self.index_all(index, [mentioned, named])
         outcome = await index.search(SearchRequest(query="vacuum"))
         ranked = [hit.title_id for hit in outcome.hits]
@@ -199,21 +253,42 @@ class SearchIndexContract:
         assert ranked.count(other.title_id) == 1
 
     async def test_a_removed_document_is_not_returned(self, index: SearchIndex) -> None:
-        """A `remove` that drops the vector and leaves the candidate row, so
-        a deleted title keeps appearing with a stale score -- which is why
-        `remove` is one method rather than two.
+        """A `remove` that drops one half of a title's index state and leaves
+        the other, so a deleted title keeps appearing with a stale score --
+        which is why `remove` is one method rather than two.
 
-        Searched in `FULL_TEXT` on purpose: a remove that cleared only the
+        **Which half is asserted depends on which half the backend owns**,
+        and neither driver is let off. A document store owns both, so this
+        searches `FULL_TEXT` on purpose: a `remove` that cleared only the
         vector passes a semantic search (the title is gone from that lane
         anyway) and fails here, which is the asymmetry that hides the bug.
-        The survivor assertion rules out the other direction, a `remove`
-        that empties the index.
+        Postgres owns the vector only -- its document is a generated column
+        of a table this port does not own -- so it asserts the semantic half
+        here and the full-text half through `ON DELETE CASCADE` in
+        `tests/integration/test_adapters_search_postgres.py`.
+
+        Both documents carry a vector so the semantic branch has two
+        candidates to distinguish; the survivor assertion rules out the other
+        direction, a `remove` that empties the index.
         """
-        removed = _document("The Quiet Vacuum")
-        survivor = _document("Vacuum Chamber")
+        removed = _document("The Quiet Vacuum", vector=_vector(1.0, 0.0))
+        survivor = _document("Vacuum Chamber", vector=_vector(0.6, 0.8))
         await self.index_all(index, [removed, survivor])
         await index.remove(removed.title_id)
-        outcome = await index.search(SearchRequest(query="vacuum", limit=50))
+
+        if self.owns_document_lifecycle:
+            outcome = await index.search(SearchRequest(query="vacuum", limit=50))
+        elif self.supports_semantic:
+            outcome = await index.search(
+                SearchRequest(
+                    query="vacuum",
+                    mode=SearchMode.SEMANTIC,
+                    query_vector=_vector(1.0, 0.0),
+                    limit=50,
+                )
+            )
+        else:
+            pytest.skip("this driver owns neither lane's lifecycle yet; see Task 18")
         found = {hit.title_id for hit in outcome.hits}
         assert removed.title_id not in found
         assert survivor.title_id in found
@@ -234,18 +309,18 @@ class SearchIndexContract:
         """
         if not self.supports_semantic:
             pytest.skip("this implementation cannot express a supplied query vector")
-        east = _document("Harbour Lights", vector=(1.0, 0.0))
-        north = _document("Vacuum Chamber", vector=(0.0, 1.0))
+        east = _document("Harbour Lights", vector=_vector(1.0, 0.0))
+        north = _document("Vacuum Chamber", vector=_vector(0.0, 1.0))
         await self.index_all(index, [east, north])
 
         first = await index.search(
             SearchRequest(
-                query="unrelated words", mode=SearchMode.SEMANTIC, query_vector=(1.0, 0.0)
+                query="unrelated words", mode=SearchMode.SEMANTIC, query_vector=_vector(1.0, 0.0)
             )
         )
         second = await index.search(
             SearchRequest(
-                query="unrelated words", mode=SearchMode.SEMANTIC, query_vector=(0.0, 1.0)
+                query="unrelated words", mode=SearchMode.SEMANTIC, query_vector=_vector(0.0, 1.0)
             )
         )
         assert first.hits[0].title_id == east.title_id
@@ -269,12 +344,12 @@ class SearchIndexContract:
         """
         if not self.supports_semantic:
             pytest.skip("this implementation cannot express a supplied query vector")
-        embedded = _document("Harbour Lights", vector=(1.0, 0.0), popularity=1.0)
+        embedded = _document("Harbour Lights", vector=_vector(1.0, 0.0), popularity=1.0)
         unembedded = _document("Vacuum Chamber", vector=None, popularity=900.0)
         await self.index_all(index, [embedded, unembedded])
         outcome = await index.search(
             SearchRequest(
-                query="unrelated words", mode=SearchMode.SEMANTIC, query_vector=(0.0, 1.0)
+                query="unrelated words", mode=SearchMode.SEMANTIC, query_vector=_vector(0.0, 1.0)
             )
         )
         found = [hit.title_id for hit in outcome.hits]
@@ -313,20 +388,23 @@ class SearchIndexContract:
             pytest.skip("this implementation cannot express a supplied query vector")
         text = _document("Vacuum Chamber", popularity=1.0)
         both = _document(
-            "Harbour Lights", overview="Inside the vacuum.", vector=(0.8, 0.6), popularity=1.0
+            "Harbour Lights",
+            overview="Inside the vacuum.",
+            vector=_vector(0.8, 0.6),
+            popularity=1.0,
         )
-        vector = _document("Salt Flats", vector=(1.0, 0.0), popularity=1.0)
+        vector = _document("Salt Flats", vector=_vector(1.0, 0.0), popularity=1.0)
         await self.index_all(index, [text, both, vector])
 
         lexical = await index.search(SearchRequest(query="vacuum", mode=SearchMode.FULL_TEXT))
         assert lexical.hits[0].title_id == text.title_id
         semantic = await index.search(
-            SearchRequest(query="vacuum", mode=SearchMode.SEMANTIC, query_vector=(1.0, 0.0))
+            SearchRequest(query="vacuum", mode=SearchMode.SEMANTIC, query_vector=_vector(1.0, 0.0))
         )
         assert semantic.hits[0].title_id == vector.title_id
 
         fused = await index.search(
-            SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=(1.0, 0.0))
+            SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=_vector(1.0, 0.0))
         )
         assert fused.hits[0].title_id == both.title_id, (
             "fusion returned a lane's own winner; the two lanes were seeded to disagree "
@@ -352,11 +430,11 @@ class SearchIndexContract:
         """
         if not self.supports_semantic:
             pytest.skip("this implementation cannot express a supplied query vector")
-        strong = _document("Salt Flats", vector=(1.0, 0.0), popularity=1.0)
+        strong = _document("Salt Flats", vector=_vector(1.0, 0.0), popularity=1.0)
         weak = _document(
             "Harbour Lights",
             overview="A vacuum, mentioned once.",
-            vector=(0.2, 0.9797958971132712),
+            vector=_vector(0.2, 0.9797958971132712),
             popularity=1.0,
         )
         await self.index_all(index, [strong, weak])
@@ -364,12 +442,12 @@ class SearchIndexContract:
         lexical = await index.search(SearchRequest(query="vacuum", mode=SearchMode.FULL_TEXT))
         assert [hit.title_id for hit in lexical.hits] == [weak.title_id]
         semantic = await index.search(
-            SearchRequest(query="vacuum", mode=SearchMode.SEMANTIC, query_vector=(1.0, 0.0))
+            SearchRequest(query="vacuum", mode=SearchMode.SEMANTIC, query_vector=_vector(1.0, 0.0))
         )
         assert semantic.hits[0].title_id == strong.title_id
 
         fused = await index.search(
-            SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=(1.0, 0.0))
+            SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=_vector(1.0, 0.0))
         )
         assert fused.hits[0].title_id == weak.title_id, (
             "the lane with one large score won; that is score addition, not RRF"

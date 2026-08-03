@@ -7,12 +7,11 @@ implementation with matching signatures are not interchangeable; only the
 same assertions against both prove it.
 """
 
-import uuid
-
 import pytest
 
 from tests.contract.search_index_contract import SearchIndexContract
 from tests.fakes.search_index import FakeSearchIndex
+from usher.ports.search import SearchDocument
 
 
 class TestFakeSearchIndex(SearchIndexContract):
@@ -29,7 +28,7 @@ class TestFakeSearchIndex(SearchIndexContract):
     def index(self) -> FakeSearchIndex:
         return FakeSearchIndex()
 
-    async def given_title_row(self, title_id: uuid.UUID) -> None:
+    async def given_title_row(self, document: SearchDocument) -> None:
         """Nothing to arrange: there is no foreign key onto a `titles` row
-        this dict has never heard of."""
+        this dict has never heard of, and no generated column to seed."""
         return None
