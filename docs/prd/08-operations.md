@@ -18,7 +18,24 @@ Until the TOML layer exists, everything in the first two rows is an
 environment setting on `usher.config.Settings` and is documented in
 `.env.example` — completeness in both directions, so a setting an operator
 cannot discover and a documented key that is not a setting are both test
-failures (`tests/unit/test_deployment_config.py`).
+failures (`tests/unit/test_deployment_config.py`). M6 added nine of them,
+four `USHER_EMBEDDING_*` and five `USHER_SEARCH_*`.
+
+**Two entries in that middle row will not become settings, and M6 is where
+that was decided rather than drifted into.**
+
+- ⏳ **"Concurrency per lane" has no knob because it has no lane** — there is
+  no semaphore anywhere in `src/`, and [01](01-architecture.md)'s concurrency
+  table now says so. A setting cannot be added ahead of the mechanism it
+  would bound.
+- **"Row weights" are deliberately module constants, not configuration.**
+  M6's similarity blend and its ranking blend are both weighted sums, and
+  both are hardcoded. Changing a weight changes what "similar" and "relevant"
+  *mean*, and every row already written to `title_neighbors` was written
+  under the old meaning — so an operator turning a dial silently gets a table
+  half computed one way and half the other, which is this milestone's own
+  headline failure mode in a config file. A weight change is a code change
+  and a rebuild.
 
 ### `.env` has two readers, and that is what the `USHER_COMPOSE_` namespace is for
 

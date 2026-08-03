@@ -274,6 +274,12 @@ incompatible scales and adding them produces confident nonsense.
 
 ### Similarity
 
+⏳ **The route is M9's; the service and the table behind it shipped in M6.**
+M6 adds no HTTP route at all (boundary call 1), so `GET /titles/{id}/similar`
+does **not** exist. What exists is `SimilarityService`, the precomputed
+`title_neighbors` table, and `usher similar` on the command line. M7 is the
+first in-process consumer.
+
 `GET /titles/{id}/similar` blends, in application code:
 
 - embedding cosine over overview text,
@@ -345,6 +351,13 @@ searching semantically. The cheaper, better-evidenced lever is **query
 expansion**: one LLM call rewriting an emotional query into narrative language
 before embedding, which measurably improves retrieval — one call per query,
 rather than enriching 1.3M records.
+
+⏳ **Query expansion is not built, and M6 declined it deliberately.**
+`ports/llm.py` declares `LLMClient` and `LLMPurpose.QUERY_EXPANSION`, and
+**there is no implementation of that port anywhere in `src/`** until M8. Adding
+a second unimplemented port dependency to the search path buys nothing M6 can
+measure, so **M6 embeds the query exactly as typed.** The seam is
+`SearchService.search`'s query string, and M8 or M9 wraps it. Boundary call 6.
 
 ## Ranking
 

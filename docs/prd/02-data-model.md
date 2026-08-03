@@ -356,7 +356,7 @@ the one that gets missed:
 
 | Table | Purpose |
 |---|---|
-| `curated_rows` | Persisted LLM row output ([06](06-rows-and-recommendations.md)) |
+| `curated_rows` | ⏳ Persisted LLM row output ([06](06-rows-and-recommendations.md)). **Does not exist yet** — M8 owns it, along with the `LLMClient` implementation that fills it |
 | `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, computed_at)`. A **batch artefact**, rebuilt rather than repaired, blending the two signals M6 has data for — embedding cosine plus genre and keyword Jaccard — and not the four [05](05-search-and-similarity.md) specifies. It is the one derived artefact in this schema with no per-row freshness predicate, and it carries a whole-artefact `computed_at` instead, on purpose ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)) |
 | `genome_scores` | ⏳ MovieLens tag-genome relevance vectors, where available. **Does not exist**: no importer, no phase, no table. Owned by M7 — see [09](09-roadmap.md) |
 | `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats. One row per *attempt*, so the availability sweep can say which run last finished cleanly |
@@ -375,6 +375,16 @@ Title      1─* WatchState *─1 User
 Title      1─1 TitleEmbedding
 Title      *─* Title        (through title_neighbors, directed, precomputed)
 ```
+
+⏳ **Three of those lines describe tables that do not exist**, and they are
+marked here because this block is the fastest place to read the schema and the
+easiest place to be misled by it. `Collection`, `Person`, `Credit` and `Image`
+have no table, no model and no port anywhere in `src/` — `Person`/`Credit`
+land with M7 and `Image` with M9, each re-derived from `raw_payloads` with no
+second network call ([09](09-roadmap.md)'s M4 boundary call 2). The one
+artefact that exists today is **`titles.collection_id`, a bare nullable UUID
+with no foreign key that nothing in `src/` ever writes**; it is the column
+waiting for the table, not evidence of one.
 
 ## Rules
 

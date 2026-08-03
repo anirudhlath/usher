@@ -182,14 +182,29 @@ crawl survives restarts.
 
 ### Phase 4 — Signals (~15 min + embedding)
 
-MovieLens `links.csv` bridges to IMDb/TMDb IDs; `genome-scores.csv` supplies
-1,128-dimension relevance vectors for 13,816 movies.
+**This phase is half built, and the halves belong to different milestones.**
 
-Coverage is the caveat: ~7% of the priority tier, skewed pre-2019 and English,
-no TV. It is a **bonus signal that fires when present**, never the primary
-similarity index — but it captures tone and feel that plot embeddings miss.
+⏳ **MovieLens is not built and is owned by M7.** `links.csv` would bridge to
+IMDb/TMDb IDs and `genome-scores.csv` would supply 1,128-dimension relevance
+vectors for 13,816 movies — but there is no `movielens` entry in `PHASES`, no
+`adapters/bulk/movielens.py`, and no `genome_scores` table. It was specified
+in five documents and deferred in none until [09](09-roadmap.md) gave it an
+owner; the cost table and licence row above are what it *will* cost, not what
+it costs today.
 
-Then embed all titles that have overviews.
+Coverage is the caveat if it lands: ~7% of the priority tier, skewed pre-2019
+and English, no TV. It is a **bonus signal that fires when present**, never the
+primary similarity index — but it captures tone and feel that plot embeddings
+miss. Until it lands, that ~7% is a plan rather than a measurement and
+[05](05-search-and-similarity.md)'s four-way similarity blend is a two-way one.
+
+✅ **The embedding half shipped in M6** — with one correction to "embed all
+titles that have overviews". The embedded population is
+`enrichment_state <> 'skeleton'`, not "has an overview": a skeleton title has
+no overview by construction, and the enriched tier is the set the partial
+index `ix_titles_enrichment_state` already covers. It is not a bootstrap phase
+at all — it is `JobKind.INDEX`, enqueued by enrichment and drained by
+`usher index --backfill` ([03](03-sources-and-sync.md) stage 4).
 
 ### Phase 5 — Steady state
 

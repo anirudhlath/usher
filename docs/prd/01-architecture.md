@@ -197,6 +197,21 @@ usher/
 Files stay small and single-purpose. A growing file is a signal that a concept
 wants extracting, not that it needs sections.
 
+⏳ **Two entries in that tree, and in the diagram at the top of this file, do
+not exist as written** — recorded rather than quietly redrawn, because the
+tree is what a new reader navigates by.
+
+- **There is no `jobs/` package.** The priority queue landed as
+  `ports/jobs.py` + `db/repositories/jobs.py` (a repository, per
+  [ADR-0009](decisions/0009-repositories-are-ports.md), which is why it is
+  under `db/`), the worker as `services/jobs.py`, and the "scheduler" as
+  `api/lanes.py`'s supervised lanes. Nothing was skipped; the concepts landed
+  under the layers that own them.
+- **There is no `adapters/llm/`.** `ports/llm.py` exists and has no
+  implementation until M8 — so `LLMClient → LiteLLMClient` in the table above
+  is a plan, not an inventory. `adapters/search/` and `adapters/embedding/`
+  are real as of M6.
+
 ## Stack
 
 | | |
@@ -226,6 +241,24 @@ own semaphore, so a slow upstream can't starve the API:
 | Enrichment workers | 8 | TMDb rate limit (~40 rps ceiling) |
 | Source sync workers | 4 | Emby is slow (~1–5 s/request observed) |
 | Embedding | 1 batch worker | CPU/GPU |
+
+⏳ **This table is the design, and the last three rows are not what shipped.**
+There is **no semaphore anywhere in `src/`** and none of these three numbers
+exists as a limit. What actually bounds the work: one `JobWorker` claiming a
+batch and running it **sequentially**, so enrichment concurrency is 1, not 8;
+TMDb is bounded by a **token bucket** at `USHER_TMDB_REQUESTS_PER_SECOND`
+rather than by a worker count, which is the more direct control over the thing
+the row names; source sync is one sequential walk per push lane; and
+**embedding has no lane of its own at all** — `JobKind.INDEX` is registered on
+the same `JobWorker` as `match` and `enrich`, so its "1 batch worker" is
+really "whatever the one worker is doing next".
+`USHER_EMBEDDING_BATCH_SIZE` is the embedder's internal batch, not a lane.
+
+The row that is worth revisiting rather than merely correcting is the last
+one: embedding is CPU-bound work sharing a worker with two I/O-bound job
+kinds, so a long backfill delays every `match` behind it. M6 bounds the damage
+by enqueueing `index` at `BACKFILL` priority, which is a priority answer to a
+scheduling question and is enough at 2k–10k titles.
 
 A `--worker` entrypoint flag exists from day one so lanes can be moved to a
 separate container later by editing compose, with no code change.
