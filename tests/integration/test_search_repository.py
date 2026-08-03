@@ -19,9 +19,13 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.repositories.search import _FINGERPRINT_SQL, PostgresTitleEmbeddingRepository
+from usher.db.repositories.title import PostgresTitleRepository
+from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
+from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import TitleEmbeddingUpsert
+from usher.services.search import compose_document
 
 _MODEL = "fake:test-384"
 _VECTOR = tuple([0.05] * 384)
@@ -37,6 +41,35 @@ async def _enriched(session: AsyncSession, name: str, **columns: object) -> uuid
         {"id": title_id, "name": name, "overview": columns.get("overview", "A harbour at dusk.")},
     )
     return title_id
+
+
+def _cross_check_title(**columns: object) -> Title:
+    """A synthetic enriched movie carrying every column the fingerprint reads.
+
+    Every value invented -- `test_no_dataset_row_is_committed_anywhere` scans
+    this file.
+    """
+    fields: dict[str, object] = {
+        "kind": TitleKind.MOVIE,
+        "name": "The Quiet Vacuum",
+        "sort_name": "quiet vacuum, the",
+        "original_name": "Das Stille Vakuum",
+        "year": 2019,
+        "overview": "A caretaker inventories a house nobody has entered since 1974.",
+        "tagline": "Nothing is missing.",
+        "genres": ("drama", "mystery"),
+        "keywords": ("house", "ledger", "attic"),
+        "enrichment_state": EnrichmentState.ENRICHED,
+    }
+    fields.update(columns)
+    return Title(**fields)
+
+
+async def _insert(session: AsyncSession, title: Title) -> None:
+    """Through the real repository, so the row is written the way production
+    writes it -- including the generated column the fingerprint sits beside.
+    """
+    await PostgresTitleRepository(session).add(title)
 
 
 async def _sql_fingerprint(session: AsyncSession, title_id: uuid.UUID) -> str:
@@ -416,3 +449,110 @@ async def test_a_vector_for_a_title_that_does_not_exist_is_a_repository_conflict
         )
     # The session survives, which is the half a bare `except` would lose.
     assert await repository.count_stale(_MODEL) == 0
+
+
+# --- The cross-check, and the reason this file's docstring names it. ---
+#
+# `_FINGERPRINT_SQL` and `usher.services.search.compose_document` are two
+# implementations of one assembly. The SQL half cannot call the Python half
+# (the assembly is per-title, so it cannot be a bound parameter, and `db/` may
+# not import `services/`), so the agreement is a test rather than a type. If
+# these two ever diverge by so much as a join character the failure is
+# entirely silent: `source_fingerprint` stops being a statement about the
+# vector, every enriched title matches the stale predicate forever, the
+# backfill re-claims the whole tier every pass, and the
+# `usher.search.embeddings.stale` gauge never reaches zero. Nothing raises.
+#
+# Same discipline the generated column's stored-versus-fresh drift test gets,
+# for the same reason.
+
+_CROSS_CHECK_TITLES: list[tuple[str, dict[str, object]]] = [
+    ("every column populated", {}),
+    ("no overview", {"overview": None}),
+    ("no tagline", {"tagline": None}),
+    ("no original name", {"original_name": None}),
+    ("nothing nullable populated", {"overview": None, "tagline": None, "original_name": None}),
+    ("no genres or keywords", {"genres": [], "keywords": []}),
+    ("one genre", {"genres": ["mystery"]}),
+    # Three, not two: a one-element join has no separator and a two-element
+    # one cannot tell `" ".join` from `", ".join` reversed.
+    ("three genres and two keywords", {"genres": ["drama", "mystery", "science fiction"]}),
+    # A genre containing the item separator, so the two sides have to agree
+    # about ambiguity rather than merely about the common case.
+    ("a genre with a space in it", {"genres": ["science fiction", "film noir"]}),
+    # A section separator inside a value. Postgres concatenates bytes and so
+    # does Python; this pins that neither normalises them.
+    ("a newline inside the overview", {"overview": "A caretaker.\nA ledger."}),
+    ("non-ascii", {"name": "Das Stille Vakuum", "overview": "Ein Hausmeister zählt die Räume."}),
+    ("a name that is only whitespace", {"name": " ", "overview": None, "tagline": None}),
+]
+
+
+@pytest.mark.parametrize(
+    "columns", [c for _, c in _CROSS_CHECK_TITLES], ids=[n for n, _ in _CROSS_CHECK_TITLES]
+)
+async def test_the_composer_and_the_sql_fingerprint_agree(
+    session: AsyncSession, columns: dict[str, object]
+) -> None:
+    """**The case the whole fingerprint scheme rests on.**
+
+    Runs `compose_document` in Python and `_FINGERPRINT_SQL` in Postgres over
+    the *same* row and compares the two hashes. Both halves are read out of
+    their own modules -- neither assembly is transcribed here, because a
+    hand-copied lookalike drifts and then reads like coverage, which this
+    project has recorded twice.
+
+    Four wrong composers this fails, each of which passes every unit case in
+    `tests/unit/test_services_search_document.py`: one that appends a section
+    only when the field is populated (the predicate `coalesce`s and always
+    emits six), one that joins arrays on `", "` (the predicate uses
+    `usher_array_text`, which is `array_to_string($1, ' ')`), one that
+    includes `year` (the predicate has no year column), and one that skips
+    `original_name` when it equals `name`.
+
+    The rows are parametrised over the shapes where the two spellings can
+    disagree rather than over a catalog sample: a NULL in each nullable
+    column, an empty array, a multi-element array, a value containing the
+    item separator, a value containing the section separator, non-ASCII, and
+    the degenerate title. A single fully-populated row would pass against all
+    four wrong composers but the third.
+    """
+    title = _cross_check_title(**columns)
+    await _insert(session, title)
+
+    assert compose_document(title).fingerprint == await _sql_fingerprint(session, title.id)
+
+
+async def test_the_composer_refuses_exactly_the_titles_the_refused_predicate_finds(
+    session: AsyncSession,
+) -> None:
+    """The two halves of the refusal, joined at the one place they can be.
+
+    `compose_document` decides degeneracy in Python; `REFUSED_EMBEDDING`
+    counts it in SQL off a NULL vector plus a matching fingerprint. They meet
+    only if the fingerprint written for the refused title is the one the
+    predicate computes -- so this is the cross-check again, on the path that
+    matters most, since a refused title whose fingerprint does not agree is
+    re-claimed by every backfill pass forever.
+    """
+    repository = PostgresTitleEmbeddingRepository(session)
+    title = _cross_check_title(
+        name=" ", overview=None, tagline=None, original_name=None, genres=(), keywords=()
+    )
+    await _insert(session, title)
+    document = compose_document(title)
+    assert document.is_degenerate is True
+
+    await repository.upsert_many(
+        [
+            TitleEmbeddingUpsert(
+                title_id=title.id,
+                embedding=None,
+                model_name=_MODEL,
+                source_fingerprint=document.fingerprint,
+            )
+        ]
+    )
+
+    assert await repository.count_stale(_MODEL) == 0
+    assert await repository.count_refused(_MODEL) == 1
