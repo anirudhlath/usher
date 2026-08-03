@@ -135,6 +135,22 @@ uv run usher work --once   # one pass over the queue, then exit
 uv run usher work          # stay up, polling
 ```
 
+`usher index` reports how much of the search index is out of date. **The bare
+form only reads**, so it is safe to run on a production box while diagnosing
+something; `--backfill` is the writing form and enqueues one `index` job per
+stale title for a worker to run.
+
+```bash
+uv run usher index             # model, stale count, refused count, estimated worker time
+uv run usher index --backfill  # enqueue the work; re-running writes zero rows
+```
+
+Embedding is optional and off by default. The model lives behind an extra
+(`uv sync --extra embedding`, 167 MiB, no torch) and `USHER_EMBEDDING_ENABLED`
+gates it; without it a worker simply never claims `index` jobs, and full-text
+and trigram still serve the whole catalog. `usher index` itself loads no model
+— staleness is a question about a recorded model *name*.
+
 **The server process already runs a worker lane**, and a push lane per
 enabled source, so a normal deployment needs neither command. They are for
 splitting the lanes across containers, and there is one rule: **do not run

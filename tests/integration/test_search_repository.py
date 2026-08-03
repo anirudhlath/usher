@@ -556,3 +556,58 @@ async def test_the_composer_refuses_exactly_the_titles_the_refused_predicate_fin
 
     assert await repository.count_stale(_MODEL) == 0
     assert await repository.count_refused(_MODEL) == 1
+
+
+async def test_the_second_page_still_applies_the_predicate(session: AsyncSession) -> None:
+    """**A page after the first must still be filtered, and the obvious
+    spelling of the keyset clause silently stops filtering.**
+
+    `select(...).where(a, b)` joins the fragments with `AND`, and `AND` binds
+    tighter than `OR` -- so an unparenthesised
+    `CAST(:after AS uuid) IS NULL OR t.id > CAST(:after AS uuid)` parses as
+
+        (population AND stale AND :after IS NULL) OR (t.id > :after)
+
+    On the **first** page `:after` is NULL, the left arm is the real
+    predicate and the right arm is NULL, so the answer is exactly right.
+    From the second page on the left arm is false and the whole clause
+    collapses to `t.id > :after`: every remaining row in `titles`, skeletons
+    and already-current titles alike. At 1,271,138 titles that is the whole
+    catalog enqueued for embedding -- 4-6 hours of work against 25 seconds --
+    produced by a backfill whose *first* page was correct and which reports a
+    plausible number all the way through.
+
+    **Invisible to a cursor test whose rows are all stale**, which is why the
+    drain case above did not catch it: when every row satisfies the
+    predicate, `t.id > :after` and the filtered predicate return the same
+    set. This case seeds a not-stale row and a skeleton *after* the stale one
+    in id order, so the second page is where the difference shows.
+
+    Found by driving the real sweep end to end in
+    `tests/integration/test_index_backfill.py`.
+    """
+    repository = PostgresTitleEmbeddingRepository(session)
+    # Ids are UUIDv7 minted at construction, so constructing in this order is
+    # what puts them in this order -- the stale one first, and the two rows
+    # that must not come back on page two after it.
+    stale = _cross_check_title(name="The Quiet Vacuum")
+    current = _cross_check_title(name="Ledgerhand")
+    skeleton = _cross_check_title(name="Autumn Iron", enrichment_state=EnrichmentState.SKELETON)
+    for title in (stale, current, skeleton):
+        await _insert(session, title)
+    await repository.upsert_many(
+        [
+            TitleEmbeddingUpsert(
+                title_id=current.id,
+                embedding=_VECTOR,
+                model_name=_MODEL,
+                source_fingerprint=compose_document(current).fingerprint,
+            )
+        ]
+    )
+
+    first = await repository.list_stale(_MODEL, limit=1)
+    second = await repository.list_stale(_MODEL, limit=10, after=first[-1].id)
+
+    assert [title.id for title in first] == [stale.id]
+    assert second == [], f"page two returned unfiltered rows: {[t.name for t in second]}"

@@ -46,11 +46,12 @@ from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.users import ensure_default_user
 from usher.domain.enums import TitleKind
-from usher.domain.jobs import JobKind
+from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
 from usher.ports.bulk import ImdbTitle
 from usher.ports.events import NullEventPublisher
+from usher.ports.jobs import JobRequest
 from usher.ports.repository import BulkCatalogRepository
 from usher.ports.source import SourceAdapter
 from usher.services.bootstrap import BootstrapService
@@ -369,6 +370,83 @@ async def _work(settings: Settings, *, once: bool) -> None:
             await aclose_model()
 
 
+async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
+    """Report the search index's freshness, or enqueue the work that fixes it.
+
+    **The bare form only reads**, so it is safe on a production box while
+    diagnosing something. `--backfill` is the writing form and it is one
+    `enqueue` per stale title, never an inline embed: the worker owns the
+    model (`composition.embedder`), and a CLI that embedded would load 65 MB
+    of ONNX in a process whose job is to print two numbers.
+
+    **The model is not loaded here at all**, and `settings.embedding_model`
+    below is what says so: staleness is a question about a *name*, which is
+    exactly what recording `model_name` on the row bought. This command works
+    on a deployment that has no embedding extra installed -- it will report
+    what is stale and enqueue it for a worker that does.
+
+    **Sized in tokens, because throughput is linear in tokens and not in
+    texts.** CPU holds ~8,000-10,700 tokens/s across the whole range and a
+    realistic `name + overview + genres + keywords` document is ~100-130
+    tokens, so the enriched tier boundary call 4 embeds (2k-10k titles) is
+    ~25 seconds to 2 minutes of worker time. Over all 1,271,138 titles it
+    would be 4-6 hours, which is the number that boundary call avoids paying.
+    A rate in texts/s would hide that a document twice as long costs twice as
+    much.
+
+    **Re-running is free.** `enqueue`'s upsert carries `WHERE jobs.status <>
+    'parked' AND jobs.priority < excluded.priority`, so a second sweep over
+    jobs already at BACKFILL costs one index probe per row and writes nothing.
+    The reported count is rows *written*, which is the honest number and is 0
+    on a second run.
+    """
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        model = settings.embedding_model
+        stale = await pipeline.embeddings.count_stale(model)
+        if not backfill:
+            refused = await pipeline.embeddings.count_refused(model)
+            print(f"model: {model}")
+            print(f"stale embeddings: {stale}")
+            print(f"refused (no content to embed): {refused}")
+            # ~115 tokens a document at ~8,000-10,700 tokens/s on CPU. A range
+            # derived from the invariant rather than from a texts/s rate.
+            print(f"estimated worker time: {stale * 115 / 10700:.0f}-{stale * 115 / 8000:.0f}s")
+            return
+
+        written = seen = 0
+        after: uuid.UUID | None = None
+        while True:
+            # Task 9's cursor, imported rather than re-derived. The predicate
+            # it walks is the one `count_stale` above and the
+            # `usher.search.embeddings.stale` gauge evaluate -- a backfill
+            # with its own copy of a staleness rule is how a sweep and the
+            # dashboard that reports on it come to disagree about what they
+            # are counting.
+            page = await pipeline.embeddings.list_stale(model, limit=page_size, after=after)
+            if not page:
+                break
+            written += await pipeline.queue.enqueue(
+                [
+                    JobRequest(kind=JobKind.INDEX, key=str(title.id), priority=JobPriority.BACKFILL)
+                    for title in page
+                ]
+            )
+            await session.commit()
+            seen += len(page)
+            # **The cursor advances on the last id of the page, always** --
+            # never on "how many were still stale afterwards". A loop that
+            # re-asked the predicate would not terminate against a row the
+            # predicate cannot clear, and this repository has shipped exactly
+            # that non-convergence once, in the watch-history repair. A keyset
+            # cursor cannot loop, because each pass starts strictly after the
+            # last id it saw, whatever the predicate did.
+            after = page[-1].id
+            if limit and seen >= limit:
+                break
+        print(f"{seen} stale titles swept, {written} index jobs written")
+
+
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
     """Probe a source's push channel once, or run the lanes in the foreground.
 
@@ -488,6 +566,15 @@ def build_parser() -> argparse.ArgumentParser:
     work = sub.add_parser("work", help="run queued jobs")
     work.add_argument("--once", action="store_true", help="one pass, then exit")
 
+    index = sub.add_parser("index", help="report search-index freshness, or enqueue the work")
+    index.add_argument(
+        "--backfill",
+        action="store_true",
+        help="enqueue one index job per stale title (the bare form only reads)",
+    )
+    index.add_argument("--limit", type=int, default=0, help="stop after N titles; 0 drains")
+    index.add_argument("--page-size", type=int, default=1000)
+
     push = sub.add_parser("push", help="run the push lane, or probe a source's push channel")
     push.add_argument("--source", default=None, help="source name; omit for every enabled source")
     push.add_argument(
@@ -565,6 +652,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     elif args.command == "work":
         asyncio.run(_work(settings, once=args.once))
+    elif args.command == "index":
+        asyncio.run(
+            _index(settings, backfill=args.backfill, limit=args.limit, page_size=args.page_size)
+        )
     elif args.command == "push":
         asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
     else:

@@ -62,8 +62,65 @@ that capped set, ordered by popularity.
 
 ### Semantic
 
-`halfvec(384)` embeddings from a local sentence-transformers model
-(`bge-small-en-v1.5`) over name + overview + genres + keywords, HNSW indexed.
+`halfvec(384)` embeddings from a local `fastembed` model
+(`bge-small-en-v1.5`) over name + original name + overview + tagline + genres +
+keywords, HNSW indexed.
+
+**The runtime is `fastembed`, not sentence-transformers, and this sentence is a
+correction rather than a preference.** Measured 2026-08-02: sentence-transformers
+is 59 packages and **4.8 GiB installed**, ~4.5 GiB of which is GPU runtime
+pulled unconditionally on a host that may never have a GPU, against a `usher`
+image of 332 MB. `fastembed` is 28 packages and **167 MiB**, has no torch, and
+is faster on identical input (252.9 texts/s against 229.5), with min cosine
+agreement **0.99999619** and top-1 identical on 205/205 documents. The
+dependency lives behind an extra (`uv sync --extra embedding`) and
+`USHER_EMBEDDING_ENABLED` is off by default: full-text and trigram serve all
+1.27M titles with no model at all, so a deployment without it is *narrowed*
+rather than broken.
+
+**The embedded population is the enriched tier, not the catalog** —
+`enrichment_state <> 'skeleton'`, for which `ix_titles_enrichment_state` is
+already exactly the partial index. This is this section's own two-workload
+split taken seriously: catalog lookup is full-text plus trigram over
+everything, and the semantic tier is the library experience at 2k–10k titles. A
+skeleton is a name and a year, so embedding it produces a vector of the name,
+which full-text already does better and cheaper — and a skeleton's search
+document is a generated column, so it is fully indexed with no job at all.
+
+**Sizing, quoted as the invariant rather than as a rate** (measured 2026-08-02
+on a Ryzen 7 5800X3D, CPU): throughput is linear in **tokens**, not texts, and
+holds at **~8,000–10,700 tokens/s** across the whole range — 412.7 texts/s at
+19 tokens, 83.5 at 100, 18.7 at 516. A realistic `name + overview + genres +
+keywords` document is **~100–130 tokens**. So the enriched tier is **~25
+seconds to 2 minutes**; all 1,271,138 titles would be **4–6 hours**, which is
+the number the population choice avoids paying. Best CPU batch size is 16, flat
+to 64, worse at 128. GPU throughput is deliberately unmeasured — the probe
+found 210 MiB free of 24,564 and declined to disturb a running service.
+
+**Freshness is a predicate, never an inference.** `title_embeddings` records
+`model_name` (the runtime *and* the checkpoint, e.g.
+`fastembed:BAAI/bge-small-en-v1.5`) and a `source_fingerprint` — the `md5` of
+the exact text embedded — so "is this stale?" is one SQL query with three
+consumers: the backfill's cursor, the `usher.search.embeddings.stale` gauge,
+and the test that proves the enqueue-on-enrichment path closes. Editing a
+title's overview moves the fingerprint and re-claims the row with nothing being
+told; swapping the runtime moves `model_name` and re-claims every row, which is
+the scheme replacing a migration. `usher index` reports both counters and
+writes nothing; `usher index --backfill` enqueues one job per stale title,
+keyset-paged on `titles.id` and re-runnable at zero write cost.
+
+**A title whose composed document is degenerate is refused, and the refusal is
+written.** Measured: every whitespace-only input embeds to the *identical*
+vector — cos = 1.0000 exactly — so a catalog of them is an unbounded cluster
+pinned to the top of every "more like this" result rather than a bad result,
+and no assertion about norms or dimensions can see it. A refused title
+therefore gets a row with a `NULL` embedding and the fingerprint of the
+degenerate text: it stops matching the stale predicate, starts matching a
+separate countable one, and is re-claimed exactly once when enrichment gives it
+content. Refusing by writing nothing would leave it matching the backfill
+forever. The threshold is about *empty*, not *thin* — name-only skeletons
+measure 0.5867 pairwise and retrieve their own enriched form at 0.7638 against
+a 0.4751 cross-title mean.
 
 - `hnsw.iterative_scan = relaxed_order` **must be set explicitly** — it is off
   by default, and without it filtered vector queries suffer severe recall

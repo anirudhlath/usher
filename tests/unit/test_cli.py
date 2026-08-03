@@ -180,3 +180,12 @@ def _lane_tasks() -> list[str]:
         for task in asyncio.all_tasks()
         if (name := task.get_name()).startswith("usher.lane.") and not task.done()
     )
+
+
+def test_index_parses_its_two_modes() -> None:
+    """`--backfill` writes and the bare form only reads, which is what makes
+    `usher index` safe to run on a production box while diagnosing
+    something."""
+    assert parse_args(["index"]).backfill is False
+    assert parse_args(["index", "--backfill", "--limit", "500"]).limit == 500
+    assert parse_args(["index", "--backfill"]).limit == 0

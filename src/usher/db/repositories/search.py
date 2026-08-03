@@ -283,7 +283,24 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
             .outerjoin(e, e.title_id == t.id)
             .where(
                 text(f"{_POPULATION} AND ({STALE_EMBEDDING})"),
-                text("CAST(:after AS uuid) IS NULL OR t.id > CAST(:after AS uuid)"),
+                # **The outer parentheses are load-bearing and their absence
+                # is silent.** `where()` joins its fragments with `AND`, and
+                # `AND` binds tighter than `OR`, so the unparenthesised form
+                # parses as
+                #
+                #     (population AND stale AND after IS NULL) OR (t.id > after)
+                #
+                # which is exactly right on the *first* page -- `after` is
+                # NULL, the left arm is the real predicate, the right arm is
+                # NULL -- and collapses to `t.id > after` on every page after
+                # it, returning every remaining row in `titles`: skeletons,
+                # already-current titles, the lot. At 1,271,138 rows that is
+                # the whole catalog enqueued for embedding, 4-6 hours against
+                # 25 seconds, from a sweep whose first page was correct and
+                # whose reported numbers stay plausible throughout. Invisible
+                # to any cursor test whose rows are all stale, because then
+                # the two spellings return the same set.
+                text("(CAST(:after AS uuid) IS NULL OR t.id > CAST(:after AS uuid))"),
             )
             .order_by(t.id)
             .limit(limit)
