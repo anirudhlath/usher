@@ -9,7 +9,7 @@ otherwise be lost and re-litigated in six months.
 | ADR | Decision | Status |
 |---|---|---|
 | [0001](0001-abc-over-protocol.md) | ABCs, not Protocols, for ports | Accepted |
-| [0002](0002-postgres-first-search.md) | Postgres-first search; Meilisearch gated | Accepted — reverses an earlier call |
+| [0002](0002-postgres-first-search.md) | Postgres-first search; Meilisearch gated | Accepted — reverses an earlier call; ⏳ gate not yet run |
 | [0003](0003-own-uuid-identity.md) | Usher-owned UUIDs, provider IDs as attributes | Accepted |
 | [0004](0004-push-over-polling.md) | Push events primary, reconcile as backstop | Accepted |
 | [0005](0005-bulk-bootstrap.md) | Pre-build the catalog from bulk datasets | Accepted |
@@ -27,5 +27,8 @@ otherwise be lost and re-litigated in six months.
 | [0017](0017-the-metadata-port-is-an-aggregate-and-a-cursor.md) | `MetadataProvider` returns an aggregate and a cursor, keyed by `ProviderRef` | Accepted — settles three provisional markers |
 | [0018](0018-push-health-is-a-message-ledger.md) | Push health is a message ledger, never an open socket | Accepted |
 | [0019](0019-the-client-event-channel-is-a-port.md) | The client event channel is a port, with one implementation | Accepted |
+| [0020](0020-derived-state-carries-its-fingerprint.md) | Derived state is fresh by construction, or carries its fingerprint | Accepted |
+| [0021](0021-the-suggest-path-is-its-own-port.md) | The suggest path is its own port, so a dual write cannot arrive quietly | Accepted — settles a provisional marker |
+| [0022](0022-the-embedder-is-optional-and-its-contract-is-measured.md) | The embedder is optional, and its contract is measured rather than asserted | Accepted — corrects PRD 05 and 01 |
 
 Format: context → decision → consequences → evidence. Short is fine.
