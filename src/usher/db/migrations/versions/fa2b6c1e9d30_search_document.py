@@ -107,8 +107,61 @@ the sharper argument and is also measured: a 1.6 MB pending list cost 231
 buffers against 30 -- 7.7x read amplification on the index stage, invisible
 in `EXPLAIN` unless you look at buffers.
 
-Reversible. The downgrade drops the index, the column and the function, and
-leaves the three extensions installed -- see above.
+**The trigram index is GIN, not the GiST PRD 05 specifies -- and that is a
+decision under an open question rather than a settled win.** At 300k rows
+GIN beat GiST on every axis measured: build 579 ms against 1,965 ms, index
+size 7,968 kB against 22 MB, p50 lookup 9.01 ms against 21.1 ms.
+
+**A later 2.08M-name run reopened half of it, and the honest summary is that
+GIN and GiST answer two different questions.** On the `%` threshold path GIN
+is ~110x faster (1.671 ms / 205 buffers against 182.5 ms / 31,174), builds in
+7.5 s against 23.1 s, and is 69 MB against 244 MB -- so for "which rows are
+candidates", GIN is not close. **But GIN has no KNN operator class at all**:
+`ORDER BY name <-> q` cannot use it and degrades to a Seq Scan at 3,989.9 ms,
+where GiST answers the same query from the index. On a 604-case
+single-edit-typo dry run over short titles, GiST KNN and GIN `%` @0.1 tied on
+recall@5 at 93.5%, and GiST had the better tail (p50 281 ms / p95 342 ms
+against 582 ms / 1,893 ms).
+
+So: this migration ships GIN because the capped-candidate path is the one
+`PostgresSuggestIndex` is designed around, and a cap is exactly what removes
+GIN's only exposure -- collecting every match before the top-N sort. **The
+KNN question is not closed by this migration**, and if the suggest path ever
+needs `ORDER BY name <-> q` it needs a GiST index, not a tuning change. That
+call belongs to the task that measures the type-ahead path end to end, with
+both numbers in front of it.
+
+Note also that no plan-shape test can distinguish the two -- GiST serves `%`
+as well -- so a green suite is not evidence for this choice. The
+measurements are.
+
+**On `name` raw, not on `lower(name)`.** `pg_trgm` folds case while
+generating trigrams, so `%` and `similarity()` are already case-insensitive.
+`ix_titles_name_lower_year` right beside it *is* an expression index on
+`lower(name)`, for a btree equality lookup where case does matter -- the two
+look inconsistent and are not.
+`tests/integration/test_trigram_index.py::
+test_pg_trgm_folds_case_so_the_index_is_on_the_raw_column` verifies the
+premise rather than trusting it.
+
+**`original_name` deliberately gets no index.** An extra GIN index on
+`titles` is paid on every write forever, including the 1.27M-row bootstrap;
+two predicates turn a single capped index scan into an unmeasured `BitmapOr`
+with undefined cap semantics; and a hit found only by original name renders
+under a canonical name the user did not type. The measurements that would
+settle it -- the fraction of the real catalog whose `original_name` differs
+from `name`, and suggest recall@5 with and without -- belong to the
+real-catalog gate, where a recall number means something.
+
+**There is no `title_search_names` table** (boundary call 3). PRD 05's
+narrow table is justified by aliases and people names, neither of which has
+a data source in M6, so it would hold exactly one row per title duplicating
+`titles(id, name, kind, popularity)` -- a second copy to keep fresh, which
+is the problem this milestone exists to eliminate. When M7 lands aliases and
+people, the narrow table is the migration that adds them.
+
+Reversible. The downgrade drops both indexes, the column and the function,
+and leaves the three extensions installed -- see above.
 """
 
 from collections.abc import Sequence
@@ -170,9 +223,17 @@ def upgrade() -> None:
         postgresql_using="gin",
         postgresql_with={"fastupdate": "off"},
     )
+    op.create_index(
+        "ix_titles_name_trgm",
+        "titles",
+        ["name"],
+        postgresql_using="gin",
+        postgresql_ops={"name": "gin_trgm_ops"},
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_titles_name_trgm", table_name="titles")
     op.drop_index("ix_titles_search_document", table_name="titles")
     op.execute("ALTER TABLE titles DROP COLUMN search_document")
     # After the column is gone nothing depends on the wrapper, so this is a

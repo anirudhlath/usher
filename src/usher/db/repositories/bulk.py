@@ -68,18 +68,48 @@ from usher.ports.repository import (
 )
 
 # Dropped for the duration of a bulk-load window and rebuilt after, but only
-# into an empty `titles` -- see `bulk_load_window`. Both are plain, non-unique
-# btrees over high-cardinality values, so they are pure write cost during a
-# load and rebuild faster from a full table than they maintain incrementally.
+# into an empty `titles` -- see `bulk_load_window`. The two btrees are plain,
+# non-unique, over high-cardinality values, so they are pure write cost
+# during a load and rebuild faster from a full table than they maintain
+# incrementally: measured 2026-07-30 against the live IMDb dump (1,271,138
+# retained titles), 35.8 s suspended against 40.2 s kept (11.0% faster), with
+# the rebuilt pair ~24% smaller (97 MB vs 127 MB).
 #
 # The three *unique* partial indexes (ix_titles_imdb_id,
-# ix_titles_tmdb_id_kind, ix_titles_tvdb_id) are deliberately absent from this
-# list: every upsert below names one of them in `ON CONFLICT`, so dropping one
-# does not slow the load down, it breaks it.
+# ix_titles_tmdb_id_kind, ix_titles_tvdb_id) are deliberately absent from
+# this list: every upsert below names one of them in `ON CONFLICT`, so
+# dropping one does not slow the load down, it breaks it.
+#
+# **M6's two GIN indexes join, and the reasoning is an inference rather than
+# a measurement.** A GIN index is more expensive to maintain incrementally
+# than a btree, so the btree result above should understate the saving -- but
+# nothing has measured a GIN rebuild at 1.27M rows, and the milestone smoke
+# run is where that number comes from. What is *not* inferred is that
+# suspending them does nothing for the dominant term: `titles.search_document`
+# is a stored generated column, computed on every write, measured at 4.06x on
+# this module's own `INSERT ... SELECT` shape, and there is no mechanism to
+# suspend it.
+#
+# **Every string here must reproduce the index its migration created**,
+# because this dict is executed verbatim and an entry that drops
+# `WITH (fastupdate = off)` or `gin_trgm_ops` rebuilds a *different* index --
+# one indistinguishable from the right one until somebody searches, and only
+# ever after a first bootstrap. Pinned by
+# `tests/integration/test_bulk_repository.py::
+# test_every_suspendable_index_rebuilds_to_what_the_migration_built`, which
+# is also the only check covering `fastupdate = off` at all: `compare_metadata`
+# is blind to index storage options (measured).
 _SUSPENDABLE_INDEXES: dict[str, str] = {
     "ix_titles_sort_name": "CREATE INDEX ix_titles_sort_name ON titles (sort_name)",
     "ix_titles_name_lower_year": (
         "CREATE INDEX ix_titles_name_lower_year ON titles (lower(name), year)"
+    ),
+    "ix_titles_search_document": (
+        "CREATE INDEX ix_titles_search_document ON titles "
+        "USING gin (search_document) WITH (fastupdate = off)"
+    ),
+    "ix_titles_name_trgm": (
+        "CREATE INDEX ix_titles_name_trgm ON titles USING gin (name gin_trgm_ops)"
     ),
 }
 

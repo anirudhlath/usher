@@ -286,6 +286,35 @@ class TitleRow(Base):
             postgresql_using="gin",
             postgresql_with={"fastupdate": "off"},
         ),
+        # The type-ahead path's whole index. Directly on `titles`, because
+        # PRD 05's narrow `title_search_names(title_id, name, kind,
+        # popularity)` table is refused (boundary call 3): its justification
+        # is aliases and people names, neither of which has a data source in
+        # M6, so it would hold exactly one row per title duplicating four
+        # columns of this one -- a second copy to keep fresh, which is the
+        # problem this milestone exists to eliminate.
+        #
+        # GIN, not the GiST PRD 05 specifies -- but the two answer different
+        # questions and only one of them is settled. For "which rows are
+        # candidates" GIN is not close: at 2.08M names it is ~110x faster on
+        # the `%` path (1.671 ms vs 182.5 ms), builds in 7.5 s vs 23.1 s, and
+        # is 69 MB vs 244 MB. For "the N nearest in distance order" GIN has
+        # no operator class at all -- `ORDER BY name <-> q` seq-scans at
+        # 3,989.9 ms where GiST answers from the index. GIN is right here
+        # because the suggest path caps candidates before re-ranking, which
+        # removes GIN's only exposure; a path that ever needs KNN needs a
+        # GiST index rather than a tuning change. See the migration docstring.
+        #
+        # On the raw column: pg_trgm folds case while generating trigrams,
+        # unlike the btree two entries up. `original_name` gets no index of
+        # its own -- see the migration's docstring for the three reasons and
+        # for the measurement that would reverse it.
+        Index(
+            "ix_titles_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+        ),
         # Mirrors the domain model's Field(ge=0) / Field(ge=0, le=10) /
         # Field(min_length=1) constraints -- see the Title commit.
         CheckConstraint("year IS NULL OR year >= 0", name="ck_titles_year_non_negative"),
