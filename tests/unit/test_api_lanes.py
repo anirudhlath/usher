@@ -31,6 +31,7 @@ from loguru import logger
 from pydantic import SecretStr
 
 from tests.fakes.credential_store import FakeCredentialStore
+from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
@@ -39,6 +40,7 @@ from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
+from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_match_repository import FakeTitleMatchRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
@@ -50,6 +52,7 @@ from usher.domain.ids import new_id
 from usher.domain.jobs import Job, JobKind
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
+from usher.ports.embedding import Embedder
 from usher.ports.repository import MediaItemRepository
 from usher.ports.source import (
     SourceAdapter,
@@ -156,9 +159,14 @@ class _CountingQueue(FakeJobQueue):
         super().__init__()
         self.claims = 0
         self.requeues = 0
+        # What each pass *asked for*, which is the observable half of
+        # `run_once` claiming `list(self._handlers)`: a lane with no model
+        # must not ask for `index` work at all.
+        self.claimed_kinds: list[tuple[JobKind, ...]] = []
 
     async def claim(self, kinds: Sequence[JobKind], *, limit: int = 1) -> list[Job]:
         self.claims += 1
+        self.claimed_kinds.append(tuple(kinds))
         return await super().claim(kinds, limit=limit)
 
     async def requeue_running(self, *, older_than_seconds: float = 0.0) -> int:
@@ -214,6 +222,7 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
         payloads=FakeRawPayloadStore(),
         runs=runs,
         queue=queue,
+        embeddings=FakeTitleEmbeddingRepository(),
         adapters=fakes.adapters,
         matcher=matcher,
         ingest=ingest,
@@ -237,7 +246,11 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
 
 
 def _supervisor(
-    fakes: _Fakes, *, worker_idle_seconds: float = 5.0, **overrides: object
+    fakes: _Fakes,
+    *,
+    worker_idle_seconds: float = 5.0,
+    embedder: Embedder | None = None,
+    **overrides: object,
 ) -> LaneSupervisor:
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
@@ -254,7 +267,12 @@ def _supervisor(
         yield _pipeline(fakes, settings)
 
     return LaneSupervisor(
-        settings, work, fakes.events, user_id=_user_id, idle_seconds=worker_idle_seconds
+        settings,
+        work,
+        fakes.events,
+        user_id=_user_id,
+        embedder=embedder,
+        idle_seconds=worker_idle_seconds,
     )
 
 
@@ -710,3 +728,58 @@ async def _drain(until: Callable[[], bool], *, bound: float = 5.0) -> None:
             return
         await asyncio.sleep(0.005)
     raise AssertionError("the lane never got there")
+
+
+async def test_the_worker_lane_holds_one_embedder_across_every_pass(fakes: _Fakes) -> None:
+    """**The measured failure `composition.embedder` exists to prevent, at
+    the layer where the mistake is actually available.**
+
+    `_run_worker` rebuilds the pipeline, the registry and the worker every
+    turn of a loop whose floor is `IDLE_SLEEP_SECONDS = 5.0`. A model is the
+    one collaborator that must *not* be rebuilt there: the load is 4.84 s
+    cold and 0.13 s warm over 65 MB of ONNX, so a per-pass build would spend
+    more time loading than running jobs, forever, with nothing in the logs
+    saying so. The precedent is on record in this repository at ~17,280 log
+    lines a day for a *string*.
+
+    Three passes, not one: a single pass cannot tell "once" from "per pass"
+    -- the same shape the requeue and missing-key cases above needed.
+    Counted through an embedder that records its own construction, so the
+    case fails against any spelling that calls the factory in the loop rather
+    than holding what the composition root handed it.
+    """
+    builds: list[int] = []
+
+    class _Loading(FakeEmbedder):
+        def __init__(self) -> None:
+            super().__init__()
+            builds.append(1)
+
+    supervisor = _supervisor(fakes, worker_idle_seconds=0.001, embedder=_Loading())
+    await supervisor.start()
+    await _drain(lambda: fakes.queue.claims >= 3, bound=2.0)
+    await supervisor.stop()
+
+    assert builds == [1], f"the lane built {len(builds)} embedders over {fakes.queue.claims} passes"
+
+
+async def test_a_worker_lane_without_an_embedder_never_claims_index_work(
+    fakes: _Fakes,
+) -> None:
+    """The guard, observed through the queue rather than through the wiring.
+
+    `run_once` claims `list(self._handlers)`, so a lane with no model must
+    not ask for `index` jobs at all -- claiming one it cannot run either
+    crashes on the lookup or parks work whose only problem is that it was
+    offered to the wrong process, and a job parked that way needs a human to
+    release it. A deployment without the extra leaves that work for one that
+    has it, and still has full-text and trigram over all 1.27M titles.
+    """
+    supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
+    await supervisor.start()
+    await _drain(lambda: fakes.queue.claims >= 1, bound=2.0)
+    await supervisor.stop()
+
+    assert fakes.queue.claimed_kinds
+    for kinds in fakes.queue.claimed_kinds:
+        assert JobKind.INDEX not in kinds

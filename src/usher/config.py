@@ -174,6 +174,42 @@ class Settings(BaseSettings):
     # retry storm into the rate limit it is meant to avoid.
     enrich_cache_max_age_days: int = Field(default=30, ge=1, le=180)
 
+    # The embedding model (PRD 05's semantic tier). **A minimal block,
+    # placed here by the task that first reads it** --
+    # `test_every_setting_is_read_by_something` means a setting cannot land
+    # before its reader, so the search settings arrive with their consumers
+    # rather than all at once. The rest of M6's `search_*` block follows.
+    #
+    # Off by default, and that is the honest default rather than a cautious
+    # one. The dependency lives behind an extra (`uv sync --extra
+    # embedding`), so the common install genuinely cannot run index jobs --
+    # and PRD 05's catalog-lookup tier, full-text plus trigram over all
+    # 1.27M titles, needs no model at all. A deployment with this off is
+    # *narrowed*, not broken.
+    embedding_enabled: bool = False
+    # The runtime **and** the checkpoint, because the two are not separable
+    # facts about a vector: the same weights served by sentence-transformers
+    # and by fastembed differ by 1.41e-03 max pairwise delta, which is 6x the
+    # halfvec quantisation error. This string is written to
+    # `title_embeddings.model_name`, so changing it invalidates every stored
+    # vector through the stale predicate -- which is the fingerprint scheme
+    # doing the work a migration would otherwise have to.
+    embedding_model: str = Field(default="fastembed:BAAI/bge-small-en-v1.5", min_length=1)
+    # Measured on CPU: best throughput at 16, flat from 16 to 64, degrading
+    # at 128. `le=512` because the ceiling here is memory, and the cost of
+    # being wrong is an OOM inside a worker pass rather than a slow one.
+    embedding_batch_size: int = Field(default=16, ge=1, le=512)
+    # Sets `HF_HUB_OFFLINE` before the model library is imported, and it is
+    # not a hardening flag. Measured: with a warm cache, no network and the
+    # variable unset, the load *fails* with `RuntimeError: Cannot send a
+    # request, as the client has been closed` -- huggingface_hub reusing a
+    # closed client on its retry path, in a message naming neither the
+    # network nor the cache. Reproduced two independent ways. It is also the
+    # only setting under which a genuine cache miss produces a
+    # comprehensible `OSError`. An operator warming the cache for the first
+    # time sets this false for that one run.
+    embedding_offline: bool = True
+
     # The push lane and the worker lane (PRD 03, PRD 01's concurrency
     # model). Same reasoning as every block above: PRD 08's TOML config
     # layer does not exist yet. Deliberately named `push_*` rather than

@@ -15,26 +15,38 @@ that the information is still surfaced rather than merely quieted.
 """
 
 import io
-from collections.abc import Iterator
+import os
+import uuid
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 import pytest
 from loguru import logger
 from pydantic import SecretStr
 
+from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
+from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
-from usher.composition import Pipeline, build_enrich_service, metadata_provider
+from usher.composition import (
+    Pipeline,
+    build_enrich_service,
+    build_worker,
+    embedder,
+    metadata_provider,
+)
 from usher.config import Settings
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind
 from usher.domain.title import Title
+from usher.ports.embedding import Embedder
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import TitleRepository
+from usher.services.handlers import SourceBinding
 
 
 def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipeline:
@@ -60,6 +72,7 @@ def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipelin
         payloads=FakeRawPayloadStore(),
         runs=unused,
         queue=queue,
+        embeddings=FakeTitleEmbeddingRepository(),
         adapters=unused,
         matcher=unused,
         ingest=unused,
@@ -150,3 +163,184 @@ async def test_the_enrich_service_enqueues_into_the_pipelines_own_queue() -> Non
     await service.enrich(title.id)
 
     assert (await queue.depth())[JobKind.INDEX] == 1
+
+
+async def test_no_embedder_configured_degrades_rather_than_raising(
+    warnings: io.StringIO,
+) -> None:
+    """The same shape `metadata_provider` has, for the same reason: a worker
+    refusing to start without a model would take three working lanes down
+    with the fourth. PRD 05's catalog-lookup tier -- full-text plus trigram
+    over 1.27M titles -- needs no model at all, so "no embedder" is a
+    *narrowed* deployment rather than a broken one.
+
+    Reported here, once per process, and not in `build_worker`, which runs
+    once per worker *pass* at a 5 s floor -- the ~17,280-lines-a-day shape.
+    """
+    built, aclose = await embedder(_settings(embedding_enabled=False))
+    await aclose()  # the no-op half of the pair, callable unconditionally
+
+    assert built is None
+    logged = warnings.getvalue()
+    assert logged.count("index jobs") == 1, f"reported more than once: {logged}"
+
+
+def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
+    """`run_once` claims `list(self._handlers)`, and its docstring says why:
+    claiming a kind you cannot run either crashes on the lookup or parks work
+    whose only problem is that it was offered to the wrong process -- and a
+    job parked that way needs a human to release it.
+
+    Fails: registering `INDEX` unconditionally and letting `IndexService`
+    hold `None`. Nothing raises until a job arrives, at which point it parks,
+    and the review list fills with work that is perfectly runnable elsewhere.
+
+    The `ENRICH` half is asserted alongside it, so the two guards cannot
+    drift into "one guarded, one not", and `MATCH` is asserted so an
+    implementation registering *nothing* cannot pass.
+    """
+    worker = build_worker(
+        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _settings(),
+        provider=None,
+        embedder=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+
+    assert JobKind.INDEX not in worker.registered_kinds
+    assert JobKind.ENRICH not in worker.registered_kinds
+    assert JobKind.MATCH in worker.registered_kinds
+
+
+def test_a_worker_with_an_embedder_registers_the_index_handler() -> None:
+    """The control that makes the case above evidence rather than a
+    tautology: without it, an implementation registering *nothing* passes."""
+    worker = build_worker(
+        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _settings(),
+        provider=None,
+        embedder=FakeEmbedder(),
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+
+    assert JobKind.INDEX in worker.registered_kinds
+
+
+async def test_the_model_is_loaded_once_across_three_worker_passes() -> None:
+    """**The measured failure this factory exists to prevent.**
+
+    `build_worker` runs once per worker *pass* -- `lanes._run_worker` rebuilds
+    it every turn of a loop whose floor is 5.0 s. A per-pass `logger.warning`
+    there was measured at ~17,280 lines a day; a per-pass *model load* is
+    4.84 s cold / 0.13 s warm and 65 MB of ONNX, so the lane would spend more
+    time loading than working, forever, with nothing in the logs saying so.
+
+    Three passes, not one: a single pass cannot tell "once" from "per pass"
+    -- the same shape
+    `test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass`
+    needed. Counted through a *loading* embedder rather than read off the
+    source, so the case fails against any spelling that builds one here.
+    """
+    loads: list[int] = []
+
+    class _Loading(FakeEmbedder):
+        def __init__(self) -> None:
+            super().__init__()
+            loads.append(1)
+
+    model = _Loading()
+    pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue())
+    for _ in range(3):
+        build_worker(
+            pipeline,
+            _settings(),
+            provider=None,
+            embedder=model,
+            resolve=_never_resolves,
+            user_id=uuid.uuid4(),
+        )
+
+    assert loads == [1], "the model was loaded per worker pass, not per process"
+
+
+async def test_the_factory_sets_hf_hub_offline_before_importing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured: warm cache, no network, flag unset -> `RuntimeError: Cannot
+    send a request, as the client has been closed`, from huggingface_hub
+    reusing a closed client on the retry path. The message names neither the
+    network nor the cache. Reproduced two independent ways, and it is also
+    the only setting under which a genuine cache miss produces a
+    comprehensible `OSError`.
+
+    `_load_embedder` is replaced rather than left to import a real model:
+    this case is about the environment variable, and no test in this
+    repository downloads 65 MB or makes a network request.
+    """
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr("usher.composition._load_embedder", lambda _: FakeEmbedder())
+
+    built, aclose = await embedder(_settings(embedding_enabled=True))
+    try:
+        assert os.environ["HF_HUB_OFFLINE"] == "1"
+    finally:
+        await aclose()
+    assert built is not None
+
+
+async def test_an_operators_own_hf_hub_offline_value_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`setdefault`, not assignment.
+
+    An operator warming the cache for the first time runs one command with
+    `HF_HUB_OFFLINE=0`, and a container may set its own; either must survive.
+    Written as its own case because the mutation to `os.environ[...] = "1"`
+    survives the case above -- the plan predicted that and said to add this
+    rather than record it as untested.
+    """
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr("usher.composition._load_embedder", lambda _: FakeEmbedder())
+
+    _, aclose = await embedder(_settings(embedding_enabled=True, embedding_offline=True))
+    await aclose()
+
+    assert os.environ["HF_HUB_OFFLINE"] == "0"
+
+
+async def test_an_embedder_that_cannot_load_degrades_rather_than_crashing(
+    monkeypatch: pytest.MonkeyPatch, warnings: io.StringIO
+) -> None:
+    """A missing extra, a missing model file, a cache miss under
+    `HF_HUB_OFFLINE=1`: all three are `ImportError`/`OSError` at *build* time
+    in a process whose other three lanes are fine.
+
+    Fails: letting it propagate out of `create_app`'s lifespan, which turns
+    "the embedding extra is not installed" into a server that will not boot
+    -- the degradation-into-outage trade PRD 08 forbids.
+
+    Both arms, because they are different exception hierarchies and catching
+    one is the natural half-fix: an absent package raises `ImportError` and a
+    cache miss raises `OSError`.
+    """
+    for failure in (ImportError("no module named fastembed"), OSError("model not in cache")):
+        monkeypatch.setattr("usher.composition._load_embedder", _raising(failure), raising=True)
+
+        built, aclose = await embedder(_settings(embedding_enabled=True))
+        await aclose()
+
+        assert built is None
+    assert "index jobs will not be claimed" in warnings.getvalue()
+
+
+def _raising(exc: Exception) -> Callable[[Settings], Embedder]:
+    def _load(_: Settings) -> Embedder:
+        raise exc
+
+    return _load
+
+
+async def _never_resolves(_: str) -> SourceBinding | None:
+    return None

@@ -35,6 +35,7 @@ contracts break. So the hole an unlisted module would otherwise leave is
 closed by what this module itself imports rather than by a rule.
 """
 
+import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -52,6 +53,7 @@ from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
+from usher.db.repositories.search import PostgresTitleEmbeddingRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
 from usher.db.repositories.title import PostgresTitleRepository
@@ -60,6 +62,7 @@ from usher.db.users import ensure_default_user
 from usher.domain.jobs import JobKind
 from usher.domain.source import Source
 from usher.ports.credentials import CredentialStore
+from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher, NullEventPublisher
 from usher.ports.jobs import JobQueue
 from usher.ports.metadata import MetadataProvider
@@ -69,6 +72,7 @@ from usher.ports.repository import (
     RawPayloadStore,
     SourceRepository,
     SyncRunRepository,
+    TitleEmbeddingRepository,
     TitleMatchRepository,
     TitleRepository,
     WatchStateRepository,
@@ -78,9 +82,11 @@ from usher.services.enrich import EnrichService
 from usher.services.handlers import (
     SourceBinding,
     enrich_handler,
+    index_handler,
     match_handler,
     watch_history_handler,
 )
+from usher.services.index import IndexService
 from usher.services.ingest import IngestService
 from usher.services.jobs import JobWorker
 from usher.services.matching import MatchService
@@ -94,6 +100,21 @@ from usher.telemetry import QueueSnapshot
 # supervisor logs it, and an operator reading either should be reading the
 # same sentence.
 NO_CREDENTIALS = "no stored credentials; re-enter them to reconnect"
+
+
+async def nothing() -> None:
+    """The no-op half of every `(thing, close it)` pair in this module.
+
+    Module scope rather than one closure per factory, so the degradation
+    paths cannot drift into "one returns a callable and one returns None" --
+    a caller must be able to `await aclose()` unconditionally whether or not
+    the thing was built. Public because both composition roots need the same
+    object for the lane they did not build: four functions that do nothing
+    are still four things to keep the same, and the `finally` that awaits
+    them has one shape rather than an `if`.
+    """
+    return None
+
 
 # One session, one pipeline, for the length of one unit of work. Spelled as
 # a callable returning a context manager rather than as a session factory so
@@ -132,6 +153,7 @@ class Pipeline:
     payloads: RawPayloadStore
     runs: SyncRunRepository
     queue: JobQueue
+    embeddings: TitleEmbeddingRepository
     adapters: SourceAdapterFactory
     matcher: MatchService
     ingest: IngestService
@@ -196,6 +218,7 @@ def build_pipeline(
     watch_states = PostgresWatchStateRepository(session)
     payloads = PostgresRawPayloadStore(session)
     runs = PostgresSyncRunRepository(session)
+    embeddings = PostgresTitleEmbeddingRepository(session)
     queue = PostgresJobQueue(
         session,
         max_attempts=settings.job_max_attempts,
@@ -220,6 +243,7 @@ def build_pipeline(
         payloads=payloads,
         runs=runs,
         queue=queue,
+        embeddings=embeddings,
         adapters=adapter_factory(settings),
         matcher=matcher,
         ingest=ingest,
@@ -325,6 +349,7 @@ def build_worker(
     settings: Settings,
     *,
     provider: MetadataProvider | None,
+    embedder: Embedder | None,
     resolve: Callable[[str], Awaitable[SourceBinding | None]],
     user_id: uuid.UUID,
 ) -> JobWorker:
@@ -353,7 +378,30 @@ def build_worker(
         worker.register(
             JobKind.ENRICH, enrich_handler(build_enrich_service(pipeline, settings, provider))
         )
+    # Guarded exactly as ENRICH is, and the symmetry is the point: `run_once`
+    # claims `list(self._handlers)`, so a worker with no model leaves index
+    # jobs pending for a worker that has one rather than parking them. A job
+    # parked that way needs a human to release it, and its only problem was
+    # being offered to the wrong process. A deployment without the extra
+    # still has full-text and trigram over all 1.27M titles -- narrowed, not
+    # broken.
+    if embedder is not None:
+        worker.register(JobKind.INDEX, index_handler(build_index_service(pipeline, embedder)))
     return worker
+
+
+def build_index_service(pipeline: Pipeline, embedder: Embedder) -> IndexService:
+    """One session's repositories plus the process's model.
+
+    The asymmetry in the arguments is the whole design: everything on
+    `pipeline` is rebuilt per pass, and the `embedder` is not.
+    """
+    return IndexService(
+        titles=pipeline.titles,
+        embeddings=pipeline.embeddings,
+        embedder=embedder,
+        commit=pipeline.commit,
+    )
 
 
 async def metadata_provider(
@@ -383,11 +431,7 @@ async def metadata_provider(
     """
     if settings.tmdb_api_key is None:
         logger.warning("no TMDb API key configured; enrich jobs will not be claimed")
-
-        async def _nothing() -> None:
-            return None
-
-        return None, _nothing
+        return None, nothing
     client = httpx.AsyncClient(timeout=settings.source_timeout_seconds)
     provider = TmdbMetadataProvider(
         TmdbClient(
@@ -399,6 +443,83 @@ async def metadata_provider(
         region=settings.tmdb_region,
     )
     return provider, client.aclose
+
+
+async def embedder(settings: Settings) -> tuple[Embedder | None, Callable[[], Awaitable[None]]]:
+    """The embedding model and the callable that releases it.
+
+    **Deliberately the same shape as `metadata_provider` above**, down to the
+    return type, for the same three reasons.
+
+    *One per process, never per pass.* `build_worker` is called once per
+    worker pass -- `usher.api.lanes._run_worker` rebuilds it every turn of a
+    loop whose floor is `IDLE_SLEEP_SECONDS = 5.0`. A 65 MB ONNX load there is
+    4.84 s cold and 0.13 s warm, every five seconds, forever, with nothing in
+    the logs saying so. The precedent is on record in this repository at
+    ~17,280 log lines a day for a *string*; a model is not a string.
+
+    *`(None, no-op)` rather than a raise.* `match`, `enrich` and
+    `watch_history` need no model, and PRD 05's catalog-lookup tier -- the one
+    serving 1.27M titles -- needs none either. A worker refusing to start
+    without one would take three working lanes down with the fourth, and a
+    `create_app` that did would turn a missing extra into a server that will
+    not boot.
+
+    *This is where the degradation is reported, once.* Not `build_worker`, for
+    the reason its own docstring gives: an operator whose index queue never
+    drains has to be able to see why, and a per-pass warning is how an
+    operator learns to ignore warnings.
+
+    **The `fastembed` import is local**, the way `connect_websocket` imports
+    `websockets`: `usher.composition` is imported by every entry point
+    including `usher bootstrap-status`, and this dependency lives behind an
+    extra (167 MiB, 28 packages, no torch -- against sentence-transformers'
+    4.8 GiB and 59, ~4.5 GiB of it GPU runtime pulled unconditionally on a
+    host that may never have a GPU).
+
+    **`HF_HUB_OFFLINE` is set before that import and it is not optional.**
+    Measured: warm cache, no network, flag unset -> `RuntimeError: Cannot send
+    a request, as the client has been closed`, from huggingface_hub reusing a
+    closed client on its retry path, in a message naming neither the network
+    nor the cache. Reproduced two independent ways. It is also the only
+    setting under which a genuine cache miss produces a comprehensible
+    `OSError`. `setdefault`, so an operator warming the cache once -- or a
+    container that set it -- wins over this default.
+    """
+    if not settings.embedding_enabled:
+        logger.warning("no embedding model configured; index jobs will not be claimed")
+        return None, nothing
+
+    # Before the import, never after: huggingface_hub reads it when it
+    # constructs its client, and the failure it prevents names neither the
+    # network nor the cache. That ordering is a comment rather than a test
+    # because the read happens *inside* the import -- moving this line below
+    # `_load_embedder` survives any test that does not load a real model.
+    os.environ.setdefault("HF_HUB_OFFLINE", "1" if settings.embedding_offline else "0")
+    try:
+        built = _load_embedder(settings)
+    except (ImportError, OSError) as exc:
+        # A missing extra, a missing model file, a cache miss under
+        # HF_HUB_OFFLINE=1. All three are a *narrowed* deployment, not a
+        # broken one, and all three must be legible -- `str(exc)` for the
+        # offline case is the OSError this setting exists to produce.
+        logger.warning("embedding model unavailable; index jobs will not be claimed: {e}", e=exc)
+        return None, nothing
+    return built, built.aclose
+
+
+def _load_embedder(settings: Settings) -> Embedder:
+    """The one line that touches `fastembed`, isolated so a test can replace it.
+
+    Absolute import, so the sibling-named module
+    `usher.adapters.embedding.fastembed` does not shadow the third-party
+    `fastembed` -- Python 3 absolute imports make that correct, and the
+    adapter's own docstring records that it was *verified* rather than
+    assumed.
+    """
+    from usher.adapters.embedding.fastembed import FastEmbedEmbedder
+
+    return FastEmbedEmbedder(settings.embedding_model, batch_size=settings.embedding_batch_size)
 
 
 def unit_of_work(
@@ -552,10 +673,13 @@ __all__ = [
     "SourceRegistry",
     "adapter_factory",
     "build_enrich_service",
+    "build_index_service",
     "build_pipeline",
     "build_push_applier",
     "build_worker",
+    "embedder",
     "metadata_provider",
+    "nothing",
     "open_adapter",
     "selected_sources",
     "unit_of_work",

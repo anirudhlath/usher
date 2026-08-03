@@ -32,6 +32,20 @@ dependencies = [
     "cryptography>=49.0.0",
 ]
 
+[project.optional-dependencies]
+# The semantic tier's model runtime, deliberately an extra rather than a
+# dependency. Measured 2026-08-02: `fastembed` is 28 packages and 167 MiB
+# against `sentence-transformers`' 59 and 4.8 GiB, ~4.5 GiB of which is GPU
+# runtime pulled unconditionally on a host that may never have a GPU -- and
+# the current `usher` image is 332 MB. Behind an extra because full-text and
+# trigram serve all 1.27M titles with no model at all, so a deployment
+# without this is narrowed rather than broken: `composition.embedder`
+# degrades to `(None, no-op)` and the worker simply never registers
+# `JobKind.INDEX`. Declared here even though the import is lazy, for the
+# reason `websockets` is declared above: a lazily-imported undeclared
+# dependency is a dependency nobody can install on purpose.
+embedding = ["fastembed>=0.8"]
+
 [project.scripts]
 # `usher <command>` as well as `python -m usher <command>`; both land on
 # `usher.cli.main`, which reads `sys.argv` when handed no argv. The
@@ -114,7 +128,11 @@ plugins = ["pydantic.mypy"]
 # consumer is tests/unit/test_deployment_config.py, which reads compose.yml
 # to check it against `Settings` and `.env.example`, and a stub package
 # bought only for a test file is more surface than the `Any` it removes.
-module = ["uuid6", "testcontainers.*", "yaml"]
+# `fastembed` ships no type information and lives behind an extra, so it
+# is not installed in the environment mypy runs in -- the annotation on
+# `FastEmbedEmbedder._model` is `Any` for exactly that reason, stated
+# there rather than implied here.
+module = ["uuid6", "testcontainers.*", "yaml", "fastembed"]
 ignore_missing_imports = true
 
 [tool.importlinter]

@@ -70,6 +70,7 @@ from usher.composition import (
 from usher.config import Settings
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
+from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher
 from usher.ports.metadata import MetadataProvider
 from usher.ports.source import SourceAdapter, SourceEvent
@@ -93,6 +94,7 @@ class LaneSupervisor:
         *,
         user_id: Callable[[], Awaitable[uuid.UUID]],
         provider: MetadataProvider | None = None,
+        embedder: Embedder | None = None,
         idle_seconds: float = IDLE_SLEEP_SECONDS,
     ) -> None:
         self._settings = settings
@@ -100,6 +102,10 @@ class LaneSupervisor:
         self._events = events
         self._user_id = user_id
         self._provider = provider
+        # Carried, never built here. Both of these are per-*process*
+        # resources handed in by the composition root that made them, and
+        # `_run_worker` below rebuilds everything else once per pass.
+        self._embedder = embedder
         # Injected only so a test can run several worker passes without
         # spending five seconds each: `usher work`'s equivalent is a module
         # constant for the reason stated above, and nothing in `src/` passes
@@ -367,6 +373,7 @@ class LaneSupervisor:
                         pipeline,
                         self._settings,
                         provider=self._provider,
+                        embedder=self._embedder,
                         resolve=registry.resolve,
                         user_id=await self._user_id(),
                     )

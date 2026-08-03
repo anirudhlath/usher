@@ -33,7 +33,9 @@ from usher.composition import (
     SourceRegistry,
     build_pipeline,
     build_worker,
+    embedder,
     metadata_provider,
+    nothing,
     open_adapter,
     selected_sources,
     unit_of_work,
@@ -313,7 +315,7 @@ async def _unmatched(
 
 
 async def _work(settings: Settings, *, once: bool) -> None:
-    """Run queued jobs: `match`, `enrich`, `watch_history`.
+    """Run queued jobs: `match`, `enrich`, `watch_history`, `index`.
 
     Owns the one `httpx.AsyncClient` behind `TmdbClient`, because the token
     bucket that keeps this deployment under TMDb's ~40 rps ceiling lives on
@@ -331,6 +333,11 @@ async def _work(settings: Settings, *, once: bool) -> None:
     """
     async with _session_for(settings) as session:
         provider, aclose = await metadata_provider(settings)
+        # Both built once, here, and closed in the same `finally`. A model is
+        # a process-lifetime resource for the same reason the TMDb client is:
+        # `build_worker` runs once per pass below, and a load there is 4.84 s
+        # cold / 0.13 s warm over 65 MB of ONNX.
+        model, aclose_model = await embedder(settings)
         pipeline = build_pipeline(session, settings, provider=provider)
         registry = SourceRegistry(pipeline)
         gauges = QueueGauges()
@@ -340,6 +347,7 @@ async def _work(settings: Settings, *, once: bool) -> None:
                 pipeline,
                 settings,
                 provider=provider,
+                embedder=model,
                 resolve=registry.resolve,
                 user_id=await ensure_default_user(session),
             )
@@ -358,6 +366,7 @@ async def _work(settings: Settings, *, once: bool) -> None:
         finally:
             await registry.aclose()
             await aclose()
+            await aclose_model()
 
 
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
@@ -414,8 +423,9 @@ async def _run_lanes(settings: Settings) -> None:
     engine = build_engine(settings.database_url.get_secret_value())
     sessions = build_session_factory(engine)
     provider, close_provider = (
-        await metadata_provider(settings) if settings.worker_enabled else (None, _no_provider)
+        await metadata_provider(settings) if settings.worker_enabled else (None, nothing)
     )
+    model, close_model = await embedder(settings) if settings.worker_enabled else (None, nothing)
     events = NullEventPublisher()
     lanes = LaneSupervisor(
         settings,
@@ -423,6 +433,7 @@ async def _run_lanes(settings: Settings) -> None:
         events,
         user_id=DefaultUserId(sessions),
         provider=provider,
+        embedder=model,
     )
     await lanes.start()
     try:
@@ -433,11 +444,8 @@ async def _run_lanes(settings: Settings) -> None:
     finally:
         await lanes.stop()
         await close_provider()
+        await close_model()
         await engine.dispose()
-
-
-async def _no_provider() -> None:
-    return None
 
 
 def _as_uuid(value: str, what: str) -> uuid.UUID:
