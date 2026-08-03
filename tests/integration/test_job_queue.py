@@ -39,6 +39,7 @@ from tests.contract.job_queue_contract import (
     ClearBackoff,
     ConcurrentClaimHarness,
     JobQueueContract,
+    StagingLockReader,
 )
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.jobs import PostgresJobQueue
@@ -67,6 +68,45 @@ async def clear_backoff(session: AsyncSession) -> ClearBackoff:
         await session.execute(text("UPDATE jobs SET run_after = NULL"))
 
     return _clear
+
+
+# `pg_locks` is per-backend, so this only means anything on the *same* session
+# the enqueue ran on -- which the shared `session` fixture guarantees, being
+# one connection for the whole test. Filtered to `relation` locks because a
+# transaction also holds `virtualxid` and `transactionid` locks that name no
+# relation at all; joined through `pg_namespace` because the schema is the
+# whole property (see the contract case).
+_STAGING_LOCKS = """
+SELECT n.nspname || '.' || c.relname AS name
+FROM pg_locks l
+JOIN pg_class c ON c.oid = l.relation
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE l.pid = pg_backend_pid()
+  AND l.locktype = 'relation'
+  AND c.relname LIKE 'stg\\_%'
+"""
+
+
+@pytest_asyncio.fixture
+async def locks_held(session: AsyncSession) -> StagingLockReader:
+    """The Postgres half of the contract's third test-only hook.
+
+    Named `locks_held`, not `staging_locks`, for the reason `claimers` is not
+    named `concurrent_claims`: a class-level fixture shadows a module-level
+    one of the same name, so the contract's own `staging_locks` returning
+    `None` would win and the case would skip itself here.
+
+    Asserted on the relation rather than on the lock *mode*: `stg_jobs` being
+    reachable by another session is the property, and a future Postgres
+    spelling `AccessExclusiveLock` differently would quietly pass a
+    mode-string assertion.
+    """
+
+    async def _read() -> tuple[str, ...]:
+        result = await session.execute(text(_STAGING_LOCKS))
+        return tuple(sorted(result.scalars().all()))
+
+    return _read
 
 
 class _PostgresConcurrentClaims(ConcurrentClaimHarness):
@@ -138,15 +178,13 @@ async def claimers(postgres_url: str) -> AsyncIterator[_PostgresConcurrentClaims
             await one.close()
         async with factory() as cleanup:
             await cleanup.execute(text("DELETE FROM jobs"))
-            # `stg_jobs` too, and this is not tidiness. `stage_records`
-            # creates the staging table with DDL, Postgres DDL is
-            # transactional, and this harness's writer *commits* -- so unlike
-            # every other test in this suite the table survives, and
-            # `test_migration_matches_the_orm_metadata` (rightly) reports it
-            # as schema drift the next time it runs. Found by running the full
-            # suite: the queue file passes alone and takes the migration test
-            # down with it in combination.
-            await cleanup.execute(text("DROP TABLE IF EXISTS stg_jobs"))
+            # A `DROP TABLE IF EXISTS stg_jobs` stood here until M6, because
+            # `stage_records` created the staging table with DDL, Postgres DDL
+            # is transactional, and this harness's writer *commits* -- so
+            # unlike every other test in this suite the table survived and
+            # took `test_migration_matches_the_orm_metadata` down in a later
+            # file. `CREATE TEMP TABLE ... ON COMMIT DROP` deleted the need
+            # for it: the commit is now what removes the table.
             await cleanup.commit()
         await engine.dispose()
 
@@ -160,6 +198,10 @@ class TestPostgresJobQueue(JobQueueContract):
     @pytest.fixture
     def concurrent_claims(self, claimers: _PostgresConcurrentClaims) -> _PostgresConcurrentClaims:
         return claimers
+
+    @pytest.fixture
+    def staging_locks(self, locks_held: StagingLockReader) -> StagingLockReader:
+        return locks_held
 
 
 async def test_a_second_worker_is_not_blocked_by_the_first_workers_claim(

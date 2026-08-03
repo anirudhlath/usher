@@ -16,15 +16,19 @@ through its whole cycle before starting the next. So `ClaimWindow` carries
 the wall-clock interval each claim actually occupied, and the case fails if
 those intervals do not overlap, whatever the claim counts say.
 
-Two test-only hooks the port deliberately does not carry:
+Three test-only hooks the port deliberately does not carry:
 
 - `clear_backoff`, because advancing past a backoff by sleeping would make
   this suite take the backoff schedule in real time, and because nothing in
   `src/` would ever call it.
 - `concurrent_claims`, for the reason above.
+- `staging_locks`, which reads the relation locks the enqueue just took. A
+  dict has no locks, so the case is *skipped* by the fake rather than passed
+  -- an assertion that trivially holds against an in-memory implementation is
+  the vacuous-pass failure mode this file already refuses once.
 
-Both are fixtures the subclass supplies, so the port stays free of methods
-that exist only for tests.
+All three are fixtures the subclass supplies, so the port stays free of
+methods that exist only for tests.
 """
 
 import uuid
@@ -38,6 +42,13 @@ from usher.domain.jobs import JobKind, JobPriority, JobStatus
 from usher.ports.jobs import JobQueue, JobRequest
 
 ClearBackoff = Callable[[], Awaitable[None]]
+
+# The schema-qualified names of the `stg_*` relations the calling backend
+# currently holds a relation lock on. Schema-qualified rather than bare,
+# because the whole property is *which schema* -- `public.stg_jobs` is a name
+# every other session in the deployment shares and `pg_temp_3.stg_jobs` is one
+# nothing else can even see.
+StagingLockReader = Callable[[], Awaitable[tuple[str, ...]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +119,48 @@ class JobQueueContract:
         that reads like a broken suite.
         """
         return None
+
+    @pytest.fixture
+    def staging_locks(self) -> StagingLockReader | None:
+        """Overridden by an implementation whose lock state can be read."""
+        return None
+
+    async def test_an_enqueue_locks_nothing_another_session_can_reach(
+        self, queue: JobQueue, staging_locks: StagingLockReader | None
+    ) -> None:
+        """The wrong implementation: `enqueue` before M6 -- `DROP TABLE IF
+        EXISTS stg_jobs` plus `CREATE UNLOGGED TABLE stg_jobs`, two `ACCESS
+        EXCLUSIVE` locks on a fixed, shared name, held to commit. M6 put a
+        one-row enqueue on the pipeline's hot path (one `index` job per
+        enriched title, one demand promotion per title read), so that name is
+        contended by a detail-screen open and a nightly walk's batch at once.
+
+        **On the lock rather than on wall-clock contention, on purpose:** a
+        timing case passes whenever the machine is idle, and the failure it
+        exists to catch only appears when it is not.
+        `tests/integration/test_staging_lock.py` carries the timing half as
+        well, where two real backends make it observable.
+
+        **On the *schema*, not on the relation name.** A temporary table is
+        still locked -- `CREATE TEMP TABLE` takes `ACCESS EXCLUSIVE` on its
+        own relation -- so "no lock on anything called `stg_jobs`" is a
+        property the fix does not have and never will. What the fix has is
+        that the locked relation lives in this backend's own `pg_temp`
+        schema, where no other session can name it.
+
+        The non-empty assertion is the vacuity guard: a reader wired to the
+        wrong pid, or scoped to a filter that matches nothing, would pass this
+        case exactly as a correct implementation does.
+        """
+        if staging_locks is None:
+            pytest.skip("this implementation has no table locks to observe")
+        await queue.enqueue(
+            [JobRequest(kind=JobKind.INDEX, key="t99000456", priority=JobPriority.NEW)]
+        )
+        held = await staging_locks()
+        assert held, "the enqueue locked no staging relation at all -- is the reader wired up?"
+        shared = [name for name in held if not name.startswith("pg_temp")]
+        assert not shared, f"a one-row enqueue locked {shared}, which every other session shares"
 
     async def test_enqueued_work_is_claimable(self, queue: JobQueue) -> None:
         written = await queue.enqueue(

@@ -209,8 +209,11 @@ async def seeded_source(postgres_url: str) -> AsyncIterator[None]:
             await session.execute(
                 text("DELETE FROM titles WHERE sort_name LIKE 'Movie %' AND tmdb_id >= 965000")
             )
-            await session.execute(text("DROP TABLE IF EXISTS stg_jobs"))
-            await session.execute(text("DROP TABLE IF EXISTS stg_media_items"))
+            # No `DROP TABLE IF EXISTS stg_*` any longer: M6's staging tables
+            # are `CREATE TEMP TABLE ... ON COMMIT DROP`, so a committing
+            # module like this one no longer leaks one into `public` for
+            # `test_migration_matches_the_orm_metadata` to find in a later
+            # file.
             await session.commit()
         await engine.dispose()
         _SOURCES.clear()

@@ -33,12 +33,15 @@ comparison and put the assembly in exactly one place. It is the wrong trade:
 to serve a query that runs a few times a day over 2k-10k rows. Recorded so
 it is not "optimised" in later without the arithmetic.
 
-**One contention note to carry forward.** `stage_records` does
-`DROP TABLE IF EXISTS` + `CREATE UNLOGGED TABLE` -- two `ACCESS EXCLUSIVE`
-locks on a fixed shared name -- so an `index` handler writing one row at a
-time serialises on `stg_title_embeddings` exactly as `stg_jobs` already
-does. The small-batch escape belongs in `usher.db.staging`, not in any one
-repository; if it lands there, this call site inherits it with no change.
+**The contention note this carried is settled, and it was settled where it
+belonged.** `stage_records` did `DROP TABLE IF EXISTS` + `CREATE UNLOGGED
+TABLE` on a fixed shared name -- two `ACCESS EXCLUSIVE` locks held to commit
+-- so an `index` handler writing one row at a time serialised on
+`stg_title_embeddings` exactly as `stg_jobs` did. The fix is one line per
+DDL constant, `CREATE TEMP TABLE ... ON COMMIT DROP`, and it landed in
+`usher.db.staging` rather than in any one repository, so this call site
+inherited it with no change of its own. See that module's docstring for the
+three failures it removes and the measurements behind them.
 """
 
 import uuid
@@ -79,10 +82,10 @@ from usher.ports.repository import (
 # today, but a property of a dependency rather than of this statement. Same
 # reasoning, same spelling, as `media_item.py`.
 _STAGING_DDL = """
-CREATE UNLOGGED TABLE stg_title_embeddings (
+CREATE TEMP TABLE stg_title_embeddings (
     ordinal integer, title_id uuid, embedding text,
     model_name text, source_fingerprint text
-)
+) ON COMMIT DROP
 """
 
 _COLUMNS = ("ordinal", "title_id", "embedding", "model_name", "source_fingerprint")

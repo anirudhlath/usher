@@ -57,10 +57,10 @@ from usher.ports.repository import BulkWriteResult, EpisodeRepository
 # true of `uuid6.uuid7()` today, but a property of a dependency rather than of
 # this statement.
 _SEASON_DDL = """
-CREATE UNLOGGED TABLE stg_seasons (
+CREATE TEMP TABLE stg_seasons (
     ordinal integer, id uuid, title_id uuid, season_number integer,
     name text, overview text, air_date date, episode_count integer, tmdb_id integer
-)
+) ON COMMIT DROP
 """
 
 _SEASON_COLUMNS = (
@@ -100,12 +100,12 @@ FROM upserted
 """
 
 _EPISODE_DDL = """
-CREATE UNLOGGED TABLE stg_episodes (
+CREATE TEMP TABLE stg_episodes (
     ordinal integer, id uuid, title_id uuid, season_id uuid,
     season_number integer, episode_number integer, absolute_number integer,
     name text, overview text, air_date date, runtime_minutes integer,
     tmdb_id integer, imdb_id varchar(16)
-)
+) ON COMMIT DROP
 """
 
 _EPISODE_COLUMNS = (

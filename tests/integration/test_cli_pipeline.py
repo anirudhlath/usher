@@ -15,11 +15,13 @@ Each command owns its own engine, session, and transaction -- built from
 real `build_engine` -> `build_session_factory` -> `_build_pipeline` chain
 rather than a hand-assembled one. The cost is that they commit for real
 against the session-scoped container instead of rolling back, so
-`_clean_slate` deletes what they wrote. It also drops any `stg_*` table:
-`usher.db.staging` creates staging tables with DDL, Postgres DDL is
-transactional, and a *committing* test is the only kind that can leak one --
-which surfaces as schema drift in `test_migrations.py`, a different file
-that then fails only in combination.
+`_clean_slate` deletes what they wrote. It used to drop `stg_*` tables too
+-- `usher.db.staging` created them with DDL, Postgres DDL is transactional,
+and a *committing* test was the only kind that could leak one, which
+surfaced as schema drift in `test_migrations.py`, a different file that then
+failed only in combination. M6's `CREATE TEMP TABLE ... ON COMMIT DROP`
+removed the leak, so those two lines are gone rather than kept as a cleanup
+that can no longer fire.
 
 No test here reaches a network. `_open_adapter` is exercised on the branch
 where the credential row is missing, which answers before an adapter is
@@ -90,8 +92,6 @@ async def _purge(settings: Settings) -> None:
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM sources WHERE name LIKE 'cli-%'",
             "DELETE FROM titles WHERE sort_name = 'cli-orphan'",
-            "DROP TABLE IF EXISTS stg_jobs",
-            "DROP TABLE IF EXISTS stg_media_items",
         ):
             await session.execute(text(statement))
         await session.commit()

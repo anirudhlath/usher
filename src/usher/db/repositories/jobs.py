@@ -67,9 +67,9 @@ from usher.ports.errors import RepositoryConflict
 from usher.ports.jobs import JobQueue, JobRequest
 
 _STAGING_DDL = """
-CREATE UNLOGGED TABLE stg_jobs (
+CREATE TEMP TABLE stg_jobs (
     id uuid, kind text, key text, priority integer, traceparent text
-)
+) ON COMMIT DROP
 """
 
 _COLUMNS = ("id", "kind", "key", "priority", "traceparent")

@@ -78,14 +78,14 @@ from usher.ports.repository import BulkWriteResult, MediaItemRepository
 # millisecond -- true of `uuid6.uuid7()` today, but a property of a
 # dependency rather than of this statement.
 _STAGING_DDL = """
-CREATE UNLOGGED TABLE stg_media_items (
+CREATE TEMP TABLE stg_media_items (
     ordinal integer, id uuid, source_id uuid, title_id uuid, episode_id uuid,
     external_id text, container varchar(32), video_codec varchar(32),
     audio_codec varchar(32), width integer, height integer,
     hdr_format varchar(16), audio_channels integer,
     file_size_bytes bigint, runtime_seconds integer,
     added_at timestamptz, last_seen_at timestamptz
-)
+) ON COMMIT DROP
 """
 
 _COLUMNS = (

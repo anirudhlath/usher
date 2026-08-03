@@ -96,22 +96,22 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
             # Takes `media_items` with it (`ON DELETE CASCADE`), which is
             # what leaves `titles` with no `media_items.title_id` referents.
             "TRUNCATE sources CASCADE",
-            # **Not hygiene, and all three of them.** Every write in this
-            # file goes through `usher.db.staging`, which creates an
-            # `UNLOGGED` table with DDL -- `stg_jobs` from the demand
-            # promotion the *route* makes, `stg_media_items` from the seeded
-            # copies, `stg_watch_states` from the seeded progress. Postgres
-            # DDL is transactional, so only a **committing** test leaks one,
-            # and it surfaces as
+            # Three `DROP TABLE IF EXISTS stg_*` statements were here until
+            # M6, and the reason outlives them. Every write in this file goes
+            # through `usher.db.staging`, which created an `UNLOGGED` table
+            # with DDL -- `stg_jobs` from the demand promotion the *route*
+            # makes, `stg_media_items` from the seeded copies,
+            # `stg_watch_states` from the seeded progress. Postgres DDL is
+            # transactional, so only a **committing** test leaked one, and it
+            # surfaced as
             # `test_migrations.py::test_migration_matches_the_orm_metadata`
-            # reporting schema drift in a *different file*: this module
-            # passes alone and takes that one down in a full run. Measured
-            # here, in both directions -- and the first sweep of it scored a
-            # kill for the wrong reason, because two of the three were still
-            # leaking while only `stg_jobs` was under test.
-            "DROP TABLE IF EXISTS stg_jobs",
-            "DROP TABLE IF EXISTS stg_media_items",
-            "DROP TABLE IF EXISTS stg_watch_states",
+            # reporting schema drift in a *different file*: this module passed
+            # alone and took that one down in a full run. Measured then in
+            # both directions -- and the first sweep of it scored a kill for
+            # the wrong reason, because two of the three were still leaking
+            # while only `stg_jobs` was under test. M6 made all three
+            # `CREATE TEMP TABLE ... ON COMMIT DROP`, which deletes the leak
+            # rather than cleaning up after it.
         ):
             await session.execute(text(statement))
         # Last, and bound rather than interpolated: only this file's own
@@ -430,17 +430,19 @@ async def test_a_title_read_costs_the_same_statements_however_many_copies_it_has
     # what this measurement found.** Ten, not the service's four: one
     # `ensure_default_user` read, the four reads `detail` documents, and
     # **five for the promotion** -- `SAVEPOINT`, `DROP TABLE IF EXISTS
-    # stg_jobs`, `CREATE UNLOGGED TABLE stg_jobs`, the `INSERT ... SELECT`,
-    # `RELEASE SAVEPOINT` -- plus a `COPY` on the raw asyncpg connection that
-    # this counter cannot see at all. `PostgresJobQueue.enqueue` is M4's
-    # bulk path, and PRD 03's demand promotion is the first caller that
-    # invokes it **once per client request** rather than once per batch of a
-    # walk. Recorded rather than fixed: the fix is a small-batch path in a
-    # queue this task does not own, and the cost is bounded per request
-    # rather than growing with anything. What it is *not* free of is
-    # contention -- `stg_jobs` is a fixed, shared table name taking an
-    # `ACCESS EXCLUSIVE` lock, so a detail-screen open and a nightly walk's
-    # batch serialise against each other.
+    # pg_temp.stg_jobs`, `CREATE TEMP TABLE stg_jobs`, the `INSERT ...
+    # SELECT`, `RELEASE SAVEPOINT` -- plus a `COPY` on the raw asyncpg
+    # connection that this counter cannot see at all.
+    # `PostgresJobQueue.enqueue` is M4's bulk path, and PRD 03's demand
+    # promotion is the first caller that invokes it **once per client
+    # request** rather than once per batch of a walk. The count is unchanged
+    # by M6 and the *contention* is not: this used to be `CREATE UNLOGGED
+    # TABLE` on a fixed, shared name, so a detail-screen open and a nightly
+    # walk's batch serialised against each other for the length of the
+    # other's whole transaction (measured at 819 ms). A temporary table has
+    # nothing shared to lock, which is why five statements per request is now
+    # a cost rather than a contention point --
+    # `tests/integration/test_staging_lock.py` is where that is asserted.
     assert small <= 10, f"one title read issued {small} statements: {statement_counter}"
 
 

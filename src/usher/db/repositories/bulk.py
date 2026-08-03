@@ -276,11 +276,11 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             return BulkWriteResult(inserted=0, updated=0)
         await self._stage(
             """
-            CREATE UNLOGGED TABLE stg_titles (
+            CREATE TEMP TABLE stg_titles (
                 id uuid, kind varchar(16), imdb_id text, name text, sort_name text,
                 original_name text, year integer, end_year integer,
                 runtime_minutes integer, genres text[]
-            )
+            ) ON COMMIT DROP
             """,
             "stg_titles",
             (
@@ -374,9 +374,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             return 0
         await self._stage(
             """
-            CREATE UNLOGGED TABLE stg_ratings (
+            CREATE TEMP TABLE stg_ratings (
                 imdb_id text, community_rating double precision, vote_count integer
-            )
+            ) ON COMMIT DROP
             """,
             "stg_ratings",
             ("imdb_id", "community_rating", "vote_count"),
@@ -402,10 +402,10 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             return 0
         await self._stage(
             """
-            CREATE UNLOGGED TABLE stg_tmdb_ids (
+            CREATE TEMP TABLE stg_tmdb_ids (
                 tmdb_id integer, kind varchar(16), original_name text,
                 popularity double precision, adult boolean
-            )
+            ) ON COMMIT DROP
             """,
             "stg_tmdb_ids",
             ("tmdb_id", "kind", "original_name", "popularity", "adult"),
@@ -432,10 +432,10 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             return 0
         await self._stage(
             """
-            CREATE UNLOGGED TABLE stg_crosswalk (
+            CREATE TEMP TABLE stg_crosswalk (
                 imdb_id text, tmdb_movie_id integer,
                 tmdb_series_id integer, tvdb_series_id integer
-            )
+            ) ON COMMIT DROP
             """,
             "stg_crosswalk",
             ("imdb_id", "tmdb_movie_id", "tmdb_series_id", "tvdb_series_id"),

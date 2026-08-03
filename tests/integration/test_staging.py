@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.staging import raw_connection, stage_records
 
-_DDL = "CREATE UNLOGGED TABLE stg_probe (n integer, label text)"
+_DDL = "CREATE TEMP TABLE stg_probe (n integer, label text) ON COMMIT DROP"
 
 
 async def test_a_staging_table_is_recreated_per_batch(session: AsyncSession) -> None:
@@ -48,7 +48,7 @@ async def test_a_destination_check_is_not_enforced_by_the_copy(session: AsyncSes
     """
     await stage_records(
         session,
-        ddl="CREATE UNLOGGED TABLE stg_probe (width integer)",
+        ddl="CREATE TEMP TABLE stg_probe (width integer) ON COMMIT DROP",
         table="stg_probe",
         columns=("width",),
         records=[(-1,)],

@@ -366,20 +366,22 @@ async def test_the_push_lanes_cost_per_event_does_not_grow_with_the_items_in_it(
     )
     # **And the level, because flatness alone hides what this found.** Nine
     # statements per event, measured: one `resolve_targets`, then `SAVEPOINT`
-    # / `DROP TABLE IF EXISTS stg_watch_states` / `CREATE UNLOGGED TABLE
+    # / `DROP TABLE IF EXISTS pg_temp.stg_watch_states` / `CREATE TEMP TABLE
     # stg_watch_states` / four merge statements (an `UPDATE ... FROM` and an
     # `INSERT ... ON CONFLICT DO NOTHING` per conflict target, title and
     # episode) / `RELEASE SAVEPOINT`, plus a `COPY` this counter cannot see.
     #
     # So **a push event costs staging DDL**, and a `UserDataChanged` arriving
     # once a second during playback pays it every time. Bounded per event
-    # rather than growing with anything, which is why it is recorded here
-    # rather than fixed in a task that does not own `merge_from_source` --
-    # but `stg_watch_states` is a fixed, shared table name taking an `ACCESS
-    # EXCLUSIVE` lock, so the push lane and a nightly watch-state walk
-    # serialise against each other for the length of each other's batch.
-    # Same finding `tests/integration/test_titles_route.py` records for
-    # `stg_jobs` on the read path; this is the write path's copy of it.
+    # rather than growing with anything, which is why the count is recorded
+    # here rather than optimised. The *contention* half of this note is
+    # settled: `stg_watch_states` used to be a fixed, shared name taking an
+    # `ACCESS EXCLUSIVE` lock, so the push lane and a nightly watch-state
+    # walk serialised against each other for the length of each other's
+    # batch; M6 made every staging table `CREATE TEMP TABLE ... ON COMMIT
+    # DROP`, so there is no shared name left to serialise on. Same fix
+    # `tests/integration/test_titles_route.py` records for `stg_jobs` on the
+    # read path; this is the write path's copy of it.
     assert one_item_each == 20 * 9, (
         f"{one_item_each / 20} statements per event against the nine measured "
         "2026-08-01: one resolve, four merge statements, and four of staging"

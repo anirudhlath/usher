@@ -98,7 +98,9 @@ async def _wipe(session: AsyncSession) -> None:
         text("DELETE FROM titles WHERE tmdb_id = :tmdb_id OR sort_name = :mark"),
         {"tmdb_id": _TMDB_ID, "mark": _MARK},
     )
-    await session.execute(text("DROP TABLE IF EXISTS stg_jobs"))
+    # `DROP TABLE IF EXISTS stg_jobs` stood here until M6's staging tables
+    # became `CREATE TEMP TABLE ... ON COMMIT DROP`; the commit below is now
+    # what removes it rather than what persists it.
     await session.commit()
 
 
@@ -119,9 +121,10 @@ async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncS
 async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
     """This module commits for real, because the ordering it exists to check
     is only visible from a second connection -- which cannot see a rolled-back
-    transaction at all. So it cleans up after itself, both ways: a leftover
-    `titles` row fails an unrelated file on `ix_titles_tmdb_id_kind`, and a
-    leftover `stg_jobs` surfaces as schema drift in `test_migrations.py`.
+    transaction at all. So it cleans up after itself: a leftover `titles` row
+    fails an unrelated file on `ix_titles_tmdb_id_kind`. A leftover `stg_jobs`
+    used to be the other half of that and no longer can be -- the staging
+    tables are temporary and drop at commit.
     """
     async with sessions() as session:
         await _wipe(session)

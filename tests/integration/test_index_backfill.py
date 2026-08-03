@@ -60,12 +60,11 @@ async def _wipe(session: AsyncSession) -> None:
     await session.execute(
         text("DELETE FROM titles WHERE sort_name LIKE :pattern"), {"pattern": f"{_MARK} %"}
     )
-    # DDL is transactional and this module commits, so it is the kind that
-    # leaks a staging table -- which surfaces as schema drift in
-    # `test_migrations.py`, a different file that then fails only in
-    # combination.
-    for name in ("stg_jobs", "stg_title_embeddings"):
-        await session.execute(text(f"DROP TABLE IF EXISTS {name}"))
+    # `stg_jobs` and `stg_title_embeddings` were dropped here until M6: DDL is
+    # transactional and this module commits, so it was the kind that leaked a
+    # staging table -- surfacing as schema drift in `test_migrations.py`, a
+    # different file that then failed only in combination. `CREATE TEMP TABLE
+    # ... ON COMMIT DROP` means the commit below removes them instead.
     await session.commit()
 
 
