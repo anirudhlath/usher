@@ -1,8 +1,13 @@
 # ADR-0002 — Postgres-first search, Meilisearch behind a measurable gate
 
-**Status:** Accepted — reverses an earlier recommendation. Implemented in M6;
-**the gate's outcome is ⏳ and its definition has been corrected** — see
-Uncertainty.
+**Status:** Accepted for the full-text and semantic halves, which the gate does
+not test and which the same run measured favourably. **The gate itself was run
+against the real catalog on 2026-08-03 and it FAILED** — not marginally, and on
+both halves of a bar stated before the numbers were known. Reverses an earlier
+recommendation; implemented in M6. **M6 adds no Meilisearch either way**
+(PRD 09's boundary call 7); the deliverable is the recorded failure, this ADR
+amended, and a scoped follow-up with an owner. See "Evidence — the gate,
+measured".
 
 ## Context
 
@@ -18,7 +23,12 @@ embeddings, fused with Reciprocal Rank Fusion.
 
 `SearchIndex` is an ABC. Meilisearch may be added later for the instant-search
 box only, gated on a **measurable** failure: recall@5 on a typo test set built
-from real catalog titles weighted toward short names.
+from real catalog titles weighted toward short names — **and, from 2026-08-02,
+latency on the same set.** Recall alone was the original wording and it is
+insufficient: a configuration can clear a recall bar while being multiples too
+slow for the box the gate exists to serve, which is precisely what happened.
+The gate is both numbers, per typo class and per length band, with sample
+sizes.
 
 ## Consequences
 
@@ -31,6 +41,33 @@ is not hand-waved — see below.
 
 **Retained:** the upgrade path costs one ABC implementation because nothing
 above the port knows which engine answers.
+
+**Paid, and now quantified.** The instant-search box specifically did not
+clear the bar. Over 2,993 single-edit typo cases on 750 real catalog movie
+names, the shipped path finds the right title **27.8% of the time for a
+2–4-character name** and **68.3% for a 5–7-character one**, and the best
+configuration measured — under any threshold, any cap, either index type —
+reaches only **47.9%** on that shortest band. No configuration comes within
+**6×** of an as-you-type latency budget. The decision was always conditional;
+its condition has now fired, and three things follow:
+
+1. **`pg_trgm` + `levenshtein_less_equal` is a good *fuzzy* path and not a
+   *keystroke* path.** From 8 characters up it is 95–100% at every typo class,
+   which is most of a real catalog. It is the short one-word name — `Up`,
+   `Her`, `Dune` — where it does not work, exactly where this ADR said it
+   would not.
+2. **A two-tier suggest is what the numbers support, and it is scoped in
+   PRD 09 with an owner (M9).** A btree `lower(name) text_pattern_ops` prefix
+   probe answers the same 2,993 queries at **p50 0.6 ms / p95 1.0 ms /
+   max 10 ms** — 200–330× faster than any fuzzy configuration and the only
+   thing measured that fits inside a keystroke. It has no typo tolerance at
+   all (1.9%), so the two are complements rather than alternatives: the btree
+   on every keystroke, the trigram path debounced behind it.
+3. **Meilisearch remains a post-v1 candidate and is now a *justified* one
+   rather than a hypothetical.** [ADR-0021](0021-the-suggest-path-is-its-own-port.md)'s
+   port split is what keeps that follow-up at one class plus a write path,
+   and the write path is the dual write this ADR refused — so adding it stays
+   a deliberate, visible act.
 
 ## Evidence
 
@@ -114,62 +151,206 @@ correction that is recorded where it belongs rather than here.
   a constant 1.32M corpus, latency spans 0.12 ms → 556.76 ms driven entirely
   by match-set size, and ranking has **no `LIMIT` pushdown** — of a 601.9 ms
   ranked query, 42 ms is the index scan and the other 560 ms is fetching
-  650,000 heap tuples so `ts_rank_cd` can score them.
+  650,000 heap tuples so `ts_rank_cd` can score them. **The gate below
+  qualifies this in one direction:** the cap is mandatory for *latency* and
+  is not the *recall* lever it was written up as — on 1,271,138 real names it
+  truncated 0.0% of the shipped configuration's misses, and the re-rank
+  dropped 0.0% of them in every configuration measured.
+
+## Evidence — the gate, measured
+
+**Run 2026-08-03 against a real 1,271,138-title catalog** (`pgvector/pgvector:pg17`,
+PostgreSQL 17.10, pgvector 0.8.6, `pg_trgm` 1.6, `fuzzystrmatch` 1.2), driving
+the shipped `PostgresSuggestIndex` — the real ordered cap, the real
+`levenshtein_less_equal` re-rank, one fresh transaction per query — from a
+throwaway script outside the working tree. **The test set is built from real
+catalog titles and is therefore not committed**; what is committed is the
+measurement and the procedure that regenerates it.
+
+### The bar, written down before the numbers were known
+
+- recall@5 **≥ 0.90** on the 8–11, 12–19 and 20+ bands; **≥ 0.85** on 5–7
+  (interpolated, because the plan named only "the 8+ bands" and "the 2–4
+  band" and a band with no bar cannot fail); **≥ 0.75** on 2–4; **no single
+  typo class below 0.60 in any band**.
+- **p95 ≤ 50 ms**, end to end. p95 and not p50: a type-ahead box that stutters
+  on one keystroke in twenty is a box that stutters, and p50 is the statistic
+  that lets a bimodal path look fine.
+- Both halves, for one single configuration, or the gate is not closed.
+
+### How the set was built, in enough detail to regenerate it
+
+Movies only, `vote_count ≥ 500` (a floor high enough that the name is one a
+person would plausibly type; the 1.27M-row IMDb skeleton is mostly obscure
+television and shorts). Names not unique in the catalog were excluded at
+sampling time — **81,054 lower-cased names are shared by more than one
+title**, and recall@5 for a name three titles share is a question about
+disambiguation rather than about typo tolerance. Five bands over
+`char_length(name)` with an **equal draw from each**, which is the "weighted
+toward short names" instruction made concrete and deliberately *not* the
+catalog's own distribution (39.4% of it is 12–19 characters and 34.4% is
+20+, against 1.6% at 2–4). Eligible pool and draw per band:
+
+| band | eligible after the floor and the uniqueness filter | drawn |
+|---|---|---|
+| 2–4 | 432 | 150 |
+| 5–7 | 2,532 | 150 |
+| 8–11 | 7,178 | 150 |
+| 12–19 | 20,520 | 150 |
+| 20+ | 17,887 | 150 |
+
+Four typo classes per name — substitution, deletion, transposition, doubled
+letter — one mutation each at a uniformly random position, `random.Random`
+**seed 20260803**. 750 names × 4 = **2,993 cases** (seven two-character names
+admit no deletion). A hit is the title the typo was generated *from*
+appearing in the five returned; the identity is known because the script
+generated the mutation.
+
+### The result: the shipped path, per typo class and per length band
+
+`PostgresSuggestIndex` as M6 shipped it — GIN `gin_trgm_ops`, `%` at the
+`Settings` default floor of 0.3, ordered cap 200, `levenshtein_less_equal ≤ 2`:
+
+| name length | substitution | deletion | transposition | doubled letter | all | n per cell |
+|---|---|---|---|---|---|---|
+| 2–4 | 19.3% | 12.5% | **0.0%** | 78.7% | **27.8%** | 144–150 |
+| 5–7 | 90.7% | 48.0% | 35.3% | 99.3% | **68.3%** | 150 |
+| 8–11 | 99.3% | 88.7% | 94.7% | 99.3% | **95.5%** | 150 |
+| 12–19 | 100.0% | 99.3% | 100.0% | 100.0% | **99.8%** | 150 |
+| 20+ | 99.3% | 98.7% | 100.0% | 100.0% | **99.5%** | 150 |
+| **all** | **81.7%** | **69.9%** | **66.1%** | **95.5%** | **78.3%** | 2,993 |
+
+p50 **33.3 ms**, p95 **208.8 ms**, max **734 ms**. When the true title was
+returned it was usually first — median rank 1, and 2,062 of 2,344 hits at
+rank 1.
+
+**Verdict: fails.** 2–4 at 27.8% against a bar of 0.75, 5–7 at 68.3% against
+0.85, five class/band cells below 0.60, and p95 4× the budget. **Transposition
+on a 2–4-character name is 0.0% — not "close to a blind spot" but a total
+one**, which is this ADR's own sentence arriving as an exact number.
+
+### After honest tuning: every configuration measured
+
+"After honest tuning" means both knobs were moved and the number recorded at
+each setting, not that one configuration was tried. Same 2,993 cases
+throughout.
+
+| configuration | recall@5 | 2–4 band | transposition | p50 | p95 | max |
+|---|---|---|---|---|---|---|
+| GIN `%` @0.3, cap 200 — **as M6 shipped** | 78.3% | 27.8% | 66.1% | **33.3 ms** | 209 ms | 734 ms |
+| GIN `%` @0.2, cap 200 | 78.3% | 32.7% | 67.7% | 128.7 ms | 704 ms | 989 ms |
+| GIN `%` @0.1, cap 200 | 77.6% | 30.2% | 67.2% | 470.1 ms | 928 ms | 1,475 ms |
+| GIN `%` @0.3, cap 200, **+ vote-count tiebreak** — as it ships now | **82.5%** | 36.1% | 69.2% | **33.6 ms** | 211 ms | 730 ms |
+| GIN `%` @0.1, cap 200, + vote-count tiebreak | 85.1% | 46.9% | 74.6% | 469.2 ms | 926 ms | 1,487 ms |
+| GIN `<%` (`word_similarity`) @0.3, + tiebreak | 78.1% | 30.0% | 64.8% | 46.1 ms | 263 ms | 631 ms |
+| GiST KNN `ORDER BY name <-> q`, cap 200 | 77.7% | 30.2% | 67.2% | 198.5 ms | 304 ms | 428 ms |
+| **GiST KNN, cap 200, + vote-count tiebreak** | **85.3%** | **47.9%** | **74.8%** | 198.1 ms | **304 ms** | **428 ms** |
+| GiST KNN, cap 1000, + vote-count tiebreak | 83.4% | 43.8% | 72.9% | 201.9 ms | 311 ms | 440 ms |
+| btree `lower(name) text_pattern_ops` prefix | 1.9% | 1.9% | 0.1% | **0.6 ms** | **1.0 ms** | **10 ms** |
+
+**Nothing passes.** The best recall available anywhere in this table is 85.3%
+overall and **47.9% on the band the gate exists to interrogate**, at a p95 six
+times the budget. Lowering the trigram floor buys nothing on this catalog and
+costs 4–14× latency; raising the cap makes recall *worse*.
+
+### Where the misses go, which a single recall number cannot say
+
+For a random 250 of each configuration's misses, the true title was traced
+back to the stage that lost it:
+
+| configuration | below the `%` floor | truncated by the cap | dropped by the re-rank | out-ranked in the final ORDER BY |
+|---|---|---|---|---|
+| GIN `%` @0.3 (as shipped) | **63.6%** | 0.0% | **0.0%** | 36.4% |
+| GIN `%` @0.2 | 26.0% | 7.6% | 0.0% | 66.4% |
+| GIN `%` @0.1 | 4.0% | 24.8% | 0.0% | 71.2% |
+| GIN `%` @0.3 + tiebreak | 82.8% | 0.0% | 0.0% | 17.2% |
+
+Three things follow, and two of them contradict what this project assumed.
+
+- **The candidate cap is never the binding constraint at the shipped
+  configuration, and the `levenshtein` re-rank never drops the true title —
+  0.0%, in every configuration measured.** M6's whole design story put the
+  cap at the centre; on real data it is inert until the floor is dropped, at
+  which point the cap becomes a *new* defect rather than the cure.
+- **Lowering the floor does not convert misses into hits. It converts
+  threshold-excluded misses into out-ranked ones**, which is why recall is
+  flat-to-worse from 0.3 to 0.1 while latency grows 14×. The synthetic dry
+  run's 66.2% → 93.5% does not reproduce at 1.27M names with real
+  competitors.
+- **The final `ORDER BY` was the other half of the loss, because
+  `titles.popularity` is NULL on all 1,271,138 rows.** Nothing in `src/`
+  writes that column except TMDb enrichment, and boundary call 4's own
+  premise is that the enriched tier is 2k–10k titles. So
+  `ORDER BY dist ASC, popularity DESC NULLS LAST, id ASC` degenerated to
+  `dist ASC, id ASC` — equal-distance candidates ordered by a UUIDv7, i.e.
+  by insertion order. **Adding `vote_count DESC NULLS LAST` under popularity
+  — a column the bootstrap itself fills, 538,937 rows — is worth +4.2 points
+  overall and +8.3 on the 2–4 band at unchanged latency, and it shipped with
+  this run**, pinned by
+  `tests/integration/test_adapters_search_postgres.py::test_vote_count_orders_the_box_when_every_popularity_is_null`.
+
+### GIN against GiST, which this ADR left ⏳ and which is now decided
+
+**Neither wins outright, they trade, and the two must not both exist.**
+
+| | GIN `gin_trgm_ops` | GiST `gist_trgm_ops` |
+|---|---|---|
+| build over 1,271,138 names | **5.394 s** | 11.800 s |
+| index size | **75 MB** | 139 MB |
+| best recall@5 measured | 82.5% | **85.3%** |
+| best 2–4-band recall | 36.1% | **47.9%** |
+| p50 | **33.6 ms** | 198.1 ms |
+| p95 / max | 211 ms / 730 ms | **304 ms / 428 ms** |
+
+GIN is 6× faster at p50 and half the size; GiST buys 2.8 points of recall,
+11.8 on the short band, and a much tighter tail (its max is 428 ms against
+GIN's 734 ms, because KNN traversal cost is nearly independent of match-set
+size while `%` is not). **GIN stays**, because p50 is what a keystroke pays
+and no amount of recall rescues a path that is 6× over budget anyway.
+
+**And the two cannot simply coexist, which is the trap worth recording.**
+With a GiST trigram index present *alongside* the GIN one, the planner takes
+GiST for the `%` operator: the identical shipped configuration went from p50
+33.3 ms to **141.5 ms** (4.3×) with byte-identical recall (78.3% both ways).
+So "add GiST for the KNN path and keep GIN for `%`" is not available — adding
+the second index silently taxes the first.
+
+### The full-text half is unaffected, checked rather than assumed
+
+One `websearch_to_tsquery` sample through the shipped `_FULL_TEXT` statement
+at 1,271,138 titles, 15 queries × 5 runs: **0.5 ms to 20.2 ms**, driven
+entirely by match-set size (15 matches → 0.64 ms; 17,616 matches → 20.15 ms).
+That is this ADR's cardinality argument holding on the workload it was made
+for: a *title* corpus never produces the 650,000-row match sets that make
+`ts_rank_cd` expensive, and the whole full-text path is comfortably inside
+the budget the type-ahead path misses.
 
 ## Uncertainty
 
-No rigorous public benchmark of `pg_trgm` typo tolerance against
-Meilisearch/Typesense on a labelled dataset appears to exist. That hole sits
-directly under this decision — which is exactly why the upgrade gate is an
-empirical test against our own catalog rather than a judgement call.
+**Narrowed, not filled.** This run measured `pg_trgm` +
+`levenshtein_less_equal` against *our own catalog*, which is what the gate
+asked for. It is still **not** the head-to-head against Meilisearch or
+Typesense on a labelled dataset — no rigorous public benchmark of that
+appears to exist, and this run did not build one. The hole this ADR named
+still sits under the *comparison*; what it no longer sits under is the
+absolute number.
 
-**⏳ The gate has not been run against the real catalog.** M6 built
-everything it measures — `PostgresSuggestIndex`, the trigram index, the
-`levenshtein_less_equal` re-rank — and the run itself is outstanding. Nothing
-in this ADR is decided by M6, and Meilisearch is not added either way
-(boundary call 7): a second stateful service bolted on at the end of a
-milestone is not what a measurement with a decision attached is for.
+Named rather than implied, this run could not settle:
 
-**And a synthetic dry run of that gate found something about the gate
-itself.** 604 single-edit typo cases over 34 genuinely short real titles
-planted in a 2.08M-name corpus with real collisions:
-
-| strategy | recall@5 | transposition | p50 | p95 |
-|---|---|---|---|---|
-| [05](../05-search-and-similarity.md) as literally written | 66.2% | 34.5% | 181 ms | 241 ms |
-| GIN `%` @0.1 | **93.5%** | 82.8% | 582 ms | 1,893 ms |
-| GiST KNN `ORDER BY name <-> q` | **93.5%** | 82.8% | 281 ms | **342 ms** |
-| btree `lower(name) text_pattern_ops` prefix | — (no typo tolerance) | — | **0.12–1.30 ms** | 0.14–18.85 ms |
-
-**Recall is arguable; latency is not.** Every configuration reaching 93.5%
-has a p50 of 281–582 ms and a p95 up to 1,893 ms, against an as-you-type
-budget of roughly **50 ms**. Recall is the half that *passes*.
-
-> **This ADR and [PRD 05](../05-search-and-similarity.md) both define the
-> gate purely as recall@5, and that omission is itself a finding.** A gate
-> that a configuration can pass while being 6–37× too slow for the box it
-> exists to serve is not measuring the thing the decision turns on. **The
-> gate must measure latency as well as recall**, and a run reporting only
-> recall does not close it.
-
-Two more corrections to the gate's own construction, both measured:
-
-- **The "cap candidates" mitigation must be an *ordered* cap.** PRD 05's
-  `LIMIT 3000` with no `ORDER BY` truncates arbitrarily, which makes
-  *lowering* the similarity threshold make recall **worse**: 66.2% @0.3 →
-  48.5% @0.1 → 2.6% @0.05.
-- **This ADR's own worked examples sit below `pg_trgm`'s default threshold.**
-  `similarity('dune','dnue') = 0.111`, `('her','hor') = 0.143`,
-  `('up','uo') = 0.200`, against a 0.3 default — so `name % 'dnue'` matches
-  *nothing*. "Transpositions are close to a blind spot" was exact.
-
-Recall by title length under the best tuning, which is the shape a real
-result set will have: **2–4 characters 79.9%**, 5–6 characters 97.5%, 7+
-characters 100%.
-
-**The measurement that would replace all of this is
-[10](../10-telemetry-and-dashboards.md)'s `search_queries` table** — zero-result
-and no-click rates on queries somebody actually typed. It is assigned to M9,
-because three of its seven columns need an HTTP surface to fill. Until then
-the synthetic set is the best evidence available, which is a statement about
-its timing rather than a criticism of it.
+- **Real typed queries.** Every case here is a synthetically mutated real
+  title. People also truncate, abbreviate, reorder words, and type the
+  article they think a film has. The measurement that replaces all of this
+  is [10](../10-telemetry-and-dashboards.md)'s `search_queries` table —
+  zero-result and no-click rates on queries somebody actually typed —
+  assigned to M9 because three of its seven columns need an HTTP surface to
+  fill.
+- **Multi-typo queries.** One mutation per case, and `_MAX_DISTANCE = 2` is
+  the shipped ceiling, so a two-typo query is out of reach by construction.
+- **Non-Latin scripts.** `pg_trgm` extracts trigrams over characters and pads
+  on word boundaries; a name in a script with no spaces behaves differently
+  and no case here tests one.
+- **The head-to-head**, deliberately: boundary call 7.
+- **Whether an enriched catalog changes the answer.** Every measurement here
+  is on a bootstrap-only catalog with `popularity` NULL throughout, which is
+  the honest state of a fresh deployment and *not* the state of one that has
+  been enriched for a month.

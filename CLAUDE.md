@@ -7,7 +7,7 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M6 complete, except its own gate.** The project scaffold, environment
+**Status: M6 complete, gate included — and the gate failed.** The project scaffold, environment
 config, domain models, port ABCs, persistence (SQLAlchemy schema + Alembic
 migrations + title repository), the telemetry bootstrap, a FastAPI app
 with liveness/readiness endpoints, the container image + compose stack + CI
@@ -44,11 +44,18 @@ and `SimilarityService`, and the `index`/`search`/`suggest`/`similar` CLI
 commands for tooling that does not exist yet — check the Commands section
 below before assuming something runs.
 
-**⏳ M6's one outstanding item is ADR-0002's typo-tolerance gate**, which is
-built and has **not been run against the real catalog**. Nothing in this file
-records a gate result, and a sentence claiming one would be the failure the
-gate exists to prevent. What *is* recorded, from a synthetic dry run, is that
-the gate's own definition is incomplete — see the M6 section below.
+**ADR-0002's typo-tolerance gate ran on 2026-08-03 against a real
+1,271,138-title catalog and FAILED**, on both halves of a bar written down
+before the numbers were known. The shipped type-ahead finds the right title
+**27.8% of the time for a 2–4-character name** and **68.3% for 5–7**, against
+bars of 0.75 and 0.85; **transposition on a 2–4-character name is 0.0%**; and
+no configuration under any threshold, cap or index type comes within **6×** of
+a 50 ms as-you-type budget. **Above 8 characters it is 95–100% and needs
+nothing**, which is 91% of the catalog by row count. **M6 adds no Meilisearch
+either way** (boundary call 7); the deliverable is the recorded failure,
+ADR-0002 amended, one shipped default changed on the strength of it, and a
+scoped follow-up — **the two-tier suggest, owned by M9** in PRD 09. Full
+result table in the M6 live-verification section below.
 
 **M6's nine deliberate boundary calls**, each stated with its reason in the
 M6 plan's Scope section and in PRD 09: **no HTTP route** (the CLI delivers
@@ -129,23 +136,158 @@ load automatically when working in `docs/`.
 **M6's measurements, all taken 2026-08-02 on this host against
 `pgvector/pgvector:pg17` (PostgreSQL 17.10, pgvector **0.8.6** — not the
 0.8.5 the PRD floor names) unless stated otherwise, with synthetic corpora.
-The one thing that is *not* here is a gate result**: ADR-0002's typo
-tolerance gate has not been run against a real catalog, and the plan's
-instruction to record its result stands unfulfilled rather than approximated.
+The exception is the gate, measured 2026-08-03 against a real catalog and
+recorded immediately below.**
 
-**⏳ The gate's own definition is incomplete, and that is the finding a dry
-run produced instead.** PRD 05 and ADR-0002 both define it as recall@5 only.
-Over 604 single-edit typo cases on 34 genuinely short real titles planted in
-a 2.08M-name corpus: PRD 05 as literally written scores **66.2%** (p50 181 ms
-/ p95 241 ms), GIN `%` @0.1 scores **93.5%** (582 ms / 1,893 ms), GiST KNN
-scores **93.5%** (281 ms / 342 ms). **Recall is the half that passes.** Every
-configuration reaching 93.5% is 6–37× over an as-you-type budget of ~50 ms,
-so the gate must measure latency too. Two sub-findings: an *unordered* cap
-makes lowering the similarity threshold make recall **worse** (66.2% @0.3 →
-48.5% @0.1 → 2.6% @0.05), and PRD 05's own worked examples sit below the 0.3
-default — `similarity('dune','dnue') = 0.111`, `('her','hor') = 0.143`,
-`('up','uo') = 0.200` — so `name % 'dnue'` matches nothing. Recall by title
-length under the best tuning: 2–4 chars 79.9%, 5–6 chars 97.5%, 7+ 100%.
+**ADR-0002's typo-tolerance gate: run against the real catalog on 2026-08-03,
+and it failed — decisively, on both halves, and five of the seven guesses the
+plan wrote down were wrong.** 1,271,138 real titles from a re-run of the M2
+bootstrap; the shipped `PostgresSuggestIndex` driven from a throwaway script
+outside the working tree; 2,993 single-edit typo cases over 750 real movie
+names; **the test set is built from real catalog rows and is therefore not
+committed — the measurement is.**
+
+**The bar was written down before the numbers were known**: recall@5 ≥ 0.90 on
+the 8+ bands, ≥ 0.85 on 5–7 (interpolated; the plan named only two bands),
+≥ 0.75 on 2–4, no single typo class below 0.60 in any band, **and p95 ≤ 50 ms**
+— p95 rather than p50, because a box that stutters one keystroke in twenty is
+a box that stutters. Both halves, one configuration, or the gate is not
+closed.
+
+*Generation procedure, stated so it is regenerable:* movies only,
+`vote_count ≥ 500`, names not unique in the catalog excluded at sampling time
+(**81,054 lower-cased names are shared by more than one title**), five equal
+draws of 150 over `char_length(name)` bands 2–4 / 5–7 / 8–11 / 12–19 / 20+
+(eligible pools 432 / 2,532 / 7,178 / 20,520 / 17,887), four typo classes per
+name at a uniformly random position, `random.Random` **seed 20260803**. Seven
+two-character names admit no deletion, hence 2,993 rather than 3,000.
+
+| name length | substitution | deletion | transposition | doubled letter | all | n per cell |
+|---|---|---|---|---|---|---|
+| 2–4 | 19.3% | 12.5% | **0.0%** | 78.7% | **27.8%** | 144–150 |
+| 5–7 | 90.7% | 48.0% | 35.3% | 99.3% | **68.3%** | 150 |
+| 8–11 | 99.3% | 88.7% | 94.7% | 99.3% | **95.5%** | 150 |
+| 12–19 | 100.0% | 99.3% | 100.0% | 100.0% | **99.8%** | 150 |
+| 20+ | 99.3% | 98.7% | 100.0% | 100.0% | **99.5%** | 150 |
+| **all** | **81.7%** | **69.9%** | **66.1%** | **95.5%** | **78.3%** | 2,993 |
+
+p50 **33.3 ms**, p95 **208.8 ms**, max **734 ms**; median rank 1 when found.
+Every configuration measured, same 2,993 cases:
+
+| configuration | recall@5 | 2–4 band | p50 | p95 | max |
+|---|---|---|---|---|---|
+| GIN `%` @0.3 cap 200 — as M6 shipped | 78.3% | 27.8% | 33.3 ms | 209 ms | 734 ms |
+| GIN `%` @0.2 cap 200 | 78.3% | 32.7% | 128.7 ms | 704 ms | 989 ms |
+| GIN `%` @0.1 cap 200 | 77.6% | 30.2% | 470.1 ms | 928 ms | 1,475 ms |
+| **GIN `%` @0.3 cap 200 + vote tiebreak — ships now** | **82.5%** | 36.1% | **33.6 ms** | 211 ms | 730 ms |
+| GIN `%` @0.1 cap 200 + vote tiebreak | 85.1% | 46.9% | 469.2 ms | 926 ms | 1,487 ms |
+| GIN `<%` word_similarity @0.3 + vote tiebreak | 78.1% | 30.0% | 46.1 ms | 263 ms | 631 ms |
+| GiST KNN cap 200 | 77.7% | 30.2% | 198.5 ms | 304 ms | 428 ms |
+| **GiST KNN cap 200 + vote tiebreak** | **85.3%** | **47.9%** | 198.1 ms | **304 ms** | **428 ms** |
+| GiST KNN cap 1000 + vote tiebreak | 83.4% | 43.8% | 201.9 ms | 311 ms | 440 ms |
+| btree `lower(name) text_pattern_ops` prefix | 1.9% | 1.9% | **0.6 ms** | **1.0 ms** | **10 ms** |
+
+**What the run refuted, refutations first.**
+
+- **`titles.popularity` is NULL on all 1,271,138 rows, so the suggest
+  statement's popularity ordering was inert and the tiebreak was `id ASC`.**
+  Nothing in `src/` writes that column but TMDb enrichment, and boundary call
+  4's premise is that the enriched tier is 2k–10k titles — so on any fresh
+  deployment "ordered by popularity" ordered by insertion order. The shipped
+  code's own comment said "roughly 60% of the catalog is NULL-popularity
+  skeletons"; it is **100%**. Adding `vote_count DESC NULLS LAST` under
+  popularity — a column the bootstrap fills, 538,937 rows — is worth **+4.2
+  points overall and +8.3 on the 2–4 band at unchanged latency** and shipped
+  with this run. This is the one shipped default the gate changed.
+- **The candidate cap is not the binding constraint and the `levenshtein`
+  re-rank never drops the true title.** Tracing 250 misses per configuration
+  back to the stage that lost them: at the shipped configuration **63.6% fell
+  below the `%` floor, 36.4% were out-ranked, 0.0% were truncated by the cap,
+  0.0% were dropped by the re-rank** — and the re-rank figure is 0.0% in
+  *every* configuration measured. M6's design story put the cap at the
+  centre; on real data it is inert until the floor is dropped, at which point
+  it becomes a new defect (24.8% at 0.1) rather than the cure.
+- **Lowering the trigram floor does not convert misses into hits — it
+  converts threshold-excluded misses into out-ranked ones.** 63.6%/36.4% at
+  0.3 becomes 4.0%/71.2% at 0.1, recall goes 78.3% → 77.6%, and latency goes
+  14×. The synthetic dry run's 66.2% → 93.5% **does not reproduce** against
+  1.27M real names with real competitors. **`Settings.search_trigram_threshold`
+  stays 0.3.**
+- **A wider cap makes recall worse**, for the same reason: GiST KNN at
+  `LIMIT 1000` scores 83.4% against 85.3% at `LIMIT 200`.
+- **One-word and multi-word names of the same length behave the same** — the
+  naive split (one-word 55.2%, multi-word 96.8%) looks like a huge effect and
+  is pure collinearity: 99.5% of the 2–4 band is one word and 0.1% of the 20+
+  band is. Held at fixed band, 8–11 is **95.9% one-word against 95.3%
+  multi-word**. The length-only stratification is the right one, and the
+  first reading of this number was wrong.
+- **`usher index --create-indexes` does not exist.** Task 8 put the trigram
+  and tsvector indexes in migration `fa2b6c1e9d30` and added both to
+  `bulk.py`'s `_SUSPENDABLE_INDEXES`, so they are dropped for the bootstrap
+  and rebuilt at the end of it — 10.9 s for all four, inside a 74.8 s import.
+  Guess 6 was about a command the milestone did not ship.
+- **`_TRIGRAM_THRESHOLD = 0.1` in `adapters/search/postgres.py` was documented
+  as "the trigram floor the shipped path runs at" and is not.**
+  `composition.build_pipeline` passes `Settings.search_trigram_threshold`,
+  whose default is **0.3**; only the integration driver injects 0.1. So every
+  typo case in `SuggestIndexContract` is green at a floor no deployment uses,
+  and `test_a_high_trigram_floor_destroys_fuzzy_recall` "proves" 0.1 rescues a
+  case that at 1.27M rows it does not rescue. The comment is corrected; both
+  values stay, each with its measured reason.
+
+**Confirmed, and worth the numbers.** Short names are the weak band and the
+curve is monotone in length (27.8 → 68.3 → 95.5 → 99.8 → 99.5). Transposition
+is the weakest class overall at 66.1% — and *within the 2–4 band it is
+**0.0%***, so "close to a blind spot" was an understatement rather than an
+approximation. Doubled letter is the easiest at 95.5%, as predicted. The
+full-text half is unaffected and was checked rather than assumed: 15 queries ×
+5 runs through the shipped `_FULL_TEXT` at 1.27M titles span **0.5–20.2 ms**,
+driven entirely by match-set size (15 matches → 0.64 ms, 17,616 → 20.15 ms) —
+ADR-0002's cardinality argument holding on the workload it was made for, and
+the whole full-text path sitting inside the budget the type-ahead path misses.
+
+**GIN against GiST is now decided, and the two must not both exist.** Build
+over 1,271,138 names: GIN **5.394 s / 75 MB**, GiST **11.800 s / 139 MB**,
+btree `lower(name) text_pattern_ops` **0.559 s / 44 MB**. GIN is 6× faster at
+p50; GiST buys 2.8 points of recall, 11.8 on the short band, and a tighter
+tail (max 428 ms against 734 ms, because KNN traversal cost barely depends on
+match-set size). **GIN stays.** And with a GiST trigram index present
+*alongside* the GIN one the planner takes GiST for `%`: the identical shipped
+configuration went **33.3 ms → 141.5 ms p50 (4.3×) with byte-identical
+recall**. "Add GiST for KNN and keep GIN for `%`" is not available; a path
+that needs KNN must *replace* the GIN index.
+
+**What the gate obliges.** Not Meilisearch (boundary call 7). The two-tier
+suggest: btree prefix on every keystroke, the trigram path debounced behind
+it. Owned by M9 in PRD 09, because a debounce and a tier split are properties
+of a request boundary and M6 adds no route.
+
+**Not settled by this run, named rather than implied:** real *typed* queries
+as opposed to synthetically mutated ones (that is `search_queries`, M9's);
+multi-typo queries (`_MAX_DISTANCE = 2` puts them out of reach by
+construction); non-Latin scripts, where trigram extraction and word-boundary
+padding behave differently and no case here tests one; the head-to-head
+against Meilisearch/Typesense, which this run deliberately does not build; and
+whether an *enriched* catalog changes any of it — every number here is from a
+bootstrap-only catalog with `popularity` NULL throughout.
+
+**The bootstrap that produced the catalog, and a cache finding with it.**
+74.8 s wall clock end to end (`title.basics` 41.6 s → 1,271,138 rows,
+`title.ratings` 22.2 s → 538,937 rows written, suspended-index rebuild
+10.9 s), 899,828 movies / 371,310 series, `titles` at 928 MB total relation
+size and the database at 937 MB. **Nothing was re-downloaded — but only
+because the run pinned the snapshot, and the shipped path would have
+re-downloaded.** `CachedDatasetFile.ensure_local` short-circuits on
+`path.exists() and stamp.read_text() == revision`, where `revision` is what
+`revision()` resolved *this run* from a `HEAD`. IMDb regenerates
+`title.basics.tsv.gz` daily, so four days after the cache was filled the
+upstream ETag had moved and `bootstrap --phase imdb` would have fetched
+224 MB and imported a *different* snapshot. Pinning `revision()` to the
+sidecar's own value made the import read the cached bytes: NIC counters moved
+**1.2 MB** across the whole bootstrap and `data/bulk` was byte-identical
+before and after. **"The dumps are on disk, so nothing re-downloads" is false
+as stated** — the cache is keyed on the upstream token, not on local
+presence.
 
 **The search document's generated column collides with the 1:1 row/model rule
 in three places, and the second one fires on writes.** `Title` is
@@ -321,16 +463,22 @@ Ranked, the same 650,000-match query is 601.9 ms, of which the index scan is
 `ts_rank_cd` can score them. **Ranking has no `LIMIT` pushdown**, so capping
 candidates is mandatory rather than optional.
 
-**Trigram: GIN, not the GiST PRD 05 specifies — and only half that question
-is closed.** At 300k rows GIN wins on every axis (build 579 ms vs 1,965 ms,
+**Trigram: GIN, not the GiST PRD 05 specifies — closed on real data
+2026-08-03, and the second half of the answer is that the two cannot
+coexist.** At 300k rows GIN wins on every axis (build 579 ms vs 1,965 ms,
 size 7,968 kB vs 22 MB, p50 9.01 ms vs 21.1 ms). At 2.08M names on the `%`
 threshold path GIN is **~110× faster** (1.671 ms / 205 buffers against
 182.5 ms / 31,174), builds in 7.5 s vs 23.1 s, and is 69 MB vs 244 MB — **but
 GIN has no KNN operator class at all**, so `ORDER BY name <-> q` degrades to
-a Seq Scan at **3,989.9 ms** where GiST answers from the index. GIN ships
-because the capped-candidate path removes GIN's only exposure. **No
-plan-shape test can distinguish the two** — GiST serves `%` as well — so a
-green suite is not evidence for this choice; the measurements are. And
+a Seq Scan at **3,989.9 ms** where GiST answers from the index. The gate's
+end-to-end run at 1,271,138 real names priced both: GIN **5.394 s / 75 MB /
+p50 33.6 ms / recall 82.5%** against GiST KNN **11.800 s / 139 MB / p50
+198.1 ms / recall 85.3%** — GIN ships, because p50 is what a keystroke pays.
+And **keeping both indexes is not an option**: with GiST present the planner
+takes it for `%` and the identical shipped configuration goes **33.3 ms →
+141.5 ms p50 with byte-identical recall**. **No plan-shape test can
+distinguish the two** — GiST serves `%` as well — so a green suite is not
+evidence for this choice; the measurements are. And
 `fastupdate = off`'s real argument is the read side: a 1.6 MB pending list
 cost **231 buffers against 30, 7.7× read amplification**, invisible in
 `EXPLAIN` unless you look at buffers.

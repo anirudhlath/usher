@@ -116,20 +116,34 @@ index, because the two would answer the same query over the same 1.27M names
 with the same operator class and the narrow table's only difference in M6 is
 that it is a copy. The number that *is* measured is the index type below.
 
-**The index is GIN, not the GiST this section used to specify — and only half
-of that question is closed.** Measured at 300k rows: build **579 ms against
-1,965 ms**, size **7,968 kB against 22 MB**, p50 lookup **9.01 ms against
-21.1 ms**. Re-measured at 2.08M names, where the honest summary is that the
-two answer *different questions*: on the `%` threshold path GIN is ~110×
-faster (1.671 ms / 205 buffers against 182.5 ms / 31,174), builds in 7.5 s
-against 23.1 s and is 69 MB against 244 MB — but **GIN has no KNN operator
-class at all**, so `ORDER BY name <-> q` under it degrades to a `Seq Scan` at
-3,989.9 ms where GiST answers from the index. GIN ships because the
-capped-candidate path is what `PostgresSuggestIndex` is built around and a
-cap is exactly what removes GIN's only exposure — collecting every match
-before the top-N sort. **A path that ever genuinely needs KNN needs a GiST
-index, not a tuning change**, and no plan-shape test can distinguish the two,
-so the measurements carry this choice and the suite does not.
+**The index is GIN, not the GiST this section used to specify, and that
+question is now closed on real data.** Measured at 300k rows: build **579 ms
+against 1,965 ms**, size **7,968 kB against 22 MB**, p50 lookup **9.01 ms
+against 21.1 ms**. Re-measured at 2.08M names, where the honest summary is
+that the two answer *different questions*: on the `%` threshold path GIN is
+~110× faster (1.671 ms / 205 buffers against 182.5 ms / 31,174), builds in
+7.5 s against 23.1 s and is 69 MB against 244 MB — but **GIN has no KNN
+operator class at all**, so `ORDER BY name <-> q` under it degrades to a
+`Seq Scan` at 3,989.9 ms where GiST answers from the index.
+
+**Settled 2026-08-03 against 1,271,138 real names** by the gate below, which
+ran both end to end over the same 2,993 typo cases. They trade rather than
+one winning: GIN builds in **5.394 s** and occupies **75 MB** against GiST's
+**11.800 s / 139 MB**, and answers at **p50 33.6 ms** against **198.1 ms**;
+GiST returns **85.3%** recall@5 against **82.5%**, **47.9%** against 36.1% on
+2–4-character names, and a tighter tail (**max 428 ms** against 730 ms,
+because KNN traversal cost barely depends on match-set size while `%` does).
+**GIN stays**: p50 is what a keystroke pays, and 2.8 points of recall do not
+rescue a path already 4× over budget.
+
+**And the two must not both exist.** With a GiST trigram index present
+alongside the GIN one, the planner takes GiST for the `%` operator — the
+identical shipped configuration went from p50 **33.3 ms to 141.5 ms** with
+byte-identical recall. "Add GiST for a KNN path and keep GIN for `%`" is not
+available; adding the second index silently taxes the first. **A path that
+genuinely needs KNN needs to *replace* the GIN index, not sit beside it.** No
+plan-shape test can distinguish the two, so the measurements carry this
+choice and the suite does not.
 
 **The cap must be ordered, and an unordered one is an active bug rather than
 a simplification.** A `LIMIT` with no `ORDER BY` truncates arbitrarily, which
@@ -139,12 +153,51 @@ makes *lowering* the similarity threshold make recall **worse**: measured
 GiST). Capping smaller does not help — GiST KNN costs 272 ms at `LIMIT 200`
 against 283 ms at `LIMIT 3000`; the cost is the traversal.
 
+**The cap is a latency control and not the recall lever this section
+implied.** Over the gate's 2,993 real typo cases the cap truncated **0.0%**
+of the shipped configuration's misses and the `levenshtein_less_equal`
+re-rank dropped **0.0%** in every configuration measured. Capping *wider*
+makes recall worse, not better — GiST KNN at `LIMIT 1000` scores 83.4%
+against 85.3% at `LIMIT 200` — because a bigger pool means more
+equal-distance competitors for the final ordering to separate.
+
 `pg_trgm.similarity_threshold` stays at its 0.3 default and is set with **`SET
 LOCAL`**, never a bare `SET`, which leaks onto the next checkout of a pooled
 connection — verified for this GUC and for `hnsw.*`. And **never feature-detect
 a contrib GUC**: `SHOW pg_trgm.similarity_threshold` raises on a backend that
 has not yet run one of the library's operators, while the `SET LOCAL` succeeds
 on that same cold backend.
+
+**0.3 survived the gate, and the case for lowering it does not.** At
+1,271,138 real names, dropping the floor to 0.2 or 0.1 leaves recall flat or
+slightly worse (82.5% @0.3 → 85.1% @0.1 *only* once the ordering below is
+fixed, and 78.3% → 77.6% before it) while costing 4–14× latency (p50 33.6 ms
+→ 128.7 ms → 469.2 ms). What a lower floor actually does is move a miss from
+one stage to another: the gate's own diagnosis went from 63.6%
+below-the-floor / 36.4% out-ranked at 0.3 to 4.0% / 71.2% at 0.1. Note that
+`_TRIGRAM_THRESHOLD` in `adapters/search/postgres.py` is **0.1 and is the
+*contract suite's* floor, not the shipped one** — a fixture with two rows has
+no competitors, so 0.1 rescues a case there that it cannot rescue at scale.
+The divergence is stated in that constant's own comment rather than left to
+be discovered.
+
+**The result is ordered by popularity *and then by vote count*, because on a
+real catalog popularity is empty.** `titles.popularity` is NULL on all
+1,271,138 rows of a bootstrapped catalog — nothing writes it but TMDb
+enrichment, and the enriched tier is 2k–10k titles by design — so
+`ORDER BY dist ASC, popularity DESC NULLS LAST, id ASC` degenerates to
+ordering equal-distance candidates by a UUIDv7, which is insertion order.
+`vote_count DESC NULLS LAST` goes *under* popularity, is filled by the
+bootstrap itself (538,937 rows), and is worth **+4.2 points of recall@5
+overall and +8.3 on 2–4-character names at unchanged latency**. Shipped
+2026-08-03 with the gate that found it.
+
+**`<%` (`word_similarity`) was measured and not taken.** It separates
+fixture-scale examples better than `%` (0.8 / 0.4 / 0.2 against
+0.250 / 0.250 / 0.111) and is served by the same `gin_trgm_ops` index, and
+over the gate's 2,993 real cases it scores **78.1% at p50 46.1 ms** against
+`%`'s 82.5% at 33.6 ms — worse on both axes. A fixture-scale separation is
+not a recall figure.
 
 > **Settled in M6 — yes, `suggest` is its own port.** This section already
 > treated autocomplete as a separate narrow path while `SearchIndex.suggest`
@@ -444,39 +497,62 @@ trigrams; one typo destroys most of them, and transpositions are close to a
 blind spot). If recall@5 on that set falls below the bar after honest tuning,
 add Meilisearch for the instant-search box only.
 
-**⏳ The gate has not been run against the real catalog.** M6 built everything
-it measures and the run is outstanding; Meilisearch is not added either way,
-because a second stateful service bolted on at the end of a milestone is not
-what a measurement with a decision attached is for (boundary call 7).
+**The gate was run on 2026-08-03 against a real 1,271,138-title catalog, and
+it failed.** 2,993 single-edit typo cases over 750 real movie names — five
+equal-sized length bands, `vote_count ≥ 500`, 81,054 non-unique lower-cased
+names excluded, four typo classes at a uniformly random position, seed
+20260803 — driven through the shipped `PostgresSuggestIndex`. Full tables,
+the bar as it was written down beforehand, the miss diagnosis and the
+regeneration procedure are in
+[ADR-0002](decisions/0002-postgres-first-search.md)'s "Evidence — the gate,
+measured". The headline, per typo class and length band, for the shipped
+path:
 
-**And the gate as defined above measures the wrong half — which is itself a
-finding, from a synthetic dry run over 604 single-edit typo cases on 34
-genuinely short real titles planted in a 2.08M-name corpus.** Recall is
-arguable and passes; latency is not and does not:
+| name length | substitution | deletion | transposition | doubled letter | all | n per cell |
+|---|---|---|---|---|---|---|
+| 2–4 | 19.3% | 12.5% | **0.0%** | 78.7% | **27.8%** | 144–150 |
+| 5–7 | 90.7% | 48.0% | 35.3% | 99.3% | **68.3%** | 150 |
+| 8–11 | 99.3% | 88.7% | 94.7% | 99.3% | **95.5%** | 150 |
+| 12–19 | 100.0% | 99.3% | 100.0% | 100.0% | **99.8%** | 150 |
+| 20+ | 99.3% | 98.7% | 100.0% | 100.0% | **99.5%** | 150 |
+| **all** | **81.7%** | **69.9%** | **66.1%** | **95.5%** | **78.3%** | 2,993 |
 
-| strategy | recall@5 | transposition | p50 | p95 |
-|---|---|---|---|---|
-| this section as literally written | 66.2% | 34.5% | 181 ms | 241 ms |
-| GIN `%` @0.1 | **93.5%** | 82.8% | 582 ms | 1,893 ms |
-| GiST KNN `ORDER BY name <-> q` | **93.5%** | 82.8% | 281 ms | **342 ms** |
-| btree prefix, `lower(name) text_pattern_ops` | — (no typo tolerance) | — | **0.12–1.30 ms** | 0.14–18.85 ms |
+p50 33.3 ms, p95 208.8 ms, max 734 ms. The best configuration found under any
+threshold, any cap and either index type reaches **85.3% overall and 47.9% on
+the 2–4 band at p95 304 ms** — so the failure is not a tuning oversight.
+**This section's own examples were exact**: `similarity('dune','dnue') = 0.111`,
+`('her','hor') = 0.143`, `('up','uo') = 0.200`, all below the 0.3 default, and
+transposition on a 2–4-character name measures **0.0%** — a total blind spot,
+not merely a near one.
 
-Every configuration reaching 93.5% has a p50 of 281–582 ms against an
-as-you-type budget of roughly 50 ms. **So the gate must measure latency as
-well as recall**, and a run reporting recall alone does not close it — this
-section and [ADR-0002](decisions/0002-postgres-first-search.md) both defined
-it as recall@5 only. Recall by title length under the best tuning: **2–4
-characters 79.9%**, 5–6 characters 97.5%, 7+ characters 100%.
+**Above 8 characters it works and needs nothing** — 95–100% at every typo
+class, which is 91% of this catalog by row count. **The failure is the short
+one-word name**, which is where this section always said it would be.
 
-Also measured, and it makes this section's own examples concrete:
-`similarity('dune','dnue') = 0.111`, `('her','hor') = 0.143`,
-`('up','uo') = 0.200` — all below the 0.3 default, so `name % 'dnue'` matches
-**nothing**. "Transpositions are close to a blind spot" is exact.
+**M6 does not add Meilisearch** (boundary call 7): a second stateful service
+bolted on at the end of a milestone is not what a measurement with a decision
+attached is for. What the numbers support instead, and what
+[09](09-roadmap.md) gives an owner to, is a **two-tier suggest**: a btree
+`lower(name) text_pattern_ops` prefix probe on every keystroke — measured at
+**p50 0.6 ms / p95 1.0 ms / max 10 ms** over the same 2,993 queries, 200–330×
+faster than any fuzzy configuration and the only thing measured that fits
+inside a keystroke — with the trigram + `levenshtein_less_equal` path
+**debounced behind it**. They are complements: the btree has no typo
+tolerance at all (1.9%) and the trigram path cannot meet a keystroke budget
+at any setting.
 
-If that happens: precompute embeddings and use `userProvided`, run ≥ v1.39 (a
-memory leak existed from v1.12–v1.38), configure `filterableAttributes`
-granularly *before* loading documents (changing them forces a full reindex),
-and hydrate hits from Postgres by ID so stale index entries are invisible.
+**The gate as this section defined it measured the wrong half, and that
+correction stands.** A synthetic dry run over 604 cases first showed it, and
+the real run confirmed the shape: recall is the half that is arguable, and a
+configuration can look acceptable on recall while being 4–6× too slow for the
+box it exists to serve. Both dimensions are now recorded together, per cell,
+with sample sizes.
+
+If Meilisearch is ever taken: precompute embeddings and use `userProvided`,
+run ≥ v1.39 (a memory leak existed from v1.12–v1.38), configure
+`filterableAttributes` granularly *before* loading documents (changing them
+forces a full reindex), and hydrate hits from Postgres by ID so stale index
+entries are invisible.
 
 **Typesense is ruled out** regardless: fully memory-resident with no on-disk
 mode, so every restart returns HTTP 503 for 2–15 minutes while it rebuilds. The

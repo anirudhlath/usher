@@ -107,6 +107,7 @@ async def _insert_title(
     document: SearchDocument,
     *,
     enrichment_state: EnrichmentState = EnrichmentState.ENRICHED,
+    vote_count: int | None = None,
 ) -> None:
     """One `titles` row carrying the document's own text.
 
@@ -123,12 +124,12 @@ async def _insert_title(
     """
     columns = (
         "id, kind, name, sort_name, original_name, overview, tagline, "
-        "genres, keywords, year, popularity, enrichment_state"
+        "genres, keywords, year, popularity, vote_count, enrichment_state"
     )
     values = (
         "CAST(:id AS uuid), :kind, :name, :sort_name, :original_name, :overview, "
         ":tagline, CAST(:genres AS text[]), CAST(:keywords AS text[]), :year, "
-        ":popularity, :enrichment_state"
+        ":popularity, :vote_count, :enrichment_state"
     )
     await session.execute(
         text(f"INSERT INTO titles ({columns}) VALUES ({values})"),  # noqa: S608
@@ -137,6 +138,7 @@ async def _insert_title(
             "kind": document.kind.value,
             "genres": list(document.genres),
             "keywords": list(document.keywords),
+            "vote_count": vote_count,
             "enrichment_state": enrichment_state.value,
             **{
                 name: getattr(document, name)
@@ -733,6 +735,51 @@ async def test_a_null_popularity_does_not_take_the_first_row(session: AsyncSessi
     assert hits[0].title_id == wanted.title_id, (
         "a title with no popularity took the first row; a descending sort puts NULLs "
         "first and the catalog is mostly NULL-popularity skeletons"
+    )
+
+
+@pytest.mark.integration
+async def test_vote_count_orders_the_box_when_every_popularity_is_null(
+    session: AsyncSession,
+) -> None:
+    """**The catalog is not "mostly" NULL-popularity. It is entirely so**, and
+    that is what this case exists for.
+
+    Measured against a real 1,271,138-row bootstrap on 2026-08-03 (ADR-0002's
+    gate): `titles.popularity` is NULL on **every** row, because nothing in
+    `src/` writes it except TMDb enrichment and boundary call 4's premise is
+    that the enriched tier is 2k-10k titles. So `ORDER BY dist ASC,
+    popularity DESC NULLS LAST, id ASC` degenerates to `dist ASC, id ASC` --
+    every equal-distance candidate ordered by a UUIDv7, which is insertion
+    order, which is arbitrary. Adding `vote_count DESC NULLS LAST` under
+    popularity moved recall@5 from 78.3% to 82.5% over 2,993 real typo cases,
+    and from 27.8% to 36.1% on 2-4-character names, at unchanged latency.
+
+    Three titles, one query, all three at edit distance 0 from `vane`, so
+    only the tiebreak can separate them -- and every popularity is NULL,
+    which is the production state. Insertion order is deliberately the
+    *reverse* of the wanted order, so the case fails against the statement
+    that has no `vote_count` clause (it answers in id order) **and** against
+    one that has it without `NULLS LAST` (a descending sort puts the
+    vote-less title first, the same trap one column over).
+    """
+    voteless = _doc("Vane Alpha", popularity=None)
+    await _insert_title(session, voteless, vote_count=None)
+    obscure = _doc("Vane Bravo", popularity=None)
+    await _insert_title(session, obscure, vote_count=1)
+    wanted = _doc("Vane Charlie", popularity=None)
+    await _insert_title(session, wanted, vote_count=900)
+    index = PostgresSuggestIndex(session, threshold=_TRIGRAM_THRESHOLD, candidates=200)
+
+    hits = await index.suggest("vane")
+    assert [hit.title_id for hit in hits] == [
+        wanted.title_id,
+        obscure.title_id,
+        voteless.title_id,
+    ], (
+        "equal-distance candidates came back in insertion order; with popularity NULL "
+        "on the whole catalog, vote_count is the only popularity signal the bootstrap "
+        "actually writes"
     )
 
 

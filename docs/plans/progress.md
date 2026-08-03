@@ -1186,3 +1186,43 @@ stub handler would be a queue that grows forever). Scale: 1,271,138 titles.
 **M5 left a scale risk M6 will meet: usher.db.staging uses FIXED SHARED table names taking ACCESS
 EXCLUSIVE, and M5 is the first milestone to call it per-REQUEST and per-EVENT** — a detail-screen
 open and a nightly walk's batch SERIALISE.
+
+## ✅ M6 Task 26 — ADR-0002's typo-tolerance gate, RUN against the real catalog. IT FAILED.
+2026-08-03. Real 1,271,138-title catalog rebuilt from `data/bulk` in **74.8 s** (title.basics 41.6 s,
+title.ratings 22.2 s → 538,937 rows, suspended-index rebuild 10.9 s). 2,993 single-edit typo cases
+over 750 real movie names, seed 20260803, floor vote_count ≥ 500, 81,054 non-unique lower-cased names
+excluded, five equal draws of 150 over length bands. Driven through the shipped `PostgresSuggestIndex`
+from `/tmp/m6-gate/`; **the test set is real catalog rows and is NOT committed — the measurement is.**
+**Bar written down BEFORE the run** (`/tmp/m6-gate/BAR.md`): recall@5 ≥0.90 on 8+, ≥0.85 on 5–7,
+≥0.75 on 2–4, no class <0.60 in any band, **and p95 ≤ 50 ms**. Both halves or it is not closed.
+**Result: 2–4 band 27.8%, 5–7 68.3%, 8–11 95.5%, 12–19 99.8%, 20+ 99.5%; p50 33.3 ms / p95 208.8 ms.
+Transposition in the 2–4 band is 0.0% — a TOTAL blind spot, not a near one.** Best configuration
+found anywhere (GiST KNN + vote tiebreak): 85.3% overall, 47.9% on 2–4, p95 304 ms. **Nothing passes.**
+**5 of 7 documented guesses REFUTED:**
+(1) **`titles.popularity` is NULL on ALL 1,271,138 rows** — nothing writes it but TMDb enrichment —
+so the suggest's `ORDER BY … popularity DESC NULLS LAST, id ASC` degenerated to id order. The code's
+own comment said "roughly 60%"; it is 100%. **SHIPPED DEFAULT CHANGED**: `vote_count DESC NULLS LAST`
+added under popularity, +4.2 pts overall / +8.3 on 2–4 at unchanged latency, pinned by
+`test_vote_count_orders_the_box_when_every_popularity_is_null` (mutation-checked both ways).
+(2) **The cap is never the binding constraint and the levenshtein re-rank drops the true title 0.0%
+of the time, in every configuration.** Misses at the shipped config: 63.6% below the `%` floor,
+36.4% out-ranked, 0.0% capped, 0.0% re-ranked away. Task 17's whole design story aimed at a defect
+that does not occur.
+(3) **Lowering the trigram floor does NOT help.** It converts threshold-excluded misses into
+out-ranked ones (63.6/36.4 at 0.3 → 4.0/71.2 at 0.1), recall 78.3% → 77.6%, latency 14×. The
+synthetic dry run's 66.2% → 93.5% does not reproduce with real competitors. **0.3 stays.**
+(4) **One-word vs multi-word is pure collinearity with length.** 55.2% vs 96.8% raw; at fixed band
+(8–11) it is 95.9% vs 95.3%. Guess 4 CONFIRMED; my own first reading of the raw split was wrong.
+(5) **`usher index --create-indexes` does not exist** — Task 8 put the indexes in migration
+`fa2b6c1e9d30` and in `bulk.py::_SUSPENDABLE_INDEXES`.
+**Also found before the run started: "the dumps are on disk so nothing re-downloads" is FALSE.**
+`CachedDatasetFile.ensure_local` keys on the UPSTREAM ETag, and IMDb regenerates daily — the shipped
+path would have pulled 224 MB and imported a different snapshot. Pinned `revision()` to the sidecar;
+NIC delta 1.2 MB, `data/bulk` byte-identical before and after.
+**GIN vs GiST closed**: GIN 5.394 s / 75 MB / p50 33.6 ms / 82.5%; GiST KNN 11.800 s / 139 MB /
+p50 198.1 ms / 85.3%. **GIN stays. And the two cannot coexist** — with GiST present the planner takes
+it for `%` and the shipped config goes 33.3 → 141.5 ms p50 at identical recall.
+**Full-text half unaffected, checked not assumed:** 0.5–20.2 ms at 1.27M, driven by match-set size.
+**Obliges**: no Meilisearch (boundary call 7). **Two-tier suggest — btree prefix (p50 0.6 ms /
+p95 1.0 ms / max 10 ms, 44 MB, 0.559 s build) on every keystroke, trigram debounced behind it —
+owned by M9** in PRD 09.

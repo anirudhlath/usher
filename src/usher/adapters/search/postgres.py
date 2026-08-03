@@ -612,43 +612,56 @@ class PostgresSearchIndex(SearchIndex):
         return 0.0 if row.total == 0 else float(row.embedded / row.total)
 
 
-# The trigram floor the shipped path runs at, and it is **not** pg_trgm's own
-# 0.3 default. Measured on this host against the very fixtures the shared
-# contract seeds:
+# **The floor this module's own integration contract runs at -- which is NOT
+# the floor the shipped path runs at**, and the difference was invisible for
+# a whole milestone. `usher.composition.build_pipeline` passes
+# `Settings.search_trigram_threshold`, whose default is **0.3**; only
+# `tests/integration/test_adapters_search_postgres.py` injects this constant.
+# So every typo case in `SuggestIndexContract` is green at a threshold no
+# deployment uses. The comment that used to sit here asserted the opposite
+# and was simply wrong.
+#
+# Both values are kept, and the reason each is what it is, is measured.
+#
+# **Why the contract needs 0.1.** On the very fixtures it seeds:
 #
 #     similarity('Harbour Lights', 'harb') = 0.250
 #     similarity('Vane',           'vame') = 0.250   (one-character typo)
 #     similarity('Vane',           'vnae') = 0.111   (transposition)
 #
-# At 0.3 the `%` operator is **false for all three**, so the candidate CTE is
-# empty and `levenshtein` never runs -- the type-ahead box returns nothing for
-# a prefix of a real title, for a typo, and for a transposition alike. This is
-# the plan's own amendment arriving as a local measurement: PRD 05's worked
-# examples (`similarity('dune','dnue') = 0.111`) sit below the default too, so
-# "transpositions are close to a blind spot" is exact and the default floor is
-# what makes it one.
+# At 0.3 the `%` operator is false for all three, so on a two-row fixture the
+# candidate CTE is empty and `levenshtein` never runs.
+# `test_a_high_trigram_floor_destroys_fuzzy_recall` is that cliff pinned.
 #
-# 0.1 is the floor the full-scale dry run measured at 93.5% recall@5 on the
-# GIN `%` path, against 66.2% for PRD 05 as literally written. Its cost is
-# latency -- p50 582 ms at 2.08M names against GiST KNN's 281 ms -- and that
-# half of the trade is **not** settled here: ADR-0002's gate defines the
-# measurement as recall alone, recall is the half that passes, and Task 26
-# owns measuring both against the real catalog.
+# **Why the shipped default is nevertheless left at 0.3.** The fixture's
+# conclusion does not survive 1,271,138 real names, and ADR-0002's gate
+# (2026-08-03, 2,993 single-edit typo cases over 750 real movie names)
+# measured the whole curve through this exact statement:
 #
-# **Lowering the floor is only safe because the cap below is ordered.** With
-# an unordered `LIMIT`, lowering the threshold makes recall *worse* -- 66.2%
-# at 0.3 down to 48.5% at 0.1 and 2.6% at 0.05 -- because an unordered cap
-# truncates arbitrarily and admits more rows to truncate. `ORDER BY
-# similarity(...) DESC` inside the CTE is what turns a bigger candidate pool
-# into a better one.
+#     floor 0.3 -> recall@5 82.5%, p50  33.6 ms, p95 211 ms
+#     floor 0.2 -> recall@5 78.3%*, p50 128.7 ms, p95 704 ms
+#     floor 0.1 -> recall@5 85.1%, p50 469.2 ms, p95 926 ms
+#       (*0.2 measured before the vote_count tiebreak below; 0.3 and 0.1
+#        after it, so read 0.3 against 0.1 and not against 0.2.)
 #
-# Not measured and therefore not shipped: `<%` (`word_similarity`), which is
-# the operator actually shaped like a type-ahead prefix and scores these same
-# three fixtures 0.8 / 0.4 / 0.2 -- strictly better separation than `%`, and
-# also served by `gin_trgm_ops`. It is recorded rather than taken because no
-# recall or latency run in this project has ever used it, and a constant
-# chosen by eye that reads like a measurement is the failure mode this
-# repository names by name.
+# Lowering the floor does not convert misses into hits, it converts
+# *threshold-excluded* misses into *out-ranked* ones: the gate's own
+# miss-diagnosis moved from 63.6% below-the-floor / 36.4% out-ranked at 0.3
+# to 4.0% / 71.2% at 0.1. Two and a half points of recall for 14x the
+# latency, on the one path in this project with a keystroke budget, is not a
+# trade worth taking -- so 0.3 stays and this constant stays 0.1, with the
+# divergence stated instead of implied.
+#
+# **The cap must still be ordered.** With an unordered `LIMIT`, lowering the
+# threshold makes recall *worse* -- 66.2% at 0.3 down to 48.5% at 0.1 and
+# 2.6% at 0.05, measured on the synthetic dry run -- because an unordered cap
+# truncates arbitrarily and admits more rows to truncate.
+#
+# `<%` (`word_similarity`) is **no longer unmeasured and is still not
+# shipped**: the same gate ran it as its own configuration and it scored
+# recall@5 78.1% at p50 46.1 ms, i.e. worse than `%` at 0.3 on both axes
+# (82.5% / 33.6 ms) despite separating these three fixtures better
+# (0.8 / 0.4 / 0.2). A fixture-scale separation is not a recall figure.
 _TRIGRAM_THRESHOLD = 0.1
 
 # `pg_trgm.similarity_threshold`'s allowed range, which is also
@@ -700,7 +713,7 @@ _LEVENSHTEIN_MAX_INPUT = 255
 # *prefix's* length and therefore attacker-supplied.
 _SUGGEST = f"""
 WITH candidates AS MATERIALIZED (
-    SELECT t.id, t.name, t.popularity, similarity(t.name, :prefix) AS sim
+    SELECT t.id, t.name, t.popularity, t.vote_count, similarity(t.name, :prefix) AS sim
     FROM titles AS t
     -- The `%` operator, never `similarity(...) > <floor>`: only this
     -- spelling has a gin_trgm_ops operator class behind it, and the other is
@@ -716,7 +729,7 @@ WITH candidates AS MATERIALIZED (
     LIMIT :candidates
 ),
 scored AS (
-    SELECT c.id, c.popularity, c.sim,
+    SELECT c.id, c.popularity, c.vote_count, c.sim,
            levenshtein_less_equal(
                left(lower(c.name), least(char_length(:prefix), {_LEVENSHTEIN_MAX_INPUT})),
                left(lower(:prefix), {_LEVENSHTEIN_MAX_INPUT}),
@@ -727,13 +740,29 @@ scored AS (
 SELECT id, dist, sim
 FROM scored
 WHERE dist <= :max_distance
--- Distance first, then popularity, then id. Popularity is what stops the
--- type-ahead box's first row from being arbitrary among equally-good
--- matches; NULLS LAST because `titles.popularity` is nullable and a
--- descending sort puts NULLs first by default, which would hand the box to
--- whichever skeleton the scan reached first -- and roughly 60% of the
--- catalog is NULL-popularity skeletons. The id makes the order total.
-ORDER BY dist ASC, popularity DESC NULLS LAST, id ASC
+-- Distance first, then popularity, then vote count, then id. Popularity is
+-- what stops the type-ahead box's first row from being arbitrary among
+-- equally-good matches; NULLS LAST because `titles.popularity` is nullable
+-- and a descending sort puts NULLs first by default, which would hand the
+-- box to whichever skeleton the scan reached first. The id makes the order
+-- total.
+--
+-- **`vote_count` is here because `popularity` is empty, and that is
+-- measured rather than suspected.** On a real bootstrapped catalog
+-- `titles.popularity` is NULL on **all 1,271,138 rows** -- nothing in
+-- `src/` writes it except TMDb enrichment, and boundary call 4's own
+-- premise is that the enriched tier is 2k-10k titles against a 1.27M-row
+-- catalog. So with popularity alone this clause degenerates to
+-- `dist ASC, id ASC`: equal-distance candidates are ordered by a UUIDv7,
+-- i.e. by insertion order, i.e. arbitrarily. `vote_count` is written by the
+-- bootstrap itself (538,937 rows) and is the popularity signal the catalog
+-- actually holds. Measured over 2,993 single-edit typo cases on 750 real
+-- movie names, ADR-0002's gate run of 2026-08-03: recall@5 **78.3% ->
+-- 82.5%** overall, **27.8% -> 36.1%** on 2-4-character names and
+-- **68.3% -> 77.5%** on 5-7, at an unchanged p50 (33.3 -> 33.6 ms) and p95
+-- (209 -> 211 ms). It is strictly a tiebreak *under* popularity, so an
+-- enriched catalog is unaffected.
+ORDER BY dist ASC, popularity DESC NULLS LAST, vote_count DESC NULLS LAST, id ASC
 LIMIT :limit
 """  # noqa: S608 - every interpolated fragment is a module constant
 
