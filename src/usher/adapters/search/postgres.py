@@ -298,8 +298,18 @@ class PostgresSearchIndex(SearchIndex):
 
     async def search(self, request: SearchRequest) -> SearchOutcome:
         predicates, parameters = _predicates(request.filters)
-        if request.mode is not SearchMode.FULL_TEXT:  # pragma: no cover - Task 18
-            raise NotImplementedError(request.mode)
+        if request.mode is SearchMode.FULL_TEXT:
+            return await self._full_text(request, predicates, parameters)
+        if request.mode is SearchMode.SEMANTIC:
+            hits = await self._semantic(request, predicates, parameters)
+            return SearchOutcome(
+                hits=hits, semantic_coverage=await self._coverage(predicates, parameters)
+            )
+        raise NotImplementedError(request.mode)  # pragma: no cover - Task 19
+
+    async def _full_text(
+        self, request: SearchRequest, predicates: str, parameters: dict[str, object]
+    ) -> SearchOutcome:
         rows = await self._session.execute(
             text(_FULL_TEXT.format(predicates=predicates)),
             {**parameters, "query": request.query, "limit": max(request.limit, 0)},
@@ -311,6 +321,36 @@ class PostgresSearchIndex(SearchIndex):
             hits=tuple(SearchHit(title_id=row.id, score=float(row.score)) for row in rows),
             semantic_coverage=0.0,
         )
+
+    async def _semantic(
+        self, request: SearchRequest, predicates: str, parameters: dict[str, object]
+    ) -> tuple[SearchHit, ...]:
+        # A rule, not an estimate. An estimate is a second thing that can be
+        # wrong, and it would be wrong exactly when the statistics are stale,
+        # which is when the query is hardest.
+        if request.filters.owned_only:
+            await _force_exact_scan(self._session)
+        else:
+            await _apply_hnsw_gucs(self._session, self._ef_search)
+        rows = await self._session.execute(
+            text(_SEMANTIC.format(predicates=predicates)),
+            {
+                **parameters,
+                "query_vector": _as_vector_text(request.query_vector),
+                "limit": max(request.limit, 0),
+            },
+        )
+        # 1 - cosine distance, so a larger score is a better match and the
+        # two lanes' scores at least point the same way. They are still not
+        # on the same *scale* as a ts_rank_cd, which is why Task 19 fuses by
+        # rank and never by adding these numbers together.
+        return tuple(SearchHit(title_id=row.id, score=1.0 - float(row.distance)) for row in rows)
+
+    async def _coverage(self, predicates: str, parameters: dict[str, object]) -> float:
+        row = (
+            await self._session.execute(text(_COVERAGE.format(predicates=predicates)), parameters)
+        ).one()
+        return 0.0 if row.total == 0 else float(row.embedded / row.total)
 
 
 # The trigram floor the shipped path runs at, and it is **not** pg_trgm's own
@@ -501,3 +541,118 @@ class PostgresSuggestIndex(SuggestIndex):
         # Python re-sort would silently drop the NULLS LAST and the id
         # tiebreak the statement is careful about.
         return [SearchHit(title_id=row.id, score=1.0 / (1.0 + float(row.dist))) for row in rows]
+
+
+# pgvector's `hnsw.iterative_scan`, and the one value that is correct here.
+#
+# Measured at 2% filter selectivity, 25 query vectors, recall@10 against
+# exact brute force:
+#
+#   off,           ef_search 40   -> recall 0.068, **0.88 rows of 10**
+#   off,           ef_search 200  -> recall 0.284, 4.24 rows of 10
+#   strict_order,  ef_search 40   -> recall 0.100, 10.00 rows
+#   relaxed_order, ef_search 40   -> recall 0.508, 10.00 rows
+#
+# **The row count is the headline, not the recall.** With the GUC off a
+# request for 10 returns roughly one row: HNSW visits ef_search candidates,
+# the filter kills them (`rows=1, Rows Removed by Filter: 39`), the scan
+# ends. That is an empty endpoint.
+#
+# `relaxed_order` over `strict_order` because strict terminates earlier to
+# pay for index order, and nothing downstream needs index order -- the outer
+# statement re-sorts by distance and Task 19's RRF re-ranks by rank. And
+# `ef_search` is *not* the lever: 40 -> 200 with the GUC off still returns
+# 4.24 of 10.
+#
+# Caveat, because the numbers are meaningless without it: the probe used
+# uniform-random 384-dim vectors, the worst case for any ANN index, so
+# absolute recall is a pessimistic floor. **0.56 is not a production recall
+# figure.** What transfers is the ordering of the options and the row-count
+# failure, which is structural.
+_ITERATIVE_SCAN = "relaxed_order"
+_ITERATIVE_SCAN_VALUES = frozenset({"off", "relaxed_order", "strict_order"})
+
+# pgvector's own bounds for `hnsw.ef_search`, checked here because the value
+# is interpolated into a `SET LOCAL`, which takes no bind parameter.
+_EF_SEARCH_RANGE = (1, 1000)
+
+_SEMANTIC = """
+SELECT t.id, e.embedding <=> CAST(:query_vector AS halfvec) AS distance
+FROM titles AS t
+JOIN title_embeddings AS e ON e.title_id = t.id
+-- **IS NOT NULL, never COALESCE to zeros.** A title with no vector is not a
+-- candidate. The origin is a point roughly equidistant from everything on
+-- the unit sphere, so treating absence as the origin makes every unembedded
+-- title a mediocre match for every query -- a plausible ranking full of
+-- titles nobody embedded, with nothing reporting it. It is also what makes
+-- the partial HNSW index usable at all.
+WHERE e.embedding IS NOT NULL
+  {predicates}
+ORDER BY e.embedding <=> CAST(:query_vector AS halfvec), t.id
+LIMIT :limit
+"""
+
+# The population the semantic lane could see, and the fraction of it that
+# had a vector. **Skeletons are not in the denominator**: boundary call 4
+# excludes them from the embedded population deliberately, so counting them
+# would report ~0.008 coverage on a healthy 1.27M-row catalog and read as a
+# broken subsystem forever. `ix_titles_enrichment_state` is already the
+# partial index over exactly this set, so this is an index-only count over
+# the enriched tier rather than a scan of the catalog.
+_COVERAGE = """
+SELECT count(*) FILTER (WHERE e.embedding IS NOT NULL) AS embedded, count(*) AS total
+FROM titles AS t
+LEFT JOIN title_embeddings AS e ON e.title_id = t.id
+WHERE t.enrichment_state <> 'skeleton'
+  {predicates}
+"""
+
+
+async def _apply_hnsw_gucs(session: AsyncSession, ef_search: int) -> None:
+    """Per-transaction pgvector settings for a filtered ANN query.
+
+    **`SET LOCAL`, never `SET`** -- it reverts at COMMIT (verified), so a
+    pooled connection is left clean for the next unrelated request.
+
+    **Interpolated from an allow-list, never bound.** `SET LOCAL` cannot take
+    a bind parameter at all, so the value is checked against the closed set
+    of legal values first and the integer is bounded before it reaches the
+    string. Neither value has any path from user input.
+
+    **And there is no feature detection here, deliberately.** `pg_settings`
+    returns **zero** `hnsw.%` rows on a fresh connection and one after any
+    query that touched a vector operator -- the library loads lazily, per
+    backend. So a probe for "does this GUC exist" answers differently
+    depending on what the connection happened to do first, which is a
+    flaky-test generator. Setting the GUC on a cold connection succeeds
+    regardless, so the honest implementation just sets it.
+    """
+    if _ITERATIVE_SCAN not in _ITERATIVE_SCAN_VALUES:  # pragma: no cover - constant
+        raise ValueError(f"unknown hnsw.iterative_scan value {_ITERATIVE_SCAN!r}")
+    low, high = _EF_SEARCH_RANGE
+    if not low <= ef_search <= high:
+        raise ValueError(f"hnsw.ef_search {ef_search} is outside pgvector's {low}..{high}")
+    await session.execute(text(f"SET LOCAL hnsw.iterative_scan = '{_ITERATIVE_SCAN}'"))
+    await session.execute(text(f"SET LOCAL hnsw.ef_search = {ef_search}"))
+
+
+async def _force_exact_scan(session: AsyncSession) -> None:
+    """Boundary call 4's exact path: no ANN, no approximation, no recall
+    question at all.
+
+    PRD 05 puts owned titles on exact brute-force cosine, and the reason it
+    is affordable is boundary call 4 -- the embedded population is the
+    enriched tier at 2k-10k, not the 1,271,138-row catalog. `owned_only` is
+    also the most selective filter in the vocabulary, which is exactly the
+    selectivity that collapses HNSW's post-filter, so the two arguments point
+    the same way.
+
+    **The cost is stated rather than discovered**: this also takes the index
+    away from the `media_items` EXISTS, and from every other statement in the
+    same transaction, because `SET LOCAL` is transaction-scoped and Postgres
+    has no per-statement hint mechanism. At 2k-10k rows that is affordable;
+    at 1.27M it would not be, which is another way of saying boundary call 4
+    is what makes this path exist.
+    """
+    await session.execute(text("SET LOCAL enable_indexscan = off"))
+    await session.execute(text("SET LOCAL enable_bitmapscan = off"))

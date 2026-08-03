@@ -41,20 +41,24 @@ from tests.contract.suggest_index_contract import SuggestIndexContract
 from usher.adapters.search.postgres import (
     _LEVENSHTEIN_MAX_INPUT,
     _MAX_DISTANCE,
+    _SEMANTIC,
     _SUGGEST,
     _TRANSLATORS,
     _TRIGRAM_THRESHOLD,
     PostgresSearchIndex,
     PostgresSuggestIndex,
+    _apply_hnsw_gucs,
     _predicates,
 )
 from usher.db.base import build_engine, build_session_factory
+from usher.db.repositories.search import PostgresTitleEmbeddingRepository
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.ports.search import (
     FilterNotSupported,
     SearchDocument,
     SearchFilters,
+    SearchMode,
     SearchRequest,
     SuggestIndex,
 )
@@ -192,13 +196,49 @@ async def _own(session: AsyncSession, title_id: uuid.UUID, *, copies: int = 1) -
         )
 
 
+async def _own_every_title(session: AsyncSession) -> None:
+    """One `media_items` row for every title there is.
+
+    Deliberately *non*-selective. `owned_only` over a handful of rows makes
+    the planner abandon HNSW on its own, so a plan assertion under it would
+    pass against an implementation with no exact-path lever at all -- the
+    case would be measuring the planner's arithmetic rather than the rule
+    PRD 05 asks for.
+    """
+    source_id = new_id()
+    await session.execute(
+        text(
+            "INSERT INTO sources (id, kind, name, base_url, credentials_ref, device_id) "
+            "VALUES (CAST(:id AS uuid), :kind, :name, :url, :ref, :device)"
+        ),
+        {
+            "id": source_id,
+            "kind": SourceKind.EMBY.value,
+            "name": f"Owned Library {source_id}",
+            "url": "https://emby.invalid",
+            "ref": f"ref-{source_id}",
+            "device": str(source_id),
+        },
+    )
+    await session.execute(
+        text(
+            "INSERT INTO media_items (id, source_id, title_id, external_id, available) "
+            "SELECT gen_random_uuid(), CAST(:source AS uuid), t.id, "
+            "       'owned-' || t.id, true "
+            "FROM titles AS t"
+        ),
+        {"source": source_id},
+    )
+
+
 @pytest.mark.integration
 class TestPostgresSearchIndex(SearchIndexContract):
-    # Flipped to True by Task 18, which is what turns the four semantic and
-    # fusion cases from skips into assertions. **Task 16 ends with four
-    # skips and Task 18 ends with none** -- if Task 18 ends with four, the
-    # flag was never flipped and four cases silently did not run.
-    supports_semantic = False
+    # Flipped from False by Task 18, which is what turns the four semantic
+    # and fusion cases -- plus the removal case's semantic branch -- from
+    # skips into assertions. **If any of those five still skips, the flag
+    # was never flipped and the milestone's most delicate logic silently
+    # did not run.**
+    supports_semantic = True
     # This backend expresses the whole vocabulary, including the two the
     # port's docstring says a document-only engine cannot: `owned_only` is
     # an EXISTS over `media_items` and `min_enrichment` is a predicate on
@@ -694,3 +734,375 @@ async def test_a_null_popularity_does_not_take_the_first_row(session: AsyncSessi
         "a title with no popularity took the first row; a descending sort puts NULLs "
         "first and the catalog is mostly NULL-popularity skeletons"
     )
+
+
+# 10,000 embedded titles, one in fifty a `series`. **Both numbers are the
+# minimum that reproduces the failure, measured rather than chosen.** At
+# 1,000, 3,000 and 5,000 rows the planner does not use the HNSW index at all
+# for this shape -- it drives off the 2% filter on `titles` and re-sorts
+# exactly, so `hnsw.iterative_scan` is unobservable and a case at that scale
+# asserts nothing. At 10,000 the plan flips to
+# `Index Scan using ix_title_embeddings_hnsw` feeding a nested loop, and a
+# request for 10 comes back with 5-6.
+#
+# Measured cost: ~2.8 s to seed, which is what buys a case that can fail.
+_EMBEDDED_ROWS = 10_000
+_ONE_SERIES_EVERY = 50
+
+# pgvector's own default, and the value the whole finding is stated at. **At
+# `ef_search = 100` this fixture returns 10 of 10 with the GUC off**, which is
+# not a refutation and is recorded so nobody reads it as one: the amendment's
+# 50,000-row measurement has 40 -> 200 still returning 4.24 of 10, so what
+# scales is the failure, not the size of the `ef_search` that happens to mask
+# it. A fixture is always small enough for some `ef_search` to paper over it.
+_EF_SEARCH = 40
+
+# Any real model name works, because the sentinel `index_many` writes is
+# `IS DISTINCT FROM` every one of them. This is the shipped default, so the
+# case reads as the deployment it describes.
+_A_REAL_MODEL_NAME = "fastembed:BAAI/bge-small-en-v1.5"
+
+
+def _unit(position: int) -> tuple[float, ...]:
+    """A basis vector, 1.0 in one dimension of the shipped 384."""
+    return tuple(1.0 if index == position else 0.0 for index in range(_VECTOR_DIMENSIONS))
+
+
+def _probe_vectors(count: int) -> list[tuple[float, ...]]:
+    """`count` deterministic query vectors, spread across the basis.
+
+    Deterministic and not random: the assertion these feed is a **row count**,
+    which is exact for fixed vectors, and a fixture whose inputs move between
+    runs turns an exact assertion into a flaky one.
+    """
+    return [_unit((index * 37) % _VECTOR_DIMENSIONS) for index in range(count)]
+
+
+async def _seed_embedded_catalog(session: AsyncSession, rows: int) -> None:
+    """`rows` enriched titles with a vector each, one in fifty a `series`.
+
+    Generated in SQL rather than in Python: `rows` x 384 floats through the
+    driver is a great deal of round-trip for a fixture. The vectors are
+    *deterministic* -- two non-zero components derived from the row number --
+    and their values are deliberately meaningless.
+
+    **That makes this exactly the right fixture for asserting a row count and
+    exactly the wrong one for asserting recall**, and nothing in this file
+    asserts recall. In 384 dimensions an arbitrary point cloud has no
+    neighbour structure for an ANN index to find, so a recall figure taken
+    here would be measuring the fixture. The amendment records a whole probe
+    thrown away for exactly that reason: uniform-random vectors measured 4.7%
+    unfiltered recall@10, which is a broken harness rather than a pgvector
+    result.
+
+    The `ANALYZE` is load-bearing. Without statistics the planner sizes both
+    relations off an empty `pg_class` and picks the nested loop whatever the
+    real row count is, so the HNSW index is never chosen and the case under
+    test becomes vacuous.
+    """
+    await session.execute(
+        text(
+            "INSERT INTO titles (id, kind, name, sort_name, enrichment_state) "
+            "SELECT gen_random_uuid(), "
+            "       CASE WHEN i % :every = 0 THEN 'series' ELSE 'movie' END, "
+            "       'Vane ' || i, 'Vane ' || i, 'enriched' "
+            "FROM generate_series(1, :rows) AS i"
+        ),
+        {"rows": rows, "every": _ONE_SERIES_EVERY},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO title_embeddings (title_id, model_name, source_fingerprint, embedding) "
+            "SELECT s.id, :model, :fingerprint, CAST(v.tv AS halfvec) "
+            "FROM (SELECT t.id, row_number() OVER (ORDER BY t.id) AS n FROM titles AS t "
+            "      WHERE NOT EXISTS (SELECT 1 FROM title_embeddings AS e "
+            "                        WHERE e.title_id = t.id)) AS s "
+            "CROSS JOIN LATERAL ("
+            "    SELECT '[' || string_agg("
+            "        CASE WHEN d = 1 + (s.n % :width) THEN '1' "
+            "             WHEN d = 1 + ((s.n * 7) % :width) THEN '0.5' "
+            "             ELSE '0' END, ',' ORDER BY d) || ']' AS tv "
+            "    FROM generate_series(1, :width) AS d) AS v"
+        ),
+        {"model": _A_REAL_MODEL_NAME, "fingerprint": "0" * 32, "width": _VECTOR_DIMENSIONS},
+    )
+    await session.execute(text("ANALYZE titles"))
+    await session.execute(text("ANALYZE title_embeddings"))
+
+
+def _series_request(query_vector: tuple[float, ...]) -> SearchRequest:
+    return SearchRequest(
+        query="unused by the vector lane",
+        mode=SearchMode.SEMANTIC,
+        query_vector=query_vector,
+        limit=10,
+        filters=SearchFilters(kinds=(TitleKind.SERIES,)),
+    )
+
+
+@pytest.mark.integration
+async def test_a_filtered_semantic_search_returns_the_rows_it_was_asked_for(
+    session: AsyncSession,
+) -> None:
+    """**The case that catches a missing `hnsw.iterative_scan`.**
+
+    With the GUC at its default `off`, a request for 10 results under a
+    2%-selective filter returns **0.88 rows on average** at 50,000 rows --
+    measured, 25 query vectors -- and `EXPLAIN` says why in one line:
+    `rows=1, Rows Removed by Filter: 39`. HNSW visits `ef_search`
+    candidates, the filter kills them, the scan ends. That is an empty
+    endpoint, not a worse ranking. Reproduced on this fixture at 5-6 rows of
+    10.
+
+    Asserts the **row count**, not recall, and deliberately. Recall over an
+    arbitrary point cloud is noise and a recall threshold is a number
+    somebody loosens the first time it goes red; the row count is
+    deterministic for fixed vectors and "asked for ten, got ten" is
+    checkable by reading it.
+
+    Ten query vectors rather than one, summed, so a single lucky draw cannot
+    carry the case -- the failing implementation loses a few rows per query
+    and the sum turns that into a gap no draw can close.
+    """
+    await _seed_embedded_catalog(session, _EMBEDDED_ROWS)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH)
+    returned = 0
+    for query_vector in _probe_vectors(10):
+        outcome = await index.search(_series_request(query_vector))
+        returned += len(outcome.hits)
+    assert returned == 100, (
+        "a filtered semantic search returned fewer rows than it was asked for; "
+        "this is hnsw.iterative_scan at its default of off"
+    )
+
+
+@pytest.mark.integration
+async def test_the_default_guc_is_what_makes_that_fail(session: AsyncSession) -> None:
+    """The control, and the reason the case above is evidence rather than an
+    assertion that happens to pass.
+
+    Same fixture, same queries, the same shipped statement, with
+    `hnsw.iterative_scan` forced back to `off` for the transaction. Asserts
+    strictly fewer rows come back. Without this half, the case above passes
+    against an implementation that never needed the GUC -- because the
+    planner chose a sequential scan on a small table, say -- and the
+    milestone would ship a `SET LOCAL` nobody has shown does anything.
+
+    Note the ordering hazard this case is written around: `SET LOCAL` reverts
+    at COMMIT and the integration suite's fixture is one transaction per
+    test, so a GUC set by the search under test is **still set** for the next
+    statement in the same test. The adapter's own call therefore runs first
+    and the `off` is set explicitly *after* it, over the top.
+    """
+    await _seed_embedded_catalog(session, _EMBEDDED_ROWS)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH)
+    probes = _probe_vectors(10)
+    with_guc = 0
+    for query_vector in probes:
+        with_guc += len((await index.search(_series_request(query_vector))).hits)
+
+    await session.execute(text("SET LOCAL hnsw.iterative_scan = 'off'"))
+    await session.execute(text(f"SET LOCAL hnsw.ef_search = {_EF_SEARCH}"))
+    predicates, parameters = _predicates(SearchFilters(kinds=(TitleKind.SERIES,)))
+    without_guc = 0
+    for query_vector in probes:
+        rows = await session.execute(
+            text(_SEMANTIC.format(predicates=predicates)),
+            {
+                **parameters,
+                "query_vector": "[" + ",".join(repr(one) for one in query_vector) + "]",
+                "limit": 10,
+            },
+        )
+        without_guc += len(rows.all())
+
+    assert without_guc < with_guc, (
+        "the default GUC returned as many rows as relaxed_order; this fixture is not "
+        "reaching the HNSW index at all, so the case above is asserting nothing"
+    )
+
+
+@pytest.mark.integration
+async def test_the_owned_path_does_not_use_the_ann_index(session: AsyncSession) -> None:
+    """Boundary call 4's exact half, asserted on the plan.
+
+    PRD 05 says owned titles skip ANN entirely, and that is only affordable
+    because the embedded population is the enriched tier -- 2k-10k titles,
+    not 1,271,138. An implementation that quietly used HNSW here would return
+    a *subset* of the household's own library for a query about it, which is
+    the one place an approximate answer is least excusable and least
+    visible.
+
+    Fails an implementation that forgets the `enable_indexscan` lever, and
+    the control above the assertion is what makes that a real risk rather
+    than a hypothetical: with the ANN GUCs applied and index scans left on,
+    the identical statement over the identical predicates **does** name the
+    HNSW index. Every title is owned here on purpose -- a selective
+    `owned_only` would make the planner abandon HNSW by itself, and the case
+    would then pass against an implementation with no lever at all.
+
+    Wall clock at real scale is Task 26's to record; what is decided here is
+    the rule.
+    """
+    await _seed_embedded_catalog(session, _EMBEDDED_ROWS)
+    await _own_every_title(session)
+    await session.execute(text("ANALYZE media_items"))
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH)
+    predicates, parameters = _predicates(SearchFilters(owned_only=True))
+    probe = {
+        **parameters,
+        "query_vector": "[" + ",".join(repr(one) for one in _probe_vectors(1)[0]) + "]",
+        "limit": 10,
+    }
+
+    await _apply_hnsw_gucs(session, _EF_SEARCH)
+    ann = await session.execute(
+        text(f"EXPLAIN (FORMAT JSON) {_SEMANTIC.format(predicates=predicates)}"),
+        probe,
+    )
+    assert "ix_title_embeddings_hnsw" in json.dumps(ann.scalar_one()), (
+        "the planner would not have chosen HNSW here anyway, so this case cannot see "
+        "the lever it exists to check"
+    )
+
+    await index.search(
+        SearchRequest(
+            query="unused by the vector lane",
+            mode=SearchMode.SEMANTIC,
+            query_vector=_probe_vectors(1)[0],
+            limit=10,
+            filters=SearchFilters(owned_only=True),
+        )
+    )
+    exact = await session.execute(
+        text(f"EXPLAIN (FORMAT JSON) {_SEMANTIC.format(predicates=predicates)}"),
+        probe,
+    )
+    assert "ix_title_embeddings_hnsw" not in json.dumps(exact.scalar_one()), (
+        "an owned_only search reached the ANN index; PRD 05 puts the household's own "
+        "library on exact cosine, where recall is not a question at all"
+    )
+
+
+@pytest.mark.integration
+async def test_coverage_does_not_count_skeletons_it_was_never_going_to_embed(
+    session: AsyncSession,
+) -> None:
+    """**The denominator, which is a decision and not a detail.**
+
+    Counting every filtered title would put 1,271,138 skeletons under a
+    numerator of ~10,000 and report 0.008 coverage on a perfectly healthy
+    catalog -- a number that reads as "semantic search is broken", forever,
+    on a system working exactly as designed. A skeleton is not missing an
+    embedding; boundary call 4 excludes it from the population on purpose,
+    and `ix_titles_enrichment_state` is already the partial index over
+    exactly that set.
+
+    Seeds two enriched titles (one embedded) and fifty skeletons. The wrong
+    denominator reports 1/52; the right one reports 1/2.
+    """
+    embedded = _doc("Harbour Lights", vector=_vec(1.0))
+    bare = _doc("Vacuum Chamber")
+    await _insert_title(session, embedded)
+    await _insert_title(session, bare)
+    for number in range(50):
+        await _insert_title(
+            session,
+            _doc(f"Salt Flats {number:03d}"),
+            enrichment_state=EnrichmentState.SKELETON,
+        )
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH)
+    await index.index_many([embedded])
+    outcome = await index.search(
+        SearchRequest(
+            query="unused",
+            mode=SearchMode.SEMANTIC,
+            query_vector=_vec(1.0),
+            limit=10,
+        )
+    )
+    assert outcome.semantic_coverage == pytest.approx(0.5)
+
+
+@pytest.mark.integration
+async def test_a_document_indexed_through_the_port_is_still_stale(
+    session: AsyncSession,
+) -> None:
+    """Task 16's write half, asserted now that there is a vector lane to see
+    it with.
+
+    `index_many` writes a sentinel `model_name` and `source_fingerprint`, so
+    the row is `IS DISTINCT FROM` every real model name and the backfill
+    re-claims it exactly once. Fails an implementation that writes the
+    configured model name and an `md5` of text nobody embedded: that row
+    *asserts* it is current, so the stale predicate never looks at it again
+    and the wrong vector is permanent.
+
+    Asserted through `count_stale`, which is the predicate the backfill and
+    the gauge both use -- a case comparing the two columns to a literal would
+    pass against a second copy of the rule that had drifted. The direct read
+    beside it is the other half: the predicate alone is satisfied by a row
+    that got the model name right and the fingerprint wrong, which is a
+    different bug with the same symptom today.
+    """
+    document = _doc("The Quiet Vacuum", vector=_vec(1.0))
+    await _insert_title(session, document)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH)
+    embeddings = PostgresTitleEmbeddingRepository(session)
+    await index.index_many([document])
+
+    assert await embeddings.count_stale(_A_REAL_MODEL_NAME) == 1
+    stored = await embeddings.get(document.title_id)
+    assert stored is not None
+    assert stored.embedding is not None
+    assert stored.model_name != _A_REAL_MODEL_NAME
+
+
+@pytest.mark.integration
+async def test_the_hnsw_gucs_do_not_outlive_the_transaction(postgres_url: str) -> None:
+    """`SET` in place of `SET LOCAL` for `hnsw.iterative_scan`/`ef_search`.
+
+    Verified for both extensions and stated as a standing rule: a bare `SET`
+    in one session is still readable from a brand-new transaction on the same
+    pooled connection after it is returned. That is one search's ANN tuning
+    governing the next unrelated request -- a different answer, in code that
+    never touched this module, for a reason nothing in a log can explain.
+
+    **This case exists because the rest of the file structurally cannot see
+    it.** The suite's fixture is one transaction per test, so within it `SET`
+    and `SET LOCAL` are indistinguishable; measured, the mutation survives
+    every other case here. The discriminating boundary is a COMMIT, so this
+    builds its own engine, exactly as the suggest path's own leak case does.
+
+    The warm-up is not decoration: `hnsw.%` GUCs do not exist on a backend
+    that has not yet evaluated a vector operator, so `SHOW` on a cold
+    connection raises rather than answering -- which is also why
+    `_apply_hnsw_gucs` sets the value instead of probing for it first.
+    """
+    engine = build_engine(postgres_url)
+    try:
+        factory = build_session_factory(engine)
+        async with engine.connect() as conn, factory(bind=conn) as leaky:
+            await leaky.execute(
+                text("SELECT CAST('[1,0]' AS halfvec) <=> CAST('[0,1]' AS halfvec)")
+            )
+            index = PostgresSearchIndex(leaky, ef_search=_EF_SEARCH)
+            await index.search(
+                SearchRequest(
+                    query="unused by the vector lane",
+                    mode=SearchMode.SEMANTIC,
+                    query_vector=_vec(1.0),
+                    limit=10,
+                )
+            )
+            await leaky.commit()
+
+            scan = await leaky.execute(text("SHOW hnsw.iterative_scan"))
+            searched = await leaky.execute(text("SHOW hnsw.ef_search"))
+            assert scan.scalar_one() == "off", (
+                "a semantic search left hnsw.iterative_scan on the connection; this is "
+                "SET where SET LOCAL belongs"
+            )
+            assert int(searched.scalar_one()) == 40
+    finally:
+        await engine.dispose()
