@@ -504,7 +504,9 @@ async def metadata_provider(
     return provider, client.aclose
 
 
-async def embedder(settings: Settings) -> tuple[Embedder | None, Callable[[], Awaitable[None]]]:
+async def embedder(
+    settings: Settings, *, report: bool = True
+) -> tuple[Embedder | None, Callable[[], Awaitable[None]]]:
     """The embedding model and the callable that releases it.
 
     **Deliberately the same shape as `metadata_provider` above**, down to the
@@ -529,6 +531,21 @@ async def embedder(settings: Settings) -> tuple[Embedder | None, Callable[[], Aw
     drains has to be able to see why, and a per-pass warning is how an
     operator learns to ignore warnings.
 
+    **`report=False` is for the one caller that is not a worker root**, and it
+    was found by an operator smoke run rather than by the suite. The sentence
+    below is about a *lane* -- "index jobs will not be claimed" -- which is
+    exactly right for `usher work`, the server's worker lane and `usher push`,
+    and is wrong twice over for `usher search`: it advises about work that
+    process does not do, and `cli.py:153-154`'s rule says an operator's report
+    is printed rather than logged, so with `USHER_LOG_JSON=true` (the default)
+    it is a JSON envelope in front of the search results. `_search` prints its
+    own line, which names the setting and the extra instead of a lane, so the
+    information is not lost -- it is better. Pinned by
+    `tests/integration/test_cli_pipeline.py::
+    test_every_search_command_prints_and_never_logs`, which drives `--mode
+    fused` for exactly this reason: a version of that case using only
+    `full_text` never reaches this function at all.
+
     **The `fastembed` import is local**, the way `connect_websocket` imports
     `websockets`: `usher.composition` is imported by every entry point
     including `usher bootstrap-status`, and this dependency lives behind an
@@ -546,7 +563,8 @@ async def embedder(settings: Settings) -> tuple[Embedder | None, Callable[[], Aw
     container that set it -- wins over this default.
     """
     if not settings.embedding_enabled:
-        logger.warning("no embedding model configured; index jobs will not be claimed")
+        if report:
+            logger.warning("no embedding model configured; index jobs will not be claimed")
         return None, nothing
 
     # Before the import, never after: huggingface_hub reads it when it
@@ -562,7 +580,10 @@ async def embedder(settings: Settings) -> tuple[Embedder | None, Callable[[], Aw
         # HF_HUB_OFFLINE=1. All three are a *narrowed* deployment, not a
         # broken one, and all three must be legible -- `str(exc)` for the
         # offline case is the OSError this setting exists to produce.
-        logger.warning("embedding model unavailable; index jobs will not be claimed: {e}", e=exc)
+        if report:
+            logger.warning(
+                "embedding model unavailable; index jobs will not be claimed: {e}", e=exc
+            )
         return None, nothing
     return built, built.aclose
 

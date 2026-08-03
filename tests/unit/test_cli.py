@@ -5,12 +5,24 @@ is a composition root nothing else calls, and wiring nothing calls is
 wiring nothing checks.
 """
 
+import argparse
 import asyncio
+import dataclasses
 
 import pytest
 
-from usher.cli import PHASES, SYNC_KINDS, _run_lanes, build_parser, parse_args
+from usher.cli import (
+    PHASES,
+    SYNC_KINDS,
+    _as_uuid,
+    _filters_from,
+    _run_lanes,
+    build_parser,
+    parse_args,
+)
 from usher.config import Settings
+from usher.domain.enums import EnrichmentState, TitleKind
+from usher.ports.search import SearchFilters, SearchMode
 
 
 def test_no_arguments_still_means_serve() -> None:
@@ -216,3 +228,144 @@ def test_index_parses_its_two_modes() -> None:
     assert parse_args(["index"]).backfill is False
     assert parse_args(["index", "--backfill", "--limit", "500"]).limit == 500
     assert parse_args(["index", "--backfill"]).limit == 0
+
+
+def _search_actions() -> list[argparse.Action]:
+    """Every action the `search` subparser declares, read off the parser.
+
+    Reached through `_subparsers` rather than by rebuilding the flags here,
+    because the property the case below asserts is about *this* parser and a
+    second list would only ever agree with itself.
+    """
+    subparsers = next(
+        action
+        for action in build_parser()._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    return list(subparsers.choices["search"]._actions)
+
+
+def test_search_takes_the_modes_the_port_declares() -> None:
+    """The wrong implementation: `choices=["full_text", "semantic"]`, which is
+    what you get by writing the flag before `FUSED` existed and never
+    revisiting it. `usher search --mode fused` then exits 2 with "invalid
+    choice" for the mode that is the milestone's whole design (ADR-0002), and
+    nothing else in the suite notices.
+
+    Taken from the enum rather than retyped, so a fourth mode is offered the
+    day it exists.
+    """
+    for mode in SearchMode:
+        assert parse_args(["search", "q", "--mode", mode.value]).mode == mode.value
+    assert parse_args(["search", "q"]).mode == SearchMode.FUSED.value
+    with pytest.raises(SystemExit):
+        parse_args(["search", "q", "--mode", "vibes"])
+
+
+def test_search_refuses_an_empty_year_range() -> None:
+    """A cross-argument rule argparse cannot express: each bound is
+    individually valid, so `--year-from 2020 --year-to 1990` parses cleanly and
+    returns nothing -- which reads as "the catalog does not have it" rather
+    than as a transposed pair.
+
+    `parser.error`, so it exits 2 with usage on stderr like every other
+    argument failure; a `raise` would exit 1 with a traceback.
+    """
+    assert parse_args(["search", "q", "--year-from", "1990", "--year-to", "2020"]).year_to == 2020
+    # A single-year window is a legitimate ask, so the rule is `>` and not `>=`.
+    assert parse_args(["search", "q", "--year-from", "1999", "--year-to", "1999"]).year_to == 1999
+    with pytest.raises(SystemExit):
+        parse_args(["search", "q", "--year-from", "2020", "--year-to", "1990"])
+
+
+def test_search_refuses_a_limit_of_zero() -> None:
+    """Checked here rather than left to `SearchService`'s ceiling, because the
+    two failures differ: above `search_result_limit` the service clamps and the
+    answer says so, and at zero the operator asked for nothing and meant
+    something."""
+    assert parse_args(["search", "q", "--limit", "1"]).limit == 1
+    with pytest.raises(SystemExit):
+        parse_args(["search", "q", "--limit", "0"])
+
+
+def test_the_filter_flags_are_search_filters_whole_vocabulary() -> None:
+    """One flag per `SearchFilters` field, checked against the dataclass rather
+    than against a list.
+
+    The wrong implementation is a CLI offering the three filters somebody
+    needed on the day. A filter with no flag is a capability the port declares,
+    the backend implements, and no operator can reach -- and because
+    `SearchFilters` is frozen and slotted, adding a field later without a flag
+    is silent. The vocabulary being closed is 🔶 1's settlement: a
+    `dict[str, Any]` let two backends invent different keys, and a backend that
+    cannot express a filter must raise rather than ignore it, because an
+    ignored filter returns *more* results and reads as working.
+    """
+    declared = {field.name for field in dataclasses.fields(SearchFilters)}
+    reachable = {action.dest for action in _search_actions()}
+    assert declared <= reachable, f"no flag reaches {sorted(declared - reachable)}"
+
+
+def test_the_filter_flags_build_the_filters_they_advertise() -> None:
+    """The other half, because a parser action named `genres` proves only that
+    the *name* exists. `_filters_from` is the one place the flag-to-field
+    mapping lives, so a flag wired to the wrong field is visible here and
+    nowhere else."""
+    args = parse_args(
+        [
+            "search",
+            "vacuum",
+            "--kind",
+            "movie",
+            "--year-from",
+            "1990",
+            "--year-to",
+            "2030",
+            "--genre",
+            "drama",
+            "--genre",
+            "sci-fi",
+            "--owned-only",
+            "--min-enrichment",
+            "enriched",
+        ]
+    )
+    assert _filters_from(args) == SearchFilters(
+        kinds=(TitleKind.MOVIE,),
+        year_from=1990,
+        year_to=2030,
+        genres=("drama", "sci-fi"),
+        owned_only=True,
+        min_enrichment=EnrichmentState.ENRICHED,
+    )
+
+
+def test_the_bare_search_carries_no_filters_at_all() -> None:
+    """`SearchFilters()` and not a half-populated one: `owned_only=False` and
+    empty tuples are the port's own "narrow nothing", and a CLI that sent
+    `genres=()` as `genres=("",)` would narrow every search to nothing while
+    looking like it passed no filter."""
+    assert _filters_from(parse_args(["search", "vacuum"])) == SearchFilters()
+
+
+def test_suggest_takes_a_prefix_and_a_limit() -> None:
+    assert parse_args(["suggest", "quie"]).prefix == "quie"
+    assert parse_args(["suggest", "quie", "--limit", "5"]).limit == 5
+    assert parse_args(["suggest", "quie"]).limit == 10
+
+
+def test_suggest_refuses_a_limit_of_zero() -> None:
+    """`usher search`'s rule, for the same reason -- a type-ahead box asking
+    for nothing is an operator who meant something."""
+    with pytest.raises(SystemExit):
+        parse_args(["suggest", "quie", "--limit", "0"])
+
+
+def test_similar_rejects_a_title_id_that_is_not_a_uuid() -> None:
+    """`_as_uuid`, the treatment `--resolve`/`--title` already get: a sentence
+    naming the argument rather than a `ValueError` traceback out of
+    `uuid.UUID`. Parsing succeeds -- argparse has no uuid type -- so the
+    refusal has to happen where `main` converts it."""
+    assert parse_args(["similar", "not-a-uuid"]).title_id == "not-a-uuid"
+    with pytest.raises(SystemExit, match="title id is not a uuid"):
+        _as_uuid("not-a-uuid", "title id")

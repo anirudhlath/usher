@@ -32,24 +32,39 @@ with", both of which answer from local state.
 """
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 
 import pytest
 import pytest_asyncio
+from loguru import logger
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.cli import _open_adapter, _push, _session_for, _sync_status, _unmatched, _work
-from usher.composition import build_pipeline, selected_sources
+from tests.fakes.embedding import FakeEmbedder
+from usher.cli import (
+    _open_adapter,
+    _push,
+    _search,
+    _session_for,
+    _similar,
+    _suggest,
+    _sync_status,
+    _unmatched,
+    _work,
+)
+from usher.composition import build_pipeline, nothing, selected_sources
 from usher.config import Settings, get_settings
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.users import DEFAULT_USER_NAME, ensure_default_user
-from usher.domain.enums import SourceKind
+from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
+from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.jobs import JobRequest
+from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
+from usher.ports.search import SearchFilters
 
 
 @pytest.fixture
@@ -360,3 +375,259 @@ async def test_push_probe_skips_a_source_whose_credential_row_is_gone(
     printed = capsys.readouterr().out
     assert "no stored credentials" in printed
     assert "upgraded=" not in printed
+
+
+# -- `usher search` / `usher suggest`, against the real indexes ------------
+#
+# Every title here is synthetic (`tests/fixtures/README.md`'s bands), and each
+# carries `sort_name = _SEARCH_MARK` so `_purge_search` can find its own rows
+# without a blanket `DELETE FROM titles` that could reach another committing
+# file's work.
+
+_SEARCH_MARK = "cli-search"
+
+
+def _searchable(name: str, *, overview: str | None = None) -> Title:
+    return Title(
+        kind=TitleKind.MOVIE,
+        name=name,
+        sort_name=_SEARCH_MARK,
+        overview=overview,
+        year=2021,
+        enrichment_state=EnrichmentState.ENRICHED,
+    )
+
+
+async def _seed_searchable(settings: Settings, titles: Sequence[Title]) -> None:
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        for title in titles:
+            await pipeline.titles.add(title)
+        await session.commit()
+
+
+@pytest_asyncio.fixture
+async def clean_search(cli_settings: Settings) -> AsyncIterator[None]:
+    await _purge_search(cli_settings)
+    yield
+    await _purge_search(cli_settings)
+
+
+async def _purge_search(settings: Settings) -> None:
+    async with _session_for(settings) as session:
+        for statement in (
+            "DELETE FROM title_neighbors WHERE title_id IN "
+            "(SELECT id FROM titles WHERE sort_name = :mark) "
+            "OR neighbor_id IN (SELECT id FROM titles WHERE sort_name = :mark)",
+            "DELETE FROM title_embeddings WHERE title_id IN "
+            "(SELECT id FROM titles WHERE sort_name = :mark)",
+        ):
+            await session.execute(text(statement), {"mark": _SEARCH_MARK})
+        await session.execute(
+            text("DELETE FROM titles WHERE sort_name = :mark"), {"mark": _SEARCH_MARK}
+        )
+        await session.commit()
+
+
+@pytest.fixture
+def a_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`composition.embedder` replaced with one that answers.
+
+    The `embedding` extra is not installed in this environment (167 MiB and a
+    65 MB ONNX download for a suite that asserts on printed text), so a real
+    `usher search --mode fused` here always *degrades* -- which is a genuine
+    case and is the one below this. It is not the case that exercises FUSED
+    with zero coverage, and the two print different sentences on purpose. The
+    fake supplies a vector and nothing else; relevance is never asserted
+    against it (`tests/fakes/embedding.py`'s own docstring forbids it).
+    """
+
+    async def _fake(settings: Settings, *, report: bool = True) -> tuple[FakeEmbedder, object]:
+        return FakeEmbedder(model_name=settings.embedding_model), nothing
+
+    monkeypatch.setattr("usher.cli.embedder", _fake)
+
+
+async def test_search_reports_semantic_coverage_and_moves_when_something_is_embedded(
+    cli_settings: Settings, clean_search: None, a_model: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The milestone's headline failure mode, arriving at the CLI.
+
+    The wrong implementation: a `_search` that prints the rows and stops. A
+    FUSED search over a catalog with no vectors returns a perfectly plausible
+    ranked list -- no error, no empty result, no log line -- and an operator
+    cannot tell it from a working hybrid search. The coverage figure is the
+    only thing that says so.
+
+    **Asserts the figure *moves*, not merely that it is printed**, because a
+    `_search` that hardcoded `semantic_coverage=0.000` passes the first half
+    alone. Coverage is the fraction of the *filtered population* that had a
+    vector, so seeding one embedding of two titles has to read 0.500 and not
+    1.000 -- the two agree exactly when every returned hit had one, which is
+    the case a green test is most likely to have used.
+    """
+    first, second = _searchable("The Quiet Vacuum"), _searchable("The Second Vacuum")
+    await _seed_searchable(cli_settings, [first, second])
+
+    await _search(cli_settings, query="vacuum", mode="fused", limit=5, filters=SearchFilters())
+    before = capsys.readouterr().out
+    assert "semantic_coverage=0.000" in before, before
+    assert "usher index --backfill" in before, before
+    assert str(first.id) in before and str(second.id) in before, before
+
+    async with _session_for(cli_settings) as session:
+        pipeline = build_pipeline(session, settings=cli_settings)
+        vector = (await FakeEmbedder().embed(["The Quiet Vacuum"]))[0]
+        await pipeline.embeddings.upsert_many(
+            [
+                TitleEmbeddingUpsert(
+                    title_id=first.id,
+                    embedding=tuple(vector),
+                    model_name=cli_settings.embedding_model,
+                    source_fingerprint="fingerprint",
+                )
+            ]
+        )
+        await session.commit()
+
+    await _search(cli_settings, query="vacuum", mode="fused", limit=5, filters=SearchFilters())
+    after = capsys.readouterr().out
+    assert "semantic_coverage=0.500" in after, after
+    assert "usher index --backfill" not in after, after
+
+
+async def test_search_says_the_deployment_has_no_model_rather_than_no_embeddings(
+    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two problems that present identically and need different fixes.
+
+    `USHER_EMBEDDING_ENABLED` is false in this environment, so a FUSED request
+    is *degraded* -- served as full-text because there is no model at all --
+    and the fix is an extra plus a setting, not `usher index`. A single
+    warning for both cases sends an operator to the wrong one half the time,
+    which is exactly why `SearchAnswer` carries `requested_mode` beside
+    `mode`.
+    """
+    await _seed_searchable(cli_settings, [_searchable("The Quiet Vacuum")])
+    await _search(cli_settings, query="vacuum", mode="fused", limit=5, filters=SearchFilters())
+    printed = capsys.readouterr().out
+    assert "mode=full_text" in printed, printed
+    assert "USHER_EMBEDDING_ENABLED" in printed, printed
+    assert "usher index --backfill" not in printed, printed
+
+
+async def test_semantic_search_without_a_model_refuses_rather_than_narrowing(
+    cli_settings: Settings, clean_search: None
+) -> None:
+    """`--mode semantic` asks the one question full-text cannot answer, so a
+    silent narrowing would hand back a plausible answer to a different
+    question. `SystemExit` with a sentence naming the way out, the treatment
+    `_as_uuid` gives a bad id."""
+    await _seed_searchable(cli_settings, [_searchable("The Quiet Vacuum")])
+    with pytest.raises(SystemExit, match="embedding model"):
+        await _search(
+            cli_settings, query="vacuum", mode="semantic", limit=5, filters=SearchFilters()
+        )
+
+
+async def test_search_says_no_match_rather_than_printing_nothing(
+    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An empty stdout is indistinguishable from a command that crashed
+    before it printed, and this one still has a coverage line to give."""
+    await _search(
+        cli_settings,
+        query="zzznothingmatchesthis",
+        mode="full_text",
+        limit=5,
+        filters=SearchFilters(),
+    )
+    printed = capsys.readouterr().out
+    assert "no match" in printed
+    assert "results=0" in printed
+
+
+async def test_suggest_finds_a_title_by_a_prefix_of_its_name(
+    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The type-ahead path end to end through the real trigram index, and
+    with **no model loaded** -- `SuggestIndex` is its own port precisely
+    because this tier serves the whole catalog without one."""
+    title = _searchable("The Quiet Vacuum")
+    await _seed_searchable(cli_settings, [title])
+    await _suggest(cli_settings, prefix="The Quiet Vacu", limit=5)
+    printed = capsys.readouterr().out
+    assert str(title.id) in printed, printed
+
+
+async def test_every_search_command_prints_and_never_logs(
+    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`cli.py:153-154`'s rule, asserted rather than followed.
+
+    With `USHER_LOG_JSON=true` -- the default -- a result routed through
+    loguru is a JSON envelope wrapped around a table, per line. The wrong
+    implementation is `logger.info` in a command, which looks fine in a dev
+    shell with `USHER_LOG_JSON=false` and is unreadable as shipped.
+
+    **`--mode fused` is in this list because a *collaborator* broke the rule,
+    not the command.** Found by the operator smoke run rather than by this
+    suite: `composition.embedder` reports "no embedding model configured;
+    index jobs will not be claimed" once per process, which is exactly right
+    for `usher work` and is, for a search, a JSON envelope printed in front of
+    the results carrying advice about a lane this process does not run -- and
+    duplicating, worse, the warning `_search` prints itself. A version of this
+    case driving only `--mode full_text` never reaches the factory at all and
+    passes against that.
+    """
+    await _seed_searchable(cli_settings, [_searchable("The Quiet Vacuum")])
+    sink: list[str] = []
+    handler = logger.add(sink.append, level="DEBUG")
+    try:
+        for mode in ("full_text", "fused"):
+            await _search(cli_settings, query="vacuum", mode=mode, limit=5, filters=SearchFilters())
+        await _suggest(cli_settings, prefix="quiet", limit=5)
+        await _similar(cli_settings, title_id=new_id(), limit=5, rebuild=False)
+    finally:
+        logger.remove(handler)
+    assert capsys.readouterr().out, "the commands printed nothing at all"
+    assert sink == [], f"a search command logged instead of printing: {sink}"
+
+
+async def test_similar_says_whether_the_neighbours_were_ever_computed(
+    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`title_neighbors` is a batch artefact, so an empty answer has two causes
+    and only one is a fact about the title.
+
+    The wrong implementation prints one message for both, and it sends an
+    operator to look at the wrong thing exactly half the time: "no neighbours
+    for this title" means run nothing, and "no neighbours have ever been
+    computed" means run `usher similar --rebuild`. This is the one place in
+    M6 where freshness is a whole-artefact age rather than a per-row
+    fingerprint (`TitleNeighborRepository.computed_at`), which is why the
+    distinction has to be made in the command rather than derived from a row.
+
+    Landed here rather than with the command it tests: `usher similar` shipped
+    with Task 21 and both sentences, and neither was ever asserted.
+    """
+    seed, other = _searchable("The Quiet Vacuum"), _searchable("Vane 4417")
+    await _seed_searchable(cli_settings, [seed, other])
+
+    await _similar(cli_settings, title_id=seed.id, limit=5, rebuild=False)
+    assert "no neighbours have ever been computed" in capsys.readouterr().out
+
+    # A row for *some other* seed, so the table has an age while this title
+    # still has nothing -- which is the state the two messages differ on.
+    async with _session_for(cli_settings) as session:
+        pipeline = build_pipeline(session, settings=cli_settings)
+        await pipeline.neighbors.replace(
+            [other.id],
+            [ScoredNeighbor(title_id=other.id, neighbor_title_id=seed.id, score=0.5, rank=0)],
+        )
+        await session.commit()
+
+    await _similar(cli_settings, title_id=seed.id, limit=5, rebuild=False)
+    printed = capsys.readouterr().out
+    assert "no neighbours for this title" in printed, printed
+    assert "have ever been computed" not in printed, printed

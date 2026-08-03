@@ -151,8 +151,39 @@ gates it; without it a worker simply never claims `index` jobs, and full-text
 and trigram still serve the whole catalog. `usher index` itself loads no model
 — staleness is a question about a recorded model *name*.
 
-`usher similar` has the same two forms for the same reason: a read and the
-write that refreshes what it reads.
+`usher search` and `usher suggest` are the read side, and M6 adds no HTTP
+route — the CLI delivers the whole capability, exactly as `bootstrap` and the
+ingest commands do, and M9 owns the routers.
+
+```bash
+uv run usher search "the quiet vacuum"                 # hybrid by default
+uv run usher search "vacuum" --mode full_text --limit 5
+uv run usher search "vacuum" --kind movie --year-from 1990 --year-to 2030 \
+                             --genre drama --owned-only --min-enrichment enriched
+uv run usher suggest "the quie" --limit 5              # type-ahead, typo-tolerant
+```
+
+**`usher search` prints `semantic_coverage` on every run, not only when it is
+low**, and that line is the reason the command has a human-readable mode at
+all. A `--mode fused` search against a catalog with no embeddings degrades to
+full-text — correctly, because a title with no vector is *absent from the
+semantic candidate list* rather than ranked last — and the result looks
+exactly like a working hybrid search: no error, no empty result, no log line.
+Two things can produce it and they get different sentences, because they have
+different fixes: `fused was served as full_text` means this deployment has no
+model (install the extra, set `USHER_EMBEDDING_ENABLED=true`), while
+`semantic_coverage=0.000` on a search that really did run fused means nothing
+has been embedded yet (`usher index --backfill`). `--mode semantic` with no
+model refuses outright rather than narrowing — it is the one question
+full-text cannot answer, so a plausible answer to a different one is worse
+than none.
+
+Every `SearchFilters` field has a flag and no filter has two, which is
+deliberate: an engine that cannot express a filter raises rather than ignoring
+it, because an ignored filter returns *more* results and reads as working.
+
+`usher similar` has the same two forms `usher index` does, and for the same
+reason: a read and the write that refreshes what it reads.
 
 ```bash
 uv run usher similar <title id>    # the precomputed neighbours, best first
