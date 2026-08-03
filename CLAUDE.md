@@ -7,7 +7,7 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M5 complete.** The project scaffold, environment
+**Status: M6 complete, except its own gate.** The project scaffold, environment
 config, domain models, port ABCs, persistence (SQLAlchemy schema + Alembic
 migrations + title repository), the telemetry bootstrap, a FastAPI app
 with liveness/readiness endpoints, the container image + compose stack + CI
@@ -26,15 +26,45 @@ TMDb v3 API — and the push lane, the supervised reconnect with its
 gap-closing delta, `GET /titles/{id}` with demand promotion, `GET /events`
 over SSE, and the two supervised lanes `create_app` now runs (M5), verified
 2026-08-02 against the same live Emby server in the first run this
-repository has ever made that parsed a real `/embywebsocket` message. See
+repository has ever made that parsed a real `/embywebsocket` message — and
+PRD 03's fourth pipeline stage, which every earlier milestone deferred: the
+`search_document` generated column and its GIN index, trigram type-ahead on
+`titles`, `title_embeddings`/`title_neighbors`, `JobKind.INDEX` and its
+handler, an optional `fastembed` embedder, `PostgresSearchIndex`/
+`PostgresSuggestIndex`, RRF fusion with reported coverage, `SearchService`
+and `SimilarityService`, and the `index`/`search`/`suggest`/`similar` CLI
+(M6). See
 `docs/plans/2026-07-28-m1-foundation.md`,
 `docs/plans/2026-07-30-m2-bootstrap.md`,
 `docs/plans/2026-07-30-m3-emby-adapter.md`,
-`docs/plans/2026-07-31-m4-ingest.md` and
-`docs/plans/2026-08-01-m5-push.md` for the task breakdowns and
-`docs/prd/09-roadmap.md` for what's next (M6 — search). Do not invent
+`docs/plans/2026-07-31-m4-ingest.md`,
+`docs/plans/2026-08-01-m5-push.md` and
+`docs/plans/2026-08-02-m6-search.md` for the task breakdowns and
+`docs/prd/09-roadmap.md` for what's next (M7 — rows). Do not invent
 commands for tooling that does not exist yet — check the Commands section
 below before assuming something runs.
+
+**⏳ M6's one outstanding item is ADR-0002's typo-tolerance gate**, which is
+built and has **not been run against the real catalog**. Nothing in this file
+records a gate result, and a sentence claiming one would be the failure the
+gate exists to prevent. What *is* recorded, from a synthetic dry run, is that
+the gate's own definition is incomplete — see the M6 section below.
+
+**M6's nine deliberate boundary calls**, each stated with its reason in the
+M6 plan's Scope section and in PRD 09: **no HTTP route** (the CLI delivers
+all four capabilities; `GET /titles/{id}/similar` is M9's); **weight class B
+is reserved and empty** (no `Person`/`Credit` table exists, and the only
+place credits live is `raw_payloads.payload`); **no `title_search_names`
+table** (with no aliases and no people it would duplicate four columns of
+`titles`); **embeddings cover the enriched tier only**
+(`enrichment_state <> 'skeleton'` — a skeleton needs no `index` job at all,
+because its document is a generated column); **no new client event**
+(`EnrichService` already publishes `title.updated`, and a second one would
+have no consumer); **no query expansion** (`ports/llm.py` has no
+implementation until M8); **no Meilisearch regardless of the gate**;
+**similarity blends the two signals that have data** (embedding cosine plus
+genre/keyword Jaccard); and **the `usher.db.staging` shared-table lock is
+fixed here**, because M6's per-title `index` enqueue is what makes it hurt.
 
 **M4's four deliberate boundary calls**, each stated with its reason in the
 M4 plan's Scope section and in PRD 09: the **index** stage is M6's (no
@@ -95,6 +125,262 @@ load automatically when working in `docs/`.
   logged" rule is enforced rather than merely asserted.
 
 ## Verified facts worth not re-deriving
+
+**M6's measurements, all taken 2026-08-02 on this host against
+`pgvector/pgvector:pg17` (PostgreSQL 17.10, pgvector **0.8.6** — not the
+0.8.5 the PRD floor names) unless stated otherwise, with synthetic corpora.
+The one thing that is *not* here is a gate result**: ADR-0002's typo
+tolerance gate has not been run against a real catalog, and the plan's
+instruction to record its result stands unfulfilled rather than approximated.
+
+**⏳ The gate's own definition is incomplete, and that is the finding a dry
+run produced instead.** PRD 05 and ADR-0002 both define it as recall@5 only.
+Over 604 single-edit typo cases on 34 genuinely short real titles planted in
+a 2.08M-name corpus: PRD 05 as literally written scores **66.2%** (p50 181 ms
+/ p95 241 ms), GIN `%` @0.1 scores **93.5%** (582 ms / 1,893 ms), GiST KNN
+scores **93.5%** (281 ms / 342 ms). **Recall is the half that passes.** Every
+configuration reaching 93.5% is 6–37× over an as-you-type budget of ~50 ms,
+so the gate must measure latency too. Two sub-findings: an *unordered* cap
+makes lowering the similarity threshold make recall **worse** (66.2% @0.3 →
+48.5% @0.1 → 2.6% @0.05), and PRD 05's own worked examples sit below the 0.3
+default — `similarity('dune','dnue') = 0.111`, `('her','hor') = 0.143`,
+`('up','uo') = 0.200` — so `name % 'dnue'` matches nothing. Recall by title
+length under the best tuning: 2–4 chars 79.9%, 5–6 chars 97.5%, 7+ 100%.
+
+**The search document's generated column collides with the 1:1 row/model rule
+in three places, and the second one fires on writes.** `Title` is
+`extra="forbid"` and `_to_domain` builds it from `TitleRow.__table__.columns`,
+so (1) every read of every title raises without a filter;
+(2) **`update()`'s mutation loop `setattr`s every column, so it writes `None`
+onto the generated column and Postgres answers `ERROR: column
+"search_document" can only be updated to DEFAULT`** — a task that only tested
+reading a seeded row would never see this; and (3) the 1:1 assertion in
+`tests/unit/test_db_models.py` fails. `DERIVED_COLUMNS` on `TitleRow` is the
+declared exception, and the assertion is spelled `columns - DERIVED_COLUMNS
+== model_fields` so it *also* fails if a name is added there that `Title`
+does model. **Write the failing update test before the failing read test**;
+the other order ships site 2.
+
+**PRD 05's generated-column expression does not compile, and the obvious fix
+is a trap.** `GENERATED ALWAYS AS (…) STORED` rejects it with `ERROR:
+generation expression is not immutable`, caused by exactly one function:
+`array_to_string(anyarray, text)` is `STABLE`, because `anyarray` admits
+element types whose output depends on a GUC. From `pg_proc`:
+`to_tsvector(regconfig, text)` **is** `IMMUTABLE`, so the explicit `'english'`
+is load-bearing and a bare `to_tsvector(text)` would not work; `setweight` is
+`IMMUTABLE`. `array_to_tsvector` is immutable and **wrong** — it emits raw,
+unlexized, case-preserving lexemes, so `ARRAY['Sci-Fi','Film-Noir','Drama']`
+stores `'Drama' 'Film-Noir' 'Sci-Fi'` and fails to match even
+`websearch_to_tsquery('english','drama')`. The working form is a custom
+`IMMUTABLE` wrapper narrowed to `text[]`; do not widen it to `anyarray`.
+Cost of the column: **4.06×** on `INSERT … SELECT` of 300k rows (734 ms →
+2,980 ms) and **+33%** relation size, i.e. ≈ +9.5 s and ≈ +80 MB over
+1,271,138 titles. Two costs not in that figure: the GIN index's own write
+cost, and `apply_ratings`' `UPDATE` over 538,937 rows.
+
+**`CREATE OR REPLACE FUNCTION` does not recompute stored generated values —
+and a later `UPDATE` of the row does.** Verified directly: a row stored as
+`'alpha':1 'beta':2` did not move when the body changed, while a fresh
+evaluation returned something else. So replacing the wrapper's body silently
+produces a table where some rows were computed by the old definition and some
+by the new, with nothing to tell them apart. Any migration that changes the
+body **must force a full column rewrite in the same migration** (drop index,
+drop column, replace function, re-add column, recreate index — `fa2b6c1e9d30`
+carries the recipe), and
+`tests/integration/test_search_document.py::test_the_stored_document_equals_a_freshly_computed_one`
+is what catches one that forgets.
+[ADR-0020](docs/prd/decisions/0020-derived-state-carries-its-fingerprint.md).
+
+**Every whitespace-only input embeds to the *identical* vector: cos(`""`,
+`" "`) = cos(`""`, `"\n"`) = 1.0000, exactly.** So a title whose composed
+document is empty is not a bad result — it is a perfect unit vector at cosine
+1.0 from every other empty-document title, a degenerate cluster of unbounded
+size pinned to the top of every "more like this" list, invisible to any
+assertion about norms, dimensions or determinism. The composer refuses, **and
+a refusal is a written outcome, not a skipped one**: a `NULL` embedding, the
+current `model_name`, the fingerprint of the degenerate text. Skipping it
+leaves the row matching the stale predicate forever, which is **the second
+time this project has hit that exact shape** — the first was the
+watch-history repair refused by the very row it existed to repair. The
+control that says the threshold is about *empty* and not about *thin*:
+unrelated name-only skeletons measure pairwise cosine **0.5867 (sd 0.055)**,
+and a skeleton retrieves its own enriched form at **0.7638** against a
+**0.4751** cross-title mean — crowded, but ordered.
+
+**`fastembed` over `sentence-transformers`, and it is not a preference.**
+sentence-transformers is 59 packages, **2.62 GiB downloaded / 4.8 GiB
+installed**, 104 s cold install, against a `usher` image of 332 MB — and
+**~4.5 GiB of the 4.8 is GPU runtime** (`nvidia/` 2.7 G, `torch/` 1.1 G,
+`triton/` 689 M) pulled unconditionally. fastembed is 28 packages, **167
+MiB**, **1.2 s** cold install, no torch, and **252.9 texts/s against 229.5**
+(+10%) on identical input at lower peak RSS (1,067 MiB against 1,381).
+Agreement over 205 documents: **min cosine 0.99999619, top-1 identical
+205/205**. Two caveats: it serves a **third-party** ONNX conversion
+(`qdrant/bge-small-en-v1.5-onnx-q`), not BAAI's own weights; and the
+ST↔fastembed difference (max pairwise-similarity delta **1.41e-03**) is **6×
+the halfvec quantisation error**, so the two are not interchangeable without
+a re-embed — which is why `model_name` records the runtime
+(`fastembed:BAAI/bge-small-en-v1.5`).
+
+**Throughput is linear in *tokens*, not texts — quote the invariant, never
+the rate.** CPU holds ~8,000–10,700 tokens/s across the range: 412.7 texts/s
+at 19 tokens, 83.5 at 100, 18.7 at 516. A realistic `name + overview + genres
++ keywords` document is ~100–130 tokens, i.e. **~83 texts/s** — 4–6 hours
+over 1,271,138 titles, ~25 s to 2 min over the enriched tier the milestone
+actually embeds. Best CPU batch size **16**, flat to 64, worse at 128.
+**GPU throughput is deliberately unmeasured**: the 4090 had 210 MiB free of
+24,564 (a live `vllm` container held 21,764) and the probe declined to
+disturb a running service. No decision rests on a GPU number.
+
+**The BGE query prefix is a measured null, and applying it to both sides is
+harmful.** Over 210 paired observations (24 gold documents + 1,200
+distractors per draw, 5 disjoint draws, 42 queries): the prefix moves MRR
+**−0.0028**, 95% CI `[−0.0259, +0.0203]`. Both sides: **−0.0663**, CI
+`[−0.1013, −0.0330]`. **The power control is what makes this a null rather
+than a blind spot** — a deliberately wrong prefix moves MRR **−0.2497** at
+P(>0) = 0.000. Corroborated twice at the library level: sentence-transformers
+5.6.1's `encode_query()`/`encode_document()` and fastembed 0.8.0's
+`query_embed()`/`passage_embed()` are each **bit-identical to plain
+`embed()`** here, because the checkpoint declares empty prompts. **This is
+the one a future contributor is most likely to reintroduce**, by "fixing"
+`SearchService`'s symmetric loop to apply the documented prefix — which is
+exactly the −0.066 condition, with no error and no log line to see it.
+
+**Normalisation is baked into the checkpoint, stops holding after the
+`halfvec` cast, and is not load-bearing under the operator this index uses.**
+Norms are 1.0 to within **5.96e-08** and `normalize_embeddings=False` returns
+**bit-identical** vectors — the flag cannot turn it off, because it is a third
+module (`Transformer → Pooling → Normalize`) rather than a library step; the
+same backbone with `2_Normalize` removed returns norms **8.99–9.46**, which is
+why `FastEmbedEmbedder` asserts the norm on its first batch instead of
+trusting a model card. After the `halfvec` cast norm drift goes 1.19e-07 →
+**1.21e-04**, so "cosine == dot" holds only *before* it. And `<=>` is
+normalisation-**invariant** (a norm-5 vector in the same direction gives the
+identical cosine distance) while `<#>` is not — with `halfvec_cosine_ops`,
+which is what ships, normalisation buys speed, not correctness.
+
+**`HF_HUB_OFFLINE=1` is not optional, and its absence fails in a message
+naming neither the network nor the cache.** With the cache warm, no network,
+and the flag unset, the load raises `RuntimeError: Cannot send a request, as
+the client has been closed` — huggingface_hub 1.26.0 reuses a closed client
+on its retry path instead of falling back to the cache. Reproduced two
+independent ways. It is also the only setting under which a genuine cache
+miss produces a comprehensible `OSError`. `usher.composition` sets it with
+`os.environ.setdefault` **before** the library import, driven by
+`USHER_EMBEDDING_OFFLINE` (default on). And **do not use
+`snapshot_download`** — 401 MB / 14 files, three redundant copies of the same
+weights, against ~129–134 MB / 12 blobs on the normal path.
+
+**`hnsw.iterative_scan` is off by default and the headline is the row count,
+not the recall.** At 2% filter selectivity, recall@10 over 25 query vectors:
+`off`/`ef_search=40` → recall 0.068 and **0.88 rows returned of 10**;
+`off`/200 → 0.284 and 4.24; `strict_order`/40 → 0.100 and 10.00;
+**`relaxed_order`/40 → 0.508 and 10.00**. With the GUC off, a request for ten
+results **frequently returns zero** — `EXPLAIN` says why: `rows=1, Rows
+Removed by Filter: 39`, i.e. HNSW visited `ef_search` candidates, the filter
+killed them, the scan ended. **`ef_search` is the wrong lever** and
+`relaxed_order` beats `strict_order` because strict terminates earlier to buy
+an ordering RRF does not need. **Caveat that must travel with the numbers:**
+the probe used uniform-random 384-dim vectors, the worst case for any ANN
+index, so absolute recall is a pessimistic floor — **0.508 is not a
+production recall figure**; what transfers is the ordering of the options and
+the row-count failure. Re-run over a clustered mixture the conclusion is
+unchanged and stronger (at 0.1% selectivity: default 0.3% at n=0.0,
+`relaxed_order` 75.7% at n=10.0). Set it with **`SET LOCAL`** — a bare `SET`
+was verified readable from a brand-new session on the same engine — and
+**never feature-detect it**: `pg_settings` returns zero `hnsw.%` rows on a
+cold backend and rows on a warm one, so a probe is a flaky-test generator
+while the `SET LOCAL` itself succeeds either way. Same rule, separately
+measured, for `pg_trgm.similarity_threshold`: `SHOW` raises on a cold
+backend, a failed `SHOW` does not load the library, and `SET LOCAL` does.
+
+**RRF has five traps and one of them is silent and total.** `row_number()`
+returns **`bigint`**, so `1 / (60 + rank)` is **integer division**: every
+score becomes `0.0`, the result comes back in `id` order, and **nothing
+errors**. It must be `1.0 / (60 + rank)`. The other four: omitting `COALESCE`
+on a term makes a single-lane row score `NULL`, and `NULLS FIRST` under
+`ORDER BY … DESC` then sorts every single-lane row *above* every correctly
+scored one; `COALESCE(ft.id, vec.id)` is equally mandatory or single-lane
+rows surface a `NULL` id; an `INNER JOIN` reduces hybrid search to what both
+lanes already agreed on; and **ties are pervasive rather than occasional** —
+two disjoint 50-row lanes produced 100 fused rows with **50 distinct scores,
+every one a two-way tie**, and among the top 500 `ts_rank_cd` values for one
+query the largest tie group was **498**. So `id` must break ties in the outer
+`ORDER BY` *and* inside each lane's `row_number()` window. SQL versus Python
+is a non-question: byte-identical top-20 order on 7/7 query pairs, with
+Python marginally faster; SQL wins on the single round trip and the 20-row
+payload.
+
+**The FTS collapse is caused by ranking, not by matching.** ADR-0002's
+cardinality claim holds and is sharper than stated: at a constant 1.32M
+corpus, latency spans **0.12 ms → 556.76 ms — a 4,600× range** — driven
+entirely by match-set size. But `LIMIT 20` *without* `ORDER BY` is flat at
+~0.13 ms at every cardinality, because the planner early-exits a seq scan.
+Ranked, the same 650,000-match query is 601.9 ms, of which the index scan is
+**42 ms** and the other **560 ms** is fetching 650,000 heap tuples so
+`ts_rank_cd` can score them. **Ranking has no `LIMIT` pushdown**, so capping
+candidates is mandatory rather than optional.
+
+**Trigram: GIN, not the GiST PRD 05 specifies — and only half that question
+is closed.** At 300k rows GIN wins on every axis (build 579 ms vs 1,965 ms,
+size 7,968 kB vs 22 MB, p50 9.01 ms vs 21.1 ms). At 2.08M names on the `%`
+threshold path GIN is **~110× faster** (1.671 ms / 205 buffers against
+182.5 ms / 31,174), builds in 7.5 s vs 23.1 s, and is 69 MB vs 244 MB — **but
+GIN has no KNN operator class at all**, so `ORDER BY name <-> q` degrades to
+a Seq Scan at **3,989.9 ms** where GiST answers from the index. GIN ships
+because the capped-candidate path removes GIN's only exposure. **No
+plan-shape test can distinguish the two** — GiST serves `%` as well — so a
+green suite is not evidence for this choice; the measurements are. And
+`fastupdate = off`'s real argument is the read side: a 1.6 MB pending list
+cost **231 buffers against 30, 7.7× read amplification**, invisible in
+`EXPLAIN` unless you look at buffers.
+
+**`usher.db.staging`'s shared table names were an `ACCESS EXCLUSIVE` lock on
+the hot path, and both failure modes were measured through the shipped
+`PostgresJobQueue`.** With a leftover table, two concurrent one-row enqueues
+wait **819 ms** for each other's *whole transaction* — not the length of a
+DDL. With **no** leftover they do not wait at all: they race on
+`pg_type_typname_nsp_index` and one comes back as a `RepositoryConflict`, so
+**a healthy batch is reported to its caller as a constraint violation**.
+`CREATE TEMP TABLE … ON COMMIT DROP` fixes both in one line per DDL constant,
+for all ten staging tables. **The `pg_temp`-qualified `DROP` is
+load-bearing**: measured, a `TEMP` create behind an *unqualified* drop still
+stalls **818 ms** on a leftover `public` table. `CREATE TEMP UNLOGGED TABLE`
+is a syntax error (`TEMP` replaces `UNLOGGED`, and temp tables are already
+WAL-free). Nine integration files' `DROP TABLE IF EXISTS stg_*` cleanup is
+deleted rather than left to drop nothing.
+
+**`halfvec(384)` is correct and effectively free, and numpy `float16` is
+not.** Round-trip error over 1,000 vectors: max cosine error **1.21e-04**,
+mean 3.03e-05 — three orders of magnitude below the useful signal, with top-1
+and top-5 ordering identical in 42/42 queries. Storage at 1,271,138 titles:
+1.83 GiB → 0.92 GiB. But brute-force exact cosine at 10k is **1.820 ms in
+Postgres against 0.088 ms in numpy `float32`** — PRD 05's "sub-millisecond"
+was a numpy figure — and numpy `float16` is **140× slower than `float32`**
+(12.275 ms), because there is no SIMD GEMM path for half precision. Store
+`halfvec`; convert to `float32` before any numpy dot product.
+
+**The deterministic `FakeEmbedder` is `blake2b → Box-Muller → L2-normalise`,
+and its non-vacuity is measured.** Over 15,996,000 off-diagonal pairs: cosine
+mean −0.00001, **sd 0.05102 against a theoretical 1/√384 = 0.05103** (ratio
+1.000), max +0.2549, **zero pairs above 0.5**. **Use `hashlib`, never
+`hash()`** — `np.random.default_rng(abs(hash(text)))` passes *every* contract
+check and fails only across processes, because `str.__hash__` is
+`PYTHONHASHSEED`-salted, so the cross-process case must be pinned. A
+hashing-trick TF-IDF fake was built and **rejected on evidence**: off-diagonal
+cosine floor **+0.723**, and it collapses case and punctuation to 1.00000,
+which is the vacuous-pass failure mode itself. For a test needing a *known*
+similarity, plant the angle (`v = cos θ·a + sin θ·b`, `a ⊥ b`) — exact to
+2.22e-16 — rather than hoping a hash produces one.
+
+**A relevance assertion that any ordering satisfies is not a relevance
+test**, and it is the easiest way to ship a search that does not work.
+`assert title_id in {h.title_id for h in hits}` passes against an
+implementation returning the whole table in physical order, and so does
+`assert len(hits) > 0`. Every retrieval case in M6 asserts on **position**,
+seeds a **distractor a broken implementation would rank first**, and names
+the wrong implementation in its docstring. The same applies to fusion: an RRF
+test over two candidate lists that *agree* proves nothing about fusion.
 
 **Emby push works.** Verified 2026-07-29 against the live server with a normal
 non-admin token: `/embywebsocket` upgrades (101), delivers periodic `Sessions`,
@@ -2289,6 +2575,38 @@ uv run usher work                               # a worker daemon
 uv run python scripts/measure_ingest.py --items 50000
 uv run python scripts/measure_ingest.py --scale 1126674
 ```
+
+Verified working as of M6 — the catalog is answerable, and **no HTTP route
+was added** (boundary call 1; M9 owns the routers). Suite is **2432 passed +
+5 skipped**, 7 import contracts:
+
+```bash
+uv run usher index                        # model, stale count, refused count -- reads only
+uv run usher index --backfill             # enqueue one index job per stale title
+uv run usher search "the quiet vacuum"    # hybrid by default, prints semantic_coverage
+uv run usher search "vacuum" --mode full_text --kind movie --year-from 1990 --owned-only
+uv run usher suggest "the quie" --limit 5 # type-ahead, typo-tolerant
+uv run usher similar <title id>           # the precomputed neighbours
+uv run usher similar --rebuild            # recompute title_neighbors; nothing else ever does
+
+uv sync --extra embedding                 # optional: fastembed, 167 MiB, no torch
+```
+
+**The embedder is optional and off by default.** `USHER_EMBEDDING_ENABLED`
+gates it and `worker.register(JobKind.INDEX, …)` is guarded on the embedder
+being present exactly as `ENRICH` is guarded on `provider is not None`, so a
+worker never claims work it cannot run. Without it, full-text and trigram
+still serve all 1.27M titles — narrowed, not broken — and `--mode semantic`
+refuses outright while `--mode fused` narrows to full-text *and says which*.
+`usher index` loads no model at all: staleness is a question about a recorded
+model **name**.
+
+**Nothing runs `usher similar --rebuild` for you**, and that is the one
+freshness gap in the milestone, written down as a gap rather than dressed up:
+a title's neighbours go stale when *some other* title gets an embedding,
+which no per-row predicate can decide. `title_neighbors` carries a
+whole-artefact `computed_at` instead of a fingerprint, and refreshing it is
+an operator's command or a cron entry run after `usher index --backfill`.
 
 **A live end-to-end run needs a real catalog, and building one costs three
 minutes and no API key.** `bootstrap --phase all` pulls IMDb's

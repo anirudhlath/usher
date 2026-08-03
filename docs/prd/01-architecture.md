@@ -36,17 +36,33 @@ services for a household-scale deployment.
 port's implementation talks to one nameable external service** (`emby/` →
 `SourceAdapter`, `tmdb/` → `MetadataProvider`) **and for the capability
 otherwise.** That covers two different reasons, not one: a port with more
-than one implementation (`bulk/` → `BulkDataset`'s four dataset importers,
+than one implementation (`bulk/` → `BulkDataset`'s dataset importers,
 `search/` → `SearchIndex`'s Postgres/Meilisearch pair) obviously can't be
 named for a single service — but `embedding/` and `llm/` are capability-named
 too, despite one implementation each, because neither implementation is
-itself a single external service to name: `sentence-transformers` runs
-in-process against a local model, and `litellm` is itself a multi-provider
-abstraction, not one upstream.
+itself a single external service to name: **`fastembed` runs in-process
+against a local ONNX conversion of a BAAI checkpoint** — a Qdrant library
+serving a third-party conversion of somebody else's weights, which is three
+names and no upstream service at all — and `litellm` is itself a
+multi-provider abstraction, not one upstream. (This example read
+`sentence-transformers` until M6 replaced the runtime; the argument is
+unchanged and the substitution makes it stronger. See
+[ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md).)
+
+M6 shipped `adapters/search/postgres.py` and
+`adapters/embedding/fastembed.py` under exactly that rule. **`adapters/postgres/`
+does not exist and must not be created**: it would put a `SearchIndex` and a
+repository in one directory, and the `### adapters/search/ vs db/repositories/`
+section below exists because those are not the same kind of thing.
 
 **Deployment:** `compose.yml` with `usher` + `postgres`. One stateful service.
-An optional `meilisearch` service exists behind a feature gate — see
-[ADR-0002](decisions/0002-postgres-first-search.md).
+**There is no `meilisearch` service** — the sentence here used to say one
+existed behind a feature gate, and none has ever been in `compose.yml`. What
+exists is the gate itself, which is a measurement with a decision attached
+([ADR-0002](decisions/0002-postgres-first-search.md)) and has **⏳ not yet been
+run**. If it is ever taken, the service is added behind the `SuggestIndex`
+port alone — that being the whole of
+[ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md).
 
 ## Layering rules
 
@@ -132,9 +148,10 @@ Other ports follow the same pattern:
 |---|---|
 | `SourceAdapter` | `EmbyAdapter` |
 | `MetadataProvider` | `TmdbMetadataProvider` |
-| `BulkDataset` | `IMDbDumps`, `TMDbIdExport`, `WikidataCrosswalk`, `MovieLensGenome` |
+| `BulkDataset` | `IMDbDumps`, `TMDbIdExport`, `WikidataCrosswalk` — ⏳ `MovieLensGenome` **does not exist**; owned by M7, see [09](09-roadmap.md) |
 | `SearchIndex` | `PostgresSearchIndex` (`MeilisearchIndex` gated) |
-| `Embedder` | `SentenceTransformerEmbedder` |
+| `SuggestIndex` | `PostgresSuggestIndex` (`MeilisearchSuggestIndex` gated) — **the gate moved to this port**, which is [ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md) |
+| `Embedder` | `FastEmbedEmbedder` — **optional**, behind an extra and off by default; a deployment without it still has full-text and trigram, the tier serving 1.27M titles ([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)) |
 | `LLMClient` | `LiteLLMClient` |
 | `TitleRepository` | `PostgresTitleRepository` ([ADR-0009](decisions/0009-repositories-are-ports.md)) |
 | `Row` / `RowProvider` | see [06](06-rows-and-recommendations.md) |
@@ -142,9 +159,11 @@ Other ports follow the same pattern:
 **`adapters/search/` vs `db/repositories/`.** Both ultimately talk to the
 same PostgreSQL instance, which invites conflating them — they are not the
 same thing and do not hold the same kind of data. `adapters/search/`
-implements the `SearchIndex` port (`postgres.py`, with a gated
-`meilisearch.py` alongside it): weighted full-text, trigram autocomplete,
-and vector search ([ADR-0002](decisions/0002-postgres-first-search.md)).
+implements the `SearchIndex` and `SuggestIndex` ports (`postgres.py`, with a
+gated `meilisearch.py` alongside it): weighted full-text and vector search on
+the first, trigram autocomplete on the second
+([ADR-0002](decisions/0002-postgres-first-search.md),
+[ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)).
 Titles, sources, media items, users, and watch state are persisted through
 repositories in `db/repositories/`, which implement repository ports
 declared in `ports/` (`TitleRepository` —
@@ -189,7 +208,7 @@ wants extracting, not that it needs sections.
 | DB | PostgreSQL 17 + pgvector ≥ 0.8.5 |
 | Jobs | In-process asyncio workers over a Postgres-backed queue |
 | LLM | litellm (provider-agnostic) |
-| Embeddings | sentence-transformers, local |
+| Embeddings | fastembed, local, **optional** (167 MiB, no torch) |
 | Packaging | uv |
 | License | MIT |
 
@@ -221,5 +240,8 @@ Deliberately designed-for but not built:
 - **Additional sources.** `MediaItem` is many-per-title from the start.
 - **Additional metadata providers.** Provider precedence is a config list; field
   provenance is recorded per title.
-- **Alternative search backends.** `SearchIndex` is a port with a measurable
-  swap criterion.
+- **Alternative search backends.** `SearchIndex` and `SuggestIndex` are ports
+  with a measurable swap criterion, and the criterion applies to the second
+  one: the swap ADR-0002 contemplates is the instant-search box, which is
+  what put `suggest` on its own port
+  ([ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)).

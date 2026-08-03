@@ -677,6 +677,11 @@ raises it through `ENRICHMENT_RANK`
 enrichment records `Title.enrichment_error` and leaves the tier exactly where
 it was.
 
+**A successful enrichment now does one more thing:** after the commit, beside
+the `title.updated` publish, it enqueues exactly one `index` job for the title
+it just wrote — one job per enriched title, on this stage's hot path. Stage 4
+below owns the reasoning for the ordering and the priority.
+
 ### 4. Index
 
 Update the search document and compute the embedding
@@ -694,7 +699,17 @@ it can fail, park, or never be enqueued. `title_embeddings` therefore records
 staleness a SQL predicate rather than something inferred from the queue. So
 this stage's correctness does not depend on the queue being reliable: a title
 whose job was lost still matches the predicate, and the backfill still claims
-it.
+it. That asymmetry is the milestone's central decision and it is argued in
+full, with its costs, in
+[ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md).
+
+**The last sentence of the paragraph above is still true and now means
+something operationally.** "A pure function of catalog state, rebuildable
+from scratch at any time" is what lets the backfill be a *predicate* rather
+than a cursor over everything: self-draining, idempotent, and re-runnable at
+zero write cost, because `enqueue`'s
+`WHERE jobs.status <> 'parked' AND jobs.priority < excluded.priority` means a
+re-run writes no rows at all.
 
 **A finished enrichment enqueues exactly one `index` job**, after the commit
 that writes the title and beside the `title.updated` publish, on the success
@@ -722,7 +737,35 @@ missed, keyset-paged and re-runnable at zero write cost.
 already fires from stage 3 and nothing a client renders depends on the search
 document or the embedding, so a `title.indexed` would be an event with no
 consumer — which [ports/events.py](../../src/usher/ports/events.py) rules out
-by name.
+by name. Boundary call 5; [09](09-roadmap.md) carries the corrected roadmap
+wording.
+
+**What this stage deliberately does *not* do**, each with its reason, because
+a stage described only by what it does reads as one that does everything:
+
+- **It does not fill weight class B.** No `Person`/`Credit` table exists
+  anywhere in `src/`, and the only place credits physically exist is
+  `raw_payloads.payload` — a *provider's* JSON shape, which has no business in
+  `services/`. The class is reserved and empty, and because the document is a
+  generated column, filling it when M7 lands `Credit` is a migration rather
+  than a rewrite. Boundary call 2.
+- **It does not rebuild the search document.** That would be the obvious
+  symmetry and it is wrong: it makes the cheap, always-correct half depend on
+  the expensive, fallible half, so a parked embedding job would *also* mean a
+  stale full-text document with the two failures indistinguishable.
+- **It refuses a degenerate document, and records the refusal.** A title with
+  no overview, no genres and no keywords composes to whitespace, and every
+  whitespace-only input embeds to the *identical* vector — cosine 1.0000
+  exactly — which is a degenerate cluster pinned to the top of every "more
+  like this" result rather than a bad result. So the composer refuses; and
+  the refusal is **written**, as a row with a `NULL` embedding and the
+  fingerprint of the degenerate text, not skipped. A skipped refusal keeps
+  matching the stale predicate forever, and the backfill re-claims it every
+  pass. **This project has shipped exactly that bug once already** — the
+  watch-history repair that was refused by the very row it existed to repair
+  and then matched `played AND play_count = 0` permanently — which is why it
+  is worth a paragraph in the PRD: it is a *class* of bug this pipeline keeps
+  producing.
 
 ## Watch state
 

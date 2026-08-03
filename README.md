@@ -10,23 +10,36 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 ## Status
 
 Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
-adapter), M4 (ingest pipeline) and M5 (push and read-through) are complete —
-see [`docs/plans/`](docs/plans/) for the task breakdowns and
+adapter), M4 (ingest pipeline), M5 (push and read-through) and M6 (search)
+are complete — see [`docs/plans/`](docs/plans/) for the task breakdowns and
 [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's next.
 
 M3, M4 and M5 are each verified against a live Emby server, and M4's metadata
 half against the live TMDb API. M5's run is the first in this repository to
-have parsed a real `/embywebsocket` message.
+have parsed a real `/embywebsocket` message. **M6's one outstanding item is
+its own typo-tolerance gate**, which is built but has not yet been run
+against a real 1.27M-title catalog
+([ADR-0002](docs/prd/decisions/0002-postgres-first-search.md)).
 
 **The HTTP surface is deliberately small so far**: `/health`,
 `/health/ready`, `/titles/{id}`, `/events` (SSE) and the `/admin/sources`
-routes. Everything the ingest pipeline does is driven from the command line
-until M9 adds the admin API — see below.
+routes. **M6 adds none** — search, suggest, similarity and indexing are all
+command-line, and M9 owns the routers. Everything the ingest pipeline does is
+driven from the command line until then — see below.
 
 ## Requirements
 
 - Docker and Docker Compose
 - A [TMDb API key](https://www.themoviedb.org/settings/api) (free, non-commercial)
+- **Optional:** the embedding extra, for semantic search and "more like
+  this". `uv sync --extra embedding` installs `fastembed` — **167 MiB, 28
+  packages, no torch** — and downloads a 65 MB model on first use. Without
+  it, full-text and typo-tolerant type-ahead still serve the whole catalog;
+  the deployment is narrowed, not broken. Leave `USHER_EMBEDDING_OFFLINE=true`
+  on: it sets `HF_HUB_OFFLINE=1` before the library loads, and without it a
+  host with a warm cache but no network fails with
+  `RuntimeError: Cannot send a request, as the client has been closed` — a
+  message that names neither the network nor the cache.
 
 ## Running it
 

@@ -37,9 +37,55 @@ Summary of why:
 
 ### Full-text
 
-A stored generated `tsvector` with weighted fields — A: name and alternate
-titles, B: cast and crew, C: overview — indexed with GIN and `fastupdate = off`
-(the default buffers into a pending list that produces mysterious p99 spikes).
+A stored generated `tsvector` with weighted fields — A: name and original
+name, **B: reserved for cast and crew and empty**, C: overview and tagline,
+D: genres and keywords — indexed with GIN and `fastupdate = off` (the default
+buffers into a pending list that produces mysterious p99 spikes).
+
+**Weight class B ships reserved and empty, and that is a decision rather than
+an omission.** There is no `Person`, `Credit`, `Collection` or `Image` table,
+domain model or port anywhere in `src/` — `ports/metadata.py` defers all four
+to M7 and M9 by name, and [09](09-roadmap.md)'s M4 boundary call 2 says the
+same. The only place credits physically exist is `raw_payloads.payload`, and
+assembling a search document out of a *provider's* JSON shape would put a
+TMDb-shaped concept in `services/`. So `SearchDocument` carries a
+`credits: Sequence[str] = ()` that is always empty in M6, and the class is
+**reserved rather than repurposed**: moving overview up into B would make the
+weights mean something different the day credits arrive, and the whole point
+of a stored generated column is that filling B later is a migration rather
+than a rewrite. Boundary call 2.
+
+**"A stored generated `tsvector`" is right and the obvious spelling of it
+does not compile — measured, not suspected.** `GENERATED ALWAYS AS (…)
+STORED` rejects the natural expression with `ERROR: generation expression is
+not immutable`, because `array_to_string(anyarray, text)` is `STABLE`:
+`anyarray` admits element types whose output depends on a GUC (`timestamptz`
+and `TimeZone`). Two further facts fall out of the same check —
+`to_tsvector(regconfig, text)` *is* `IMMUTABLE`, so the explicit `'english'`
+is load-bearing and a bare `to_tsvector(text)` would not work; and
+`array_to_tsvector`, the obvious core-function fix, is **wrong for this
+purpose**: it emits array elements as raw, unlexized, case-preserving
+lexemes, so `ARRAY['Sci-Fi','Film-Noir','Drama']` stores
+`'Drama' 'Film-Noir' 'Sci-Fi'` and a genre search silently matches nothing.
+What ships is a custom `IMMUTABLE` SQL wrapper narrowed to `text[]`,
+`usher_array_text` — and narrowing the signature is what makes the
+immutability promise honest, so it must not be widened to `anyarray` to
+"reuse" it.
+
+**Changing that wrapper's body requires a forced rewrite of the column in the
+same migration.** `CREATE OR REPLACE FUNCTION` does not recompute stored
+generated values — verified — while a later `UPDATE` of a row *does*, which
+produces a table where some rows were computed by the old definition and some
+by the new with nothing to tell them apart. Migration `fa2b6c1e9d30` carries
+the recipe and a test samples rows against a freshly computed document.
+[ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md).
+
+**`fastupdate = off` is confirmed and its real argument is the read side.**
+Verified with `pageinspect`: after 5,000 inserts the default had 50 pending
+pages / 5,000 pending tuples against 0 / 0. The cost that matters is what a
+*query* then pays — a 1.6 MB pending list cost **231 buffers against 30, 7.7×
+read amplification** on the index stage, invisible in `EXPLAIN` unless you
+look at buffers. That is the mechanism behind "mysterious p99 spikes".
 
 ### Autocomplete — a separate, narrow path
 
@@ -47,18 +93,72 @@ titles, B: cast and crew, C: overview — indexed with GIN and `fastupdate = off
 matching against a large full-text index is where the latency cliff genuinely
 lives.
 
-Instead: a narrow `(title_id, name, kind, popularity)` table over names and
-aliases, GiST trigram index, candidates capped at a few thousand, then
+Instead: a trigram index, candidates capped at a few hundred, then
 `levenshtein_less_equal` from the core `fuzzystrmatch` module as a re-rank over
 that capped set, ordered by popularity.
 
-> 🔶 **Provisional.** This section already treats autocomplete as its own
-> narrow path, separate from full-text search — but `SearchIndex.suggest`
-> (`usher.ports.search`) is still one method on the same port as
-> `search`/`index`/`remove`. ADR-0002 gates Meilisearch "for the
-> instant-search box only", which suggests the real swap boundary may be
-> `suggest` alone, not the whole class. Whether it should be its own
-> `SuggestIndex` port is undecided; settle in **M6**.
+**There is no narrow `title_search_names` table, and the trigram index goes
+directly on `titles`.** This section used to specify a narrow
+`(title_id, name, kind, popularity)` table "over names and aliases", and its
+justification is exactly that — *aliases and people names*, one title
+contributing many rows. Neither has a data source in M6 (see weight class B
+above), so the table would hold exactly one row per title duplicating
+`titles(id, name, kind, popularity)`: a second copy of the same data, a
+second thing to keep fresh, and a new instance of precisely the staleness
+problem this milestone exists to eliminate. **When M7 lands aliases and
+people, the narrow table is the migration that adds them** — and at that
+point it holds rows `titles` does not, which is what its justification always
+was. Boundary call 3.
+
+Stated honestly: **that call rests on a structural argument, not on a
+latency measurement.** No variant was built and timed against the direct
+index, because the two would answer the same query over the same 1.27M names
+with the same operator class and the narrow table's only difference in M6 is
+that it is a copy. The number that *is* measured is the index type below.
+
+**The index is GIN, not the GiST this section used to specify — and only half
+of that question is closed.** Measured at 300k rows: build **579 ms against
+1,965 ms**, size **7,968 kB against 22 MB**, p50 lookup **9.01 ms against
+21.1 ms**. Re-measured at 2.08M names, where the honest summary is that the
+two answer *different questions*: on the `%` threshold path GIN is ~110×
+faster (1.671 ms / 205 buffers against 182.5 ms / 31,174), builds in 7.5 s
+against 23.1 s and is 69 MB against 244 MB — but **GIN has no KNN operator
+class at all**, so `ORDER BY name <-> q` under it degrades to a `Seq Scan` at
+3,989.9 ms where GiST answers from the index. GIN ships because the
+capped-candidate path is what `PostgresSuggestIndex` is built around and a
+cap is exactly what removes GIN's only exposure — collecting every match
+before the top-N sort. **A path that ever genuinely needs KNN needs a GiST
+index, not a tuning change**, and no plan-shape test can distinguish the two,
+so the measurements carry this choice and the suite does not.
+
+**The cap must be ordered, and an unordered one is an active bug rather than
+a simplification.** A `LIMIT` with no `ORDER BY` truncates arbitrarily, which
+makes *lowering* the similarity threshold make recall **worse**: measured
+66.2% @0.3 → 48.5% @0.1 → 2.6% @0.05 on a 604-case typo set. Any cap is
+`ORDER BY similarity(name, q) DESC` under GIN (or `ORDER BY name <-> q` under
+GiST). Capping smaller does not help — GiST KNN costs 272 ms at `LIMIT 200`
+against 283 ms at `LIMIT 3000`; the cost is the traversal.
+
+`pg_trgm.similarity_threshold` stays at its 0.3 default and is set with **`SET
+LOCAL`**, never a bare `SET`, which leaks onto the next checkout of a pooled
+connection — verified for this GUC and for `hnsw.*`. And **never feature-detect
+a contrib GUC**: `SHOW pg_trgm.similarity_threshold` raises on a backend that
+has not yet run one of the library's operators, while the `SET LOCAL` succeeds
+on that same cold backend.
+
+> **Settled in M6 — yes, `suggest` is its own port.** This section already
+> treated autocomplete as a separate narrow path while `SearchIndex.suggest`
+> was one method on the same port as `search`/`index`/`remove`. It is now
+> `SuggestIndex`, a separate ABC with exactly one method and **no write
+> path**. The argument that decides it is dual-write visibility, not
+> tidiness: if the gate below fails and Meilisearch is added for the
+> instant-search box, documents must be written to *both* engines — the cost
+> [ADR-0002](decisions/0002-postgres-first-search.md) refused — and splitting
+> the port puts that cost in the type system rather than making it look like
+> implementing a method that was already there. The shipped pair is the
+> evidence: `PostgresSuggestIndex` and `PostgresSearchIndex` share a session,
+> the `titles` table, and no SQL, index, GUC or ranking rule.
+> [ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md).
 
 ### Semantic
 
@@ -108,6 +208,8 @@ told; swapping the runtime moves `model_name` and re-claims every row, which is
 the scheme replacing a migration. `usher index` reports both counters and
 writes nothing; `usher index --backfill` enqueues one job per stale title,
 keyset-paged on `titles.id` and re-runnable at zero write cost.
+[ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md) carries
+the argument and the costs.
 
 **A title whose composed document is degenerate is refused, and the refusal is
 written.** Measured: every whitespace-only input embeds to the *identical*
@@ -126,17 +228,43 @@ a 0.4751 cross-title mean.
   by default, and without it filtered vector queries suffer severe recall
   collapse.
 - Owned titles skip ANN entirely; exact brute-force cosine is faster and exact
-  at that scale.
+  at that scale. **The claim above that this is "sub-millisecond" is true in
+  numpy and false in Postgres**: measured at 10k vectors, 1.820 ms in
+  Postgres (seq scan plus top-N) against 0.088 ms in numpy `float32`. The
+  conclusion survives comfortably — 1.8 ms exact beats an approximate
+  filtered HNSW scan — but **numpy `float16` is 140× slower than `float32`**
+  (12.275 ms against 0.088 ms; there is no SIMD GEMM path for half
+  precision), so store `halfvec` and convert to `float32` before any numpy
+  dot product.
 - pgvector pinned ≥ 0.8.5 (CVE-2026-3172, plus HNSW vacuum corruption fixes).
+  The image used by the test suite and by compose ships **0.8.6**.
 
-> 🔶 **Provisional.** "Brute-force exact cosine" (above) is only equivalent
-> to a plain dot product if the embeddings are unit-normalised — the
-> `Embedder` port (`usher.ports.embedding`) documents that contract, but
-> has no query/document distinction, even though BGE-family models like
-> `bge-small-en-v1.5` document a query-side instruction prefix that
-> document-side text does not get. Whether the port needs
-> `embed_query`/`embed_documents` instead of one `embed` is undecided;
-> settle in **M6**.
+> **Settled in M6 by measurement, and both halves resolve *against* the
+> previous wording.**
+>
+> **No query/document split.** `Embedder` keeps one `embed`. The documented
+> BGE query prefix moves MRR by **−0.0028**, 95% CI `[−0.0259, +0.0203]`;
+> applying it to *both* sides is significantly harmful at **−0.0663**, CI
+> `[−0.1013, −0.0330]`. The experiment carries a power control — a
+> deliberately wrong prefix moves MRR **−0.2497** at P(>0) = 0.000 — so this
+> is a measured null rather than a blind one, and the port's old "callers are
+> responsible for any query-side prefix" clause is deleted because it is the
+> hazard: one symmetric loop is the cheapest way to obey it and *is* the
+> −0.066 condition.
+>
+> **Normalisation is real, and it is a property of this checkpoint rather
+> than of embedders.** Norms are 1.0 to within 5.96e-08 and the library's
+> `normalize_embeddings=False` returns bit-identical vectors, because
+> normalisation is a third module baked into the checkpoint; the same
+> backbone without it returns norms 8.99–9.46. So the implementation asserts
+> the norm on its first batch rather than trusting a model card. Two limits
+> the old sentence did not carry: **after the `halfvec` cast the vectors are
+> no longer unit** (norm drift 1.19e-07 → 1.21e-04), so "cosine == dot" holds
+> only before the cast; and the contract is **load-bearing only under the
+> inner-product operator** — `<=>` is normalisation-invariant while `<#>` is
+> not, and this design specifies `halfvec_cosine_ops`/`<=>`, so normalisation
+> buys speed here, not correctness.
+> [ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md).
 
 ### Fusion
 
@@ -150,8 +278,10 @@ incompatible scales and adding them produces confident nonsense.
 
 - embedding cosine over overview text,
 - Jaccard over genres, keywords, cast, and crew,
-- MovieLens tag-genome cosine where available (~7% coverage, weighted in only
-  when present),
+- ⏳ MovieLens tag-genome cosine where available (~7% coverage, weighted in
+  only when present) — **the importer does not exist; [09](09-roadmap.md)
+  assigns it to M7**, and until then the ~7% is a plan rather than a
+  measurement,
 - collection membership as a strong signal.
 
 Neighbours are precomputed offline into a `title_neighbors` table — item vectors
@@ -162,7 +292,8 @@ instant and engine-independent.
 blend is the other two**, checked against the code rather than against this
 prose. Cast and crew have no `Person`/`Credit` table, model or port anywhere;
 the MovieLens tag-genome importer has never been built (there is no `movielens`
-bootstrap phase and no `adapters/bulk/movielens.py`); and `titles.collection_id`
+bootstrap phase and no `adapters/bulk/movielens.py` — it is now owned by M7,
+see [09](09-roadmap.md)); and `titles.collection_id`
 is a bare nullable UUID with no table that nothing in `src/` writes. So M6 ships
 **embedding cosine (0.60) plus keyword Jaccard (0.25) and genre Jaccard
 (0.15)**, written as a sum of weighted terms over an explicit signal list, so
@@ -270,16 +401,28 @@ list stop agreeing.
 `SearchIndex` is an ABC. Adding Meilisearch means implementing it once; nothing
 above the port changes.
 
-> 🔶 **Provisional.** The port's current shape is closer to Postgres's own
-> operations than a neutral candidate-generation contract:
-> `index(title_id)` forces a Meilisearch implementation to fetch each
-> title back out to build its document (1.3M round-trips on a full
-> rebuild); `SearchRequest.filters` has no key vocabulary, so two backends
-> would invent different ones; there is no `index_many`/`rebuild` for bulk
-> operations; and semantic search needs the query *vector* itself, which
-> the paragraph below already anticipates supplying to Meilisearch as
-> `userProvided`. Settle if and when the gate below actually trips, in
-> **M6**.
+> **Settled in M6.** All four named defects are fixed, and the port is now a
+> candidate-generation contract rather than a description of Postgres's own
+> operations.
+>
+> - `index(title_id)` became **`index_many(documents)`** — the port takes a
+>   `SearchDocument` the *service* assembles from a `Title` it already holds,
+>   so no implementation ever fetches a title back out.
+> - `SearchRequest.filters: dict[str, Any]` became **`SearchFilters`**, a
+>   frozen dataclass with a closed vocabulary (`kinds`, `year_from`,
+>   `year_to`, `genres`, `owned_only`, `min_enrichment`). A backend that
+>   cannot express one **raises** rather than ignoring it, because an ignored
+>   filter returns *more* results and reads as working.
+> - `SearchRequest` gained **`query_vector`**, computed by the caller — which
+>   is what makes the port engine-neutral and simultaneously settles who
+>   applies a model's query prefix (nobody: see `### Semantic`).
+> - **No `rebuild`, deliberately.** It would be a second path to the same
+>   state, exercised only by an operator, and the predicate-driven backfill
+>   already rebuilds from scratch by construction. A port method whose only
+>   test is its own test is a liability.
+>
+> The fifth change is the split above: `suggest` left this port entirely
+> ([ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)).
 
 **The gate is measurable, not a judgement call.** Build a typo test set from
 real catalog titles, weighted toward short names — `Up`, `Her`, `Dune`, `Alien`
@@ -287,6 +430,35 @@ real catalog titles, weighted toward short names — `Up`, `Her`, `Dune`, `Alien
 trigrams; one typo destroys most of them, and transpositions are close to a
 blind spot). If recall@5 on that set falls below the bar after honest tuning,
 add Meilisearch for the instant-search box only.
+
+**⏳ The gate has not been run against the real catalog.** M6 built everything
+it measures and the run is outstanding; Meilisearch is not added either way,
+because a second stateful service bolted on at the end of a milestone is not
+what a measurement with a decision attached is for (boundary call 7).
+
+**And the gate as defined above measures the wrong half — which is itself a
+finding, from a synthetic dry run over 604 single-edit typo cases on 34
+genuinely short real titles planted in a 2.08M-name corpus.** Recall is
+arguable and passes; latency is not and does not:
+
+| strategy | recall@5 | transposition | p50 | p95 |
+|---|---|---|---|---|
+| this section as literally written | 66.2% | 34.5% | 181 ms | 241 ms |
+| GIN `%` @0.1 | **93.5%** | 82.8% | 582 ms | 1,893 ms |
+| GiST KNN `ORDER BY name <-> q` | **93.5%** | 82.8% | 281 ms | **342 ms** |
+| btree prefix, `lower(name) text_pattern_ops` | — (no typo tolerance) | — | **0.12–1.30 ms** | 0.14–18.85 ms |
+
+Every configuration reaching 93.5% has a p50 of 281–582 ms against an
+as-you-type budget of roughly 50 ms. **So the gate must measure latency as
+well as recall**, and a run reporting recall alone does not close it — this
+section and [ADR-0002](decisions/0002-postgres-first-search.md) both defined
+it as recall@5 only. Recall by title length under the best tuning: **2–4
+characters 79.9%**, 5–6 characters 97.5%, 7+ characters 100%.
+
+Also measured, and it makes this section's own examples concrete:
+`similarity('dune','dnue') = 0.111`, `('her','hor') = 0.143`,
+`('up','uo') = 0.200` — all below the 0.3 default, so `name % 'dnue'` matches
+**nothing**. "Transpositions are close to a blind spot" is exact.
 
 If that happens: precompute embeddings and use `userProvided`, run ≥ v1.39 (a
 memory leak existed from v1.12–v1.38), configure `filterableAttributes`
