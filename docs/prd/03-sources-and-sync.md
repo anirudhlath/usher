@@ -683,6 +683,47 @@ Update the search document and compute the embedding
 ([05](05-search-and-similarity.md)). Both derive from the Title, so this stage
 is a pure function of catalog state and can be rebuilt from scratch at any time.
 
+**The two halves are not maintained the same way, and the asymmetry is
+deliberate.** The search document is a `GENERATED ALWAYS AS (…) STORED` column
+on `titles`, so PostgreSQL recomputes it inside the statement that writes
+`name` or `overview` — no job is involved, and a skeleton title is fully
+searchable with no queued work at all. The embedding needs a model, which the
+database cannot run, so it is a `JobKind.INDEX` job; and because it is queued
+it can fail, park, or never be enqueued. `title_embeddings` therefore records
+`model_name` and a `source_fingerprint` of the exact text embedded, which makes
+staleness a SQL predicate rather than something inferred from the queue. So
+this stage's correctness does not depend on the queue being reliable: a title
+whose job was lost still matches the predicate, and the backfill still claims
+it.
+
+**A finished enrichment enqueues exactly one `index` job**, after the commit
+that writes the title and beside the `title.updated` publish, on the success
+path only. *After*, because a worker claiming the job reads `titles` in a
+different transaction: enqueued before the commit it can fingerprint and embed
+the *pre-enrichment* text and then stop matching the stale predicate, which is
+a permanently stale vector produced by the enqueue meant to prevent one. *On
+the success path only*, because a failure leaves the tier and the text where
+they were, so the job would find the row already current and complete without
+embedding — once per attempt of a backoff schedule. It is enqueued at
+`BACKFILL` priority: nothing a client renders depends on a search document, so
+it must never sit in front of a `match` or a demand-promoted `enrich`.
+
+**The embedded population is the enriched tier, not the catalog.** Enrichment
+completion is the producer — not the nightly walk, for the reason stage 1
+already gives about enqueueing per item — so the population is
+`enrichment_state <> 'skeleton'` (2k–10k titles), for which
+`ix_titles_enrichment_state` is already exactly the partial index. Embedding
+all 1,271,138 titles would produce a vector of each skeleton's name, which
+full-text already does better and cheaper, and would cost 4–6 hours against 25
+seconds to 2 minutes. `usher index --backfill` drains anything the queue
+missed, keyset-paged and re-runnable at zero write cost.
+
+**No second client event is published on index completion.** `title.updated`
+already fires from stage 3 and nothing a client renders depends on the search
+document or the embedding, so a `title.indexed` would be an event with no
+consumer — which [ports/events.py](../../src/usher/ports/events.py) rules out
+by name.
+
 ## Watch state
 
 **Canonical in Usher; sources are event streams and write targets.**

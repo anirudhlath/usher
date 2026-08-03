@@ -201,6 +201,7 @@ async def test_enrichment_records_prd_10s_latency_metric(
         provider=FakeMetadataProvider(),
         commit=_no_commit,
         events=FakeEventPublisher(),
+        queue=FakeJobQueue(),
     )
     await service.enrich(title.id)
     recorded = _recorded(meter_reader)

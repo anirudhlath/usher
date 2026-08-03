@@ -46,10 +46,12 @@ from pydantic import AwareDatetime
 
 from usher.domain.enums import ENRICHMENT_RANK, EnrichmentState
 from usher.domain.episode import Episode
+from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, UsherPortError
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.ingest import ProviderRef
+from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.metadata import EnrichmentResult, MetadataProvider
 from usher.ports.repository import EpisodeRepository, RawPayloadStore, TitleRepository
 
@@ -135,6 +137,7 @@ class EnrichService:
         commit: Callable[[], Awaitable[None]],
         events: EventPublisher,
         *,
+        queue: JobQueue,
         cache_max_age_days: int = 30,
         now: Callable[[], AwareDatetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -149,6 +152,12 @@ class EnrichService:
         # the two composition roots supply `NullEventPublisher()` where they
         # mean it, and say why.
         self._events = events
+        # Required and keyword-only, for the same reason `events` is: a
+        # defaulted queue in this signature is how one composition root ends
+        # up enqueueing index work into an object nothing ever claims from,
+        # while the other works. It must be the *same* queue `MatchService`
+        # and `IngestService` hold, which only a composition root can know.
+        self._queue = queue
         self._max_age = timedelta(days=cache_max_age_days)
         # Injected, the way `EmbySession`, `TmdbClient` and `TMDbIdDataset`
         # all inject theirs: the cache-expiry branch is otherwise only
@@ -197,6 +206,53 @@ class EnrichService:
         await self._titles.update(enriched)
         await self._store_hierarchy(result)
         await self._commit()
+        # PRD 03's fourth stage, enqueued from the third. **After the commit**,
+        # and that ordering is the one here with a wrong answer and no error
+        # attached: a worker claiming this job reads `titles` in a different
+        # transaction, so a job enqueued before the commit can run against the
+        # pre-enrichment row, fingerprint the old text, store a vector of the
+        # old text -- and then *stop matching the stale predicate*, because the
+        # fingerprint agrees with what it embedded. A permanently stale vector
+        # the backfill will never re-claim, produced by the enqueue that exists
+        # to keep it fresh.
+        #
+        # Success path only. A failure leaves the tier where it was (ADR-0008)
+        # and changes no text, so the fingerprint is unchanged and the job
+        # would complete without embedding -- one claim per attempt of a
+        # backoff schedule, for nothing.
+        #
+        # `BACKFILL`, the floor: nothing a client renders depends on a search
+        # document. It is also the sweep's priority, which is what makes a
+        # re-enqueue write zero rows (`_ENQUEUE`'s `WHERE jobs.priority <
+        # excluded.priority`) rather than rewriting the row.
+        #
+        # Flushes, never commits (`JobQueue`'s contract), so this row lands in
+        # the transaction `JobWorker` closes with `complete(job.id)`: "this
+        # enrich job is done" and "an index job exists" commit together.
+        #
+        # `enriched.id`, not `title.id`. `_merged` preserves the id today, so
+        # the two are the same object and the mutation between them survives
+        # every test -- it is written this way so a future `_merged` that
+        # re-mints an id cannot silently index the wrong row.
+        #
+        # **A failure here propagates**, deliberately. After a successful
+        # commit the session is healthy, so this is close to unreachable --
+        # but catching and logging would be a silently lost index job, this
+        # milestone's failure mode in miniature. The cost of propagating is
+        # one `enrichment_error` on an already-enriched title (the tier is
+        # untouched) that the next attempt clears, and the retry is cheap
+        # because `_payload_for` reads the cache.
+        #
+        # **No second client event, and that is boundary call 5 rather than an
+        # omission.** PRD 09 asks M6 to publish `title.updated` "through the
+        # `EventPublisher` port M5 built rather than inventing a channel" --
+        # and it is published immediately below, already. Nothing a client
+        # renders depends on the search document or the embedding, so a
+        # `title.indexed` would be an event with no consumer, which
+        # `ports/events.py` names: "no member nothing emits". Do not add one.
+        await self._queue.enqueue(
+            [JobRequest(kind=JobKind.INDEX, key=str(enriched.id), priority=JobPriority.BACKFILL)]
+        )
         # PRD 03's read-through loop, closed: "Completion publishes a
         # `title.updated` event on a Server-Sent Events channel; clients patch
         # in place."

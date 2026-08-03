@@ -310,6 +310,12 @@ def build_enrich_service(
         provider=provider,
         commit=pipeline.commit,
         events=pipeline.events,
+        # The *same* queue `MatchService` and `IngestService` hold. This is
+        # what a composition root is for: `services/` may not import `db/`
+        # (ADR-0009), so nothing below here can discover that these are one
+        # table, and a second queue would enqueue index work into an object
+        # nothing ever claims from -- enriched titles, no vectors, no error.
+        queue=pipeline.queue,
         cache_max_age_days=settings.enrich_cache_max_age_days,
     )
 
