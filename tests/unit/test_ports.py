@@ -144,8 +144,12 @@ def test_llm_purpose_is_a_closed_string_vocabulary() -> None:
 def test_search_mode_fused_is_reachable() -> None:
     """The bug this replaced: `semantic: bool` could not express a third
     "fused" option, even though RRF fusion is the actual design
-    (ADR-0002), not a hypothetical alongside full-text and semantic."""
-    request = SearchRequest(query="dune", mode=SearchMode.FUSED)
+    (ADR-0002), not a hypothetical alongside full-text and semantic.
+
+    Carries a `query_vector` since M6: a fused request without one is
+    refused at construction, because the caller owns the model.
+    """
+    request = SearchRequest(query="an empty room", mode=SearchMode.FUSED, query_vector=(1.0, 0.0))
     assert request.mode is SearchMode.FUSED
 
 
