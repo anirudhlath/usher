@@ -16,6 +16,7 @@ from sqlalchemy import Table
 
 from usher.db.base import Base
 from usher.db.models import MediaItemRow, SourceRow, TitleRow, UserRow, WatchStateRow
+from usher.db.models.title import DERIVED_COLUMNS
 from usher.domain.enums import (
     EnrichmentState,
     HdrFormat,
@@ -245,12 +246,23 @@ def test_bulk_load_friendly_columns_have_server_defaults() -> None:
 
 
 def test_title_and_title_row_have_matching_field_sets() -> None:
-    """STANDING CONSTRAINT (title.py's module docstring, point 1):
-    Title's field set and TitleRow's column set must stay in exact 1:1
-    correspondence by name -- `_to_domain`'s dict-comprehension-into-
-    `model_validate` and `_to_row`'s `TitleRow(**title.model_dump(...))`
-    both rely on it, and `Title`'s `extra="forbid"` makes a break loud
-    only at read/write time, inside the Docker-requiring integration
-    suite, as a ValidationError or TypeError with no obvious cause. This
-    is the same check, running here for free, no Postgres required."""
-    assert set(Title.model_fields) == {c.name for c in TitleRow.__table__.columns}
+    """STANDING CONSTRAINT (title.py's module docstring, point 1): Title's
+    field set and TitleRow's column set must stay in exact 1:1
+    correspondence by name, *modulo the columns the row deliberately
+    derives* -- `_to_domain`'s dict-comprehension-into-`model_validate` and
+    `_to_row`'s `TitleRow(**title.model_dump(...))` both rely on it, and
+    `Title`'s `extra="forbid"` makes a break loud only at read/write time,
+    inside the Docker-requiring integration suite, as a ValidationError or
+    TypeError with no obvious cause. This is the same check, running here for
+    free, no Postgres required.
+
+    Written as `columns - DERIVED_COLUMNS == fields` rather than
+    `columns == fields | DERIVED_COLUMNS` so it still fails two ways, not
+    one: an undeclared new column fails it (the property the rule exists
+    for), *and* a name added to `DERIVED_COLUMNS` that `Title` also models
+    fails it -- which is the mistake that would quietly stop a real domain
+    field from ever being read back.
+    """
+    columns = {c.name for c in TitleRow.__table__.columns}
+    assert columns >= DERIVED_COLUMNS, "DERIVED_COLUMNS names a column that does not exist"
+    assert columns - DERIVED_COLUMNS == set(Title.model_fields)

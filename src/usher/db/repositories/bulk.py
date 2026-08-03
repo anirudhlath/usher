@@ -41,6 +41,14 @@ The `COPY` mechanics themselves now live in `usher.db.staging`, so M4's
 re-deriving the three traps above per repository -- which is how one of them
 gets missed. This module docstring stays the canonical statement of them;
 `staging.py` points back here.
+
+Every statement here enumerates its columns by hand, which is what keeps
+`titles.search_document` (a `GENERATED ALWAYS AS ... STORED` column, added by
+migration fa2b6c1e9d30) out of them. That is not incidental: naming a
+generated column in an `INSERT` column list is an *error*, not an ignored
+value. The generated column is also the one index artefact on `titles` that
+`bulk_load_window` cannot suspend -- it is computed on every write, measured
+at 4.06x on this module's own `INSERT ... SELECT` shape, and accepted.
 """
 
 from collections.abc import AsyncIterator, Sequence
