@@ -44,6 +44,7 @@ repository; if it lands there, this call site inherits it with no change.
 import uuid
 from collections.abc import Sequence
 
+from pydantic import AwareDatetime
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,9 +63,13 @@ from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import (
     BulkWriteResult,
+    NeighborCandidate,
+    NeighborSeed,
+    ScoredNeighbor,
     StoredEmbedding,
     TitleEmbeddingRepository,
     TitleEmbeddingUpsert,
+    TitleNeighborRepository,
 )
 
 # `ordinal` is the row's index within the batch, and it is what makes
@@ -153,6 +158,132 @@ REFUSED_EMBEDDING = f"NOT ({STALE_EMBEDDING}) AND e.embedding IS NULL"
 # `ix_titles_enrichment_state`'s partial predicate, so the planner can drive
 # the whole scan off an index that already exists.
 _POPULATION = "t.enrichment_state <> 'skeleton'"
+
+# --- the similarity precompute ------------------------------------------
+#
+# One page of seeds, with the two tag columns the blend reads. A keyset cursor
+# for the reason `list_stale`'s is one: `OFFSET` pagination is 43.7 ms at
+# offset 0 and 388.9 ms at offset 1,126,574 on this project's own measurement.
+#
+# `e.embedding IS NOT NULL` is the seed-side half of the exclusion pair. A
+# refused title -- one whose composed document was degenerate -- is written as a
+# row with a NULL vector precisely so it stops matching the stale predicate;
+# there is nothing to search *from*, so it is not a seed.
+_LIST_EMBEDDED = """
+SELECT e.title_id, t.genres, t.keywords
+FROM title_embeddings AS e
+JOIN titles AS t ON t.id = e.title_id
+WHERE e.embedding IS NOT NULL
+  AND (CAST(:after AS uuid) IS NULL OR e.title_id > CAST(:after AS uuid))
+ORDER BY e.title_id
+LIMIT :limit
+"""
+
+# The candidate pool: a whole page of seeds in one statement, through
+# `CROSS JOIN LATERAL`. One round trip per *seed* is the same shape
+# `index_many` was introduced to delete from `SearchIndex` -- at 10,000 instead
+# of 1.3M, which is smaller and is still no reason to reintroduce it.
+#
+# **Three clauses carry the whole design and none of them is decoration:**
+#
+# - `e.embedding IS NOT NULL` is the candidate-side exclusion. Without it,
+#   `e.embedding <=> seed.embedding` is NULL, Postgres sorts NULLs *last* on an
+#   ascending order, and so refused rows arrive only when the population is
+#   smaller than the pool -- at which point they are either a type error on the
+#   float conversion or, under a careless `coalesce(..., 0)`, a distance of 0
+#   pinning every refused title to the top of every list. Measured, and the
+#   reason the failure is invisible without the clause: every whitespace-only
+#   input embeds to the *identical* vector, cosine 1.0000 exactly.
+# - `e.title_id <> seed.title_id`, because cosine with itself is 1.0 and every
+#   neighbour list would otherwise open with the film the reader is looking at.
+# - `ORDER BY <distance>, e.title_id`. The distance alone leaves *which*
+#   candidates enter the pool to the executor, and this artefact is read until
+#   the next rebuild.
+#
+# **`titles` is deliberately not joined here.** The tag columns are read by a
+# second statement, because this one runs with index scans disabled (see
+# `_EXACT_SCAN_OFF`) and a forced sequential join against a 1,271,138-row
+# `titles` per seed would cost orders of magnitude more than the brute-force
+# distance scan this is here to do.
+_NEAREST = """
+SELECT seed.title_id AS seed_id, near.title_id AS neighbor_id, 1 - near.distance AS cosine
+FROM title_embeddings AS seed
+CROSS JOIN LATERAL (
+    SELECT e.title_id, e.embedding <=> seed.embedding AS distance
+    FROM title_embeddings AS e
+    WHERE e.embedding IS NOT NULL
+      AND e.title_id <> seed.title_id
+    ORDER BY e.embedding <=> seed.embedding, e.title_id
+    LIMIT :limit
+) AS near
+WHERE seed.title_id = ANY(:seed_ids) AND seed.embedding IS NOT NULL
+"""
+
+_TAGS_FOR = "SELECT id, genres, keywords FROM titles WHERE id = ANY(:title_ids)"
+
+# **Exact, not approximate, and bracketed around one statement rather than left
+# on for the transaction.** PRD 05 puts brute-force exact cosine at this scale
+# (10k x 384 halfvec is 7.7 MB, inside this host's 96 MB L3), and the argument
+# is sharper than "it is affordable": recall loss in a live query is per-query,
+# and recall loss in a cached artefact is permanent -- a neighbour an
+# approximate scan missed is missed by every read of that row until the next
+# rebuild. This milestone has **not** measured HNSW recall, and borrowing the
+# halfvec quantisation figures to justify an approximate index would be
+# laundering one measurement into a claim about another.
+#
+# The adapter's `_force_exact_scan` sets the same two GUCs and leaves them set,
+# because its transaction serves one read. This one writes: the rebuild's own
+# `DELETE` and `INSERT` run in the same transaction and must keep their
+# indexes, so the pair is turned back on immediately. `SET LOCAL`, never `SET`
+# -- verified, a bare `SET` is still readable from a brand-new session on the
+# same engine after the connection is returned.
+_EXACT_SCAN_OFF = ("SET LOCAL enable_indexscan = off", "SET LOCAL enable_bitmapscan = off")
+_EXACT_SCAN_ON = ("SET LOCAL enable_indexscan = on", "SET LOCAL enable_bitmapscan = on")
+
+_COUNT_WITHOUT_EMBEDDING = "SELECT count(*) FROM title_embeddings WHERE embedding IS NULL"
+
+# Scoped to `seed_ids`, never to the rows being written. A seed whose
+# neighbours all disappeared contributes no rows at all, so a delete derived
+# from `neighbors` deletes nothing for it and leaves its stale neighbours in
+# place through every future rebuild -- the one row shape a rebuild cannot
+# repair.
+_DELETE_NEIGHBORS = "DELETE FROM title_neighbors WHERE title_id = ANY(:seed_ids)"
+
+# One statement per page, through parallel `unnest`. No staging table and
+# therefore no `ACCESS EXCLUSIVE` lock on a shared name: this write is already
+# set-based and there is nothing for a `COPY` to buy at a page of at most
+# `page_size * 25` rows.
+#
+# `computed_at` is left to its `server_default` of `now()`, which is
+# `transaction_timestamp()` -- frozen for the page's transaction, so every row
+# a page writes shares one instant and `min(computed_at)` is genuinely the
+# oldest *page* rather than the oldest row.
+_INSERT_NEIGHBORS = """
+INSERT INTO title_neighbors (title_id, neighbor_id, score, rank)
+SELECT * FROM unnest(
+    CAST(:title_ids AS uuid[]), CAST(:neighbor_ids AS uuid[]),
+    CAST(:scores AS double precision[]), CAST(:ranks AS integer[])
+)
+"""
+
+# `ORDER BY rank`, not `ORDER BY score DESC`. The batch's own ordering is
+# stored rather than re-derived: reproducing it from the score works only up to
+# float ties, and a tie broken differently on two reads shows a client two
+# different "most similar" titles for one catalog. `neighbor_id` after it makes
+# the order total even if a rebuild ever wrote a duplicate rank.
+_LIST_NEIGHBORS = """
+SELECT title_id, neighbor_id, score, rank FROM title_neighbors
+WHERE title_id = :title_id
+ORDER BY rank, neighbor_id
+LIMIT :limit
+"""
+
+# `min`, not `max`. The newest row would report a whole-table rebuild as fresh
+# the moment its first page committed, which is this milestone's own failure
+# mode -- looks healthy while describing yesterday -- wearing an accessor.
+# `NULL` for an empty table is the "never computed" signal, and it is a
+# different fact from "this title has no neighbours".
+_OLDEST_NEIGHBOR = "SELECT min(computed_at) FROM title_neighbors"
 
 # Every interpolated fragment here is a module constant built from module
 # constants; `model_name` is the only caller-supplied value and it crosses as
@@ -326,6 +457,139 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                 {"model_name": model_name},
             )
         return int(result.scalar_one())
+
+    async def list_embedded(
+        self, *, after: uuid.UUID | None = None, limit: int = 500
+    ) -> list[NeighborSeed]:
+        with self._session.no_autoflush:
+            result = await self._session.execute(
+                text(_LIST_EMBEDDED), {"after": after, "limit": limit}
+            )
+        return [
+            NeighborSeed(
+                title_id=row.title_id, genres=tuple(row.genres), keywords=tuple(row.keywords)
+            )
+            for row in result.all()
+        ]
+
+    async def nearest_for(
+        self, seed_ids: Sequence[uuid.UUID], *, limit: int
+    ) -> dict[uuid.UUID, list[NeighborCandidate]]:
+        if not seed_ids:
+            return {}
+        with self._session.no_autoflush:
+            for statement in _EXACT_SCAN_OFF:
+                await self._session.execute(text(statement))
+            try:
+                result = await self._session.execute(
+                    text(_NEAREST), {"seed_ids": list(seed_ids), "limit": limit}
+                )
+                rows = result.all()
+            finally:
+                # In a `finally` because the alternative is a transaction that
+                # keeps writing without indexes after a failed candidate scan,
+                # which is the kind of degradation nothing reports.
+                for statement in _EXACT_SCAN_ON:
+                    await self._session.execute(text(statement))
+            # The tag read runs *after* the bracket, with indexes back: it is a
+            # primary-key lookup into `titles`, and the whole reason it is a
+            # second statement rather than a join inside the LATERAL.
+            tags = await self._tags_for({row.neighbor_id for row in rows})
+        answer: dict[uuid.UUID, list[NeighborCandidate]] = {}
+        for row in rows:
+            genres, keywords = tags.get(row.neighbor_id, ((), ()))
+            answer.setdefault(row.seed_id, []).append(
+                NeighborCandidate(
+                    title_id=row.neighbor_id,
+                    # `float(...)` rather than the driver's own numeric: the
+                    # blend is arithmetic and a `Decimal` here would raise on
+                    # the first multiplication by a float weight.
+                    cosine=float(row.cosine),
+                    genres=genres,
+                    keywords=keywords,
+                )
+            )
+        return answer
+
+    async def _tags_for(
+        self, title_ids: set[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[tuple[str, ...], tuple[str, ...]]]:
+        if not title_ids:
+            return {}
+        result = await self._session.execute(text(_TAGS_FOR), {"title_ids": list(title_ids)})
+        return {row.id: (tuple(row.genres), tuple(row.keywords)) for row in result.all()}
+
+    async def count_without_embedding(self) -> int:
+        with self._session.no_autoflush:
+            result = await self._session.execute(text(_COUNT_WITHOUT_EMBEDDING))
+        return int(result.scalar_one())
+
+
+class PostgresTitleNeighborRepository(TitleNeighborRepository):
+    """`title_neighbors`, written wholesale by the similarity batch.
+
+    Two statements per page and no staging table, which is deliberate: the
+    write is already set-based, and `stage_records` would take two
+    `ACCESS EXCLUSIVE` locks on a shared name to save nothing at a page of at
+    most `page_size * 25` rows.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def replace(
+        self, seed_ids: Sequence[uuid.UUID], neighbors: Sequence[ScoredNeighbor]
+    ) -> int:
+        if not seed_ids:
+            return 0
+        try:
+            with self._session.no_autoflush:
+                async with self._session.begin_nested():
+                    await self._session.execute(
+                        text(_DELETE_NEIGHBORS), {"seed_ids": list(seed_ids)}
+                    )
+                    if neighbors:
+                        await self._session.execute(
+                            text(_INSERT_NEIGHBORS),
+                            {
+                                "title_ids": [row.title_id for row in neighbors],
+                                "neighbor_ids": [row.neighbor_title_id for row in neighbors],
+                                "scores": [row.score for row in neighbors],
+                                "ranks": [row.rank for row in neighbors],
+                            },
+                        )
+        except IntegrityError as exc:
+            # A score outside [0, 1], a self-neighbour, a negative rank, or a
+            # title id naming no row -- all four are CHECKs or foreign keys on
+            # `title_neighbors`, and all four are a bug in the blend rather
+            # than a conflict a retry could clear. Translated so nothing above
+            # imports sqlalchemy.exc, and raised inside a SAVEPOINT so the
+            # rebuild's caller keeps a usable session.
+            raise RepositoryConflict(
+                "a neighbour batch violates the similarity table's own bounds",
+                constraint=constraint_name(exc),
+            ) from exc
+        return len(neighbors)
+
+    async def list_for(self, title_id: uuid.UUID, *, limit: int) -> list[ScoredNeighbor]:
+        with self._session.no_autoflush:
+            result = await self._session.execute(
+                text(_LIST_NEIGHBORS), {"title_id": title_id, "limit": limit}
+            )
+        return [
+            ScoredNeighbor(
+                title_id=row.title_id,
+                neighbor_title_id=row.neighbor_id,
+                score=float(row.score),
+                rank=int(row.rank),
+            )
+            for row in result.all()
+        ]
+
+    async def computed_at(self) -> AwareDatetime | None:
+        with self._session.no_autoflush:
+            result = await self._session.execute(text(_OLDEST_NEIGHBOR))
+        return result.scalar_one_or_none()
 
 
 def _as_vector_literal(embedding: tuple[float, ...] | None) -> str | None:

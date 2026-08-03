@@ -151,6 +151,24 @@ gates it; without it a worker simply never claims `index` jobs, and full-text
 and trigram still serve the whole catalog. `usher index` itself loads no model
 — staleness is a question about a recorded model *name*.
 
+`usher similar` has the same two forms for the same reason: a read and the
+write that refreshes what it reads.
+
+```bash
+uv run usher similar <title id>    # the precomputed neighbours, best first
+uv run usher similar --rebuild     # recompute title_neighbors for the embedded tier
+```
+
+**Nothing runs the rebuild for you**, and that is stated rather than implied.
+A title's neighbours go stale when *some other* title gets an embedding, which
+no per-row predicate can decide — so unlike everything else Usher derives,
+`title_neighbors` carries a whole-artefact age instead of a per-row
+fingerprint, and refreshing it is an operator's command or a cron entry, run
+after `usher index --backfill`. The read form says which of the two empty
+answers you are looking at: "no neighbours for this title" and "no neighbours
+have ever been computed" have different fixes. Neither form loads a model —
+the rebuild reads stored vectors — so both start in about a tenth of a second.
+
 **The server process already runs a worker lane**, and a push lane per
 enabled source, so a normal deployment needs neither command. They are for
 splitting the lanes across containers, and there is one rule: **do not run

@@ -111,6 +111,33 @@ def test_resolving_an_unmatched_item_needs_both_ids() -> None:
         parse_args(["unmatched", "--title", "x"])
 
 
+def test_similar_is_a_read_form_and_a_write_form_of_one_subcommand() -> None:
+    """One subcommand for one artefact, exactly as `usher index` has
+    `--backfill`. Two subcommands is how those two would have drifted, and
+    argparse has no vocabulary for "exactly one of these".
+
+    Both refusals matter and neither is symmetric with the other. **No
+    arguments** is a read of nothing -- and it is the spelling an operator
+    reaches for when they mean `--rebuild`, so falling through to a rebuild
+    would recompute a 250,000-row table by accident. **Both together** is a
+    read and a write in one command, where the read would answer from rows the
+    write had just replaced.
+    """
+    read = parse_args(["similar", "0198c6b1-0000-7000-8000-000000000001"])
+    assert read.title_id == "0198c6b1-0000-7000-8000-000000000001"
+    assert read.rebuild is False
+    assert read.limit == 10
+
+    write = parse_args(["similar", "--rebuild"])
+    assert write.title_id is None
+    assert write.rebuild is True
+
+    with pytest.raises(SystemExit):
+        parse_args(["similar"])
+    with pytest.raises(SystemExit):
+        parse_args(["similar", "0198c6b1-0000-7000-8000-000000000001", "--rebuild"])
+
+
 def test_work_runs_forever_unless_asked_for_one_pass() -> None:
     """`--once` is what `docker compose exec usher python -m usher work
     --once` needs to exit; without it the command is a daemon."""

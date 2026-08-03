@@ -54,7 +54,10 @@ from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
-from usher.db.repositories.search import PostgresTitleEmbeddingRepository
+from usher.db.repositories.search import (
+    PostgresTitleEmbeddingRepository,
+    PostgresTitleNeighborRepository,
+)
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
 from usher.db.repositories.title import PostgresTitleRepository
@@ -75,6 +78,7 @@ from usher.ports.repository import (
     SyncRunRepository,
     TitleEmbeddingRepository,
     TitleMatchRepository,
+    TitleNeighborRepository,
     TitleRepository,
     WatchStateRepository,
 )
@@ -94,6 +98,7 @@ from usher.services.matching import MatchService
 from usher.services.push import PushApplyService
 from usher.services.reconcile import ReconcileService
 from usher.services.search import SearchService
+from usher.services.similar import SimilarityService
 from usher.services.watch_sync import WatchStateSyncService
 from usher.telemetry import QueueSnapshot
 
@@ -156,12 +161,14 @@ class Pipeline:
     runs: SyncRunRepository
     queue: JobQueue
     embeddings: TitleEmbeddingRepository
+    neighbors: TitleNeighborRepository
     adapters: SourceAdapterFactory
     matcher: MatchService
     ingest: IngestService
     reconcile: ReconcileService
     watch: WatchStateSyncService
     search: SearchService
+    similar: SimilarityService
     events: EventPublisher
     commit: Callable[[], Awaitable[None]]
 
@@ -231,6 +238,7 @@ def build_pipeline(
     payloads = PostgresRawPayloadStore(session)
     runs = PostgresSyncRunRepository(session)
     embeddings = PostgresTitleEmbeddingRepository(session)
+    neighbors = PostgresTitleNeighborRepository(session)
     queue = PostgresJobQueue(
         session,
         max_attempts=settings.job_max_attempts,
@@ -256,6 +264,7 @@ def build_pipeline(
         runs=runs,
         queue=queue,
         embeddings=embeddings,
+        neighbors=neighbors,
         adapters=adapter_factory(settings),
         matcher=matcher,
         ingest=ingest,
@@ -301,6 +310,12 @@ def build_pipeline(
             result_limit=settings.search_result_limit,
             embedder=embedder,
         ),
+        # **No embedder here, in either form.** The rebuild reads stored
+        # vectors and never embeds anything, which is why `usher similar`
+        # starts in 0.13 s rather than paying a 4.84 s cold model load --
+        # and why a deployment with no embedding extra can still read and
+        # rebuild neighbours for whatever the worker did index.
+        similar=SimilarityService(embeddings, neighbors, titles, session.commit),
         events=publisher,
         commit=session.commit,
     )

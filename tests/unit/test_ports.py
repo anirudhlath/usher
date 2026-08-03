@@ -34,6 +34,7 @@ from usher.ports.repository import (
     SyncRunRepository,
     TitleEmbeddingRepository,
     TitleMatchRepository,
+    TitleNeighborRepository,
     TitleRepository,
     WatchStateRepository,
 )
@@ -72,6 +73,7 @@ ALL_PORTS: list[type[ABC]] = [
     SyncRunRepository,
     TitleEmbeddingRepository,
     TitleMatchRepository,
+    TitleNeighborRepository,
     TitleRepository,
     WatchStateRepository,
 ]

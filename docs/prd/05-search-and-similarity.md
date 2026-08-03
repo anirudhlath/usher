@@ -158,6 +158,55 @@ Neighbours are precomputed offline into a `title_neighbors` table — item vecto
 are static, so this is a cheap batch artifact that makes "more like this"
 instant and engine-independent.
 
+**As of M6 two of those four signals have no data in `src/` and the shipped
+blend is the other two**, checked against the code rather than against this
+prose. Cast and crew have no `Person`/`Credit` table, model or port anywhere;
+the MovieLens tag-genome importer has never been built (there is no `movielens`
+bootstrap phase and no `adapters/bulk/movielens.py`); and `titles.collection_id`
+is a bare nullable UUID with no table that nothing in `src/` writes. So M6 ships
+**embedding cosine (0.60) plus keyword Jaccard (0.25) and genre Jaccard
+(0.15)**, written as a sum of weighted terms over an explicit signal list, so
+that landing a third signal is one entry and one accessor rather than a
+rewritten scorer. The weights are **chosen with an argument, not measured** —
+nothing in M6 measures similarity relevance — and they are constants rather than
+settings, because changing one changes what "similar" means and every stored row
+was written under the old meaning.
+
+Genres and keywords are **two terms rather than one Jaccard over their union**,
+and the reason is vocabulary size: genres are a closed set of about nineteen
+values with two to four per title, so genre overlap saturates (any two dramas
+score 0.33 or better regardless of subject), while keywords are a long tail
+where an overlap of three is evidence. Merged, the five-element genre
+contribution disappears inside a forty-element keyword union and the term
+nobody weighted does all the work.
+
+**Jaccard of two empty sets is `None`, not `0.0`.** The naive spelling divides
+by zero inside a batch job — which aborts a rebuild mid-page and leaves a table
+half old and half new — and `0.0` is worse because it is silent: it gives the
+same answer for "these two share no genres" (evidence) as for "we do not know
+either one's genres" (a fact about enrichment, not about the films). An absent
+signal leaves the numerator *and* the denominator, so a thin title's neighbours
+are decided by its vector rather than pushed to the bottom of every list.
+[ADR-0014](decisions/0014-absence-is-not-zero.md), applied to a set-valued
+field.
+
+**The precompute is exact, not approximate**, and the argument is about the
+artefact rather than about the cost: recall loss in a live query is per-query,
+while recall loss in a cached artefact is permanent — a neighbour an ANN scan
+missed is missed by every read of that row until the next rebuild.
+
+**And this table is the one derived artefact whose freshness is not a per-row
+predicate.** A title's neighbours go stale when *some other* title gets an
+embedding, which nothing can decide without recomputing the row. So it carries
+an **oldest-row `computed_at`** rather than a fingerprint, `None` means never
+computed, and it is rebuilt rather than repaired. That is a weaker guarantee
+than the rest of the search subsystem and is written down as weaker on purpose:
+a freshness predicate that looked like the others and did not mean the same
+thing would be worse than an honest gap. Nothing in M6 re-runs the rebuild —
+`usher similar --rebuild` is an operator's command or a cron entry — so PRD 06's
+"TTL: hours" is a statement about how long a consumer may cache what it read,
+not a promise about this table's age.
+
 ### Mood queries
 
 "Movies about isolation in space" is handled by embedding the query and

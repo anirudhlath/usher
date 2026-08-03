@@ -43,6 +43,7 @@ from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_match_repository import FakeTitleMatchRepository
+from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.lanes import LaneSupervisor
@@ -67,6 +68,7 @@ from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
 from usher.services.search import SearchService
+from usher.services.similar import SimilarityService
 from usher.services.watch_sync import WatchStateSyncService
 
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
@@ -197,6 +199,8 @@ class _Fakes:
 def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
     titles = FakeTitleRepository()
     matching = FakeTitleMatchRepository(titles)
+    embeddings = FakeTitleEmbeddingRepository()
+    neighbors = FakeTitleNeighborRepository()
     queue = fakes.queue
     episodes = FakeEpisodeRepository()
     watch_states = FakeWatchStateRepository()
@@ -224,7 +228,8 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
         payloads=FakeRawPayloadStore(),
         runs=runs,
         queue=queue,
-        embeddings=FakeTitleEmbeddingRepository(),
+        embeddings=embeddings,
+        neighbors=neighbors,
         adapters=fakes.adapters,
         matcher=matcher,
         ingest=ingest,
@@ -252,6 +257,7 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
             fakes.media_items,
             result_limit=settings.search_result_limit,
         ),
+        similar=SimilarityService(embeddings, neighbors, titles, commit),
         events=fakes.events,
         commit=commit,
     )

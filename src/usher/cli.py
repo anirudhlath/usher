@@ -447,6 +447,61 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
         print(f"{seen} stale titles swept, {written} index jobs written")
 
 
+async def _similar(
+    settings: Settings, *, title_id: uuid.UUID | None, limit: int, rebuild: bool
+) -> None:
+    """Read one title's precomputed neighbours, or recompute the whole table.
+
+    **No model is loaded in either form**, and that is a property of the
+    design rather than an optimisation: the rebuild reads stored vectors and
+    never embeds anything, so this command starts in 0.13 s instead of paying
+    a 4.84 s cold ONNX load. A deployment with no embedding extra installed can
+    still rebuild neighbours over whatever a worker elsewhere indexed.
+
+    **`--rebuild` is not a job kind, and the argument is about the unit of
+    work.** Re-embedding one title changes the neighbour lists of every title
+    it is near, and no per-seed job can know which those are without doing the
+    whole computation anyway -- so a `JobKind.SIMILAR` keyed on a title id
+    would update the seed's own row and leave every list that should now
+    contain it untouched, producing a table that is never coherent and whose
+    incoherence is invisible from any single row.
+
+    **And the cost of that decision, stated rather than hidden: nothing in M6
+    re-runs this.** It is an operator's command or a cron entry, run after
+    `usher index --backfill`. PRD 06's "TTL: hours" is a statement about how
+    long M7 may cache what it read, not a promise that this table is hours
+    fresh.
+    """
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        if rebuild:
+            report = await pipeline.similar.rebuild()
+            print(f"rebuilt {report.seeds} seeds, wrote {report.rows} neighbour rows")
+            if report.without_embedding:
+                # Excluded *and* counted. A rebuild that silently skipped a
+                # growing swathe of the catalog reads exactly like one with
+                # nothing to skip, which is this milestone's own failure mode.
+                print(
+                    f"{report.without_embedding} titles have no embedding and were excluded "
+                    "-- run `usher index --backfill` if that is unexpected"
+                )
+            return
+
+        if title_id is None:  # pragma: no cover - `parse_args` refuses this
+            raise SystemExit("give a title id, or --rebuild, but not both")
+        rows = await pipeline.similar.neighbors_of(title_id, limit=limit)
+        for row in rows:
+            year = f" ({row.year})" if row.year else ""
+            print(f"{row.score:.3f}  {row.name}{year}  {row.title_id}")
+        if not rows and await pipeline.similar.computed_at() is None:
+            # Two causes for an empty answer and only one is a fact about the
+            # title. One message for both sends an operator to look at the
+            # wrong thing.
+            print("no neighbours have ever been computed -- run `usher similar --rebuild`")
+        elif not rows:
+            print("no neighbours for this title")
+
+
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
     """Probe a source's push channel once, or run the lanes in the foreground.
 
@@ -575,6 +630,19 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument("--limit", type=int, default=0, help="stop after N titles; 0 drains")
     index.add_argument("--page-size", type=int, default=1000)
 
+    similar = sub.add_parser("similar", help="titles like this one, or rebuild the table")
+    # Optional because `--rebuild` is the write form of the same command. Two
+    # subcommands for one artefact is how `usher index` and its backfill would
+    # have drifted; the cross-argument rule in `parse_args` is what argparse
+    # cannot express.
+    similar.add_argument("title_id", nargs="?")
+    similar.add_argument("--limit", type=int, default=10)
+    similar.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="recompute title_neighbors for the whole embedded population",
+    )
+
     push = sub.add_parser("push", help="run the push lane, or probe a source's push channel")
     push.add_argument("--source", default=None, help="source name; omit for every enabled source")
     push.add_argument(
@@ -602,6 +670,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         # `parser.error`, not a raise: it exits 2 with usage on stderr, the
         # same way every other argument failure does.
         parser.error("--resolve and --title are used together")
+    if args.command == "similar" and bool(args.title_id) == bool(args.rebuild):
+        # Both spellings refused: no arguments is a read of nothing, and both
+        # together is a read and a write in one command. `parser.error` again
+        # -- exit 2 with usage rather than exit 1 with a traceback.
+        parser.error("give a title id, or --rebuild, but not both")
     return args
 
 
@@ -655,6 +728,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.command == "index":
         asyncio.run(
             _index(settings, backfill=args.backfill, limit=args.limit, page_size=args.page_size)
+        )
+    elif args.command == "similar":
+        asyncio.run(
+            _similar(
+                settings,
+                title_id=None if args.title_id is None else _as_uuid(args.title_id, "title id"),
+                limit=args.limit,
+                rebuild=args.rebuild,
+            )
         )
     elif args.command == "push":
         asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
