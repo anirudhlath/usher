@@ -31,22 +31,15 @@ satisfy would be the vacuous pass the plan's trap section warns about.
 
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
 
 from usher.domain.enums import EnrichmentState
 from usher.domain.title import Title
 from usher.ports.repository import (
     BulkWriteResult,
+    StoredEmbedding,
     TitleEmbeddingRepository,
     TitleEmbeddingUpsert,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _StoredEmbedding:
-    embedding: tuple[float, ...] | None
-    model_name: str
-    source_fingerprint: str
 
 
 class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
@@ -65,7 +58,7 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
     ) -> None:
         self.titles: list[Title] = list(titles)
         self.fingerprints: dict[uuid.UUID, str] = dict(fingerprints or {})
-        self.rows: dict[uuid.UUID, _StoredEmbedding] = {}
+        self.rows: dict[uuid.UUID, StoredEmbedding] = {}
         self.upsert_calls: list[Sequence[TitleEmbeddingUpsert]] = []
 
     async def upsert_many(self, rows: Sequence[TitleEmbeddingUpsert]) -> BulkWriteResult:
@@ -78,7 +71,7 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
                 updated += 1
             else:
                 inserted += 1
-            self.rows[row.title_id] = _StoredEmbedding(
+            self.rows[row.title_id] = StoredEmbedding(
                 embedding=row.embedding,
                 model_name=row.model_name,
                 source_fingerprint=row.source_fingerprint,
@@ -92,6 +85,9 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
             inserted = min(inserted, distinct)
             updated = distinct - inserted
         return BulkWriteResult(inserted=inserted, updated=updated)
+
+    async def get(self, title_id: uuid.UUID) -> StoredEmbedding | None:
+        return self.rows.get(title_id)
 
     def _population(self) -> list[Title]:
         return sorted(

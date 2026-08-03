@@ -71,6 +71,20 @@ class JobWorker:
     def register(self, kind: JobKind, handler: Handler) -> None:
         self._handlers[kind] = handler
 
+    @property
+    def registered_kinds(self) -> frozenset[JobKind]:
+        """Exactly what `run_once` will claim.
+
+        A read-only view rather than a test reaching into `_handlers`, and
+        the property that assertion needs is the one `run_once` relies on:
+        two of the four kinds are registered conditionally (`ENRICH` on a
+        TMDb key, `INDEX` on an embedder), so "this deployment cannot run
+        that kind" is wiring a test has to be able to see. A mutable dict
+        handed out would let a caller register a handler the worker never
+        knew about, which is the same silent gap the other way round.
+        """
+        return frozenset(self._handlers)
+
     async def startup(self) -> int:
         """PRD 08's "startup requeues anything left `in_progress`".
 

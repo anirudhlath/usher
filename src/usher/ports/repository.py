@@ -1057,6 +1057,27 @@ class TitleEmbeddingUpsert:
     source_fingerprint: str
 
 
+@dataclass(frozen=True, slots=True)
+class StoredEmbedding:
+    """What is currently stored for one title, as `get` answers it.
+
+    Deliberately not `TitleEmbeddingUpsert` even though it carries the same
+    facts: the `title_id` is absent because the caller passed it, and the two
+    types travelling in opposite directions is what keeps a read from being
+    handed straight back to a write without the caller deciding to.
+
+    Its one consumer is the index stage's idempotence check, and that check
+    is a comparison of **both** `model_name` and `source_fingerprint` — a
+    skip on existence alone passes every redelivery case and then never
+    updates a vector again, which is a stale index that does not raise, it
+    answers.
+    """
+
+    embedding: tuple[float, ...] | None
+    model_name: str
+    source_fingerprint: str
+
+
 class TitleEmbeddingRepository(ABC):
     """Persistence for the semantic half, and the home of the one predicate
     three consumers share.
@@ -1086,6 +1107,24 @@ class TitleEmbeddingRepository(ABC):
         `title_id` naming no title raises `RepositoryConflict`, translated
         from the backing store's own error, and leaves the session usable for
         the caller's other pending work.
+        """
+
+    @abstractmethod
+    async def get(self, title_id: uuid.UUID) -> StoredEmbedding | None:
+        """One title's stored row, or `None` if it has never been indexed.
+
+        The index stage reads this *before* asking a model for anything, and
+        that read is what makes redelivery free rather than merely safe:
+        `JobWorker.startup()` requeues everything left `running`, so a
+        process killed between a handler returning and `complete` committing
+        produces a second delivery of work already done. At ~83 texts/s a
+        requeued backfill that re-embedded would re-run the whole enriched
+        tier.
+
+        `None` is "no row", which is the first disjunct of the stale
+        predicate — a title that has never been indexed and one whose text
+        has moved are the same question to a caller, and both are answered by
+        embedding it.
         """
 
     @abstractmethod

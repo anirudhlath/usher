@@ -62,6 +62,7 @@ from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import (
     BulkWriteResult,
+    StoredEmbedding,
     TitleEmbeddingRepository,
     TitleEmbeddingUpsert,
 )
@@ -208,6 +209,35 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                 constraint=constraint_name(exc),
             ) from exc
         return BulkWriteResult(inserted=int(inserted), updated=int(updated))
+
+    async def get(self, title_id: uuid.UUID) -> StoredEmbedding | None:
+        # The one read here that is not the predicate, and the one place a
+        # stored vector crosses back into Python. pgvector hands `halfvec`
+        # back as a numpy array of float16, so the tuple below is both the
+        # port's declared type and the conversion -- a caller comparing it
+        # against a freshly embedded vector must not be handed something
+        # whose `==` returns an array.
+        #
+        # `no_autoflush` for the reason every read in this package carries
+        # it: an unflushed, invalid row left on this shared session by
+        # unrelated code would otherwise surface as this read's failure.
+        with self._session.no_autoflush:
+            result = await self._session.execute(
+                select(
+                    TitleEmbeddingRow.embedding,
+                    TitleEmbeddingRow.model_name,
+                    TitleEmbeddingRow.source_fingerprint,
+                ).where(TitleEmbeddingRow.title_id == title_id)
+            )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        embedding, model_name, source_fingerprint = row
+        return StoredEmbedding(
+            embedding=None if embedding is None else tuple(float(value) for value in embedding),
+            model_name=model_name,
+            source_fingerprint=source_fingerprint,
+        )
 
     async def list_stale(
         self, model_name: str, *, limit: int = 100, after: uuid.UUID | None = None

@@ -41,6 +41,7 @@ from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import MediaItemRepository
 from usher.ports.source import SourceAdapter
 from usher.services.enrich import EnrichService
+from usher.services.index import IndexService
 from usher.services.jobs import Handler
 from usher.services.matching import MatchService
 from usher.services.watch_sync import WatchStateSyncService
@@ -70,6 +71,28 @@ def enrich_handler(service: EnrichService) -> Handler:
 
     async def handle(job: Job) -> None:
         await service.enrich(_title_id(job))
+
+    return handle
+
+
+def index_handler(service: IndexService) -> Handler:
+    """`index` jobs key on a `Title.id`, exactly as `enrich` does.
+
+    Deliberately not a variation on `enrich_handler`: `_title_id` is shared,
+    so the `ValueError` -> `PortDataMalformed` conversion happens in one place
+    for both kinds.
+
+    **A worker holds this handler only if an embedder was built.**
+    `composition.build_worker` registers `JobKind.INDEX` under `embedder is
+    not None`, the way it registers `ENRICH` under `provider is not None`, and
+    `run_once` claims only the kinds it has handlers for -- so a deployment
+    without the embedding extra leaves index jobs for one that can run them
+    rather than parking work whose only problem is that it was offered to the
+    wrong process.
+    """
+
+    async def handle(job: Job) -> None:
+        await service.index(_title_id(job))
 
     return handle
 
@@ -179,6 +202,7 @@ __all__ = [
     "SourceBinding",
     "SourceResolver",
     "enrich_handler",
+    "index_handler",
     "match_handler",
     "watch_history_handler",
 ]
