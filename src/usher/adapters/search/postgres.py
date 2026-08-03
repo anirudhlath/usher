@@ -19,9 +19,15 @@ outcome available: a permanently wrong vector the backfill never revisits.
 `IndexService` is the only writer that knows, and the only one allowed to
 say so.
 
+**This module holds both implementations**, which is what the milestone's
+file table prescribes and is right: `PostgresSearchIndex` and
+`PostgresSuggestIndex` share the session, the `titles` table and nothing
+else -- which is the observation that made them two ports (ADR-0021) rather
+than one.
+
 Layering: an adapter, so it imports `usher.db`'s schema -- but nothing above
-it may name `PostgresSearchIndex` (Task 24). It takes an injected
-`AsyncSession` and **never commits**.
+it may name either class (Task 24). Both take an injected `AsyncSession` and
+**never commit**.
 
 Two spellings here are this repository's own scar tissue and must not be
 "tidied":
@@ -57,6 +63,7 @@ from usher.ports.search import (
     SearchMode,
     SearchOutcome,
     SearchRequest,
+    SuggestIndex,
 )
 
 # `ts_rank_cd`'s weight array, in PostgreSQL's own order: **D, C, B, A**.
@@ -304,3 +311,193 @@ class PostgresSearchIndex(SearchIndex):
             hits=tuple(SearchHit(title_id=row.id, score=float(row.score)) for row in rows),
             semantic_coverage=0.0,
         )
+
+
+# The trigram floor the shipped path runs at, and it is **not** pg_trgm's own
+# 0.3 default. Measured on this host against the very fixtures the shared
+# contract seeds:
+#
+#     similarity('Harbour Lights', 'harb') = 0.250
+#     similarity('Vane',           'vame') = 0.250   (one-character typo)
+#     similarity('Vane',           'vnae') = 0.111   (transposition)
+#
+# At 0.3 the `%` operator is **false for all three**, so the candidate CTE is
+# empty and `levenshtein` never runs -- the type-ahead box returns nothing for
+# a prefix of a real title, for a typo, and for a transposition alike. This is
+# the plan's own amendment arriving as a local measurement: PRD 05's worked
+# examples (`similarity('dune','dnue') = 0.111`) sit below the default too, so
+# "transpositions are close to a blind spot" is exact and the default floor is
+# what makes it one.
+#
+# 0.1 is the floor the full-scale dry run measured at 93.5% recall@5 on the
+# GIN `%` path, against 66.2% for PRD 05 as literally written. Its cost is
+# latency -- p50 582 ms at 2.08M names against GiST KNN's 281 ms -- and that
+# half of the trade is **not** settled here: ADR-0002's gate defines the
+# measurement as recall alone, recall is the half that passes, and Task 26
+# owns measuring both against the real catalog.
+#
+# **Lowering the floor is only safe because the cap below is ordered.** With
+# an unordered `LIMIT`, lowering the threshold makes recall *worse* -- 66.2%
+# at 0.3 down to 48.5% at 0.1 and 2.6% at 0.05 -- because an unordered cap
+# truncates arbitrarily and admits more rows to truncate. `ORDER BY
+# similarity(...) DESC` inside the CTE is what turns a bigger candidate pool
+# into a better one.
+#
+# Not measured and therefore not shipped: `<%` (`word_similarity`), which is
+# the operator actually shaped like a type-ahead prefix and scores these same
+# three fixtures 0.8 / 0.4 / 0.2 -- strictly better separation than `%`, and
+# also served by `gin_trgm_ops`. It is recorded rather than taken because no
+# recall or latency run in this project has ever used it, and a constant
+# chosen by eye that reads like a measurement is the failure mode this
+# repository names by name.
+_TRIGRAM_THRESHOLD = 0.1
+
+# `pg_trgm.similarity_threshold`'s allowed range, which is also
+# `similarity()`'s own. Checked in the constructor rather than trusted from
+# `Settings`, because this value is *interpolated* into SQL and an
+# interpolation whose safety rests on a caller two layers up is not safe.
+_THRESHOLD_RANGE = (0.0, 1.0)
+
+# Levenshtein's ceiling for a re-ranked candidate. Two, not one: a
+# transposition is distance 2 under plain Levenshtein -- "vnae" against
+# "vane" -- and a transposition is exactly the case ADR-0002 names as trigram
+# overlap's blind spot ({vna, nae} against {van, ane} share nothing but the
+# leading pad, so similarity() is 0.111 and no usable threshold separates it
+# from noise). One would fail the contract's transposition case; three admits
+# noise on short names.
+_MAX_DISTANCE = 2
+
+# `fuzzystrmatch`'s hard limit, measured rather than read: an input of 300
+# characters answers `ERROR: levenshtein argument exceeds maximum length of
+# 255 characters`. The catalog is bulk-loaded from a dump nobody has audited
+# for its longest name, and here the walk that must not abort is a keystroke.
+_LEVENSHTEIN_MAX_INPUT = 255
+
+# The verified statement, adapted to `titles`.
+#
+# **`AS MATERIALIZED` is belt-and-braces and stays.** The inner LIMIT is
+# already an optimisation barrier, so the CTE cannot be inlined and
+# re-executed per row -- but the guarantee this whole path rests on should be
+# visible in the statement rather than inferred from a fence-post rule, and a
+# later edit that widens the candidate set by removing the LIMIT would
+# otherwise take the barrier with it silently.
+#
+# **The cap is the point, and it is provable from the plan.** On the 300,000-
+# row measurement: 417 kept plus 1,357 removed by filter equals 1,774, which
+# is exactly the CTE's row count -- 1,774 levenshtein calls rather than
+# 300,000, a 169x reduction.
+#
+# **The distance is measured against the name's *head*, not the whole name**,
+# and that is what makes this a type-ahead rather than a spell-checker.
+# `levenshtein('harbour lights', 'harb')` is 10; the user has not misspelt
+# anything, they have stopped typing. `left(lower(name), length(prefix))` is
+# 0 for a true prefix and 1 for a one-character typo in it -- the identical
+# rule `FakeSuggestIndex` applies in Python, which is what lets one contract
+# run against both. Without it every prefix case in `SuggestIndexContract`
+# fails on a name longer than the query.
+#
+# Both arguments are bounded to 255 because fuzzystrmatch refuses longer
+# inputs; `least(...)` covers the name side, whose head length is the
+# *prefix's* length and therefore attacker-supplied.
+_SUGGEST = f"""
+WITH candidates AS MATERIALIZED (
+    SELECT t.id, t.name, t.popularity, similarity(t.name, :prefix) AS sim
+    FROM titles AS t
+    -- The `%` operator, never `similarity(...) > <floor>`: only this
+    -- spelling has a gin_trgm_ops operator class behind it, and the other is
+    -- a sequential scan with a function call per row -- the cliff this whole
+    -- statement exists to avoid, one line above the cap that avoids it.
+    WHERE t.name % :prefix
+    -- **Ordered, and that is load-bearing rather than tidy.** An unordered
+    -- cap truncates arbitrarily, which is what makes a *lower* floor score
+    -- *worse* recall (66.2% at 0.3 -> 48.5% at 0.1 -> 2.6% at 0.05,
+    -- measured). The id keeps the cap itself deterministic when many names
+    -- score identically, which on a `Vane NNNN` family is all of them.
+    ORDER BY similarity(t.name, :prefix) DESC, t.id
+    LIMIT :candidates
+),
+scored AS (
+    SELECT c.id, c.popularity, c.sim,
+           levenshtein_less_equal(
+               left(lower(c.name), least(char_length(:prefix), {_LEVENSHTEIN_MAX_INPUT})),
+               left(lower(:prefix), {_LEVENSHTEIN_MAX_INPUT}),
+               :max_distance
+           ) AS dist
+    FROM candidates AS c
+)
+SELECT id, dist, sim
+FROM scored
+WHERE dist <= :max_distance
+-- Distance first, then popularity, then id. Popularity is what stops the
+-- type-ahead box's first row from being arbitrary among equally-good
+-- matches; NULLS LAST because `titles.popularity` is nullable and a
+-- descending sort puts NULLs first by default, which would hand the box to
+-- whichever skeleton the scan reached first -- and roughly 60% of the
+-- catalog is NULL-popularity skeletons. The id makes the order total.
+ORDER BY dist ASC, popularity DESC NULLS LAST, id ASC
+LIMIT :limit
+"""  # noqa: S608 - every interpolated fragment is a module constant
+
+
+class PostgresSuggestIndex(SuggestIndex):
+    """Typo-tolerant type-ahead over `titles.name`. **Writes nothing.**
+
+    ADR-0021 gives this its own port with no write method, and this class is
+    why: it reads `titles` through a trigram index and maintains no artefact
+    of its own. Boundary call 3 declined PRD 05's `title_search_names` table
+    for the same reason -- with no aliases and no people in M6 it would hold
+    one row per title duplicating `titles(id, name, kind, popularity)`, a
+    second copy and a second staleness problem, in the milestone whose whole
+    purpose is to delete staleness problems.
+
+    **GIN, not the GiST PRD 05 specifies.** At 2.08M names the `%` path is
+    ~110x faster under GIN (1.671 ms / 205 buffers against 182.5 ms /
+    31,174), builds in 7.5 s against 23.1 s, and is 69 MB against 244 MB.
+    GIN's one exposure is that it has no KNN operator class at all -- an
+    `ORDER BY name <-> q` under it degrades to a Seq Scan at 3,989.9 ms --
+    and capping candidates before the re-rank is exactly what removes the
+    need for one. A path that ever genuinely needs KNN needs a GiST index,
+    not a tuning change.
+    """
+
+    def __init__(self, session: AsyncSession, *, threshold: float, candidates: int) -> None:
+        low, high = _THRESHOLD_RANGE
+        if not low < threshold <= high:
+            raise ValueError(f"trigram threshold {threshold} is outside {_THRESHOLD_RANGE}")
+        self._session = session
+        self._threshold = threshold
+        self._candidates = candidates
+
+    async def suggest(self, prefix: str, limit: int = 10) -> list[SearchHit]:
+        # **SET LOCAL, never SET, and never set_limit().** All three set the
+        # same knob and only this one is scoped to the transaction; the other
+        # two write the pooled session, so one search's threshold would
+        # govern the next unrelated request. SET LOCAL cannot take a bind
+        # parameter, so the value is interpolated -- provably safe because
+        # the constructor range-checked it and formats it as a fixed-width
+        # float, and the only path to it is a Settings field already bounded
+        # to (0.0, 1.0].
+        #
+        # And no feature detection first: a contrib GUC does not exist on a
+        # backend that has not yet run one of the library's operators, so
+        # `SHOW` raises on a cold connection while this very `SET LOCAL`
+        # succeeds on it. Probing is a flaky-test generator and a worse
+        # production check.
+        await self._session.execute(
+            text(f"SET LOCAL pg_trgm.similarity_threshold = {self._threshold:.6f}")
+        )
+        rows = await self._session.execute(
+            text(_SUGGEST),
+            {
+                "prefix": prefix,
+                "candidates": self._candidates,
+                "max_distance": _MAX_DISTANCE,
+                "limit": max(limit, 0),
+            },
+        )
+        # The score is a rank-shaped number for a caller to render, not a
+        # distance: 1.0 for an exact prefix, falling with edit distance. The
+        # *ordering* is the database's, and nothing here re-sorts it -- a
+        # Python re-sort would silently drop the NULLS LAST and the id
+        # tiebreak the statement is careful about.
+        return [SearchHit(title_id=row.id, score=1.0 / (1.0 + float(row.dist))) for row in rows]

@@ -18,11 +18,18 @@ Two more need no container and are here anyway, beside the SQL they guard --
 the translation table's coverage of `SearchFilters`, and the raise for a
 member nothing translates. A guard that lives away from the thing it guards
 is one the next edit leaves behind.
+
+`PostgresSuggestIndex` runs the second contract suite from the same file,
+because the two implementations share a session and the `titles` table and
+nothing else -- which is the observation that made them two ports (ADR-0021)
+and the reason one module holds both.
 """
 
 import dataclasses
+import json
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -30,7 +37,18 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.contract.search_index_contract import SearchIndexContract
-from usher.adapters.search.postgres import _TRANSLATORS, PostgresSearchIndex, _predicates
+from tests.contract.suggest_index_contract import SuggestIndexContract
+from usher.adapters.search.postgres import (
+    _LEVENSHTEIN_MAX_INPUT,
+    _MAX_DISTANCE,
+    _SUGGEST,
+    _TRANSLATORS,
+    _TRIGRAM_THRESHOLD,
+    PostgresSearchIndex,
+    PostgresSuggestIndex,
+    _predicates,
+)
+from usher.db.base import build_engine, build_session_factory
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.ports.search import (
@@ -38,6 +56,7 @@ from usher.ports.search import (
     SearchDocument,
     SearchFilters,
     SearchRequest,
+    SuggestIndex,
 )
 
 # The shipped column is `halfvec(384)` and pgvector rejects anything else, so
@@ -409,3 +428,269 @@ def test_an_untranslated_filter_raises_rather_than_being_ignored() -> None:
     future = dataclasses.make_dataclass("FutureFilters", [("people", tuple[str, ...], ())])
     with pytest.raises(FilterNotSupported, match="people"):
         _predicates(future())
+
+
+_CANDIDATE_CTE = "CTE candidates"
+
+
+def _actual_rows(node: dict[str, Any], subplan: str) -> int:
+    """`Actual Rows` for the plan node built for one named CTE.
+
+    A small recursive walk rather than a dependency: the tree is a handful of
+    dicts and a `Plans` list, and a library that parsed it would be a second
+    thing to keep current with PostgreSQL's own JSON.
+    """
+    if node.get("Subplan Name") == subplan:
+        return int(node["Actual Rows"])
+    for child in node.get("Plans", ()):
+        found = _actual_rows(child, subplan)
+        if found >= 0:
+            return found
+    return -1
+
+
+async def _candidate_rows(
+    session: AsyncSession, *, prefix: str, threshold: float, candidates: int, limit: int
+) -> int:
+    """`Actual Rows` for the candidate CTE of the shipped suggest statement.
+
+    **The statement is imported, not transcribed.** `_SUGGEST` is the literal
+    constant `PostgresSuggestIndex` issues, so this cannot drift from what
+    ships -- and a hand-copied lookalike that drifts reads exactly like
+    coverage, which is how two earlier tasks in this repository were
+    replaced.
+
+    Asserted on the plan rather than on a clock because the property is
+    "levenshtein ran over the cap, not the table", and at fixture scale every
+    spelling is fast. The same arithmetic as the 300,000-row measurement:
+    417 kept + 1,357 removed = 1,774 = this node's row count.
+    """
+    await session.execute(text(f"SET LOCAL pg_trgm.similarity_threshold = {threshold:.6f}"))
+    plan = await session.execute(
+        text(f"EXPLAIN (ANALYZE, FORMAT JSON) {_SUGGEST}"),
+        {
+            "prefix": prefix,
+            "candidates": candidates,
+            "max_distance": _MAX_DISTANCE,
+            "limit": limit,
+        },
+    )
+    rows = _actual_rows(plan.scalar_one()[0]["Plan"], _CANDIDATE_CTE)
+    assert rows >= 0, "the shipped statement no longer builds a CTE named `candidates`"
+    return rows
+
+
+@pytest.mark.integration
+class TestPostgresSuggestIndex(SuggestIndexContract):
+    # The real path caps its candidate set before the re-rank, which is the
+    # one property `FakeSuggestIndex` structurally cannot have -- it computes
+    # edit distance over its whole dict, so its typo tolerance is *better*
+    # than the shipped one. That is the dangerous direction, and it is why the
+    # fake skips this case rather than passing it.
+    supports_candidate_cap = True
+    candidate_cap = 200
+
+    @pytest_asyncio.fixture
+    async def index(self, session: AsyncSession) -> AsyncIterator[PostgresSuggestIndex]:
+        yield PostgresSuggestIndex(
+            session, threshold=_TRIGRAM_THRESHOLD, candidates=self.candidate_cap
+        )
+
+    @pytest.fixture(autouse=True)
+    def _bind_session(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def given_title(self, index: SuggestIndex, *, name: str, popularity: float) -> uuid.UUID:
+        """The port has no write method (ADR-0021) and this implementation
+        writes nothing at all -- it reads `titles`. So the arrangement is an
+        insert into a table somebody else owns, which is the honest shape of
+        a read-only port and the reason this is a hook."""
+        document = _doc(name, popularity=popularity)
+        await _insert_title(self._session, document)
+        return document.title_id
+
+    async def rerank_candidates(self, index: SuggestIndex) -> int:
+        """How many rows `levenshtein` actually ran over, read out of the
+        plan of the statement the implementation issues.
+
+        **The constant is imported, never transcribed.** A hand-copied
+        lookalike drifts from the shipped SQL and then reads like coverage;
+        this repository has replaced two tasks for exactly that. The number
+        comes from the candidate CTE's `Actual Rows`, which is the same
+        arithmetic the 300,000-row measurement used: 417 kept + 1,357 removed
+        = 1,774 = the CTE's row count, against 300,000 rows in the table.
+        """
+        return await _candidate_rows(
+            self._session,
+            prefix="vane",
+            threshold=_TRIGRAM_THRESHOLD,
+            candidates=self.candidate_cap,
+            limit=10,
+        )
+
+
+@pytest.mark.integration
+async def test_the_candidate_predicate_uses_the_trigram_index(session: AsyncSession) -> None:
+    """An implementation whose predicate is `similarity(name, :p) > :t`
+    rather than `name % :p`.
+
+    The two are equivalent in *meaning* and not in *plan*: only the `%`
+    operator has a `gin_trgm_ops` operator class behind it, so the
+    similarity spelling is a sequential scan with a function call per row --
+    the exact cliff the cap exists to avoid, reintroduced one line above the
+    cap. Measured at 2.08M names: 1.671 ms / 205 buffers for the operator
+    against 182.5 ms / 31,174 for the function.
+
+    Forced with `SET LOCAL enable_seqscan = off`, because on a fixture-sized
+    table a sequential scan is genuinely cheaper and the planner is right to
+    take it. The same lever `test_the_claim_orders_by_created_at` needs, for
+    the same reason: a plan assertion at fixture scale is asserting about a
+    plan the fixture would not otherwise produce.
+    """
+    for number in range(20):
+        await _insert_title(session, _doc(f"Vane {number:04d}"))
+    await session.execute(text("SET LOCAL enable_seqscan = off"))
+    await session.execute(
+        text(f"SET LOCAL pg_trgm.similarity_threshold = {_TRIGRAM_THRESHOLD:.6f}")
+    )
+    plan = await session.execute(
+        text(f"EXPLAIN (FORMAT JSON) {_SUGGEST}"),
+        {"prefix": "vane", "candidates": 200, "max_distance": _MAX_DISTANCE, "limit": 10},
+    )
+    rendered = json.dumps(plan.scalar_one())
+    assert "ix_titles_name_trgm" in rendered, (
+        "the candidate predicate did not reach the trigram index; only the `%` operator "
+        "has a gin_trgm_ops operator class behind it"
+    )
+
+
+@pytest.mark.integration
+async def test_a_high_trigram_floor_destroys_fuzzy_recall(session: AsyncSession) -> None:
+    """**The cliff, demonstrated rather than described.**
+
+    Measured on this host against the very fixtures the shared contract
+    seeds: `similarity('Vane', 'vame') = 0.25` and
+    `similarity('Vane', 'vnae') = 0.111`, so a floor of 0.3 admits *neither*
+    while 0.1 admits both. That is a setting turning the feature off while
+    every test that ships with the higher default stays green, and it is the
+    measured reason `_TRIGRAM_THRESHOLD` is 0.1 rather than pg_trgm's own
+    0.3 default -- see the constant's own comment.
+
+    Same title, same typo, two thresholds. Fails an implementation that
+    ignores its configured threshold entirely (a hard-coded `set_limit`, a
+    forgotten `SET LOCAL`), because then both halves return the same thing.
+    """
+    wanted = _doc("Vane")
+    await _insert_title(session, wanted)
+    lax = PostgresSuggestIndex(session, threshold=0.1, candidates=200)
+    strict = PostgresSuggestIndex(session, threshold=0.3, candidates=200)
+    assert [hit.title_id for hit in await lax.suggest("vame")] == [wanted.title_id]
+    assert await strict.suggest("vame") == []
+
+
+@pytest.mark.integration
+async def test_the_threshold_does_not_leak_into_the_next_statement(postgres_url: str) -> None:
+    """`SET` in place of `SET LOCAL`, or `set_limit()` in place of either.
+
+    All three set the same knob; only `SET LOCAL` is scoped to the
+    transaction. On a pooled connection a session-scoped write means one
+    search's threshold governs the next unrelated request, which is a wrong
+    answer in code that never touched this module -- and is invisible to any
+    test that only ever runs one search.
+
+    **The boundary has to be a COMMIT and that is why this case builds its
+    own engine.** PostgreSQL reverts a bare `SET` too when the transaction
+    that issued it is rolled back, so any rollback-based case -- including
+    the plan's own draft, which read `current_setting` back inside the
+    suite's single-transaction fixture -- passes against both spellings.
+    Measured in
+    `test_a_bare_set_outlives_a_commit_and_set_local_does_not`, which pins
+    the same property one layer down against raw statements; this case pins
+    it against the shipped `suggest`.
+
+    `SHOW` is safe here only because the suggest itself loaded `pg_trgm` into
+    this backend -- on a cold connection that read raises
+    `unrecognized configuration parameter`, which is the trap
+    `test_a_contrib_guc_is_unreadable_until_something_loads_the_library`
+    measures in full.
+    """
+    engine = build_engine(postgres_url)
+    try:
+        factory = build_session_factory(engine)
+        async with engine.connect() as conn, factory(bind=conn) as leaky:
+            index = PostgresSuggestIndex(leaky, threshold=0.45, candidates=200)
+            await index.suggest("vane")
+            await leaky.commit()
+            after = await leaky.execute(text("SHOW pg_trgm.similarity_threshold"))
+            assert float(after.scalar_one()) == pytest.approx(0.3), (
+                "a suggest left its own threshold on the connection; this is SET where "
+                "SET LOCAL belongs"
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+async def test_a_very_long_name_does_not_abort_the_suggest(session: AsyncSession) -> None:
+    """`fuzzystrmatch`'s `levenshtein` refuses inputs longer than 255
+    characters -- measured, `levenshtein argument exceeds maximum length of
+    255 characters` -- and the catalog is bulk-loaded from a dump nobody has
+    audited for its longest name.
+
+    Same rule as `usher.services.matching._as_imdb`: nothing a source can put
+    in a payload may abort a walk, and here the walk is a keystroke. Seeds a
+    400-character synthetic name alongside a short one and asserts the short
+    one still comes back; then types a 400-character query, which is the half
+    that bounds the *other* argument. An unbounded implementation raises
+    instead of ranking, and the exception surfaces in the type-ahead box.
+    """
+    long_name = "Vane " + "abcde " * 80
+    assert len(long_name) > _LEVENSHTEIN_MAX_INPUT
+    long_title = _doc(long_name)
+    await _insert_title(session, long_title)
+    short = _doc("Vane", popularity=900.0)
+    await _insert_title(session, short)
+    index = PostgresSuggestIndex(session, threshold=_TRIGRAM_THRESHOLD, candidates=200)
+
+    # Both heads are exactly "vane", so distance cannot separate them and the
+    # long name -- inserted first, so lower id -- wins any tie the statement
+    # does not break on popularity. Position, not membership.
+    ranked = await index.suggest("vane")
+    assert ranked[0].title_id == short.title_id
+    # And the query side, which is the argument an unbounded implementation
+    # actually blows up on: both sides truncate to 255, so a 400-character
+    # keystroke still resolves to the title it spells rather than raising.
+    typed = await index.suggest(long_name)
+    assert [hit.title_id for hit in typed] == [long_title.title_id]
+
+
+@pytest.mark.integration
+async def test_a_null_popularity_does_not_take_the_first_row(session: AsyncSession) -> None:
+    """`ORDER BY popularity DESC` with the `NULLS LAST` left off.
+
+    A descending sort puts NULLs **first** in PostgreSQL, and roughly 60% of
+    this catalog is NULL-popularity skeletons -- so the omission hands the
+    type-ahead box's first row to whichever skeleton the scan reached first,
+    for every query, which is the single most likely wrong first row in
+    production.
+
+    `SuggestIndexContract`'s ordering case cannot seed this: it is shared
+    with `FakeSuggestIndex`, which sorts on `-popularity` in Python and would
+    raise on `None` rather than mis-rank. So the property lives here, against
+    the backend whose nullable column creates it.
+
+    The NULL-popularity title is inserted first, so it also wins on id order
+    -- the case therefore fails on both spellings of the mistake rather than
+    only on the one that reads the column.
+    """
+    await _insert_title(session, _doc("Vane Alpha", popularity=None))
+    wanted = _doc("Vane Bravo", popularity=1.0)
+    await _insert_title(session, wanted)
+    index = PostgresSuggestIndex(session, threshold=_TRIGRAM_THRESHOLD, candidates=200)
+
+    hits = await index.suggest("vane")
+    assert len(hits) == 2
+    assert hits[0].title_id == wanted.title_id, (
+        "a title with no popularity took the first row; a descending sort puts NULLs "
+        "first and the catalog is mostly NULL-popularity skeletons"
+    )
