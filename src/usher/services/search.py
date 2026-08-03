@@ -57,8 +57,11 @@ not interchangeable without a re-embed.
 """
 
 import hashlib
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+
+from opentelemetry import metrics
 
 from usher.domain.search import SearchResult
 from usher.domain.title import Title
@@ -71,6 +74,29 @@ from usher.ports.search import (
     SearchMode,
     SearchRequest,
     SuggestIndex,
+)
+
+_meter = metrics.get_meter("usher.search")
+
+# PRD 10's names, byte for byte, and neither is shortened or pluralised by
+# analogy with anything. **A metric under a near-miss name is a dashboard
+# panel that is permanently empty and nothing distinguishes it from a healthy
+# zero** -- PRD 10 says so at the head of its own table, and M4 found three
+# instances of it there. The near misses this pair invites are
+# `usher.search.result` (singular, matching `usher.enrich.result` two rows up
+# that table) and `usher.search.hits`; neither raises, neither fails a case
+# asserting "a histogram was recorded".
+_search_duration = _meter.create_histogram(
+    "usher.search.duration", unit="s", description="Wall time per search, by mode"
+)
+# A histogram rather than a counter, and the label says why: the useful
+# question is the *distribution* of result-set sizes per mode -- how often
+# FUSED comes back empty, how often it saturates the limit -- not a running
+# total nobody plots. A different instrument type under a documented name is
+# the same class of failure as a near-miss name, which is what
+# `register_push_gauges` records for its own pair.
+_search_results = _meter.create_histogram(
+    "usher.search.results", unit="1", description="Results returned per search, by mode"
 )
 
 # The two separators, named because they are load-bearing rather than
@@ -284,16 +310,33 @@ class SearchService:
         # spelling, not the reason.
         filters: SearchFilters | None = None,
     ) -> SearchAnswer:
-        """Retrieve, then rank. Raises `SemanticSearchUnavailable`."""
+        """Retrieve, then rank. Raises `SemanticSearchUnavailable`.
+
+        **PRD 10's two search series are recorded here, labelled with the mode
+        that *ran*.** A `FUSED` request on a deployment with no embedder is
+        served as full-text, and labelling it `fused` would attribute
+        full-text latency and full-text result counts to a lane that did not
+        run -- ADR-0002's "never a confident blended score that is really one
+        lane", arriving in the panel an operator would use to check for it.
+        The degradation is carried by `SearchAnswer.requested_mode`, which is
+        what `usher search` prints; PRD 10 documents one label and this is it.
+        """
         requested = mode
         # Refused before the model, not after. Every whitespace-only input
         # embeds to the identical vector at cos 1.0000 exactly, so a blank
         # semantic query would return a confident list of whatever sits nearest
         # a degenerate point -- `compose_document`'s trap, on the query side.
         # Empty rather than a raise: a search box sends this between keystrokes.
+        #
+        # **Deliberately before the measurement**, so a blank query is not a
+        # data point. A keystroke-driven client sends one between every
+        # character, and counted they would dominate both histograms and turn
+        # dashboard 1's search latency into a measure of how fast this
+        # declines. The series is about retrieval.
         if not query.strip():
             return SearchAnswer(requested_mode=requested, mode=requested)
 
+        started = time.perf_counter()
         vector: tuple[float, ...] | None = None
         if mode is not SearchMode.FULL_TEXT:
             if self._embedder is None:
@@ -322,7 +365,7 @@ class SearchService:
                 query_vector=vector,
             )
         )
-        return SearchAnswer(
+        answer = SearchAnswer(
             results=await self._rank(outcome.hits),
             requested_mode=requested,
             mode=mode,
@@ -332,6 +375,13 @@ class SearchService:
             # exactly the case a green test seeds.
             semantic_coverage=outcome.semantic_coverage,
         )
+        # After the rank, not around the retrieval alone: PRD 05 splits the two
+        # stages and an operator asking "why is search slow" is asking about
+        # the answer, not about half of it.
+        labels = {"mode": mode.value}
+        _search_duration.record(time.perf_counter() - started, labels)
+        _search_results.record(len(answer.results), labels)
+        return answer
 
     async def suggest(self, prefix: str, limit: int = 10) -> tuple[SearchResult, ...]:
         """Type-ahead candidates, hydrated and **not re-ranked**.

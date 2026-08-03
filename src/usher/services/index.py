@@ -20,11 +20,12 @@ staleness a predicate rather than an inference.
 session is neither.
 """
 
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 
 from loguru import logger
-from opentelemetry import trace
+from opentelemetry import metrics, trace
 
 from usher.ports.embedding import Embedder
 from usher.ports.errors import PortDataMalformed
@@ -36,6 +37,17 @@ from usher.ports.repository import (
 from usher.services.search import compose_document
 
 _tracer = trace.get_tracer("usher.index")
+_meter = metrics.get_meter("usher.index")
+
+# PRD 10's name, and **no labels, which is a decision rather than an
+# omission**: the obvious label is `model`, and adding one makes the series
+# unqueryable by the documented panel while looking like an improvement. The
+# model is recorded where it belongs -- `title_embeddings.model_name`, where
+# it drives the stale predicate. The near miss this one invites is
+# `usher.embed.duration`.
+_embedding_duration = _meter.create_histogram(
+    "usher.embedding.duration", unit="s", description="Wall time per embed call"
+)
 
 
 class IndexService:
@@ -130,8 +142,32 @@ class IndexService:
         declared, answers the same way however many times it is asked. Left to
         the database, the second surfaces one statement later as a constraint
         error naming a *column*, on a job whose real problem is a model swap.
+
+        **`index.embed` is a child of `index.title`, never a root.** PRD 10's
+        tree puts it there and
+        `tests/unit/test_telemetry_search.py::test_an_index_job_nests_its_embed
+        _span_under_index_title` asserts parentage rather than existence,
+        because a service that started its own roots produces valid ids,
+        exports fine, and satisfies every "the span exists" assertion in this
+        repository -- and then "why did indexing this title take 40 seconds"
+        is two unrelated traces instead of one. `start_as_current_span` inside
+        a method the caller already wrapped is what makes that structural.
+
+        **Opened here rather than around `index`'s whole body**, so a job that
+        found the fingerprint already current emits no `index.embed` at all.
+        `JobWorker.startup()` requeues everything left `running`, so
+        redelivery is ordinary, and a p50 computed over spans that skipped the
+        model is a p50 of doing nothing.
         """
-        vectors = await self._embedder.embed([text])
+        with _tracer.start_as_current_span("index.embed") as span:
+            span.set_attribute("usher.embedding.model", self._embedder.model_name)
+            started = time.perf_counter()
+            vectors = await self._embedder.embed([text])
+            # Recorded before the two checks below, so a model that answers
+            # wrongly still contributes the time it took to answer -- a swap
+            # returning 512 floats slowly is exactly the case an operator
+            # would be reading this series to understand.
+            _embedding_duration.record(time.perf_counter() - started)
         if len(vectors) != 1:
             raise PortDataMalformed(
                 "embedder returned the wrong number of vectors", detail=str(len(vectors))

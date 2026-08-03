@@ -60,6 +60,7 @@ from loguru import logger
 from usher.composition import (
     Pipeline,
     QueueGauges,
+    SearchGauges,
     SourceRegistry,
     UnitOfWork,
     build_push_applier,
@@ -75,7 +76,7 @@ from usher.ports.events import EventPublisher
 from usher.ports.metadata import MetadataProvider
 from usher.ports.source import SourceAdapter, SourceEvent
 from usher.services.push import PushOutcome, PushSupervisor
-from usher.telemetry import PushSnapshot, register_queue_gauges
+from usher.telemetry import PushSnapshot, register_queue_gauges, register_search_gauges
 
 # How long the worker lane waits after a pass that claimed nothing. Not a
 # setting, for the reason `usher.cli`'s copy of this constant is not: it is
@@ -120,6 +121,13 @@ class LaneSupervisor:
         self._worker: asyncio.Task[None] | None = None
         self._refresher: asyncio.Task[None] | None = None
         self._gauges = QueueGauges()
+        # PRD 10's embedding backlog, on the same beat and for the same
+        # reason: an OTel observable callback runs on the metric reader's
+        # background thread and cannot await an asyncpg query. Refreshed
+        # whether or not this process holds a model -- a worker without one
+        # leaves index jobs for a worker that has, and the backlog is the
+        # number that says so.
+        self._backlog = SearchGauges()
 
     # -- lifecycle -------------------------------------------------------
 
@@ -359,6 +367,7 @@ class LaneSupervisor:
         not.
         """
         register_queue_gauges(self._gauges.read)
+        register_search_gauges(self._backlog.read)
         registry: SourceRegistry | None = None
         requeued = False
         while True:
@@ -387,6 +396,7 @@ class LaneSupervisor:
                         requeued = True
                     ran = await worker.run_once()
                     await self._gauges.refresh(pipeline.queue)
+                    await self._backlog.refresh(pipeline.embeddings, self._settings.embedding_model)
             except asyncio.CancelledError:
                 if registry is not None:
                     await registry.aclose()

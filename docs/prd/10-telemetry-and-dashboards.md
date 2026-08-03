@@ -46,8 +46,8 @@ sync.watch_state                  ← the watch-state lane (M4)
 job.enrich · job.match · job.watch_history   ← a worker's root span,
 └── enrich.title                     Linked (never parented) to whatever
     └── metadata.request             enqueued it
-index.title                       ← M6
-├── index.fulltext · index.embed
+index.title                       ← M6, a child of job.index
+└── index.embed
 
 bootstrap.import
 ├── bootstrap.batch
@@ -67,6 +67,17 @@ back to the enqueueing span, because the request that enqueued it has
 usually already returned and a child span of a finished parent misstates
 causality.
 
+**`index.fulltext` was in this tree until M6 and is deliberately gone, rather
+than unimplemented.** The search document is a `GENERATED ALWAYS AS (…)
+STORED` column on `titles`, so PostgreSQL recomputes it inside the same
+statement that writes `name` or `overview` and there is no full-text indexing
+*stage* for a span to measure — half this milestone's freshness problem is
+deleted rather than solved (see
+[05](05-search-and-similarity.md)). A span emitted for work that does not
+happen is the mirror of a metric under a near-miss name: it looks like
+coverage and reports nothing. `index.embed` remains, because the embedding
+genuinely is a job that can be slow, fail or park.
+
 `bootstrap.import` spans (one per dataset, per `BootstrapService.import_dataset`
 call) and their child `bootstrap.batch` spans carry `usher.dataset` and
 `usher.revision` as attributes — the same "why was this slow" query the
@@ -85,8 +96,8 @@ is maintained rather than aspirational.
 | Metric | Type | Labels | Emitted |
 |---|---|---|---|
 | `usher.http.server.duration` | histogram | route, status | M9 |
-| `usher.search.duration` | histogram | mode | M6 |
-| `usher.search.results` | histogram | mode | M6 |
+| `usher.search.duration` | histogram | mode | ✅ M6 |
+| `usher.search.results` | histogram | mode | ✅ M6 |
 | `usher.home.compose.duration` | histogram | — | M7 |
 | `usher.row.build.duration` | histogram | provider | M7 |
 | `usher.jobs.queued` | gauge | kind | ✅ M4 |
@@ -105,8 +116,10 @@ is maintained rather than aspirational.
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
-| `usher.embedding.duration` | histogram | — | M6 |
+| `usher.embedding.duration` | histogram | — | ✅ M6 |
 | `usher.cache.hits` / `.misses` | counter | cache | M9 |
+| `usher.search.embeddings.stale` | gauge | — | ✅ M6 |
+| `usher.search.embeddings.refused` | gauge | — | ✅ M6 |
 | `usher.sse.connections` | gauge | — | ✅ M5 |
 | `usher.bootstrap.rows` | counter | dataset | ✅ M2 |
 | `usher.bootstrap.batch.duration` | histogram | dataset | ✅ M2 |

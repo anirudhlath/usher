@@ -30,6 +30,7 @@ from usher.composition import (
     DefaultUserId,
     Pipeline,
     QueueGauges,
+    SearchGauges,
     SourceRegistry,
     build_pipeline,
     build_worker,
@@ -55,7 +56,11 @@ from usher.ports.jobs import JobRequest
 from usher.ports.repository import BulkCatalogRepository
 from usher.ports.source import SourceAdapter
 from usher.services.bootstrap import BootstrapService
-from usher.telemetry import configure_telemetry, register_queue_gauges
+from usher.telemetry import (
+    configure_telemetry,
+    register_queue_gauges,
+    register_search_gauges,
+)
 
 PHASES = ("imdb", "tmdb-ids", "crosswalk", "all")
 # The two lanes `ReconcileService` walks `list_items` for. `watch_state` is a
@@ -343,6 +348,13 @@ async def _work(settings: Settings, *, once: bool) -> None:
         registry = SourceRegistry(pipeline)
         gauges = QueueGauges()
         register_queue_gauges(gauges.read)
+        # PRD 10's embedding backlog, refreshed on the same beat and for the
+        # same reason: an OTel observable callback runs on the metric reader's
+        # background thread and cannot await an asyncpg query. Refreshed even
+        # when this process has no model -- a worker without one leaves index
+        # jobs for one that has, and the backlog is the number that says so.
+        backlog = SearchGauges()
+        register_search_gauges(backlog.read)
         try:
             worker = build_worker(
                 pipeline,
@@ -358,12 +370,14 @@ async def _work(settings: Settings, *, once: bool) -> None:
             await worker.startup()
             ran = await worker.run_once()
             await gauges.refresh(pipeline.queue)
+            await backlog.refresh(pipeline.embeddings, settings.embedding_model)
             print(f"{ran} jobs")
             while not once:
                 if ran == 0:
                     await asyncio.sleep(_IDLE_SLEEP_SECONDS)
                 ran = await worker.run_once()
                 await gauges.refresh(pipeline.queue)
+                await backlog.refresh(pipeline.embeddings, settings.embedding_model)
         finally:
             await registry.aclose()
             await aclose()
@@ -400,18 +414,28 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
     The reported count is rows *written*, which is the honest number and is 0
     on a second run.
     """
+    gauges = SearchGauges()
+    # Registered even in the bare read form, so the two numbers this prints and
+    # the two PRD 10 exports are the same read rather than two reads that agree
+    # today. A short-lived command exports on shutdown when an OTLP endpoint is
+    # configured and does nothing when one is not, which is the same bargain
+    # `register_queue_gauges` takes in `usher work`.
+    register_search_gauges(gauges.read)
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
         model = settings.embedding_model
-        stale = await pipeline.embeddings.count_stale(model)
         if not backfill:
-            refused = await pipeline.embeddings.count_refused(model)
+            await gauges.refresh(pipeline.embeddings, model)
+            snapshot = gauges.read()
             print(f"model: {model}")
-            print(f"stale embeddings: {stale}")
-            print(f"refused (no content to embed): {refused}")
+            print(f"stale embeddings: {snapshot.stale}")
+            print(f"refused (no content to embed): {snapshot.refused}")
             # ~115 tokens a document at ~8,000-10,700 tokens/s on CPU. A range
             # derived from the invariant rather than from a texts/s rate.
-            print(f"estimated worker time: {stale * 115 / 10700:.0f}-{stale * 115 / 8000:.0f}s")
+            print(
+                f"estimated worker time: {snapshot.stale * 115 / 10700:.0f}-"
+                f"{snapshot.stale * 115 / 8000:.0f}s"
+            )
             return
 
         written = seen = 0
@@ -444,6 +468,11 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
             after = page[-1].id
             if limit and seen >= limit:
                 break
+        # After the sweep, not inside it. The predicate is cheap to count and
+        # cheaper still not to count per page, and the number an operator wants
+        # is the backlog *left over* -- the same reason `QueueGauges` refreshes
+        # after a worker pass rather than before it.
+        await gauges.refresh(pipeline.embeddings, model)
         print(f"{seen} stale titles swept, {written} index jobs written")
 
 

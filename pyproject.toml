@@ -221,3 +221,42 @@ source_modules = [
 ]
 forbidden_modules = ["usher.adapters.emby"]
 allow_indirect_imports = true
+
+# The same criterion as the contract above, for the two implementations most
+# likely to be swapped. Until M6 nothing stopped `usher/services/search.py`
+# naming `PostgresSearchIndex` directly -- which would type-check, pass every
+# test, and quietly make the port decorative. `PostgresSearchIndex` is exactly
+# the class ADR-0002 says may one day be a Meilisearch class and
+# `FastEmbedEmbedder` is exactly the class ADR-0022 says is one of two
+# interchangeable runtimes, so the two most swap-prone implementations in the
+# project were the two constrained by nothing.
+#
+# `allow_indirect_imports` for the previous contract's reason and not as a
+# loosening: the composition root reaches these through `usher.composition`,
+# and `usher.api.deps -> usher.composition -> usher.adapters.search.postgres`
+# is an indirect chain a forbidden contract reports by default. Verified both
+# ways -- with the flag that chain is KEPT and a direct import in
+# `usher.services` is still BROKEN, which is the line the criterion draws.
+#
+# `usher.composition` is absent from the source list for the reason recorded
+# in CLAUDE.md: it is the wiring both roots share, and the hole is closed by
+# what it *imports* -- a core module reaching it breaks contracts two and
+# three, which report indirect chains.
+#
+# Verified by planting exactly the import it forbids, in both `usher.services`
+# (where contract two also fires, so it proves nothing on its own) and
+# `usher.api` (which contract two does not cover, so this one fires alone).
+# The last time that step was skipped, five contracts reported KEPT against a
+# violation none of them constrained.
+[[tool.importlinter.contracts]]
+name = "no concrete search or embedding implementation escapes its package"
+type = "forbidden"
+source_modules = [
+    "usher.domain",
+    "usher.ports",
+    "usher.services",
+    "usher.api",
+    "usher.db",
+]
+forbidden_modules = ["usher.adapters.search", "usher.adapters.embedding"]
+allow_indirect_imports = true

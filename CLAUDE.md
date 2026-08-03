@@ -1841,7 +1841,7 @@ uv run pytest tests/unit         # fast unit tests only, no Docker required
 uv run ruff check .              # lint — clean
 uv run ruff format .             # format — clean
 uv run mypy                      # type check, strict mode — clean
-uv run lint-imports              # enforce architecture contracts — 6 kept, 0 broken
+uv run lint-imports              # enforce architecture contracts — 7 kept, 0 broken
 ```
 
 `[tool.ruff] extend-exclude = ["docs"]` keeps ruff off `docs/plans/*.md` and
@@ -2237,7 +2237,7 @@ uv run pytest tests/unit                         # 1319 passed + 1 skipped, no D
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .
-uv run lint-imports                              # 6 kept, 0 broken
+uv run lint-imports                              # 7 kept, 0 broken
 
 # Register a source and read its health, against a running app:
 curl -sS -X POST http://localhost:8000/admin/sources \

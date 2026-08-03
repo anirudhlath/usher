@@ -26,13 +26,24 @@ contract saying nothing may import it, precisely because it *is* a
 composition root. Shared code there would either break that contract or
 force it to be weakened.
 
-**Why no seventh import-linter contract.** `usher.composition` imports
+**Why this module is in no import-linter contract's source list.** Seven
+contracts exist and none names `usher.composition`, deliberately: it imports
 `usher.db` and `usher.adapters`, so a core module reaching it breaks
 contracts two and three -- which report indirect chains by default, unlike
-contract six's `allow_indirect_imports = true`. Verified by planting
-`from usher.composition import Pipeline` in `usher/services/push.py`: two
-contracts break. So the hole an unlisted module would otherwise leave is
-closed by what this module itself imports rather than by a rule.
+contracts six and seven's `allow_indirect_imports = true`. Verified by
+planting `from usher.composition import Pipeline` in
+`usher/services/push.py`: two contracts break. So the hole an unlisted module
+would otherwise leave is closed by what this module itself imports rather
+than by a rule.
+
+**And that is also why it is absent from contract seven's sources** ("no
+concrete search or embedding implementation escapes its package", M6). This
+module is where `PostgresSearchIndex`, `PostgresSuggestIndex` and
+`FastEmbedEmbedder` are named on purpose; `allow_indirect_imports = true` is
+what keeps the real chain `usher.api.lanes -> usher.composition ->
+usher.adapters.search.postgres` KEPT while a *direct* import in
+`usher.services` or `usher.api` stays BROKEN. Both halves measured rather
+than argued -- without the flag that real chain reports BROKEN.
 """
 
 import os
@@ -100,7 +111,7 @@ from usher.services.reconcile import ReconcileService
 from usher.services.search import SearchService
 from usher.services.similar import SimilarityService
 from usher.services.watch_sync import WatchStateSyncService
-from usher.telemetry import QueueSnapshot
+from usher.telemetry import QueueSnapshot, SearchSnapshot
 
 # What a caller is told when a source's credential row has gone missing.
 # One string rather than one per root: `usher sync` prints it, the lane
@@ -713,11 +724,51 @@ class QueueGauges:
         )
 
 
+class SearchGauges:
+    """The embedding backlog as PRD 10's two M6 gauges see it.
+
+    `QueueGauges`' shape exactly, and for the same reason: an OTel observable
+    callback runs on the metric reader's background thread and cannot await an
+    asyncpg query, so `read()` hands back the last *complete* re-read and
+    `refresh` is a coroutine the caller awaits where awaiting is safe --
+    `register_search_gauges`' docstring carries the whole argument. Stale,
+    never wrong.
+
+    `refresh` takes the repository rather than holding one, because a worker
+    pass's session lives for one pass while this snapshot outlives every pass.
+    It takes the model name for the same reason `usher index` does: staleness
+    is a question about a *name*, which is what recording `model_name` on the
+    row bought, and a gauge computed against a different name from the one the
+    backfill sweeps would report a number nothing acts on.
+
+    Two `count(*)`s per refresh, both over `enrichment_state <> 'skeleton'` --
+    boundary call 4's population and exactly `ix_titles_enrichment_state`'s
+    partial predicate, so the scan is the enriched tier (2k-10k rows) rather
+    than the 1.27M-row catalog. That is what makes a per-pass refresh at the
+    worker's 5 s floor affordable.
+    """
+
+    __slots__ = ("_snapshot",)
+
+    def __init__(self) -> None:
+        self._snapshot = SearchSnapshot()
+
+    def read(self) -> SearchSnapshot:
+        return self._snapshot
+
+    async def refresh(self, embeddings: TitleEmbeddingRepository, model_name: str) -> None:
+        self._snapshot = SearchSnapshot(
+            stale=await embeddings.count_stale(model_name),
+            refused=await embeddings.count_refused(model_name),
+        )
+
+
 __all__ = [
     "NO_CREDENTIALS",
     "DefaultUserId",
     "Pipeline",
     "QueueGauges",
+    "SearchGauges",
     "SourceRegistry",
     "adapter_factory",
     "build_enrich_service",
