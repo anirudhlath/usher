@@ -1030,3 +1030,104 @@ class RawPayloadStore(ABC):
         """The compliance query: the oldest cache entry for a provider, which
         is what PRD 10's dashboard-5 panel plots against TMDb's 6-month
         ceiling. `None` when the provider has no entries at all."""
+
+
+@dataclass(frozen=True, slots=True)
+class TitleEmbeddingUpsert:
+    """One title's vector and the two facts that make its staleness a query.
+
+    `embedding` is `None` for a **refused** title — one whose composed
+    document is degenerate. That is a written outcome, not a skipped one: it
+    stops the title matching the stale predicate, starts it matching a
+    separate countable one, and gets it re-claimed exactly once when
+    enrichment changes the text. Measured: every whitespace-only input
+    embeds to the identical vector, cosine 1.0000 exactly, so a degenerate
+    document is an unbounded cluster at the top of every similar-titles
+    result rather than a bad result.
+
+    `model_name` carries the runtime as well as the checkpoint
+    (`fastembed:BAAI/bge-small-en-v1.5`), because two runtimes of the same
+    weights differ by 6x the halfvec quantisation error and are not
+    interchangeable without a re-embed.
+    """
+
+    title_id: uuid.UUID
+    embedding: tuple[float, ...] | None
+    model_name: str
+    source_fingerprint: str
+
+
+class TitleEmbeddingRepository(ABC):
+    """Persistence for the semantic half, and the home of the one predicate
+    three consumers share.
+
+    Unlike the search document — a stored generated column PostgreSQL keeps
+    correct inside every write of its inputs — an embedding needs a model,
+    so it is a job, and jobs can fail, park, or never be enqueued at all.
+    This port is where that asymmetry is paid for: rather than trusting the
+    queue, every row records *what* was embedded and *by what*, and
+    "is this stale?" becomes a query the backfill, the gauge and a test all
+    ask the same way.
+
+    Same session ownership as every other repository here: methods flush and
+    return counts, and never commit. `model_name` is a parameter on every
+    method rather than a constructor argument read from settings — `db/`
+    may not import `config`, and a repository that knew the deployment's
+    model could not be asked "how many rows would a model swap invalidate?"
+    """
+
+    @abstractmethod
+    async def upsert_many(self, rows: Sequence[TitleEmbeddingUpsert]) -> BulkWriteResult:
+        """Write a batch, insert-or-update, keyed on `title_id`.
+
+        Idempotent by construction: PRD 08's redelivery rule, and the job
+        queue *will* redeliver. A batch carrying the same `title_id` twice
+        keeps the later row — last-wins on the batch's own order. A
+        `title_id` naming no title raises `RepositoryConflict`, translated
+        from the backing store's own error, and leaves the session usable for
+        the caller's other pending work.
+        """
+
+    @abstractmethod
+    async def list_stale(
+        self, model_name: str, *, limit: int = 100, after: uuid.UUID | None = None
+    ) -> list[Title]:
+        """One page of titles needing an embedding, oldest id first.
+
+        **A keyset cursor, not an offset.** `MediaItemRepository.list_unmatched`'s
+        `OFFSET` pagination is measured at 43.7 ms at offset 0 and 388.9 ms
+        at offset 1,126,574 — linear per page, quadratic to drain — which
+        is fine for an operator reading the first few pages and wrong for a
+        backfill, whose entire job is to walk a population to exhaustion.
+        Pass the last id of a page as `after` to get the next one; an empty
+        list means drained.
+
+        The population is `enrichment_state <> 'skeleton'` (boundary call 4),
+        for which `ix_titles_enrichment_state` is already the partial index
+        that exists. A skeleton title's document is a generated column, so it
+        is fully indexed with no job at all.
+        """
+
+    @abstractmethod
+    async def count_stale(self, model_name: str) -> int:
+        """How many titles the predicate currently claims.
+
+        A plain `int`, synchronously consumable by a caller that caches it —
+        **never wired directly to an OTel observable callback.** The SDK
+        invokes those from the metric reader's background thread and every
+        call here is a coroutine on asyncpg, so a querying callback would
+        have to bounce onto the event loop and block the exporter thread on
+        it. `telemetry.register_queue_gauges` already records the shape.
+        """
+
+    @abstractmethod
+    async def count_refused(self, model_name: str) -> int:
+        """How many titles are current *and* have no vector — the composer
+        refused their document as degenerate.
+
+        **This must not overlap `count_stale`.** Spelled as a bare
+        `embedding IS NULL` it would also count rows refused under an older
+        model, which are stale; the two counters would then sum above the
+        population and "the backfill has drained" would stop being an
+        observable condition.
+        """
