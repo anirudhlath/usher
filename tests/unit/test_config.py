@@ -442,3 +442,155 @@ def test_every_setting_is_read_by_something(monkeypatch: pytest.MonkeyPatch) -> 
     )
     unread = [name for name in Settings.model_fields if f".{name}" not in read]
     assert unread == []
+
+
+def test_the_search_and_embedding_settings_have_the_measured_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nine fields pinned together, and most of them are *measurements*
+    rather than choices -- which is why an edit to any one of them has to be
+    visible somewhere.
+
+    `embedding_batch_size` 16 is CPU throughput at 229.5 texts/s at 38
+    tokens, flat 16-64 and degrading at 128. `search_rrf_k` 60 is RRF's
+    original paper and ADR-0002's assumption. `search_hnsw_ef_search` 100 is
+    against a GUC default of 40 that returned 0.88 rows of a requested 10
+    under a filter. `search_trigram_threshold` 0.3 is `pg_trgm`'s own default
+    and sits on the right side of a measured cliff (0.5 admits 23 candidates
+    where 0.3 admits 1,774).
+
+    They landed across three commits -- Group C's four `embedding_*` with the
+    embedder, Group D and E's five `search_*` with the indexes and the
+    service -- because `test_every_setting_is_read_by_something` means a
+    field cannot ship ahead of its reader. This is the case that finally
+    holds the whole block in one place.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    settings = Settings()
+    assert (
+        settings.embedding_enabled,
+        settings.embedding_model,
+        settings.embedding_batch_size,
+        settings.embedding_offline,
+    ) == (False, "fastembed:BAAI/bge-small-en-v1.5", 16, True)
+    assert (
+        settings.search_result_limit,
+        settings.search_rrf_k,
+        settings.search_hnsw_ef_search,
+        settings.search_trigram_threshold,
+        settings.search_suggest_candidates,
+    ) == (50, 60, 100, 0.3, 200)
+
+
+def test_the_embedding_model_name_cannot_be_blank(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`min_length=1` is not decoration. The string is written to
+    `title_embeddings.model_name` and the stale predicate compares against
+    it, so an empty name makes **every** row stale forever: the backfill
+    re-claims the whole enriched tier every pass, the
+    `usher.search.embeddings.stale` gauge never reaches zero, and nothing
+    raises."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_EMBEDDING_MODEL", "")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_the_embed_batch_is_bounded_both_ways(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero is not "no batching", it is a call that embeds nothing while
+    looking configured -- the same shape every other `ge=1` in this file
+    refuses.
+
+    The ceiling is memory rather than throughput, which is a **deliberate
+    departure from the plan's `le=64`**: 64 is the top of the measured flat
+    region, so a value above it is slower and not dangerous, and the cost of
+    being wrong at the top end is an OOM inside a worker pass rather than a
+    slow one. Recorded here so the two numbers are not confused -- 16 is
+    measured, 512 is a guard.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    for bad in ("0", "-1", "513"):
+        monkeypatch.setenv("USHER_EMBEDDING_BATCH_SIZE", bad)
+        with pytest.raises(ValidationError):
+            Settings()
+    monkeypatch.setenv("USHER_EMBEDDING_BATCH_SIZE", "512")
+    assert Settings().embedding_batch_size == 512
+
+
+def test_the_trigram_floor_stays_inside_similaritys_own_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`similarity()` returns [0, 1], so a floor outside it is not a strict
+    setting but one that silently means "everything" or "nothing".
+
+    Zero admits every row in `titles` to the `levenshtein` re-rank -- the
+    exact cliff ADR-0002 says the narrow path exists to avoid, measured at
+    8,020 candidates against 1,774 at the default. 1.0 is accepted rather
+    than refused: it is `LIKE` with extra steps, which is a strange thing to
+    want and not an incoherent one.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    for bad in ("0", "-0.1", "1.5"):
+        monkeypatch.setenv("USHER_SEARCH_TRIGRAM_THRESHOLD", bad)
+        with pytest.raises(ValidationError):
+            Settings()
+    monkeypatch.setenv("USHER_SEARCH_TRIGRAM_THRESHOLD", "1.0")
+    assert Settings().search_trigram_threshold == 1.0
+
+
+def test_the_rrf_constant_and_the_ef_search_cannot_be_switched_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both `ge=1`, and neither zero is "off".
+
+    `search_rrf_k = 0` makes `1 / (k + rank)` unbounded at rank 0 against the
+    second rank's half, which is "return whichever list ranked something
+    first" wearing fusion's name -- ADR-0002's prohibition reachable by
+    configuration. `search_hnsw_ef_search = 0` is below pgvector's own floor,
+    and the measured failure at the *default* of 40 was already 0.88 rows
+    returned of a requested 10.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    for name in ("USHER_SEARCH_RRF_K", "USHER_SEARCH_HNSW_EF_SEARCH"):
+        for bad in ("0", "1001"):
+            monkeypatch.setenv(name, bad)
+            with pytest.raises(ValidationError):
+                Settings()
+        monkeypatch.delenv(name)
+
+
+def test_the_suggest_cap_is_above_the_result_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cross-field rule, in the shape
+    `test_the_sse_heartbeat_is_under_every_proxy_idle_timeout` established: a
+    constraint no single field can express, asserted as a type rather than
+    left in a comment.
+
+    `PostgresSuggestIndex` collects `search_suggest_candidates` trigram
+    matches, re-ranks them by edit distance, and keeps the best
+    `search_result_limit`. At or below the limit the re-rank is handed
+    exactly the rows it is meant to choose *among*, so it can reorder but
+    never discard -- and a suggest path that cannot discard is one whose
+    trigram floor is doing all the work, which is the implementation
+    `test_a_single_character_typo_still_finds_a_short_title` exists to rule
+    out, reachable by configuration rather than by code.
+
+    **Not hypothetical.** An operator reaches it by raising the limit alone,
+    which is the ordinary thing to do: both fields' ceilings allow
+    `search_result_limit = 200` against the cap's own default of 200.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_SEARCH_RESULT_LIMIT", "200")
+    with pytest.raises(ValidationError, match="USHER_SEARCH_SUGGEST_CANDIDATES"):
+        Settings()
+    monkeypatch.setenv("USHER_SEARCH_SUGGEST_CANDIDATES", "201")
+    assert Settings().search_suggest_candidates == 201
+    # Equal is refused too: a cap that admits exactly what it keeps is the
+    # same decorative cap one row lower.
+    monkeypatch.setenv("USHER_SEARCH_SUGGEST_CANDIDATES", "200")
+    with pytest.raises(ValidationError):
+        Settings()

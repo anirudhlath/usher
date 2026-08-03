@@ -174,11 +174,34 @@ class Settings(BaseSettings):
     # retry storm into the rate limit it is meant to avoid.
     enrich_cache_max_age_days: int = Field(default=30, ge=1, le=180)
 
-    # The embedding model (PRD 05's semantic tier). **A minimal block,
-    # placed here by the task that first reads it** --
-    # `test_every_setting_is_read_by_something` means a setting cannot land
-    # before its reader, so the search settings arrive with their consumers
-    # rather than all at once. The rest of M6's `search_*` block follows.
+    # Search and embeddings (PRD 05, M6). Same reasoning as every block
+    # above: PRD 08 puts knobs like these in a TOML config layer that does
+    # not exist yet. Named `embedding_*` / `search_*` rather than
+    # `fastembed_*` or `postgres_*` -- config.py is not an adapter, and
+    # ADR-0002's whole position is that the engine behind these is
+    # replaceable.
+    #
+    # **The block arrived in three commits and is one block.**
+    # `test_every_setting_is_read_by_something` means a field cannot land
+    # ahead of its reader, so the four `embedding_*` came with the embedder
+    # and the five `search_*` with the two indexes and `SearchService`.
+    # `tests/unit/test_config.py::test_the_search_and_embedding_settings_
+    # have_the_measured_defaults` is what holds all nine in one place.
+    #
+    # **There is deliberately no `index_enabled`.** M6's plan asked for one,
+    # "same shape as `push_enabled` / `worker_enabled`", and its stated
+    # justification -- a deployment with it off still has full-text and
+    # trigram over all 1.27M titles -- is `embedding_enabled`'s
+    # justification, word for word. The two would gate the same decision:
+    # `composition.build_worker` registers `JobKind.INDEX` on
+    # `embedder is not None`, and `composition.embedder` returns `None`
+    # exactly when `embedding_enabled` is false, so an `index_enabled` added
+    # today has no reachable behaviour of its own -- and
+    # `test_every_setting_is_read_by_something` is a substring scan that
+    # cannot see that. The pair genuinely separates when the *server* process
+    # gains a use for a model the worker lane must not consume, which is M9's
+    # search routes; that is when to add it, with a case that fails without
+    # it.
     #
     # Off by default, and that is the honest default rather than a cautious
     # one. The dependency lives behind an extra (`uv sync --extra
@@ -208,16 +231,23 @@ class Settings(BaseSettings):
     # only setting under which a genuine cache miss produces a
     # comprehensible `OSError`. An operator warming the cache for the first
     # time sets this false for that one run.
+    #
+    # **And that override is why `HF_HUB_OFFLINE` is deliberately not in
+    # `compose.yml`'s `environment:` block**, which M6's plan asked for as a
+    # topology fact. `environment:` beats `env_file:` absolutely, and this
+    # setting reaches the library through `os.environ.setdefault`, so a
+    # hard-set `HF_HUB_OFFLINE=1` in compose would make
+    # `USHER_EMBEDDING_OFFLINE=false` dead config inside the container --
+    # exactly the shape `USHER_COMPOSE_` exists to prevent -- and an operator
+    # could never warm the cache there. The setting also reaches every entry
+    # point compose cannot: `uv run usher work`, `usher index`, a dev shell.
+    # (The shipped image installs no embedding extra and carries no model
+    # cache, so the variable would be inert there in any case.)
     embedding_offline: bool = True
 
-    # The retrieval knobs, arriving the same way the `embedding_*` three above
-    # did -- **with their readers, not before them.**
-    # `test_every_setting_is_read_by_something` means a field cannot land in a
-    # commit that does not read it in `src/`, and the two search indexes are
-    # constructed for the first time by `composition.build_pipeline` in the
-    # commit that adds `SearchService`. The rest of the block (`index_enabled`,
-    # and the cross-field rule that `search_suggest_candidates` must exceed
-    # `search_result_limit`) belongs to the settings task.
+    # The retrieval half. Every one of these is read by
+    # `composition.build_pipeline`, which constructs the two indexes and
+    # `SearchService`.
 
     # The ceiling on `SearchRequest.limit`, applied by `SearchService` before a
     # request reaches an index -- not the default, the most a caller may ask
@@ -354,6 +384,35 @@ class Settings(BaseSettings):
         if not isinstance(values, dict):
             return values
         return {key: value for key, value in values.items() if not _is_compose_only(key)}
+
+    @model_validator(mode="after")
+    def _suggest_cap_leaves_room_to_choose(self) -> "Settings":
+        """A cap at or below the result limit is a cap that cannot cut.
+
+        `PostgresSuggestIndex` collects `search_suggest_candidates` trigram
+        matches, re-ranks them by edit distance, and keeps the best
+        `search_result_limit`. With the cap at or below the limit the re-rank
+        is handed exactly the rows it is meant to choose *among*, so it can
+        reorder but never discard -- and the ordering the type-ahead box shows
+        is then whatever the trigram floor happened to admit. That is the
+        implementation `test_a_single_character_typo_still_finds_a_short_title`
+        and `test_results_are_ordered_by_popularity_within_equal_distance`
+        exist to rule out, reachable by configuration rather than by code.
+
+        A cross-field rule because neither field can express it alone, in the
+        shape `sse_heartbeat_seconds`' `lt=60.0` established for a constraint
+        that *is* expressible: a bound that is a real constraint belongs in
+        the type system, wherever it fits. **Not hypothetical** -- both
+        ceilings allow `search_result_limit = 200` against the cap's own
+        default of 200, so an operator reaches the bad state by raising the
+        limit alone, which is the ordinary thing to do.
+        """
+        if self.search_suggest_candidates <= self.search_result_limit:
+            raise ValueError(
+                "USHER_SEARCH_SUGGEST_CANDIDATES must exceed USHER_SEARCH_RESULT_LIMIT "
+                "-- the edit-distance re-rank has to have more candidates than it keeps"
+            )
+        return self
 
     @field_validator("tmdb_api_key", "otlp_endpoint", mode="before")
     @classmethod
