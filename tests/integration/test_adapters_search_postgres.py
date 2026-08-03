@@ -252,7 +252,7 @@ class TestPostgresSearchIndex(SearchIndexContract):
 
     @pytest_asyncio.fixture
     async def index(self, session: AsyncSession) -> AsyncIterator[PostgresSearchIndex]:
-        yield PostgresSearchIndex(session, ef_search=100)
+        yield PostgresSearchIndex(session, ef_search=100, rrf_k=_RRF_K)
 
     @pytest.fixture(autouse=True)
     def _bind_session(self, session: AsyncSession) -> None:
@@ -281,7 +281,7 @@ async def test_a_renamed_title_is_findable_under_its_new_name_without_reindexing
     """
     document = _doc("The Quiet Vacuum")
     await _insert_title(session, document)
-    index = PostgresSearchIndex(session, ef_search=100)
+    index = PostgresSearchIndex(session, ef_search=100, rrf_k=_RRF_K)
     assert (await index.search(SearchRequest(query="vacuum"))).hits
 
     await session.execute(
@@ -315,7 +315,7 @@ async def test_remove_drops_the_vector_and_leaves_the_catalog_alone(
     """
     document = _doc("The Quiet Vacuum", vector=_vec(1.0, 0.0))
     await _insert_title(session, document)
-    index = PostgresSearchIndex(session, ef_search=100)
+    index = PostgresSearchIndex(session, ef_search=100, rrf_k=_RRF_K)
     await index.index_many([document])
     await index.remove(document.title_id)
 
@@ -348,7 +348,7 @@ async def test_deleting_the_title_removes_it_from_full_text(session: AsyncSessio
     survivor = _doc("Vacuum Chamber")
     await _insert_title(session, removed)
     await _insert_title(session, survivor)
-    index = PostgresSearchIndex(session, ef_search=100)
+    index = PostgresSearchIndex(session, ef_search=100, rrf_k=_RRF_K)
     await index.index_many([removed, survivor])
 
     await session.execute(
@@ -387,7 +387,7 @@ async def test_owned_only_does_not_multiply_a_series_by_its_episodes(
     await _insert_title(session, unowned)
     await _own(session, owned.title_id, copies=3)
 
-    index = PostgresSearchIndex(session, ef_search=100)
+    index = PostgresSearchIndex(session, ef_search=100, rrf_k=_RRF_K)
     outcome = await index.search(
         SearchRequest(query="vacuum", limit=50, filters=SearchFilters(owned_only=True))
     )
@@ -422,7 +422,7 @@ async def test_min_enrichment_is_a_rank_and_not_a_string_comparison(
     await _insert_title(session, stub, enrichment_state=EnrichmentState.STUB)
     await _insert_title(session, enriched, enrichment_state=EnrichmentState.ENRICHED)
 
-    index = PostgresSearchIndex(session, ef_search=100)
+    index = PostgresSearchIndex(session, ef_search=100, rrf_k=_RRF_K)
     outcome = await index.search(
         SearchRequest(
             query="vacuum",
@@ -762,6 +762,13 @@ _EF_SEARCH = 40
 # case reads as the deployment it describes.
 _A_REAL_MODEL_NAME = "fastembed:BAAI/bge-small-en-v1.5"
 
+# The standard RRF constant, and the value the shared contract's two fusion
+# cases are arranged around: at k=60 a title ranked second in both lanes
+# scores 1/62 + 1/62 against 1/61 for each lane's own leader, a 2x margin
+# that does not rest on float noise. Task 23 gives it a setting; the tests
+# pass it explicitly so no case is secretly asserting a default.
+_RRF_K = 60
+
 
 def _unit(position: int) -> tuple[float, ...]:
     """A basis vector, 1.0 in one dimension of the shipped 384."""
@@ -865,7 +872,7 @@ async def test_a_filtered_semantic_search_returns_the_rows_it_was_asked_for(
     and the sum turns that into a gap no draw can close.
     """
     await _seed_embedded_catalog(session, _EMBEDDED_ROWS)
-    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     returned = 0
     for query_vector in _probe_vectors(10):
         outcome = await index.search(_series_request(query_vector))
@@ -895,7 +902,7 @@ async def test_the_default_guc_is_what_makes_that_fail(session: AsyncSession) ->
     and the `off` is set explicitly *after* it, over the top.
     """
     await _seed_embedded_catalog(session, _EMBEDDED_ROWS)
-    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     probes = _probe_vectors(10)
     with_guc = 0
     for query_vector in probes:
@@ -947,7 +954,7 @@ async def test_the_owned_path_does_not_use_the_ann_index(session: AsyncSession) 
     await _seed_embedded_catalog(session, _EMBEDDED_ROWS)
     await _own_every_title(session)
     await session.execute(text("ANALYZE media_items"))
-    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     predicates, parameters = _predicates(SearchFilters(owned_only=True))
     probe = {
         **parameters,
@@ -1011,7 +1018,7 @@ async def test_coverage_does_not_count_skeletons_it_was_never_going_to_embed(
             _doc(f"Salt Flats {number:03d}"),
             enrichment_state=EnrichmentState.SKELETON,
         )
-    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     await index.index_many([embedded])
     outcome = await index.search(
         SearchRequest(
@@ -1047,7 +1054,7 @@ async def test_a_document_indexed_through_the_port_is_still_stale(
     """
     document = _doc("The Quiet Vacuum", vector=_vec(1.0))
     await _insert_title(session, document)
-    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
     embeddings = PostgresTitleEmbeddingRepository(session)
     await index.index_many([document])
 
@@ -1086,7 +1093,7 @@ async def test_the_hnsw_gucs_do_not_outlive_the_transaction(postgres_url: str) -
             await leaky.execute(
                 text("SELECT CAST('[1,0]' AS halfvec) <=> CAST('[0,1]' AS halfvec)")
             )
-            index = PostgresSearchIndex(leaky, ef_search=_EF_SEARCH)
+            index = PostgresSearchIndex(leaky, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
             await index.search(
                 SearchRequest(
                     query="unused by the vector lane",
@@ -1106,3 +1113,255 @@ async def test_the_hnsw_gucs_do_not_outlive_the_transaction(postgres_url: str) -
             assert int(searched.scalar_one()) == 40
     finally:
         await engine.dispose()
+
+
+@pytest.mark.integration
+async def test_a_single_lane_row_does_not_outrank_the_row_both_lanes_found(
+    session: AsyncSession,
+) -> None:
+    """**Trap 1: the missing `COALESCE`, which inverts the entire ordering.**
+
+    A row in one lane only scores `NULL + 1/(60+r)` = `NULL`, and Postgres
+    defaults to `NULLS FIRST` under `ORDER BY ... DESC`. So every single-lane
+    row sorts *above* every correctly-scored row and the one id both lanes
+    agree on lands **last** -- reproduced, and the failure is silent because
+    the result set is full, plausibly ordered, and completely backwards.
+
+    Seeds three titles: text-only, vector-only, and one both lanes rank
+    second. RRF at k=60 gives the shared title 1/62 + 1/62 against 1/61 for
+    each single-lane leader -- a 2x margin, so this rests on arithmetic
+    rather than on float noise. Asserts the shared title is **first** and,
+    separately, that it is not last, because the two failures look different
+    in a diff and only one of them is this trap.
+    """
+    lexical_leader = _doc("Vacuum Chamber")
+    shared = _doc("Harbour Lights", overview="Inside the vacuum.", vector=_vec(0.8, 0.6))
+    vector_leader = _doc("Salt Flats", vector=_vec(1.0, 0.0))
+    for document in (lexical_leader, shared, vector_leader):
+        await _insert_title(session, document)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
+    await index.index_many([shared, vector_leader])
+
+    fused = await index.search(
+        SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=_vec(1.0, 0.0), limit=10)
+    )
+    ranked = [hit.title_id for hit in fused.hits]
+    assert ranked[0] == shared.title_id, (
+        "a single-lane row outranked the row both lanes found; this is a missing "
+        "COALESCE and Postgres sorting NULLS FIRST under ORDER BY ... DESC"
+    )
+    assert ranked[-1] != shared.title_id
+
+
+@pytest.mark.integration
+async def test_a_row_only_one_lane_found_is_still_returned(session: AsyncSession) -> None:
+    """**Trap 2: `INNER JOIN` in place of `FULL OUTER JOIN`.**
+
+    Measured: 1 fused row where 5 were correct. It is not a ranking defect,
+    it is a search that answers only when two independent retrieval methods
+    coincide -- which is the opposite of the reason for having two.
+
+    Seeds lanes with **no overlap at all**, so the inner-join spelling
+    returns an empty result set for a query that matched four titles. Also
+    asserts every hit has a real `title_id`: without `COALESCE(ft.id,
+    vec.id)` a single-lane row surfaces with a NULL id, which is a hit
+    pointing at nothing and a shape that survives every ordering assertion.
+    """
+    lexical = [_doc("Vacuum Chamber"), _doc("The Quiet Vacuum")]
+    vectors = [
+        _doc("Salt Flats", vector=_vec(1.0, 0.0)),
+        _doc("Harbour Lights", vector=_vec(0.9, 0.4)),
+    ]
+    for document in (*lexical, *vectors):
+        await _insert_title(session, document)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
+    await index.index_many(vectors)
+
+    fused = await index.search(
+        SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=_vec(1.0, 0.0), limit=10)
+    )
+    found = [hit.title_id for hit in fused.hits]
+    assert None not in found, "a fused hit carries a NULL id; COALESCE(ft.id, vec.id) is missing"
+    assert set(found) == {document.title_id for document in (*lexical, *vectors)}, (
+        "fusion returned only what both lanes agreed on; that is an INNER JOIN where a "
+        "FULL OUTER JOIN belongs"
+    )
+
+
+@pytest.mark.integration
+async def test_tied_scores_are_broken_deterministically_and_survive_a_rewrite(
+    session: AsyncSession,
+) -> None:
+    """**Trap 3: ties are pervasive, not occasional.**
+
+    Two disjoint 50-row lanes produced 100 fused rows with **50 distinct
+    scores -- every score a two-way tie**, which is arithmetic and not luck:
+    rank *i* in either lane contributes the identical 1/(60+i). Without a
+    deterministic tiebreak, pagination duplicates and drops rows between
+    pages, and nobody can reproduce a bug report.
+
+    The rewrite is what makes this a test rather than a coincidence. A
+    trailing `UPDATE` only separates heap order from id order if it is
+    **non-HOT**, so this one moves `sort_name`, which `ix_titles_sort_name`
+    covers -- re-upserting a row unchanged leaves the index entry pointing at
+    the original TID and the scan arrives in the original order, which is how
+    this idiom silently does nothing. Measured on `media_items`: the
+    unchanged upsert left an already-sorted answer already passing, and
+    moving an indexed column flipped it. The rows are rewritten in reverse id
+    order so heap order ends up reversed rather than merely different.
+
+    Asserts the fused order is byte-for-byte identical across the rewrite,
+    and that the scores really are tied -- a fixture that happened to produce
+    distinct scores would make the whole case vacuous.
+    """
+    # **The vector-lane titles are minted first, and that is the whole of what
+    # makes this case bite.** Every id is a UUIDv7, so creation order is id
+    # order; the join emits the lexical lane's rows first, and PostgreSQL's
+    # small-N sort is stable. With the lexical titles created first, id order
+    # and emission order agree and `ORDER BY score DESC` alone answers
+    # identically -- measured, the mutation survived. Minted the other way
+    # round, the two disagree on every tied pair.
+    vectors = [
+        _doc(f"Salt Flats {number:02d}", vector=_vec(*(0.0,) * number, 1.0)) for number in range(4)
+    ]
+    lexical = [_doc(f"Vacuum {number:02d}") for number in range(4)]
+    for document in (*vectors, *lexical):
+        await _insert_title(session, document)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
+    await index.index_many(vectors)
+
+    request = SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=_vec(1.0), limit=20)
+    before = await index.search(request)
+    scores = [hit.score for hit in before.hits]
+    assert len(scores) > len(set(scores)), (
+        "no two fused scores tied, so this fixture cannot see a missing tiebreak at all"
+    )
+
+    for document in sorted((*lexical, *vectors), key=lambda one: one.title_id.bytes, reverse=True):
+        await session.execute(
+            text("UPDATE titles SET sort_name = sort_name || ' rewritten' WHERE id = :id"),
+            {"id": document.title_id},
+        )
+
+    after = await index.search(request)
+    assert [hit.title_id for hit in after.hits] == [hit.title_id for hit in before.hits], (
+        "the fused order moved when rows were rewritten; ties are pervasive here and "
+        "without the id tiebreak two identical searches answer differently"
+    )
+
+    # **And the half a self-comparison structurally cannot see.** Both halves
+    # above compare the implementation against itself, so they pass against
+    # any order that is merely *repeatable* -- and a tie order decided by the
+    # hash join's emission order is repeatable. Measured with the tiebreak
+    # removed: the fused list comes back `Salt Flats 00, Vacuum 00, Vacuum
+    # 01, Salt Flats 01, ...` -- rank 3 and 4 swapped, because the join's
+    # probe side is the vector lane and PostgreSQL's quicksort is not stable.
+    # So the order is asserted *absolutely*, against the rule the statement
+    # claims to implement, rather than against another run of itself.
+    assert [hit.title_id for hit in after.hits] == [
+        hit.title_id for hit in sorted(after.hits, key=lambda hit: (-hit.score, hit.title_id.bytes))
+    ], "the fused order is not (score DESC, id ASC); ties are being broken by the plan"
+
+    # Pagination, which is what a non-total order costs a caller: page one
+    # must be the first page of the whole answer. Cheap, and it would catch a
+    # top-N heapsort disagreeing with a full sort at a size this fixture does
+    # not reach.
+    page = await index.search(dataclasses.replace(request, limit=4))
+    assert [hit.title_id for hit in page.hits] == [hit.title_id for hit in after.hits[:4]], (
+        "page one is not the first page of the whole result; the fused order is not total"
+    )
+
+
+@pytest.mark.integration
+async def test_fusion_against_a_catalog_with_no_embeddings_degrades_and_says_so(
+    session: AsyncSession,
+) -> None:
+    """**Point 3 of "the one thing this milestone must not get wrong".**
+
+    With no embeddings at all, `FUSED` returns exactly the full-text order
+    wearing a blended-looking score, and nothing in the result set says the
+    semantic lane contributed nothing. RRF cannot tell "ranked last" from
+    "never a candidate"; `semantic_coverage` is the only thing that can.
+
+    Fails two implementations. One that reports a coverage it did not
+    measure -- a hard-coded 1.0, or the fraction of the *returned hits* that
+    had a vector, which is 0/0 here and reads as either. And one that
+    returns nothing at all for `FUSED` when the vector lane is empty, which
+    is a `JOIN` where a `FULL OUTER JOIN` belongs, arriving from the same
+    place as trap 2.
+
+    Asserts both halves: the order equals the `FULL_TEXT` order exactly, and
+    `semantic_coverage == 0.0`. Either alone is satisfiable by an
+    implementation that is wrong about the other.
+    """
+    loud = _doc("Vacuum Chamber")
+    quiet = _doc("Harbour Lights", overview="A study of the vacuum between two stars.")
+    await _insert_title(session, loud)
+    await _insert_title(session, quiet)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
+
+    lexical = await index.search(SearchRequest(query="vacuum", limit=10))
+    fused = await index.search(
+        SearchRequest(
+            query="vacuum",
+            mode=SearchMode.FUSED,
+            query_vector=_vec(1.0),
+            limit=10,
+        )
+    )
+    assert [hit.title_id for hit in fused.hits] == [hit.title_id for hit in lexical.hits]
+    assert fused.semantic_coverage == 0.0
+
+
+@pytest.mark.integration
+async def test_a_title_deep_in_both_lanes_still_reaches_the_first_page(
+    session: AsyncSession,
+) -> None:
+    """`_LANE_MULTIPLIER = 1`, which is trap 2 arriving through a constant
+    instead of through a `JOIN`.
+
+    A lane window equal to the result limit can only ever *re-order* what
+    both lanes already had in their own top `limit` -- so the title that is
+    rank 40 in one lane and rank 3 in the other, which is precisely the row
+    fusion exists to surface, is never a candidate at all. The failure looks
+    like a plausible ranking of the wrong set.
+
+    Seeds `wanted` third in the lexical lane and third in the vector lane and
+    asks for two results. RRF gives it 1/63 + 1/63 against 1/61 for each
+    lane's own leader -- so it must be **first**, and with a lane window of
+    two it is not in the statement at all.
+    """
+    first = _doc("Vacuum One")
+    second = _doc("Vacuum Two")
+    wanted = _doc("Vacuum Three", vector=_vec(0.5, 0.8660254037844386))
+    near = _doc("Salt Flats", vector=_vec(1.0, 0.0))
+    nearer = _doc("Harbour Lights", vector=_vec(0.9, 0.4358898943540674))
+    for document in (first, second, wanted, near, nearer):
+        await _insert_title(session, document)
+    index = PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K)
+    await index.index_many([wanted, near, nearer])
+
+    lexical = await index.search(SearchRequest(query="vacuum", limit=10))
+    assert [hit.title_id for hit in lexical.hits] == [
+        first.title_id,
+        second.title_id,
+        wanted.title_id,
+    ]
+    semantic = await index.search(
+        SearchRequest(
+            query="vacuum", mode=SearchMode.SEMANTIC, query_vector=_vec(1.0, 0.0), limit=10
+        )
+    )
+    assert [hit.title_id for hit in semantic.hits] == [
+        near.title_id,
+        nearer.title_id,
+        wanted.title_id,
+    ]
+
+    fused = await index.search(
+        SearchRequest(query="vacuum", mode=SearchMode.FUSED, query_vector=_vec(1.0, 0.0), limit=2)
+    )
+    assert fused.hits[0].title_id == wanted.title_id, (
+        "the row both lanes ranked third never reached the fused statement; the lane "
+        "window is the result limit, which can only re-order what both lanes already had"
+    )
