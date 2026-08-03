@@ -394,7 +394,27 @@ def _owned_only(value: bool, parameters: dict[str, object]) -> str | None:
     # page of itself. EXISTS stops at the first row. Measured on the shipped
     # `list_for_title` statement: 1 row / 0.251 ms / 21 buffers bounded,
     # 20,001 rows / 22.901 ms / 402 buffers unbounded.
-    return "EXISTS (SELECT 1 FROM media_items AS m WHERE m.title_id = t.id AND m.available)"
+    #
+    # **The predicate is `MediaItemRepository.owned_title_ids`', clause for
+    # clause, and that is a requirement rather than a coincidence.** This one
+    # is the *filter* and that one is the *boost*, and two definitions of owned
+    # is how a filtered list and a boosted list stop agreeing -- a title
+    # `owned_only` returns and the ranking then marks `owned = false`.
+    # Consequences of matching it, in the order they bite:
+    #
+    # - **No `m.available` test.** PRD 02's availability is a soft delete: a
+    #   copy the nightly sweep retracted is still a copy this household has,
+    #   and a result set that shrank because a drive was unmounted narrowed for
+    #   a reason unconnected to the query. (This clause was here and is
+    #   deliberately gone; `test_ownership_counts_a_retracted_copy` in
+    #   tests/integration/test_services_search.py is what pins its absence.)
+    # - **`m.episode_id IS NULL` is present**, matching `owned_title_ids` and
+    #   `_EXTERNAL_IDS_FOR_TITLES` and `_FOR_TITLE`. It buys the bound those
+    #   three already accept and name: a library that reported episodes but
+    #   never their series row reads as not-owned for that series.
+    return (
+        "EXISTS (SELECT 1 FROM media_items AS m WHERE m.title_id = t.id AND m.episode_id IS NULL)"
+    )
 
 
 def _min_enrichment(value: EnrichmentState | None, parameters: dict[str, object]) -> str | None:

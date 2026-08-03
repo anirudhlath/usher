@@ -1,0 +1,364 @@
+"""`SearchService` against real Postgres, for the three things fakes cannot say.
+
+The unit file holds the ranking arithmetic, driven through a scripted index so
+that only ranking varies. What is here instead is everything that is a property
+of a *statement*: how many are issued, what `episode_id IS NULL` costs and buys,
+and whether the two definitions of "owned" -- the boost in `services/search.py`
+and the `owned_only` filter in `adapters/search/postgres.py` -- are actually the
+same predicate. A dict can be made to agree with itself; two SQL statements
+written a task apart cannot.
+
+Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
+scans this file.
+"""
+
+import uuid
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from tests.fakes.search_index import FakeSuggestIndex
+from usher.adapters.search.postgres import PostgresSearchIndex, _predicates
+from usher.db.repositories.media_item import PostgresMediaItemRepository
+from usher.db.repositories.source import PostgresSourceRepository
+from usher.db.repositories.title import PostgresTitleRepository
+from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
+from usher.domain.source import Source
+from usher.domain.title import Title
+from usher.ports.ingest import MediaItemUpsert
+from usher.ports.search import SearchFilters, SearchMode
+from usher.services.search import SearchService
+
+SEEN_AT = datetime(2026, 8, 2, 3, 0, tzinfo=UTC)
+
+# The two knobs the shipped indexes take. Fixed here rather than read from
+# `Settings`, because `tests/integration/` builds no `Settings` and a value an
+# operator can change is not what these cases are about.
+_EF_SEARCH = 100
+_RRF_K = 60
+
+
+@pytest_asyncio.fixture
+async def source(session: AsyncSession) -> AsyncIterator[Source]:
+    row = Source(
+        kind=SourceKind.EMBY,
+        name="Attic Library",
+        base_url="https://emby.invalid",
+        credentials_ref=f"ref-{uuid.uuid4()}",
+        device_id=str(uuid.uuid4()),
+    )
+    await PostgresSourceRepository(session).add(row)
+    yield row
+
+
+def _service(session: AsyncSession) -> SearchService:
+    """The real index, the real repositories, and a *fake* suggest index.
+
+    The suggest half has its own contract driver against real Postgres in
+    `tests/integration/test_adapters_search_postgres.py`; re-running it through
+    here would measure the same statement twice, and every case in this file is
+    about the search path's hydration.
+    """
+    return SearchService(
+        PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K),
+        FakeSuggestIndex(),
+        PostgresTitleRepository(session),
+        PostgresMediaItemRepository(session),
+        result_limit=100,
+    )
+
+
+async def _seed_title(
+    session: AsyncSession,
+    name: str,
+    *,
+    kind: TitleKind = TitleKind.MOVIE,
+    overview: str | None = None,
+) -> Title:
+    title = Title(
+        kind=kind,
+        name=name,
+        sort_name=name.casefold(),
+        overview=overview,
+        year=2019,
+        enrichment_state=EnrichmentState.ENRICHED,
+    )
+    await PostgresTitleRepository(session).add(title)
+    return title
+
+
+async def _seed_copy(
+    session: AsyncSession,
+    *,
+    source_id: uuid.UUID,
+    title_id: uuid.UUID,
+    external_id: str,
+    episode_id: uuid.UUID | None = None,
+) -> None:
+    await PostgresMediaItemRepository(session).upsert_many(
+        [
+            MediaItemUpsert(
+                source_id=source_id,
+                external_id=external_id,
+                title_id=title_id,
+                episode_id=episode_id,
+                container="mkv",
+                video_codec="hevc",
+                audio_codec="truehd",
+                width=3840,
+                height=2160,
+                hdr_format=None,
+                audio_channels=8,
+                file_size_bytes=1,
+                runtime_seconds=9360,
+                added_at=None,
+                last_seen_at=SEEN_AT,
+            )
+        ]
+    )
+
+
+async def _seed_episode_copy(
+    session: AsyncSession, *, source_id: uuid.UUID, series_id: uuid.UUID, external_id: str
+) -> None:
+    """One `media_items` row shaped the way `IngestService` writes an episode:
+    the *series'* `title_id` **and** the episode's own `episode_id`.
+
+    Written through raw SQL rather than through `upsert_many` because
+    `media_items.episode_id` is a real foreign key and this case does not care
+    which episode it points at -- only that the row is not the series' own.
+    """
+    season_id = uuid.uuid4()
+    episode_id = uuid.uuid4()
+    await session.execute(
+        text(
+            "INSERT INTO seasons (id, title_id, season_number) "
+            "VALUES (CAST(:id AS uuid), CAST(:title AS uuid), 1)"
+        ),
+        {"id": season_id, "title": series_id},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO episodes (id, title_id, season_id, season_number, episode_number) "
+            "VALUES (CAST(:id AS uuid), CAST(:title AS uuid), CAST(:season AS uuid), 1, 1)"
+        ),
+        {"id": episode_id, "title": series_id, "season": season_id},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO media_items (id, source_id, title_id, episode_id, external_id, "
+            "                         last_seen_at, available) "
+            "VALUES (CAST(:id AS uuid), CAST(:source AS uuid), CAST(:title AS uuid), "
+            "        CAST(:episode AS uuid), :external, :seen, true)"
+        ),
+        {
+            "id": uuid.uuid4(),
+            "source": source_id,
+            "title": series_id,
+            "episode": episode_id,
+            "external": external_id,
+            "seen": SEEN_AT,
+        },
+    )
+
+
+@contextmanager
+def _record_statements(session: AsyncSession, sink: list[str]) -> Iterator[None]:
+    """Capture SQL off `before_cursor_execute`, never transcribed.
+
+    A hand-copied lookalike drifts and then reads like coverage, which is a
+    failure this repository has recorded twice.
+    """
+    engine = session.get_bind().engine
+
+    def _on_execute(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        sink.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _on_execute)
+    try:
+        yield
+    finally:
+        event.remove(engine, "before_cursor_execute", _on_execute)
+
+
+@pytest.mark.integration
+async def test_a_search_costs_the_same_statements_at_5_hits_and_at_50(
+    session: AsyncSession,
+) -> None:
+    """The N+1 this task's two port additions exist to delete, asserted the way
+    M4's ingest cases assert it: hold the *shape* fixed and vary the thing that
+    would multiply.
+
+    Fails: `titles.get(hit.title_id)` per hit, and `media_items.list_for_title`
+    per hit. The second is worse than N+1 -- a read on `media_items.title_id`
+    alone is a read of the whole show, measured in this repository at 20,001
+    rows / 22.901 ms / 402 buffers against 1 row / 0.251 ms / 21 buffers with
+    `AND episode_id IS NULL`.
+
+    Captured off `before_cursor_execute`, never transcribed.
+    """
+    for index in range(50):
+        await _seed_title(session, f"Vacuum Study {index:02d}")
+    await session.flush()
+    service = _service(session)
+
+    small: list[str] = []
+    with _record_statements(session, small):
+        few = await service.search("vacuum", limit=5)
+    large: list[str] = []
+    with _record_statements(session, large):
+        many = await service.search("vacuum", limit=50)
+
+    assert len(few.results) == 5
+    assert len(many.results) == 50
+    assert len(small) == len(large), (
+        f"{len(large)} statements for 50 hits against {len(small)} for 5 -- "
+        "hydration is per hit, which is the round-trip-per-item shape "
+        "`list_by_ids` and `owned_title_ids` were added to delete"
+    )
+
+
+@pytest.mark.integration
+async def test_ownership_counts_a_retracted_copy(session: AsyncSession, source: Source) -> None:
+    """PRD 02's soft-delete availability. A copy the nightly sweep marked
+    unavailable is still a copy you have, and a ranking that flips because a
+    source went down moves search results for a reason unconnected to the
+    query.
+
+    This is also the case that pins the *shared* definition: the same predicate
+    backs `SearchFilters.owned_only` in `PostgresSearchIndex`, and two
+    definitions of owned is how a filtered list and a boosted list stop
+    agreeing. Both halves are asserted here, in one case, because asserting
+    either alone is what let them drift in the first place.
+    """
+    retracted = await _seed_title(session, "The Quiet Vacuum")
+    await _seed_copy(session, source_id=source.id, title_id=retracted.id, external_id="retracted-1")
+    await session.execute(
+        text("UPDATE media_items SET available = false WHERE title_id = CAST(:id AS uuid)"),
+        {"id": retracted.id},
+    )
+    await session.flush()
+
+    media_items = PostgresMediaItemRepository(session)
+    assert await media_items.owned_title_ids([retracted.id]) == {retracted.id}, (
+        "the boost half stopped counting a retracted copy"
+    )
+
+    owned_only = await _service(session).search(
+        "vacuum", filters=SearchFilters(owned_only=True), limit=10
+    )
+    assert [result.title_id for result in owned_only.results] == [retracted.id], (
+        "the filter half stopped counting a retracted copy; the two definitions "
+        "of owned have drifted and a filtered list and a boosted list now disagree"
+    )
+    assert [result.owned for result in owned_only.results] == [True]
+
+
+@pytest.mark.integration
+async def test_a_series_owned_only_through_its_episodes_is_read_once(
+    session: AsyncSession, source: Source
+) -> None:
+    """The bound named rather than implied. `owned_title_ids` carries
+    `AND episode_id IS NULL`, so a library that reported episodes but never
+    their series row reads as not-owned for that series -- the same bound
+    `resolve_external_ids`' title branch already accepts, and the alternative
+    is the 20,001-row read above. Asserted so the trade is visible if anyone
+    later calls it a bug.
+
+    Both sides again: the boost's read and the `owned_only` filter must give
+    the same answer for this row shape, or a series appears in a filtered list
+    with its badge off.
+    """
+    series = await _seed_title(session, "Vacuum Chamber Diaries", kind=TitleKind.SERIES)
+    own_row = await _seed_title(session, "The Quiet Vacuum")
+    await _seed_episode_copy(
+        session, source_id=source.id, series_id=series.id, external_id="episode-1"
+    )
+    await _seed_copy(session, source_id=source.id, title_id=own_row.id, external_id="film-1")
+    await session.flush()
+
+    media_items = PostgresMediaItemRepository(session)
+    assert await media_items.owned_title_ids([series.id, own_row.id]) == {own_row.id}
+
+    owned_only = await _service(session).search(
+        "vacuum", filters=SearchFilters(owned_only=True), limit=10
+    )
+    assert [result.title_id for result in owned_only.results] == [own_row.id]
+
+
+@pytest.mark.integration
+async def test_the_two_owned_predicates_are_the_same_string(session: AsyncSession) -> None:
+    """The agreement asserted structurally rather than only behaviourally.
+
+    Both cases above would still pass if the two statements happened to agree
+    on the rows those cases seed and disagreed on a shape neither seeds. This
+    reads the shipped SQL out of both modules and asserts they carry the same
+    two clauses -- `episode_id IS NULL` present in both, `available` absent
+    from both -- so a future edit to one is visible here rather than in a
+    household's badge column.
+    """
+    from usher.db.repositories.media_item import _OWNED_TITLE_IDS
+
+    filter_sql, _ = _predicates(SearchFilters(owned_only=True))
+    both = ((filter_sql, "the owned_only filter"), (_OWNED_TITLE_IDS, "the owned boost"))
+    for sql, where in both:
+        assert "episode_id IS NULL" in sql, f"{where} lost the episode bound"
+        assert "available" not in sql, (
+            f"{where} filters on availability; PRD 02's soft delete means a "
+            "retracted copy is still a copy you have"
+        )
+
+
+@pytest.mark.integration
+async def test_a_hydrated_result_carries_the_row_and_not_just_an_id(
+    session: AsyncSession, source: Source
+) -> None:
+    """Hydration through the real repository, where a `Title` is 31 columns and
+    `search_document` is a deferred generated column the read must not touch.
+
+    Fails: a `list_by_ids` whose `defer(..., raiseload=True)` reaches
+    `_to_domain` -- which would be a `MissingGreenlet` rather than a wrong
+    answer, and only against real SQLAlchemy.
+    """
+    title = await _seed_title(session, "The Quiet Vacuum", overview="A house nobody has entered.")
+    await _seed_copy(session, source_id=source.id, title_id=title.id, external_id="film-1")
+    await session.flush()
+
+    answer = await _service(session).search("vacuum", limit=10)
+
+    assert [result.name for result in answer.results] == ["The Quiet Vacuum"]
+    assert answer.results[0].kind is TitleKind.MOVIE
+    assert answer.results[0].year == 2019
+    assert answer.results[0].owned is True
+    assert answer.mode is SearchMode.FULL_TEXT
+    assert answer.degraded is False
+
+
+@pytest.mark.integration
+async def test_a_search_that_matches_nothing_costs_no_hydration(session: AsyncSession) -> None:
+    """The empty-candidate guard, where it is observable. Fails: a `_rank` that
+    issues `list_by_ids([])` and `owned_title_ids([])` anyway -- two statements
+    per keystroke on a search box whose query has not matched yet, which is
+    most keystrokes."""
+    await _seed_title(session, "The Quiet Vacuum")
+    await session.flush()
+    service = _service(session)
+
+    seen: list[str] = []
+    with _record_statements(session, seen):
+        answer = await service.search("thereisnosuchword", limit=10)
+
+    assert answer.results == ()
+    assert len(seen) == 1, f"{len(seen)} statements for a search that matched nothing: {seen}"

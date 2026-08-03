@@ -78,6 +78,7 @@ def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipelin
         ingest=unused,
         reconcile=unused,
         watch=unused,
+        search=unused,
         events=NullEventPublisher(),
         commit=commit,
     )

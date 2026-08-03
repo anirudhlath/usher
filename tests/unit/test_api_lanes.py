@@ -37,6 +37,7 @@ from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
+from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
@@ -65,6 +66,7 @@ from usher.ports.source import (
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
+from usher.services.search import SearchService
 from usher.services.watch_sync import WatchStateSyncService
 
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
@@ -239,6 +241,16 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
             runs=runs,
             queue=queue,
             commit=commit,
+        ),
+        # Over the port doubles rather than `cast(Any, None)`: no lane reads
+        # it, but a field left unset here is one a lane could start reading
+        # without this file noticing.
+        search=SearchService(
+            FakeSearchIndex(),
+            FakeSuggestIndex(),
+            titles,
+            fakes.media_items,
+            result_limit=settings.search_result_limit,
         ),
         events=fakes.events,
         commit=commit,

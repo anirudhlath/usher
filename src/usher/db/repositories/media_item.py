@@ -219,6 +219,29 @@ WHERE title_id = :title_id AND episode_id IS NULL
 ORDER BY available DESC, last_seen_at DESC, id
 """
 
+# Which of a search's candidate titles this household holds a copy of. One
+# statement for the whole result set, and the two clauses that are *not* here
+# are the load-bearing part:
+#
+# - **No `available` predicate.** PRD 02's availability is a soft delete, so a
+#   copy the nightly sweep retracted is still a copy you have. A search
+#   ranking that flipped because a source went down would move results for a
+#   reason unconnected to the query, which is M5's lesson one subsystem over.
+#   `PostgresSearchIndex`'s `owned_only` filter carries the identical
+#   predicate; two definitions of owned is how a filtered list and a boosted
+#   list stop agreeing.
+# - **`episode_id IS NULL` *is* here**, and it is the same bound
+#   `_EXTERNAL_IDS_FOR_TITLES` and `_FOR_TITLE` already carry, for the same
+#   measured reason: an episode's row carries its series' `title_id` too, so
+#   without it one 20,000-episode series is 20,001 rows read to answer one
+#   boolean. `DISTINCT` would still return one id, having paid for all of
+#   them. What it costs is named on the port: a library that reported episodes
+#   but never their series row reads as not-owned for that series.
+_OWNED_TITLE_IDS = """
+SELECT DISTINCT title_id FROM media_items
+WHERE title_id = ANY(:title_ids) AND episode_id IS NULL
+"""
+
 
 class PostgresMediaItemRepository(MediaItemRepository):
     def __init__(self, session: AsyncSession) -> None:
@@ -476,6 +499,17 @@ class PostgresMediaItemRepository(MediaItemRepository):
                 constraint=constraint_name(exc),
             ) from exc
         return result.rowcount == 1
+
+    async def owned_title_ids(self, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        if not title_ids:
+            # One fewer round trip on the common empty search, and the same
+            # reason `list_by_ids` guards: an empty `ANY` array is legal here
+            # but a statement that can only answer "nothing" is a statement
+            # not worth sending.
+            return set()
+        with self._session.no_autoflush:
+            result = await self._session.execute(text(_OWNED_TITLE_IDS), {"title_ids": title_ids})
+        return {row[0] for row in result.all()}
 
     async def count_for_source(self, source_id: uuid.UUID) -> int:
         with self._session.no_autoflush:

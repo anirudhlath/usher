@@ -132,6 +132,22 @@ class TitleRepository(ABC):
         """Fetch by IMDb id, or None if no title carries it."""
 
     @abstractmethod
+    async def list_by_ids(self, title_ids: Sequence[uuid.UUID]) -> list[Title]:
+        """Every title named by `title_ids` that still exists, in any order.
+
+        **A missing id is an omission, never an error.** A title deleted
+        between an index write and a search read is ordinary, and the caller
+        re-orders by its own ranking anyway — so returning fewer rows than
+        asked for is the contract, and a caller that indexes the result by id
+        must tolerate the gap.
+
+        Exists because hydrating a 50-hit result set through `get()` is 50
+        statements per search: the same round-trip-per-item shape `index_many`
+        was introduced to delete from `SearchIndex`, arriving from the other
+        direction.
+        """
+
+    @abstractmethod
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         """Catalog size broken down by enrichment tier.
 
@@ -640,6 +656,33 @@ class MediaItemRepository(ABC):
         Unlike `upsert_many` this *does* write what it is given, including a
         `None` `episode_id`: it is the deliberate act of a human or of a
         re-match, not a walk's incidental "I did not look".
+        """
+
+    @abstractmethod
+    async def owned_title_ids(self, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        """Which of `title_ids` this household has a copy of, on any source.
+
+        **A retracted copy still counts.** PRD 02's availability is a soft
+        delete, so `available = false` means "a source is not currently
+        reporting it", and a search ranking that flipped when a source went
+        down would move results for a reason unconnected to the query. The
+        `owned_only` filter in `PostgresSearchIndex` carries the *identical*
+        predicate: two definitions of owned is how a filtered list and a
+        boosted list stop agreeing.
+
+        **Restricted to a title's own row (`episode_id IS NULL`), and the
+        reason is measured.** `IngestService` writes an episode's row with its
+        series' `title_id` *and* its own `episode_id`, so an unrestricted read
+        of a series is one row per episode file: 20,001 rows / 22.901 ms / 402
+        buffers against 1 row / 0.251 ms / 21 buffers, on this project's own
+        measurement of `list_for_title`. `resolve_external_ids`' title branch
+        carries the identical clause. The bound that buys: a library that
+        reported episodes but never their series row reads as not-owned for
+        that series.
+
+        One statement however many ids are asked about — the same N+1 this
+        port's `list_for_title` would otherwise be used for, and worse, since
+        each of those reads is a read of a whole show.
         """
 
     @abstractmethod

@@ -46,6 +46,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
+from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestIndex
 from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
 from usher.config import Settings
 from usher.db.repositories.credentials import PostgresCredentialStore
@@ -92,6 +93,7 @@ from usher.services.jobs import JobWorker
 from usher.services.matching import MatchService
 from usher.services.push import PushApplyService
 from usher.services.reconcile import ReconcileService
+from usher.services.search import SearchService
 from usher.services.watch_sync import WatchStateSyncService
 from usher.telemetry import QueueSnapshot
 
@@ -159,6 +161,7 @@ class Pipeline:
     ingest: IngestService
     reconcile: ReconcileService
     watch: WatchStateSyncService
+    search: SearchService
     events: EventPublisher
     commit: Callable[[], Awaitable[None]]
 
@@ -187,6 +190,7 @@ def build_pipeline(
     events: EventPublisher | None = None,
     max_retract_fraction: float | None = None,
     provider: MetadataProvider | None = None,
+    embedder: Embedder | None = None,
 ) -> Pipeline:
     """Wire one session into the whole ingest pipeline.
 
@@ -207,6 +211,14 @@ def build_pipeline(
     call per unmatched item, and its constructor takes the provider as
     optional for exactly that reason. Only a worker -- which runs the
     queued `match` and `enrich` handlers -- passes one.
+
+    `embedder` is `None` on the same terms, and for a sharper reason: it is a
+    once-per-*process* resource and this function runs once per session, so it
+    is **never built here**. `usher search --mode fused` builds one with
+    `composition.embedder(settings)` and closes it in the same `finally`;
+    every other caller passes nothing and gets a `SearchService` whose
+    full-text and trigram lanes work exactly as well. That is the whole of
+    ADR-0022's "the embedder is optional" at the wiring layer.
     """
     publisher = NullEventPublisher() if events is None else events
     sources = PostgresSourceRepository(session)
@@ -267,6 +279,27 @@ def build_pipeline(
             queue=queue,
             commit=session.commit,
             batch_size=settings.sync_batch_size,
+        ),
+        # The two indexes are built here rather than being fields on the
+        # pipeline, because nothing outside this service has any business
+        # holding a `SearchIndex`: PRD 05's split is retrieve-then-rank, and a
+        # caller that could reach the generator directly would get unranked
+        # hits with no `owned` flag and no `SearchAnswer` to say what ran.
+        search=SearchService(
+            PostgresSearchIndex(
+                session,
+                ef_search=settings.search_hnsw_ef_search,
+                rrf_k=settings.search_rrf_k,
+            ),
+            PostgresSuggestIndex(
+                session,
+                threshold=settings.search_trigram_threshold,
+                candidates=settings.search_suggest_candidates,
+            ),
+            titles,
+            media_items,
+            result_limit=settings.search_result_limit,
+            embedder=embedder,
         ),
         events=publisher,
         commit=session.commit,

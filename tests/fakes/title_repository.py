@@ -7,6 +7,7 @@ parametrized tests along with it.
 """
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from usher.domain.enums import EnrichmentState, TitleKind
@@ -151,6 +152,19 @@ class FakeTitleRepository(TitleRepository):
             if title.imdb_id == imdb_id:
                 return title
         return None
+
+    async def list_by_ids(self, title_ids: Sequence[uuid.UUID]) -> list[Title]:
+        # Ids the store does not hold are simply absent, which is the port's
+        # contract rather than this fake being lenient: a title deleted
+        # between an index write and a search read is ordinary.
+        #
+        # Deliberately **not** returned in the order asked for. The real one
+        # is a single `IN (...)` and promises no order at all, and a caller
+        # that got insertion order from this fake would be relying on
+        # something Postgres never said -- the same shape as `list_for_title`'s
+        # tiebreak, which this module's siblings already document.
+        wanted = set(title_ids)
+        return [title for title in self._titles.values() if title.id in wanted]
 
     def stored(self) -> list[Title]:
         """Every title held, for `FakeTitleMatchRepository` to read through.

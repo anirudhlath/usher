@@ -210,6 +210,51 @@ class Settings(BaseSettings):
     # time sets this false for that one run.
     embedding_offline: bool = True
 
+    # The retrieval knobs, arriving the same way the `embedding_*` three above
+    # did -- **with their readers, not before them.**
+    # `test_every_setting_is_read_by_something` means a field cannot land in a
+    # commit that does not read it in `src/`, and the two search indexes are
+    # constructed for the first time by `composition.build_pipeline` in the
+    # commit that adds `SearchService`. The rest of the block (`index_enabled`,
+    # and the cross-field rule that `search_suggest_candidates` must exceed
+    # `search_result_limit`) belongs to the settings task.
+
+    # The ceiling on `SearchRequest.limit`, applied by `SearchService` before a
+    # request reaches an index -- not the default, the most a caller may ask
+    # for. `le=200` because every candidate becomes a `SearchResult` assembled
+    # in application code and RRF fuses two lists of this size; 10,000 is a
+    # scan wearing a search's name.
+    search_result_limit: int = Field(default=50, ge=1, le=200)
+    # Reciprocal Rank Fusion's smoothing constant: `1 / (k + rank)`. It sets
+    # how fast a hit's contribution decays with rank, so a small k makes rank 1
+    # dominate and a large one flattens both lists into near-equal votes. 60 is
+    # the value RRF's original paper uses and the one ADR-0002 assumes. `ge=1`
+    # because k=0 makes the top rank's weight unbounded against the second's,
+    # which is "return the first list". **Not the constant `SearchService`'s
+    # relevance term uses**, which is 1: that term is scaled against a
+    # popularity term in [0, 1) rather than against a second candidate list,
+    # and sharing this number would make relevance two orders of magnitude
+    # smaller than popularity.
+    search_rrf_k: int = Field(default=60, ge=1, le=1000)
+    # pgvector's `hnsw.ef_search`, set per statement rather than globally. The
+    # GUC's own default is 40 and is not what this wants: measured, a filtered
+    # query at 40 returned 0.88 rows of a requested 10. Larger is more accurate
+    # and linearly slower. `ge=1` is pgvector's floor; `le=1000` because beyond
+    # that the index is a scan with extra steps.
+    search_hnsw_ef_search: int = Field(default=100, ge=1, le=1000)
+    # `pg_trgm`'s `similarity()` floor for the suggest path. Bounded to (0, 1]
+    # because that is `similarity()`'s own range: 0 admits every row in
+    # `titles` as a candidate, which is the latency cliff PRD 05 says the
+    # narrow path exists to avoid, and 1.0 admits only exact matches, which is
+    # `LIKE`.
+    search_trigram_threshold: float = Field(default=0.3, gt=0.0, le=1.0)
+    # How many trigram candidates are collected before the `levenshtein`
+    # re-rank. Measured: 1,774 candidates against a 300,000-row table is a 169x
+    # reduction in `levenshtein` calls, and edit distance over the whole table
+    # is the exact cliff ADR-0002 names. It must exceed `search_result_limit`
+    # or the re-rank can only reorder what the cap already chose.
+    search_suggest_candidates: int = Field(default=200, ge=1, le=2000)
+
     # The push lane and the worker lane (PRD 03, PRD 01's concurrency
     # model). Same reasoning as every block above: PRD 08's TOML config
     # layer does not exist yet. Deliberately named `push_*` rather than

@@ -284,5 +284,18 @@ class FakeMediaItemRepository(MediaItemRepository):
                 return True
         return False
 
+    async def owned_title_ids(self, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        # `entry.episode_id is None` is the real one's `episode_id IS NULL`,
+        # and the *absence* of an `entry.available` test is the other half of
+        # the definition: a retracted copy is still a copy you have (PRD 02's
+        # soft delete). Both halves are asserted against Postgres, where the
+        # sweep that sets `available = false` actually runs.
+        wanted = set(title_ids)
+        return {
+            entry.title_id
+            for entry in self._items.values()
+            if entry.title_id in wanted and entry.episode_id is None and entry.title_id is not None
+        }
+
     async def count_for_source(self, source_id: uuid.UUID) -> int:
         return sum(1 for entry in self._items.values() if entry.source_id == source_id)

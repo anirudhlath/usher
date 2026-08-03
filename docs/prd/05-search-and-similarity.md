@@ -177,6 +177,45 @@ Retrieval is separated from ranking, deliberately:
 Owned titles are boosted but not exclusive: searching should surface things you
 don't have, clearly marked, because that feeds discovery.
 
+**Three of those six terms ship in M6 and three are M7's, each for a named
+reason** (`services/search.py`). Relevance, popularity and owned-vs-not have
+data behind them today. **Watch state** needs a user and `SearchRequest`
+carries none — `SearchFilters` is a closed vocabulary that deliberately has no
+user field, and M7 is the first milestone whose calls hold a user identity by
+construction. **Recency** has data (`year` across the catalog, `release_date`
+on the enriched tier) and no way to choose a decay constant: nothing in M6
+measures ranking, so a half-life picked here would read like a measurement and
+be a guess. There is also a double-counting argument, recorded as an argument
+rather than a measurement — TMDb's `popularity` is a rolling engagement figure
+and already leans recent. **Taste-centroid proximity** has no centroid; PRD 06
+owns the taste model and nothing computes one.
+
+**Relevance enters the blend as a rank, never as a raw score.** A `ts_rank` is
+around 0.06, an RRF score around 0.016–0.033 and a cosine is in [-1, 1];
+adding any of those to a popularity term in [0, 1) is
+[ADR-0002](decisions/0002-postgres-first-search.md)'s incompatible-scale
+prohibition committed one layer up, where the SQL-side rule cannot see it. The
+service reads the outcome as an *ordering* and derives `1 / (1 + rank)` from
+the position, with equal index scores sharing a rank.
+
+**An absent signal is excluded from the blend, not scored zero.**
+`titles.popularity` is null for every title TMDb has never described, which is
+most of the catalog, and `popularity or 0.0` would rank a title nobody measured
+identically to one measured as unpopular — the same rule
+[ADR-0014](decisions/0014-absence-is-not-zero.md) states for watch
+history, applied to a ranking term. The observable consequence: at equal
+relevance, unknown popularity ranks above a measured zero.
+
+**"Owned" has one definition, and both consumers cite it.** A copy the nightly
+availability sweep retracted (`available = false`, PRD 02's soft delete) still
+counts, because a ranking that flipped when a source went down would move
+results for a reason unconnected to the query; and the read is restricted to a
+title's own `media_items` row (`episode_id IS NULL`), which costs the bound
+that a library reporting episodes but never their series row reads as not-owned
+for that series. The `owned_only` *filter* and the owned *boost* are the same
+predicate on purpose — two definitions is how a filtered list and a boosted
+list stop agreeing.
+
 ## The upgrade path
 
 `SearchIndex` is an ABC. Adding Meilisearch means implementing it once; nothing

@@ -64,10 +64,12 @@ autoflush fails.
 """
 
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from usher.db.models.title import DERIVED_COLUMNS, TitleRow
 from usher.db.repositories._errors import constraint_name
@@ -256,6 +258,36 @@ class PostgresTitleRepository(TitleRepository):
             )
         row = result.scalar_one_or_none()
         return _to_domain(row) if row else None
+
+    async def list_by_ids(self, title_ids: Sequence[uuid.UUID]) -> list[Title]:
+        # One statement for a whole result set. Hydrating 50 hits through
+        # `get()` is 50 round trips per search -- the same shape `index_many`
+        # was introduced to delete from `SearchIndex`, arriving from the other
+        # direction.
+        #
+        # `defer(search_document, raiseload=True)` for the reason `list_stale`
+        # carries it: `titles` holds a tsvector roughly the size of the
+        # document it indexes and a ranked result set has no use for it, so
+        # without the deferral every search ships one per hit for nothing.
+        # `raiseload` turns a stray attribute access into a raise rather than
+        # into one extra query per row -- an N+1 that answers correctly and is
+        # therefore invisible. `_to_domain` filters `DERIVED_COLUMNS` before
+        # touching it, so nothing legitimate trips it.
+        #
+        # An id naming no row is simply absent from the answer; the port says
+        # so, and the caller re-orders by its own ranking anyway.
+        if not title_ids:
+            # Never an unbounded read: `IN ()` is a syntax error in Postgres
+            # and SQLAlchemy renders an always-false expression with a
+            # warning, so the empty case is answered here rather than sent.
+            return []
+        with self._session.no_autoflush:  # see get()'s comment
+            result = await self._session.execute(
+                select(TitleRow)
+                .options(defer(TitleRow.search_document, raiseload=True))
+                .where(TitleRow.id.in_(list(title_ids)))
+            )
+        return [_to_domain(row) for row in result.scalars().all()]
 
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         with self._session.no_autoflush:  # see get()'s comment
