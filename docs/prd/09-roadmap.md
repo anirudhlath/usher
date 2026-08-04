@@ -139,6 +139,16 @@ deliberately rather than drifted into.**
    *provider's* JSON shape would put a TMDb-shaped concept in `services/`.
    Because the document is a generated column, filling B when M7 lands
    `Credit` is a migration rather than a rewrite.
+
+   **M7 filled it, and annotated that last sentence rather than deleting
+   it.** It is true of the search *path* — no service was rewritten — and
+   understates the migration: filling B needed a denormalised
+   `titles.credit_names` column (a stored generated expression cannot reach
+   another table, and the `IMMUTABLE`-wrapper workaround is accepted by
+   Postgres and silently wrong), a forced full-column rewrite in the same
+   migration, and a re-embed of the whole enriched tier, because the
+   positional assembly moves every fingerprint including uncredited titles'.
+   See [05](05-search-and-similarity.md).
 3. **No `title_search_names` table is built.** [05](05-search-and-similarity.md)
    specifies a narrow `(title_id, name, kind, popularity)` table for
    autocomplete, justified by *aliases and people names* — one title

@@ -76,6 +76,7 @@ def _document(
     popularity: float = 1.0,
     year: int | None = 2019,
     vector: tuple[float, ...] | None = None,
+    credits: tuple[str, ...] = (),
 ) -> SearchDocument:
     """One synthetic document. Every name in this file is invented; nothing
     here is a row from any third-party dataset (see
@@ -87,6 +88,7 @@ def _document(
         sort_name=name,
         overview=overview,
         genres=genres,
+        credits=credits,
         popularity=popularity,
         year=year,
         vector=vector,
@@ -163,6 +165,58 @@ class SearchIndexContract:
         await self.index_all(index, [document])
         outcome = await index.search(SearchRequest(query="vacuum"))
         assert document.title_id in {hit.title_id for hit in outcome.hits}
+
+    async def test_a_cast_match_ranks_below_a_name_match_and_above_an_overview_match(
+        self, index: SearchIndex
+    ) -> None:
+        """Weight class B, and **`test_a_name_match_outranks_an_overview_match`
+        is not enough to pin it.**
+
+        That case compares A against C, and B sits between them without
+        touching either -- so a milestone that filled B with the wrong weight
+        passes it. Two wrong implementations this kills, and both are one
+        character in a migration: class B filled at `'A'` (the cast match ties
+        the name match, and this is an *ordering* assertion rather than a
+        membership one) and class B filled at `'D'` (it falls below the
+        overview match).
+
+        Measured on pg17.10 before this case was written, three rows carrying
+        `Marlow Vance` in three different classes, scored with
+        `ts_rank(search_document, websearch_to_tsquery('english', 'marlow
+        vance'))`: name **0.9910322**, credit_names **0.39641288**, overview
+        **0.19820644**. A is 2.5x B and B is 2x C, with no ties and no tuning
+        -- those are `ts_rank`'s default weights `{0.1, 0.2, 0.4, 1.0}` doing
+        exactly what the class assignment says.
+
+        All three rows are in one index and the assertion is on **position**,
+        which is the front matter's rule 1 and is what distinguishes "B is
+        between A and C" from "B exists".
+        """
+        # **Creation order is the load-bearing half, and it is the id order
+        # rather than the list order that matters** -- `_document` mints a
+        # UUIDv7 when it is *called*. Measured on pg17.10: class B filled at
+        # `'A'` makes the cast row and the name row tie *exactly*, at
+        # 0.9910322 both, so which one comes back first is decided entirely by
+        # the tiebreak -- `ORDER BY score DESC, t.id` in the shipped statement
+        # and `title_id.bytes` in the fake, both ascending. So `named` is
+        # minted **last**: on a tie it sorts behind `credited` and the case
+        # fails. Minted first, the tie resolves to the expected answer and the
+        # `'A'` mutation survives -- verified, it did, before this ordering
+        # was fixed.
+        mentioned = _document("Ten Harbour", overview="Marlow Vance walks at dusk.")
+        credited = _document(
+            "Nine Harbour", overview="A harbour at dusk.", credits=("Marlow Vance",)
+        )
+        named = _document("Marlow Vance", overview="A harbour at dusk.")
+        await self.index_all(index, [mentioned, credited, named])
+
+        outcome = await index.search(SearchRequest(query="marlow vance"))
+
+        assert [hit.title_id for hit in outcome.hits] == [
+            named.title_id,
+            credited.title_id,
+            mentioned.title_id,
+        ]
 
     async def test_a_name_match_outranks_an_overview_match(self, index: SearchIndex) -> None:
         """**The milestone's central retrieval claim**, and the one no

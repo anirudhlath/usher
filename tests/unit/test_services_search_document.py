@@ -137,8 +137,10 @@ def test_the_document_is_deterministic_and_ordered_by_the_provider() -> None:
 def test_the_assembly_is_positional_so_a_missing_field_is_an_empty_segment() -> None:
     """**The property that makes the Python composer and `_FINGERPRINT_SQL`
     the same function.** The predicate is spelled with `coalesce(..., '')` on
-    every nullable field and no conditionals at all, so it emits six segments
-    for every title in the catalog.
+    every nullable field and no conditionals at all, so it emits seven
+    segments for every title in the catalog -- seven since M7 filled weight
+    class B, and the seventh is `credit_names`, which is empty for the great
+    majority of them and is an **empty segment** rather than an absent one.
 
     Fails: the obvious composer, which appends a section only when the field
     is populated. That one reads better, embeds slightly cleaner text, and
@@ -162,9 +164,20 @@ def test_the_assembly_is_positional_so_a_missing_field_is_an_empty_segment() -> 
     )
     sparse = compose_document(_title(name="Ledgerhand", sort_name="ledgerhand", year=None))
 
-    assert full.text.count("\n") == 5
-    assert sparse.text.count("\n") == 5
-    assert sparse.text == "Ledgerhand\n\n\n\n\n"
+    assert full.text.count("\n") == 6
+    assert sparse.text.count("\n") == 6
+    assert sparse.text == "Ledgerhand\n\n\n\n\n\n"
+
+    # The credits segment specifically, because it is the one that arrived as
+    # a *conditional* append and the count above cannot tell which of the
+    # seven is missing. An empty `credits` and an absent one must be the same
+    # string.
+    assert (
+        compose_document(
+            _title(name="Ledgerhand", sort_name="ledgerhand", year=None), credits=()
+        ).text
+        == sparse.text
+    )
 
 
 def test_the_year_is_not_in_the_document_because_the_predicate_has_no_year() -> None:
@@ -203,19 +216,45 @@ def test_array_fields_join_on_a_single_space_as_usher_array_text_does() -> None:
     assert "science fiction, thriller" not in document.text
 
 
-def test_credits_are_accepted_and_are_empty_in_m6() -> None:
-    """Boundary call 2: weight class B ships empty because no `Person` or
-    `Credit` table exists in `src/` at all. The argument is present so M7
-    fills a caller rather than rewriting this, and this case exists so the
-    parameter is not deleted as unused before M7 arrives.
+def test_the_credits_segment_sits_at_position_three_and_not_at_the_end() -> None:
+    """`test_credits_are_accepted_and_are_empty_in_m6` was deleted here, and
+    this replaced it.
 
-    **The second assertion is the M7 obligation, made into a tripwire.** A
-    non-empty `credits` moves the fingerprint, and `_FINGERPRINT_SQL` has no
-    credits column -- so the day a caller passes one, the predicate and the
-    composer disagree for every title with a credit and the backfill stops
-    draining. M7 changes both in the same commit or neither.
+    That case existed *"to make visible"* the obligation that M7 move both
+    spellings in one commit or neither, and the thing it was making visible
+    has now happened -- so leaving it asserting `credits == ()` would pin the
+    milestone shut. What survives it is the ordering, which the tripwire never
+    covered.
+
+    **Position three, matching the generated column's concatenation order**,
+    so all three spellings of this document read in the same sequence. The
+    wrong implementation is the M6 shim's `text + _SECTION + _ITEM.join(...)`
+    at the end: it produces a *different string* from `_FINGERPRINT_SQL`'s for
+    every credited title, which is a fingerprint the predicate cannot
+    reproduce and therefore a backfill that never drains -- and both
+    spellings contain the same words, so an assertion on membership passes
+    against it.
     """
-    with_credit = compose_document(_title(), credits=("Wren Halloway",))
+    document = compose_document(
+        _title(original_name="Das Stille Vakuum", overview="A caretaker inventories a house."),
+        credits=("Marlow Vance", "Iris Kemp"),
+    )
+    segments = document.text.split("\n")
 
-    assert "Wren Halloway" in with_credit.text
-    assert with_credit.fingerprint != compose_document(_title()).fingerprint
+    assert len(segments) == 7
+    assert segments[2] == "Marlow Vance Iris Kemp", (
+        "position three, joined by usher_array_text's separator"
+    )
+    assert segments[3] == "A caretaker inventories a house.", "the overview follows it"
+
+
+def test_a_credit_moves_the_fingerprint() -> None:
+    """ADR-0020's scheme, at the field M7 added. A title that gains a cast
+    gains a different document, so it is re-embedded exactly once -- and a
+    composer that accepted `credits` and ignored them would leave weight class
+    B populated in the tsvector while the vector was computed without it, with
+    nothing to say so."""
+    assert (
+        compose_document(_title(), credits=("Marlow Vance",)).fingerprint
+        != compose_document(_title()).fingerprint
+    )

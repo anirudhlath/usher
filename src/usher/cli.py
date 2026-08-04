@@ -494,11 +494,22 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
             print(f"model: {model}")
             print(f"stale embeddings: {snapshot.stale}")
             print(f"refused (no content to embed): {snapshot.refused}")
-            # ~115 tokens a document at ~8,000-10,700 tokens/s on CPU. A range
+            # ~135 tokens a document at ~8,000-10,700 tokens/s on CPU. A range
             # derived from the invariant rather than from a texts/s rate.
+            #
+            # **135 and not the ~115 M6 measured**, because M7's weight class
+            # B added a seventh segment: `credit_names` holds up to ten names
+            # at ~2 tokens each, so a credited document is ~20 tokens longer.
+            # The 100-130 range in this function's docstring was measured for
+            # a `name + overview + genres + keywords` document and is left
+            # standing as what it is -- a measurement of a different document
+            # shape -- rather than quietly restated for this one. Uncredited
+            # titles, which are most of the catalog, still sit inside it; the
+            # estimate is deliberately the pessimistic end, because an
+            # operator reading it is deciding whether to start a backfill now.
             print(
-                f"estimated worker time: {snapshot.stale * 115 / 10700:.0f}-"
-                f"{snapshot.stale * 115 / 8000:.0f}s"
+                f"estimated worker time: {snapshot.stale * 135 / 10700:.0f}-"
+                f"{snapshot.stale * 135 / 8000:.0f}s"
             )
             return
 

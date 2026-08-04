@@ -205,6 +205,7 @@ class TitleRow(Base):
         Computed(
             "setweight(to_tsvector('english', coalesce(name, '')), 'A') "
             "|| setweight(to_tsvector('english', coalesce(original_name, '')), 'A') "
+            "|| setweight(to_tsvector('english', usher_array_text(credit_names)), 'B') "
             "|| setweight(to_tsvector('english', coalesce(overview, '')), 'C') "
             "|| setweight(to_tsvector('english', coalesce(tagline, '')), 'C') "
             "|| setweight(to_tsvector('english', usher_array_text(genres)), 'D') "

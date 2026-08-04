@@ -129,12 +129,29 @@ FROM upserted
 # NULL fingerprint. `usher_array_text` is the same IMMUTABLE wrapper the
 # generated column uses -- one definition of "an array as text" in this
 # schema, not two.
+#
+# **`credit_names` at position three, and it moved here in the same commit as
+# `compose_document` and `IndexService`'s call site.** Move one alone and
+# every credited title matches the stale predicate forever: the backfill
+# re-embeds it, writes a fingerprint this cannot reproduce, and re-claims it
+# on the next pass. An infinite backfill that never errors -- a plausible
+# stale count that never reaches zero, a busy worker, and
+# `usher.embedding.duration` looking healthy because the embeds are real.
+# `test_an_indexed_title_with_credits_stops_matching_the_stale_predicate` is
+# the only case that sees it, and it asserts the closure property rather than
+# an equality of two strings.
+#
+# `usher_array_text` and not a hand-rolled join, on this side as on the
+# other: `usher_array_text(ARRAY[]::text[])` is `''` and its md5 is `md5('')`,
+# verified on pg17.10, so an uncredited title emits the identical empty
+# segment either way.
 _FINGERPRINT_SQL = """md5(
-    coalesce(t.name, '')          || CHR(10) ||
-    coalesce(t.original_name, '') || CHR(10) ||
-    coalesce(t.overview, '')      || CHR(10) ||
-    coalesce(t.tagline, '')       || CHR(10) ||
-    usher_array_text(t.genres)    || CHR(10) ||
+    coalesce(t.name, '')             || CHR(10) ||
+    coalesce(t.original_name, '')    || CHR(10) ||
+    usher_array_text(t.credit_names) || CHR(10) ||
+    coalesce(t.overview, '')         || CHR(10) ||
+    coalesce(t.tagline, '')          || CHR(10) ||
+    usher_array_text(t.genres)       || CHR(10) ||
     usher_array_text(t.keywords)
 )"""
 

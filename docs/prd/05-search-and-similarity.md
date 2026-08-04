@@ -38,22 +38,56 @@ Summary of why:
 ### Full-text
 
 A stored generated `tsvector` with weighted fields — A: name and original
-name, **B: reserved for cast and crew and empty**, C: overview and tagline,
-D: genres and keywords — indexed with GIN and `fastupdate = off` (the default
-buffers into a pending list that produces mysterious p99 spikes).
+name, **B: `credit_names`** (M7), C: overview and tagline, D: genres and
+keywords — indexed with GIN and `fastupdate = off` (the default buffers into
+a pending list that produces mysterious p99 spikes).
 
-**Weight class B ships reserved and empty, and that is a decision rather than
-an omission.** There is no `Person`, `Credit`, `Collection` or `Image` table,
-domain model or port anywhere in `src/` — `ports/metadata.py` defers all four
-to M7 and M9 by name, and [09](09-roadmap.md)'s M4 boundary call 2 says the
-same. The only place credits physically exist is `raw_payloads.payload`, and
-assembling a search document out of a *provider's* JSON shape would put a
-TMDb-shaped concept in `services/`. So `SearchDocument` carries a
-`credits: Sequence[str] = ()` that is always empty in M6, and the class is
-**reserved rather than repurposed**: moving overview up into B would make the
-weights mean something different the day credits arrive, and the whole point
-of a stored generated column is that filling B later is a migration rather
-than a rewrite. Boundary call 2.
+**Weight class B is filled by M7, and the sentence M6 wrote about what that
+would cost was optimistic.** M6 shipped B *reserved and empty* — correctly:
+there was no `Person`, `Credit`, `Collection` or `Image` table, model or port
+anywhere in `src/`, the only place credits physically existed was
+`raw_payloads.payload`, and assembling a search document out of a
+*provider's* JSON shape would have put a TMDb-shaped concept in `services/`.
+It also wrote that *"filling B when M7 lands `Credit` is a migration rather
+than a rewrite"*. **That is true only of the search path, and the migration is
+a bigger one than the sentence implies.** Filling B cost three things:
+
+- **A denormalised column, `titles.credit_names text[]`.** A stored generated
+  expression may reference only the current row, so `setweight(to_tsvector(…,
+  (SELECT … FROM credits …)), 'B')` is not expressible. Measured on
+  PostgreSQL 17.10: the subquery form answers `ERROR: cannot use subquery in
+  column generation expression` — **not** the immutability error this schema's
+  wrapper trains a reader to expect, because Postgres refuses it syntactically
+  before volatility is considered — and a bare cross-table reference answers
+  `ERROR: missing FROM-clause entry for table "credits"`. An
+  `IMMUTABLE`-declared SQL function that reads `credits` is **accepted in
+  silence**, and is the worst of the three: the column it feeds then reflects
+  credits as of whenever each row was last written, permanently, with no
+  migration to blame. `credit_names` is maintained by the one statement that
+  also writes `credits`, holds the top ten billed plus every stored crew name,
+  and is `NOT NULL` because `usher_array_text` is `STRICT` and one NULL nulls
+  the entire document.
+- **A forced full-column rewrite.** `CREATE OR REPLACE FUNCTION` does not
+  recompute stored generated values, and neither does changing the expression:
+  the migration drops the GIN index, drops the column, re-adds it and
+  recreates the index. A table rewrite over the whole catalog — a maintenance
+  window, not a hot deploy.
+- **A full re-embed of the enriched tier.** The document assembly is
+  positional, so an uncredited title gains a seventh *empty* segment and its
+  fingerprint moves too: there is no subset of the catalog that keeps its old
+  one. That is ADR-0020's scheme working, and it is 25 s to 2 min at the
+  measured throughput.
+
+`SearchDocument.credits` was carried through M6 as an always-empty parameter
+so that M7 filled a caller rather than rewriting the type, and it is filled
+from `titles.credit_names` — which is **not** a `Title` field: it is `credits`
+projected to names and truncated to a ranking constant, so a domain model
+carrying it would be a cast list that is not the cast.
+
+**Measured class weights**, pg17.10, one term in three classes scored with
+`ts_rank(…, websearch_to_tsquery('english', …))`: name **0.991** (A),
+`credit_names` **0.396** (B), overview **0.198** (C) — `ts_rank`'s default
+`{0.1, 0.2, 0.4, 1.0}` doing exactly what the class assignment says.
 
 **"A stored generated `tsvector`" is right and the obvious spelling of it
 does not compile — measured, not suspected.** `GENERATED ALWAYS AS (…)
