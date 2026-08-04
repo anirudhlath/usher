@@ -7,24 +7,75 @@ context, season, and taste rather than being a fixed list.
 ## The Row hierarchy
 
 ```python
+# usher/ports/rows.py
 class Row(ABC):
-    """A named, ordered shelf of titles."""
+    """A named, ordered shelf of titles, able to build itself."""
 
+    # abstract *properties*, not bare annotations: a bare annotation is a
+    # class-variable declaration, so a subclass that forgot one inherits
+    # None and fails at render time rather than at instantiation — the
+    # failure ADR-0001 chose ABCs to avoid.
     slug: str                    # "continue-watching", "because-you-watched-dune"
     title: str                   # display name
-    reason: str | None           # subtitle: "Because you watched Dune"
+    reason: str | None           # subtitle, written to be spoken aloud
+    family: RowFamily            # the diversity key
+    display_hint: DisplayHint    # ADR-0006's hint, never a layout
     ttl: timedelta               # how long a built result may be cached
 
     @abstractmethod
     async def build(self, ctx: RowContext) -> BuiltRow: ...
 
+# usher/services/rows/base.py
+class BaseRow(Row):
     # concrete, shared:
     async def hydrate(self, title_ids: Sequence[UUID]) -> list[RowCard]: ...
     def empty(self) -> BuiltRow: ...
 ```
 
-`RowContext` carries the user, repositories, search index, and clock — so rows
-are pure functions of context and trivially testable with fakes.
+**The ABC is a port and the shared behaviour is a base class**, which is a
+correction to this section's earlier sentence (*"The `Row` ABC lives in the
+services layer because it has behaviour and dependencies"*). That sentence
+gives a reason for the **base class** to be in `services/` and not for the
+**abstraction**: `hydrate()` needs a `TitleRepository`, a
+`MediaItemRepository` and a `WatchStateRepository`, and a concrete method on a
+port is a port with a dependency — `ports/` has none today. The mechanical
+half is that `test_every_port_abc_is_registered_in_all_ports` walks
+`usher.ports.*` and is the only thing that checks an ABC is an ABC, so a `Row`
+in `services/` would get neither of ADR-0001's two checks. The DTOs stay pure
+either way.
+
+`build` returns a `BuiltRow`, never `BuiltRow | None`: an empty row and an
+absent row are different states, and the composer's metrics count them
+separately.
+
+`RowContext` is a frozen dataclass of ports plus an injected clock — nine
+fields in M7, twelve once `people`/`credits`/`collections` exist:
+
+```python
+user: User                          now: Callable[[], AwareDatetime]
+titles: TitleRepository             media_items: MediaItemRepository
+watch_states: WatchStateRepository  episodes: EpisodeRepository
+neighbors: TitleNeighborRepository  search: SearchIndex
+taste: Centroid | None
+```
+
+- **No `AsyncSession`, and that is checked rather than commented.**
+  `AsyncSession` is not safe for concurrent use, so a context carrying one is
+  a context nine providers can `asyncio.gather` over — which *usually works*,
+  and fails as an intermittent error under load. A row holding repositories
+  has no session to share.
+- **The clock is injected** because `SeasonalProvider` fires on a calendar
+  window and `RediscoverProvider` on "watched > 2 years ago". A wall-clock
+  read makes the first testable only in October; a fixture dated two years
+  back stops meaning what it meant as the calendar moves. It is on the
+  context rather than each provider's constructor because providers are
+  registered once, and a per-request clock cannot be a singleton's
+  constructor argument.
+- **`taste` is optional** — a deployment with no embedder has no centroid
+  (ADR-0022), and every reader drops the signal rather than zeroing it. Fewer
+  rows, not worse rows.
+
+So rows are pure functions of context and trivially testable with fakes.
 
 `BuiltRow` and `RowCard` are Pydantic DTOs (`usher.domain.rows`). `RowCard`
 carries `title_id`, `kind`, `name`, `year`, `enrichment_state`, `owned`, and
@@ -82,9 +133,26 @@ Rows are proposed rather than listed:
 ```python
 class RowProvider(ABC):
     @abstractmethod
-    async def propose(self, ctx: RowContext) -> list[ScoredRow]:
+    async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         """Return 0..n candidate rows with relevance scores."""
 ```
+
+`Sequence`, not `list`: a caller must not mutate a provider's return, and a
+provider that hands back its own cached list finds that out the hard way.
+
+`ScoredRow` (`usher/ports/rows.py`) carries the `Row` itself, its `score`, and
+a `pinned` flag. It carries the row rather than a slug because the slug form
+needs a `dict[str, Row]` on the composer — a second source of truth, and a
+`KeyError` waiting for the first provider that proposes two rows under one
+slug.
+
+**Scores are module constants, not configuration**, and `pinned` is how
+`ContinueWatchingProvider`'s *"always ranked first"* is expressed. "Always
+first" is a **positional** guarantee; scores are minted per provider from
+unrelated signals with nothing normalising them, so a guarantee expressed as
+"a score high enough to win" is one another provider's arithmetic can silently
+take away. Never a slug comparison: `because-you-watched-<seed>` is per-seed,
+so a slug-keyed rule couples the composer to the catalog.
 
 A provider returns nothing when it has nothing to say. The home service collects
 all proposals, sorts by score, applies diversity constraints (no three

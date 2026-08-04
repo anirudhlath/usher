@@ -38,6 +38,7 @@ from usher.ports.repository import (
     TitleRepository,
     WatchStateRepository,
 )
+from usher.ports.rows import Row, RowProvider
 from usher.ports.search import (
     FilterNotSupported,
     SearchIndex,
@@ -76,6 +77,8 @@ ALL_PORTS: list[type[ABC]] = [
     TitleNeighborRepository,
     TitleRepository,
     WatchStateRepository,
+    Row,
+    RowProvider,
 ]
 
 

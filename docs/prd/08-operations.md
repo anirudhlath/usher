@@ -7,7 +7,7 @@ Three layers, split by what changes and when:
 | Layer | Holds | Changes |
 |---|---|---|
 | **Environment** | `DATABASE_URL`, port, log level, embedding model, `USHER_SECRET_KEY`, TMDb key | Deploy time |
-| **Config file** (TOML) | Rate limits, TTLs, row weights, enrichment tier, concurrency per lane, image cache ladder | Restart |
+| **Config file** (TOML) | Rate limits, TTLs, enrichment tier, image cache ladder | Restart |
 | **Database** | Sources, users, row provider enable/disable | Runtime, via admin API |
 
 Sources live in the database because they are added through the admin API. A
@@ -21,8 +21,11 @@ cannot discover and a documented key that is not a setting are both test
 failures (`tests/unit/test_deployment_config.py`). M6 added nine of them,
 four `USHER_EMBEDDING_*` and five `USHER_SEARCH_*`.
 
-**Two entries in that middle row will not become settings, and M6 is where
-that was decided rather than drifted into.**
+**Two entries that were in that middle row will not become settings, and M6 is
+where that was decided rather than drifted into. They are struck from the table
+above in M7, which is the milestone that made leaving them there concretely
+wrong** — a table listing a knob after its own prose retracted it is the same
+failure as a table listing a control nothing implements.
 
 - ⏳ **"Concurrency per lane" has no knob because it has no lane** — there is
   no semaphore anywhere in `src/`, and [01](01-architecture.md)'s concurrency
@@ -36,6 +39,17 @@ that was decided rather than drifted into.**
   half computed one way and half the other, which is this milestone's own
   headline failure mode in a config file. A weight change is a code change
   and a rebuild.
+
+  **M7's row provider scores are the same answer for different reasons**, and
+  they are worth stating because the M6 argument does not transfer: a row
+  score is computed per request and cached for ~30 s, so there is no
+  half-written artefact to be inconsistent. Two other reasons hold instead.
+  A configurable score set can *reorder* Continue Watching, which
+  [06](06-rows-and-recommendations.md) fixes as *"1 row, always ranked
+  first"* — a TOML file that can break a specification. And a score only
+  decides ordering *among proposals*, after which diversity constraints and
+  the top-N cap reshape the result, so an operator turning the dial would
+  watch a screen change for reasons the dial does not explain.
 
 ### `.env` has two readers, and that is what the `USHER_COMPOSE_` namespace is for
 
