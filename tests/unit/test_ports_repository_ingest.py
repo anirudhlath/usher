@@ -52,7 +52,21 @@ def test_media_item_repository_surface() -> None:
 
 def test_watch_state_repository_surface() -> None:
     assert WatchStateRepository.__abstractmethods__ == frozenset(
-        {"merge_from_source", "list_needing_history", "get_for_title", "get_for_episode"}
+        {
+            "merge_from_source",
+            "list_needing_history",
+            "get_for_title",
+            "get_for_episode",
+            # M7's row-read surface. Named here for the same reason
+            # `list_for_title` is on the port above: dropped from the ABC,
+            # every implementation could stop providing it and still
+            # type-check, and Continue Watching would be a row that is
+            # always empty -- which renders identically to a household with
+            # nothing in progress and is the failure this milestone opens by
+            # describing.
+            "list_in_progress",
+            "list_recent",
+        }
     )
 
 

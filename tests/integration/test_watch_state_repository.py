@@ -23,6 +23,7 @@ from tests.contract.watch_state_repository_contract import (
     LATER,
     WALK_AT,
     WatchStateRepositoryContract,
+    WatchStateRepositoryInProgressContract,
     merge,
 )
 from usher.db.repositories.title import PostgresTitleRepository
@@ -49,6 +50,19 @@ async def user_id(session: AsyncSession) -> uuid.UUID:
 
 
 @pytest_asyncio.fixture
+async def other_user_id(session: AsyncSession) -> uuid.UUID:
+    """A second household member, so `list_in_progress`' `user_id` predicate
+    has something to exclude. On a single-user deployment -- i.e. every
+    deployment during development -- a lost `WHERE user_id` is invisible."""
+    identifier = new_id()
+    await session.execute(
+        text("INSERT INTO users (id, name) VALUES (:id, :name)"),
+        {"id": identifier, "name": f"user-{identifier}"},
+    )
+    return identifier
+
+
+@pytest_asyncio.fixture
 async def title_id(session: AsyncSession) -> uuid.UUID:
     title = Title(kind=TitleKind.MOVIE, name="Contract Title", sort_name="Contract Title")
     await PostgresTitleRepository(session).add(title)
@@ -56,27 +70,77 @@ async def title_id(session: AsyncSession) -> uuid.UUID:
 
 
 @pytest_asyncio.fixture
-async def episode_id(session: AsyncSession) -> uuid.UUID:
-    """A real episode, which needs a real series and a real season -- both FKs
-    are `ON DELETE CASCADE` and neither is nullable."""
+async def other_title_id(session: AsyncSession) -> uuid.UUID:
+    title = Title(kind=TitleKind.MOVIE, name="Other Title", sort_name="Other Title")
+    await PostgresTitleRepository(session).add(title)
+    return title.id
+
+
+@pytest_asyncio.fixture
+async def third_title_id(session: AsyncSession) -> uuid.UUID:
+    title = Title(kind=TitleKind.MOVIE, name="Third Title", sort_name="Third Title")
+    await PostgresTitleRepository(session).add(title)
+    return title.id
+
+
+@pytest_asyncio.fixture
+async def episode_series_id(session: AsyncSession) -> uuid.UUID:
+    """The series `episode_id` and every id in `episode_ids` hang off.
+
+    Separate from the episodes themselves because `list_recent` rolls an
+    episode up to *this* id through `episodes.title_id`, so a case asserting
+    the rollup needs to name it.
+    """
     series = Title(kind=TitleKind.SERIES, name="Contract Series", sort_name="Contract Series")
     await PostgresTitleRepository(session).add(series)
-    season, episode = new_id(), new_id()
     await session.execute(
         text("INSERT INTO seasons (id, title_id, season_number) VALUES (:id, :title_id, 1)"),
-        {"id": season, "title_id": series.id},
+        {"id": new_id(), "title_id": series.id},
     )
+    return series.id
+
+
+async def _add_episode(session: AsyncSession, series_id: uuid.UUID, number: int) -> uuid.UUID:
+    """One real episode of `series_id`'s season 1.
+
+    `episodes.season_id` and `episodes.title_id` are both `NOT NULL` with
+    `ON DELETE CASCADE`, so neither can be invented.
+    """
+    identifier = new_id()
+    season = (
+        await session.execute(
+            text("SELECT id FROM seasons WHERE title_id = :title_id AND season_number = 1"),
+            {"title_id": series_id},
+        )
+    ).scalar_one()
     await session.execute(
         text(
             "INSERT INTO episodes (id, title_id, season_id, season_number, episode_number) "
-            "VALUES (:id, :title_id, :season_id, 1, 1)"
+            "VALUES (:id, :title_id, :season_id, 1, :number)"
         ),
-        {"id": episode, "title_id": series.id, "season_id": season},
+        {"id": identifier, "title_id": series_id, "season_id": season, "number": number},
     )
-    return episode
+    return identifier
 
 
-class TestPostgresWatchStateRepository(WatchStateRepositoryContract):
+@pytest_asyncio.fixture
+async def episode_id(session: AsyncSession, episode_series_id: uuid.UUID) -> uuid.UUID:
+    """A real episode, which needs a real series and a real season -- both FKs
+    are `ON DELETE CASCADE` and neither is nullable."""
+    return await _add_episode(session, episode_series_id, 1)
+
+
+@pytest_asyncio.fixture
+async def episode_ids(session: AsyncSession, episode_series_id: uuid.UUID) -> list[uuid.UUID]:
+    """Ten episodes of one series, which is what makes the dedup observable:
+    without it a household that watched ten episodes seeds ten identical
+    "Because you watched" rows."""
+    return [await _add_episode(session, episode_series_id, number) for number in range(2, 12)]
+
+
+class TestPostgresWatchStateRepository(
+    WatchStateRepositoryContract, WatchStateRepositoryInProgressContract
+):
     """Every case in `WatchStateRepositoryContract`, against real Postgres."""
 
 
@@ -196,3 +260,38 @@ async def test_a_batch_costs_the_same_number_of_statements_however_big_it_is(
     large = len(statement_counter)
 
     assert small == large, f"{small} statements for 5 merges, {large} for 495"
+
+
+@pytest.mark.xfail(reason="ix_watch_states_user_recent lands in Task 17's migration", strict=True)
+async def test_the_in_progress_statement_has_no_sort_node_once_the_index_exists(
+    session: AsyncSession, user_id: uuid.UUID
+) -> None:
+    """Scoped to the stage that has an ordering to serve, per the standing
+    rule: this asserts the absence of a `Sort` **above the index scan on
+    `watch_states`**, not the absence of a `Seq Scan` anywhere in the plan. An
+    unscoped "no Seq Scan" assertion fails on a three-row fixture for a plan
+    that is correct at a hundred thousand rows, and a suite that has to
+    disable that assertion has learned nothing.
+
+    `SET LOCAL enable_seqscan = off` is what makes the claim observable at
+    all on a near-empty table -- the same technique
+    `test_a_fuzzy_lookup_uses_the_trigram_index` uses one file over.
+
+    The wrong implementation this kills is the one Task 14 exists to
+    prevent: an index declared `(user_id, played, last_played_at DESC)`
+    without `NULLS LAST`. That index serves the *filter* and cannot supply
+    the *order*, so Postgres inserts a `Sort` -- which is invisible in every
+    behavioural case in this file, because the answer is correct either way.
+    """
+    await session.execute(text("SET LOCAL enable_seqscan = off"))
+    result = await session.execute(
+        text(
+            "EXPLAIN SELECT id FROM watch_states "
+            "WHERE user_id = CAST(:user_id AS uuid) AND NOT played AND position_seconds > 0 "
+            "ORDER BY last_played_at DESC NULLS LAST, id DESC LIMIT 20"
+        ),
+        {"user_id": user_id},
+    )
+    plan = "\n".join(row[0] for row in result)
+    assert "ix_watch_states_user_recent" in plan, plan
+    assert "Sort" not in plan, plan

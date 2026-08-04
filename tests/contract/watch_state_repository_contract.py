@@ -18,6 +18,15 @@ branch a title-only suite leaves untested is the majority one.
 Subclass and provide `repository`, `user_id`, `title_id` and `episode_id`,
 where the last three must name rows that actually exist for an implementation
 with foreign keys.
+
+**Two of the recency cases in `WatchStateRepositoryInProgressContract` insert
+in an order no id-ordering satisfies, and that is the whole point of them.**
+`watch_states.id` is a UUIDv7, so insertion order and id order are the same
+order, and a fixture that seeds three rows oldest-watched-first is satisfied
+by `ORDER BY id` -- which is not recency, is not what any provider asked for,
+and looks identical to the right answer on that fixture forever. So the
+recency cases seed three rows whose watch order is a permutation of their
+insertion order in both directions.
 """
 
 import uuid
@@ -458,3 +467,532 @@ class WatchStateRepositoryContract:
             [merge(user_id, None, episode_id=episode_id, position_seconds=42)]
         )
         assert await repository.get_for_title(user_id, title_id) is None
+
+
+async def _seed_progress(
+    repository: WatchStateRepository,
+    user_id: uuid.UUID,
+    title_id: uuid.UUID,
+    *,
+    last_played_at: datetime | None,
+    position_seconds: int = 90,
+    played: bool = False,
+    play_count: int | None = None,
+    observed_at: datetime = WALK_AT,
+) -> None:
+    await repository.merge_from_source(
+        [
+            merge(
+                user_id,
+                title_id,
+                position_seconds=position_seconds,
+                played=played,
+                last_played_at=last_played_at,
+                play_count=play_count,
+                observed_at=observed_at,
+            )
+        ]
+    )
+
+
+class WatchStateRepositoryInProgressContract:
+    """`list_in_progress` and `list_recent`, the two reads Continue Watching
+    and the taste centroid are built on.
+
+    Kept as a separate mixin from `WatchStateRepositoryContract` only so the
+    two integration subclasses can seed the extra titles these need without
+    every merge case paying for them.
+
+    Subclasses provide everything `WatchStateRepositoryContract` does plus
+    `other_user_id`, `other_title_id`, `third_title_id`, `episode_series_id`
+    and `episode_ids` -- where `episode_id` and every id in `episode_ids`
+    must belong to the series `episode_series_id` names.
+    """
+
+    async def test_in_progress_excludes_a_title_that_was_finished(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """The distractor the front matter names for ContinueWatching: a title
+        finished last night, which carries `played = true` and
+        `position_seconds = 0` and is the single most recent thing the
+        household did.
+
+        The wrong implementation this kills: `WHERE user_id = :u` with no
+        `played` predicate **and** no `position_seconds` one -- i.e. an
+        implementation written against the *index* (`user_id, played`) rather
+        than against the *question*, which has both columns available and
+        filters on neither.
+
+        **What it deliberately does not kill, measured:** dropping `NOT
+        played` *alone*. This fixture's distractor satisfies both halves of
+        the predicate at once, so either half excludes it and the case cannot
+        say which one did. That is the vacuous-pass failure this milestone
+        opens by describing, and it survived a mutation run here before
+        `test_in_progress_excludes_a_finished_title_that_kept_its_resume_position`
+        existed to isolate the half this one cannot.
+        """
+        await _seed_progress(repository, user_id, title_id, last_played_at=LAST_PLAYED)
+        await _seed_progress(
+            repository,
+            user_id,
+            other_title_id,
+            last_played_at=LATER,
+            position_seconds=0,
+            played=True,
+        )
+
+        rows = await repository.list_in_progress(user_id)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_in_progress_excludes_a_finished_title_that_kept_its_resume_position(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """`NOT played` on its own, isolated from `position_seconds > 0`.
+
+        The obvious distractor -- finished, position zero -- satisfies both
+        halves of the predicate, so it cannot tell which half did the work,
+        and the mutation that drops `NOT played` survives it. The state that
+        *can* tell is a `played` row whose resume position was never cleared,
+        and that state is real rather than contrived: nothing in the schema
+        couples the two columns, `merge_from_source` writes both from
+        whatever a source reported, and M3 measured that clearing the
+        position on "mark played" is a behaviour of one Emby route rather
+        than an invariant of watch state.
+
+        Without `NOT played`, this title is both in the answer and *first* in
+        it, because it was played more recently than the one genuinely in
+        progress -- so Continue Watching leads with something the household
+        has already finished.
+        """
+        await _seed_progress(repository, user_id, title_id, last_played_at=LAST_PLAYED)
+        await _seed_progress(
+            repository,
+            user_id,
+            other_title_id,
+            last_played_at=LATER,
+            position_seconds=1200,
+            played=True,
+        )
+
+        rows = await repository.list_in_progress(user_id)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_in_progress_excludes_a_title_at_position_zero(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """`NOT played AND position_seconds > 0`, both halves.
+
+        A state at `position_seconds = 0` and `played = false` is a title the
+        source knows about and nobody has started -- which on a full walk is
+        most of the library. The wrong implementation this kills is
+        `WHERE NOT played` alone, which returns the household's entire
+        unwatched catalog in physical order and satisfies every
+        `len(rows) > 0` assertion anyone will ever write about it.
+        """
+        await _seed_progress(repository, user_id, title_id, last_played_at=LAST_PLAYED)
+        await _seed_progress(
+            repository, user_id, other_title_id, last_played_at=None, position_seconds=0
+        )
+
+        rows = await repository.list_in_progress(user_id)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_in_progress_is_ordered_by_recency_and_not_by_insertion_order(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        third_title_id: uuid.UUID,
+    ) -> None:
+        """Three rows, inserted A B C, watched B A C.
+
+        `watch_states.id` is a UUIDv7, so insertion order *is* id order, and
+        the point of the permutation is that neither direction of an id sort
+        produces the expected answer: `ORDER BY id` gives A B C and
+        `ORDER BY id DESC` gives C B A, and the correct answer is B A C. A
+        fixture seeded in watch order would be satisfied by both an id sort
+        and a recency sort, which is the failure the contract table names --
+        "ordered by `id` ... is *satisfied by a seeded fixture inserted in the
+        right order*".
+
+        The wrong implementations this kills: `ORDER BY id DESC`,
+        `ORDER BY id`, and no ORDER BY at all (physical order, which on a
+        fresh table is insertion order and therefore also A B C).
+        """
+        oldest = LAST_PLAYED
+        middle = LAST_PLAYED + timedelta(days=2)
+        newest = LAST_PLAYED + timedelta(days=5)
+
+        await _seed_progress(repository, user_id, title_id, last_played_at=middle)  # A
+        await _seed_progress(repository, user_id, other_title_id, last_played_at=newest)  # B
+        await _seed_progress(repository, user_id, third_title_id, last_played_at=oldest)  # C
+
+        rows = await repository.list_in_progress(user_id)
+
+        assert [row.title_id for row in rows] == [other_title_id, title_id, third_title_id]
+
+    async def test_a_state_with_no_last_played_at_does_not_outrank_one_that_has_one(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """The trap of this task, pinned.
+
+        `last_played_at` is nullable because ADR-0014 says a walk's listing
+        frequently cannot determine it -- so on a walk-sourced library it is
+        `NULL` on nearly every row, and on a push-sourced one it is a real
+        instant. Postgres's default for a `DESC` sort is **NULLS FIRST**, so
+        the obvious `ORDER BY last_played_at DESC` hoists every state the
+        system knows *least* about to the top of Continue Watching, forever,
+        on a row that is populated and plausible and indistinguishable from
+        working.
+
+        `NULLS LAST` is therefore not tidiness. The wrong implementation this
+        kills is exactly one missing word, and there is no other assertion in
+        this suite that can see it.
+
+        It also fixes the *other* direction as a decision: a state that cannot
+        be dated sorts last rather than being dropped, because dropping it
+        would empty Continue Watching entirely on a walk-only deployment.
+        """
+        await _seed_progress(repository, user_id, title_id, last_played_at=None)
+        await _seed_progress(repository, user_id, other_title_id, last_played_at=LAST_PLAYED)
+
+        rows = await repository.list_in_progress(user_id)
+
+        assert [row.title_id for row in rows] == [other_title_id, title_id]
+
+    async def test_in_progress_is_scoped_to_one_user(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        other_user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """A household is per-person (PRD 02's `User` docstring), and the
+        wrong implementation is a `WHERE` clause that lost its first
+        predicate -- which on a single-user deployment, i.e. every
+        deployment during development, is undetectable."""
+        await _seed_progress(repository, user_id, title_id, last_played_at=LAST_PLAYED)
+        await _seed_progress(repository, other_user_id, other_title_id, last_played_at=LATER)
+
+        rows = await repository.list_in_progress(user_id)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_in_progress_respects_its_limit(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        third_title_id: uuid.UUID,
+    ) -> None:
+        """`ContinueWatchingProvider` renders a shelf, not a history. An
+        unbounded read is the household's whole abandoned-at-three-seconds
+        backlog, which nothing in PRD 06 or PRD 07 can ever dismiss."""
+        for index, identifier in enumerate((title_id, other_title_id, third_title_id)):
+            await _seed_progress(
+                repository,
+                user_id,
+                identifier,
+                last_played_at=LAST_PLAYED + timedelta(days=index),
+            )
+
+        rows = await repository.list_in_progress(user_id, limit=2)
+
+        assert [row.title_id for row in rows] == [third_title_id, other_title_id]
+
+    async def test_in_progress_returns_an_episode_state_without_rolling_it_up(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """The asymmetry with `list_recent`, asserted rather than commented.
+
+        Continue Watching's card resumes a *file*; an episode state collapsed
+        to its series' `title_id` has lost the only identity a client can
+        resume from. `list_recent` rolls up and this does not, and a reader
+        who finds one of the two and infers the other is wrong either way.
+        """
+        await repository.merge_from_source(
+            [merge(user_id, None, episode_id=episode_id, last_played_at=LAST_PLAYED)]
+        )
+
+        rows = await repository.list_in_progress(user_id)
+
+        assert [row.episode_id for row in rows] == [episode_id]
+        assert rows[0].title_id is None
+
+    async def test_recent_rolls_an_episode_up_to_its_series(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        episode_id: uuid.UUID,
+        episode_series_id: uuid.UUID,
+    ) -> None:
+        """999,827 of the one measured source's 1,126,674 items are episodes,
+        so a title-only `list_recent` returns an empty list for a TV-heavy
+        household -- and `TasteService` then averages nothing and
+        `BecauseYouWatchedProvider` seeds from nothing, which composes into a
+        home screen that is populated, plausible, and personalised to no one.
+
+        `title_embeddings` and `title_neighbors` are both keyed on
+        `titles.id`; an episode has neither, which is why the rollup is here
+        rather than in the two services.
+
+        The wrong implementation this kills: `WHERE title_id IS NOT NULL`,
+        which is the natural spelling and is green on every movie fixture.
+        """
+        await repository.merge_from_source(
+            [
+                merge(
+                    user_id,
+                    None,
+                    episode_id=episode_id,
+                    played=True,
+                    last_played_at=LAST_PLAYED,
+                )
+            ]
+        )
+
+        rows = await repository.list_recent(user_id)
+
+        assert [row.title_id for row in rows] == [episode_series_id]
+
+    async def test_recent_returns_one_row_per_series_however_many_episodes_were_watched(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        episode_ids: list[uuid.UUID],
+        episode_series_id: uuid.UUID,
+    ) -> None:
+        """`BecauseYouWatchedProvider` emits one row *per seed*. Without the
+        dedup, a household that watched ten episodes of one show gets ten
+        identical "Because you watched" rows, and the taste centroid is the
+        mean of one series counted ten times -- a centroid that is
+        confidently wrong rather than empty, which is worse.
+
+        The wrong implementation this kills: the rollup without the
+        `DISTINCT ON`.
+        """
+        for index, episode in enumerate(episode_ids):
+            await repository.merge_from_source(
+                [
+                    merge(
+                        user_id,
+                        None,
+                        episode_id=episode,
+                        played=True,
+                        last_played_at=LAST_PLAYED + timedelta(hours=index),
+                    )
+                ]
+            )
+
+        rows = await repository.list_recent(user_id)
+
+        assert [row.title_id for row in rows] == [episode_series_id]
+        assert rows[0].last_played_at == LAST_PLAYED + timedelta(hours=len(episode_ids) - 1)
+
+    async def test_recent_prefers_a_dated_episode_when_rolling_a_series_up(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        episode_id: uuid.UUID,
+        episode_ids: list[uuid.UUID],
+        episode_series_id: uuid.UUID,
+    ) -> None:
+        """`NULLS LAST` **inside** the dedup, which is a second place the word
+        has to appear and the only case that can see it.
+
+        `_RECENT` spells the recency ordering twice -- once in the
+        `DISTINCT ON`'s own `ORDER BY`, which decides *which* of a series'
+        episodes represents it, and once above it, which decides where that
+        representative sorts. The outer one is covered by
+        `test_recent_does_not_rank_an_undatable_watch_above_a_dated_one`; the
+        inner one is invisible to every case that gives a series exactly one
+        watched episode, and it survived a mutation run here before this case
+        existed.
+
+        Two played episodes of one series, one dated and one not. Postgres
+        sorts `DESC` as NULLS FIRST, so without the word the undated episode
+        wins the slot and the series is reported to `TasteService` and
+        `BecauseYouWatchedProvider` as a watch with no date at all -- which
+        then sorts it to the very bottom of a list it belongs at the top of.
+        """
+        await repository.merge_from_source(
+            [merge(user_id, None, episode_id=episode_id, played=True, last_played_at=LAST_PLAYED)]
+        )
+        await repository.merge_from_source(
+            [merge(user_id, None, episode_id=episode_ids[0], played=True, last_played_at=None)]
+        )
+
+        rows = await repository.list_recent(user_id)
+
+        assert [row.title_id for row in rows] == [episode_series_id]
+        assert rows[0].last_played_at == LAST_PLAYED
+
+    async def test_recent_excludes_something_still_in_progress(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """`played`, not "has a `last_played_at`". A seed for "because you
+        watched" that names a film the household abandoned twenty minutes in
+        is a recommendation built on a rejection.
+
+        The wrong implementation this kills: reusing `list_in_progress`'
+        predicate with a different ORDER BY, which is what "one method with a
+        flag" degenerates into.
+        """
+        await _seed_progress(repository, user_id, title_id, played=True, last_played_at=LAST_PLAYED)
+        await _seed_progress(repository, user_id, other_title_id, last_played_at=LATER)
+
+        rows = await repository.list_recent(user_id)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_recent_is_ordered_by_recency_and_not_by_insertion_order(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        third_title_id: uuid.UUID,
+    ) -> None:
+        """The same A-B-C / B-A-C permutation as the in-progress case, for the
+        same reason and against a different statement.
+
+        The front matter's own example of a silent wrong answer is
+        "`BecauseYouWatchedProvider` seeded from the *oldest* watch state
+        rather than the most recent returns a beautifully constructed row
+        about a film watched in 2019". `ORDER BY last_played_at` without
+        `DESC` is that bug, one word long, and only an ordering assertion on a
+        deliberately-permuted fixture can see it.
+        """
+        oldest = LAST_PLAYED
+        middle = LAST_PLAYED + timedelta(days=2)
+        newest = LAST_PLAYED + timedelta(days=5)
+
+        await _seed_progress(repository, user_id, title_id, played=True, last_played_at=middle)
+        await _seed_progress(
+            repository, user_id, other_title_id, played=True, last_played_at=newest
+        )
+        await _seed_progress(
+            repository, user_id, third_title_id, played=True, last_played_at=oldest
+        )
+
+        rows = await repository.list_recent(user_id)
+
+        assert [row.title_id for row in rows] == [other_title_id, title_id, third_title_id]
+
+    async def test_recent_does_not_rank_an_undatable_watch_above_a_dated_one(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """The `NULLS LAST` twin of the `list_in_progress` case, and it exists
+        because the two statements spell the clause **independently**.
+
+        `_IN_PROGRESS` and `_RECENT` each carry their own
+        `ORDER BY last_played_at DESC NULLS LAST`, so a fix applied to one is
+        invisible from the other -- and `_RECENT` carries it twice, once
+        inside the `DISTINCT ON` and once above it. Without this case the
+        mutation that drops the word from the outer ordering survives the
+        whole suite, which is the plan's own Step 8 prediction and the reason
+        it says to add this.
+        """
+        await _seed_progress(repository, user_id, title_id, played=True, last_played_at=None)
+        await _seed_progress(
+            repository, user_id, other_title_id, played=True, last_played_at=LAST_PLAYED
+        )
+
+        rows = await repository.list_recent(user_id)
+
+        assert [row.title_id for row in rows] == [other_title_id, title_id]
+
+    async def test_recent_carries_the_play_count_the_engagement_signal_needs(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+    ) -> None:
+        """`play_count` travels on `RecentWatch` rather than being left for a
+        second call, because it is the only engagement signal `watch_states`
+        carries -- there is no rating column (M7 front matter) -- and every
+        consumer of this method wants to weight by it.
+
+        The wrong implementation this kills: returning a hardcoded `0`, which
+        the type checker cannot see and which makes `TasteService`'s weighting
+        uniform while looking exactly like a weighted mean.
+        """
+        await _seed_progress(
+            repository,
+            user_id,
+            title_id,
+            played=True,
+            last_played_at=LAST_PLAYED,
+            play_count=4,
+        )
+
+        rows = await repository.list_recent(user_id)
+
+        assert [(row.title_id, row.play_count) for row in rows] == [(title_id, 4)]
+
+    async def test_recent_respects_its_limit(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        third_title_id: uuid.UUID,
+    ) -> None:
+        """One method, two consumers, different limits: `TasteService` wants
+        ~50 to average, `BecauseYouWatchedProvider` wants ~3 seeds. If the
+        limit were not honoured they would be two methods, and this is the
+        case that says so.
+
+        Note the limit is applied *after* the dedup, and the fixture is what
+        makes that observable: the three titles are minted in ascending id
+        order and seeded in ascending recency, so id order and recency order
+        are exact reverses. A `LIMIT` pushed inside the `DISTINCT ON` -- whose
+        own `ORDER BY` must lead with the distinct key -- therefore keeps the
+        two *lowest ids*, which are the two *oldest* watches, and the outer
+        sort cannot recover what the inner one already threw away.
+        """
+        for index, identifier in enumerate((title_id, other_title_id, third_title_id)):
+            await _seed_progress(
+                repository,
+                user_id,
+                identifier,
+                played=True,
+                last_played_at=LAST_PLAYED + timedelta(days=index),
+            )
+
+        rows = await repository.list_recent(user_id, limit=2)
+
+        assert [row.title_id for row in rows] == [third_title_id, other_title_id]

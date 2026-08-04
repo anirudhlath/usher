@@ -761,6 +761,29 @@ class MediaItemRepository(ABC):
         denominator, and the CLI's report."""
 
 
+@dataclass(frozen=True, slots=True)
+class RecentWatch:
+    """One title the household finished, with the engagement facts this
+    schema actually has.
+
+    **Not a `WatchState`, and that is structural rather than stylistic.** A
+    watched *episode* is rolled up to its series here, and a `WatchState`
+    carrying a series' `title_id` alongside an episode's `episode_id` is
+    forbidden both by the model validator and by
+    `ck_watch_states_exactly_one_target`. Returning one anyway would mean
+    lying about which row was read.
+
+    `play_count` is here rather than being left for a second call because it
+    is the only engagement signal `watch_states` carries -- there is no
+    rating column, and M7 does not invent one -- and every consumer of
+    `list_recent` wants to weight by it.
+    """
+
+    title_id: uuid.UUID
+    last_played_at: AwareDatetime | None
+    play_count: int
+
+
 class WatchStateRepository(ABC):
     """Persistence for watch state, and the inbound merge from a source.
 
@@ -845,6 +868,76 @@ class WatchStateRepository(ABC):
         unique constraint, and a different branch of `merge_from_source`'s
         SQL. Without it, an implementation whose `COALESCE` is right for
         titles and wrong for episodes has nothing that can tell.
+        """
+
+    @abstractmethod
+    async def list_in_progress(self, user_id: uuid.UUID, *, limit: int = 20) -> list[WatchState]:
+        """One user's in-progress states, most recently played first.
+
+        **"In progress" is `NOT played AND position_seconds > 0`**, and both
+        halves are load-bearing. Without `NOT played`, a title finished last
+        night is the single most recent thing the household did and heads the
+        row. Without `position_seconds > 0`, the answer is the entire
+        unwatched library in physical order -- which is a populated, plausible
+        row that satisfies every `len(cards) > 0` assertion ever written
+        about it.
+
+        **A minimum position is deliberately *not* here.** A title abandoned
+        at three seconds is in progress by this definition and stays there
+        forever, because nothing in PRD 06 or PRD 07 can dismiss a card. The
+        floor belongs to `ContinueWatchingProvider`: it is a product tunable,
+        the percentage spelling needs the nullable `runtime_seconds` (and so
+        evaluates to false for every state whose runtime a source did not
+        report), and Postgres uses a partial index whenever the query's
+        predicate implies the index's -- so a tighter provider predicate over
+        this looser one costs nothing, while a floor baked into an index
+        predicate makes every adjustment a migration.
+
+        **Ordered `last_played_at DESC NULLS LAST, id DESC`.** `NULLS LAST` is
+        the whole correctness content of that clause: `last_played_at` is
+        nullable because a walk's listing frequently cannot determine it
+        (ADR-0014), Postgres's default for `DESC` is NULLS FIRST, and the
+        obvious spelling therefore ranks every state the system knows least
+        about above every state it knows most about. `updated_at` is not a
+        tiebreak here: it is trigger-owned and is the *write* instant, which a
+        nightly walk makes identical across a million rows because `now()` is
+        frozen per transaction.
+
+        **Episode states are returned as themselves, not rolled up to their
+        series.** The card resumes a file. Collapsing to one card per series
+        is the provider's, and is decided once, there.
+        """
+
+    @abstractmethod
+    async def list_recent(self, user_id: uuid.UUID, *, limit: int = 20) -> list[RecentWatch]:
+        """One user's most recently *finished* titles, one row per title.
+
+        Feeds `BecauseYouWatchedProvider`'s seeds and `TasteService`'s
+        centroid. One method rather than two: same predicate, same ordering,
+        same dedup, and only `limit` differs (~3 seeds against ~50 to
+        average).
+
+        **`played`, not "has a `last_played_at`".** A seed naming a film the
+        household abandoned twenty minutes in is a recommendation built on a
+        rejection.
+
+        **Watched episodes are rolled up to their series' `title_id`, and this
+        is not a convenience.** `title_embeddings` and `title_neighbors` are
+        keyed on `titles.id` and an episode has neither, while 999,827 of the
+        one measured source's 1,126,674 items are episodes -- so a title-only
+        implementation returns an empty list for exactly the household PRD
+        06's taste model describes, and both consumers then produce confident
+        output from no input.
+
+        **One row per title.** Ten watched episodes of one series are one
+        seed, or `BecauseYouWatchedProvider` emits ten identical rows and the
+        centroid is one series counted ten times. `last_played_at` and
+        `play_count` come from the most recent contributing state.
+
+        Ordered `last_played_at DESC NULLS LAST`, with the same `NULLS`
+        argument as `list_in_progress`. `limit` is applied after the dedup: a
+        limit pushed inside it keeps whichever titles the dedup's own key
+        ordered first, which is not a recency answer at all.
         """
 
 

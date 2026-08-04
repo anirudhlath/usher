@@ -191,6 +191,39 @@ available fallbacks — grouping by name prefix, by `networks`, or by Emby's
 `TmdbCollection` provider-id key — each produce a populated, plausible, wrong
 row. See [02](02-data-model.md)'s `Collection` section.
 
+**"Anything in progress" is `NOT played AND position_seconds > 0`, ordered
+`last_played_at DESC NULLS LAST`, and both halves of each are decisions this
+table left open.** M7's `WatchStateRepository.list_in_progress` settles them.
+
+- *Both predicates, not one.* Without `played`, a title finished last night is
+  the most recent thing the household did and heads the row. Without
+  `position_seconds > 0`, the answer is the entire unwatched library — which on
+  a full walk is most of it, and which satisfies every `len(cards) > 0`
+  assertion anyone will write.
+- *A minimum position is the **provider's**, not the query's.* A title
+  abandoned at three seconds is in progress by this definition and stays there
+  forever, because nothing in this document or [07](07-api-surface.md) can
+  dismiss a card. The floor is left to `ContinueWatchingProvider` because it is
+  a product tunable, because the percentage spelling divides by a nullable
+  `runtime_seconds` and so silently empties the row on a source that reports no
+  runtimes, and because Postgres uses a partial index whenever the query's
+  predicate implies the index's — so a tighter caller is free and a tighter
+  index predicate is a migration per adjustment.
+- *`NULLS LAST` is correctness, not formatting.* `last_played_at` is nullable
+  because a walk's listing frequently cannot determine it
+  ([ADR-0014](decisions/0014-absent-is-not-zero.md)), and Postgres orders `DESC`
+  as NULLS FIRST — so the obvious spelling leads Continue Watching with
+  precisely the rows the system knows *least* about, on a row that is populated,
+  plausible and wrong. An undatable state sorts **last** rather than being
+  dropped, because dropping it empties the row entirely on a walk-only
+  deployment.
+- *An in-progress episode is returned as itself, never rolled up to its
+  series*, because the card resumes a file. `list_recent` — which feeds the
+  taste centroid and `BecauseYouWatchedProvider`'s seeds — rolls up instead, and
+  the asymmetry is deliberate: a title-only read of watch history answers
+  **films only**, on a library where 999,827 of 1,126,674 measured items are
+  episodes.
+
 Adding a row type is a subclass and a registration. Nothing else changes.
 
 ## Taste
