@@ -169,27 +169,85 @@ than a string match.
 ```python
 class Person(BaseModel):
     id: UUID
-    tmdb_id: int | None; imdb_id: str | None
-    name: str; sort_name: str
-    birth_year: int | None; death_year: int | None
+    tmdb_id: int | None
+    name: str; sort_name: str            # sort_name NOT NULL, name verbatim
     known_for_department: str | None
-    biography: str | None
+    created_at: datetime; updated_at: datetime
 
 class Credit(BaseModel):
     id: UUID
     person_id: UUID
-    title_id: UUID | None
-    episode_id: UUID | None              # episode-level guest credits
+    title_id: UUID                       # required — no episode_id, see below
     kind: CreditKind                     # cast | crew
+    tmdb_credit_id: str | None           # TMDb's 24-char credit ObjectId
     character: str | None                # cast
     job: str | None; department: str | None   # crew
     billing_order: int | None
+    created_at: datetime
 ```
+
+⏳ **`imdb_id`, `birth_year`, `death_year` and `biography` are not built, and
+they are not deferred pending a decision — they are a different milestone's
+network budget.** None of them is on a `credits.cast[]`, `credits.crew[]` or
+`created_by[]` entry; all four live on **`/person/{id}`**, which is one request
+per person against an enriched tier of 2k–10k titles whose distinct-person
+count is several times that. M7's boundary call 4 re-derives `Person` from
+`raw_payloads` with **no second network call**, so shipping them would be four
+columns no derivation can ever fill. Owner: **unassigned** — filling them is an
+`append_to_response` namespace that does not exist plus a per-person crawl,
+i.e. a metadata-provider change, named here rather than left implied.
+
+⏳ **`episode_id` is not built, and `title_id` is `NOT NULL` in consequence.**
+Measured against the recorded payload: `season.json`'s `episodes[].crew` and
+`episodes[].guest_stars` are both `[]`, and no live run has ever seen either
+populated. Building the nullable `title_id`/`episode_id` pair now would fix
+this table's natural key, its CHECK and three consumers' semantics ("does an
+episode credit count toward its series" — `list_for_title`, `PeopleProvider`'s
+recurrence count, weight class B's `credit_names`) against a field that has
+never carried a value, and a natural key over a nullable column does not
+constrain at all, because NULL never collides with NULL. **Reversing it is four
+DDL statements** — `ADD COLUMN episode_id uuid`, `ALTER COLUMN title_id DROP
+NOT NULL`, add `CHECK (num_nonnulls(title_id, episode_id) = 1)` following
+`ck_watch_states_exactly_one_target`'s precedent, and swap one partial unique
+index for two — with no table rewrite and no re-crawl. Reversing the other
+direction is a data migration with no `ON CONFLICT` target to lean on. The cost
+until then: a guest star appearing in one episode of a series is invisible to
+`PeopleProvider` and to weight class B, over a population that is currently
+**zero**.
 
 ### Collection
 
 TMDb franchise grouping ("The Matrix Collection"). Powers franchise rows and
 "you own 2 of 4" completeness signals.
+
+```python
+class Collection(BaseModel):
+    id: UUID
+    tmdb_id: int | None
+    name: str
+    created_at: datetime; updated_at: datetime
+```
+
+**`belongs_to_collection` is movies-only and has no `/tv/{id}` counterpart** —
+verified against the recorded payloads, where `series.json` carries no such key
+and nothing plays its role. Three consequences:
+
+- `FranchiseProvider` fires on **movies only**. On a television-only household
+  PRD 06's firing condition ("≥ 2 owned titles in a collection") is
+  unsatisfiable *by construction* rather than by absence of data — a different
+  fact, and the one an operator debugging a missing row needs.
+- **No series grouping is invented.** Grouping by name prefix, grouping by
+  `networks`, and reading Emby's `TmdbCollection` provider-id key (real,
+  observed in M4's key-space sweep, and a *movie* collection id attached to
+  whatever Emby chose) each produce a populated, plausible, wrong row.
+- `titles.collection_id` is NULL on every series row, permanently. A series row
+  carrying a non-NULL one is a defect, and `CollectionRepository`'s contract
+  suite kills it.
+
+**No `overview` and no `parts[]`** — both are on `/collection/{id}`, the second
+network call boundary call 4 refuses — and **no artwork**, which is M9's whole
+table. `belongs_to_collection` itself is `{id, name, poster_path,
+backdrop_path}`.
 
 ### Image
 
