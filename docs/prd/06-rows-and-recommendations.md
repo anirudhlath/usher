@@ -172,12 +172,24 @@ drops any that build empty, and returns them.
 | `NextUpProvider` | Series with an unwatched next episode | 1 row |
 | `RecentlyAddedProvider` | New items in the window | 1 row |
 | `BecauseYouWatchedProvider` | Recent high-engagement titles | 1 row *per seed* |
-| `FranchiseProvider` | ≥ 2 owned titles in a collection | 1 row per franchise |
+| `FranchiseProvider` | ≥ 2 owned titles in a collection — **movies only** | 1 row per franchise |
 | `GenreAffinityProvider` | Taste centroid concentrated in a genre | 1–3 rows |
 | `SeasonalProvider` | Calendar window (Halloween, holidays) | 0–1 rows |
 | `PeopleProvider` | Recurring director or actor in history | 0–2 rows |
 | `CuratedProvider` | Fresh LLM rows exist | 0–5 rows |
 | `RediscoverProvider` | Watched > 2 years ago, rated highly | 0–1 rows |
+
+**`FranchiseProvider` is movies only, and on a television-only household its
+condition is unsatisfiable *by construction* rather than by absence of data.**
+`belongs_to_collection` is a field of `/movie/{id}` and TMDb has no `/tv/{id}`
+counterpart — verified against the recorded payloads, where `series.json`
+carries no such key and nothing plays its role. So `titles.collection_id` is
+NULL on every series row, permanently. That distinction is what an operator
+debugging a missing row needs, and it is why `CollectionRepository.attach_titles`
+filters `kind = 'movie'` itself rather than trusting its caller: the three
+available fallbacks — grouping by name prefix, by `networks`, or by Emby's
+`TmdbCollection` provider-id key — each produce a populated, plausible, wrong
+row. See [02](02-data-model.md)'s `Collection` section.
 
 Adding a row type is a subclass and a registration. Nothing else changes.
 
