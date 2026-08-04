@@ -26,20 +26,54 @@ class Row(ABC):
 `RowContext` carries the user, repositories, search index, and clock — so rows
 are pure functions of context and trivially testable with fakes.
 
-`BuiltRow` and `RowCard` are Pydantic DTOs (artwork refs, year, rating, progress,
-source badges, enrichment state). The `Row` ABC lives in the services layer
-because it has behaviour and dependencies; the DTOs stay pure.
+`BuiltRow` and `RowCard` are Pydantic DTOs (`usher.domain.rows`). `RowCard`
+carries `title_id`, `kind`, `name`, `year`, `enrichment_state`, `owned`, and
+the progress triple `position_seconds` / `runtime_seconds` / `played`.
+
+Three fields an earlier draft of this sentence listed are **deliberately
+absent**, each for a stated reason:
+
+- **artwork refs** — M9 owns the `Image` entity, the `images` table and
+  `GET /images/{id}`. There is no `poster_path` on `titles` either, so the
+  choice was an always-null field or no field, and
+  [ADR-0006](decisions/0006-server-composed-home.md)'s sibling call on
+  `GET /titles/{id}`'s absent `images` key settles it the same way: *"an empty
+  list would be indistinguishable from a film with no cast."* M9 adds the
+  field additively, to a DTO that never lied about having it.
+- **rating** — `watch_states` has no rating column at all, and neither does
+  `SourceWatchState`. A `rating` on a card is a field with no source.
+- **progress**, as a fraction — `runtime_seconds` is nullable, so a fraction
+  is either a division by `None` or a division by a `COALESCE`d zero, and the
+  latter renders every partially-watched title as finished. The card carries
+  the raw pair: *"half an hour in, of an unknown total"* is two true facts.
+  ADR-0014 at the card.
+
+`extra="forbid"` on `DomainModel` makes those absences runtime refusals rather
+than naming conventions.
 
 ### Three families
 
-| Family | Built from | Examples | TTL |
-|---|---|---|---|
-| **`SourceRow`** | Catalog and watch state in Postgres | Continue Watching, Next Up, Recently Added, genre shelves, collections | ~60 s |
-| **`SimilarityRow`** | Embedding / genome neighbours of a seed title | "Because you watched *Dune*", "More like this" | hours |
-| **`LLMRow`** | A persisted `curated_rows` record | "Slow-burn sci-fi for a rainy night" | until regenerated |
+`RowFamily` (`usher.domain.rows`) is the typed vocabulary these three names
+denote, and it is what the diversity constraint below is stated in — a slug
+cannot serve, because `because-you-watched-<seed>` is per-seed and a
+slug-keyed rule would couple the composer to the catalog.
+
+| Family | `RowFamily` | Built from | Examples | TTL |
+|---|---|---|---|---|
+| **`SourceRow`** | `SOURCE` | Catalog and watch state in Postgres | Continue Watching, Next Up, Recently Added, genre shelves, collections | ~60 s |
+| **`SimilarityRow`** | `SIMILARITY` | Embedding / genome neighbours of a seed title | "Because you watched *Dune*", "More like this" | hours |
+| **`LLMRow`** | ⏳ **not built in M7 — M8 owns it** | A persisted `curated_rows` record | "Slow-burn sci-fi for a rainy night" | until regenerated |
 
 `LLMRow.build()` only *hydrates* stored output. Generation happens in a
 background job — never in the request path.
+
+**`RowFamily` has two members in M7 and no `CURATED`.** M8 owns
+`curated_rows`, `LLMRow`, `CuratedProvider` and
+`POST /admin/rows/regenerate` as one family — hydrating a table whose
+generator does not exist would fix that table's shape before anything had
+tried to fill it. A "cap per family" over a family with no members is a branch
+nothing can reach, so the member arrives in the same diff as the provider that
+emits it.
 
 ## Dynamic composition
 
