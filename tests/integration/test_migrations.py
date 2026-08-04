@@ -76,6 +76,16 @@ async def test_migration_creates_the_updated_at_triggers(postgres_url: str) -> N
         # `raw_payloads` have no `updated_at` column at all.
         "trg_seasons_set_updated_at",
         "trg_episodes_set_updated_at",
+        # M7. Both are written by `INSERT ... ON CONFLICT DO UPDATE` out of a
+        # temporary staging table, which `onupdate=` never reaches. There is
+        # deliberately **no** `trg_credits_set_updated_at`: `credits` has no
+        # `updated_at` column at all, because every write to it is an insert
+        # -- a title's credit set is replaced rather than merged, and an
+        # upsert cannot express the deletion of a credit that disappeared
+        # upstream. If a run demands that seventh name, the model grew an
+        # `updated_at` it should not have.
+        "trg_people_set_updated_at",
+        "trg_collections_set_updated_at",
     }
 
 

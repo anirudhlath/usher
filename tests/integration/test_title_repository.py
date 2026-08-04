@@ -2,7 +2,7 @@ import uuid
 from typing import cast
 
 import pytest
-from sqlalchemy import Table, event, insert
+from sqlalchemy import Table, event, insert, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from tests.contract.title_repository_contract import TitleRepositoryContract
@@ -348,3 +348,26 @@ class TestPostgresTitleRepositoryContract(TitleRepositoryContract):
     @pytest.fixture
     def repo(self, session: AsyncSession) -> PostgresTitleRepository:
         return PostgresTitleRepository(session)
+
+    @pytest.fixture
+    async def collection_id(self, session: AsyncSession) -> uuid.UUID:
+        """A real `collections` row, because M7 gave `titles.collection_id`
+        a real foreign key (`fd7c3a5b9e12`).
+
+        The contract's default is a bare `new_id()`, which the fake accepts
+        because it is a dict and Postgres refuses with a
+        `ForeignKeyViolationError` -- so this override is what keeps the
+        round-trip case covering the column instead of dropping it. Written
+        with raw SQL rather than through a repository because
+        `CollectionRepository` is a different port and this file is about
+        `TitleRepository`.
+        """
+        collection_id = new_id()
+        await session.execute(
+            text(
+                "INSERT INTO collections (id, tmdb_id, name) "
+                "VALUES (CAST(:id AS uuid), 98000300, 'An Invented Collection')"
+            ),
+            {"id": collection_id},
+        )
+        return collection_id

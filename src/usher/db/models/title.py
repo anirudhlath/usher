@@ -10,6 +10,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -100,9 +101,23 @@ class TitleRow(Base):
     vote_count: Mapped[int | None] = mapped_column(Integer)
     popularity: Mapped[float | None] = mapped_column(Float)
 
-    # No index yet -- deferred for M9 alongside media_items' added_at/
-    # last_seen_at/available; see the note in db/models/source.py.
-    collection_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    # The FK it has been waiting for since M1. PRD 02: "the one artefact that
+    # exists today is titles.collection_id, a bare nullable UUID with no
+    # foreign key that nothing in src/ ever writes; it is the column waiting
+    # for the table, not evidence of one." M7 lands the table.
+    #
+    # SET NULL, and the two refused alternatives are the argument. CASCADE
+    # would delete the *films* when a franchise grouping is deleted -- wrong
+    # in kind, against PRD 02's own "the catalog outlives the servers".
+    # RESTRICT would refuse every collection delete, because a collection with
+    # no members is never written, so the refusal fires unconditionally and is
+    # a table nothing can delete from. SET NULL is media_items.title_id's
+    # precedent verbatim: the row is worth keeping and it just loses the link,
+    # and DeriveService re-attaches it on the next pass, so a NULLed link is
+    # self-healing rather than lost.
+    collection_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("collections.id", ondelete="SET NULL")
+    )
 
     enrichment_state: Mapped[EnrichmentState] = mapped_column(
         enum_column(EnrichmentState, length=16),
@@ -314,6 +329,24 @@ class TitleRow(Base):
             "name",
             postgresql_using="gin",
             postgresql_ops={"name": "gin_trgm_ops"},
+        ),
+        # FranchiseProvider's whole read (CollectionRepository.list_owned),
+        # and the referencing-side lookup collections' SET NULL performs on
+        # every delete -- Postgres implements SET NULL by finding referencing
+        # rows *by this column*, and nothing else here leads with it.
+        #
+        # PRD 02 deferred this index to M9 ("No index yet -- deferred for M9
+        # alongside media_items' added_at/last_seen_at/available"). M7 needs it
+        # now and the deferral is retracted with its reason in the same commit
+        # rather than silently overridden.
+        #
+        # Partial: NULL on all 371,310 series rows -- belongs_to_collection is
+        # movies-only -- and on the majority of the 899,828 movie rows. That
+        # is ix_titles_popularity's argument, one column over.
+        Index(
+            "ix_titles_collection_id",
+            "collection_id",
+            postgresql_where=text("collection_id IS NOT NULL"),
         ),
         # Mirrors the domain model's Field(ge=0) / Field(ge=0, le=10) /
         # Field(min_length=1) constraints -- see the Title commit.

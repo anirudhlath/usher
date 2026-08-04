@@ -30,6 +30,7 @@ tests/integration/test_title_repository.py's
 concrete subclasses.
 """
 
+import uuid
 from datetime import UTC, date, datetime
 
 import pytest
@@ -42,7 +43,23 @@ from usher.ports.repository import TitleRepository
 
 
 class TitleRepositoryContract:
-    async def test_add_then_get_round_trips(self, repo: TitleRepository) -> None:
+    @pytest.fixture
+    def collection_id(self) -> uuid.UUID:
+        """A collection id `test_add_then_get_round_trips` may store.
+
+        Overridable, and M7 is why: `titles.collection_id` gained a real
+        foreign key to `collections` in `fd7c3a5b9e12`, so the bare
+        `new_id()` this case used to inline is a `ForeignKeyViolationError`
+        against the real repository and passes silently against a fake that
+        is a dict. Same shape `EpisodeRepositoryContract` already has for
+        `title_id`: the fake takes the default, and the Postgres subclass
+        overrides it with the id of a row it seeded.
+        """
+        return new_id()
+
+    async def test_add_then_get_round_trips(
+        self, repo: TitleRepository, collection_id: uuid.UUID
+    ) -> None:
         # Not `assert fetched == title`: an earlier version of this test (in
         # tests/unit/test_ports.py, before the contract suite existed) did
         # exactly that, and it only worked by accident, against the fake
@@ -85,7 +102,7 @@ class TitleRepositoryContract:
             community_rating=8.4,
             vote_count=22000,
             popularity=369.5,
-            collection_id=new_id(),
+            collection_id=collection_id,
             enrichment_state=EnrichmentState.ENRICHED,
             enrichment_error=None,
             enriched_at=datetime(2024, 1, 1, tzinfo=UTC),

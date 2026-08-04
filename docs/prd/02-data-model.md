@@ -434,15 +434,25 @@ Title      1─1 TitleEmbedding
 Title      *─* Title        (through title_neighbors, directed, precomputed)
 ```
 
-⏳ **Three of those lines describe tables that do not exist**, and they are
-marked here because this block is the fastest place to read the schema and the
-easiest place to be misled by it. `Collection`, `Person`, `Credit` and `Image`
-have no table, no model and no port anywhere in `src/` — `Person`/`Credit`
-land with M7 and `Image` with M9, each re-derived from `raw_payloads` with no
-second network call ([09](09-roadmap.md)'s M4 boundary call 2). The one
-artefact that exists today is **`titles.collection_id`, a bare nullable UUID
-with no foreign key that nothing in `src/` ever writes**; it is the column
-waiting for the table, not evidence of one.
+⏳ **One of those lines still describes a table that does not exist.** `Image`
+has no table, no model and no port anywhere in `src/`, and it lands with M9,
+re-derived from `raw_payloads` with no second network call
+([09](09-roadmap.md)'s M4 boundary call 2).
+
+`Collection`, `Person` and `Credit` **landed in M7** (`fd7c3a5b9e12`), which
+also gave `titles.collection_id` — a bare nullable UUID with no foreign key
+since M1, which nothing in `src/` ever wrote — its foreign key to
+`collections` (`ON DELETE SET NULL`) and the partial index PRD 02 had deferred
+to M9 alongside `media_items`' three columns. That deferral is retracted here
+with its reason: the index is the whole of `FranchiseProvider`'s read *and*
+the referencing-side lookup `SET NULL` performs on every collection delete.
+
+**The `Collection 1─* Title` line is movies-only**, and by construction rather
+than by absence of data — see the `Collection` section above.
+
+**`Title *─* Person` runs through `Credit.title_id`, which is `NOT NULL`**, so
+that edge names a title and never an episode. The ⏳ under `Credit` above
+carries the measurement and the four DDL statements that would reverse it.
 
 ## Rules
 
