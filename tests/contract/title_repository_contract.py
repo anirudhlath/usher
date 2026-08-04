@@ -373,3 +373,70 @@ class TitleRepositoryContract:
         assert counts[EnrichmentState.ENRICHED] == 0
         assert counts[EnrichmentState.STUB] == 0
         assert set(counts) == set(EnrichmentState)
+
+    async def test_resolve_tmdb_ids_keeps_the_two_id_spaces_apart(
+        self, repo: TitleRepository
+    ) -> None:
+        """ADR-0011 arriving at the *reverse* lookup, which is the direction a
+        derivation gets wrong.
+
+        `get_by_tmdb_id` already takes a kind and the case above pins it. What
+        is new here is a walk that starts from a **payload** and has to find
+        its title: `raw_payloads` has no `title_id`, the join back is
+        `(provider, kind, reference)`, and the payload's own `id` field is the
+        bare integer sitting right there. 26,968 measured TMDb ids are live in
+        both spaces, so a resolver keyed on the integer alone attaches a
+        series' cast to a film -- with the right counts, the right people, and
+        nothing to say so.
+
+        The wrong implementation this kills is one that drops `kind` from its
+        predicate. It is seeded with both spaces holding the same integer,
+        because a resolver asked about one space in isolation answers
+        correctly either way.
+        """
+        movie = Title(
+            kind=TitleKind.MOVIE,
+            name="The Quiet Vacuum",
+            sort_name="The Quiet Vacuum",
+            tmdb_id=90000550,
+        )
+        series = Title(
+            kind=TitleKind.SERIES,
+            name="A Quiet Signal",
+            sort_name="A Quiet Signal",
+            tmdb_id=90000550,
+        )
+        await repo.add(movie)
+        await repo.add(series)
+
+        assert await repo.resolve_tmdb_ids(TitleKind.MOVIE, [90000550]) == {90000550: movie.id}
+        assert await repo.resolve_tmdb_ids(TitleKind.SERIES, [90000550]) == {90000550: series.id}
+
+    async def test_resolve_tmdb_ids_answers_a_whole_page_in_one_call(
+        self, repo: TitleRepository
+    ) -> None:
+        """A batch rather than one, for `PersonRepository.resolve_tmdb_ids`'
+        reason: a derivation page is 500 payloads and a lookup per payload is
+        the round-trip-per-item shape batching exists to remove.
+
+        **An id naming no title is absent from the answer, never `None` and
+        never an error.** `raw_payloads` outlives `titles` -- there is no
+        foreign key between them -- so a payload for a title deleted since the
+        fetch is ordinary, and the caller skips it. An implementation that
+        raised would make one deleted title abort a whole derivation page.
+        """
+        first = Title(kind=TitleKind.MOVIE, name="One", sort_name="One", tmdb_id=90000601)
+        second = Title(kind=TitleKind.MOVIE, name="Two", sort_name="Two", tmdb_id=90000602)
+        await repo.add(first)
+        await repo.add(second)
+
+        found = await repo.resolve_tmdb_ids(TitleKind.MOVIE, [90000601, 90000602, 90000603])
+
+        assert found == {90000601: first.id, 90000602: second.id}
+
+    async def test_resolve_tmdb_ids_of_nothing_asks_nothing(self, repo: TitleRepository) -> None:
+        """PRD 08's empty-database rule at the port. A derivation page whose
+        payloads are all series reaches the movie branch with an empty list,
+        and `WHERE tmdb_id = ANY('{}')` is a statement issued to learn
+        nothing."""
+        assert await repo.resolve_tmdb_ids(TitleKind.MOVIE, []) == {}

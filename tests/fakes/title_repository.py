@@ -84,6 +84,13 @@ class FakeTitleRepository(TitleRepository):
 
     def __init__(self) -> None:
         self._titles: dict[uuid.UUID, Title] = {}
+        # `titles.credit_names`. Public because `CreditRepository` is what
+        # writes it -- `credit_names` is not a `Title` field (DERIVED_COLUMNS)
+        # and `update()` cannot reach it, which is the guarantee rather than
+        # the cost -- so `FakeCreditRepository` is handed this dict the way
+        # `FakeCollectionRepository` is handed a catalog. A test that writes
+        # it directly is standing in for a derivation, not for the port.
+        self.credit_names: dict[uuid.UUID, tuple[str, ...]] = {}
 
     async def add(self, title: Title) -> None:
         if title.id in self._titles:
@@ -144,6 +151,32 @@ class FakeTitleRepository(TitleRepository):
             if title.tmdb_id == tmdb_id and title.kind is kind:
                 return title
         return None
+
+    async def resolve_tmdb_ids(
+        self, kind: TitleKind, tmdb_ids: Sequence[int]
+    ) -> dict[int, uuid.UUID]:
+        # The `kind` filter mirrors ix_titles_tmdb_id_kind and is half the
+        # key, not a narrowing: 26,968 measured TMDb ids are live in both
+        # spaces. An id this store does not hold is simply absent -- the
+        # port's contract, because `raw_payloads` outlives `titles`.
+        wanted = set(tmdb_ids)
+        return {
+            title.tmdb_id: title.id
+            for title in self._titles.values()
+            if title.tmdb_id in wanted and title.kind is kind and title.tmdb_id is not None
+        }
+
+    async def credit_names_for(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[str, ...]]:
+        # An empty tuple for a title that exists and has no credits, absent
+        # for one that does not exist at all. The two are different answers
+        # and the composer's positional assembly depends on the difference.
+        return {
+            title_id: self.credit_names.get(title_id, ())
+            for title_id in title_ids
+            if title_id in self._titles
+        }
 
     async def get_by_imdb_id(self, imdb_id: str) -> Title | None:
         if imdb_id is None:

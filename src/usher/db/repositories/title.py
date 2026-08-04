@@ -248,6 +248,51 @@ class PostgresTitleRepository(TitleRepository):
         row = result.scalar_one_or_none()
         return _to_domain(row) if row else None
 
+    async def resolve_tmdb_ids(
+        self, kind: TitleKind, tmdb_ids: Sequence[int]
+    ) -> dict[int, uuid.UUID]:
+        # No statement at all for an empty batch. A derivation page whose
+        # payloads are all one kind reaches the other branch with nothing to
+        # ask about, and `tmdb_id = ANY('{}')` is a round trip to learn
+        # nothing -- the same guard `list_by_ids` carries.
+        if not tmdb_ids:
+            return {}
+        with self._session.no_autoflush:  # see get()'s comment
+            rows = await self._session.execute(
+                # Two columns, never the whole row: the caller wants a
+                # `Credit.title_id` and a link target, not 31 columns per
+                # title. `ix_titles_tmdb_id_kind` serves this directly, and
+                # the `kind` predicate is half the key rather than a filter
+                # -- ADR-0011, and without it this collapses a movie and a
+                # series that share an integer into one arbitrary answer.
+                select(TitleRow.tmdb_id, TitleRow.id).where(
+                    TitleRow.tmdb_id.in_(set(tmdb_ids)), TitleRow.kind == kind
+                )
+            )
+        # `tmdb_id` is nullable on the row and the predicate above excludes
+        # NULL by construction, so the narrowing is a type-checker fact
+        # rather than a runtime branch.
+        return {tmdb_id: title_id for tmdb_id, title_id in rows.all() if tmdb_id is not None}
+
+    async def credit_names_for(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[str, ...]]:
+        if not title_ids:
+            return {}
+        with self._session.no_autoflush:  # see get()'s comment
+            rows = await self._session.execute(
+                # Two columns, not the row: this is read once per backfill
+                # page over the enriched tier, and pulling 31 columns per
+                # title to reach one array is the shape `list_by_ids` exists
+                # to avoid being used for.
+                select(TitleRow.id, TitleRow.credit_names).where(TitleRow.id.in_(set(title_ids)))
+            )
+        # The column is NOT NULL with a server_default, so `or ()` is a
+        # type-checker courtesy rather than a live branch -- and it stays,
+        # because a NULL here would be the STRICT-wrapper failure and an
+        # empty tuple is the right answer to give the composer either way.
+        return {title_id: tuple(names or ()) for title_id, names in rows.all()}
+
     async def get_by_imdb_id(self, imdb_id: str) -> Title | None:
         # See get_by_tmdb_id's comment -- same IS NULL hazard, same guard.
         if imdb_id is None:

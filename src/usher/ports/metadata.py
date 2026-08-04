@@ -26,8 +26,10 @@ from typing import Any
 
 from pydantic import AwareDatetime
 
+from usher.domain.collection import Collection
 from usher.domain.enums import TitleKind
 from usher.domain.episode import Episode, Season
+from usher.domain.people import Credit, Person
 from usher.domain.title import Title
 from usher.ports.ingest import ProviderRef
 
@@ -95,6 +97,50 @@ class EnrichmentResult:
     seasons: tuple[Season, ...]
     episodes: tuple[Episode, ...]
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class DerivationResult:
+    """Everything one *cached* payload yields about people and franchises.
+
+    **A sibling of `EnrichmentResult`, not a field on it**, and the
+    invitation to make it a field is right there in that class's own
+    docstring ("adding `people: tuple[Person, ...]` here later is an added
+    field, not a signature change"). Taking it would be wrong for a reason
+    that document could not have known: `EnrichmentResult` is produced on the
+    **enrichment** path, which runs once per title per fetch, while a
+    derivation runs over the whole cache independently of enrichment. Putting
+    people on `EnrichmentResult` means either `EnrichService` writes them --
+    which makes `enrich` a second, slower, credit-writing job and couples two
+    failure modes M4 deliberately separated -- or they are computed and
+    discarded on every enrichment.
+
+    A sibling method is the added field's honest form: same purity, same
+    signature shape, and the same "a pure function of a payload that may have
+    come out of `raw_payloads` months after the fetch that produced it, with
+    no ref alongside it" that `kind_of_payload` already documents.
+
+    **Every id here is a placeholder.** `Person.id` and `Collection.id` are
+    fresh UUIDv7s minted per sighting, exactly as ingest mints one per
+    season, and each `Credit.person_id` names the `Person` beside it in this
+    same result. A person or collection the catalog already holds keeps the
+    id it was inserted with, so the caller upserts on `tmdb_id`, reads the
+    real ids back, and re-points. `EpisodeRepository.resolve_seasons` exists
+    for the identical reason and `PersonRepository.resolve_tmdb_ids` is the
+    method to use.
+
+    `collection` is `None` for three ordinary shapes, none of which is an
+    error: `belongs_to_collection: null` (a standalone film), the key absent
+    entirely (**every series**), and an object with no usable id or name.
+
+    Frozen but **not hashable in practice**, exactly like `EnrichmentResult`:
+    `Title.field_provenance` is a dict on the neighbouring type and the same
+    property is recorded here so the two read alike.
+    """
+
+    people: tuple[Person, ...]
+    credits: tuple[Credit, ...]
+    collection: Collection | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +235,27 @@ class MetadataProvider(ABC):
         stamped `SKELETON` would demote a title another provider enriched.
         Synchronous rather than `async`: this is a pure function of a payload
         the caller already holds.
+        """
+
+    @abstractmethod
+    def to_derivation(self, payload: dict[str, Any], title_id: uuid.UUID) -> DerivationResult:
+        """Normalise a raw payload into people, credits and a collection. See
+        `DerivationResult` for what it carries and why it is not a field on
+        `EnrichmentResult`.
+
+        Same contract as `to_result`, clause for clause: `title_id` is passed
+        in and never minted (ADR-0003), and this is **synchronous and pure**
+        -- a function of a payload the caller already holds, with no network
+        call of any kind. ADR-0016 kept `raw_payloads` precisely so M7 could
+        re-derive these three entities with no second request, and a
+        `to_derivation` that fetched would re-request the whole enriched tier
+        against a rate limit to read data already sitting in a JSONB column.
+
+        A payload this provider cannot read -- no `credits`, no
+        `created_by`, no `belongs_to_collection` -- yields an **empty**
+        result, never an error. That is what most of the catalog looks like:
+        a payload cached before `credits` joined `*_APPEND_TO_RESPONSE`, or
+        an entity the provider has none for.
         """
 
     @abstractmethod

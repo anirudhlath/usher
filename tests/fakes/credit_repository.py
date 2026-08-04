@@ -33,24 +33,47 @@ whose join is missing.
 """
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from tests.fakes.person_repository import FakePersonRepository
+from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.people import Credit, CreditKind
 from usher.ports.repository import CreditedPerson, CreditRepository, PersonCredit
 
 
 class FakeCreditRepository(CreditRepository):
-    def __init__(self, people: FakePersonRepository | None = None) -> None:
+    def __init__(
+        self,
+        people: FakePersonRepository | None = None,
+        titles: FakeTitleRepository | None = None,
+    ) -> None:
         self._people = people or FakePersonRepository()
+        # Wired to the *same* `titles` store the caller reads through, for the
+        # reason `FakeTitleRepository`/`FakeTitleMatchRepository` are wired
+        # together: `credit_names` is one column, and two independent dicts
+        # would make a *correct* implementation fail rather than a wrong one
+        # pass. Left unwired it still works, and then a case asserting the
+        # array agrees with the table is asserting against this object alone.
+        self._titles = titles or FakeTitleRepository()
         self._credits: list[Credit] = []
         self.calls = 0
+
+    @property
+    def credit_names(self) -> dict[uuid.UUID, tuple[str, ...]]:
+        """`titles.credit_names`, which this port writes and no other does.
+        A dict rather than a column, so nothing here can express the
+        `IS DISTINCT FROM` guard or the dead-row-version cost it avoids."""
+        return self._titles.credit_names
 
     def reset_calls(self) -> None:
         self.calls = 0
 
     async def replace_for_titles(
-        self, title_ids: Sequence[uuid.UUID], credits: Sequence[Credit]
+        self,
+        title_ids: Sequence[uuid.UUID],
+        credits: Sequence[Credit],
+        *,
+        credit_names: Mapping[uuid.UUID, Sequence[str]],
     ) -> int:
         self.calls += 1
         # The scope is `title_ids`, never `{c.title_id for c in credits}`: a
@@ -58,6 +81,13 @@ class FakeCreditRepository(CreditRepository):
         # all, so a delete derived from the rows deletes nothing for it.
         scope = set(title_ids)
         self._credits = [one for one in self._credits if one.title_id not in scope]
+        # `titles.credit_names` in the same call, for the same scope. A title
+        # in scope and absent from the mapping is *emptied*, not skipped --
+        # the delete's argument applied to the array, and the one thing this
+        # fake has to model exactly, because a divergence between the two is
+        # invisible in `credits` alone.
+        for title_id in scope:
+            self.credit_names[title_id] = tuple(credit_names.get(title_id, ()))
 
         # Last-wins on COALESCE(tmdb_credit_id, id), matching the real one's
         # DISTINCT ON key: a plain key on `tmdb_credit_id` would collapse

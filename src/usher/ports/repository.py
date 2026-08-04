@@ -8,7 +8,7 @@ holds the Postgres implementations.
 
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any
@@ -147,6 +147,74 @@ class TitleRepository(ABC):
         statements per search: the same round-trip-per-item shape `index_many`
         was introduced to delete from `SearchIndex`, arriving from the other
         direction.
+        """
+
+    @abstractmethod
+    async def resolve_tmdb_ids(
+        self, kind: TitleKind, tmdb_ids: Sequence[int]
+    ) -> dict[int, uuid.UUID]:
+        """`tmdb_id` -> title id **within one id space**, in one round trip.
+
+        The reverse of `get_by_tmdb_id`, batched, and it exists for the walk
+        that starts from a *payload*. `raw_payloads` has no `title_id` and no
+        foreign key to `titles` (ADR-0016), so a derivation's only way back to
+        a title is `(provider, kind, reference)` -- and `kind` is half of that
+        key, not a convenience filter. ADR-0011: TMDb keys movies and series
+        in separate spaces that overlap on 26,968 measured ids, so a
+        resolution keyed on the integer alone attaches a series' cast to a
+        film, silently, with the right counts.
+
+        **Named to match `PersonRepository.resolve_tmdb_ids` and
+        `CollectionRepository.resolve_tmdb_ids`**, which do the same job for
+        the same reason one table over. It takes a `kind` where those two do
+        not, because those two id spaces are not namespaced and this one is.
+
+        **Ids rather than `Title`s.** The caller needs a `Credit.title_id` and
+        a link target, not 31 columns per row; `list_by_ids` is the method for
+        hydration and keeping the two apart is what stops a derivation from
+        pulling the whole catalog through a page walk.
+
+        A batch rather than one: a derivation page is 500 payloads, and a
+        lookup per payload is the round-trip-per-item shape batching exists to
+        remove.
+
+        **Absent keys mean "no such title", never "not asked", and never an
+        error.** `raw_payloads` outlives `titles`, so a payload naming a title
+        deleted since the fetch is ordinary -- the same call `IndexService`
+        makes when a title vanishes between the sweep and the claim. An
+        implementation that raised would let one deleted title abort a whole
+        derivation page.
+        """
+
+    @abstractmethod
+    async def credit_names_for(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[str, ...]]:
+        """Weight class B's input for a page of titles.
+
+        **Not a field on `Title`, and this method is the consequence.**
+        `credit_names` is in `DERIVED_COLUMNS` -- it is `credits` projected to
+        names and truncated to a ranking constant, so a domain model carrying
+        it would be a cast list that is not the cast, on the object
+        `GET /titles/{id}` hydrates from, and `title.evolve(credit_names=...)`
+        would spell an array that disagrees with the `credits` table. The
+        composer needs it anyway, because the fingerprint it computes has to
+        reproduce `_FINGERPRINT_SQL` byte for byte and that predicate reads
+        the column.
+
+        It is also the only port-level read of the array, which is what lets a
+        *contract* case assert that `credit_names` and `credits` never
+        disagree. Without it that property is assertable only against raw SQL
+        on one side and a fake's private dict on the other -- two assertions
+        about two implementations rather than one about the contract.
+
+        Batch, so the backfill pays one read per page rather than one per
+        title. **A title with no credits is present in the answer with an
+        empty tuple, not absent**: the assembly is *positional* and an absent
+        key would be spelled as a missing segment, which is precisely failure
+        mode (a) in `services/search.py`'s module docstring. A `title_id`
+        naming no row at all is absent, which is `list_by_ids`' rule and is a
+        different thing.
         """
 
     @abstractmethod
@@ -1661,9 +1729,34 @@ class CreditRepository(ABC):
 
     @abstractmethod
     async def replace_for_titles(
-        self, title_ids: Sequence[uuid.UUID], credits: Sequence[Credit]
+        self,
+        title_ids: Sequence[uuid.UUID],
+        credits: Sequence[Credit],
+        *,
+        credit_names: Mapping[uuid.UUID, Sequence[str]],
     ) -> int:
-        """Replace every stored credit for `title_ids` with `credits`.
+        """Replace every stored credit for `title_ids` with `credits`, and
+        write `titles.credit_names` for the same scope in the same call.
+
+        **`credit_names` is not a second write and may not become one.** It is
+        weight class B's input -- `credits` projected to names and truncated
+        to a ranking constant -- and a stored generated column cannot reach
+        another table, which is the whole reason it exists as a column at all
+        (boundary call 5, measured in migration `fe1d40c8b7a3`). The array and
+        the table are two spellings of one fact: split them across two calls
+        or two transactions and they diverge, and the symptom is a full-text
+        hit on a name `credits` no longer holds. Keyword-only and **without a
+        default**, so a caller cannot forget it.
+
+        **Scoped by `title_ids`, exactly as the delete is.** A title in scope
+        but absent from the mapping has its array emptied rather than left
+        alone -- same argument, same sentence: a title whose credits all
+        disappeared upstream contributes no rows, so a scope derived from the
+        rows leaves its stale names in place forever.
+
+        Order within each sequence is the ranking and is preserved. It is
+        top-billed first, which is what makes the class-B lexemes the ones a
+        viewer would search for.
 
         **`title_ids` is passed separately from the rows and that is not
         redundancy** -- `TitleNeighborRepository.replace`'s argument, arriving

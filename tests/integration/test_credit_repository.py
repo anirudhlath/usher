@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.contract.credit_repository_contract import CreditRepositoryContract, credit
 from tests.contract.person_repository_contract import person
 from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
+from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.ids import new_id
 from usher.ports.errors import RepositoryConflict
 
@@ -47,6 +48,12 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
     @pytest.fixture
     def repository(self, session: AsyncSession) -> PostgresCreditRepository:
         return PostgresCreditRepository(session)
+
+    @pytest.fixture
+    def titles(self, session: AsyncSession) -> PostgresTitleRepository:
+        # The same session, so this reads the rows `replace_for_titles` wrote
+        # in the transaction this test owns.
+        return PostgresTitleRepository(session)
 
     @pytest_asyncio.fixture
     async def _seeded_people(self, session: AsyncSession) -> dict[str, uuid.UUID]:
@@ -92,7 +99,9 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
         """
         orphan = new_id()
         with pytest.raises(RepositoryConflict):
-            await repository.replace_for_titles([orphan], [credit(orphan, lead_person)])
+            await repository.replace_for_titles(
+                [orphan], [credit(orphan, lead_person)], credit_names={}
+            )
 
     async def test_a_credit_naming_no_person_is_a_port_error(
         self, repository: PostgresCreditRepository, title_id: uuid.UUID
@@ -105,7 +114,9 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
         would have accepted it silently.
         """
         with pytest.raises(RepositoryConflict):
-            await repository.replace_for_titles([title_id], [credit(title_id, new_id())])
+            await repository.replace_for_titles(
+                [title_id], [credit(title_id, new_id())], credit_names={}
+            )
 
     async def test_a_credit_id_held_by_another_title_is_a_port_error(
         self, repository: PostgresCreditRepository, title_id: uuid.UUID, lead_person: uuid.UUID
@@ -123,11 +134,11 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
         """
         other = await _title(repository._session)
         await repository.replace_for_titles(
-            [title_id], [credit(title_id, lead_person, tmdb_credit_id="7" * 24)]
+            [title_id], [credit(title_id, lead_person, tmdb_credit_id="7" * 24)], credit_names={}
         )
         with pytest.raises(RepositoryConflict):
             await repository.replace_for_titles(
-                [other], [credit(other, lead_person, tmdb_credit_id="7" * 24)]
+                [other], [credit(other, lead_person, tmdb_credit_id="7" * 24)], credit_names={}
             )
 
     async def test_a_negative_billing_order_is_a_port_error(
@@ -147,7 +158,7 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
             **{**valid.model_dump(), "billing_order": -1},
         )
         with pytest.raises(RepositoryConflict):
-            await repository.replace_for_titles([title_id], [broken])
+            await repository.replace_for_titles([title_id], [broken], credit_names={})
 
     async def test_the_session_survives_a_conflicting_batch(
         self, repository: PostgresCreditRepository, title_id: uuid.UUID, lead_person: uuid.UUID
@@ -159,9 +170,11 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
         next.
         """
         with pytest.raises(RepositoryConflict):
-            await repository.replace_for_titles([title_id], [credit(title_id, new_id())])
+            await repository.replace_for_titles(
+                [title_id], [credit(title_id, new_id())], credit_names={}
+            )
 
         written = await repository.replace_for_titles(
-            [title_id], [credit(title_id, lead_person, billing_order=0)]
+            [title_id], [credit(title_id, lead_person, billing_order=0)], credit_names={}
         )
         assert written == 1

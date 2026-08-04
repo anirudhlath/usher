@@ -46,8 +46,9 @@ PostgreSQL's grammar, and an unquoted one in an `INSERT` column list is a
 parse risk that gets "fixed" by dropping the column from the statement.
 """
 
+import json
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -244,6 +245,56 @@ SELECT count(*) FROM inserted
 # The kind predicate is `CAST(:kind AS text) IS NULL OR ...` rather than two
 # statements: an implementation with the filter hardcoded passes a cast case
 # and fails the crew one, which is why the contract has both.
+# `titles.credit_names` is written by this same call, in the same
+# transaction, and that is boundary call 5's requirement rather than
+# tidiness: the array and the table are two spellings of one fact, and if
+# they are ever written by two statements they diverge -- the symptom being a
+# full-text hit on a name `credits` no longer holds, which nothing in the
+# suite would catch unless a case asserts on both.
+#
+# **The scope is `:title_ids`, exactly as the delete's is.** A title whose
+# credits all disappeared upstream contributes no rows, so an array derived
+# from the rows leaves its stale names in place through every future
+# derivation -- the one row shape a re-derivation cannot repair.
+# `COALESCE(..., '{}')` is what empties such a title rather than skipping it.
+#
+# `IS DISTINCT FROM` rather than `<>`: `credit_names` is NOT NULL so the two
+# agree today, and it is written this way because it is the same guard
+# `attach_titles` needs for a genuinely nullable column, and because a
+# re-derivation over an unchanged catalog must write zero rows -- `titles`
+# carries a GIN index and a stored generated column, so a dead row version
+# per title per pass is not free.
+#
+# The names travel as **one jsonb object keyed by title id**, not as two
+# parallel arrays: `unnest(uuid[], text[][])` flattens the second argument
+# rather than yielding one array per row, so the obvious parallel-array
+# spelling silently pairs the wrong names with the wrong title. Keys are the
+# canonical UUID text, which is what `CAST(uuid AS text)` produces on both
+# sides.
+#
+# `array_agg(... ORDER BY ord)` with `WITH ORDINALITY` preserves the order
+# the caller chose, and that order is the ranking -- top-billed first. An
+# unordered `array_agg` reads the same in every test with fewer than two
+# names and reorders the search document's class B for every real title.
+_WRITE_CREDIT_NAMES = """
+WITH wanted AS (
+    SELECT s.title_id,
+           COALESCE(
+               (SELECT array_agg(e.value ORDER BY e.ord)
+                FROM jsonb_array_elements_text(
+                         COALESCE(CAST(:names AS jsonb) -> CAST(s.title_id AS text), '[]'::jsonb)
+                     ) WITH ORDINALITY AS e(value, ord)),
+               '{}'
+           ) AS names
+    FROM unnest(CAST(:title_ids AS uuid[])) AS s(title_id)
+)
+UPDATE titles t
+SET credit_names = w.names
+FROM wanted w
+WHERE t.id = w.title_id
+  AND t.credit_names IS DISTINCT FROM w.names
+"""
+
 _LIST_FOR_TITLE = """
 SELECT c.person_id AS person_id, p.name AS name, c.kind AS kind,
        c."character" AS character, c.job AS job, c.department AS department,
@@ -346,7 +397,11 @@ class PostgresCreditRepository(CreditRepository):
         self._session = session
 
     async def replace_for_titles(
-        self, title_ids: Sequence[uuid.UUID], credits: Sequence[Credit]
+        self,
+        title_ids: Sequence[uuid.UUID],
+        credits: Sequence[Credit],
+        *,
+        credit_names: Mapping[uuid.UUID, Sequence[str]],
     ) -> int:
         if not title_ids and not credits:
             return 0
@@ -377,6 +432,22 @@ class PostgresCreditRepository(CreditRepository):
                     # JobWorker.startup() requeues everything left `running`.
                     await self._session.execute(
                         text(_DELETE_CREDITS), {"title_ids": list(title_ids)}
+                    )
+                    # In the same nested block as the delete and the
+                    # insert, and before the early return, so that a title
+                    # whose credits all disappeared upstream still has its
+                    # array emptied. Splitting these across two calls or two
+                    # transactions is what makes the array and the table
+                    # disagree, and the symptom is a full-text hit on a name
+                    # `credits` no longer holds.
+                    await self._session.execute(
+                        text(_WRITE_CREDIT_NAMES),
+                        {
+                            "title_ids": list(title_ids),
+                            "names": json.dumps(
+                                {str(key): list(value) for key, value in credit_names.items()}
+                            ),
+                        },
                     )
                     if not records:
                         return 0

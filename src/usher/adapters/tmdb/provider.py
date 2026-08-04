@@ -53,6 +53,8 @@ from pydantic import AwareDatetime
 from usher.adapters.tmdb.client import TmdbClient
 from usher.adapters.tmdb.mapping import (
     changed_ids,
+    collection_from_payload,
+    people_and_credits,
     search_candidates,
     seasons_and_episodes,
     title_from_payload,
@@ -62,6 +64,7 @@ from usher.ports.errors import PortDataMalformed
 from usher.ports.ingest import ProviderRef
 from usher.ports.metadata import (
     ChangedPage,
+    DerivationResult,
     EnrichmentResult,
     MetadataCandidate,
     MetadataProvider,
@@ -157,6 +160,27 @@ class TmdbMetadataProvider(MetadataProvider):
             # mutates it, and copying a payload the size of a `credits` block
             # once per title across 1,271,138 of them is not free.
             payload=payload,
+        )
+
+    def to_derivation(self, payload: dict[str, Any], title_id: uuid.UUID) -> DerivationResult:
+        """The other half of ADR-0016's promissory note, and it fetches
+        nothing.
+
+        Beside `to_result` rather than folded into it, for the reason
+        `DerivationResult` gives: enrichment runs once per title per fetch,
+        a derivation runs over the whole cache independently of it, and a
+        single result carrying both would mean `EnrichService` either writes
+        credits or computes and discards them on every enrichment.
+
+        Delegates to `mapping.py` and reads no key itself -- the wire format
+        stops in that module, which is the rule the whole package is built
+        around.
+        """
+        people, credits = people_and_credits(payload, title_id)
+        return DerivationResult(
+            people=tuple(people),
+            credits=tuple(credits),
+            collection=collection_from_payload(payload),
         )
 
     async def changed_since(self, since: AwareDatetime, cursor: str | None = None) -> ChangedPage:

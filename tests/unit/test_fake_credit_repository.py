@@ -17,7 +17,21 @@ from tests.contract.credit_repository_contract import CreditRepositoryContract
 from tests.contract.person_repository_contract import person
 from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.person_repository import FakePersonRepository
-from usher.domain.ids import new_id
+from tests.fakes.title_repository import FakeTitleRepository
+from usher.domain.enums import TitleKind
+from usher.domain.title import Title
+
+
+async def _seed_title(titles: FakeTitleRepository, name: str) -> uuid.UUID:
+    """A real row, because the contract requires every id it is handed to
+    name one -- `credit_names_for` distinguishes "exists with no credits"
+    (an empty tuple) from "does not exist" (absent), and a bare `new_id()`
+    silently exercises the second where the integration driver exercises the
+    first."""
+    title = Title(kind=TitleKind.MOVIE, name=name, sort_name=name)
+    await titles.add(title)
+    return title.id
+
 
 _PEOPLE = {
     "lead_person": 93_000_040,
@@ -33,8 +47,17 @@ class TestFakeCreditRepository(CreditRepositoryContract):
         return FakePersonRepository()
 
     @pytest.fixture
-    def repository(self, people: FakePersonRepository) -> FakeCreditRepository:
-        return FakeCreditRepository(people)
+    def titles(self) -> FakeTitleRepository:
+        return FakeTitleRepository()
+
+    @pytest.fixture
+    def repository(
+        self, people: FakePersonRepository, titles: FakeTitleRepository
+    ) -> FakeCreditRepository:
+        # The *same* `titles` object the `titles` fixture hands the contract,
+        # so `credit_names_for` reads what `replace_for_titles` wrote. Two
+        # independent stores here would make a correct implementation fail.
+        return FakeCreditRepository(people, titles)
 
     @pytest_asyncio.fixture
     async def _seeded_people(self, people: FakePersonRepository) -> dict[str, uuid.UUID]:
@@ -69,10 +92,10 @@ class TestFakeCreditRepository(CreditRepositoryContract):
     def other_person(self, _seeded_people: dict[str, uuid.UUID]) -> uuid.UUID:
         return _seeded_people["other_person"]
 
-    @pytest.fixture
-    def title_id(self) -> uuid.UUID:
-        return new_id()
+    @pytest_asyncio.fixture
+    async def title_id(self, titles: FakeTitleRepository) -> uuid.UUID:
+        return await _seed_title(titles, "An Invented Film")
 
-    @pytest.fixture
-    def other_title_id(self) -> uuid.UUID:
-        return new_id()
+    @pytest_asyncio.fixture
+    async def other_title_id(self, titles: FakeTitleRepository) -> uuid.UUID:
+        return await _seed_title(titles, "Another Invented Film")
