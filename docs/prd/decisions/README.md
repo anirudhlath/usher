@@ -30,5 +30,12 @@ otherwise be lost and re-litigated in six months.
 | [0020](0020-derived-state-carries-its-fingerprint.md) | Derived state is fresh by construction, or carries its fingerprint | Accepted |
 | [0021](0021-the-suggest-path-is-its-own-port.md) | The suggest path is its own port, so a dual write cannot arrive quietly | Accepted — settles a provisional marker |
 | [0022](0022-the-embedder-is-optional-and-its-contract-is-measured.md) | The embedder is optional, and its contract is measured rather than asserted | Accepted — corrects PRD 05 and 01 |
+| [0023](0023-a-provider-proposes-it-does-not-decide.md) | A provider proposes; the composer decides | Accepted — settles PRD 06's composition sketch |
 
 Format: context → decision → consequences → evidence. Short is fine.
+
+This table is scanned in both directions by
+`tests/unit/test_decision_register.py` — an ADR file with no row, and a row
+pointing at a file that was renamed, are both failures. It was hand-maintained
+and unchecked through twenty-two entries; it was correct, which is luck rather
+than a mechanism.

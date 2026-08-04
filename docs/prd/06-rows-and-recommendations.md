@@ -128,7 +128,14 @@ emits it.
 
 ## Dynamic composition
 
-Rows are proposed rather than listed:
+Rows are proposed rather than listed — a provider proposes, and the composer
+decides. That split is contested, because the cheaper alternative (build every
+provider eagerly, drop the empties) is shorter and is what the paragraph below
+reads like an endorsement of; the reasons it is wrong are recorded in
+[ADR-0023](decisions/0023-a-provider-proposes-it-does-not-decide.md), the first
+of which is that diversity is a property of a *set* and an eager builder never
+has one — so its constraint's input becomes build order, which is the order of
+lines in a registry module.
 
 ```python
 class RowProvider(ABC):
