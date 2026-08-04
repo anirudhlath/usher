@@ -289,24 +289,76 @@ state as user-originated.
 ### Embedding
 
 ```python
-class TitleEmbedding(BaseModel):
-    title_id: UUID
-    model: str                           # e.g. "bge-small-en-v1.5"
-    dimension: int
-    vector: list[float]                  # halfvec(384) in Postgres
-    source_text_hash: str                # skip re-embedding unchanged text
-    created_at: datetime
+# title_embeddings, as shipped in M6. It is a row, not a domain model:
+# nothing in `usher.domain` carries a vector.
+title_embeddings(
+    title_id            UUID PRIMARY KEY REFERENCES titles ON DELETE CASCADE,
+    embedding           halfvec(384) NULL,   -- NULL is a written refusal
+    model_name          text NOT NULL,       -- "fastembed:BAAI/bge-small-en-v1.5"
+    source_fingerprint  text NOT NULL,       -- md5 of the exact text embedded
+    created_at, updated_at
+)
 ```
 
 Model name is stored so a model change is a detectable, re-embeddable event
-rather than silent vector-space corruption.
+rather than silent vector-space corruption. **M6 is where that sentence
+became load-bearing**, and the shipped shape differs from the sketch this
+section used to carry in three ways that each carry meaning:
+
+- **`model_name` records the runtime as well as the checkpoint** —
+  `fastembed:BAAI/bge-small-en-v1.5`, not `bge-small-en-v1.5`. The
+  fastembed↔sentence-transformers vector difference for this same checkpoint
+  is a max pairwise-similarity delta of 1.41e-03, **6× the halfvec
+  quantisation error**, so the two runtimes are not interchangeable without a
+  re-embed. Recording the runtime makes an implementation swap invalidate
+  every vector through the stale predicate automatically, rather than through
+  a migration somebody has to remember to write
+  ([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)).
+- **`source_fingerprint`, not `source_text_hash`** — the name the code uses.
+  It is the `md5` of the exact assembled text, computed by *the same assembly
+  the document composer uses*, which is what makes it quotable inside a SQL
+  predicate. There is no `dimension` column: the width is the column's own
+  (`halfvec(384)`), and a model that changed it would be rejected by the cast.
+- **`embedding` is nullable, and that is the degenerate-document rule.** A
+  refusal is a *written* outcome, not a skipped one. A `NULL` embedding with
+  a current `model_name` and a real fingerprint means "composed, refused, and
+  it will be re-claimed exactly once when the fingerprint changes" — a state
+  distinct from "no row", which means "never claimed". Two predicates,
+  deliberately: the stale one and an `embedding IS NULL` diagnostic.
+  [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md).
+
+### `Title.search_document` — a derived column the domain does not model
+
+`titles` carries a `search_document tsvector GENERATED ALWAYS AS (…) STORED`
+that has **no `Title` field**, and this is the schema fact most likely to
+bite the next person who adds a column to that table.
+
+`PostgresTitleRepository` builds the domain model from
+`TitleRow.__table__.columns`, and `Title` is `extra="forbid"` — so the row and
+the model must agree 1:1, and a search document is not domain state. It is an
+index artefact derived from domain state, and a `Title` carrying a `tsvector`
+would put a PostgreSQL full-text type in `usher.domain`, which imports
+nothing.
+
+`TitleRow.DERIVED_COLUMNS` is the declared exception, and **membership in it
+is the deliberate act**: an ordinary bookkeeping column added without being
+named there still breaks every read, loudly, which is the property the 1:1
+rule exists for. It has **three** collision sites, not one, and the second is
+the one that gets missed:
+
+| Site | What happens without the exclusion |
+|---|---|
+| the row → model mapping | `extra="forbid"` rejects an unknown key — **every read of every title raises**, everywhere. Loud and immediate. |
+| **`update()`'s mutation loop** | it `setattr`s every column, so Postgres answers `ERROR: column "search_document" can only be updated to DEFAULT`. **This fires on writes**, so a change that only tested reading a seeded row will not see it. |
+| the 1:1 assertion in the model tests | fails — and, spelled as `columns - DERIVED_COLUMNS == model_fields`, it *also* fails if someone adds a name to `DERIVED_COLUMNS` that `Title` does model. |
 
 ### Supporting tables
 
 | Table | Purpose |
 |---|---|
-| `curated_rows` | Persisted LLM row output ([06](06-rows-and-recommendations.md)) |
-| `genome_scores` | MovieLens tag-genome relevance vectors, where available |
+| `curated_rows` | ⏳ Persisted LLM row output ([06](06-rows-and-recommendations.md)). **Does not exist yet** — M8 owns it, along with the `LLMClient` implementation that fills it |
+| `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, computed_at)`. A **batch artefact**, rebuilt rather than repaired, blending the two signals M6 has data for — embedding cosine plus genre and keyword Jaccard — and not the four [05](05-search-and-similarity.md) specifies. It is the one derived artefact in this schema with no per-row freshness predicate, and it carries a whole-artefact `computed_at` instead, on purpose ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)) |
+| `genome_scores` | ⏳ MovieLens tag-genome relevance vectors, where available. **Does not exist**: no importer, no phase, no table. Owned by M7 — see [09](09-roadmap.md) |
 | `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats. One row per *attempt*, so the availability sweep can say which run last finished cleanly |
 | `jobs` | Priority work queue ([03](03-sources-and-sync.md)). A completed job's row is deleted, so there is no `done` status and the table's size is the outstanding work, not the work ever done |
 | `raw_payloads` | JSONB cache of **provider** responses, so reprocessing never refetches. Its `fetched_at` column is also what enforces TMDb's ≤6-month cache term — see [ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md), which is why there is no separate `provider_cache_meta` table and why source payloads are not stored here |
@@ -321,7 +373,18 @@ Title      1─* Image
 Title      1─* MediaItem *─1 Source
 Title      1─* WatchState *─1 User
 Title      1─1 TitleEmbedding
+Title      *─* Title        (through title_neighbors, directed, precomputed)
 ```
+
+⏳ **Three of those lines describe tables that do not exist**, and they are
+marked here because this block is the fastest place to read the schema and the
+easiest place to be misled by it. `Collection`, `Person`, `Credit` and `Image`
+have no table, no model and no port anywhere in `src/` — `Person`/`Credit`
+land with M7 and `Image` with M9, each re-derived from `raw_payloads` with no
+second network call ([09](09-roadmap.md)'s M4 boundary call 2). The one
+artefact that exists today is **`titles.collection_id`, a bare nullable UUID
+with no foreign key that nothing in `src/` ever writes**; it is the column
+waiting for the table, not evidence of one.
 
 ## Rules
 

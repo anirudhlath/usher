@@ -97,6 +97,7 @@ async def test_the_enrich_handler_enriches_the_title_its_key_names() -> None:
         FakeMetadataProvider(),
         _noop,
         FakeEventPublisher(),
+        queue=FakeJobQueue(),
     )
     await enrich_handler(service)(Job(kind=JobKind.ENRICH, key=str(title.id)))
     stored = await titles.get(title.id)
@@ -117,6 +118,7 @@ async def test_an_enrich_key_that_is_not_a_uuid_parks_rather_than_killing_the_wo
         FakeMetadataProvider(),
         _noop,
         FakeEventPublisher(),
+        queue=FakeJobQueue(),
     )
     with pytest.raises(PortDataMalformed):
         await enrich_handler(service)(Job(kind=JobKind.ENRICH, key="not-a-uuid"))

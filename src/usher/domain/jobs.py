@@ -21,16 +21,35 @@ from usher.domain.ids import new_id
 class JobKind(StrEnum):
     """What a worker does with a claimed job.
 
-    `index` is deliberately absent. PRD 03's fourth stage updates a search
-    document and computes an embedding; neither artefact exists before M6,
-    which owns both. A kind whose handler is a stub is a queue that grows
-    forever, and adding the member later is one line plus a backfill
-    enqueue.
+    `index` maintains PRD 03's fourth stage, and the asymmetry inside that
+    stage is why it is a job at all. The full-text document is a `GENERATED
+    ALWAYS AS (...) STORED` column on `titles`, so PostgreSQL recomputes it
+    inside the statement that writes `name` or `overview` and **no job is
+    involved** -- a skeleton title needs none to be fully searchable. The
+    embedding needs a model, which the database cannot run, so it is queued;
+    and because it is queued it can fail, park, or never be enqueued at all.
+
+    That is why `title_embeddings` records `model_name` and a
+    `source_fingerprint` of the exact text embedded: staleness becomes a SQL
+    predicate rather than something inferred from the queue, and the backfill
+    (`usher index --backfill`) is self-draining and re-runnable at zero write
+    cost. **This kind's correctness does not depend on the queue being
+    reliable**, which is the property M6 was built around.
+
+    Its population is the enriched tier -- `enrichment_state <> 'skeleton'`,
+    for which `ix_titles_enrichment_state` is already exactly the partial
+    index -- not the whole 1.27M-row catalog. Embedding a skeleton produces a
+    vector of its name, which full-text already does better and cheaper.
+
+    **`index` was deliberately absent until M6**, and it stopped being so
+    because the handler, the enqueue and the drain land in one milestone. A
+    kind whose handler is a stub is a queue that grows forever.
     """
 
     MATCH = "match"
     ENRICH = "enrich"
     WATCH_HISTORY = "watch_history"
+    INDEX = "index"
 
 
 class JobStatus(StrEnum):

@@ -430,6 +430,112 @@ def _observe_sse_connections(options: CallbackOptions) -> Iterable[Observation]:
     return [] if _sse_reader is None else [Observation(_sse_reader())]
 
 
+@dataclass(frozen=True, slots=True)
+class SearchSnapshot:
+    """One reading of the embedding backlog.
+
+    Two numbers, because the second is what stops the first being read
+    wrongly. `stale` is titles in the embedded population whose vector is
+    missing, or was derived from different text, or from a different model --
+    the backfill's own predicate, `usher.db.repositories.search.
+    STALE_EMBEDDING`. `refused` is titles carrying a row with a **NULL**
+    embedding: the deliberate written outcome for a document the composer
+    called degenerate.
+
+    A refused title is *not* stale -- `REFUSED_EMBEDDING` is
+    `NOT (STALE_EMBEDDING) AND e.embedding IS NULL` precisely so the two
+    cannot overlap -- and without the second series an operator watching
+    `stale` settle on a nonzero floor cannot tell "the backfill is stuck"
+    from "these titles have no text to embed". One is a defect; the other is
+    the catalog.
+
+    Both default to 0, and that zero is a *held* one rather than a fabricated
+    one: `SearchGauges` reports it only after `register_search_gauges` has
+    been handed a reader, and `_search_observations` reports nothing at all
+    before that.
+    """
+
+    stale: int = 0
+    refused: int = 0
+
+
+SearchReader = Callable[[], SearchSnapshot]
+
+# Module global, replaced rather than captured, for the reason `_queue_reader`,
+# `_push_reader` and `_sse_reader` above all state: the SDK keeps only the
+# *first* observable instrument registered under a name and silently discards
+# the rest, so a second registration in one process would leave the first,
+# now-dead reader reporting forever.
+_search_reader: SearchReader | None = None
+
+
+def register_search_gauges(read: SearchReader) -> None:
+    """PRD 10's `usher.search.embeddings.stale`, plus its companion.
+
+    Observable rather than recorded, for `register_queue_gauges`' reason: the
+    backlog is a fact about a table, not an event stream, and a counter
+    incremented at enqueue drifts the moment anything changes a row without
+    going through it -- which here is *every enrichment*, since a new overview
+    changes the fingerprint and makes a current row stale without touching the
+    queue at all.
+
+    **`read` is synchronous and returns the caller's most recent full re-read,
+    never a query.** OTel invokes an observable callback from the metric
+    reader's own background thread and every database call in this project is
+    a coroutine on asyncpg, so a callback that queried would have to bounce a
+    coroutine onto the event loop with `run_coroutine_threadsafe` and block
+    the exporter thread on it -- a deadlock whenever the loop is itself
+    blocked. `composition.SearchGauges` is the held snapshot; the worker lane
+    and `usher work` refresh it once per pass, `usher index` after its own
+    sweep. The refresh is two `count(*)`s over a predicate that is a
+    *predicate* rather than a cursor precisely so counting it stays cheap --
+    both are driven off `ix_titles_enrichment_state`, whose population is the
+    enriched tier (2k-10k rows) rather than the 1.27M-row catalog.
+
+    Safe to call repeatedly, and the *reader* is what makes it so rather than
+    a guard on the instruments -- see `register_queue_gauges` for the whole
+    argument, which applies here unchanged.
+    """
+    global _search_reader
+    _search_reader = read
+    meter = metrics.get_meter("usher.search")
+    meter.create_observable_gauge(
+        "usher.search.embeddings.stale",
+        callbacks=[_observe_embeddings_stale],
+        unit="1",
+        description="Titles in the embedded population whose vector is missing or out of date",
+    )
+    meter.create_observable_gauge(
+        "usher.search.embeddings.refused",
+        callbacks=[_observe_embeddings_refused],
+        unit="1",
+        description="Titles whose composed document was degenerate, so no vector was written",
+    )
+
+
+def _observe_embeddings_stale(options: CallbackOptions) -> Iterable[Observation]:
+    return _search_observations(lambda snapshot: snapshot.stale)
+
+
+def _observe_embeddings_refused(options: CallbackOptions) -> Iterable[Observation]:
+    return _search_observations(lambda snapshot: snapshot.refused)
+
+
+def _search_observations(select: Callable[[SearchSnapshot], int]) -> Iterable[Observation]:
+    """No reader means no observation, never a zero.
+
+    A gauge reporting 0 before anything has read the table is
+    indistinguishable from a drained backlog, and "the backfill has drained"
+    is the only claim this series exists to support -- it is the one
+    observable answer to the milestone's own headline failure, an index that
+    does not raise but answers out of date. Same argument `_observations` and
+    `_push_observations` already make for their own series.
+    """
+    if _search_reader is None:
+        return []
+    return [Observation(select(_search_reader()))]
+
+
 def configure_telemetry(settings: Settings) -> None:
     configure_logging(settings)
     configure_tracing(settings)

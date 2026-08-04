@@ -41,6 +41,14 @@ The `COPY` mechanics themselves now live in `usher.db.staging`, so M4's
 re-deriving the three traps above per repository -- which is how one of them
 gets missed. This module docstring stays the canonical statement of them;
 `staging.py` points back here.
+
+Every statement here enumerates its columns by hand, which is what keeps
+`titles.search_document` (a `GENERATED ALWAYS AS ... STORED` column, added by
+migration fa2b6c1e9d30) out of them. That is not incidental: naming a
+generated column in an `INSERT` column list is an *error*, not an ignored
+value. The generated column is also the one index artefact on `titles` that
+`bulk_load_window` cannot suspend -- it is computed on every write, measured
+at 4.06x on this module's own `INSERT ... SELECT` shape, and accepted.
 """
 
 from collections.abc import AsyncIterator, Sequence
@@ -60,18 +68,48 @@ from usher.ports.repository import (
 )
 
 # Dropped for the duration of a bulk-load window and rebuilt after, but only
-# into an empty `titles` -- see `bulk_load_window`. Both are plain, non-unique
-# btrees over high-cardinality values, so they are pure write cost during a
-# load and rebuild faster from a full table than they maintain incrementally.
+# into an empty `titles` -- see `bulk_load_window`. The two btrees are plain,
+# non-unique, over high-cardinality values, so they are pure write cost
+# during a load and rebuild faster from a full table than they maintain
+# incrementally: measured 2026-07-30 against the live IMDb dump (1,271,138
+# retained titles), 35.8 s suspended against 40.2 s kept (11.0% faster), with
+# the rebuilt pair ~24% smaller (97 MB vs 127 MB).
 #
 # The three *unique* partial indexes (ix_titles_imdb_id,
-# ix_titles_tmdb_id_kind, ix_titles_tvdb_id) are deliberately absent from this
-# list: every upsert below names one of them in `ON CONFLICT`, so dropping one
-# does not slow the load down, it breaks it.
+# ix_titles_tmdb_id_kind, ix_titles_tvdb_id) are deliberately absent from
+# this list: every upsert below names one of them in `ON CONFLICT`, so
+# dropping one does not slow the load down, it breaks it.
+#
+# **M6's two GIN indexes join, and the reasoning is an inference rather than
+# a measurement.** A GIN index is more expensive to maintain incrementally
+# than a btree, so the btree result above should understate the saving -- but
+# nothing has measured a GIN rebuild at 1.27M rows, and the milestone smoke
+# run is where that number comes from. What is *not* inferred is that
+# suspending them does nothing for the dominant term: `titles.search_document`
+# is a stored generated column, computed on every write, measured at 4.06x on
+# this module's own `INSERT ... SELECT` shape, and there is no mechanism to
+# suspend it.
+#
+# **Every string here must reproduce the index its migration created**,
+# because this dict is executed verbatim and an entry that drops
+# `WITH (fastupdate = off)` or `gin_trgm_ops` rebuilds a *different* index --
+# one indistinguishable from the right one until somebody searches, and only
+# ever after a first bootstrap. Pinned by
+# `tests/integration/test_bulk_repository.py::
+# test_every_suspendable_index_rebuilds_to_what_the_migration_built`, which
+# is also the only check covering `fastupdate = off` at all: `compare_metadata`
+# is blind to index storage options (measured).
 _SUSPENDABLE_INDEXES: dict[str, str] = {
     "ix_titles_sort_name": "CREATE INDEX ix_titles_sort_name ON titles (sort_name)",
     "ix_titles_name_lower_year": (
         "CREATE INDEX ix_titles_name_lower_year ON titles (lower(name), year)"
+    ),
+    "ix_titles_search_document": (
+        "CREATE INDEX ix_titles_search_document ON titles "
+        "USING gin (search_document) WITH (fastupdate = off)"
+    ),
+    "ix_titles_name_trgm": (
+        "CREATE INDEX ix_titles_name_trgm ON titles USING gin (name gin_trgm_ops)"
     ),
 }
 
@@ -238,11 +276,11 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             return BulkWriteResult(inserted=0, updated=0)
         await self._stage(
             """
-            CREATE UNLOGGED TABLE stg_titles (
+            CREATE TEMP TABLE stg_titles (
                 id uuid, kind varchar(16), imdb_id text, name text, sort_name text,
                 original_name text, year integer, end_year integer,
                 runtime_minutes integer, genres text[]
-            )
+            ) ON COMMIT DROP
             """,
             "stg_titles",
             (
@@ -336,9 +374,9 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             return 0
         await self._stage(
             """
-            CREATE UNLOGGED TABLE stg_ratings (
+            CREATE TEMP TABLE stg_ratings (
                 imdb_id text, community_rating double precision, vote_count integer
-            )
+            ) ON COMMIT DROP
             """,
             "stg_ratings",
             ("imdb_id", "community_rating", "vote_count"),
@@ -364,10 +402,10 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             return 0
         await self._stage(
             """
-            CREATE UNLOGGED TABLE stg_tmdb_ids (
+            CREATE TEMP TABLE stg_tmdb_ids (
                 tmdb_id integer, kind varchar(16), original_name text,
                 popularity double precision, adult boolean
-            )
+            ) ON COMMIT DROP
             """,
             "stg_tmdb_ids",
             ("tmdb_id", "kind", "original_name", "popularity", "adult"),
@@ -394,10 +432,10 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
             return 0
         await self._stage(
             """
-            CREATE UNLOGGED TABLE stg_crosswalk (
+            CREATE TEMP TABLE stg_crosswalk (
                 imdb_id text, tmdb_movie_id integer,
                 tmdb_series_id integer, tvdb_series_id integer
-            )
+            ) ON COMMIT DROP
             """,
             "stg_crosswalk",
             ("imdb_id", "tmdb_movie_id", "tmdb_series_id", "tvdb_series_id"),

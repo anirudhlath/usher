@@ -10,17 +10,17 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from usher.api.errors import validation_error_without_the_request_body
 from usher.api.lanes import LaneSupervisor
 from usher.api.routers import events, health, sources, titles
-from usher.composition import DefaultUserId, metadata_provider, unit_of_work
+from usher.composition import (
+    DefaultUserId,
+    embedder,
+    metadata_provider,
+    nothing,
+    unit_of_work,
+)
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.services.events import InMemoryEventBus
 from usher.telemetry import configure_telemetry, register_push_gauges, register_sse_gauge
-
-
-async def _nothing() -> None:
-    """The `close_provider` a push-only deployment gets, so the lifespan's
-    `finally` has one shape rather than an `if`."""
-    return None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -39,7 +39,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # runs here -- an idle `httpx.AsyncClient` in a push-only
         # deployment is a resource with no reader.
         provider, close_provider = (
-            await metadata_provider(settings) if settings.worker_enabled else (None, _nothing)
+            await metadata_provider(settings) if settings.worker_enabled else (None, nothing)
+        )
+        # The embedding model, on the same terms and for the same reason: one
+        # per process, built only where a worker will use it. Not built at all
+        # in a push-only deployment -- a 65 MB ONNX session with no reader.
+        model, close_model = (
+            await embedder(settings) if settings.worker_enabled else (None, nothing)
         )
         lanes = LaneSupervisor(
             settings,
@@ -47,6 +53,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             bus,
             user_id=DefaultUserId(session_factory),
             provider=provider,
+            embedder=model,
         )
         app.state.lanes = lanes
         # PRD 10's `usher.source.push.connected` / `.reconnects`. Registered
@@ -75,6 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # raise into a task that is about to be cancelled anyway.
             await lanes.stop()
             await close_provider()
+            await close_model()
             await engine.dispose()
 
     app = FastAPI(

@@ -81,11 +81,11 @@ from usher.ports.repository import WatchStateRepository
 # the winner among same-instant duplicates is whichever row the planner
 # reached first.
 _STAGING_DDL = """
-CREATE UNLOGGED TABLE stg_watch_states (
+CREATE TEMP TABLE stg_watch_states (
     ordinal integer, id uuid, user_id uuid, title_id uuid, episode_id uuid,
     position_seconds integer, runtime_seconds integer, played boolean,
     play_count integer, last_played_at timestamptz, observed_at timestamptz
-)
+) ON COMMIT DROP
 """
 
 _COLUMNS = (

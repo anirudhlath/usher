@@ -174,6 +174,117 @@ class Settings(BaseSettings):
     # retry storm into the rate limit it is meant to avoid.
     enrich_cache_max_age_days: int = Field(default=30, ge=1, le=180)
 
+    # Search and embeddings (PRD 05, M6). Same reasoning as every block
+    # above: PRD 08 puts knobs like these in a TOML config layer that does
+    # not exist yet. Named `embedding_*` / `search_*` rather than
+    # `fastembed_*` or `postgres_*` -- config.py is not an adapter, and
+    # ADR-0002's whole position is that the engine behind these is
+    # replaceable.
+    #
+    # **The block arrived in three commits and is one block.**
+    # `test_every_setting_is_read_by_something` means a field cannot land
+    # ahead of its reader, so the four `embedding_*` came with the embedder
+    # and the five `search_*` with the two indexes and `SearchService`.
+    # `tests/unit/test_config.py::test_the_search_and_embedding_settings_
+    # have_the_measured_defaults` is what holds all nine in one place.
+    #
+    # **There is deliberately no `index_enabled`.** M6's plan asked for one,
+    # "same shape as `push_enabled` / `worker_enabled`", and its stated
+    # justification -- a deployment with it off still has full-text and
+    # trigram over all 1.27M titles -- is `embedding_enabled`'s
+    # justification, word for word. The two would gate the same decision:
+    # `composition.build_worker` registers `JobKind.INDEX` on
+    # `embedder is not None`, and `composition.embedder` returns `None`
+    # exactly when `embedding_enabled` is false, so an `index_enabled` added
+    # today has no reachable behaviour of its own -- and
+    # `test_every_setting_is_read_by_something` is a substring scan that
+    # cannot see that. The pair genuinely separates when the *server* process
+    # gains a use for a model the worker lane must not consume, which is M9's
+    # search routes; that is when to add it, with a case that fails without
+    # it.
+    #
+    # Off by default, and that is the honest default rather than a cautious
+    # one. The dependency lives behind an extra (`uv sync --extra
+    # embedding`), so the common install genuinely cannot run index jobs --
+    # and PRD 05's catalog-lookup tier, full-text plus trigram over all
+    # 1.27M titles, needs no model at all. A deployment with this off is
+    # *narrowed*, not broken.
+    embedding_enabled: bool = False
+    # The runtime **and** the checkpoint, because the two are not separable
+    # facts about a vector: the same weights served by sentence-transformers
+    # and by fastembed differ by 1.41e-03 max pairwise delta, which is 6x the
+    # halfvec quantisation error. This string is written to
+    # `title_embeddings.model_name`, so changing it invalidates every stored
+    # vector through the stale predicate -- which is the fingerprint scheme
+    # doing the work a migration would otherwise have to.
+    embedding_model: str = Field(default="fastembed:BAAI/bge-small-en-v1.5", min_length=1)
+    # Measured on CPU: best throughput at 16, flat from 16 to 64, degrading
+    # at 128. `le=512` because the ceiling here is memory, and the cost of
+    # being wrong is an OOM inside a worker pass rather than a slow one.
+    embedding_batch_size: int = Field(default=16, ge=1, le=512)
+    # Sets `HF_HUB_OFFLINE` before the model library is imported, and it is
+    # not a hardening flag. Measured: with a warm cache, no network and the
+    # variable unset, the load *fails* with `RuntimeError: Cannot send a
+    # request, as the client has been closed` -- huggingface_hub reusing a
+    # closed client on its retry path, in a message naming neither the
+    # network nor the cache. Reproduced two independent ways. It is also the
+    # only setting under which a genuine cache miss produces a
+    # comprehensible `OSError`. An operator warming the cache for the first
+    # time sets this false for that one run.
+    #
+    # **And that override is why `HF_HUB_OFFLINE` is deliberately not in
+    # `compose.yml`'s `environment:` block**, which M6's plan asked for as a
+    # topology fact. `environment:` beats `env_file:` absolutely, and this
+    # setting reaches the library through `os.environ.setdefault`, so a
+    # hard-set `HF_HUB_OFFLINE=1` in compose would make
+    # `USHER_EMBEDDING_OFFLINE=false` dead config inside the container --
+    # exactly the shape `USHER_COMPOSE_` exists to prevent -- and an operator
+    # could never warm the cache there. The setting also reaches every entry
+    # point compose cannot: `uv run usher work`, `usher index`, a dev shell.
+    # (The shipped image installs no embedding extra and carries no model
+    # cache, so the variable would be inert there in any case.)
+    embedding_offline: bool = True
+
+    # The retrieval half. Every one of these is read by
+    # `composition.build_pipeline`, which constructs the two indexes and
+    # `SearchService`.
+
+    # The ceiling on `SearchRequest.limit`, applied by `SearchService` before a
+    # request reaches an index -- not the default, the most a caller may ask
+    # for. `le=200` because every candidate becomes a `SearchResult` assembled
+    # in application code and RRF fuses two lists of this size; 10,000 is a
+    # scan wearing a search's name.
+    search_result_limit: int = Field(default=50, ge=1, le=200)
+    # Reciprocal Rank Fusion's smoothing constant: `1 / (k + rank)`. It sets
+    # how fast a hit's contribution decays with rank, so a small k makes rank 1
+    # dominate and a large one flattens both lists into near-equal votes. 60 is
+    # the value RRF's original paper uses and the one ADR-0002 assumes. `ge=1`
+    # because k=0 makes the top rank's weight unbounded against the second's,
+    # which is "return the first list". **Not the constant `SearchService`'s
+    # relevance term uses**, which is 1: that term is scaled against a
+    # popularity term in [0, 1) rather than against a second candidate list,
+    # and sharing this number would make relevance two orders of magnitude
+    # smaller than popularity.
+    search_rrf_k: int = Field(default=60, ge=1, le=1000)
+    # pgvector's `hnsw.ef_search`, set per statement rather than globally. The
+    # GUC's own default is 40 and is not what this wants: measured, a filtered
+    # query at 40 returned 0.88 rows of a requested 10. Larger is more accurate
+    # and linearly slower. `ge=1` is pgvector's floor; `le=1000` because beyond
+    # that the index is a scan with extra steps.
+    search_hnsw_ef_search: int = Field(default=100, ge=1, le=1000)
+    # `pg_trgm`'s `similarity()` floor for the suggest path. Bounded to (0, 1]
+    # because that is `similarity()`'s own range: 0 admits every row in
+    # `titles` as a candidate, which is the latency cliff PRD 05 says the
+    # narrow path exists to avoid, and 1.0 admits only exact matches, which is
+    # `LIKE`.
+    search_trigram_threshold: float = Field(default=0.3, gt=0.0, le=1.0)
+    # How many trigram candidates are collected before the `levenshtein`
+    # re-rank. Measured: 1,774 candidates against a 300,000-row table is a 169x
+    # reduction in `levenshtein` calls, and edit distance over the whole table
+    # is the exact cliff ADR-0002 names. It must exceed `search_result_limit`
+    # or the re-rank can only reorder what the cap already chose.
+    search_suggest_candidates: int = Field(default=200, ge=1, le=2000)
+
     # The push lane and the worker lane (PRD 03, PRD 01's concurrency
     # model). Same reasoning as every block above: PRD 08's TOML config
     # layer does not exist yet. Deliberately named `push_*` rather than
@@ -273,6 +384,35 @@ class Settings(BaseSettings):
         if not isinstance(values, dict):
             return values
         return {key: value for key, value in values.items() if not _is_compose_only(key)}
+
+    @model_validator(mode="after")
+    def _suggest_cap_leaves_room_to_choose(self) -> "Settings":
+        """A cap at or below the result limit is a cap that cannot cut.
+
+        `PostgresSuggestIndex` collects `search_suggest_candidates` trigram
+        matches, re-ranks them by edit distance, and keeps the best
+        `search_result_limit`. With the cap at or below the limit the re-rank
+        is handed exactly the rows it is meant to choose *among*, so it can
+        reorder but never discard -- and the ordering the type-ahead box shows
+        is then whatever the trigram floor happened to admit. That is the
+        implementation `test_a_single_character_typo_still_finds_a_short_title`
+        and `test_results_are_ordered_by_popularity_within_equal_distance`
+        exist to rule out, reachable by configuration rather than by code.
+
+        A cross-field rule because neither field can express it alone, in the
+        shape `sse_heartbeat_seconds`' `lt=60.0` established for a constraint
+        that *is* expressible: a bound that is a real constraint belongs in
+        the type system, wherever it fits. **Not hypothetical** -- both
+        ceilings allow `search_result_limit = 200` against the cap's own
+        default of 200, so an operator reaches the bad state by raising the
+        limit alone, which is the ordinary thing to do.
+        """
+        if self.search_suggest_candidates <= self.search_result_limit:
+            raise ValueError(
+                "USHER_SEARCH_SUGGEST_CANDIDATES must exceed USHER_SEARCH_RESULT_LIMIT "
+                "-- the edit-distance re-rank has to have more candidates than it keeps"
+            )
+        return self
 
     @field_validator("tmdb_api_key", "otlp_endpoint", mode="before")
     @classmethod

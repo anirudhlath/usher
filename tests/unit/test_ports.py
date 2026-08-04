@@ -9,6 +9,7 @@ import pytest
 
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.enums import TitleKind
+from usher.ports.bulk import BulkDataset
 from usher.ports.credentials import CredentialStore
 from usher.ports.embedding import Embedder
 from usher.ports.errors import (
@@ -19,21 +20,62 @@ from usher.ports.errors import (
     RepositoryNotFound,
     UsherPortError,
 )
+from usher.ports.events import EventPublisher
+from usher.ports.jobs import JobQueue
 from usher.ports.llm import LLMClient, LLMPurpose, LLMUsage
 from usher.ports.metadata import MetadataCandidate, MetadataProvider
-from usher.ports.repository import TitleRepository
-from usher.ports.search import SearchIndex, SearchMode, SearchRequest
+from usher.ports.repository import (
+    BulkCatalogRepository,
+    EpisodeRepository,
+    ImportRunRepository,
+    MediaItemRepository,
+    RawPayloadStore,
+    SourceRepository,
+    SyncRunRepository,
+    TitleEmbeddingRepository,
+    TitleMatchRepository,
+    TitleNeighborRepository,
+    TitleRepository,
+    WatchStateRepository,
+)
+from usher.ports.search import (
+    FilterNotSupported,
+    SearchIndex,
+    SearchMode,
+    SearchRequest,
+    SuggestIndex,
+)
 from usher.ports.source import SourceAdapter, SourceAdapterFactory, SourceNotSupported
 
+# Every ABC in `usher.ports` that declares an abstract method, and
+# `test_every_port_abc_is_registered_in_all_ports` is what keeps that true.
+# Until M6 wrote that case this list held eight of twenty-one -- the two
+# checks below had never once run against `JobQueue`, `EventPublisher`, or
+# any of the nine repository ports (ADR-0009: repositories are ports too).
 ALL_PORTS: list[type[ABC]] = [
     SourceAdapter,
     SourceAdapterFactory,
     CredentialStore,
     MetadataProvider,
     SearchIndex,
+    SuggestIndex,
     Embedder,
     LLMClient,
+    BulkDataset,
+    EventPublisher,
+    JobQueue,
+    BulkCatalogRepository,
+    EpisodeRepository,
+    ImportRunRepository,
+    MediaItemRepository,
+    RawPayloadStore,
+    SourceRepository,
+    SyncRunRepository,
+    TitleEmbeddingRepository,
+    TitleMatchRepository,
+    TitleNeighborRepository,
     TitleRepository,
+    WatchStateRepository,
 ]
 
 
@@ -46,6 +88,69 @@ def test_port_cannot_be_instantiated_directly(port: type[ABC]) -> None:
 @pytest.mark.parametrize("port", ALL_PORTS)
 def test_port_declares_abstract_methods(port: type[ABC]) -> None:
     assert port.__abstractmethods__
+
+
+def test_every_port_abc_is_registered_in_all_ports() -> None:
+    """`ALL_PORTS` is hand-maintained, and until this case existed nothing
+    noticed a port that was left out of it -- so a new port silently got
+    neither the "cannot be instantiated" check nor the "declares abstract
+    methods" one, which are the two properties ADR-0001 chose ABCs *for*.
+
+    M6 adds `SuggestIndex` and is the second milestone in a row to add a
+    port. The plan assumed the list was correct so far by attention;
+    running this case for the first time reported **thirteen** missing
+    names, not one -- `JobQueue`, `EventPublisher`, `BulkDataset` and all
+    nine repository ports had never been checked at all. Attention had not
+    in fact been keeping it. Two lines of `pkgutil` is cheaper.
+
+    Deliberately walks `usher.ports.*` rather than asserting a count: a
+    count moves for a rename, which teaches people to edit the number.
+
+    The two `declared` assertions are the control, and they are not
+    decoration. A scan that globs nothing passes exactly like a scan that
+    passes -- the failure mode `tests/unit/test_no_third_party_data.py`
+    carries the same guard against, and the one this case's own mutation
+    sweep found: emptying `pkgutil.iter_modules(...)` broke nothing.
+    """
+    import importlib
+    import pkgutil
+
+    import usher.ports
+
+    declared: set[type[ABC]] = set()
+    for module in pkgutil.iter_modules(usher.ports.__path__):
+        namespace = importlib.import_module(f"usher.ports.{module.name}")
+        for value in vars(namespace).values():
+            if (
+                isinstance(value, type)
+                and issubclass(value, ABC)
+                and value.__module__ == namespace.__name__
+                # `None`, not `frozenset()`: `issubclass` is true for a
+                # *virtual* subclass too, which need not carry the
+                # attribute at all -- and mypy rejects the empty-frozenset
+                # default outright, picking `getattr`'s `bool` overload.
+                and getattr(value, "__abstractmethods__", None)
+            ):
+                declared.add(value)
+    assert declared, "the port scan found nothing, so it proves nothing"
+    assert SearchIndex in declared
+    missing = {port.__name__ for port in declared} - {port.__name__ for port in ALL_PORTS}
+    assert not missing, f"ports missing from ALL_PORTS: {sorted(missing)}"
+
+
+def test_suggest_index_has_no_write_method() -> None:
+    """**The structural half of ADR-0021.** The whole argument for splitting
+    this port is that adding a second engine for the instant-search box must
+    require *adding* a write path, visibly, rather than filling in one that
+    was already declared. A future `index`/`remove` here would make that
+    change look like satisfying an abstract method instead of acquiring the
+    dual write ADR-0002 refused.
+
+    So this is not a style assertion -- it is the reason the class exists,
+    written as a check. Deleting it and adding `index` is a decision; doing
+    it without deleting this is a failing test.
+    """
+    assert SuggestIndex.__abstractmethods__ == frozenset({"suggest"})
 
 
 def test_incomplete_implementation_fails_at_instantiation() -> None:
@@ -92,6 +197,7 @@ def test_source_not_supported_is_a_usher_port_error() -> None:
         PortRateLimited,
         RepositoryConflict,
         RepositoryNotFound,
+        FilterNotSupported,
     ],
 )
 def test_port_errors_are_usher_port_errors(error: type[UsherPortError]) -> None:
@@ -144,8 +250,12 @@ def test_llm_purpose_is_a_closed_string_vocabulary() -> None:
 def test_search_mode_fused_is_reachable() -> None:
     """The bug this replaced: `semantic: bool` could not express a third
     "fused" option, even though RRF fusion is the actual design
-    (ADR-0002), not a hypothetical alongside full-text and semantic."""
-    request = SearchRequest(query="dune", mode=SearchMode.FUSED)
+    (ADR-0002), not a hypothetical alongside full-text and semantic.
+
+    Carries a `query_vector` since M6: a fused request without one is
+    refused at construction, because the caller owns the model.
+    """
+    request = SearchRequest(query="an empty room", mode=SearchMode.FUSED, query_vector=(1.0, 0.0))
     assert request.mode is SearchMode.FUSED
 
 

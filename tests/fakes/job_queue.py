@@ -195,6 +195,17 @@ class FakeJobQueue(JobQueue):
             if job.run_after is not None:
                 self._jobs[key] = job.evolve(run_after=None)
 
+    def jobs_of(self, kind: JobKind) -> list[Job]:
+        """Test-only hook, deliberately absent from the port.
+
+        `depth()` answers how many, and a case asserting *which* row was
+        written -- its key, its priority -- would otherwise reach into
+        `_jobs`. Same status as `clear_backoff` above: nothing in `src/`
+        would ever call it, and the real queue answers the same question with
+        a `SELECT`.
+        """
+        return [job for job in self._jobs.values() if job.kind is kind]
+
     def _find(self, job_id: uuid.UUID) -> _Key | None:
         return next((key for key, job in self._jobs.items() if job.id == job_id), None)
 

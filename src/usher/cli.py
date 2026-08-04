@@ -30,10 +30,13 @@ from usher.composition import (
     DefaultUserId,
     Pipeline,
     QueueGauges,
+    SearchGauges,
     SourceRegistry,
     build_pipeline,
     build_worker,
+    embedder,
     metadata_provider,
+    nothing,
     open_adapter,
     selected_sources,
     unit_of_work,
@@ -43,16 +46,23 @@ from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.users import ensure_default_user
-from usher.domain.enums import TitleKind
-from usher.domain.jobs import JobKind
+from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
 from usher.ports.bulk import ImdbTitle
 from usher.ports.events import NullEventPublisher
+from usher.ports.jobs import JobRequest
 from usher.ports.repository import BulkCatalogRepository
+from usher.ports.search import SearchFilters, SearchMode
 from usher.ports.source import SourceAdapter
 from usher.services.bootstrap import BootstrapService
-from usher.telemetry import configure_telemetry, register_queue_gauges
+from usher.services.search import SemanticSearchUnavailable
+from usher.telemetry import (
+    configure_telemetry,
+    register_queue_gauges,
+    register_search_gauges,
+)
 
 PHASES = ("imdb", "tmdb-ids", "crosswalk", "all")
 # The two lanes `ReconcileService` walks `list_items` for. `watch_state` is a
@@ -313,7 +323,7 @@ async def _unmatched(
 
 
 async def _work(settings: Settings, *, once: bool) -> None:
-    """Run queued jobs: `match`, `enrich`, `watch_history`.
+    """Run queued jobs: `match`, `enrich`, `watch_history`, `index`.
 
     Owns the one `httpx.AsyncClient` behind `TmdbClient`, because the token
     bucket that keeps this deployment under TMDb's ~40 rps ceiling lives on
@@ -331,15 +341,28 @@ async def _work(settings: Settings, *, once: bool) -> None:
     """
     async with _session_for(settings) as session:
         provider, aclose = await metadata_provider(settings)
+        # Both built once, here, and closed in the same `finally`. A model is
+        # a process-lifetime resource for the same reason the TMDb client is:
+        # `build_worker` runs once per pass below, and a load there is 4.84 s
+        # cold / 0.13 s warm over 65 MB of ONNX.
+        model, aclose_model = await embedder(settings)
         pipeline = build_pipeline(session, settings, provider=provider)
         registry = SourceRegistry(pipeline)
         gauges = QueueGauges()
         register_queue_gauges(gauges.read)
+        # PRD 10's embedding backlog, refreshed on the same beat and for the
+        # same reason: an OTel observable callback runs on the metric reader's
+        # background thread and cannot await an asyncpg query. Refreshed even
+        # when this process has no model -- a worker without one leaves index
+        # jobs for one that has, and the backlog is the number that says so.
+        backlog = SearchGauges()
+        register_search_gauges(backlog.read)
         try:
             worker = build_worker(
                 pipeline,
                 settings,
                 provider=provider,
+                embedder=model,
                 resolve=registry.resolve,
                 user_id=await ensure_default_user(session),
             )
@@ -349,15 +372,301 @@ async def _work(settings: Settings, *, once: bool) -> None:
             await worker.startup()
             ran = await worker.run_once()
             await gauges.refresh(pipeline.queue)
+            await backlog.refresh(pipeline.embeddings, settings.embedding_model)
             print(f"{ran} jobs")
             while not once:
                 if ran == 0:
                     await asyncio.sleep(_IDLE_SLEEP_SECONDS)
                 ran = await worker.run_once()
                 await gauges.refresh(pipeline.queue)
+                await backlog.refresh(pipeline.embeddings, settings.embedding_model)
         finally:
             await registry.aclose()
             await aclose()
+            await aclose_model()
+
+
+async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
+    """Report the search index's freshness, or enqueue the work that fixes it.
+
+    **The bare form only reads**, so it is safe on a production box while
+    diagnosing something. `--backfill` is the writing form and it is one
+    `enqueue` per stale title, never an inline embed: the worker owns the
+    model (`composition.embedder`), and a CLI that embedded would load 65 MB
+    of ONNX in a process whose job is to print two numbers.
+
+    **The model is not loaded here at all**, and `settings.embedding_model`
+    below is what says so: staleness is a question about a *name*, which is
+    exactly what recording `model_name` on the row bought. This command works
+    on a deployment that has no embedding extra installed -- it will report
+    what is stale and enqueue it for a worker that does.
+
+    **Sized in tokens, because throughput is linear in tokens and not in
+    texts.** CPU holds ~8,000-10,700 tokens/s across the whole range and a
+    realistic `name + overview + genres + keywords` document is ~100-130
+    tokens, so the enriched tier boundary call 4 embeds (2k-10k titles) is
+    ~25 seconds to 2 minutes of worker time. Over all 1,271,138 titles it
+    would be 4-6 hours, which is the number that boundary call avoids paying.
+    A rate in texts/s would hide that a document twice as long costs twice as
+    much.
+
+    **Re-running is free.** `enqueue`'s upsert carries `WHERE jobs.status <>
+    'parked' AND jobs.priority < excluded.priority`, so a second sweep over
+    jobs already at BACKFILL costs one index probe per row and writes nothing.
+    The reported count is rows *written*, which is the honest number and is 0
+    on a second run.
+    """
+    gauges = SearchGauges()
+    # Registered even in the bare read form, so the two numbers this prints and
+    # the two PRD 10 exports are the same read rather than two reads that agree
+    # today. A short-lived command exports on shutdown when an OTLP endpoint is
+    # configured and does nothing when one is not, which is the same bargain
+    # `register_queue_gauges` takes in `usher work`.
+    register_search_gauges(gauges.read)
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        model = settings.embedding_model
+        if not backfill:
+            await gauges.refresh(pipeline.embeddings, model)
+            snapshot = gauges.read()
+            print(f"model: {model}")
+            print(f"stale embeddings: {snapshot.stale}")
+            print(f"refused (no content to embed): {snapshot.refused}")
+            # ~115 tokens a document at ~8,000-10,700 tokens/s on CPU. A range
+            # derived from the invariant rather than from a texts/s rate.
+            print(
+                f"estimated worker time: {snapshot.stale * 115 / 10700:.0f}-"
+                f"{snapshot.stale * 115 / 8000:.0f}s"
+            )
+            return
+
+        written = seen = 0
+        after: uuid.UUID | None = None
+        while True:
+            # Task 9's cursor, imported rather than re-derived. The predicate
+            # it walks is the one `count_stale` above and the
+            # `usher.search.embeddings.stale` gauge evaluate -- a backfill
+            # with its own copy of a staleness rule is how a sweep and the
+            # dashboard that reports on it come to disagree about what they
+            # are counting.
+            page = await pipeline.embeddings.list_stale(model, limit=page_size, after=after)
+            if not page:
+                break
+            written += await pipeline.queue.enqueue(
+                [
+                    JobRequest(kind=JobKind.INDEX, key=str(title.id), priority=JobPriority.BACKFILL)
+                    for title in page
+                ]
+            )
+            await session.commit()
+            seen += len(page)
+            # **The cursor advances on the last id of the page, always** --
+            # never on "how many were still stale afterwards". A loop that
+            # re-asked the predicate would not terminate against a row the
+            # predicate cannot clear, and this repository has shipped exactly
+            # that non-convergence once, in the watch-history repair. A keyset
+            # cursor cannot loop, because each pass starts strictly after the
+            # last id it saw, whatever the predicate did.
+            after = page[-1].id
+            if limit and seen >= limit:
+                break
+        # After the sweep, not inside it. The predicate is cheap to count and
+        # cheaper still not to count per page, and the number an operator wants
+        # is the backlog *left over* -- the same reason `QueueGauges` refreshes
+        # after a worker pass rather than before it.
+        await gauges.refresh(pipeline.embeddings, model)
+        print(f"{seen} stale titles swept, {written} index jobs written")
+
+
+def _filters_from(args: argparse.Namespace) -> SearchFilters:
+    """`SearchFilters`' whole closed vocabulary, built in one place.
+
+    One function rather than a construction inlined at the call site, so the
+    flag-to-field mapping exists once and
+    `test_the_filter_flags_are_search_filters_whole_vocabulary` has something
+    to check it against. **All six, not the useful ones**: 🔶 1's settlement
+    made the vocabulary closed precisely because a `dict[str, Any]` let two
+    backends invent different keys, and a filter with no flag is a capability
+    the port declares, the backend implements, and no operator can reach.
+
+    Empty tuples rather than `None` for the two list-shaped filters: the port
+    reads `()` as "narrow nothing", and `argparse`'s `action="append"` default
+    is `None`, so the conversion has to happen somewhere and here is the only
+    place it can happen once.
+    """
+    return SearchFilters(
+        kinds=tuple(TitleKind(kind) for kind in args.kinds or ()),
+        year_from=args.year_from,
+        year_to=args.year_to,
+        genres=tuple(args.genres or ()),
+        owned_only=args.owned_only,
+        min_enrichment=(
+            None if args.min_enrichment is None else EnrichmentState(args.min_enrichment)
+        ),
+    )
+
+
+async def _search(
+    settings: Settings, *, query: str, mode: str, limit: int, filters: SearchFilters
+) -> None:
+    """PRD 05's search, at a terminal.
+
+    **Reports coverage on every run, which is the point of this command having
+    a human-readable mode at all.** A `FUSED` search against a catalog with no
+    embeddings degrades to full-text -- correctly, because a title with no
+    vector is *absent from the semantic candidate list* rather than ranked
+    last -- and the result looks exactly like a working hybrid search. No
+    error, no empty result, no log line. This milestone's headline failure
+    mode, arriving at the CLI.
+
+    **Two different problems present identically and get different sentences**,
+    which is what `SearchAnswer` carrying `requested_mode` beside `mode` is
+    for. `degraded` means the deployment has no model at all and the fix is an
+    extra plus a setting; `semantic_coverage == 0.0` on an undegraded FUSED
+    search means the model is there and nothing has been embedded yet, and the
+    fix is `usher index --backfill`. A single warning for both would send an
+    operator to the wrong one half the time.
+
+    **The embedder is built here and closed in the same `finally`**, and only
+    when a non-full-text mode asks for one. It is a once-per-process resource
+    (`composition.embedder`), which for a command is once; `build_pipeline`
+    deliberately never builds one, so a full-text search costs no model load
+    at all. `SearchRequest.__post_init__` refuses a `SEMANTIC` or `FUSED`
+    request with no vector, so the only object that can construct one is the
+    object holding the model -- which is why this passes primitives to
+    `SearchService.search` and never a `SearchRequest`.
+    """
+    requested = SearchMode(mode)
+    model, aclose_model = (
+        # `report=False`: that factory's warning is about a *lane* ("index jobs
+        # will not be claimed"), which is right for `usher work` and wrong
+        # twice over here -- it advises about work this process does not do,
+        # and `cli.py`'s printed-not-logged rule makes it a JSON envelope in
+        # front of the results. The line printed below says the same thing
+        # better, naming the setting and the extra.
+        await embedder(settings, report=False)
+        if requested is not SearchMode.FULL_TEXT
+        else (None, nothing)
+    )
+    try:
+        async with _session_for(settings) as session:
+            pipeline = build_pipeline(session, settings, embedder=model)
+            try:
+                answer = await pipeline.search.search(
+                    query, mode=requested, limit=limit, filters=filters
+                )
+            except SemanticSearchUnavailable as exc:
+                # Not narrowed to full-text, and the service is right to refuse
+                # rather than answer: the caller asked the one question
+                # full-text cannot answer and would otherwise get a plausible
+                # answer to a different one. `SystemExit` with a sentence, the
+                # treatment `_as_uuid` gives a bad id.
+                raise SystemExit(f"{exc} -- try --mode fused, or run `usher index`") from exc
+    finally:
+        await aclose_model()
+
+    for rank, result in enumerate(answer.results, start=1):
+        year = f" ({result.year})" if result.year else ""
+        owned = "*" if result.owned else " "
+        print(f"{rank:>3} {owned} {result.score:6.4f}  {result.name}{year}  {result.title_id}")
+    if not answer.results:
+        print("no match")
+    # Always, not only when it is low: a number an operator sees only when
+    # something is wrong is a number they have no baseline for.
+    print(
+        f"mode={answer.mode.value} results={len(answer.results)} "
+        f"semantic_coverage={answer.semantic_coverage:.3f}"
+    )
+    if answer.degraded:
+        print(
+            f"warning: {answer.requested_mode.value} was served as {answer.mode.value} -- "
+            "this deployment has no embedding model "
+            "(set USHER_EMBEDDING_ENABLED=true and install the `embedding` extra)"
+        )
+    elif answer.mode is SearchMode.FUSED and answer.semantic_coverage == 0.0:
+        # The warning names the command that fixes it, which is the difference
+        # between a diagnostic and a complaint.
+        print(
+            "warning: no title in the filtered population has an embedding, so this "
+            "was full-text only -- run `usher index --backfill`"
+        )
+
+
+async def _suggest(settings: Settings, *, prefix: str, limit: int) -> None:
+    """Type-ahead, at a terminal.
+
+    **No embedder in either direction.** `SuggestIndex` is its own port
+    (🔶 2) and `PostgresSuggestIndex` queries `titles` through a trigram index
+    and writes nothing, so this command starts in 0.13 s on any deployment --
+    including one with no embedding extra installed at all, which is PRD 05's
+    catalog-lookup tier serving all 1.27M titles with no model.
+
+    No coverage line, and that is not an omission: there is no semantic lane
+    here to have degraded.
+    """
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        results = await pipeline.search.suggest(prefix, limit=limit)
+    for result in results:
+        year = f" ({result.year})" if result.year else ""
+        print(f"{result.score:6.4f}  {result.name}{year}  {result.title_id}")
+    if not results:
+        print("no match")
+
+
+async def _similar(
+    settings: Settings, *, title_id: uuid.UUID | None, limit: int, rebuild: bool
+) -> None:
+    """Read one title's precomputed neighbours, or recompute the whole table.
+
+    **No model is loaded in either form**, and that is a property of the
+    design rather than an optimisation: the rebuild reads stored vectors and
+    never embeds anything, so this command starts in 0.13 s instead of paying
+    a 4.84 s cold ONNX load. A deployment with no embedding extra installed can
+    still rebuild neighbours over whatever a worker elsewhere indexed.
+
+    **`--rebuild` is not a job kind, and the argument is about the unit of
+    work.** Re-embedding one title changes the neighbour lists of every title
+    it is near, and no per-seed job can know which those are without doing the
+    whole computation anyway -- so a `JobKind.SIMILAR` keyed on a title id
+    would update the seed's own row and leave every list that should now
+    contain it untouched, producing a table that is never coherent and whose
+    incoherence is invisible from any single row.
+
+    **And the cost of that decision, stated rather than hidden: nothing in M6
+    re-runs this.** It is an operator's command or a cron entry, run after
+    `usher index --backfill`. PRD 06's "TTL: hours" is a statement about how
+    long M7 may cache what it read, not a promise that this table is hours
+    fresh.
+    """
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        if rebuild:
+            report = await pipeline.similar.rebuild()
+            print(f"rebuilt {report.seeds} seeds, wrote {report.rows} neighbour rows")
+            if report.without_embedding:
+                # Excluded *and* counted. A rebuild that silently skipped a
+                # growing swathe of the catalog reads exactly like one with
+                # nothing to skip, which is this milestone's own failure mode.
+                print(
+                    f"{report.without_embedding} titles have no embedding and were excluded "
+                    "-- run `usher index --backfill` if that is unexpected"
+                )
+            return
+
+        if title_id is None:  # pragma: no cover - `parse_args` refuses this
+            raise SystemExit("give a title id, or --rebuild, but not both")
+        rows = await pipeline.similar.neighbors_of(title_id, limit=limit)
+        for row in rows:
+            year = f" ({row.year})" if row.year else ""
+            print(f"{row.score:.3f}  {row.name}{year}  {row.title_id}")
+        if not rows and await pipeline.similar.computed_at() is None:
+            # Two causes for an empty answer and only one is a fact about the
+            # title. One message for both sends an operator to look at the
+            # wrong thing.
+            print("no neighbours have ever been computed -- run `usher similar --rebuild`")
+        elif not rows:
+            print("no neighbours for this title")
 
 
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
@@ -414,8 +723,9 @@ async def _run_lanes(settings: Settings) -> None:
     engine = build_engine(settings.database_url.get_secret_value())
     sessions = build_session_factory(engine)
     provider, close_provider = (
-        await metadata_provider(settings) if settings.worker_enabled else (None, _no_provider)
+        await metadata_provider(settings) if settings.worker_enabled else (None, nothing)
     )
+    model, close_model = await embedder(settings) if settings.worker_enabled else (None, nothing)
     events = NullEventPublisher()
     lanes = LaneSupervisor(
         settings,
@@ -423,6 +733,7 @@ async def _run_lanes(settings: Settings) -> None:
         events,
         user_id=DefaultUserId(sessions),
         provider=provider,
+        embedder=model,
     )
     await lanes.start()
     try:
@@ -433,11 +744,8 @@ async def _run_lanes(settings: Settings) -> None:
     finally:
         await lanes.stop()
         await close_provider()
+        await close_model()
         await engine.dispose()
-
-
-async def _no_provider() -> None:
-    return None
 
 
 def _as_uuid(value: str, what: str) -> uuid.UUID:
@@ -480,6 +788,62 @@ def build_parser() -> argparse.ArgumentParser:
     work = sub.add_parser("work", help="run queued jobs")
     work.add_argument("--once", action="store_true", help="one pass, then exit")
 
+    index = sub.add_parser("index", help="report search-index freshness, or enqueue the work")
+    index.add_argument(
+        "--backfill",
+        action="store_true",
+        help="enqueue one index job per stale title (the bare form only reads)",
+    )
+    index.add_argument("--limit", type=int, default=0, help="stop after N titles; 0 drains")
+    index.add_argument("--page-size", type=int, default=1000)
+
+    search = sub.add_parser("search", help="search the catalog")
+    search.add_argument("query", help="what to search for")
+    # `SearchMode`'s values, taken from the enum rather than retyped: a
+    # hand-copied list drifts silently and offers an operator a mode the
+    # service cannot serve -- or, worse, omits the one ADR-0002's whole design
+    # is about.
+    search.add_argument(
+        "--mode", choices=[mode.value for mode in SearchMode], default=SearchMode.FUSED.value
+    )
+    search.add_argument("--limit", type=int, default=20)
+    # `SearchFilters`' closed vocabulary, one flag per field and no more. The
+    # vocabulary being closed is 🔶 1's settlement -- a `dict[str, Any]` let
+    # two backends invent different keys, and a backend that cannot express a
+    # filter must raise rather than ignore it, because an ignored filter
+    # returns *more* results and reads as working. So this is not "the useful
+    # ones"; it is all of them, and a new filter is a port change before it is
+    # a flag.
+    search.add_argument(
+        "--kind", action="append", dest="kinds", choices=[kind.value for kind in TitleKind]
+    )
+    search.add_argument("--year-from", type=int, default=None)
+    search.add_argument("--year-to", type=int, default=None)
+    search.add_argument("--genre", action="append", dest="genres")
+    search.add_argument("--owned-only", action="store_true")
+    search.add_argument(
+        "--min-enrichment",
+        choices=[state.value for state in EnrichmentState],
+        default=None,
+    )
+
+    suggest = sub.add_parser("suggest", help="type-ahead over titles")
+    suggest.add_argument("prefix")
+    suggest.add_argument("--limit", type=int, default=10)
+
+    similar = sub.add_parser("similar", help="titles like this one, or rebuild the table")
+    # Optional because `--rebuild` is the write form of the same command. Two
+    # subcommands for one artefact is how `usher index` and its backfill would
+    # have drifted; the cross-argument rule in `parse_args` is what argparse
+    # cannot express.
+    similar.add_argument("title_id", nargs="?")
+    similar.add_argument("--limit", type=int, default=10)
+    similar.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="recompute title_neighbors for the whole embedded population",
+    )
+
     push = sub.add_parser("push", help="run the push lane, or probe a source's push channel")
     push.add_argument("--source", default=None, help="source name; omit for every enabled source")
     push.add_argument(
@@ -507,6 +871,29 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         # `parser.error`, not a raise: it exits 2 with usage on stderr, the
         # same way every other argument failure does.
         parser.error("--resolve and --title are used together")
+    if args.command == "search":
+        if (
+            args.year_from is not None
+            and args.year_to is not None
+            and args.year_from > args.year_to
+        ):
+            # An empty range is not something argparse can see: each bound is
+            # individually valid, so a transposed pair parses cleanly and then
+            # returns nothing -- which reads as "the catalog does not have it".
+            parser.error("--year-from must not be after --year-to")
+        if args.limit < 1:
+            # Here rather than left to `SearchService`'s ceiling, because the
+            # two failures differ: above `search_result_limit` the service
+            # clamps and the answer says so, and at zero the operator asked for
+            # nothing and meant something.
+            parser.error("--limit must be at least 1")
+    if args.command == "suggest" and args.limit < 1:
+        parser.error("--limit must be at least 1")
+    if args.command == "similar" and bool(args.title_id) == bool(args.rebuild):
+        # Both spellings refused: no arguments is a read of nothing, and both
+        # together is a read and a write in one command. `parser.error` again
+        # -- exit 2 with usage rather than exit 1 with a traceback.
+        parser.error("give a title id, or --rebuild, but not both")
     return args
 
 
@@ -557,6 +944,31 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     elif args.command == "work":
         asyncio.run(_work(settings, once=args.once))
+    elif args.command == "index":
+        asyncio.run(
+            _index(settings, backfill=args.backfill, limit=args.limit, page_size=args.page_size)
+        )
+    elif args.command == "search":
+        asyncio.run(
+            _search(
+                settings,
+                query=args.query,
+                mode=args.mode,
+                limit=args.limit,
+                filters=_filters_from(args),
+            )
+        )
+    elif args.command == "suggest":
+        asyncio.run(_suggest(settings, prefix=args.prefix, limit=args.limit))
+    elif args.command == "similar":
+        asyncio.run(
+            _similar(
+                settings,
+                title_id=None if args.title_id is None else _as_uuid(args.title_id, "title id"),
+                limit=args.limit,
+                rebuild=args.rebuild,
+            )
+        )
     elif args.command == "push":
         asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
     else:

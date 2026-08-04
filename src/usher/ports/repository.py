@@ -132,6 +132,22 @@ class TitleRepository(ABC):
         """Fetch by IMDb id, or None if no title carries it."""
 
     @abstractmethod
+    async def list_by_ids(self, title_ids: Sequence[uuid.UUID]) -> list[Title]:
+        """Every title named by `title_ids` that still exists, in any order.
+
+        **A missing id is an omission, never an error.** A title deleted
+        between an index write and a search read is ordinary, and the caller
+        re-orders by its own ranking anyway — so returning fewer rows than
+        asked for is the contract, and a caller that indexes the result by id
+        must tolerate the gap.
+
+        Exists because hydrating a 50-hit result set through `get()` is 50
+        statements per search: the same round-trip-per-item shape `index_many`
+        was introduced to delete from `SearchIndex`, arriving from the other
+        direction.
+        """
+
+    @abstractmethod
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         """Catalog size broken down by enrichment tier.
 
@@ -643,6 +659,33 @@ class MediaItemRepository(ABC):
         """
 
     @abstractmethod
+    async def owned_title_ids(self, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        """Which of `title_ids` this household has a copy of, on any source.
+
+        **A retracted copy still counts.** PRD 02's availability is a soft
+        delete, so `available = false` means "a source is not currently
+        reporting it", and a search ranking that flipped when a source went
+        down would move results for a reason unconnected to the query. The
+        `owned_only` filter in `PostgresSearchIndex` carries the *identical*
+        predicate: two definitions of owned is how a filtered list and a
+        boosted list stop agreeing.
+
+        **Restricted to a title's own row (`episode_id IS NULL`), and the
+        reason is measured.** `IngestService` writes an episode's row with its
+        series' `title_id` *and* its own `episode_id`, so an unrestricted read
+        of a series is one row per episode file: 20,001 rows / 22.901 ms / 402
+        buffers against 1 row / 0.251 ms / 21 buffers, on this project's own
+        measurement of `list_for_title`. `resolve_external_ids`' title branch
+        carries the identical clause. The bound that buys: a library that
+        reported episodes but never their series row reads as not-owned for
+        that series.
+
+        One statement however many ids are asked about — the same N+1 this
+        port's `list_for_title` would otherwise be used for, and worse, since
+        each of those reads is a read of a whole show.
+        """
+
+    @abstractmethod
     async def count_for_source(self, source_id: uuid.UUID) -> int:
         """How many items this source has, available or not. The sweep's
         denominator, and the CLI's report."""
@@ -1030,3 +1073,320 @@ class RawPayloadStore(ABC):
         """The compliance query: the oldest cache entry for a provider, which
         is what PRD 10's dashboard-5 panel plots against TMDb's 6-month
         ceiling. `None` when the provider has no entries at all."""
+
+
+@dataclass(frozen=True, slots=True)
+class TitleEmbeddingUpsert:
+    """One title's vector and the two facts that make its staleness a query.
+
+    `embedding` is `None` for a **refused** title — one whose composed
+    document is degenerate. That is a written outcome, not a skipped one: it
+    stops the title matching the stale predicate, starts it matching a
+    separate countable one, and gets it re-claimed exactly once when
+    enrichment changes the text. Measured: every whitespace-only input
+    embeds to the identical vector, cosine 1.0000 exactly, so a degenerate
+    document is an unbounded cluster at the top of every similar-titles
+    result rather than a bad result.
+
+    `model_name` carries the runtime as well as the checkpoint
+    (`fastembed:BAAI/bge-small-en-v1.5`), because two runtimes of the same
+    weights differ by 6x the halfvec quantisation error and are not
+    interchangeable without a re-embed.
+    """
+
+    title_id: uuid.UUID
+    embedding: tuple[float, ...] | None
+    model_name: str
+    source_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class StoredEmbedding:
+    """What is currently stored for one title, as `get` answers it.
+
+    Deliberately not `TitleEmbeddingUpsert` even though it carries the same
+    facts: the `title_id` is absent because the caller passed it, and the two
+    types travelling in opposite directions is what keeps a read from being
+    handed straight back to a write without the caller deciding to.
+
+    Its one consumer is the index stage's idempotence check, and that check
+    is a comparison of **both** `model_name` and `source_fingerprint` — a
+    skip on existence alone passes every redelivery case and then never
+    updates a vector again, which is a stale index that does not raise, it
+    answers.
+    """
+
+    embedding: tuple[float, ...] | None
+    model_name: str
+    source_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class NeighborSeed:
+    """One embedded title, carrying the tag sets the blend needs — so a page
+    read answers the seed half in one statement rather than ids here plus a
+    second `list_by_ids` pulling 31 columns per row for two of them."""
+
+    title_id: uuid.UUID
+    genres: tuple[str, ...]
+    keywords: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NeighborCandidate:
+    """One candidate neighbour and the raw signals it offers.
+
+    **`cosine`, never a distance.** pgvector's `<=>` is a distance and the
+    blend wants agreement, so `1 - (a <=> b)` happens once, in the adapter,
+    rather than in a scorer that would then have to know which operator
+    produced its input. A signal list whose members disagree about direction is
+    how a weight silently becomes a penalty.
+
+    It may be **negative**, and clamping is deliberately the *service's* job
+    rather than this port's: `title_neighbors.score` is `CHECK (score >= 0 AND
+    score <= 1)`, so the clamp has to hold for every implementation of this
+    port rather than for the one that remembered.
+    """
+
+    title_id: uuid.UUID
+    cosine: float
+    genres: tuple[str, ...]
+    keywords: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ScoredNeighbor:
+    """One row of `title_neighbors`, as the service computed it.
+
+    `neighbor_title_id` rather than the row's own `neighbor_id`: on this side
+    of the port the two ids are both title ids and calling one of them
+    `neighbor_id` reads like a `title_neighbors` primary key travelling in a
+    DTO. The repository maps it.
+    """
+
+    title_id: uuid.UUID
+    neighbor_title_id: uuid.UUID
+    score: float
+    rank: int
+
+
+class TitleEmbeddingRepository(ABC):
+    """Persistence for the semantic half, and the home of the one predicate
+    three consumers share.
+
+    Unlike the search document — a stored generated column PostgreSQL keeps
+    correct inside every write of its inputs — an embedding needs a model,
+    so it is a job, and jobs can fail, park, or never be enqueued at all.
+    This port is where that asymmetry is paid for: rather than trusting the
+    queue, every row records *what* was embedded and *by what*, and
+    "is this stale?" becomes a query the backfill, the gauge and a test all
+    ask the same way.
+
+    Same session ownership as every other repository here: methods flush and
+    return counts, and never commit. `model_name` is a parameter on every
+    method rather than a constructor argument read from settings — `db/`
+    may not import `config`, and a repository that knew the deployment's
+    model could not be asked "how many rows would a model swap invalidate?"
+    """
+
+    @abstractmethod
+    async def upsert_many(self, rows: Sequence[TitleEmbeddingUpsert]) -> BulkWriteResult:
+        """Write a batch, insert-or-update, keyed on `title_id`.
+
+        Idempotent by construction: PRD 08's redelivery rule, and the job
+        queue *will* redeliver. A batch carrying the same `title_id` twice
+        keeps the later row — last-wins on the batch's own order. A
+        `title_id` naming no title raises `RepositoryConflict`, translated
+        from the backing store's own error, and leaves the session usable for
+        the caller's other pending work.
+        """
+
+    @abstractmethod
+    async def get(self, title_id: uuid.UUID) -> StoredEmbedding | None:
+        """One title's stored row, or `None` if it has never been indexed.
+
+        The index stage reads this *before* asking a model for anything, and
+        that read is what makes redelivery free rather than merely safe:
+        `JobWorker.startup()` requeues everything left `running`, so a
+        process killed between a handler returning and `complete` committing
+        produces a second delivery of work already done. At ~83 texts/s a
+        requeued backfill that re-embedded would re-run the whole enriched
+        tier.
+
+        `None` is "no row", which is the first disjunct of the stale
+        predicate — a title that has never been indexed and one whose text
+        has moved are the same question to a caller, and both are answered by
+        embedding it.
+        """
+
+    @abstractmethod
+    async def list_stale(
+        self, model_name: str, *, limit: int = 100, after: uuid.UUID | None = None
+    ) -> list[Title]:
+        """One page of titles needing an embedding, oldest id first.
+
+        **A keyset cursor, not an offset.** `MediaItemRepository.list_unmatched`'s
+        `OFFSET` pagination is measured at 43.7 ms at offset 0 and 388.9 ms
+        at offset 1,126,574 — linear per page, quadratic to drain — which
+        is fine for an operator reading the first few pages and wrong for a
+        backfill, whose entire job is to walk a population to exhaustion.
+        Pass the last id of a page as `after` to get the next one; an empty
+        list means drained.
+
+        The population is `enrichment_state <> 'skeleton'` (boundary call 4),
+        for which `ix_titles_enrichment_state` is already the partial index
+        that exists. A skeleton title's document is a generated column, so it
+        is fully indexed with no job at all.
+        """
+
+    @abstractmethod
+    async def count_stale(self, model_name: str) -> int:
+        """How many titles the predicate currently claims.
+
+        A plain `int`, synchronously consumable by a caller that caches it —
+        **never wired directly to an OTel observable callback.** The SDK
+        invokes those from the metric reader's background thread and every
+        call here is a coroutine on asyncpg, so a querying callback would
+        have to bounce onto the event loop and block the exporter thread on
+        it. `telemetry.register_queue_gauges` already records the shape.
+        """
+
+    @abstractmethod
+    async def count_refused(self, model_name: str) -> int:
+        """How many titles are current *and* have no vector — the composer
+        refused their document as degenerate.
+
+        **This must not overlap `count_stale`.** Spelled as a bare
+        `embedding IS NULL` it would also count rows refused under an older
+        model, which are stale; the two counters would then sum above the
+        population and "the backfill has drained" would stop being an
+        observable condition.
+        """
+
+    @abstractmethod
+    async def list_embedded(
+        self, *, after: uuid.UUID | None = None, limit: int = 500
+    ) -> list[NeighborSeed]:
+        """Titles with a **non-NULL** embedding, in `id` order, after `after`.
+
+        A keyset cursor for the reason `list_stale`'s is one: `OFFSET`
+        pagination is measured in this repository at 43.7 ms at offset 0 and
+        388.9 ms at offset 1,126,574 — linear per page, quadratic to drain.
+
+        **NULL embeddings are excluded here rather than by the caller.** A
+        refused title is written as a row with a NULL embedding so it stops
+        matching the stale predicate; it has no vector to search from and is
+        not a seed. Excluding it in the caller would mean every future caller
+        has to remember.
+        """
+
+    @abstractmethod
+    async def nearest_for(
+        self, seed_ids: Sequence[uuid.UUID], *, limit: int
+    ) -> dict[uuid.UUID, list[NeighborCandidate]]:
+        """The `limit` nearest candidates for each seed, nearest first.
+
+        **Excludes the seed itself and every NULL-embedding row**, and both are
+        the implementation's job rather than the caller's. Self-exclusion,
+        because cosine with itself is 1.0 and every neighbour list would
+        otherwise open with the title the reader is already looking at.
+        NULL-exclusion, because `embedding <=> :seed` is NULL, NULLs sort last
+        on an ascending order, and so they arrive only when the population is
+        smaller than `limit` — at which point they are either a type error or,
+        under a careless `coalesce`, a distance of 0 pinning every refused
+        title to the top of every list.
+
+        **A page of seeds rather than one**, so a rebuild costs one statement
+        per page instead of one per title: the same round-trip-per-item shape
+        `index_many` was introduced to delete from `SearchIndex`, at 10,000
+        instead of 1.3M and still worth not reintroducing.
+
+        **Exact, not approximate.** PRD 05: brute-force exact cosine at this
+        scale, 10k x 384. Recall loss in a live query is per-query; recall loss
+        in a precomputed artefact is permanent, and this one is read until the
+        next rebuild. The `halfvec` quantisation figures do **not** license an
+        approximate index here — that would be laundering one measurement into
+        a claim about another, and this milestone has not measured HNSW recall.
+
+        Ties on distance break on `title_id`, so *which* candidates enter the
+        pool is decided rather than left to the executor.
+
+        A seed with no embedding, or none at all, is simply absent from the
+        answer — never a key mapped to an empty list, which a caller would have
+        to distinguish from "computed and found nothing".
+        """
+
+    @abstractmethod
+    async def count_without_embedding(self) -> int:
+        """Rows carrying a `NULL` embedding — the written refusals.
+
+        The second half of the predicate pair, and it exists so the exclusion
+        above is *observable*: a rebuild that silently skipped a growing swathe
+        of the catalog reads exactly like one with nothing to skip. `usher
+        similar --rebuild` prints it.
+
+        Deliberately **not** `count_refused`'s number: that one is scoped to a
+        `model_name` and answers "how many are current and vectorless", which
+        is a question about the backfill draining. This one answers "how many
+        rows can never be a seed", which is a question about the artefact's
+        coverage, and it stays true across a model swap.
+        """
+
+
+class TitleNeighborRepository(ABC):
+    """`title_neighbors` — the precomputed similarity artefact (PRD 05).
+
+    **The one derived artefact in M6 whose freshness is not a per-row
+    predicate**, and the port says so rather than implying otherwise. A row is
+    stale when either title's embedding moved — which is a predicate, and
+    which subsumes the metadata case for free because `compose_document`
+    includes genres and keywords. But a row is *also* stale when some third
+    title's embedding moved into its neighbourhood, and that is not decidable
+    without recomputing the row. So the artefact carries an age, not a
+    fingerprint, and it is rebuilt rather than repaired.
+
+    Same session ownership as every other repository here: methods flush and
+    return counts, and never commit.
+    """
+
+    @abstractmethod
+    async def replace(
+        self, seed_ids: Sequence[uuid.UUID], neighbors: Sequence[ScoredNeighbor]
+    ) -> int:
+        """Replace every stored row for `seed_ids` with `neighbors`.
+
+        **`seed_ids` is passed separately from the rows and that is not
+        redundancy.** A seed whose neighbours all disappeared — the other
+        enriched titles were deleted, or every candidate became degenerate —
+        contributes no rows at all, so an implementation deriving the delete's
+        scope from `neighbors` deletes nothing for it and leaves its stale
+        neighbours in place through every future rebuild. It is the one row
+        shape a rebuild cannot repair.
+
+        Returns the number of rows written, which is what makes an operator's
+        rebuild report a number rather than a reassurance.
+        """
+
+    @abstractmethod
+    async def list_for(self, title_id: uuid.UUID, *, limit: int) -> list[ScoredNeighbor]:
+        """One seed's stored neighbours, best first, ties broken by id.
+
+        Read back by the batch's own stored `rank` rather than by re-sorting on
+        `score`: reproducing the order from the score works only up to float
+        ties, and a tie broken differently on two reads shows a client two
+        different "most similar" titles for one catalog.
+        """
+
+    @abstractmethod
+    async def computed_at(self) -> AwareDatetime | None:
+        """The **oldest** stored row's timestamp, or `None` if none exists.
+
+        Oldest rather than newest: the newest would report a whole-table
+        rebuild as fresh the moment the first page committed, which is this
+        milestone's own failure mode ("looks healthy while describing
+        yesterday") wearing an accessor.
+
+        `None` means *never computed*, which is a different fact from "this
+        title has no neighbours" and is what stops `usher similar` sending an
+        operator to look at the wrong thing.
+        """

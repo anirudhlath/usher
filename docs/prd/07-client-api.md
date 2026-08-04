@@ -40,6 +40,18 @@ be added if a client turns out to need flexible field selection.
 | `GET /search/suggest?q=` | Type-ahead — the cheap narrow path from [05](05-search-and-similarity.md) |
 | `GET /browse?genre=&year=&sort=&owned=&cursor=` | Faceted paging with facet counts |
 
+> ⏳ **`GET /search` and `GET /search/suggest` are M9's.** M6 built everything
+> behind them — `SearchService`, `PostgresSearchIndex`, `PostgresSuggestIndex`,
+> RRF fusion and the ranking blend — and **added no HTTP route**, delivering
+> the whole capability through `usher search` and `usher suggest` on the
+> command line, exactly as M2 did for `bootstrap` and M4 for the ingest
+> pipeline ([09](09-roadmap.md)'s M6 boundary call 1). M9 adds routers over
+> finished wiring, and is where this document's RFC 9457 envelope is defined.
+> One shape note for whoever writes them: `semantic=` in the sketch above is a
+> boolean, and the shipped `SearchRequest` carries a three-valued
+> `SearchMode` (`full_text` / `semantic` / `fused`), because a bool cannot
+> express fusion at all.
+
 ### Resources
 
 | Endpoint | Returns |
@@ -57,8 +69,12 @@ be added if a client turns out to need flexible field selection.
 > `similar` and the season/episode hierarchy are **absent rather than empty**:
 > `Person`/`Credit` land with M7 and `Image` with M9, each re-derived from
 > `raw_payloads` with no second network call ([09](09-roadmap.md)'s M4 boundary
-> call 2), `GET /titles/{id}/similar` is M6's with its own row above, and an
-> empty list would be indistinguishable from a film with no cast.
+> call 2), and an empty list would be indistinguishable from a film with no
+> cast. **`GET /titles/{id}/similar` is M9's, not M6's** — this sentence said
+> "M6's" until M6 ran and added no HTTP route at all
+> ([09](09-roadmap.md)'s M6 boundary call 1). M6 built the
+> `SimilarityService` and the precomputed `title_neighbors` table that route
+> will read, and delivered the capability through `usher similar`.
 >
 > **`availability` is one badge per copy of the title, never per episode.** An
 > episode's `MediaItem` carries its series' `title_id` as well as its own

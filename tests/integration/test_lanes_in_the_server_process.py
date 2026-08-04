@@ -101,23 +101,24 @@ async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncS
 
 
 async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
-    """Undo what a committing test wrote, including the staging tables.
+    """Undo what a committing test wrote.
 
-    `usher.db.staging` creates `stg_*` with DDL and Postgres DDL is
-    transactional, so a *committing* test is the only kind that can leak
-    one -- and it surfaces as schema drift in
+    Two `DROP TABLE IF EXISTS stg_*` statements used to be part of this, and
+    the reason is worth keeping even though the lines are gone:
+    `usher.db.staging` created `stg_*` with DDL, Postgres DDL is
+    transactional, so a *committing* test was the only kind that could leak
+    one -- and it surfaced as schema drift in
     `test_migrations.py::test_migration_matches_the_orm_metadata`, a
-    different file that then fails only in combination. Reproduced here
-    exactly as CLAUDE.md predicts: without the two `DROP`s below, this file
-    passes alone and takes the migration test down in the full run.
+    different file that then failed only in combination. Reproduced here
+    exactly as CLAUDE.md predicted at the time. M6 made the staging tables
+    `CREATE TEMP TABLE ... ON COMMIT DROP`, so the commit is what removes
+    them.
     """
     async with sessions() as session:
         for statement in (
             "DELETE FROM jobs",
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM sources",
-            "DROP TABLE IF EXISTS stg_jobs",
-            "DROP TABLE IF EXISTS stg_media_items",
         ):
             await session.execute(text(statement))
         await session.commit()

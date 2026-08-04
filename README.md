@@ -10,23 +10,36 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 ## Status
 
 Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
-adapter), M4 (ingest pipeline) and M5 (push and read-through) are complete —
-see [`docs/plans/`](docs/plans/) for the task breakdowns and
+adapter), M4 (ingest pipeline), M5 (push and read-through) and M6 (search)
+are complete — see [`docs/plans/`](docs/plans/) for the task breakdowns and
 [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's next.
 
 M3, M4 and M5 are each verified against a live Emby server, and M4's metadata
 half against the live TMDb API. M5's run is the first in this repository to
-have parsed a real `/embywebsocket` message.
+have parsed a real `/embywebsocket` message. **M6's one outstanding item is
+its own typo-tolerance gate**, which is built but has not yet been run
+against a real 1.27M-title catalog
+([ADR-0002](docs/prd/decisions/0002-postgres-first-search.md)).
 
 **The HTTP surface is deliberately small so far**: `/health`,
 `/health/ready`, `/titles/{id}`, `/events` (SSE) and the `/admin/sources`
-routes. Everything the ingest pipeline does is driven from the command line
-until M9 adds the admin API — see below.
+routes. **M6 adds none** — search, suggest, similarity and indexing are all
+command-line, and M9 owns the routers. Everything the ingest pipeline does is
+driven from the command line until then — see below.
 
 ## Requirements
 
 - Docker and Docker Compose
 - A [TMDb API key](https://www.themoviedb.org/settings/api) (free, non-commercial)
+- **Optional:** the embedding extra, for semantic search and "more like
+  this". `uv sync --extra embedding` installs `fastembed` — **167 MiB, 28
+  packages, no torch** — and downloads a 65 MB model on first use. Without
+  it, full-text and typo-tolerant type-ahead still serve the whole catalog;
+  the deployment is narrowed, not broken. Leave `USHER_EMBEDDING_OFFLINE=true`
+  on: it sets `HF_HUB_OFFLINE=1` before the library loads, and without it a
+  host with a warm cache but no network fails with
+  `RuntimeError: Cannot send a request, as the client has been closed` — a
+  message that names neither the network nor the cache.
 
 ## Running it
 
@@ -134,6 +147,71 @@ set).
 uv run usher work --once   # one pass over the queue, then exit
 uv run usher work          # stay up, polling
 ```
+
+`usher index` reports how much of the search index is out of date. **The bare
+form only reads**, so it is safe to run on a production box while diagnosing
+something; `--backfill` is the writing form and enqueues one `index` job per
+stale title for a worker to run.
+
+```bash
+uv run usher index             # model, stale count, refused count, estimated worker time
+uv run usher index --backfill  # enqueue the work; re-running writes zero rows
+```
+
+Embedding is optional and off by default. The model lives behind an extra
+(`uv sync --extra embedding`, 167 MiB, no torch) and `USHER_EMBEDDING_ENABLED`
+gates it; without it a worker simply never claims `index` jobs, and full-text
+and trigram still serve the whole catalog. `usher index` itself loads no model
+— staleness is a question about a recorded model *name*.
+
+`usher search` and `usher suggest` are the read side, and M6 adds no HTTP
+route — the CLI delivers the whole capability, exactly as `bootstrap` and the
+ingest commands do, and M9 owns the routers.
+
+```bash
+uv run usher search "the quiet vacuum"                 # hybrid by default
+uv run usher search "vacuum" --mode full_text --limit 5
+uv run usher search "vacuum" --kind movie --year-from 1990 --year-to 2030 \
+                             --genre drama --owned-only --min-enrichment enriched
+uv run usher suggest "the quie" --limit 5              # type-ahead, typo-tolerant
+```
+
+**`usher search` prints `semantic_coverage` on every run, not only when it is
+low**, and that line is the reason the command has a human-readable mode at
+all. A `--mode fused` search against a catalog with no embeddings degrades to
+full-text — correctly, because a title with no vector is *absent from the
+semantic candidate list* rather than ranked last — and the result looks
+exactly like a working hybrid search: no error, no empty result, no log line.
+Two things can produce it and they get different sentences, because they have
+different fixes: `fused was served as full_text` means this deployment has no
+model (install the extra, set `USHER_EMBEDDING_ENABLED=true`), while
+`semantic_coverage=0.000` on a search that really did run fused means nothing
+has been embedded yet (`usher index --backfill`). `--mode semantic` with no
+model refuses outright rather than narrowing — it is the one question
+full-text cannot answer, so a plausible answer to a different one is worse
+than none.
+
+Every `SearchFilters` field has a flag and no filter has two, which is
+deliberate: an engine that cannot express a filter raises rather than ignoring
+it, because an ignored filter returns *more* results and reads as working.
+
+`usher similar` has the same two forms `usher index` does, and for the same
+reason: a read and the write that refreshes what it reads.
+
+```bash
+uv run usher similar <title id>    # the precomputed neighbours, best first
+uv run usher similar --rebuild     # recompute title_neighbors for the embedded tier
+```
+
+**Nothing runs the rebuild for you**, and that is stated rather than implied.
+A title's neighbours go stale when *some other* title gets an embedding, which
+no per-row predicate can decide — so unlike everything else Usher derives,
+`title_neighbors` carries a whole-artefact age instead of a per-row
+fingerprint, and refreshing it is an operator's command or a cron entry, run
+after `usher index --backfill`. The read form says which of the two empty
+answers you are looking at: "no neighbours for this title" and "no neighbours
+have ever been computed" have different fixes. Neither form loads a model —
+the rebuild reads stored vectors — so both start in about a tenth of a second.
 
 **The server process already runs a worker lane**, and a push lane per
 enabled source, so a normal deployment needs neither command. They are for

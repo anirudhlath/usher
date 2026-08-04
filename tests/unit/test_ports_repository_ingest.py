@@ -37,6 +37,14 @@ def test_media_item_repository_surface() -> None:
             "list_for_title",
             "list_unmatched",
             "attach_title",
+            # M6's ranking surface. Named here for the same reason
+            # `list_for_title` is: dropped from the ABC, every implementation
+            # could stop providing it and still type-check, and the owned
+            # boost would silently become a term that is always zero -- which
+            # is exactly the "declared and never applied" failure
+            # `test_an_owned_title_outranks_an_unowned_one_at_equal_relevance`
+            # exists to catch one layer up.
+            "owned_title_ids",
             "count_for_source",
         }
     )

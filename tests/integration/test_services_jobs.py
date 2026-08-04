@@ -52,11 +52,16 @@ async def factory(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSe
     The shared `session` fixture is one connection inside one externally
     managed transaction that is rolled back afterwards, so two workers over
     it would be *one* backend and could not contend for a row lock even in
-    principle. These commit, so they clean up after themselves -- including
-    `stg_jobs`, which `enqueue` creates with DDL: Postgres DDL is
-    transactional, so a committing test is the one shape that leaves the
-    staging table behind, and `test_migration_matches_the_orm_metadata` then
-    reports it as schema drift in a later file.
+    principle. These commit, so they clean up after themselves.
+
+    **No `DROP TABLE IF EXISTS stg_jobs` any more.** It used to be here
+    because Postgres DDL is transactional and a committing test was the one
+    shape that left a staging table behind, which surfaced as schema drift in
+    `test_migration_matches_the_orm_metadata` in a *later* file. M6 made
+    `usher.db.staging` create `CREATE TEMP TABLE ... ON COMMIT DROP`, so the
+    commit below is what removes the table rather than what persists it, and
+    a cleanup that can no longer fire is indistinguishable from one still
+    needed.
     """
     engine = build_engine(postgres_url)
     make = build_session_factory(engine)
@@ -65,7 +70,6 @@ async def factory(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSe
     finally:
         async with make() as cleanup:
             await cleanup.execute(text("DELETE FROM jobs"))
-            await cleanup.execute(text("DROP TABLE IF EXISTS stg_jobs"))
             await cleanup.commit()
         await engine.dispose()
 

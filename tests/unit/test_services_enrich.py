@@ -10,6 +10,7 @@ response is cached verbatim, which is what lets M7 and M9 derive
 """
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -17,13 +18,16 @@ import pytest
 
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
+from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
+from usher.ports.jobs import JobRequest
 from usher.services.enrich import EnrichService
 
 _MOVIE_TMDB_ID = 90000550
@@ -61,6 +65,11 @@ def events() -> FakeEventPublisher:
 
 
 @pytest.fixture
+def queue() -> FakeJobQueue:
+    return FakeJobQueue()
+
+
+@pytest.fixture
 def service(
     titles: FakeTitleRepository,
     episodes: FakeEpisodeRepository,
@@ -68,11 +77,12 @@ def service(
     provider: FakeMetadataProvider,
     commits: list[int],
     events: FakeEventPublisher,
+    queue: FakeJobQueue,
 ) -> EnrichService:
     async def commit() -> None:
         commits.append(1)
 
-    return EnrichService(titles, episodes, payloads, provider, commit, events)
+    return EnrichService(titles, episodes, payloads, provider, commit, events, queue=queue)
 
 
 async def _given(
@@ -349,6 +359,7 @@ async def test_a_payload_older_than_the_ceiling_is_refetched(
         provider,
         commit,
         FakeEventPublisher(),
+        queue=FakeJobQueue(),
         cache_max_age_days=1,
         now=lambda: datetime.now(UTC) + timedelta(days=2),
     )
@@ -518,6 +529,11 @@ async def test_the_event_is_published_after_the_commit(
     genuinely invisible here and only real Postgres can show it. The order is
     the property the transaction makes matter, and it is observable -- which
     is one more than the plan expected the unit suite to manage.
+
+    The whole tail, not just the pair: M6 puts the index enqueue between the
+    two, and asserting only "commit before publish" would let it drift back
+    above the commit -- where it fingerprints the pre-enrichment text and
+    writes a vector the backfill never re-claims.
     """
     order: list[str] = []
 
@@ -528,7 +544,154 @@ async def test_the_event_is_published_after_the_commit(
         async def publish(self, event: ClientEvent) -> None:
             order.append("publish")
 
-    service = EnrichService(titles, episodes, payloads, provider, commit, _Recording())
+    service = EnrichService(
+        titles, episodes, payloads, provider, commit, _Recording(), queue=_RecordingQueue(order)
+    )
     title = await _given(titles, state=EnrichmentState.STUB)
     await service.enrich(title.id)
-    assert order == ["commit", "publish"]
+    assert order == ["commit", "enqueue", "publish"]
+
+
+class _RecordingQueue(FakeJobQueue):
+    """A `FakeJobQueue` that also records *when* it was written to.
+
+    The ordering below is a claim about two collaborators, so it is recorded
+    through one rather than through a clock -- the same shape
+    `test_the_commit_happens_before_the_publish` already uses one case up.
+    """
+
+    def __init__(self, order: list[str]) -> None:
+        super().__init__()
+        self._order = order
+
+    async def enqueue(self, requests: Sequence[JobRequest]) -> int:
+        self._order.append("enqueue")
+        return await super().enqueue(requests)
+
+
+async def test_a_finished_enrichment_enqueues_one_index_job(
+    titles: FakeTitleRepository, service: EnrichService, queue: FakeJobQueue
+) -> None:
+    """PRD 03's stage ordering, closed: match, ingest, enrich, index.
+
+    The wrong implementation is the absent one, and it is absent *silently*
+    -- an enriched title with no index job produces no error, no log line, no
+    failed job and no degraded health check. It produces a search result set
+    that is quietly wrong, which is the one thing this milestone must not get
+    wrong.
+    """
+    title = await _given(titles, state=EnrichmentState.STUB)
+
+    await service.enrich(title.id)
+
+    assert (await queue.depth())[JobKind.INDEX] == 1
+    assert [job.key for job in queue.jobs_of(JobKind.INDEX)] == [str(title.id)]
+
+
+async def test_the_index_job_is_enqueued_at_backfill_priority(
+    titles: FakeTitleRepository, service: EnrichService, queue: FakeJobQueue
+) -> None:
+    """Nothing a client renders depends on a search document, so this must
+    never sit in front of a `match` or a demand-promoted `enrich`. It is also
+    the priority the sweep uses, and `enqueue`'s `WHERE jobs.priority <
+    excluded.priority` is why that matters: at the same priority the second
+    producer writes nothing rather than rewriting the row.
+
+    Fails: the `JobRequest` default (`JobPriority.NEW`), which on a first walk
+    puts one background job per enriched title ahead of every match.
+    """
+    title = await _given(titles, state=EnrichmentState.STUB)
+
+    await service.enrich(title.id)
+
+    assert queue.jobs_of(JobKind.INDEX)[0].priority == JobPriority.BACKFILL
+
+
+@pytest.mark.parametrize(
+    "state", [EnrichmentState.SKELETON, EnrichmentState.STUB, EnrichmentState.ENRICHED]
+)
+async def test_a_failed_enrichment_enqueues_nothing(
+    titles: FakeTitleRepository,
+    service: EnrichService,
+    provider: FakeMetadataProvider,
+    queue: FakeJobQueue,
+    state: EnrichmentState,
+) -> None:
+    """ADR-0008: a failed attempt records `enrichment_error` and leaves the
+    tier exactly where it was. The text did not change, so the fingerprint did
+    not change, so the job would find the row already current and complete
+    without embedding -- one claim and one staging round trip per attempt of a
+    backoff schedule.
+
+    Parametrised over all three rungs, for the reason this file already
+    parametrises its failure cases: a handler that reset the tier is invisible
+    to a test seeded at that tier.
+    """
+    title = await _given(titles, state=state)
+    provider.fail_with(PortUnavailable("TMDb is down"))
+
+    with pytest.raises(PortUnavailable):
+        await service.enrich(title.id)
+
+    assert (await queue.depth())[JobKind.INDEX] == 0
+
+
+async def test_the_enqueue_happens_after_the_commit(
+    titles: FakeTitleRepository,
+    episodes: FakeEpisodeRepository,
+    payloads: FakeRawPayloadStore,
+    provider: FakeMetadataProvider,
+) -> None:
+    """The one ordering here with a wrong answer and no error attached.
+
+    A worker claiming the index job reads `titles` in a different
+    transaction. Enqueued *before* the commit, the job can run against the
+    pre-enrichment row: it fingerprints the old text, stores a vector of the
+    old text, and -- because the fingerprint matches what it embedded --
+    **stops matching the stale predicate**. A permanently stale vector the
+    backfill will never re-claim, produced by the enqueue that exists to
+    prevent one.
+
+    Recorded through a collaborator, never a clock -- the same shape
+    `test_the_commit_happens_before_the_publish` uses. **The data consequence
+    is genuinely invisible to a port fake**, which has no transaction at all;
+    `tests/integration/test_services_enrich.py` is where the row is read back.
+    """
+    order: list[str] = []
+
+    async def commit() -> None:
+        order.append("commit")
+
+    service = EnrichService(
+        titles,
+        episodes,
+        payloads,
+        provider,
+        commit,
+        FakeEventPublisher(),
+        queue=_RecordingQueue(order),
+    )
+    title = await _given(titles, state=EnrichmentState.STUB)
+
+    await service.enrich(title.id)
+
+    assert order == ["commit", "enqueue"]
+
+
+async def test_enrichment_publishes_no_second_event_for_the_index(
+    titles: FakeTitleRepository, service: EnrichService, events: FakeEventPublisher
+) -> None:
+    """Boundary call 5, pinned rather than left to a comment. PRD 09 asks M6
+    to publish `title.updated` "rather than inventing a channel", and it is
+    published three lines up already. A second one would be an event with no
+    consumer, which `ports/events.py` calls out by name: "no member nothing
+    emits".
+
+    This case exists because the obvious "improvement" is to add one, and it
+    would look like satisfying the roadmap.
+    """
+    title = await _given(titles, state=EnrichmentState.STUB)
+
+    await service.enrich(title.id)
+
+    assert [event.kind for event in events.published] == [ClientEventKind.TITLE_UPDATED]

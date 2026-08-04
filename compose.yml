@@ -46,6 +46,17 @@ services:
       # this sentence, instead of as a container that starts and dies on a
       # validation error the operator has to go and read the logs for.
       USHER_SECRET_KEY: ${USHER_SECRET_KEY:?set USHER_SECRET_KEY in .env, e.g. openssl rand -hex 32}
+      # **`HF_HUB_OFFLINE` is deliberately not a fifth entry**, though M6's
+      # plan asked for one as a topology fact. `environment:` beats
+      # `env_file:` absolutely, and `usher.composition.embedder` reaches the
+      # library through `os.environ.setdefault` -- so hard-setting it here
+      # would make `USHER_EMBEDDING_OFFLINE=false`, the documented way to
+      # warm a model cache once, dead config inside the container. That is
+      # the exact shape `USHER_COMPOSE_` exists to prevent, one layer over.
+      # The setting covers every entry point instead, including the ones
+      # compose cannot reach at all (`uv run usher work`, a dev shell), and
+      # this image installs no embedding extra and ships no model cache, so
+      # the variable would be inert here regardless.
     ports:
       # Host-side port is overridable (USHER_COMPOSE_HOST_PORT in .env)
       # rather than a bare "8000:8000" -- this host already has another

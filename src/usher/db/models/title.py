@@ -6,6 +6,7 @@ from datetime import date, datetime
 from sqlalchemy import (
     ARRAY,
     CheckConstraint,
+    Computed,
     Date,
     DateTime,
     Float,
@@ -16,12 +17,25 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from usher.db.base import Base, enum_column
 from usher.domain.enums import EnrichmentState, ProductionStatus, TitleKind
+
+#: Columns that exist on the row and deliberately have no `Title` field.
+#: A search document is not domain state -- it is an index artefact derived
+#: from domain state, and a `Title` carrying a `tsvector` would put a
+#: PostgreSQL full-text type in `usher.domain`, which imports nothing.
+#: Membership here is the deliberate act: a *bookkeeping* column added
+#: without being named here still breaks every read, loudly, which is the
+#: property the 1:1 rule exists for.
+#:
+#: Three call sites consume this, and the second is the one that gets missed
+#: -- `_to_domain` (a read), `update()`'s mutation loop (a *write*), and
+#: `test_title_and_title_row_have_matching_field_sets`.
+DERIVED_COLUMNS: frozenset[str] = frozenset({"search_document"})
 
 
 class TitleRow(Base):
@@ -102,6 +116,43 @@ class TitleRow(Base):
     enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     field_provenance: Mapped[dict[str, str]] = mapped_column(
         JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+    # PostgreSQL recomputes this inside the same statement that writes any of
+    # its six inputs, so there is no code path -- not a bulk COPY, not a
+    # hand-written UPDATE, not a future migration -- that can write a title
+    # and skip its document. That is the whole reason it is a generated
+    # column rather than a trigger, a job, or a queue: half of M6's freshness
+    # problem is deleted rather than solved.
+    #
+    # `Computed(..., persisted=True)` is what tells SQLAlchemy the column is
+    # STORED rather than VIRTUAL and that it is not ours to write. It is
+    # **not** sufficient on its own: `update()`'s mutation loop assigns every
+    # column by name off `TitleRow.__table__.columns`, which reaches this one
+    # regardless -- see DERIVED_COLUMNS above and db/repositories/title.py.
+    #
+    # Typed `str | None` because that is what asyncpg hands back for a
+    # tsvector and because nothing in `src/` ever reads this attribute in
+    # Python -- every consumer references it in SQL. `_to_domain` filters it
+    # out by name before it can reach `Title`.
+    #
+    # The expression is duplicated between here and migration fa2b6c1e9d30
+    # rather than shared, because an Alembic migration must not import
+    # application code that can change under it. What keeps the two honest is
+    # `test_migration_matches_the_orm_metadata` plus
+    # `test_the_stored_document_equals_a_freshly_computed_one`, which reads
+    # the live expression out of `pg_attrdef`.
+    search_document: Mapped[str | None] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "setweight(to_tsvector('english', coalesce(name, '')), 'A') "
+            "|| setweight(to_tsvector('english', coalesce(original_name, '')), 'A') "
+            "|| setweight(to_tsvector('english', coalesce(overview, '')), 'C') "
+            "|| setweight(to_tsvector('english', coalesce(tagline, '')), 'C') "
+            "|| setweight(to_tsvector('english', usher_array_text(genres)), 'D') "
+            "|| setweight(to_tsvector('english', usher_array_text(keywords)), 'D')",
+            persisted=True,
+        ),
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -208,6 +259,62 @@ class TitleRow(Base):
         # normalisation the matcher actually applies (lowercase; no
         # whitespace/punctuation folding) is what a btree can use.
         Index("ix_titles_name_lower_year", text("lower(name)"), "year"),
+        # GIN over the tsvector, with the pending list turned off.
+        #
+        # `fastupdate` defaults to on, which defers index maintenance into an
+        # unsorted pending list that *every query then scans linearly* until
+        # autovacuum flushes it. That is exactly wrong for a table written in
+        # million-row bursts and queried during them. Verified with
+        # `pageinspect`: after 5,000 inserts, `fastupdate = off` had
+        # `n_pending_pages = 0 / n_pending_tuples = 0` against `50 / 5000`
+        # for the default, and on the read side a 1.6 MB pending list cost
+        # 231 buffers against 30 -- 7.7x read amplification on the index
+        # stage. `postgresql_with` is native Alembic here -- verified by
+        # compiling the DDL, not by reading the docs.
+        #
+        # **This index should be suspended during a first bootstrap and the
+        # edit is deliberately Task 7's**, not because the decision is
+        # unclear but because `bulk.py`'s `_SUSPENDABLE_INDEXES` holds
+        # literal `CREATE INDEX` strings: an entry whose text drifts from the
+        # migration silently rebuilds a *different* index, and splitting the
+        # dict's new entries across two tasks is how one of them drifts.
+        # Task 7 adds them together, with the round-trip test that pins each
+        # string against what Postgres actually built.
+        Index(
+            "ix_titles_search_document",
+            "search_document",
+            postgresql_using="gin",
+            postgresql_with={"fastupdate": "off"},
+        ),
+        # The type-ahead path's whole index. Directly on `titles`, because
+        # PRD 05's narrow `title_search_names(title_id, name, kind,
+        # popularity)` table is refused (boundary call 3): its justification
+        # is aliases and people names, neither of which has a data source in
+        # M6, so it would hold exactly one row per title duplicating four
+        # columns of this one -- a second copy to keep fresh, which is the
+        # problem this milestone exists to eliminate.
+        #
+        # GIN, not the GiST PRD 05 specifies -- but the two answer different
+        # questions and only one of them is settled. For "which rows are
+        # candidates" GIN is not close: at 2.08M names it is ~110x faster on
+        # the `%` path (1.671 ms vs 182.5 ms), builds in 7.5 s vs 23.1 s, and
+        # is 69 MB vs 244 MB. For "the N nearest in distance order" GIN has
+        # no operator class at all -- `ORDER BY name <-> q` seq-scans at
+        # 3,989.9 ms where GiST answers from the index. GIN is right here
+        # because the suggest path caps candidates before re-ranking, which
+        # removes GIN's only exposure; a path that ever needs KNN needs a
+        # GiST index rather than a tuning change. See the migration docstring.
+        #
+        # On the raw column: pg_trgm folds case while generating trigrams,
+        # unlike the btree two entries up. `original_name` gets no index of
+        # its own -- see the migration's docstring for the three reasons and
+        # for the measurement that would reverse it.
+        Index(
+            "ix_titles_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+        ),
         # Mirrors the domain model's Field(ge=0) / Field(ge=0, le=10) /
         # Field(min_length=1) constraints -- see the Title commit.
         CheckConstraint("year IS NULL OR year >= 0", name="ck_titles_year_non_negative"),

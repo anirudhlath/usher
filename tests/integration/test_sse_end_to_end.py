@@ -106,14 +106,13 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM jobs",
             "DELETE FROM raw_payloads WHERE provider = 'tmdb'",
-            # Every write here goes through `usher.db.staging`, which creates
-            # its table with DDL -- and DDL is transactional, so a committing
-            # module is the only kind that leaks one. It surfaces as schema
-            # drift in `test_migrations.py`, a different file that then fails
-            # only in combination.
-            "DROP TABLE IF EXISTS stg_jobs",
-            "DROP TABLE IF EXISTS stg_seasons",
-            "DROP TABLE IF EXISTS stg_episodes",
+            # Three `DROP TABLE IF EXISTS stg_*` statements stood here until
+            # M6. Every write in this module goes through `usher.db.staging`,
+            # which created its table with DDL -- and DDL is transactional, so
+            # a committing module was the only kind that leaked one, surfacing
+            # as schema drift in `test_migrations.py`, a different file that
+            # then failed only in combination. The staging tables are
+            # temporary now and drop at commit.
         ):
             await session.execute(text(statement))
         # **`tmdb_id` as well as the name mark, because enrichment renames

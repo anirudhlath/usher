@@ -70,11 +70,20 @@ def test_an_empty_key_is_rejected() -> None:
         Job(kind=JobKind.MATCH, key="")
 
 
-def test_the_three_kinds_m4_ships() -> None:
-    """`index` is deliberately absent: PRD 03 stage 4 writes a search
-    document and an embedding, neither of which exists before M6, and a job
-    kind whose handler is a stub is a queue that grows forever."""
-    assert set(JobKind) == {JobKind.MATCH, JobKind.ENRICH, JobKind.WATCH_HISTORY}
+def test_the_four_kinds_m6_ships() -> None:
+    """`index` arrives with the artefacts it maintains, not before.
+
+    M4's version asserted three members and explained the absence: "a job
+    kind whose handler is a stub is a queue that grows forever". That
+    reasoning is retired rather than reversed -- M6 ships the handler, the
+    enqueue on enrichment and the draining backfill together.
+    """
+    assert set(JobKind) == {
+        JobKind.MATCH,
+        JobKind.ENRICH,
+        JobKind.WATCH_HISTORY,
+        JobKind.INDEX,
+    }
 
 
 def test_every_member_of_every_enum_is_its_stored_value() -> None:
@@ -82,8 +91,14 @@ def test_every_member_of_every_enum_is_its_stored_value() -> None:
     `.value`. A member whose value drifted from its wire spelling would be
     written to Postgres under the new spelling and silently stop matching
     the partial-index predicates (`WHERE status = 'pending'`) written
-    against the old one."""
-    assert {k.value for k in JobKind} == {"match", "enrich", "watch_history"}
+    against the old one.
+
+    `index` is the most exposed of the four: it is a SQL keyword and a
+    plausible thing to "clarify" to `search_index`, at which point every row
+    a previous release wrote is unclaimable and `claim` reports an empty
+    queue rather than an error.
+    """
+    assert {k.value for k in JobKind} == {"match", "enrich", "watch_history", "index"}
     assert {s.value for s in JobStatus} == {"pending", "running", "parked"}
 
 

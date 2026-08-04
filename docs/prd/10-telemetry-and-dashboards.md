@@ -46,8 +46,8 @@ sync.watch_state                  ← the watch-state lane (M4)
 job.enrich · job.match · job.watch_history   ← a worker's root span,
 └── enrich.title                     Linked (never parented) to whatever
     └── metadata.request             enqueued it
-index.title                       ← M6
-├── index.fulltext · index.embed
+index.title                       ← M6, a child of job.index
+└── index.embed
 
 bootstrap.import
 ├── bootstrap.batch
@@ -67,6 +67,17 @@ back to the enqueueing span, because the request that enqueued it has
 usually already returned and a child span of a finished parent misstates
 causality.
 
+**`index.fulltext` was in this tree until M6 and is deliberately gone, rather
+than unimplemented.** The search document is a `GENERATED ALWAYS AS (…)
+STORED` column on `titles`, so PostgreSQL recomputes it inside the same
+statement that writes `name` or `overview` and there is no full-text indexing
+*stage* for a span to measure — half this milestone's freshness problem is
+deleted rather than solved (see
+[05](05-search-and-similarity.md)). A span emitted for work that does not
+happen is the mirror of a metric under a near-miss name: it looks like
+coverage and reports nothing. `index.embed` remains, because the embedding
+genuinely is a job that can be slow, fail or park.
+
 `bootstrap.import` spans (one per dataset, per `BootstrapService.import_dataset`
 call) and their child `bootstrap.batch` spans carry `usher.dataset` and
 `usher.revision` as attributes — the same "why was this slow" query the
@@ -85,8 +96,8 @@ is maintained rather than aspirational.
 | Metric | Type | Labels | Emitted |
 |---|---|---|---|
 | `usher.http.server.duration` | histogram | route, status | M9 |
-| `usher.search.duration` | histogram | mode | M6 |
-| `usher.search.results` | histogram | mode | M6 |
+| `usher.search.duration` | histogram | mode | ✅ M6 |
+| `usher.search.results` | histogram | mode | ✅ M6 |
 | `usher.home.compose.duration` | histogram | — | M7 |
 | `usher.row.build.duration` | histogram | provider | M7 |
 | `usher.jobs.queued` | gauge | kind | ✅ M4 |
@@ -105,13 +116,46 @@ is maintained rather than aspirational.
 | `usher.source.push.events` | counter | source, kind | ✅ M5 |
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
-| `usher.embedding.duration` | histogram | — | M6 |
+| `usher.embedding.duration` | histogram | — | ✅ M6 |
 | `usher.cache.hits` / `.misses` | counter | cache | M9 |
+| `usher.search.embeddings.stale` | gauge | — | ✅ M6 |
+| `usher.search.embeddings.refused` | gauge | — | ✅ M6 |
 | `usher.sse.connections` | gauge | — | ✅ M5 |
 | `usher.bootstrap.rows` | counter | dataset | ✅ M2 |
 | `usher.bootstrap.batch.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.phase.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.failures` | counter | dataset, kind | ✅ M2 |
+
+**`mode`'s vocabulary is `full_text` / `semantic` / `fused`** — `SearchMode`'s
+own values, lower-case, and written down here because a label whose vocabulary
+is undocumented is a label two call sites spell differently (M4 made three
+corrections in this table for exactly that reason). Two things about it that a
+dashboard query has to know:
+
+- **It is the mode that *ran*, not the mode that was requested.** A `fused`
+  search served as full-text — which is what a deployment with no embedder
+  gets — is attributed to `full_text`, because attributing full-text latency
+  to a lane that did not run is
+  [ADR-0002](decisions/0002-postgres-first-search.md)'s prohibition arriving
+  in the panel an operator would use to check for it. The *requested* mode is
+  carried in the answer (`SearchOutcome.requested_mode`), not in a label.
+- **There is no `suggest` value**, and there is no series for the type-ahead
+  path at all. `suggest` is a separate port with its own latency budget
+  ([ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)), and M6
+  emits nothing for it — a gap named here rather than left to be discovered
+  from an empty panel, and one the gate's ⏳ latency finding makes worth
+  closing.
+
+A blank query is deliberately not a data point: a search box sends one between
+every keystroke.
+
+`usher.search.embeddings.stale` and `.refused` are the two backlog gauges, and
+they are fed by **the same predicate that drives the backfill and the contract
+case** — one definition, three consumers, which is
+[ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s whole
+argument in one metric. They are two gauges rather than one because a refused
+title is *current*, not behind: summing them would put the total above the
+population and "the backfill has drained" would stop being observable.
 
 Three label corrections M4 made, each because the code that emits the metric
 can only answer the question it actually has:
@@ -216,7 +260,7 @@ llm_calls(
   latency_ms, ok, error
 )
 
-search_queries(
+search_queries(                       -- M9, whole. Not built in M6; see below
   id, at, user_id, query, mode,
   result_count, latency_ms,
   clicked_title_id, played          -- outcome attribution
@@ -230,6 +274,37 @@ than estimated counters.
 Meilisearch gate in [ADR-0002](decisions/0002-postgres-first-search.md) into a
 live measurement.** Zero-result and no-click rates on queries you actually typed
 are better evidence than a synthetic typo set.
+
+**It was assigned to no milestone, and M6 assigns it to M9 whole.** Its
+columns split cleanly in two:
+
+| Columns | Nature | Fillable in M6? |
+|---|---|---|
+| `at`, `query`, `mode`, `result_count`, `latency_ms` | retrieval-side — everything `SearchService` already knows | yes |
+| `user_id`, `clicked_title_id`, `played` | outcome attribution — a click and a play are things a *client* does | **no.** Needs an HTTP surface, which is M9's (M6 adds no route, boundary call 1), and a real `user_id`, which is the authentication seam [01](01-architecture.md) leaves open |
+
+Creating it in M6 would ship a table three of whose seven columns nothing ever
+fills. **This document's own first principle is that a documented thing
+nothing emits is a permanently empty panel indistinguishable from a healthy
+zero — and a half-populated *table* is worse than an empty metric**, because a
+`NULL` in `clicked_title_id` is genuinely ambiguous between "not implemented"
+and "the user searched and clicked nothing", and that second reading is
+exactly the signal the column exists to carry. The whole point of this table
+is the sentence above it: it turns the gate into a live measurement. **A
+no-click rate computed over a column nothing writes is not better evidence
+than anything.** So the table lands with the surface that can fill it: **M9**.
+
+**M6's contribution is the two histograms** — `usher.search.duration` and
+`usher.search.results`, both labelled by mode — which answer latency and
+result count without needing a durable row per query. Said explicitly so a
+reader does not conclude M6 measured nothing about search.
+
+And the synthetic typo set this paragraph compares itself favourably to is
+[ADR-0002](decisions/0002-postgres-first-search.md)'s gate, which is **⏳ still
+to be run against the real catalog**. The comparison is fair and it is not a
+criticism: the gate is the best evidence available *until* M9 lands this
+table, and this paragraph is a plan to replace it rather than a reason not to
+run it.
 
 Row attribution (`played` joined back to the row a title was launched from) does
 the same for [06](06-rows-and-recommendations.md) — it shows which

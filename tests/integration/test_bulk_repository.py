@@ -7,10 +7,13 @@ when the catalog is non-empty.
 """
 
 import uuid
+from typing import cast
 
 import pytest
-from sqlalchemy import delete, insert, text
+from sqlalchemy import Table, delete, insert, text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.schema import CreateIndex
 
 from tests.contract.bulk_catalog_repository_contract import (
     SHAWSHANK,
@@ -18,11 +21,20 @@ from tests.contract.bulk_catalog_repository_contract import (
 )
 from usher.db.base import build_engine, build_session_factory
 from usher.db.models.source import SourceRow
+from usher.db.models.title import TitleRow
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.domain.enums import SourceKind
 from usher.ports.repository import BulkCatalogRepository
 
-_SUSPENDED = {"ix_titles_sort_name", "ix_titles_name_lower_year"}
+# Spelled out rather than derived from `_SUSPENDABLE_INDEXES`, so a name
+# silently dropped from that dict fails these cases instead of being read
+# back as agreement. M6's two GIN indexes joined it; see bulk.py.
+_SUSPENDED = {
+    "ix_titles_sort_name",
+    "ix_titles_name_lower_year",
+    "ix_titles_search_document",
+    "ix_titles_name_trgm",
+}
 
 
 async def _index_names(session: AsyncSession) -> set[str]:
@@ -246,3 +258,75 @@ async def test_bulk_load_window_commits_the_callers_own_pending_work(
             await cleanup.execute(delete(SourceRow).where(SourceRow.id == source_id))
             await cleanup.commit()
         await engine.dispose()
+
+
+async def _indexdef(session: AsyncSession, name: str) -> str | None:
+    result = await session.execute(
+        text("SELECT indexdef FROM pg_indexes WHERE indexname = :name"), {"name": name}
+    )
+    row = result.scalar_one_or_none()
+    return None if row is None else str(row)
+
+
+async def test_every_suspendable_index_rebuilds_to_what_the_migration_built(
+    session: AsyncSession,
+) -> None:
+    """`_SUSPENDABLE_INDEXES` holds literal `CREATE INDEX` strings that
+    `bulk_load_window` executes verbatim in its `finally`. Nothing has ever
+    checked that those strings reproduce the index the migration created, and
+    until M6 the hazard was mild -- both entries were plain btrees whose only
+    degree of freedom is the column list.
+
+    It stops being mild the moment a GIN index joins. An entry that drops
+    `WITH (fastupdate = off)` rebuilds an index that is functionally
+    identical until somebody searches during a bootstrap, at which point
+    every query linearly scans a pending list. An entry that drops
+    `gin_trgm_ops` rebuilds an index that is not an error and simply cannot
+    serve `%` -- so the type-ahead path silently seq-scans forever after the
+    first bootstrap, and only after it.
+
+    This is also the only thing covering the GIN index's `fastupdate = off`
+    at all: `compare_metadata` is blind to index storage options, measured --
+    flipping the model's `postgresql_with` to `{"fastupdate": "on"}` while
+    the migration keeps `off` survives `test_migration_matches_the_orm_metadata`
+    untouched.
+
+    Comparing the dict's string to `pg_indexes.indexdef` textually does not
+    work (Postgres re-prints `ON public.titles USING btree (...)`), so both
+    sides are *built* under probe names and their `indexdef`s compared modulo
+    the name. Both probes are created inside the suite's rolled-back
+    transaction, so neither outlives the case.
+
+    **The ground truth is `Base.metadata`, deliberately not the live index,
+    and that is a correction rather than a preference.** Reading the live
+    `ix_titles_search_document` looks like the obvious comparison and is
+    self-confirming: `bulk_load_window` *commits*, this suite's schema is
+    session-scoped, and three cases in this very file run a window -- so by
+    the time this one executes, the live index has already been rebuilt **by
+    the dict under test**. Measured: with `WITH (fastupdate = off)` deleted
+    from the dict, the against-the-live-index spelling passed the whole file
+    and failed only when run alone. Against `Base.metadata` it fails either
+    way, and the model-to-migration link is `test_migration_matches_the_orm_metadata`'s
+    job one file over.
+    """
+    from usher.db.repositories.bulk import _SUSPENDABLE_INDEXES
+
+    declared = {str(index.name): index for index in cast(Table, TitleRow.__table__).indexes}
+
+    assert _SUSPENDABLE_INDEXES, "an empty dict passes every assertion below"
+    for name, ddl in _SUSPENDABLE_INDEXES.items():
+        assert name in declared, f"{name} is in the dict and not on the model"
+        create = CreateIndex(declared[name])
+        expected_ddl = str(create.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
+
+        model_probe, dict_probe = f"{name}__model", f"{name}__dict"
+        await session.execute(text(expected_ddl.replace(name, model_probe, 1)))
+        await session.execute(text(ddl.replace(name, dict_probe, 1)))
+
+        from_model = await _indexdef(session, model_probe)
+        from_dict = await _indexdef(session, dict_probe)
+        assert from_model is not None, f"{name}: the model's DDL created no index"
+        assert from_dict is not None, f"{name}: the dict's DDL created no index"
+        assert from_dict.replace(dict_probe, name, 1) == from_model.replace(model_probe, name, 1), (
+            name
+        )

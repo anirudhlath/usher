@@ -60,6 +60,7 @@ from loguru import logger
 from usher.composition import (
     Pipeline,
     QueueGauges,
+    SearchGauges,
     SourceRegistry,
     UnitOfWork,
     build_push_applier,
@@ -70,11 +71,12 @@ from usher.composition import (
 from usher.config import Settings
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
+from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher
 from usher.ports.metadata import MetadataProvider
 from usher.ports.source import SourceAdapter, SourceEvent
 from usher.services.push import PushOutcome, PushSupervisor
-from usher.telemetry import PushSnapshot, register_queue_gauges
+from usher.telemetry import PushSnapshot, register_queue_gauges, register_search_gauges
 
 # How long the worker lane waits after a pass that claimed nothing. Not a
 # setting, for the reason `usher.cli`'s copy of this constant is not: it is
@@ -93,6 +95,7 @@ class LaneSupervisor:
         *,
         user_id: Callable[[], Awaitable[uuid.UUID]],
         provider: MetadataProvider | None = None,
+        embedder: Embedder | None = None,
         idle_seconds: float = IDLE_SLEEP_SECONDS,
     ) -> None:
         self._settings = settings
@@ -100,6 +103,10 @@ class LaneSupervisor:
         self._events = events
         self._user_id = user_id
         self._provider = provider
+        # Carried, never built here. Both of these are per-*process*
+        # resources handed in by the composition root that made them, and
+        # `_run_worker` below rebuilds everything else once per pass.
+        self._embedder = embedder
         # Injected only so a test can run several worker passes without
         # spending five seconds each: `usher work`'s equivalent is a module
         # constant for the reason stated above, and nothing in `src/` passes
@@ -114,6 +121,13 @@ class LaneSupervisor:
         self._worker: asyncio.Task[None] | None = None
         self._refresher: asyncio.Task[None] | None = None
         self._gauges = QueueGauges()
+        # PRD 10's embedding backlog, on the same beat and for the same
+        # reason: an OTel observable callback runs on the metric reader's
+        # background thread and cannot await an asyncpg query. Refreshed
+        # whether or not this process holds a model -- a worker without one
+        # leaves index jobs for a worker that has, and the backlog is the
+        # number that says so.
+        self._backlog = SearchGauges()
 
     # -- lifecycle -------------------------------------------------------
 
@@ -353,6 +367,7 @@ class LaneSupervisor:
         not.
         """
         register_queue_gauges(self._gauges.read)
+        register_search_gauges(self._backlog.read)
         registry: SourceRegistry | None = None
         requeued = False
         while True:
@@ -367,6 +382,7 @@ class LaneSupervisor:
                         pipeline,
                         self._settings,
                         provider=self._provider,
+                        embedder=self._embedder,
                         resolve=registry.resolve,
                         user_id=await self._user_id(),
                     )
@@ -380,6 +396,7 @@ class LaneSupervisor:
                         requeued = True
                     ran = await worker.run_once()
                     await self._gauges.refresh(pipeline.queue)
+                    await self._backlog.refresh(pipeline.embeddings, self._settings.embedding_model)
             except asyncio.CancelledError:
                 if registry is not None:
                     await registry.aclose()

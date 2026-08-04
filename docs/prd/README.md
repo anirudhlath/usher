@@ -44,6 +44,7 @@ historical once executed; the PRD above stays authoritative when they disagree.
 | [2026-07-30-m3-emby-adapter.md](../plans/2026-07-30-m3-emby-adapter.md) | M3 — Emby adapter (PRD [03](03-sources-and-sync.md)) | ✅ complete |
 | [2026-07-31-m4-ingest.md](../plans/2026-07-31-m4-ingest.md) | M4 — Ingest pipeline (PRD [03](03-sources-and-sync.md) stages 1–3) | ✅ complete |
 | [2026-08-01-m5-push.md](../plans/2026-08-01-m5-push.md) | M5 — Push and read-through (PRD [03](03-sources-and-sync.md) push lane, [07](07-client-api.md) `GET /titles/{id}` and `GET /events`) | ✅ complete |
+| [2026-08-02-m6-search.md](../plans/2026-08-02-m6-search.md) | M6 — Search (PRD [03](03-sources-and-sync.md) stage 4 and all of [05](05-search-and-similarity.md)) | ✅ complete, gate included — [ADR-0002](decisions/0002-postgres-first-search.md)'s gate ran 2026-08-03 and **failed**; follow-up owned by M9 |
 
 ## Conventions for maintaining this
 

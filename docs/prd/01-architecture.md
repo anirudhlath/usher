@@ -36,17 +36,33 @@ services for a household-scale deployment.
 port's implementation talks to one nameable external service** (`emby/` →
 `SourceAdapter`, `tmdb/` → `MetadataProvider`) **and for the capability
 otherwise.** That covers two different reasons, not one: a port with more
-than one implementation (`bulk/` → `BulkDataset`'s four dataset importers,
+than one implementation (`bulk/` → `BulkDataset`'s dataset importers,
 `search/` → `SearchIndex`'s Postgres/Meilisearch pair) obviously can't be
 named for a single service — but `embedding/` and `llm/` are capability-named
 too, despite one implementation each, because neither implementation is
-itself a single external service to name: `sentence-transformers` runs
-in-process against a local model, and `litellm` is itself a multi-provider
-abstraction, not one upstream.
+itself a single external service to name: **`fastembed` runs in-process
+against a local ONNX conversion of a BAAI checkpoint** — a Qdrant library
+serving a third-party conversion of somebody else's weights, which is three
+names and no upstream service at all — and `litellm` is itself a
+multi-provider abstraction, not one upstream. (This example read
+`sentence-transformers` until M6 replaced the runtime; the argument is
+unchanged and the substitution makes it stronger. See
+[ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md).)
+
+M6 shipped `adapters/search/postgres.py` and
+`adapters/embedding/fastembed.py` under exactly that rule. **`adapters/postgres/`
+does not exist and must not be created**: it would put a `SearchIndex` and a
+repository in one directory, and the `### adapters/search/ vs db/repositories/`
+section below exists because those are not the same kind of thing.
 
 **Deployment:** `compose.yml` with `usher` + `postgres`. One stateful service.
-An optional `meilisearch` service exists behind a feature gate — see
-[ADR-0002](decisions/0002-postgres-first-search.md).
+**There is no `meilisearch` service** — the sentence here used to say one
+existed behind a feature gate, and none has ever been in `compose.yml`. What
+exists is the gate itself, which is a measurement with a decision attached
+([ADR-0002](decisions/0002-postgres-first-search.md)) and has **⏳ not yet been
+run**. If it is ever taken, the service is added behind the `SuggestIndex`
+port alone — that being the whole of
+[ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md).
 
 ## Layering rules
 
@@ -132,9 +148,10 @@ Other ports follow the same pattern:
 |---|---|
 | `SourceAdapter` | `EmbyAdapter` |
 | `MetadataProvider` | `TmdbMetadataProvider` |
-| `BulkDataset` | `IMDbDumps`, `TMDbIdExport`, `WikidataCrosswalk`, `MovieLensGenome` |
+| `BulkDataset` | `IMDbDumps`, `TMDbIdExport`, `WikidataCrosswalk` — ⏳ `MovieLensGenome` **does not exist**; owned by M7, see [09](09-roadmap.md) |
 | `SearchIndex` | `PostgresSearchIndex` (`MeilisearchIndex` gated) |
-| `Embedder` | `SentenceTransformerEmbedder` |
+| `SuggestIndex` | `PostgresSuggestIndex` (`MeilisearchSuggestIndex` gated) — **the gate moved to this port**, which is [ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md) |
+| `Embedder` | `FastEmbedEmbedder` — **optional**, behind an extra and off by default; a deployment without it still has full-text and trigram, the tier serving 1.27M titles ([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)) |
 | `LLMClient` | `LiteLLMClient` |
 | `TitleRepository` | `PostgresTitleRepository` ([ADR-0009](decisions/0009-repositories-are-ports.md)) |
 | `Row` / `RowProvider` | see [06](06-rows-and-recommendations.md) |
@@ -142,9 +159,11 @@ Other ports follow the same pattern:
 **`adapters/search/` vs `db/repositories/`.** Both ultimately talk to the
 same PostgreSQL instance, which invites conflating them — they are not the
 same thing and do not hold the same kind of data. `adapters/search/`
-implements the `SearchIndex` port (`postgres.py`, with a gated
-`meilisearch.py` alongside it): weighted full-text, trigram autocomplete,
-and vector search ([ADR-0002](decisions/0002-postgres-first-search.md)).
+implements the `SearchIndex` and `SuggestIndex` ports (`postgres.py`, with a
+gated `meilisearch.py` alongside it): weighted full-text and vector search on
+the first, trigram autocomplete on the second
+([ADR-0002](decisions/0002-postgres-first-search.md),
+[ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)).
 Titles, sources, media items, users, and watch state are persisted through
 repositories in `db/repositories/`, which implement repository ports
 declared in `ports/` (`TitleRepository` —
@@ -178,6 +197,21 @@ usher/
 Files stay small and single-purpose. A growing file is a signal that a concept
 wants extracting, not that it needs sections.
 
+⏳ **Two entries in that tree, and in the diagram at the top of this file, do
+not exist as written** — recorded rather than quietly redrawn, because the
+tree is what a new reader navigates by.
+
+- **There is no `jobs/` package.** The priority queue landed as
+  `ports/jobs.py` + `db/repositories/jobs.py` (a repository, per
+  [ADR-0009](decisions/0009-repositories-are-ports.md), which is why it is
+  under `db/`), the worker as `services/jobs.py`, and the "scheduler" as
+  `api/lanes.py`'s supervised lanes. Nothing was skipped; the concepts landed
+  under the layers that own them.
+- **There is no `adapters/llm/`.** `ports/llm.py` exists and has no
+  implementation until M8 — so `LLMClient → LiteLLMClient` in the table above
+  is a plan, not an inventory. `adapters/search/` and `adapters/embedding/`
+  are real as of M6.
+
 ## Stack
 
 | | |
@@ -189,7 +223,7 @@ wants extracting, not that it needs sections.
 | DB | PostgreSQL 17 + pgvector ≥ 0.8.5 |
 | Jobs | In-process asyncio workers over a Postgres-backed queue |
 | LLM | litellm (provider-agnostic) |
-| Embeddings | sentence-transformers, local |
+| Embeddings | fastembed, local, **optional** (167 MiB, no torch) |
 | Packaging | uv |
 | License | MIT |
 
@@ -208,6 +242,24 @@ own semaphore, so a slow upstream can't starve the API:
 | Source sync workers | 4 | Emby is slow (~1–5 s/request observed) |
 | Embedding | 1 batch worker | CPU/GPU |
 
+⏳ **This table is the design, and the last three rows are not what shipped.**
+There is **no semaphore anywhere in `src/`** and none of these three numbers
+exists as a limit. What actually bounds the work: one `JobWorker` claiming a
+batch and running it **sequentially**, so enrichment concurrency is 1, not 8;
+TMDb is bounded by a **token bucket** at `USHER_TMDB_REQUESTS_PER_SECOND`
+rather than by a worker count, which is the more direct control over the thing
+the row names; source sync is one sequential walk per push lane; and
+**embedding has no lane of its own at all** — `JobKind.INDEX` is registered on
+the same `JobWorker` as `match` and `enrich`, so its "1 batch worker" is
+really "whatever the one worker is doing next".
+`USHER_EMBEDDING_BATCH_SIZE` is the embedder's internal batch, not a lane.
+
+The row that is worth revisiting rather than merely correcting is the last
+one: embedding is CPU-bound work sharing a worker with two I/O-bound job
+kinds, so a long backfill delays every `match` behind it. M6 bounds the damage
+by enqueueing `index` at `BACKFILL` priority, which is a priority answer to a
+scheduling question and is enough at 2k–10k titles.
+
 A `--worker` entrypoint flag exists from day one so lanes can be moved to a
 separate container later by editing compose, with no code change.
 
@@ -221,5 +273,8 @@ Deliberately designed-for but not built:
 - **Additional sources.** `MediaItem` is many-per-title from the start.
 - **Additional metadata providers.** Provider precedence is a config list; field
   provenance is recorded per title.
-- **Alternative search backends.** `SearchIndex` is a port with a measurable
-  swap criterion.
+- **Alternative search backends.** `SearchIndex` and `SuggestIndex` are ports
+  with a measurable swap criterion, and the criterion applies to the second
+  one: the swap ADR-0002 contemplates is the instant-search box, which is
+  what put `suggest` on its own port
+  ([ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)).

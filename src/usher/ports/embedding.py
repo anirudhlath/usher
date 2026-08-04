@@ -7,34 +7,106 @@ from collections.abc import Sequence
 class Embedder(ABC):
     """Turns text into vectors. Implementations are expected to batch.
 
-    Contract: vectors are L2-normalised, so downstream cosine similarity
-    can be computed as a plain dot product (PRD 05 promises "brute-force
-    exact cosine", which is only equivalent to a dot product when inputs
-    are unit-normalised). Callers are responsible for any query-side
-    instruction prefix their chosen model needs before calling `embed` —
-    this port has no query/document distinction, so it cannot apply one
-    itself.
+    **Settled in M6, by measurement, and both halves resolved against this
+    docstring's previous wording.** Evidence in ADR-0022.
 
-    🔶 Provisional — whether that split is the right one (as opposed to,
-    say, separate `embed_query`/`embed_documents` methods) is undecided.
-    BGE-family models (PRD 05 names `bge-small-en-v1.5`) document a
-    query-side instruction prefix that this contract currently pushes
-    entirely onto the caller. Settle in M6.
+    **There is no query/document asymmetry, and no caller should invent
+    one.** This checkpoint requires no instruction prefix. Measured over 210
+    paired observations (24 gold documents plus 1,200 distractors per draw,
+    5 disjoint draws, 42 queries): the documented BGE query prefix moves MRR
+    by **-0.0028**, 95% CI `[-0.0259, +0.0203]` -- an interval that excludes
+    any benefit larger than +0.02. Applying it to **both** sides is
+    significantly harmful: **-0.0663**, CI `[-0.1013, -0.0330]`. The
+    experiment carries a power control, so this is a measured null and not a
+    blind one: a deliberately wrong prefix moves MRR **-0.2497**, detected
+    at P(>0) = 0.000.
+
+    This clause used to say that **callers were responsible** for any
+    query-side instruction prefix their chosen model needs -- reported in
+    the past tense on purpose, because
+    `tests/unit/test_ports_embedding.py` guards the present-tense
+    instruction as a literal substring and a verbatim quotation of it here
+    would be indistinguishable from its return. That was the hazard, not
+    the guidance: a caller with one `embed` and two kinds of text obeys it
+    most cheaply with a single symmetric loop, which *is* the -0.0663
+    condition, and nothing in this codebase could detect it -- no error, no
+    log line, just 6.6 MRR points. Corroborated twice at the library level:
+    sentence-transformers 5.6.1's `encode_query()`/`encode_document()` and
+    fastembed 0.8.0's `query_embed()`/`passage_embed()` are each
+    **bit-identical to plain `embed()`** for this checkpoint, which declares
+    empty prompts and whose `config_sentence_transformers.json` has no
+    `prompts` key at all. Both libraries already offer the asymmetric API;
+    both make it a no-op here. A future model that genuinely needs asymmetry
+    arrives with a new `model_name`, a new measurement, and a port change
+    made on evidence -- which is cheaper than shipping an unused asymmetry
+    today and having every caller guess which side to use.
+
+    **Vectors are L2-normalised, verified, and the mechanism matters.**
+    Norms are 1.0 to within **5.96e-08**, and `normalize_embeddings=False`
+    returns **bit-identical** vectors -- the flag cannot turn it off,
+    because normalisation is baked into the *checkpoint* as a third module
+    (`Transformer -> Pooling -> Normalize`) rather than applied by the
+    library. The control confirms it: the same backbone with `2_Normalize`
+    removed returns norms **8.99-9.46**. Three consequences:
+
+    1. **It is a property of this checkpoint, not of embedders.** A model
+       swap that drops the normalise module silently returns norm-9 vectors
+       and every dot-product score is then ~85x too large -- a
+       plausible-looking ranking that is wrong everywhere. An implementation
+       therefore **asserts the norm on its first batch** rather than
+       trusting a model card.
+    2. **It stops holding after the `halfvec` cast.** Norm drift goes from
+       1.19e-07 to **1.21e-04**, a 1000x change. Anything relying on
+       "cosine == dot" must do so *before* the cast.
+    3. **It is load-bearing only under the inner-product operator.**
+       Verified against real pgvector: `<=>` is normalisation-*invariant*
+       (a vector of norm 5 in the same direction gives the identical cosine
+       distance), `<#>` is not. With `halfvec_cosine_ops`/`<=>` -- what PRD
+       05 specifies -- normalisation buys **speed, not correctness**. Stated
+       here because a contract that omits the operator reads as a
+       correctness requirement the shipped index does not have, and a
+       requirement that makes no observable difference is one somebody
+       eventually deletes along with the `<#>` case it was really for.
     """
 
     @property
     @abstractmethod
     def model_name(self) -> str:
-        """Stored alongside vectors so a model change is detectable."""
+        """Stored alongside vectors, so a model change is one SQL predicate.
+
+        **Records the runtime *and* the checkpoint**, e.g.
+        `fastembed:BAAI/bge-small-en-v1.5`, never the checkpoint alone. The
+        same checkpoint served by sentence-transformers and by fastembed
+        produces vectors whose max pairwise-similarity delta is **1.41e-03**
+        -- **6x the halfvec quantisation error** (1.21e-04) -- so the two are
+        not interchangeable without a re-embed.
+
+        Spelling the runtime into this string is what makes swapping it
+        invalidate every stored vector through
+        `e.model_name IS DISTINCT FROM :model_name`: the backfill re-claims
+        them, the stale gauge climbs and then drains, and nobody has to
+        remember to write a migration. The fingerprint scheme doing its job
+        instead of a human doing it.
+        """
 
     @property
     @abstractmethod
     def dimension(self) -> int:
-        """Vector width, must match the database column."""
+        """Vector width, must match the database column (`halfvec(384)`)."""
 
     @abstractmethod
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """Embed a batch, returning one vector per input in order."""
+        """Embed a batch, returning one vector per input **in order**.
+
+        Order is the contract, not a convenience: an implementation that
+        deduplicates or reorders internally lands title *n*'s vector on
+        title *m*, which is the most damaging bug available in this
+        milestone and is completely invisible to any per-vector assertion.
+
+        An empty batch is an empty result and **not a call** -- on a
+        GPU-resident model that is the difference between a no-op and a
+        stall.
+        """
 
     @abstractmethod
     async def aclose(self) -> None:

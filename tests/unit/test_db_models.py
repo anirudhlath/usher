@@ -11,11 +11,18 @@ in Task 9's migration verification, not here.
 
 from typing import cast
 
+from pgvector.sqlalchemy import HALFVEC
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy import Table
 
 from usher.db.base import Base
 from usher.db.models import MediaItemRow, SourceRow, TitleRow, UserRow, WatchStateRow
+from usher.db.models.search import (
+    EMBEDDING_DIMENSIONS,
+    TitleEmbeddingRow,
+    TitleNeighborRow,
+)
+from usher.db.models.title import DERIVED_COLUMNS
 from usher.domain.enums import (
     EnrichmentState,
     HdrFormat,
@@ -245,12 +252,57 @@ def test_bulk_load_friendly_columns_have_server_defaults() -> None:
 
 
 def test_title_and_title_row_have_matching_field_sets() -> None:
-    """STANDING CONSTRAINT (title.py's module docstring, point 1):
-    Title's field set and TitleRow's column set must stay in exact 1:1
-    correspondence by name -- `_to_domain`'s dict-comprehension-into-
-    `model_validate` and `_to_row`'s `TitleRow(**title.model_dump(...))`
-    both rely on it, and `Title`'s `extra="forbid"` makes a break loud
-    only at read/write time, inside the Docker-requiring integration
-    suite, as a ValidationError or TypeError with no obvious cause. This
-    is the same check, running here for free, no Postgres required."""
-    assert set(Title.model_fields) == {c.name for c in TitleRow.__table__.columns}
+    """STANDING CONSTRAINT (title.py's module docstring, point 1): Title's
+    field set and TitleRow's column set must stay in exact 1:1
+    correspondence by name, *modulo the columns the row deliberately
+    derives* -- `_to_domain`'s dict-comprehension-into-`model_validate` and
+    `_to_row`'s `TitleRow(**title.model_dump(...))` both rely on it, and
+    `Title`'s `extra="forbid"` makes a break loud only at read/write time,
+    inside the Docker-requiring integration suite, as a ValidationError or
+    TypeError with no obvious cause. This is the same check, running here for
+    free, no Postgres required.
+
+    Written as `columns - DERIVED_COLUMNS == fields` rather than
+    `columns == fields | DERIVED_COLUMNS` so it still fails two ways, not
+    one: an undeclared new column fails it (the property the rule exists
+    for), *and* a name added to `DERIVED_COLUMNS` that `Title` also models
+    fails it -- which is the mistake that would quietly stop a real domain
+    field from ever being read back.
+    """
+    columns = {c.name for c in TitleRow.__table__.columns}
+    assert columns >= DERIVED_COLUMNS, "DERIVED_COLUMNS names a column that does not exist"
+    assert columns - DERIVED_COLUMNS == set(Title.model_fields)
+
+
+def test_the_embedding_column_is_nullable_and_the_neighbour_columns_are_not() -> None:
+    """A schema fact that reads like an oversight and is the design.
+
+    `title_embeddings.embedding` is nullable because a refusal is a written
+    outcome: a degenerate document gets a row with a NULL vector, the current
+    model, and the fingerprint of the degenerate text, so it stops matching
+    the stale predicate and starts matching a countable one. Making it NOT
+    NULL removes the only place that outcome can be recorded.
+
+    Runs here rather than in the integration suite because it needs no
+    Postgres, and because the property is about the declaration -- someone
+    "tidying" a nullable column is a code change, not a migration.
+    """
+    embeddings = cast(Table, TitleEmbeddingRow.__table__)
+    neighbours = cast(Table, TitleNeighborRow.__table__)
+    assert embeddings.c.embedding.nullable is True
+    assert embeddings.c.model_name.nullable is False
+    assert embeddings.c.source_fingerprint.nullable is False
+    for column in ("title_id", "neighbor_id", "score", "rank"):
+        assert neighbours.c[column].nullable is False
+
+
+def test_the_embedding_width_is_declared_once() -> None:
+    """`EMBEDDING_DIMENSIONS` is the storage side of a number the `Embedder`
+    port also declares. Nothing can make the two structural -- a model swap
+    that changes width writes vectors this column rejects, which is the loud
+    failure -- so the least this can do is have one spelling on this side.
+    """
+    embeddings = cast(Table, TitleEmbeddingRow.__table__)
+    column_type = embeddings.c.embedding.type
+    assert isinstance(column_type, HALFVEC)
+    assert column_type.dim == EMBEDDING_DIMENSIONS

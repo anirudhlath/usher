@@ -3,6 +3,7 @@
 from usher.db.models.bootstrap import IdCrosswalkRow, ImportRunRow, TmdbIdRow
 from usher.db.models.episode import EpisodeRow, SeasonRow
 from usher.db.models.jobs import JobRow
+from usher.db.models.search import TitleEmbeddingRow, TitleNeighborRow
 from usher.db.models.source import MediaItemRow, SourceCredentialRow, SourceRow
 from usher.db.models.sync import RawPayloadRow, SyncRunRow
 from usher.db.models.title import TitleRow
@@ -19,6 +20,8 @@ __all__ = [
     "SourceCredentialRow",
     "SourceRow",
     "SyncRunRow",
+    "TitleEmbeddingRow",
+    "TitleNeighborRow",
     "TitleRow",
     "TmdbIdRow",
     "UserRow",
