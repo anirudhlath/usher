@@ -222,6 +222,13 @@ class PostgresCollectionRepository(CollectionRepository):
         # annotated to return, so mypy rejects the direct read.
         return cast(CursorResult[Any], result).rowcount
 
+    async def count(self) -> int:
+        with self._session.no_autoflush:
+            found = (
+                await self._session.execute(text("SELECT count(*) FROM collections"))
+            ).scalar_one()
+        return int(found)
+
     async def list_owned(self, *, min_owned: int = 2, limit: int = 5) -> list[OwnedCollection]:
         with self._session.no_autoflush:
             rows = (

@@ -130,6 +130,9 @@ class FakeCollectionRepository(CollectionRepository):
                 changed += 1
         return changed
 
+    async def count(self) -> int:
+        return len(self._by_tmdb_id) + len(self._anonymous)
+
     async def list_owned(self, *, min_owned: int = 2, limit: int = 5) -> list[OwnedCollection]:
         self.calls += 1
         owned_titles = {

@@ -60,11 +60,13 @@ from usher.adapters.factory import ConfiguredSourceAdapterFactory
 from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestIndex
 from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
 from usher.config import Settings
+from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
+from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
 from usher.db.repositories.search import (
     PostgresTitleEmbeddingRepository,
     PostgresTitleNeighborRepository,
@@ -82,8 +84,11 @@ from usher.ports.events import EventPublisher, NullEventPublisher
 from usher.ports.jobs import JobQueue
 from usher.ports.metadata import MetadataProvider
 from usher.ports.repository import (
+    CollectionRepository,
+    CreditRepository,
     EpisodeRepository,
     MediaItemRepository,
+    PersonRepository,
     RawPayloadStore,
     SourceRepository,
     SyncRunRepository,
@@ -94,9 +99,11 @@ from usher.ports.repository import (
     WatchStateRepository,
 )
 from usher.ports.source import SourceAdapter, SourceAdapterFactory
+from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
 from usher.services.handlers import (
     SourceBinding,
+    derive_handler,
     enrich_handler,
     index_handler,
     match_handler,
@@ -173,6 +180,9 @@ class Pipeline:
     queue: JobQueue
     embeddings: TitleEmbeddingRepository
     neighbors: TitleNeighborRepository
+    people: PersonRepository
+    credits: CreditRepository
+    collections: CollectionRepository
     adapters: SourceAdapterFactory
     matcher: MatchService
     ingest: IngestService
@@ -255,6 +265,9 @@ def build_pipeline(
         max_attempts=settings.job_max_attempts,
         backoff_seconds=settings.job_backoff_seconds,
     )
+    people = PostgresPersonRepository(session)
+    credits = PostgresCreditRepository(session)
+    collections = PostgresCollectionRepository(session)
     matcher = MatchService(titles=titles, matching=matching, queue=queue, provider=provider)
     ingest = IngestService(
         matcher=matcher,
@@ -276,6 +289,9 @@ def build_pipeline(
         queue=queue,
         embeddings=embeddings,
         neighbors=neighbors,
+        people=people,
+        credits=credits,
+        collections=collections,
         adapters=adapter_factory(settings),
         matcher=matcher,
         ingest=ingest,
@@ -437,6 +453,14 @@ def build_worker(
         worker.register(
             JobKind.ENRICH, enrich_handler(build_enrich_service(pipeline, settings, provider))
         )
+        # Guarded on the provider rather than on the embedder, and that is the
+        # honest dependency rather than the convenient one: `DeriveService`
+        # holds a `MetadataProvider` for `to_derivation`, which is a pure
+        # mapping and makes no network call. A deployment with no key has no
+        # TMDb payloads to derive from at all -- they exist only because a key
+        # once did -- so leaving derive jobs pending for a worker that has one
+        # is exactly INDEX's bargain, one lane over.
+        worker.register(JobKind.DERIVE, derive_handler(build_derive_service(pipeline, provider)))
     # Guarded exactly as ENRICH is, and the symmetry is the point: `run_once`
     # claims `list(self._handlers)`, so a worker with no model leaves index
     # jobs pending for a worker that has one rather than parking them. A job
@@ -447,6 +471,26 @@ def build_worker(
     if embedder is not None:
         worker.register(JobKind.INDEX, index_handler(build_index_service(pipeline, embedder)))
     return worker
+
+
+def build_derive_service(pipeline: Pipeline, provider: MetadataProvider) -> DeriveService:
+    """One session's repositories plus the provider's pure mapper.
+
+    The `provider` argument looks like `build_index_service`'s `embedder` and
+    is a different kind of thing: an embedder is a once-per-*process*
+    resource this factory must not build, while a provider is held here only
+    for `to_derivation`, which is synchronous and makes no request. Nothing
+    on this path opens a socket.
+    """
+    return DeriveService(
+        payloads=pipeline.payloads,
+        provider=provider,
+        titles=pipeline.titles,
+        people=pipeline.people,
+        credits=pipeline.credits,
+        collections=pipeline.collections,
+        commit=pipeline.commit,
+    )
 
 
 def build_index_service(pipeline: Pipeline, embedder: Embedder) -> IndexService:

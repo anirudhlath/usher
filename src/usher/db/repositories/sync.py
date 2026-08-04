@@ -255,6 +255,16 @@ class PostgresRawPayloadStore(RawPayloadStore):
         # "no entries at all" answer -- no separate existence check needed.
         return cast(datetime | None, found)
 
+    async def count(self, provider: str) -> int:
+        with self._session.no_autoflush:
+            found = (
+                await self._session.execute(
+                    text("SELECT count(*) FROM raw_payloads WHERE provider = :provider"),
+                    {"provider": provider},
+                )
+            ).scalar_one()
+        return int(found)
+
     async def iterate(
         self, provider: str, *, limit: int = 500, after: uuid.UUID | None = None
     ) -> list[CachedPayload]:

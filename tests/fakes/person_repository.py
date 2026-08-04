@@ -176,6 +176,9 @@ class FakePersonRepository(PersonRepository):
             return None
         return self.household.episode_titles.get(watch_state.episode_id)
 
+    async def count(self) -> int:
+        return len(self._by_tmdb_id) + len(self._anonymous)
+
     async def list_recurring_for_user(
         self, user_id: uuid.UUID, *, min_titles: int = 2, limit: int = 10
     ) -> list[RecurringPerson]:

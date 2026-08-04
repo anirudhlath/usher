@@ -1174,6 +1174,16 @@ class RawPayloadStore(ABC):
         ceiling. `None` when the provider has no entries at all."""
 
     @abstractmethod
+    async def count(self, provider: str) -> int:
+        """How many payloads this provider has cached.
+
+        The denominator of `usher derive`'s coverage report, and it is printed
+        as a **count beside another count** rather than as a percentage: PRD
+        08 requires every command to work against an empty database, and a
+        derived-coverage percentage is `0/0` on exactly that deployment.
+        """
+
+    @abstractmethod
     async def iterate(
         self, provider: str, *, limit: int = 500, after: uuid.UUID | None = None
     ) -> list[CachedPayload]:
@@ -1675,6 +1685,11 @@ class PersonRepository(ABC):
         """
 
     @abstractmethod
+    async def count(self) -> int:
+        """How many people the catalog holds. `usher derive`'s report, and the
+        one number that tells an operator a derivation ran at all."""
+
+    @abstractmethod
     async def list_recurring_for_user(
         self, user_id: uuid.UUID, *, min_titles: int = 2, limit: int = 10
     ) -> list[RecurringPerson]:
@@ -1812,6 +1827,17 @@ class CreditRepository(ABC):
         """
 
     @abstractmethod
+    async def count_titles_with_credits(self) -> int:
+        """How many **distinct titles** hold at least one credit.
+
+        Titles, never credit rows: a report counting rows says "412,000
+        credits" where an operator asked "did my library get derived", and one
+        heavily-credited film moves it by fifty. This is the numerator beside
+        `RawPayloadStore.count`'s denominator, and the two are printed
+        unreduced.
+        """
+
+    @abstractmethod
     async def list_for_person(self, person_id: uuid.UUID, *, limit: int = 50) -> list[PersonCredit]:
         """Everything one person is credited on -- `PeopleProvider`'s cards.
 
@@ -1893,6 +1919,16 @@ class CollectionRepository(ABC):
         given, not "the world". An implementation that NULLs every unnamed
         title unlinks the whole catalog the first time the derivation runs
         over one page.
+        """
+
+    @abstractmethod
+    async def count(self) -> int:
+        """How many franchises the catalog holds -- `usher derive`'s report.
+
+        Deliberately **not** scoped to franchises with owned members, which is
+        `list_owned`'s question: this one answers "did the derivation write
+        collections", and narrowing it would make an empty answer ambiguous
+        between "nothing derived" and "nothing owned".
         """
 
     @abstractmethod

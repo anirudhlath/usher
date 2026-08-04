@@ -129,6 +129,10 @@ class FakeCreditRepository(CreditRepository):
             for one in matching[:limit]
         ]
 
+    async def count_titles_with_credits(self) -> int:
+        # Distinct titles, never rows -- the port's own distinction.
+        return len({one.title_id for one in self._credits})
+
     async def list_for_person(self, person_id: uuid.UUID, *, limit: int = 50) -> list[PersonCredit]:
         self.calls += 1
         matching = [one for one in self._credits if one.person_id == person_id]

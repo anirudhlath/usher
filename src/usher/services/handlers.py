@@ -40,6 +40,7 @@ from usher.domain.source import Source
 from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import MediaItemRepository
 from usher.ports.source import SourceAdapter
+from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
 from usher.services.index import IndexService
 from usher.services.jobs import Handler
@@ -93,6 +94,29 @@ def index_handler(service: IndexService) -> Handler:
 
     async def handle(job: Job) -> None:
         await service.index(_title_id(job))
+
+    return handle
+
+
+def derive_handler(service: DeriveService) -> Handler:
+    """`derive` jobs key on a `Title.id`, exactly as `enrich` and `index` do.
+
+    Deliberately not a variation on either: `_title_id` is shared, so the
+    `ValueError` -> `PortDataMalformed` conversion happens in one place for
+    all three kinds. Do not write a third converter -- an unparseable key
+    raises a `ValueError`, which is not a `UsherPortError`, and `JobWorker`
+    lets those propagate, so one corrupted key would take the worker process
+    down instead of parking its own job.
+
+    **A worker holds this handler only if a metadata provider was built.**
+    `composition.build_worker` registers `JobKind.DERIVE` under `provider is
+    not None` -- the `ENRICH` arm rather than the `INDEX` one -- because
+    `DeriveService` holds a `MetadataProvider` for `to_derivation`, and a
+    deployment with no key has no cached TMDb payloads to derive from at all.
+    """
+
+    async def handle(job: Job) -> None:
+        await service.derive(_title_id(job))
 
     return handle
 
@@ -201,6 +225,7 @@ def _title_id(job: Job) -> uuid.UUID:
 __all__ = [
     "SourceBinding",
     "SourceResolver",
+    "derive_handler",
     "enrich_handler",
     "index_handler",
     "match_handler",

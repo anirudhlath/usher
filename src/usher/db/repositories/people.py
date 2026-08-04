@@ -370,6 +370,11 @@ class PostgresPersonRepository(PersonRepository):
             rows = (await self._session.execute(text(_RESOLVE_PEOPLE), {"tmdb_ids": unique})).all()
         return {row.tmdb_id: row.id for row in rows}
 
+    async def count(self) -> int:
+        with self._session.no_autoflush:
+            found = (await self._session.execute(text("SELECT count(*) FROM people"))).scalar_one()
+        return int(found)
+
     async def list_recurring_for_user(
         self, user_id: uuid.UUID, *, min_titles: int = 2, limit: int = 10
     ) -> list[RecurringPerson]:
@@ -496,6 +501,16 @@ class PostgresCreditRepository(CreditRepository):
             )
             for row in rows
         ]
+
+    async def count_titles_with_credits(self) -> int:
+        with self._session.no_autoflush:
+            found = (
+                # `count(DISTINCT title_id)`, never `count(*)`: the question is
+                # how much of the library got derived, and one heavily-credited
+                # film would otherwise move the answer by fifty.
+                await self._session.execute(text("SELECT count(DISTINCT title_id) FROM credits"))
+            ).scalar_one()
+        return int(found)
 
     async def list_for_person(self, person_id: uuid.UUID, *, limit: int = 50) -> list[PersonCredit]:
         with self._session.no_autoflush:

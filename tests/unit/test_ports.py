@@ -139,12 +139,20 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
     [
         (
             PersonRepository,
-            {"upsert_many", "resolve_tmdb_ids", "list_recurring_for_user"},
+            {"upsert_many", "resolve_tmdb_ids", "list_recurring_for_user", "count"},
         ),
-        (CreditRepository, {"replace_for_titles", "list_for_title", "list_for_person"}),
+        (
+            CreditRepository,
+            {
+                "replace_for_titles",
+                "list_for_title",
+                "list_for_person",
+                "count_titles_with_credits",
+            },
+        ),
         (
             CollectionRepository,
-            {"upsert_many", "resolve_tmdb_ids", "attach_titles", "list_owned"},
+            {"upsert_many", "resolve_tmdb_ids", "attach_titles", "list_owned", "count"},
         ),
     ],
 )
@@ -161,10 +169,19 @@ def test_the_new_repository_ports_declare_exactly_these_abstract_methods(
     and a fake that never implements it passes its own contract suite while
     the real repository is the only thing that works.
 
-    Also a spelled-out inventory of the ten methods Task 6 settled, so the
-    four deliberately-absent ones -- `PersonRepository.get`,
+    Also a spelled-out inventory of the methods Task 6 settled, so the four
+    deliberately-absent ones -- `PersonRepository.get`,
     `CollectionRepository.get`, `list_members`, and any `rebuild` -- cannot
     be added without this list moving and someone reading the reason.
+
+    It moved once, and this is the record of it: M7's `usher derive` report
+    added `PersonRepository.count`, `CollectionRepository.count` and
+    `CreditRepository.count_titles_with_credits`. Each is read by that
+    command's bare form, which is the same bargain `usher index`'s bare form
+    takes with `count_stale`/`count_refused` -- a count with a caller, not a
+    port method whose only test is its own. `count_titles_with_credits`
+    counts **titles**, never rows, and its name says so because a report
+    reading "412,000 credits" answers a question nobody asked.
     """
     assert set(port.__abstractmethods__) == methods
 

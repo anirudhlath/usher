@@ -158,6 +158,26 @@ uv run usher index             # model, stale count, refused count, estimated wo
 uv run usher index --backfill  # enqueue the work; re-running writes zero rows
 ```
 
+`usher derive` re-derives people, credits and collections out of the provider
+payloads M4 already cached (ADR-0016) — **with no second network call**. Its
+bare form is five counts and no writes; `--backfill` walks the cache inline,
+which is where it deliberately differs from `usher index`: derivation needs no
+model, no request and no rate limit, so the queue would buy ordering, retry and
+backoff for work that needs none of the three. In steady state each enrichment
+enqueues a `derive` job alongside its `index` one, and the backfill exists
+because M7 arrives after a catalog is already enriched — nothing will ever
+re-enrich those titles, so nothing will ever enqueue a job for them.
+
+```bash
+uv run usher derive             # cached payloads, titles with credits, people, collections
+uv run usher derive --backfill  # walk the cache and re-derive inline; idempotent
+```
+
+**Order matters after a fresh upgrade**: `alembic upgrade head` → `usher derive
+--backfill` → `usher index --backfill` → `usher work`. Indexing before deriving
+embeds every title with an empty weight class B and then re-claims all of them
+once `credit_names` is populated, which is the wasted pass twice over.
+
 Embedding is optional and off by default. The model lives behind an extra
 (`uv sync --extra embedding`, 167 MiB, no torch) and `USHER_EMBEDDING_ENABLED`
 gates it; without it a worker simply never claims `index` jobs, and full-text

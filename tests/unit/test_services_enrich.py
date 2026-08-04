@@ -588,6 +588,41 @@ async def test_a_finished_enrichment_enqueues_one_index_job(
     assert [job.key for job in queue.jobs_of(JobKind.INDEX)] == [str(title.id)]
 
 
+async def test_enrichment_enqueues_index_and_derive_in_one_call(
+    titles: FakeTitleRepository, service: EnrichService, queue: FakeJobQueue
+) -> None:
+    """Two requests, **one call**, and the call count is the assertion that
+    matters.
+
+    `JobQueue.enqueue` is a staged write -- a temp DDL, a COPY and one
+    `INSERT ... SELECT ... ON CONFLICT` -- so a second `await
+    self._queue.enqueue([...])` here is a second full staging cycle per
+    enriched title, on the path M6 already had to fix once for exactly this
+    shape of cost (`stg_jobs`' shared name was an ACCESS EXCLUSIVE lock on the
+    hot path, measured at 819 ms of mutual waiting).
+
+    **A case that only asserted both kinds were enqueued is green against the
+    two-call version**, which is the version somebody writes by adding four
+    lines below the existing block. So this counts the calls.
+    """
+    title = await _given(titles, state=EnrichmentState.STUB)
+    calls: list[int] = []
+    original = queue.enqueue
+
+    async def counting(requests: Sequence[JobRequest]) -> int:
+        calls.append(len(requests))
+        return await original(requests)
+
+    queue.enqueue = counting  # type: ignore[method-assign]
+
+    await service.enrich(title.id)
+
+    assert calls == [2], "one call carrying two requests, not two calls"
+    assert (await queue.depth())[JobKind.DERIVE] == 1
+    assert [job.key for job in queue.jobs_of(JobKind.DERIVE)] == [str(title.id)]
+    assert queue.jobs_of(JobKind.DERIVE)[0].priority == JobPriority.BACKFILL
+
+
 async def test_the_index_job_is_enqueued_at_backfill_priority(
     titles: FakeTitleRepository, service: EnrichService, queue: FakeJobQueue
 ) -> None:

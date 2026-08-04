@@ -32,6 +32,7 @@ from usher.composition import (
     QueueGauges,
     SearchGauges,
     SourceRegistry,
+    build_derive_service,
     build_pipeline,
     build_worker,
     embedder,
@@ -384,6 +385,67 @@ async def _work(settings: Settings, *, once: bool) -> None:
             await registry.aclose()
             await aclose()
             await aclose_model()
+
+
+async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
+    """Report derivation coverage, or re-derive people and credits inline.
+
+    **The bare form only reads** -- five counts, no writes -- so it is safe on
+    a production box while diagnosing something, which is the same bargain
+    `usher index`'s bare form takes.
+
+    **`--backfill` walks the cache inline rather than enqueueing, and that is
+    the one place this command deliberately does not follow `index`.**
+    `_index`'s backfill enqueues because the worker owns the model and a CLI
+    that embedded would load 65 MB of ONNX in a process whose job is to print
+    two numbers. Derivation needs none of that: no model, no network call, no
+    rate limit -- it is a JSONB read and three writes. So the queue would buy
+    ordering, retry and backoff for work that needs none of the three, and
+    enqueueing over the enriched tier instead would write 2k-10k `jobs` rows,
+    claim them one at a time, and issue one `get` per row to do what `iterate`
+    does in a page-walk reading the same payloads in one pass.
+
+    **The one-shot backfill exists because M7 arrives after a catalog is
+    already enriched.** Those titles were enriched by M4/M5/M6, their payloads
+    are in the cache, and *nothing will ever re-enrich them* -- so nothing
+    will ever enqueue a `derive` job for them. The steady state is the job
+    kind, enqueued alongside `index` after each enrichment commits.
+
+    **On an empty database every line reads 0 and the command exits 0.** PRD
+    08: *"every one of them has to work against an empty database"*. The
+    arithmetic hazard here is the coverage ratio, which is why the report
+    prints two counts and no percentage: `titles_with_credits /
+    cached_payloads` is `0/0` on exactly the deployment that rule exists for.
+    """
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        if not backfill:
+            print("provider: tmdb")
+            print(f"cached payloads: {await pipeline.payloads.count('tmdb'):,}")
+            print(f"titles with credits: {await pipeline.credits.count_titles_with_credits():,}")
+            print(f"people: {await pipeline.people.count():,}")
+            print(f"collections: {await pipeline.collections.count():,}")
+            return
+
+        # The provider is required for `to_derivation` -- a pure mapping, no
+        # client and no request -- and its absence is the same degradation
+        # `usher index` reports for a missing embedder: narrowed, not broken,
+        # and said once rather than guessed at.
+        provider, aclose = await metadata_provider(settings)
+        if provider is None:
+            print("no TMDb API key configured; nothing can be derived from the cache")
+            return
+        try:
+            report = await build_derive_service(pipeline, provider).derive_all(
+                page_size=page_size, limit=limit
+            )
+        finally:
+            await aclose()
+        print(f"payloads read: {report.payloads_read:,}")
+        print(f"titles derived: {report.titles_derived:,}")
+        print(f"people written: {report.people_written:,}")
+        print(f"credits written: {report.credits_written:,}")
+        print(f"collections linked: {report.collections_written:,}")
 
 
 async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
@@ -797,6 +859,20 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument("--limit", type=int, default=0, help="stop after N titles; 0 drains")
     index.add_argument("--page-size", type=int, default=1000)
 
+    derive = sub.add_parser(
+        "derive", help="report derivation coverage, or re-derive from the cache"
+    )
+    derive.add_argument(
+        "--backfill",
+        action="store_true",
+        help="walk the cached payloads and re-derive inline (the bare form only reads)",
+    )
+    derive.add_argument("--limit", type=int, default=0, help="stop after N payloads; 0 drains")
+    # 500 rather than `index`'s 1000: a page here carries whole JSONB payloads
+    # rather than title ids, and 500 TMDb detail responses at ~8 kB is ~4 MB in
+    # flight. A number to keep in mind, not a measured optimum.
+    derive.add_argument("--page-size", type=int, default=500)
+
     search = sub.add_parser("search", help="search the catalog")
     search.add_argument("query", help="what to search for")
     # `SearchMode`'s values, taken from the enum rather than retyped: a
@@ -947,6 +1023,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.command == "index":
         asyncio.run(
             _index(settings, backfill=args.backfill, limit=args.limit, page_size=args.page_size)
+        )
+    elif args.command == "derive":
+        asyncio.run(
+            _derive(settings, backfill=args.backfill, limit=args.limit, page_size=args.page_size)
         )
     elif args.command == "search":
         asyncio.run(

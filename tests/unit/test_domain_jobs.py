@@ -70,19 +70,25 @@ def test_an_empty_key_is_rejected() -> None:
         Job(kind=JobKind.MATCH, key="")
 
 
-def test_the_four_kinds_m6_ships() -> None:
-    """`index` arrives with the artefacts it maintains, not before.
+def test_the_five_kinds_m7_ships() -> None:
+    """Each kind arrives with the artefacts it maintains, not before.
 
     M4's version asserted three members and explained the absence: "a job
-    kind whose handler is a stub is a queue that grows forever". That
-    reasoning is retired rather than reversed -- M6 ships the handler, the
-    enqueue on enrichment and the draining backfill together.
+    kind whose handler is a stub is a queue that grows forever". M6 retired
+    that reasoning for `index` rather than reversing it, shipping the
+    handler, the enqueue and the draining backfill together, and M7 does the
+    same for `derive` -- the member, the handler, the enqueue site and
+    `usher derive` in one commit.
+
+    An exact set rather than a membership check, so a sixth kind cannot be
+    added without this list moving and someone reading that rule.
     """
     assert set(JobKind) == {
         JobKind.MATCH,
         JobKind.ENRICH,
         JobKind.WATCH_HISTORY,
         JobKind.INDEX,
+        JobKind.DERIVE,
     }
 
 
@@ -98,7 +104,7 @@ def test_every_member_of_every_enum_is_its_stored_value() -> None:
     a previous release wrote is unclaimable and `claim` reports an empty
     queue rather than an error.
     """
-    assert {k.value for k in JobKind} == {"match", "enrich", "watch_history", "index"}
+    assert {k.value for k in JobKind} == {"match", "enrich", "watch_history", "index", "derive"}
     assert {s.value for s in JobStatus} == {"pending", "running", "parked"}
 
 

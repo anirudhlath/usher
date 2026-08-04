@@ -83,6 +83,9 @@ class FakeRawPayloadStore(RawPayloadStore):
         # right up to the moment it is audited.
         return min(stamps) if stamps else None
 
+    async def count(self, provider: str) -> int:
+        return sum(1 for (name, _, _) in self._entries if name == provider)
+
     async def iterate(
         self, provider: str, *, limit: int = 500, after: uuid.UUID | None = None
     ) -> list[CachedPayload]:

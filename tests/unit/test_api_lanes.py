@@ -30,12 +30,15 @@ import pytest
 from loguru import logger
 from pydantic import SecretStr
 
+from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credential_store import FakeCredentialStore
+from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
 from tests.fakes.source_adapter import FakeSourceAdapter
@@ -217,6 +220,11 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
     async def commit() -> None:
         fakes.commits.append(time.perf_counter())
 
+    # Real fakes rather than `None`: `build_worker` constructs
+    # `DeriveService` eagerly whenever a provider is present, so an unused
+    # slot here would fail at construction instead of at the lane behaviour
+    # each of these cases is about.
+    people = FakePersonRepository()
     return Pipeline(
         sources=fakes.sources,
         credentials=fakes.credentials,
@@ -230,6 +238,9 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
         queue=queue,
         embeddings=embeddings,
         neighbors=neighbors,
+        people=people,
+        credits=FakeCreditRepository(people, titles),
+        collections=FakeCollectionRepository(),
         adapters=fakes.adapters,
         matcher=matcher,
         ingest=ingest,
