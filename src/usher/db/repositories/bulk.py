@@ -49,6 +49,16 @@ generated column in an `INSERT` column list is an *error*, not an ignored
 value. The generated column is also the one index artefact on `titles` that
 `bulk_load_window` cannot suspend -- it is computed on every write, measured
 at 4.06x on this module's own `INSERT ... SELECT` shape, and accepted.
+
+`titles.credit_names` joins that list for a different reason: it is an
+ordinary column, so naming it in an `INSERT` here would be accepted rather
+than rejected -- and would write an array disagreeing with `credits`. The
+only correct writer is the statement that also writes that table
+(`DeriveService`). Its `server_default` of `'{}'` is what lets every
+statement here go on omitting it, and the omission is load-bearing rather
+than tidy: `usher_array_text` is STRICT, so a NULL in that column nulls the
+whole `search_document` and the title leaves every full-text index in
+silence.
 """
 
 from collections.abc import AsyncIterator, Sequence

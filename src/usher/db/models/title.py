@@ -35,8 +35,20 @@ from usher.domain.enums import EnrichmentState, ProductionStatus, TitleKind
 #:
 #: Three call sites consume this, and the second is the one that gets missed
 #: -- `_to_domain` (a read), `update()`'s mutation loop (a *write*), and
-#: `test_title_and_title_row_have_matching_field_sets`.
-DERIVED_COLUMNS: frozenset[str] = frozenset({"search_document"})
+#: `test_title_and_title_row_have_matching_field_sets`. All three consume the
+#: set *generically*, which is the whole reason it is a set rather than a
+#: hardcoded name, and `credit_names` is the first time that is paid off:
+#: adding it needed no edit at any of the three. Confirmed by reading them,
+#: not by assuming.
+#:
+#: **`credit_names` is here for a different reason from `search_document`, and
+#: the asymmetry matters.** Postgres refuses to let anyone write a generated
+#: column, so membership there is belt-and-braces. `credit_names` is an
+#: ordinary column that something *must* write, so membership is the **only**
+#: thing stopping `TitleRepository.update()` from writing it -- and the only
+#: correct writer is the statement that also writes `credits`, because any
+#: other writer produces an array that disagrees with that table.
+DERIVED_COLUMNS: frozenset[str] = frozenset({"search_document", "credit_names"})
 
 
 class TitleRow(Base):
@@ -117,6 +129,37 @@ class TitleRow(Base):
     # self-healing rather than lost.
     collection_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("collections.id", ondelete="SET NULL")
+    )
+
+    # Weight class B's input, denormalised onto `titles` because a stored
+    # generated expression cannot reach another table -- measured, three
+    # spellings, in migration fe1d40c8b7a3's docstring. This is `credits`
+    # projected to names and truncated to the top billed; `credits` is the
+    # fact, this is the search input.
+    #
+    # NOT NULL with a server_default, and **all three of the reasons are
+    # independently sufficient** -- which is why it is spelled this way rather
+    # than as a nullable column somebody later "tidies":
+    #
+    # 1. `_to_row` builds `TitleRow(**title.model_dump(...))` and this column
+    #    is not a `Title` field (see DERIVED_COLUMNS), so every INSERT through
+    #    the repository omits it. The same reason `genres` carries one.
+    # 2. `bulk.py` enumerates its columns by hand and names none of them here.
+    # 3. **`usher_array_text` is STRICT.** `usher_array_text(NULL)` is NULL,
+    #    `tsvector || NULL` is NULL, so one NULL in this column makes the whole
+    #    `search_document` NULL and the title vanishes from every full-text
+    #    search with no error anywhere. Measured directly on pg17.10 against
+    #    this schema's own wrapper: a row with `credit_names IS NULL` stored
+    #    `search_document IS NULL` while its name was populated, and the same
+    #    row with `'{}'` stored `'harbour':2A 'iron':1A`.
+    #
+    # No index. Nothing queries this column directly -- it exists to be read
+    # by the generated expression in the same row, and
+    # `ix_titles_search_document` is what serves the query. A GIN index here
+    # would be a second write cost on every derivation for a query nobody
+    # makes.
+    credit_names: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list, server_default=text("'{}'")
     )
 
     enrichment_state: Mapped[EnrichmentState] = mapped_column(
