@@ -117,9 +117,14 @@ full 12.7M. Not added in M1 because `CREATE INDEX CONCURRENTLY` can add it
 online with no table rewrite whenever M9 lands — there is no cost to
 waiting and a real cost (write overhead through M2's bulk load, and every
 write after) to adding it before anything queries by facet. The same
-applies to indexes on `media_items.added_at`/`last_seen_at`/`available`
-and `titles.collection_id`: none exist yet, and none are needed while
-`media_items` stays in the tens of thousands of rows.
+applied to indexes on `media_items.added_at`/`last_seen_at`/`available` and
+`titles.collection_id`. Three of those five have since landed:
+`ix_media_items_sweep` covers `last_seen_at`/`available` for the availability
+sweep (M4), `titles.collection_id` got its index with the foreign key that
+needs it (M7), and `ix_media_items_recently_added` covers `added_at` for the
+row M7 built on it. The `genres` GIN index is still deferred, and M7 records
+why the query it was measured for is not the query M7 runs — see
+[06](06-rows-and-recommendations.md).
 
 ### Season / Episode
 
@@ -310,6 +315,30 @@ section opens with, and that `CLAUDE.md` states project-wide.
 
 **Unmatched items are never dropped.** A `MediaItem` with `title_id IS NULL`
 sits in a review queue exposed over the admin API for manual resolution.
+
+**`added_at` is COALESCEd forward, which is not the same as immutable — and
+the difference is what M7's Recently Added row is exposed to.** The shipped
+upsert is `added_at = COALESCE(excluded.added_at, media_items.added_at)`. That
+refuses to overwrite with **NULL**, so a delta payload that omits the field
+cannot erase it. It does **not** refuse to overwrite with a *value*: if a
+source reports a different `added_at`, the new one wins, every walk. Two
+opposite consequences follow and both are real:
+
+- A library re-imported into the same source keeps its dates, as long as the
+  source keeps reporting the same ones. This is the behaviour the `COALESCE`
+  is usually credited with.
+- A library whose source reports *fresh* dates — files genuinely re-copied, so
+  their creation time is new, or a source migration re-deriving them from the
+  import — has **every row's `added_at` reprogrammed to the import instant**,
+  and `RecentlyAddedProvider` then shows the entire library. The window and the
+  row's limit cap how bad that looks; nothing prevents it.
+
+M7 deliberately does not make the column insert-only, because the same clause
+is what lets a source that initially could not report `added_at` fill it in on
+a later walk. Making it immutable would fix the flood and make that
+permanently unfixable, which is the worse trade against a nullable column on a
+review-queue table. Recorded here so the next reader of "COALESCEd forward"
+does not read it as "write-once".
 
 ### User / WatchState
 

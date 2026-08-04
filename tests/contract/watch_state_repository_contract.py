@@ -42,6 +42,9 @@ from usher.ports.repository import WatchStateRepository
 WALK_AT = datetime(2026, 7, 31, 3, 0, tzinfo=UTC)
 LATER = WALK_AT + timedelta(hours=1)
 LAST_PLAYED = datetime(2026, 7, 20, 21, 4, tzinfo=UTC)
+LAST_WEEK = LAST_PLAYED - timedelta(days=7)
+TWO_YEARS_AGO = LAST_PLAYED - timedelta(days=730)
+THREE_YEARS_AGO = LAST_PLAYED - timedelta(days=1095)
 
 
 def merge(
@@ -994,5 +997,242 @@ class WatchStateRepositoryInProgressContract:
             )
 
         rows = await repository.list_recent(user_id, limit=2)
+
+        assert [row.title_id for row in rows] == [third_title_id, other_title_id]
+
+    async def test_rediscover_excludes_a_title_watched_last_week(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """The distractor the front matter names for Rediscover, seeded, and
+        the whole point of the cutoff.
+
+        The wrong implementation this kills: `WHERE played` ordered by
+        `play_count DESC` with no cutoff at all, which is "your favourites"
+        wearing Rediscover's title -- a populated, plausible row about a film
+        watched on Tuesday.
+        """
+        await _seed_progress(
+            repository, user_id, title_id, played=True, last_played_at=THREE_YEARS_AGO
+        )
+        await _seed_progress(
+            repository, user_id, other_title_id, played=True, last_played_at=LAST_WEEK
+        )
+
+        rows = await repository.list_rediscoverable(user_id, before=TWO_YEARS_AGO)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_rediscover_ranks_a_rewatch_above_a_single_watch(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """The substitution for the rating column that does not exist,
+        asserted as an *ordering*.
+
+        `play_count` is the engagement proxy and it is deliberately not in the
+        predicate: `list_needing_history` records that `played AND play_count
+        = 0` is how "history unknown" is spelled, and Emby's listing reports
+        `PlayCount: 0` for an item played twice -- so `play_count >= 2` as a
+        filter returns nothing on a freshly-walked deployment and an
+        arbitrary subset on a half-backfilled one. As an ordering the same
+        column degrades gracefully.
+
+        The wrong implementation this kills: the filter version, which passes
+        the case above and empties this one. Also `ORDER BY last_played_at
+        DESC` alone, which the fixture defeats by making the rewatch the
+        *older* of the two.
+        """
+        await _seed_progress(
+            repository,
+            user_id,
+            title_id,
+            played=True,
+            last_played_at=THREE_YEARS_AGO,
+            play_count=1,
+        )
+        await _seed_progress(
+            repository,
+            user_id,
+            other_title_id,
+            played=True,
+            last_played_at=THREE_YEARS_AGO - timedelta(days=30),
+            play_count=4,
+        )
+
+        rows = await repository.list_rediscoverable(user_id, before=TWO_YEARS_AGO)
+
+        assert [row.title_id for row in rows] == [other_title_id, title_id]
+
+    async def test_rediscover_excludes_a_state_that_cannot_be_dated(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """`last_played_at < :before` is NULL, and therefore not true, for a
+        state the walk could not date (ADR-0014). So an undatable state is
+        excluded for free.
+
+        That is the exact mirror of
+        `test_a_state_with_no_last_played_at_does_not_outrank_one_that_has_one`,
+        where the same nullability did the *wrong* thing for free. Same
+        column, same three-valued logic, opposite outcomes -- asserted here so
+        a later `COALESCE(last_played_at, updated_at)` "fix" that helps one
+        breaks the other loudly.
+
+        **The undated row is observed *long ago*, and that is what makes the
+        COALESCE observable at all** -- measured. `merge_from_source` writes
+        `updated_at = observed_at` on the insert path, so an undated state
+        merged at the walk's own instant has an `updated_at` far *newer* than
+        any cutoff Rediscover would use, and `COALESCE(last_played_at,
+        updated_at) < before` therefore excludes it anyway: the mutation
+        survived the whole suite on that seeding. Backdating the observation
+        puts the fallback column on the wrong side of the cutoff, which is
+        exactly the state the "helpful fix" would sweep in -- every row a walk
+        wrote long ago and has not touched since.
+        """
+        await _seed_progress(
+            repository, user_id, title_id, played=True, last_played_at=THREE_YEARS_AGO
+        )
+        await _seed_progress(
+            repository,
+            user_id,
+            other_title_id,
+            played=True,
+            last_played_at=None,
+            observed_at=THREE_YEARS_AGO,
+        )
+
+        rows = await repository.list_rediscoverable(user_id, before=TWO_YEARS_AGO)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_rediscover_excludes_something_never_finished(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """An abandonment three years ago is a rejection, not a fondness.
+
+        The wrong implementation this kills: dropping `played` because
+        `last_played_at` "already implies it" -- it does not; a title
+        abandoned at twenty minutes has one, and this fixture gives the
+        abandoned title the higher `play_count` so it heads the row.
+        """
+        await _seed_progress(
+            repository, user_id, title_id, played=True, last_played_at=THREE_YEARS_AGO
+        )
+        await _seed_progress(
+            repository,
+            user_id,
+            other_title_id,
+            played=False,
+            last_played_at=THREE_YEARS_AGO,
+            play_count=9,
+        )
+
+        rows = await repository.list_rediscoverable(user_id, before=TWO_YEARS_AGO)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_rediscover_is_title_keyed_and_returns_no_episode_state(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """Rediscover is **film-only**, and that is a scope decision rather
+        than the oversight `list_recent`'s rollup would make it look like.
+
+        The two calls are genuinely different. A title-only `list_recent`
+        returns an **empty** set for a TV household, so the taste centroid is
+        computed from nothing and both its consumers produce confident output
+        from no input -- a correctness failure. A title-only
+        `list_rediscoverable` returns a **correct but film-only** row: every
+        card in it is genuinely something the household watched long ago. A
+        "rediscover" card for a series is an invitation to re-watch sixty
+        hours, and PRD 06's own example is film-shaped.
+
+        Without `title_id IS NOT NULL` this returns rows whose `title_id` is
+        NULL, which the provider cannot hydrate -- so the row arrives short
+        rather than wrong, which is the harder failure to notice.
+        """
+        await _seed_progress(
+            repository, user_id, title_id, played=True, last_played_at=THREE_YEARS_AGO
+        )
+        await repository.merge_from_source(
+            [
+                merge(
+                    user_id,
+                    None,
+                    episode_id=episode_id,
+                    played=True,
+                    play_count=9,
+                    last_played_at=THREE_YEARS_AGO,
+                )
+            ]
+        )
+
+        rows = await repository.list_rediscoverable(user_id, before=TWO_YEARS_AGO)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_rediscover_is_scoped_to_one_user(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        other_user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """One household member's forgotten favourite is not another's."""
+        await _seed_progress(
+            repository, user_id, title_id, played=True, last_played_at=THREE_YEARS_AGO
+        )
+        await _seed_progress(
+            repository,
+            other_user_id,
+            other_title_id,
+            played=True,
+            play_count=9,
+            last_played_at=THREE_YEARS_AGO,
+        )
+
+        rows = await repository.list_rediscoverable(user_id, before=TWO_YEARS_AGO)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_rediscover_respects_its_limit(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        third_title_id: uuid.UUID,
+    ) -> None:
+        """0-1 rows in PRD 06's table means a handful of cards, not the
+        household's entire pre-2024 history."""
+        for index, identifier in enumerate((title_id, other_title_id, third_title_id)):
+            await _seed_progress(
+                repository,
+                user_id,
+                identifier,
+                played=True,
+                play_count=index + 1,
+                last_played_at=THREE_YEARS_AGO,
+            )
+
+        rows = await repository.list_rediscoverable(user_id, before=TWO_YEARS_AGO, limit=2)
 
         assert [row.title_id for row in rows] == [third_title_id, other_title_id]

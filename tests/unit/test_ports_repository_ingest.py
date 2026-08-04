@@ -45,6 +45,12 @@ def test_media_item_repository_surface() -> None:
             # `test_an_owned_title_outranks_an_unowned_one_at_equal_relevance`
             # exists to catch one layer up.
             "owned_title_ids",
+            # M7's Recently Added surface. Same argument again: dropped from
+            # the ABC, every implementation could stop providing it and still
+            # type-check, and the row would be permanently empty -- which
+            # renders identically to a household that added nothing this
+            # month.
+            "list_recently_added",
             "count_for_source",
         }
     )
@@ -66,6 +72,7 @@ def test_watch_state_repository_surface() -> None:
             # describing.
             "list_in_progress",
             "list_recent",
+            "list_rediscoverable",
         }
     )
 

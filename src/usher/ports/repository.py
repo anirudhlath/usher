@@ -505,6 +505,21 @@ class SourceRepository(ABC):
         have deleted something that never existed. Idempotent."""
 
 
+@dataclass(frozen=True, slots=True)
+class AddedTitle:
+    """One title the household has a copy of, and when that copy arrived.
+
+    Not a `MediaItem`: a title with twenty thousand episode files is *one*
+    row here, so no single item's identity is the honest answer. `added_at`
+    is the newest contributing file's, because a season that landed last
+    night on a show whose pilot has been on disk for two years is a new
+    arrival.
+    """
+
+    title_id: uuid.UUID
+    added_at: AwareDatetime
+
+
 class MediaItemRepository(ABC):
     """Persistence for "this title is available on that source".
 
@@ -756,6 +771,58 @@ class MediaItemRepository(ABC):
         """
 
     @abstractmethod
+    async def list_recently_added(
+        self, *, since: AwareDatetime, limit: int = 24
+    ) -> list[AddedTitle]:
+        """Titles whose newest copy arrived on or after `since`, newest first.
+
+        **One row per title, and `episode_id IS NULL` is deliberately not how
+        that is done.** An episode's `MediaItem` carries its series'
+        `title_id`, so a series that just landed is one row per episode file
+        -- 20,000 for the measured pathological series, one card. Three other
+        statements on this port bound that with `episode_id IS NULL`; here
+        the same bound is the wrong one, and its cost is already named on
+        `owned_title_ids`: *"a library that reported episodes but never their
+        series row reads as not-owned for that series."* Recently Added is
+        precisely the surface where a newly added series must appear. So the
+        dedup is over *all* matched rows and the window is the bound instead.
+
+        `added_at` is the **newest** contributing copy's, because a season
+        that landed last night on a two-year-old show is a new arrival.
+
+        **`available` is filtered, and that is the opposite call from
+        `owned_title_ids`**, whose comment argues against an availability
+        predicate because "a copy the nightly sweep retracted is still a copy
+        you have". True of *ownership*, false of *what arrived this week*.
+        Two statements, two answers, and the divergence is deliberate.
+
+        **`since` is the caller's, not the statement's.** `now()` is frozen
+        per transaction, so a statement spelling its own
+        `now() - interval '30 days'` cannot be tested at its boundary -- every
+        row a case inserts shares one instant, and "inside the window" and "at
+        its edge" become the same fact. `clock_timestamp()` would trade that
+        for a nondeterministic test. It is also what lets
+        `RecentlyAddedProvider` own the window as a tunable rather than as a
+        migration. An item with no `added_at` at all is excluded, by
+        three-valued logic rather than by a predicate.
+
+        **No `user_id` and no `source_id`.** Availability is household-wide,
+        so this is the one provider whose output is identical for every member
+        of the household. Stated because every other statement on this port is
+        per-source and the natural instinct is to scope this one too.
+
+        **`added_at` is not immutable, and a reader of the upsert's
+        `COALESCE(excluded.added_at, media_items.added_at)` will assume it
+        is.** That clause refuses to overwrite with **NULL** only. A source
+        that reports a *different* `added_at` -- files genuinely re-copied, or
+        a source migration re-deriving its creation date -- wins, every walk,
+        and moves the whole library into this window at once. The window and
+        the `limit` cap how bad that looks; nothing prevents it. The clause is
+        deliberately unchanged, because it is also what lets a source that
+        initially could not report `added_at` fill it in later.
+        """
+
+    @abstractmethod
     async def count_for_source(self, source_id: uuid.UUID) -> int:
         """How many items this source has, available or not. The sweep's
         denominator, and the CLI's report."""
@@ -938,6 +1005,55 @@ class WatchStateRepository(ABC):
         argument as `list_in_progress`. `limit` is applied after the dedup: a
         limit pushed inside it keeps whichever titles the dedup's own key
         ordered first, which is not a recency answer at all.
+        """
+
+    @abstractmethod
+    async def list_rediscoverable(
+        self, user_id: uuid.UUID, *, before: AwareDatetime, limit: int = 24
+    ) -> list[RecentWatch]:
+        """Titles this user finished long ago, most-rewatched first.
+
+        **This is a substitution and it is named as one.** PRD 06 fires
+        `RediscoverProvider` on *"Watched > 2 years ago, **rated highly**"*.
+        There is no rating column on `watch_states`, no `favorite`, and
+        `SourceWatchState` carries neither -- M7 does not invent one, because
+        landing a real rating is a source-port change against a field no
+        client can set yet. What this schema can express instead is split in
+        two, and the split is the whole design:
+
+        - **The filter is `played AND last_played_at < before`.** Both halves
+          are needed: `played` excludes an abandonment, which is a rejection
+          rather than a fondness, and the cutoff is the entire "> 2 years
+          ago".
+        - **The engagement proxy is the *ordering*, never the filter**:
+          `play_count DESC`. A rewatch is a revealed preference and it is the
+          only thing in this table a household writes more than once.
+
+        **`play_count >= 2` as a filter is the tempting version and it is
+        wrong.** `list_needing_history`'s own docstring records that `played
+        AND play_count = 0` is how "history unknown" is spelled, and that
+        Emby's listing reports `PlayCount: 0` for an item played twice -- so
+        that filter returns **nothing** on a freshly-walked deployment and an
+        arbitrary subset on a half-backfilled one. As an *ordering* the same
+        unreliable column degrades gracefully: an un-backfilled household
+        gets a correct set ordered by recency within it, a backfilled one
+        gets rewatches first, and neither is empty for a reason nobody can
+        see.
+
+        **A state that cannot be dated is excluded for free**, because
+        `last_played_at < before` is NULL and therefore not true. That is the
+        exact mirror of `list_in_progress`, where the same nullability does
+        the *wrong* thing for free -- same column, same three-valued logic,
+        opposite outcomes.
+
+        **Title-keyed only, so Rediscover is film-only.** This is a scope
+        decision and not the call `list_recent` refused: a title-only
+        `list_recent` returns an *empty* set for a TV household and the
+        centroid is then computed from nothing, which is a correctness
+        failure that produces confident output. A title-only
+        `list_rediscoverable` returns a correct but film-only row -- and a
+        "rediscover" card for a series is an invitation to re-watch sixty
+        hours.
         """
 
 

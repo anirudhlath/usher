@@ -68,7 +68,7 @@ from usher.ports.ingest import (
     MediaItemUpsert,
     SweepResult,
 )
-from usher.ports.repository import BulkWriteResult, MediaItemRepository
+from usher.ports.repository import AddedTitle, BulkWriteResult, MediaItemRepository
 
 # `ordinal` is the row's index within the batch, and it is what makes
 # deduplication deterministic: `ORDER BY ..., ordinal DESC` is literally
@@ -240,6 +240,50 @@ ORDER BY available DESC, last_seen_at DESC, id
 _OWNED_TITLE_IDS = """
 SELECT DISTINCT title_id FROM media_items
 WHERE title_id = ANY(:title_ids) AND episode_id IS NULL
+"""
+
+
+# Recently Added. The bound is a **time window**, not a row count, which is
+# what PRD 06 already says ("New items in the window") and what makes the
+# dedup affordable.
+#
+# `DISTINCT ON (title_id)` over ALL matched rows, and `episode_id IS NULL` --
+# the bound three statements above this one carry -- is deliberately absent.
+# An episode's row carries its series' `title_id`, so a series that landed
+# last night is one row per episode file: 20,000 for the measured
+# pathological series, one card. Collapsing them is the work rather than the
+# waste, and it is the same 20,001-vs-1 measurement `_OWNED_TITLE_IDS`
+# records, paid inside a window instead of across the table. Excluding
+# episode rows instead would mean a source that reports episode files and no
+# series-level row never shows a new series at all -- which is exactly the
+# cost `_OWNED_TITLE_IDS`' comment already names for the other direction.
+#
+# The inner `ORDER BY title_id, added_at DESC` picks the NEWEST contributing
+# file, because a season that landed last night on a two-year-old show is a
+# new arrival. Ascending would bury every long-running series the household
+# is actively collecting, at the bottom of the one row whose job is to
+# surface what just arrived.
+#
+# The cutoff is bound in rather than spelled `now() - interval '30 days'`:
+# `now()` is frozen per transaction and the integration fixture is one
+# transaction, so a statement carrying its own clock cannot be tested at its
+# boundary, and `clock_timestamp()` would make the test nondeterministic
+# instead. It also lets RecentlyAddedProvider own the window as a tunable
+# rather than as a migration.
+#
+# No source and no user: availability is household-wide. An item with no
+# `added_at` is excluded by three-valued logic rather than by a predicate.
+_RECENTLY_ADDED = """
+SELECT title_id, added_at FROM (
+    SELECT DISTINCT ON (title_id) title_id, added_at
+    FROM media_items
+    WHERE available
+      AND title_id IS NOT NULL
+      AND added_at >= CAST(:since AS timestamptz)
+    ORDER BY title_id, added_at DESC
+) newest
+ORDER BY added_at DESC, title_id DESC
+LIMIT :limit
 """
 
 
@@ -510,6 +554,15 @@ class PostgresMediaItemRepository(MediaItemRepository):
         with self._session.no_autoflush:
             result = await self._session.execute(text(_OWNED_TITLE_IDS), {"title_ids": title_ids})
         return {row[0] for row in result.all()}
+
+    async def list_recently_added(
+        self, *, since: AwareDatetime, limit: int = 24
+    ) -> list[AddedTitle]:
+        with self._session.no_autoflush:
+            rows = (
+                await self._session.execute(text(_RECENTLY_ADDED), {"since": since, "limit": limit})
+            ).all()
+        return [AddedTitle(row.title_id, row.added_at) for row in rows]
 
     async def count_for_source(self, source_id: uuid.UUID) -> int:
         with self._session.no_autoflush:

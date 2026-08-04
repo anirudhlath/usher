@@ -63,6 +63,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any, cast
 
+from pydantic import AwareDatetime
 from sqlalchemy import CursorResult, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -259,6 +260,43 @@ LIMIT :limit
 """
 
 
+# Rediscover, and the substitution for the rating column that does not exist.
+#
+# PRD 06 fires this row on "watched > 2 years ago, rated highly".
+# `watch_states` has no rating column, no favorite, and `SourceWatchState`
+# carries neither -- so the signal splits in two, and the split is the design:
+# the FILTER is `played AND last_played_at < cutoff`, and the engagement proxy
+# is the ORDERING, `play_count DESC`.
+#
+# `play_count >= 2` in the WHERE is the tempting version and it is wrong.
+# `_NEEDING_HISTORY` above spells "history unknown" as `played AND play_count
+# = 0`, because Emby's listing reports `PlayCount: 0` for an item played
+# twice -- so as a filter it returns NOTHING on a freshly-walked deployment
+# and an arbitrary subset on a half-backfilled one. As an ordering the same
+# unreliable column degrades gracefully.
+#
+# `last_played_at < cutoff` is NULL, and therefore not true, for a state the
+# walk could not date -- so an undatable state is excluded for free. That is
+# the exact mirror of `_IN_PROGRESS`, where the same nullability does the
+# WRONG thing for free and `NULLS LAST` is what corrects it. Same column,
+# same three-valued logic, opposite outcomes.
+#
+# `title_id IS NOT NULL`, so Rediscover is film-only. A scope decision rather
+# than the call `_RECENT` refused: title-only there returns an EMPTY set for
+# a TV household and the centroid is computed from nothing, where title-only
+# here returns a correct but film-only row.
+_REDISCOVERABLE = """
+SELECT title_id, last_played_at, play_count
+FROM watch_states
+WHERE user_id = CAST(:user_id AS uuid)
+  AND played
+  AND title_id IS NOT NULL
+  AND last_played_at < CAST(:before AS timestamptz)
+ORDER BY play_count DESC, last_played_at DESC, title_id DESC
+LIMIT :limit
+"""
+
+
 class PostgresWatchStateRepository(WatchStateRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -344,6 +382,18 @@ class PostgresWatchStateRepository(WatchStateRepository):
         with self._session.no_autoflush:
             rows = (
                 await self._session.execute(text(_RECENT), {"user_id": user_id, "limit": limit})
+            ).all()
+        return [RecentWatch(row.title_id, row.last_played_at, row.play_count) for row in rows]
+
+    async def list_rediscoverable(
+        self, user_id: uuid.UUID, *, before: AwareDatetime, limit: int = 24
+    ) -> list[RecentWatch]:
+        with self._session.no_autoflush:
+            rows = (
+                await self._session.execute(
+                    text(_REDISCOVERABLE),
+                    {"user_id": user_id, "before": before, "limit": limit},
+                )
             ).all()
         return [RecentWatch(row.title_id, row.last_played_at, row.play_count) for row in rows]
 

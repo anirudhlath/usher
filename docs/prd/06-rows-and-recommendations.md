@@ -177,7 +177,7 @@ drops any that build empty, and returns them.
 | `SeasonalProvider` | Calendar window (Halloween, holidays) | 0–1 rows |
 | `PeopleProvider` | Recurring director or actor in history | 0–2 rows |
 | `CuratedProvider` | Fresh LLM rows exist | 0–5 rows |
-| `RediscoverProvider` | Watched > 2 years ago, rated highly | 0–1 rows |
+| `RediscoverProvider` | Watched > 2 years ago, **most-rewatched first** — there is no rating column; see below | 0–1 rows |
 
 **`FranchiseProvider` is movies only, and on a television-only household its
 condition is unsatisfiable *by construction* rather than by absence of data.**
@@ -191,6 +191,52 @@ available fallbacks — grouping by name prefix, by `networks`, or by Emby's
 `TmdbCollection` provider-id key — each produce a populated, plausible, wrong
 row. See [02](02-data-model.md)'s `Collection` section.
 
+**Rediscover substitutes for a rating column that does not exist, and the
+substitution is on the page rather than in the query.** `watch_states` has no
+`rating` and no `favorite`, and `SourceWatchState` carries neither — Emby has
+both and the adapter reads neither. M7 does not invent one: landing a real
+rating is a source-port change plus a contract case plus a live verification,
+against a field no client can set yet. What this schema can express splits in
+two:
+
+- **The filter is `played AND last_played_at < cutoff`.** `played` excludes an
+  abandonment, which is a rejection rather than a fondness; the cutoff is the
+  whole "> 2 years ago".
+- **The engagement proxy is the *ordering*, never the filter**: `play_count
+  DESC`. A rewatch is a revealed preference and it is the only thing in this
+  table a household writes more than once.
+
+`play_count >= 2` as a *filter* is the tempting version and it is wrong: `played
+AND play_count = 0` is how "history unknown" is spelled while the history
+backfill drains, so that filter returns **nothing** on a freshly-walked
+deployment and an arbitrary subset on a half-drained one. As an ordering the
+same unreliable column degrades gracefully.
+
+**Rediscover is film-only**, and that is a scope decision rather than an
+oversight: a "rediscover" card for a series is an invitation to re-watch sixty
+hours, and the example this row is built around is film-shaped. It is *not* the
+same call the taste centroid's read makes — there, a title-only query returns an
+empty set for a TV household and the centroid is computed from nothing, which is
+a correctness failure rather than a narrower row.
+
+**Recently Added is bounded by a window, not by a row count**, which is what
+"New items in the window" above already says and what makes its dedup
+affordable. Three consequences worth stating, because each is a decision:
+
+- *One row per title.* An episode's `MediaItem` carries its series' `title_id`,
+  so a series that landed last night is one row per episode file — 20,000 for
+  the measured pathological series, one card. The row reports the **newest**
+  contributing file, because a season that just landed on a two-year-old show is
+  a new arrival.
+- *Episode rows are **not** excluded*, even though three other reads of that
+  table bound themselves with `episode_id IS NULL`. A source that reports
+  episode files and never a series-level row would otherwise never show a new
+  series at all, on the one surface whose whole job is to show it.
+- *No user and no source.* Availability is household-wide, so this is the one
+  provider whose output is identical for every member of the household — and the
+  window cutoff is passed in by the provider rather than spelled inside the
+  query, which is what makes it a tunable rather than a migration.
+
 **"Next" is a high-water mark, not a first gap, and three cases this table
 left open are settled with it.** M7's `EpisodeRepository.next_up` is the read.
 
@@ -198,7 +244,7 @@ left open are settled with it.** M7's `EpisodeRepository.next_up` is the read.
   episodes, and the next episode is the one after it.* The alternative — the
   earliest unplayed episode following the earliest played one — tells a
   household that skipped S02E05 to watch S02E05 tonight, and tomorrow, and
-  every night after, because nothing here or in [07](07-api-surface.md) can
+  every night after, because nothing here or in [07](07-client-api.md) can
   dismiss a card. High-water costs the opposite failure (an episode watched
   out of order *ahead* of the household's position moves the mark and skips
   what lies between), and that one is recoverable by watching the skipped
@@ -206,7 +252,7 @@ left open are settled with it.** M7's `EpisodeRepository.next_up` is the read.
 - *The mark is a position, never `ORDER BY last_played_at DESC`.* A household
   that finishes season three and rewatches the pilot is not asking for S01E02
   — and `last_played_at` is NULL on nearly every walk-sourced row
-  ([ADR-0014](decisions/0014-absent-is-not-zero.md)), which would make a
+  ([ADR-0014](decisions/0014-absence-is-not-zero.md)), which would make a
   recency-keyed mark arbitrary rather than merely wrong.
 - *A series with nothing played emits **nothing**.* "Fires when: series with an
   unwatched **next** episode" reads as though it might mean a first episode
@@ -236,7 +282,7 @@ table left open.** M7's `WatchStateRepository.list_in_progress` settles them.
   assertion anyone will write.
 - *A minimum position is the **provider's**, not the query's.* A title
   abandoned at three seconds is in progress by this definition and stays there
-  forever, because nothing in this document or [07](07-api-surface.md) can
+  forever, because nothing in this document or [07](07-client-api.md) can
   dismiss a card. The floor is left to `ContinueWatchingProvider` because it is
   a product tunable, because the percentage spelling divides by a nullable
   `runtime_seconds` and so silently empties the row on a source that reports no
@@ -245,7 +291,7 @@ table left open.** M7's `WatchStateRepository.list_in_progress` settles them.
   index predicate is a migration per adjustment.
 - *`NULLS LAST` is correctness, not formatting.* `last_played_at` is nullable
   because a walk's listing frequently cannot determine it
-  ([ADR-0014](decisions/0014-absent-is-not-zero.md)), and Postgres orders `DESC`
+  ([ADR-0014](decisions/0014-absence-is-not-zero.md)), and Postgres orders `DESC`
   as NULLS FIRST — so the obvious spelling leads Continue Watching with
   precisely the rows the system knows *least* about, on a row that is populated,
   plausible and wrong. An undatable state sorts **last** rather than being

@@ -63,7 +63,7 @@ from usher.ports.ingest import (
     MediaItemUpsert,
     SweepResult,
 )
-from usher.ports.repository import BulkWriteResult, MediaItemRepository
+from usher.ports.repository import AddedTitle, BulkWriteResult, MediaItemRepository
 
 # Sorts before every real timestamp, so an undated item lands at the end of
 # a descending review queue -- Postgres's `NULLS LAST`, spelled for Python.
@@ -296,6 +296,32 @@ class FakeMediaItemRepository(MediaItemRepository):
             for entry in self._items.values()
             if entry.title_id in wanted and entry.episode_id is None and entry.title_id is not None
         }
+
+    async def list_recently_added(
+        self, *, since: AwareDatetime, limit: int = 24
+    ) -> list[AddedTitle]:
+        # One row per title, keeping the NEWEST contributing file -- an
+        # episode's row carries its series' `title_id`, so a series that just
+        # landed is one row per episode file and one card.
+        #
+        # The `added_at is None` guard is written out rather than folded into
+        # a sort key, and so is the `>= since` comparison. Python's `None`
+        # comparisons and SQL's three-valued logic agree here only because
+        # both were written to: in SQL `added_at >= :since` is simply not true
+        # for a NULL, and a fake that reached for `entry.added_at or _UNDATED`
+        # would silently include every undated row in the library.
+        newest: dict[uuid.UUID, AddedTitle] = {}
+        for entry in self._items.values():
+            if not entry.available or entry.title_id is None or entry.added_at is None:
+                continue
+            if entry.added_at < since:
+                continue
+            current = newest.get(entry.title_id)
+            if current is None or entry.added_at > current.added_at:
+                newest[entry.title_id] = AddedTitle(entry.title_id, entry.added_at)
+        rows = sorted(newest.values(), key=lambda one: one.title_id, reverse=True)
+        rows.sort(key=lambda one: one.added_at, reverse=True)
+        return rows[:limit]
 
     async def count_for_source(self, source_id: uuid.UUID) -> int:
         return sum(1 for entry in self._items.values() if entry.source_id == source_id)

@@ -781,3 +781,321 @@ class MediaItemRepositoryContract:
         of titles are on no source at all. A normal answer, not a missing
         row."""
         assert await repository.list_for_title(new_id()) == []
+
+
+LONG_AGO = RUN_AT - timedelta(days=730)
+YESTERDAY = RUN_AT - timedelta(days=1)
+WINDOW_START = RUN_AT - timedelta(days=30)
+
+
+class MediaItemRepositoryRecentlyAddedContract:
+    """`list_recently_added`, and the wrong implementations that each return
+    a populated, plausible row.
+
+    The distractor the front matter names for this provider is **an item with
+    the newest `last_seen_at` and the oldest `added_at`** -- which is every
+    item in the library on the morning after a walk, so an implementation
+    that reached for the wrong timestamp is green against any fixture that
+    does not seed one deliberately.
+
+    Subclasses provide `repository`, `source_id`, `title_id`,
+    `other_title_id`, `series_title_id` and `episode_ids`, where every id in
+    `episode_ids` belongs to `series_title_id`.
+    """
+
+    async def test_recently_added_orders_by_added_at_and_not_by_last_seen_at(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """The named distractor, seeded: an item added two years ago and seen
+        one minute ago, against an item added yesterday and seen a day ago.
+
+        `last_seen_at` is "when the walk last observed this file" and is
+        `NOT NULL` with a `now()` default, so on any real deployment it is
+        approximately the same recent instant for the entire library.
+        `added_at` is a fact about the file. An implementation that sorts on
+        the first returns the library in an order that changes nightly for
+        reasons unconnected to anything the household did -- and returns
+        something for every input, forever.
+        """
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    "old",
+                    title_id=title_id,
+                    added_at=LONG_AGO,
+                    last_seen_at=RUN_AT,
+                ),
+                item(
+                    source_id,
+                    "new",
+                    title_id=other_title_id,
+                    added_at=YESTERDAY,
+                    last_seen_at=EARLIER,
+                ),
+            ]
+        )
+
+        rows = await repository.list_recently_added(since=LONG_AGO)
+
+        assert [row.title_id for row in rows] == [other_title_id, title_id]
+
+    async def test_a_series_that_just_landed_is_one_row_not_one_per_episode(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        series_title_id: uuid.UUID,
+        episode_ids: list[uuid.UUID],
+    ) -> None:
+        """An episode's MediaItem carries its series' `title_id`, so a series
+        added last night is one row per episode file -- 20,000 for the
+        measured pathological series, one card.
+
+        The wrong implementation this kills is no dedup at all, which returns
+        a Recently Added row that is twenty thousand copies of one show and
+        nothing else. `LIMIT` hides it: a limit of 12 returns 12 identical
+        cards, which looks like a rendering bug rather than a query bug and
+        will be chased in the client.
+
+        Note what this case does **not** assert: that episode rows are
+        excluded. `episode_id IS NULL` is the bound three other statements in
+        this module use and it is deliberately absent here, because a source
+        that reports episode files and no series-level row would otherwise
+        never show a new series at all -- the cost the port already names for
+        `owned_title_ids`.
+        """
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    f"ep-{index}",
+                    title_id=series_title_id,
+                    episode_id=episode,
+                    added_at=YESTERDAY,
+                )
+                for index, episode in enumerate(episode_ids)
+            ]
+        )
+
+        rows = await repository.list_recently_added(since=WINDOW_START)
+
+        assert [row.title_id for row in rows] == [series_title_id]
+
+    async def test_a_series_reports_the_newest_of_its_episode_files(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        series_title_id: uuid.UUID,
+        episode_ids: list[uuid.UUID],
+    ) -> None:
+        """The dedup has to pick a *deterministic* winner, and which one it
+        picks is a product decision rather than a detail.
+
+        A season that landed last night on a show whose pilot has been on
+        disk for two years is a *new arrival*, so the row reports the newest
+        contributing file and sorts on it. Picking the oldest would bury
+        every long-running series the household is actively collecting, at
+        the bottom of the one row whose whole job is to surface what just
+        arrived.
+
+        The wrong implementation this kills: `ORDER BY title_id, added_at`
+        inside the `DISTINCT ON` -- ascending, one word short -- which is
+        green against every fixture that gives a title exactly one file.
+        """
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    "ep-old",
+                    title_id=series_title_id,
+                    episode_id=episode_ids[0],
+                    added_at=LONG_AGO,
+                ),
+                item(
+                    source_id,
+                    "ep-new",
+                    title_id=series_title_id,
+                    episode_id=episode_ids[1],
+                    added_at=YESTERDAY,
+                ),
+            ]
+        )
+
+        rows = await repository.list_recently_added(since=LONG_AGO)
+
+        assert [(row.title_id, row.added_at) for row in rows] == [(series_title_id, YESTERDAY)]
+
+    async def test_recently_added_excludes_unmatched_and_unavailable_items(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """Two predicates, two failure shapes.
+
+        Without `title_id IS NOT NULL` the row carries items with nothing to
+        hydrate -- a card with no title, which the composer drops, so the row
+        silently arrives short rather than wrong.
+
+        Without `available` the row advertises files the nightly sweep
+        retracted. That is the opposite call from `owned_title_ids`, whose
+        comment argues *against* an availability predicate because "a copy
+        the nightly sweep retracted is still a copy you have" -- true of
+        *ownership*, false of *what arrived this week*. Two statements, two
+        answers, and the divergence is deliberate.
+
+        **Each predicate gets its own row, and that is what makes this case
+        two cases rather than one.** An earlier seeding retracted the
+        unmatched item along with everything else, so `available` excluded it
+        first and dropping `title_id IS NOT NULL` survived the whole suite --
+        measured. `DISTINCT ON (title_id)` groups every unmatched row under
+        one NULL key, so what the mutation produces is a single card with no
+        title, which the composer drops: the row arrives *short*, not wrong,
+        and only an assertion on the exact id list can see it.
+        """
+        await repository.upsert_many(
+            [
+                item(source_id, "kept", title_id=title_id, added_at=YESTERDAY),
+                # Available and unmatched: excluded by `title_id IS NOT NULL`
+                # alone, so that half of the predicate has a row of its own.
+                item(source_id, "unmatched", title_id=None, added_at=RUN_AT),
+                # Matched and about to be retracted -- an older `last_seen_at`
+                # is what the sweep keys on -- so it is excluded by
+                # `available` alone.
+                item(
+                    source_id,
+                    "gone",
+                    title_id=other_title_id,
+                    added_at=RUN_AT,
+                    last_seen_at=EARLIER,
+                ),
+            ]
+        )
+        await repository.mark_unseen_unavailable(
+            source_id, seen_since=RUN_AT, max_retract_fraction=1.0
+        )
+
+        rows = await repository.list_recently_added(since=WINDOW_START)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_the_window_bounds_the_result(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """`since` is the caller's, not the statement's.
+
+        A statement spelling its own `now() - interval '30 days'` cannot be
+        tested at its boundary: `now()` is frozen per transaction and the
+        integration fixture is one transaction, so every row a case inserts
+        shares one instant and "inside the window" and "at its edge" become
+        the same fact. `clock_timestamp()` would trade that for a
+        nondeterministic test. Passing the cutoff in removes the clock from
+        the statement -- and lets `RecentlyAddedProvider` own the window as a
+        tunable rather than as a migration.
+
+        The two rows here straddle a cutoff **the case chooses**, which is
+        the whole point: both were written in the same transaction and no
+        clock inside the statement could tell them apart.
+        """
+        await repository.upsert_many(
+            [
+                item(source_id, "inside", title_id=title_id, added_at=YESTERDAY),
+                item(source_id, "outside", title_id=other_title_id, added_at=LONG_AGO),
+            ]
+        )
+
+        rows = await repository.list_recently_added(since=WINDOW_START)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_an_undated_item_is_not_recently_added(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """`added_at` is nullable, and a file a source cannot date is not
+        evidence that it arrived this week.
+
+        `added_at >= :since` is NULL -- and therefore not true -- for such a
+        row, so the exclusion is free. Asserted anyway, because the free
+        version and a deliberate `COALESCE(added_at, last_seen_at)` "fix"
+        differ by exactly this case: under the COALESCE every undated row in
+        the library joins Recently Added on the night of the first walk that
+        saw it.
+        """
+        await repository.upsert_many(
+            [
+                item(source_id, "dated", title_id=title_id, added_at=YESTERDAY),
+                item(source_id, "undated", title_id=other_title_id, added_at=None),
+            ]
+        )
+
+        rows = await repository.list_recently_added(since=WINDOW_START)
+
+        assert [row.title_id for row in rows] == [title_id]
+
+    async def test_recently_added_respects_its_limit(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        series_title_id: uuid.UUID,
+    ) -> None:
+        """A shelf, not a changelog. The three titles are minted in ascending
+        id order and added in ascending recency, so id order and recency
+        order are exact reverses -- which is what makes a `LIMIT` pushed
+        inside the `DISTINCT ON` return the two *oldest* arrivals rather than
+        the two newest, and what the outer sort then cannot recover.
+        """
+        for index, identifier in enumerate((title_id, other_title_id, series_title_id)):
+            await repository.upsert_many(
+                [
+                    item(
+                        source_id,
+                        f"limit-{index}",
+                        title_id=identifier,
+                        added_at=WINDOW_START + timedelta(days=index + 1),
+                    )
+                ]
+            )
+
+        rows = await repository.list_recently_added(since=WINDOW_START, limit=2)
+
+        assert [row.title_id for row in rows] == [series_title_id, other_title_id]
+
+    async def test_recently_added_spans_every_source(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        other_source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """No `user_id` and no `source_id`: availability is household-wide,
+        so this is the one provider whose output is identical for every
+        member of the household and for every source it owns.
+
+        Worth an assertion rather than a comment, because the natural place
+        to reach for a scope is the very next method along on this port --
+        every other statement here is per-source.
+        """
+        await repository.upsert_many([item(source_id, "a", title_id=title_id, added_at=YESTERDAY)])
+        await repository.upsert_many(
+            [item(other_source_id, "b", title_id=other_title_id, added_at=RUN_AT)]
+        )
+
+        rows = await repository.list_recently_added(since=WINDOW_START)
+
+        assert [row.title_id for row in rows] == [other_title_id, title_id]

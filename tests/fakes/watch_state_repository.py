@@ -56,6 +56,8 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
+from pydantic import AwareDatetime
+
 from usher.domain.enums import WatchStateOrigin
 from usher.domain.ids import new_id
 from usher.domain.watch import WatchState
@@ -214,6 +216,36 @@ class FakeWatchStateRepository(WatchStateRepository):
         return [
             RecentWatch(by_state[state.id], state.last_played_at, state.play_count)
             for state in _recency_ordered(list(newest.values()))[:limit]
+        ]
+
+    async def list_rediscoverable(
+        self, user_id: uuid.UUID, *, before: AwareDatetime, limit: int = 24
+    ) -> list[RecentWatch]:
+        # The filter is `played AND last_played_at < before`; `play_count` is
+        # the ORDERING and deliberately not a predicate -- as a filter it
+        # returns nothing on a freshly-walked deployment, because
+        # `played AND play_count = 0` is how "history unknown" is spelled.
+        #
+        # The `last_played_at is None` guard is written out rather than
+        # relying on a comparison: in SQL `last_played_at < :before` is NULL
+        # and therefore not true for an undatable state, and a fake that
+        # substituted a sentinel would include exactly the rows the real one
+        # excludes.
+        rows = [
+            state
+            for state in self._states.values()
+            if state.user_id == user_id
+            and state.played
+            and state.title_id is not None
+            and state.last_played_at is not None
+            and state.last_played_at < before
+        ]
+        rows.sort(key=lambda state: state.title_id or _NO_EPISODE, reverse=True)
+        rows = _recency_ordered(rows)
+        rows.sort(key=lambda state: state.play_count, reverse=True)
+        return [
+            RecentWatch(state.title_id or _NO_EPISODE, state.last_played_at, state.play_count)
+            for state in rows[:limit]
         ]
 
     async def list_needing_history(
