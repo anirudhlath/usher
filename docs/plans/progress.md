@@ -1226,3 +1226,225 @@ it for `%` and the shipped config goes 33.3 → 141.5 ms p50 at identical recall
 **Obliges**: no Meilisearch (boundary call 7). **Two-tier suggest — btree prefix (p50 0.6 ms /
 p95 1.0 ms / max 10 ms, 44 MB, 0.559 s build) on every keystroke, trigram debounced behind it —
 owned by M9** in PRD 09.
+
+## ✅ M6 Tasks 27–28 — the PRD/ADR pass and the milestone verification (2026-08-03)
+Branch `milestone/m6-search`, 30 commits `41763f3..1035b47`. **NOT merged — the controller merges.**
+**Final counts: 2433 passed, 5 skipped (1835 unit + 4 skipped / 598 integration + 1 skipped —
+reconciled by addition, not accepted); 7 import contracts; mypy clean over 311 files; ruff clean
+over 322; migration head `fc6d2b81a794`; image 356 MB.** The 5 skips are all capability-flag skips,
+which is the sanctioned form: 3 in `job_queue_contract`/`source_adapter_contract`, 1 in
+`suggest_index_contract` ("this implementation cannot cap its candidate set"), 1 in
+`search_index_contract` ("this implementation expresses the whole filter vocabulary").
+
+**⚠️ THE PLAN SAYS TWO MIGRATIONS AND THREE SHIPPED.** `fa2b6c1e9d30` (extensions, the wrapper, the
+generated column, GIN `fastupdate=off`, trigram), `fb4e0a7d2c15` (`title_embeddings`,
+`title_neighbors`, HNSW), **and `fc6d2b81a794`** (drop the leftover `public.stg_*` tables that
+Task 22's `CREATE TEMP TABLE` fix orphans). Up → `downgrade base` → up **all clean**; after
+`downgrade base` only `alembic_version` remains and the three extensions stay installed, which is
+the decision `fa2b6c1e9d30`'s own docstring makes with a sentence: `DROP EXTENSION vector` fails
+while `title_embeddings.embedding` exists and the `CASCADE` form drops the column silently.
+Second `upgrade head` from base is clean, 17 tables.
+
+### Mutation sweep: 61 mutations, 50 killed, 11 survived, 0 HUNG, 0 DID-NOT-RUN
+Run in place against the **whole** 2,433-case suite, `__pycache__` cleared and
+`PYTHONDONTWRITEBYTECODE=1` before the sweep, `cp` backups and never `git checkout --`, target
+required to appear exactly once, wall-clock bound 420 s against a 69.6 s baseline.
+**All four of Task 28's headline mutations died on the cases the plan named**, blast radius measured
+without `-x`: the collapsed `setweight` classes → `test_a_name_match_outranks_an_overview_match`
+(1 case); RRF as score addition → `test_fusion_produces_an_order_neither_input_produced` **and**
+`test_fusion_does_not_add_scores_from_different_scales` (2); a missing vector as zeros →
+`test_a_title_with_no_vector_is_absent_from_semantic_results_not_last` (**4** — the largest blast
+radius in the sweep); the refusal made a skip → 1.
+
+**⚠️ THE HARNESS SCORED A BROKEN MUTATION AS A KILL, AND `ast.parse` IS WHY.** The refusal-as-skip
+mutation was first spelled with `continue`, which is **not** in a loop there. `ast.parse` **accepts**
+`'continue' not properly in loop` — that is raised by the *compile* stage — so the dry run passed,
+the suite died at collection in 1 s, and the harness recorded `KILLED` by
+`tests/integration/test_admin_sources.py`. Caught by reading the log, not by the rule. The validator
+is now `compile(source, path, "exec")`, and the runner additionally scores
+`ERROR collecting` + `SyntaxError` as `BROKEN-MUTATION`. **This is trap rule 3 failing in a way the
+rule as written does not cover**, and it is the same family as the zsh word-splitting trap M4 hit.
+Second harness lesson: killing the sweep with SIGTERM **skips the `finally`** and leaves the tree
+mutated. The `cp` backup is what recovered it; `git checkout --` would have been the M5 Group F
+disaster again.
+
+**⚠️ A MUTATION MUST BE THE CHANGE THE PLAN NAMES, NOT A CHANGE THAT HAPPENS TO BREAK THE
+STATEMENT.** `updated_at = now()` "dropped" was first spelled as a *replacement* with an assignment
+already in the `DO UPDATE` clause — a duplicate `SET`, i.e. a SQL error — and scored a false KILL
+against a mutation the plan names as equivalent. Re-run as an actual deletion it **SURVIVED**, as
+the plan predicted.
+
+**A SURVIVOR THE PLAN DID NOT NAME, AND IT IS A REAL COVERAGE GAP — NOW CLOSED.**
+`test_the_port_does_not_ask_callers_to_apply_a_query_prefix` read `inspect.getdoc(Embedder)` only.
+The deleted clause originally lived on the *class* docstring, so the guard was written against where
+it happened to be rather than where it could go: restoring "callers are responsible for any
+query-side instruction prefix" on **`Embedder.embed`** — the more natural place, since `embed` is
+the method the instruction is about — **survived all 2,433 cases**. The guard now scans all five
+docstrings on the port; re-run, the same mutation is KILLED. This is the −0.066 MRR condition, the
+one CLAUDE.md already calls "the one a future contributor is most likely to reintroduce".
+
+**A NAMED SURVIVOR WAS KILLED, AND THE PLAN'S REASONING ABOUT IT WAS STALE.** Task 12 predicted
+`stored.model_name == self._embedder.model_name` would survive "because `FakeEmbedder` has one model
+name", and told the reviewer not to strengthen the fake. It is killed outright by
+`test_a_model_swap_re_embeds_a_title_whose_text_did_not_change`, which seeds two model names without
+touching the fake. Same shape as M5's `propagate = False`: recorded so nobody reads the kill as
+evidence the fake was strengthened. Task 22's `pg_temp`-qualified `DROP` was also open and is
+**covered**, by `test_a_leftover_public_staging_table_cannot_serialise_two_enqueues`.
+
+**The eleven survivors, each equivalent with its argument.** Named by the plan and surviving *for the
+stated reason*: GiST-for-GIN (GiST serves `%` too, so no plan-shape test can distinguish them — the
+choice rests on the gate's 33.6 ms vs 198.1 ms, not on the suite); `raiseload=True` removed
+(`_to_domain` never touches the deferred column, so the N+1 it prevents cannot be observed until
+something does); `updated_at = now()` deleted (no consumer reads it; kept for the operator
+diagnosing a backfill); `_load_embedder` hoisted above the `setdefault` (the env read happens
+*inside* the import, which is why the ordering is a comment rather than a test);
+`ts_rank_cd`→`ts_rank` (both honour `setweight`; the cover-density difference needs a multi-term
+query with the terms far apart and no case seeds one); `relaxed_order`→`strict_order` (both return
+10/10 rows on this fixture; the 0.508-vs-0.100 recall difference is invisible to it);
+`SimilarityService`'s own self-guard (the repository's `WHERE` is the one that matters — the fake is
+deliberately not strengthened to kill it); and migration `fc6d2b81a794`'s drop loop emptied (a fresh
+database has no leftover `public.stg_*` to drop, so the loop is a no-op wherever the suite runs).
+**Re-verified rather than trusted, and the code's own claim held**: the two `row_number()` window
+tiebreaks and the lexical lane's inner `ORDER BY … t.id` each survive **alone** — the window reads an
+input the inner `ORDER BY` has already totally ordered — and removing **both from the lexical lane at
+once** KILLS `test_tied_scores_are_broken_deterministically_and_survive_a_rewrite`, exactly as
+`adapters/search/postgres.py`'s comment says. Three survivors, one property, covered.
+
+**⚠️ ONE PLAN DEFECT WORTH CARRYING: the milestone's headline refusal property is guarded by exactly
+one case in 2,433, and it is not the one the plan named.** The plan expects
+`test_a_title_whose_document_is_degenerate_stops_matching_the_backfill` to kill it; what shipped
+under that intent is `test_a_refused_title_leaves_the_backfill_after_one_pass`, whose own docstring
+says it writes the refused row **directly** because "this case is about the *predicate*". So it
+cannot see a service-side skip at all. The behaviour *is* covered — by the unit case
+`test_a_degenerate_title_is_written_with_a_null_embedding_rather_than_skipped` — but by one case,
+for the bug this project has already shipped once.
+
+### Clean-checkout smoke test: PASS, no findings
+`git clone` to a fresh directory, `cp .env.example .env`, one `USHER_SECRET_KEY`, nothing else.
+**M5's hazard does not reproduce**: `uv run pytest` from the clean checkout is **2433 passed,
+5 skipped** — identical to the working tree, against M5's `1637 passed / 461 errors`. `uv sync`,
+`alembic upgrade head` (driven by `.env` alone, no exported variables), and **every entry point**:
+`usher --help`, `sync-status`, `bootstrap-status`, `index`, `search`, `suggest`, `similar`, all
+answering. The `USHER_COMPOSE_*` namespace is doing its job — 46 `USHER_*` + 2 `OTEL_*` lines in
+`.env.example`, and `Settings` (`extra="forbid"`) accepts the file whole.
+
+**THE EMBEDDING EXTRA IS GENUINELY OPTIONAL, PROVED END TO END RATHER THAN ASSERTED.** The clean
+checkout ran a bare `uv sync` — **`fastembed` absent** — and with two synthetic titles seeded:
+full-text `usher search "vacuum"` ranked the *name* match 0.8235 above the *overview* match 0.4118
+(the milestone's central retrieval claim, live, outside a test); `usher suggest` answered;
+`--mode semantic` **refused with a sentence** rather than crashing ("semantic search needs an
+embedding model; this deployment has none"); `--mode fused` narrowed to full-text and **said which**;
+`usher index --backfill` wrote 2 jobs; and `usher work --once` logged "no embedding model
+configured; index jobs will not be claimed" **once**, ran **0 jobs**, and left
+`queue index pending=2 / parked jobs: 0` — pending, not parked, which is the guard working.
+
+### Container and compose
+**⚠️ THE PLAN'S OWN SIZE COMMAND GIVES THE WRONG NUMBER ON THIS HOST, BY 4.2×.** Docker 29.2.1 uses
+the containerd snapshotter, under which `docker image inspect --format '{{.Size}}'` returns the
+**compressed** content size — **84.2 MB** — while `docker images` returns the uncompressed one. The
+figure comparable to M1's 332 MB is **356 MB** (venv 133 MB): **+24 MB, +7.2%**, and M6 added **no
+runtime dependency at all** (`fastembed` is `[project.optional-dependencies]` only), so that is base
+drift and `src/` growth. **The image ships WITHOUT the extra and that is what the compose stack
+pulls.** Built with `--extra embedding` for comparison: **607 MB** (venv 314 MB), **+251 MB, and no
+torch** — against ADR-0022's counterfactual of ~5 GB for `sentence-transformers`. Runs as
+`uid=1000(usher)`, no `uv`, no compiler.
+`docker compose config` renders **48** `USHER_*`/`OTEL_*` keys against M5's 39 — **+9, exactly M6's
+nine new settings** (47 `Settings` fields + `USHER_COMPOSE_HOST_PORT`). Verified *inside* the running
+container with `printenv`, not just in the rendered config: 48, including all nine of
+`USHER_EMBEDDING_*`/`USHER_SEARCH_*` and `USHER_WORKER_ENABLED`. `environment:` still overrides only
+the four keys the topology owns. Stack up, both containers healthy, `/health/ready` →
+`{"status":"ready","checks":{"database":true,"migrations":true},"lanes":{"push":[],"worker":true}}`.
+
+### The other gates
+**Network guard, seventh consecutive milestone, both halves in the same environment**: the whole
+suite under `PYTHONPATH=/tmp/netguard` is **2433 passed, 5 skipped, zero blocks**, with
+`[netguard] installed` printed by the module itself in that run, and
+`socket.getaddrinfo('huggingface.co', 443)` raising `RuntimeError: NETWORK BLOCKED` in the same
+environment — `huggingface.co` this time, because the opt-in `EmbedderContract` driver is the first
+thing here that would reach for a model.
+**The two guards Task 28 names were planted, both directions, and both fire.** `JobKind`'s member set
+pins `INDEX`. The 1:1 assertion, spelled `columns - DERIVED_COLUMNS == model_fields`, fails on an
+undeclared new column *and* on a name added to `DERIVED_COLUMNS` that `Title` also models.
+**Import contract 7 was verified by planting the import it forbids**, not by reading it: a
+`from usher.adapters.search.postgres import PostgresSearchIndex` in `usher/services/search.py` takes
+`7 kept, 0 broken` → **`4 kept, 3 broken`** (contract 7 directly, plus 1 and 3 through the indirect
+chain into `usher.db`). `allow_indirect_imports = true` is present, for contract 6's reason.
+**Link check `OK`** over `docs/prd/` + `CLAUDE.md` + `README.md`, 37 files — the scoping the
+prd-maintenance rule fixed at M5, still green with three new ADRs and seven touched PRD files.
+**`test_no_third_party_data.py` 22 passed**: the gate built its typo set from real catalog titles and
+**committed none of it** — the measurement is in the docs, the rows are not.
+
+### ⚠️ FOUND BY THIS STEP, NOT IN THE PLAN: `titles.popularity` — and the gate's own headline is half wrong
+The gate recorded "`titles.popularity` is NULL on all 1,271,138 rows — **nothing in `src/` writes it
+but TMDb enrichment**", and `adapters/search/postgres.py:752` now ships that sentence. **The second
+clause is REFUTED, measured.** `PostgresBulkCatalogRepository.link_crosswalk`
+(`db/repositories/bulk.py:495`) writes `popularity = COALESCE(m.popularity, t.popularity)` from
+`tmdb_ids`, reached by `usher bootstrap --phase crosswalk|all` (`cli.py:147` →
+`services/bootstrap.py:295`), and `ports/repository.py:318` documents that write explicitly.
+Reproduced against a real `pgvector/pgvector:pg17` with the shipped statement run verbatim: a
+**skeleton** title went `popularity IS NULL → popularity = 0`. The gate saw 100% NULL because its
+catalog was `title.basics` + `title.ratings` only — **the IMDb phase, not `--phase all`.** M2's own
+live run linked **291,737 of 1,271,138** titles, so a full bootstrap would leave roughly **23%**
+carrying a popularity, most of it written onto skeletons.
+
+**And the partially-populated catalog is the case nobody has measured, and it is worse for the
+suggest box than either extreme.** `ORDER BY dist ASC, popularity DESC NULLS LAST, vote_count DESC
+NULLS LAST, id ASC` makes popularity a **hard key above `vote_count`**, and `tmdb_ids.popularity` is
+`NOT NULL DEFAULT 0` with `adapters/bulk/tmdb_ids.py:181` defaulting a missing key to `0.0`. So a
+crosswalk-linked skeleton carrying `popularity = 0.0` sorts **above** an unlinked title with 500,000
+IMDb votes — which is the "hand the box to whichever skeleton the scan reached first" failure the
+`NULLS LAST` comment says it prevents, reintroduced from the other side. The gate's measured
+`vote_count` win (**+4.2 overall / +8.3 on the 2–4 band**) was taken on a catalog where the new key
+was **never contested**, i.e. at 100% NULL. **M7 should re-measure at ~23%, or make the ordering
+`COALESCE(popularity, 0) = 0` -aware.**
+
+**Two smaller items in the same family.** `ix_titles_popularity` is `WHERE popularity IS NOT NULL`
+and is read by **nothing in `src/`** — no statement in `db/repositories/` or `services/` orders by
+`titles.popularity` at all — while `ports/repository.py:319` justifies it as what "gives M4's
+enrichment queue a real ordering". An index with a documented consumer that does not exist. And
+`SearchService._popularity_term`'s docstring says NULL popularity is "most of 1,271,138 rows"; on a
+bootstrap-only catalog it is **all** of them.
+
+**What is NOT affected, checked rather than assumed.** `SearchService._blend` is correct at every
+population fraction: `_popularity_term` returns `None` (never `0.0`) and `_blend` drops an absent
+signal from the numerator **and** the denominator, so an all-NULL catalog collapses the blend to
+relevance+owned renormalised. Pinned by `test_an_unknown_popularity_is_not_a_popularity_of_zero`, and
+both mutations against it are killed. `SimilarityService` never reads popularity at all.
+
+### What M7 inherits
+| M7 gets | From |
+|---|---|
+| `SimilarityService` + `title_neighbors`, so a similarity row is a lookup rather than a computation | Task 21 |
+| a blend written as a **sum of weighted terms over an explicit signal list** — a third signal is a term and a weight, in both `SearchService` and `SimilarityService` | boundary call 8 |
+| a **stored generated** search document, so filling weight class B the day `Credit` lands is a migration, not a rewrite | boundary calls 2/3, ADR-0020 |
+| `title_search_names` deliberately **not** built — it is the migration that adds aliases and people, and M7 is the milestone that has them | boundary call 3 |
+| a keyset cursor on `TitleRepository`, which nothing had (`list_unmatched`'s `OFFSET`: 43.7 ms at 0, 388.9 ms at 1,126,574) | Task 9 |
+| the staging small-batch/`TEMP` fix, so a per-title enqueue is not a table-level lock on the hot path | Task 22 |
+| a **named, owned** MovieLens tag-genome obligation instead of five documents assuming it exists | Task 27 |
+| the embedder as an **optional** extra, with a worker that never claims work it cannot run — proved end to end above | ADR-0022 |
+
+**What M7 does NOT get, named rather than implied:** no `GET /titles/{id}/similar` (M9's, boundary
+call 1); no query expansion (boundary call 6 — the seam is `SearchService.search`'s query string);
+no `Person`/`Credit`/`Collection`/`Image`, which M7 itself owns; no `search_queries` table, assigned
+to M9 whole because three of its seven columns need a client to fill them; no measured GPU embedding
+throughput; and **no automatic `title_neighbors` refresh** — nothing runs `usher similar --rebuild`
+for you, and that is the milestone's one honest freshness gap, written down as a gap.
+
+**⏳ Still open, inherited as open:** the two-tier suggest (btree prefix + debounced trigram),
+**owned by M9** in PRD 09 — the gate's only obligation; real *typed* queries as opposed to
+synthetically mutated ones (`search_queries`, M9's); multi-typo queries, out of reach by
+construction at `_MAX_DISTANCE = 2`; non-Latin scripts, untested; the head-to-head against
+Meilisearch/Typesense, deliberately not built; whether an *enriched* catalog changes any gate number
+— every one of them came from a bootstrap-only catalog; and GPU embedding throughput.
+**PRD-vs-code disagreements Task 27 catalogued and marked in place rather than deleting:** PRD 05's
+similarity route and PRD 07's search endpoints (present tense for routes M6 did not add — M9's);
+PRD 07's `semantic=` bool against a three-valued `SearchMode`; PRD 05's query expansion (M8);
+PRD 04's Phase 4, whose two halves belong to different milestones (MovieLens → M7; embeddings
+shipped, population corrected to `enrichment_state <> 'skeleton'`); PRD 02's relationship block
+naming four tables that do not exist, and `curated_rows` unmarked; PRD 01's repository tree listing
+a `jobs/` package and an `adapters/llm/` that were never built, and a concurrency table whose last
+three rows name numbers that exist nowhere — **there is no semaphore in `src/` and embedding has no
+lane of its own**; PRD 08's two TOML rows that will not become settings.
+
+**Merge readiness: no unfixed finding.** The one repository change this step made is the strengthened
+`Embedder` docstring guard, written because the sweep found the gap. Everything else is recorded.

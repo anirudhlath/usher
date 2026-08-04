@@ -191,14 +191,45 @@ Every configuration measured, same 2,993 cases:
 
 - **`titles.popularity` is NULL on all 1,271,138 rows, so the suggest
   statement's popularity ordering was inert and the tiebreak was `id ASC`.**
-  Nothing in `src/` writes that column but TMDb enrichment, and boundary call
-  4's premise is that the enriched tier is 2k–10k titles — so on any fresh
-  deployment "ordered by popularity" ordered by insertion order. The shipped
-  code's own comment said "roughly 60% of the catalog is NULL-popularity
-  skeletons"; it is **100%**. Adding `vote_count DESC NULLS LAST` under
-  popularity — a column the bootstrap fills, 538,937 rows — is worth **+4.2
-  points overall and +8.3 on the 2–4 band at unchanged latency** and shipped
-  with this run. This is the one shipped default the gate changed.
+  Boundary call 4's premise is that the enriched tier is 2k–10k titles — so on
+  the measured deployment "ordered by popularity" ordered by insertion order.
+  The shipped code's own comment said "roughly 60% of the catalog is
+  NULL-popularity skeletons"; on that catalog it is **100%**. Adding
+  `vote_count DESC NULLS LAST` under popularity — a column the bootstrap fills,
+  538,937 rows — is worth **+4.2 points overall and +8.3 on the 2–4 band at
+  unchanged latency** and shipped with this run. This is the one shipped
+  default the gate changed.
+
+  **"Nothing in `src/` writes that column but TMDb enrichment" was part of this
+  finding and is REFUTED — corrected 2026-08-03 by M6's Task 28.**
+  `PostgresBulkCatalogRepository.link_crosswalk`
+  (`db/repositories/bulk.py:495`) writes
+  `popularity = COALESCE(m.popularity, t.popularity)` from `tmdb_ids`, reached
+  by `usher bootstrap --phase crosswalk|all` (`cli.py:147`), and
+  `ports/repository.py:318` documents that write. Reproduced against real
+  Postgres with the shipped statement run verbatim: a **skeleton** title went
+  `popularity IS NULL → popularity = 0`. The gate's catalog was 100% NULL
+  because it was bootstrapped `title.basics` + `title.ratings` only — **the
+  IMDb phase, not `--phase all`.** M2's live run linked **291,737 of
+  1,271,138** titles, so a full bootstrap leaves roughly **23%** carrying a
+  popularity, most of it on skeletons. **The partially-populated catalog is the
+  case nobody has measured and it is worse than either extreme**: popularity is
+  a *hard* key above `vote_count`, and `tmdb_ids.popularity` is
+  `NOT NULL DEFAULT 0`, so a crosswalk-linked skeleton at `0.0` sorts **above**
+  an unlinked title with 500,000 votes — the exact "whichever skeleton the scan
+  reached first" failure `NULLS LAST` is there to prevent, from the other side.
+  The +4.2/+8.3 win was measured where the new key was never contested. M7 owns
+  re-measuring it; `adapters/search/postgres.py:752` still carries the
+  uncorrected sentence, deliberately left for that change.
+  Two smaller items in the same family: **`ix_titles_popularity` is read by
+  nothing in `src/`** — no statement anywhere orders by `titles.popularity` —
+  though `ports/repository.py:319` justifies it as what "gives M4's enrichment
+  queue a real ordering"; and `SearchService._popularity_term`'s docstring says
+  "most of 1,271,138 rows" where a bootstrap-only catalog is all of them.
+  **`SearchService._blend` is unaffected and was checked rather than assumed**:
+  `_popularity_term` returns `None`, never `0.0`, and `_blend` drops an absent
+  signal from numerator *and* denominator, so an all-NULL catalog collapses to
+  relevance+owned renormalised. `SimilarityService` never reads popularity.
 - **The candidate cap is not the binding constraint and the `levenshtein`
   re-rank never drops the true title.** Tracing 250 misses per configuration
   back to the stage that lost them: at the shipped configuration **63.6% fell
@@ -1714,6 +1745,59 @@ Three were, before the harness started requiring that a run actually ran.
 Same family as the venv-shebang trap: the sweep proves nothing and looks
 like it proved something.
 
+**M6's sweep: 61 mutations, 50 killed, 11 survived, 0 HUNG, 0 DID-NOT-RUN —
+and three harness findings, one of which defeats the plan's own trap rule.**
+
+- **`ast.parse` is NOT sufficient to dry-run a mutation, and `compile()` is.**
+  `ast.parse` **accepts** `continue` outside a loop — that error is raised by
+  the *compile* stage — so a mutation spelled with a stray `continue` passed
+  the dry run, the suite died at collection in 1 s, and the harness scored it
+  `KILLED` against an unrelated file. Caught by reading the log, not by the
+  rule. Validate with `compile(source, path, "exec")`, and additionally score
+  `ERROR collecting` + `SyntaxError` as `BROKEN-MUTATION`. This is trap rule 3
+  ("a run that collected zero tests is DID-NOT-RUN") failing in a way the rule
+  as written does not cover: the run *did* collect, it collected an error.
+- **SIGTERM skips the `finally`, so a killed sweep leaves the tree mutated.**
+  `pkill` on the harness mid-mutation left `ports/search.py` modified. The `cp`
+  backup is what recovered it — `git checkout --` would have been M5 group F's
+  disaster again. A sweep harness needs a signal handler, or the operator needs
+  to check `git status` after every interruption.
+- **A mutation must be the change the plan names, not a change that happens to
+  break the statement.** "`updated_at = now()` dropped from the `DO UPDATE`
+  clause" spelled as a *replacement* with an assignment already in that clause
+  is a duplicate `SET`, i.e. a SQL error, and scored a false kill against a
+  mutation the plan correctly calls equivalent. Deleted properly, it survives.
+
+**And one real coverage gap the sweep found, now closed.**
+`test_the_port_does_not_ask_callers_to_apply_a_query_prefix` read
+`inspect.getdoc(Embedder)` only. The deleted clause happened to live on the
+*class* docstring, so the guard was written against where it was rather than
+where it could go: restoring "callers are responsible for any query-side
+instruction prefix" on **`Embedder.embed`** — the more natural place, since
+`embed` is the method the instruction is about — survived all 2,433 cases. The
+guard now scans every docstring on the port. Same shape as the `sitecustomize`
+installation proof: a guard scoped to one surface of two reads as coverage.
+
+**Two plan predictions about survivors were wrong, in opposite directions.**
+Task 12's `stored.model_name == …` was predicted to survive "because
+`FakeEmbedder` has one model name", with an instruction not to strengthen the
+fake — it is **killed** by
+`test_a_model_swap_re_embeds_a_title_whose_text_did_not_change`, which seeds
+two model names without touching the fake. And the milestone's **headline**
+refusal mutation is killed by exactly **one** case in 2,433, and it is not the
+one the plan named: `test_a_refused_title_leaves_the_backfill_after_one_pass`
+writes the refused row *directly* (its own docstring says the case is about the
+predicate), so it cannot see a service-side skip at all; the cover is the unit
+case `test_a_degenerate_title_is_written_with_a_null_embedding_rather_than_skipped`.
+
+**The RRF tiebreak trio is three survivors and one property, verified rather
+than trusted.** Removing `top.id` from either lane's `row_number()` window, or
+`t.id` from the lexical lane's inner `ORDER BY`, each survives the whole suite
+— the window reads an input the inner `ORDER BY` has already totally ordered.
+Removing **both from the lexical lane at once** kills
+`test_tied_scores_are_broken_deterministically_and_survive_a_rewrite`, exactly
+as `adapters/search/postgres.py`'s own comment claims.
+
 **Two `IngestService` defects are invisible to every port fake and only real
 Postgres catches them.** Skipping `resolve_seasons` or `resolve_episodes` and
 trusting the freshly-minted UUIDv7 leaves all 24 unit cases green — a dict has
@@ -2457,6 +2541,21 @@ curl -sf http://localhost:8100/health/ready   # {"status":"ready","checks":{"dat
 docker compose down                           # data/ bind mounts survive -- not removed by down, -v or not
 ```
 
+**Measure the image with `docker images`, NOT with
+`docker image inspect --format '{{.Size}}'`** — Docker 29.2.1 on this host uses
+the containerd snapshotter, under which that field is the **compressed** content
+size and understates the image by ~4.2x. Measured 2026-08-03 on the same build:
+`inspect` **84.2 MB** against `docker images` **356 MB**. The M1 figure of
+332 MB is an uncompressed one, so 356 MB is the like-for-like comparison —
+**+24 MB / +7.2% across five milestones**, and M6 added no runtime dependency at
+all. Task 28's own command in the M6 plan is the `inspect` form, which would
+have reported a 4x improvement that did not happen.
+**The shipped image does NOT install the embedding extra, and that is what the
+compose stack pulls.** Built with `uv sync --frozen --no-dev --extra embedding`
+for comparison it is **607 MB** (venv 314 MB against 133 MB), **+251 MB and
+still no torch** — against ADR-0022's counterfactual of roughly 5 GB for
+`sentence-transformers`.
+
 `USHER_COMPOSE_HOST_PORT` (`.env`, defaults to `8100`) is the *host*-side
 publish port for `usher`'s container port `8000` — deliberately not a bare
 `"8000:8000"`, since this host already publishes an unrelated container's
@@ -2725,8 +2824,12 @@ uv run python scripts/measure_ingest.py --scale 1126674
 ```
 
 Verified working as of M6 — the catalog is answerable, and **no HTTP route
-was added** (boundary call 1; M9 owns the routers). Suite is **2432 passed +
-5 skipped**, 7 import contracts:
+was added** (boundary call 1; M9 owns the routers). Suite is **2433 passed +
+5 skipped** (1,835 unit + 4 skipped / 598 integration + 1 skipped, reconciled
+by addition), 7 import contracts, migration head `fc6d2b81a794` — M6 ships
+**three** migrations, not the two its plan names, because Task 22's
+`CREATE TEMP TABLE` fix orphans the old `public.stg_*` tables and
+`fc6d2b81a794` drops them:
 
 ```bash
 uv run usher index                        # model, stale count, refused count -- reads only

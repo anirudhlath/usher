@@ -33,12 +33,30 @@ def test_the_port_does_not_ask_callers_to_apply_a_query_prefix() -> None:
     instruction looks like. The port still records that the clause existed
     -- nothing here is deleted silently -- but in reported speech, since a
     verbatim quotation is byte-for-byte the thing being guarded against.
+
+    **Every docstring on the port, not just the class's.** Found by M6's
+    Task 28 sweep: the clause originally lived on the *class* docstring, so
+    a guard reading only `inspect.getdoc(Embedder)` was written against
+    where it happened to be rather than where it could go. Restoring it on
+    `Embedder.embed` -- which is the more natural place, since `embed` is
+    the method the instruction is about -- survived the whole 2,433-case
+    suite. A guard scoped to one surface of two is a guard that reads as
+    coverage.
     """
-    documentation = inspect.getdoc(Embedder) or ""
-    assert "callers are responsible" not in documentation.casefold()
+    surfaces = {
+        "Embedder": inspect.getdoc(Embedder) or "",
+        "Embedder.embed": inspect.getdoc(Embedder.embed) or "",
+        "Embedder.model_name": inspect.getdoc(Embedder.model_name) or "",
+        "Embedder.dimension": inspect.getdoc(Embedder.dimension) or "",
+        "Embedder.aclose": inspect.getdoc(Embedder.aclose) or "",
+    }
+    for where, documentation in surfaces.items():
+        assert "callers are responsible" not in documentation.casefold(), (
+            f"the deleted query-prefix instruction is back, on {where}"
+        )
     # ASCII hyphen only: ruff's RUF001 rejects a U+2212 MINUS SIGN literal,
     # so the typographic spelling cannot reach the port docstring either.
-    assert "-0.0663" in documentation
+    assert "-0.0663" in surfaces["Embedder"]
 
 
 def test_the_normalisation_contract_names_the_operator_it_is_for() -> None:
