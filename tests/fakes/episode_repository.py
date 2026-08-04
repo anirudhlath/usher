@@ -36,6 +36,7 @@ statements instead.
 
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 
 from usher.domain.episode import Episode, Season
 from usher.ports.repository import BulkWriteResult, EpisodeRepository
@@ -63,10 +64,36 @@ class FakeEpisodeRepository(EpisodeRepository):
     def __init__(self) -> None:
         self._seasons: dict[_SeasonKey, Season] = {}
         self._episodes: dict[_EpisodeKey, Episode] = {}
+        # `next_up` reads watch state, and `EpisodeRepository` has no write
+        # path for it. Rather than give the port one it does not want, the
+        # subclass writes here through `set_watch_state` and the Postgres
+        # subclass merges through `PostgresWatchStateRepository` instead.
+        #
+        # Keyed on `(user_id, target_id)` where `target_id` is *either* an
+        # episode id or a series' `title_id`, which is deliberately the shape
+        # of the real `watch_states` table: a row carries one or the other,
+        # never both (`ck_watch_states_exactly_one_target`). Keeping them in
+        # one map is what leaves `test_a_series_level_watch_state_does_not_
+        # finish_the_series` something to catch -- two separate maps would
+        # make the mistake it names structurally unspellable here, and a case
+        # that cannot fail is not coverage.
+        self._watch: dict[tuple[uuid.UUID, uuid.UUID], tuple[bool, datetime | None]] = {}
         self.calls = 0
 
     def reset_calls(self) -> None:
         self.calls = 0
+
+    def set_watch_state(
+        self,
+        user_id: uuid.UUID,
+        target_id: uuid.UUID,
+        *,
+        played: bool,
+        last_played_at: datetime | None = None,
+    ) -> None:
+        """A test-double affordance, not a port method -- the same shape
+        `reset_calls` is."""
+        self._watch[(user_id, target_id)] = (played, last_played_at)
 
     async def upsert_seasons(self, seasons: Sequence[Season]) -> BulkWriteResult:
         self.calls += 1
@@ -128,6 +155,40 @@ class FakeEpisodeRepository(EpisodeRepository):
             if stored is not None:
                 found[key] = stored.id
         return found
+
+    async def next_up(
+        self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, Episode]:
+        # One increment, whatever the batch: the real one is one statement,
+        # and `test_next_up_costs_one_call_however_many_series_are_asked_about`
+        # is what makes a per-series loop visible at the unit level at all.
+        self.calls += 1
+        wanted = set(title_ids)
+        if not wanted:
+            return {}
+        # The high-water mark: the greatest (season, episode) among played
+        # episodes, never the most recently played one. Specials excluded.
+        marks: dict[uuid.UUID, tuple[int, int]] = {}
+        for one in self._episodes.values():
+            if one.title_id not in wanted or one.season_number <= 0:
+                continue
+            state = self._watch.get((user_id, one.id))
+            if state is None or not state[0]:
+                continue
+            position = (one.season_number, one.episode_number)
+            if position > marks.get(one.title_id, (-1, -1)):
+                marks[one.title_id] = position
+        result: dict[uuid.UUID, Episode] = {}
+        for one in sorted(
+            self._episodes.values(), key=lambda e: (e.season_number, e.episode_number)
+        ):
+            mark = marks.get(one.title_id)
+            if mark is None or one.season_number <= 0:
+                continue
+            if (one.season_number, one.episode_number) <= mark:
+                continue
+            result.setdefault(one.title_id, one)
+        return result
 
     async def list_for_title(self, title_id: uuid.UUID) -> tuple[list[Season], list[Episode]]:
         seasons = sorted(

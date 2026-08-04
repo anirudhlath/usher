@@ -1131,6 +1131,60 @@ class EpisodeRepository(ABC):
         """
 
     @abstractmethod
+    async def next_up(
+        self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, Episode]:
+        """The next episode to watch for each of many series, in one round
+        trip.
+
+        **"Next" is the episode immediately after the household's high-water
+        mark** -- the greatest `(season_number, episode_number)` among played
+        episodes of that series -- not the first gap. A skipped episode stays
+        skipped: nothing in PRD 06 or PRD 07 can dismiss a card, so a
+        gap-seeking implementation makes one skipped episode this household's
+        Next Up tonight and every night after.
+
+        **The mark is a position, not an instant.** Never
+        `ORDER BY last_played_at DESC LIMIT 1`: a household that finishes
+        season three and rewatches the pilot is not asking for S01E02, and
+        `last_played_at` is nullable on nearly every walk-sourced row
+        (ADR-0014), which makes a recency-keyed mark arbitrary rather than
+        merely wrong.
+
+        **Absent, not null, in three cases**: nothing played (a series never
+        started has a *first* episode, not a next one -- and "S01E01 of
+        everything unstarted" is the whole unwatched library wearing a
+        personalised row's title); the mark is the finale (the series is
+        finished; **never wrap to S01E01**); and no episodes at all. A key
+        missing from the mapping means "nothing to say", which is the answer
+        PRD 06 asks a provider to give.
+
+        **Season 0 is excluded on both sides.** Specials are out-of-band by
+        construction, and `(0, n) < (1, 1)` is an artefact of the numbering
+        rather than a claim about viewing order -- so one watched special
+        must not make this say "continue" about a show nobody has started,
+        and a special must never be offered as the next chapter.
+
+        **Reads watch state keyed on `episode_id` only.** A series' own
+        `title_id`-keyed row is the whole show, and a source can set it
+        (Emby's "mark series watched"); an implementation that reads it has
+        no `(season, episode)` to position from and answers from whatever the
+        join degenerates to.
+
+        **Only `played` states move the mark.** A walk writes a row for every
+        item it sees, so on a full library nearly every episode has a
+        `watch_states` row and almost none are played -- without the
+        predicate the mark is the finale for every series at once and this
+        method goes silent across the whole library.
+
+        **One statement for every series asked about.** A per-series loop
+        returns the identical mapping and is the N+1 this method exists to
+        prevent -- the same argument `resolve_episodes` makes, and the reason
+        `NextUpProvider` must never reach for `list_for_title`, which returns
+        the whole tree (20,000 rows for the measured pathological series).
+        """
+
+    @abstractmethod
     async def list_for_title(self, title_id: uuid.UUID) -> tuple[list[Season], list[Episode]]:
         """Everything under one series, seasons then episodes, each ordered by
         its own numbering. Used by enrichment to decide what changed, and by

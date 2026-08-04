@@ -8,6 +8,7 @@ same batch is a real `ON CONFLICT DO UPDATE command cannot affect row a
 second time` unless the staging read is `SELECT DISTINCT ON`.
 """
 
+import re
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -17,14 +18,26 @@ import pytest_asyncio
 from sqlalchemy import Connection, Engine, event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.contract.episode_repository_contract import EpisodeRepositoryContract, episode, season
-from usher.db.repositories.episode import PostgresEpisodeRepository
+from tests.contract.episode_repository_contract import (
+    OTHER_SEEDED_KEYS,
+    SEEDED_KEYS,
+    EpisodeRepositoryContract,
+    EpisodeRepositoryNextUpContract,
+    MarkPlayed,
+    MarkSeriesPlayed,
+    episode,
+    season,
+    seed_series,
+)
+from usher.db.repositories.episode import _NEXT_UP, PostgresEpisodeRepository
 from usher.db.repositories.title import PostgresTitleRepository
+from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.domain.enums import TitleKind
 from usher.domain.episode import Episode
 from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
+from usher.ports.ingest import WatchStateMerge
 
 
 @pytest.fixture
@@ -71,7 +84,116 @@ async def other_season_id(session: AsyncSession, other_title_id: uuid.UUID) -> u
     return identifier
 
 
-class TestPostgresEpisodeRepository(EpisodeRepositoryContract):
+@pytest_asyncio.fixture
+async def user_id(session: AsyncSession) -> uuid.UUID:
+    identifier = new_id()
+    await session.execute(
+        text("INSERT INTO users (id, name) VALUES (:id, :name)"),
+        {"id": identifier, "name": f"user-{identifier}"},
+    )
+    return identifier
+
+
+@pytest_asyncio.fixture
+async def other_user_id(session: AsyncSession) -> uuid.UUID:
+    identifier = new_id()
+    await session.execute(
+        text("INSERT INTO users (id, name) VALUES (:id, :name)"),
+        {"id": identifier, "name": f"user-{identifier}"},
+    )
+    return identifier
+
+
+@pytest_asyncio.fixture
+async def series_id(session: AsyncSession) -> uuid.UUID:
+    series = Title(kind=TitleKind.SERIES, name="Next Up Series", sort_name="Next Up Series")
+    await PostgresTitleRepository(session).add(series)
+    return series.id
+
+
+@pytest_asyncio.fixture
+async def other_series_id(session: AsyncSession) -> uuid.UUID:
+    series = Title(kind=TitleKind.SERIES, name="Second Series", sort_name="Second Series")
+    await PostgresTitleRepository(session).add(series)
+    return series.id
+
+
+@pytest_asyncio.fixture
+async def seeded(
+    repository: PostgresEpisodeRepository, series_id: uuid.UUID
+) -> dict[tuple[int, int], uuid.UUID]:
+    return await seed_series(repository, series_id, SEEDED_KEYS)
+
+
+@pytest_asyncio.fixture
+async def other_seeded(
+    repository: PostgresEpisodeRepository, other_series_id: uuid.UUID
+) -> dict[tuple[int, int], uuid.UUID]:
+    return await seed_series(repository, other_series_id, OTHER_SEEDED_KEYS)
+
+
+def _merge(
+    user_id: uuid.UUID,
+    *,
+    title_id: uuid.UUID | None = None,
+    episode_id: uuid.UUID | None = None,
+    played: bool,
+    last_played_at: datetime | None,
+) -> WatchStateMerge:
+    return WatchStateMerge(
+        user_id=user_id,
+        title_id=title_id,
+        episode_id=episode_id,
+        position_seconds=0 if played else 120,
+        played=played,
+        runtime_seconds=2700,
+        observed_at=datetime(2026, 7, 31, 3, 0, tzinfo=UTC),
+        play_count=1 if played else 0,
+        last_played_at=last_played_at,
+    )
+
+
+@pytest.fixture
+def mark_played(session: AsyncSession, user_id: uuid.UUID) -> MarkPlayed:
+    """Real watch state, written through the real repository.
+
+    The seam is the fixture rather than the port: `EpisodeRepository` has no
+    write path for watch state and must not grow one just so a contract case
+    can arrange its fixture.
+    """
+
+    async def _mark(episode_id: uuid.UUID, *, last_played_at: datetime | None = None) -> None:
+        await PostgresWatchStateRepository(session).merge_from_source(
+            [_merge(user_id, episode_id=episode_id, played=True, last_played_at=last_played_at)]
+        )
+
+    return _mark
+
+
+@pytest.fixture
+def mark_in_progress(session: AsyncSession, user_id: uuid.UUID) -> MarkPlayed:
+    async def _mark(episode_id: uuid.UUID, *, last_played_at: datetime | None = None) -> None:
+        await PostgresWatchStateRepository(session).merge_from_source(
+            [_merge(user_id, episode_id=episode_id, played=False, last_played_at=last_played_at)]
+        )
+
+    return _mark
+
+
+@pytest.fixture
+def mark_series_played(session: AsyncSession, user_id: uuid.UUID) -> MarkSeriesPlayed:
+    """The row Emby writes when a user marks a whole show watched: keyed on
+    the series' `title_id`, with no episode at all."""
+
+    async def _mark(series_id: uuid.UUID) -> None:
+        await PostgresWatchStateRepository(session).merge_from_source(
+            [_merge(user_id, title_id=series_id, played=True, last_played_at=None)]
+        )
+
+    return _mark
+
+
+class TestPostgresEpisodeRepository(EpisodeRepositoryContract, EpisodeRepositoryNextUpContract):
     """Every case in `EpisodeRepositoryContract`, against real Postgres."""
 
 
@@ -286,3 +408,68 @@ async def test_resolve_seasons_costs_one_statement_for_a_whole_page(
     )
     assert len(resolved) == 40
     assert len(statement_counter) == 1, f"40 lookups cost {len(statement_counter)} statements"
+
+
+async def test_next_up_costs_one_statement_however_many_series_are_asked_about(
+    repository: PostgresEpisodeRepository,
+    user_id: uuid.UUID,
+    series_id: uuid.UUID,
+    other_series_id: uuid.UUID,
+    seeded: dict[tuple[int, int], uuid.UUID],
+    other_seeded: dict[tuple[int, int], uuid.UUID],
+    mark_played: MarkPlayed,
+    statement_counter: list[str],
+) -> None:
+    """`NextUpProvider` asks about every series the household has started, so
+    a per-series loop is one round trip per started series -- and it returns
+    the identical mapping, which is why nothing about the result can see it.
+
+    `list_for_title` is the method a loop would reach for and it returns the
+    whole tree: 20,000 rows for the measured pathological series, four
+    million to produce two hundred cards.
+    """
+    await mark_played(seeded[(1, 1)])
+    await mark_played(other_seeded[(1, 1)])
+    statement_counter.clear()
+
+    await repository.next_up(user_id, [series_id, other_series_id])
+
+    assert len(statement_counter) == 1, statement_counter
+
+
+async def test_next_up_reads_the_episode_key_index_and_does_not_scan_episodes(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    series_id: uuid.UUID,
+    seeded: dict[tuple[int, int], uuid.UUID],
+) -> None:
+    """Scoped to the stage with an ordering to serve, per the standing rule:
+    `uq_episodes_title_season_episode` must appear and `Seq Scan on episodes`
+    must not. Nothing is asserted about the rest of the plan, because an
+    eight-episode fixture seq-scans whatever it is given and an unscoped
+    assertion would be a claim about the fixture.
+
+    This is also the case that justifies **not** adding an index in Task 17.
+    Both spellings of the comparison return identical rows, so nothing about
+    a result can tell them apart.
+
+    **The third assertion is the one with teeth, and the first two are not
+    enough -- measured.** A correctly hand-expanded `OR` still names
+    `uq_episodes_title_season_episode` (the *mark* side uses it either way)
+    and still shows no `Seq Scan` under `enable_seqscan = off`, so that
+    mutation survived both of them. What separates the spellings is *where*
+    the comparison lands: as an `Index Cond` it bounds the scan, and as a
+    `Filter` it reads the whole series and discards. At catalog scale --
+    32,409 series, 999,827 episodes, 200 probed -- that is 15.7 ms against
+    134.1 ms with a `Seq Scan` over every episode in the library, for the
+    identical 200 rows.
+    """
+    await session.execute(text("SET LOCAL enable_seqscan = off"))
+    result = await session.execute(
+        text(f"EXPLAIN {_NEXT_UP}"),
+        {"user_id": user_id, "title_ids": [series_id]},
+    )
+    plan = "\n".join(row[0] for row in result)
+    assert "uq_episodes_title_season_episode" in plan, plan
+    assert "Seq Scan on episodes" not in plan, plan
+    assert re.search(r"Index Cond:.*ROW\(season_number, episode_number\)", plan), plan

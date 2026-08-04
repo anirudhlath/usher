@@ -169,7 +169,7 @@ drops any that build empty, and returns them.
 | Provider | Fires when | Emits |
 |---|---|---|
 | `ContinueWatchingProvider` | Anything in progress | 1 row, always ranked first |
-| `NextUpProvider` | Series with an unwatched next episode | 1 row |
+| `NextUpProvider` | Series with an unwatched next episode — **started, never merely owned**; see below | 1 row |
 | `RecentlyAddedProvider` | New items in the window | 1 row |
 | `BecauseYouWatchedProvider` | Recent high-engagement titles | 1 row *per seed* |
 | `FranchiseProvider` | ≥ 2 owned titles in a collection — **movies only** | 1 row per franchise |
@@ -190,6 +190,40 @@ filters `kind = 'movie'` itself rather than trusting its caller: the three
 available fallbacks — grouping by name prefix, by `networks`, or by Emby's
 `TmdbCollection` provider-id key — each produce a populated, plausible, wrong
 row. See [02](02-data-model.md)'s `Collection` section.
+
+**"Next" is a high-water mark, not a first gap, and three cases this table
+left open are settled with it.** M7's `EpisodeRepository.next_up` is the read.
+
+- *The mark is the greatest `(season_number, episode_number)` among played
+  episodes, and the next episode is the one after it.* The alternative — the
+  earliest unplayed episode following the earliest played one — tells a
+  household that skipped S02E05 to watch S02E05 tonight, and tomorrow, and
+  every night after, because nothing here or in [07](07-api-surface.md) can
+  dismiss a card. High-water costs the opposite failure (an episode watched
+  out of order *ahead* of the household's position moves the mark and skips
+  what lies between), and that one is recoverable by watching the skipped
+  episodes where the gap semantic's is not recoverable at all.
+- *The mark is a position, never `ORDER BY last_played_at DESC`.* A household
+  that finishes season three and rewatches the pilot is not asking for S01E02
+  — and `last_played_at` is NULL on nearly every walk-sourced row
+  ([ADR-0014](decisions/0014-absent-is-not-zero.md)), which would make a
+  recency-keyed mark arbitrary rather than merely wrong.
+- *A series with nothing played emits **nothing**.* "Fires when: series with an
+  unwatched **next** episode" reads as though it might mean a first episode
+  too; it does not. A series never started has a *first* episode, not a next
+  one, and at 32,409 series "S01E01 of everything unstarted" is a Next Up row
+  holding the household's entire unwatched television library — a generic row
+  wearing a personalised row's title, which is exactly the failure the rule
+  above names. Never-started series belong to Recently Added and to M9's
+  `/browse`.
+- *A finished series emits **nothing**, and never wraps to the pilot.*
+- *Specials — season 0 — are excluded on both sides.* One watched Christmas
+  special must not make this say "continue" about a show nobody has started,
+  and a special must never be offered as the next chapter. `(0, n) < (1, 1)`
+  is an artefact of how the numbering is spelled rather than a claim about
+  viewing order: a special has no defined position in the narrative sequence,
+  which is what season 0 *means*. This document said nothing about specials
+  before M7.
 
 **"Anything in progress" is `NOT played AND position_seconds > 0`, ordered
 `last_played_at DESC NULLS LAST`, and both halves of each are decisions this
