@@ -35,6 +35,7 @@ never constructs a Pydantic model), that gap mattered.
 it by reading `pg_constraint` directly.
 """
 
+import asyncio
 import re
 import uuid
 from typing import cast
@@ -47,6 +48,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.integration.conftest import run_alembic
 from usher.db.base import Base, build_engine
 from usher.domain.ids import new_id
 
@@ -304,3 +306,135 @@ async def _insert_series_tree(
         ),
         {"id": episode_id, "title_id": title_id, "season_id": season_id},
     )
+
+
+async def test_the_row_read_indexes_carry_the_clauses_that_make_them_work(
+    session: AsyncSession,
+) -> None:
+    """`compare_metadata` does not diff a partial index's predicate or a
+    btree's null ordering, so `test_migration_matches_the_orm_metadata` is
+    green against an index missing either -- and an index missing either is
+    not an error, it just silently stops serving the query it was built for.
+
+    `ix_watch_states_user_recent` without `NULLS LAST` serves the filter and
+    cannot supply the order, so Postgres replaces an incremental sort with a
+    full one and Continue Watching sorts the household's whole per-user set
+    on every home screen. The rows it returns are identical, which is why
+    nothing else can see it.
+
+    `ix_media_items_recently_added` without its `WHERE` is a larger index
+    over every row including the review queue and every retracted file.
+    Correct answers, wrong size, and no test would notice.
+
+    Asserted off `pg_indexes.indexdef` -- what Postgres will actually do --
+    rather than off `Base.metadata`, the same discipline
+    `test_search_schema.py` applies to `confdeltype`.
+    """
+    for name, expected in (
+        (
+            "ix_watch_states_user_recent",
+            "(user_id, played, last_played_at DESC NULLS LAST)",
+        ),
+        (
+            "ix_media_items_recently_added",
+            "(added_at DESC NULLS LAST) WHERE (available AND (title_id IS NOT NULL))",
+        ),
+    ):
+        result = await session.execute(
+            text("SELECT indexdef FROM pg_indexes WHERE indexname = :name"), {"name": name}
+        )
+        definition = result.scalar_one_or_none()
+        assert definition is not None, f"{name} is declared on the model and not in the database"
+        assert expected in str(definition), definition
+
+
+async def test_the_dropped_watch_state_index_is_gone(session: AsyncSession) -> None:
+    """`ix_watch_states_user_played` is replaced rather than supplemented,
+    because `(user_id, played, last_played_at DESC NULLS LAST)` is a strict
+    prefix superset -- anything the narrow one could serve, the wide one
+    serves.
+
+    Two indexes where one suffices is a write cost on every merge of every
+    nightly walk -- up to 1,126,789 states -- for no read. Asserted rather
+    than assumed because a migration that creates the new one and forgets
+    the drop passes every other case in this suite.
+    """
+    result = await session.execute(
+        text("SELECT count(*) FROM pg_indexes WHERE indexname = 'ix_watch_states_user_played'")
+    )
+    assert result.scalar_one() == 0
+
+
+async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) -> None:
+    """`downgrade base` then `upgrade head`, on a throwaway database, with
+    the index set compared before and after.
+
+    **This exists because a mutation survived without it.** Deleting the
+    `op.create_index("ix_watch_states_user_played", ...)` from `ff`'s
+    `downgrade()` passes every other case in this file, and it would pass
+    forever: the session-scoped schema is built by one `upgrade head` and
+    never goes down, so an upgrade-only migration is green in a suite that
+    never reverses one. What it costs in production is a schema that is one
+    index short of where it started after a rollback -- and `watch_states`
+    is the table whose merge path runs a million times a night.
+
+    A throwaway database rather than the shared one, because
+    `downgrade base` drops every table and every other test in this run is
+    built on the schema it would take with it.
+
+    Deliberately compares the whole index set rather than the two indexes
+    this milestone touches: a downgrade that forgets *any* index is the same
+    defect, and naming only the new ones would make this case blind to the
+    next one.
+    """
+    admin = postgres_url.rsplit("/", 1)[0]
+    scratch = f"cycle_{uuid.uuid4().hex[:12]}"
+    engine = build_engine(f"{admin}/postgres")
+    try:
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text(f'CREATE DATABASE "{scratch}"'))
+    finally:
+        await engine.dispose()
+
+    url = f"{admin}/{scratch}"
+    try:
+        await asyncio.to_thread(run_alembic, url, "head")
+        before = await _index_set(url)
+
+        # One step back first, which is what an operator rolling back the
+        # last migration actually runs -- and the only state in which a
+        # forgotten `drop_index` is observable at all. Going straight to
+        # `base` drops the tables, and a table takes its indexes with it, so
+        # a downgrade that forgets to drop one is invisible from there.
+        await asyncio.to_thread(run_alembic, url, "-1")
+        stepped = await _index_set(url)
+        assert "ix_watch_states_user_recent" not in stepped
+        assert "ix_media_items_recently_added" not in stepped
+        assert "ix_watch_states_user_played" in stepped
+
+        await asyncio.to_thread(run_alembic, url, "base")
+        await asyncio.to_thread(run_alembic, url, "head")
+        after = await _index_set(url)
+        assert after == before, sorted(before ^ after)
+        assert "ix_watch_states_user_recent" in after
+        assert "ix_media_items_recently_added" in after
+        assert "ix_watch_states_user_played" not in after
+    finally:
+        engine = build_engine(f"{admin}/postgres")
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)'))
+        await engine.dispose()
+
+
+async def _index_set(url: str) -> set[str]:
+    engine = build_engine(url)
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.execute(
+                text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
+            )
+            return {row[0] for row in rows}
+    finally:
+        await engine.dispose()

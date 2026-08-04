@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from alembic.command import upgrade
+from alembic.command import downgrade, upgrade
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -98,6 +98,32 @@ def _upgrade_head(database_url: str) -> None:
     get_settings.cache_clear()
     try:
         upgrade(Config(str(_ALEMBIC_INI)), "head")
+    finally:
+        for key in list(os.environ):
+            if key.startswith(("USHER_", "OTEL_")):
+                del os.environ[key]
+        os.environ.update(saved)
+        get_settings.cache_clear()
+
+
+def run_alembic(database_url: str, target: str) -> None:
+    """`alembic upgrade`/`downgrade` against an arbitrary database.
+
+    Exposed beside `_upgrade_head` so a test can drive the chain in *both*
+    directions against a throwaway database, which the session-scoped schema
+    cannot survive.
+    """
+    saved = {key: value for key, value in os.environ.items() if key.startswith(("USHER_", "OTEL_"))}
+    for key in saved:
+        del os.environ[key]
+    os.environ["USHER_DATABASE_URL"] = database_url
+    os.environ["USHER_SECRET_KEY"] = "0" * 32
+    get_settings.cache_clear()
+    try:
+        if target == "base" or target.startswith("-"):
+            downgrade(Config(str(_ALEMBIC_INI)), target)
+        else:
+            upgrade(Config(str(_ALEMBIC_INI)), target)
     finally:
         for key in list(os.environ):
             if key.startswith(("USHER_", "OTEL_")):

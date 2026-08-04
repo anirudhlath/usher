@@ -262,28 +262,46 @@ async def test_a_batch_costs_the_same_number_of_statements_however_big_it_is(
     assert small == large, f"{small} statements for 5 merges, {large} for 495"
 
 
-@pytest.mark.xfail(reason="ix_watch_states_user_recent lands in Task 17's migration", strict=True)
-async def test_the_in_progress_statement_has_no_sort_node_once_the_index_exists(
+async def test_the_in_progress_statement_takes_its_recency_order_from_the_index(
     session: AsyncSession, user_id: uuid.UUID
 ) -> None:
     """Scoped to the stage that has an ordering to serve, per the standing
-    rule: this asserts the absence of a `Sort` **above the index scan on
-    `watch_states`**, not the absence of a `Seq Scan` anywhere in the plan. An
-    unscoped "no Seq Scan" assertion fails on a three-row fixture for a plan
-    that is correct at a hundred thousand rows, and a suite that has to
-    disable that assertion has learned nothing.
+    rule: this asserts that `ix_watch_states_user_recent` supplies the
+    recency ordering, not that no `Seq Scan` appears anywhere in the plan. An
+    unscoped assertion fails on a three-row fixture for a plan that is
+    correct at a million rows, and a suite that has to disable an assertion
+    has learned nothing.
 
     `SET LOCAL enable_seqscan = off` is what makes the claim observable at
     all on a near-empty table -- the same technique
     `test_a_fuzzy_lookup_uses_the_trigram_index` uses one file over.
+    `enable_bitmapscan = off` goes with it, and not for tidiness: a bitmap
+    index scan discards ordering **by construction**, so with it available
+    the planner picks one on a small table and the plan carries a full
+    `Sort` whatever the index looks like. Measured -- this case passed alone
+    and failed inside the full integration run for exactly that reason,
+    which is the "assertion about the fixture rather than about the code"
+    failure the standing rule names. With both off, the only question left
+    is whether the index can supply the order, which is the question.
 
-    The wrong implementation this kills is the one Task 14 exists to
-    prevent: an index declared `(user_id, played, last_played_at DESC)`
-    without `NULLS LAST`. That index serves the *filter* and cannot supply
-    the *order*, so Postgres inserts a `Sort` -- which is invisible in every
-    behavioural case in this file, because the answer is correct either way.
+    **`Presorted Key: last_played_at` is the assertion, and "no Sort node" --
+    which is what this case was first written as -- is not achievable.** The
+    query orders by `last_played_at DESC NULLS LAST, id DESC` and the index
+    carries only the first of those, so Postgres always needs an
+    `Incremental Sort` above it for the `id` tiebreak. That node is the index
+    *working*: `Presorted Key` is Postgres saying it consumed the index's own
+    order and only sorted within ties.
+
+    Which is exactly what separates the right index from the wrong one. An
+    index declared `(user_id, played, last_played_at DESC)` without
+    `NULLS LAST` cannot supply a `DESC NULLS LAST` order at all, so there is
+    no presorted key, the incremental sort becomes a **full** one, and
+    Continue Watching sorts the household's entire per-user set on every home
+    screen -- while returning byte-identical rows, which is why no
+    behavioural case in this file can see it.
     """
     await session.execute(text("SET LOCAL enable_seqscan = off"))
+    await session.execute(text("SET LOCAL enable_bitmapscan = off"))
     result = await session.execute(
         text(
             "EXPLAIN SELECT id FROM watch_states "
@@ -294,4 +312,5 @@ async def test_the_in_progress_statement_has_no_sort_node_once_the_index_exists(
     )
     plan = "\n".join(row[0] for row in result)
     assert "ix_watch_states_user_recent" in plan, plan
-    assert "Sort" not in plan, plan
+    assert "Presorted Key: last_played_at" in plan, plan
+    assert "Incremental Sort" in plan, plan

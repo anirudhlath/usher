@@ -100,11 +100,13 @@ class MediaItemRow(Base):
         Boolean, nullable=False, default=True, server_default=text("true")
     )
 
-    # Deferred, not designed away: no index on added_at/last_seen_at/
-    # available (or titles.collection_id in title.py). media_items is ~94k
-    # rows at the 300k-title benchmark scale, so a sort or filter on any of
-    # these is a few ms without one -- revisit for M9 if/when catalog size
-    # or query patterns change that.
+    # `added_at` is no longer deferred -- M7's Recently Added row reads it and
+    # `ix_media_items_recently_added` below serves it -- and neither is
+    # `titles.collection_id`, which got its index in fd7c3a5b9e12 alongside
+    # the foreign key whose referential action needs it. What remains
+    # deferred is `last_seen_at`/`available` on their own: the one statement
+    # that filters on them is the availability sweep, and `ix_media_items_
+    # sweep` already covers it as `(source_id, available, last_seen_at)`.
     __table_args__ = (
         UniqueConstraint("source_id", "external_id", name="uq_media_items_source_external"),
         Index("ix_media_items_title_id", "title_id"),
@@ -142,6 +144,51 @@ class MediaItemRow(Base):
         # `UPDATE` seek straight to the stale tail rather than filter the
         # whole source.
         Index("ix_media_items_sweep", "source_id", "available", "last_seen_at"),
+        # Recently Added (M7). Partial on both halves of the query's own
+        # predicate, because at 1.1M rows the unmatched review queue and every
+        # retracted file are dead weight for this one read -- and the partial
+        # form is what makes the index 24 MB instead of covering the table.
+        #
+        # `DESC NULLS LAST` matches the statement's ordering, and an item a
+        # source cannot date is excluded from the row by three-valued logic
+        # rather than by a predicate, so it has no business in the index
+        # either.
+        #
+        # **The sweep pays for the `available` half, and that was measured
+        # rather than assumed.** `mark_unseen_unavailable`'s whole job is to
+        # set `available = false`, so every row it retracts leaves this index.
+        # At 1,119,097 rows with 200 stale the sweep's UPDATE is 2.560 ms with
+        # this index present and 2.675 ms without: no cost above noise. Had it
+        # moved materially, the non-partial `(added_at DESC NULLS LAST)` --
+        # larger, less selective here, untouched by the sweep -- was the
+        # alternative.
+        #
+        # What it buys, measured the same way: _RECENTLY_ADDED over a 30-day
+        # window goes 47.639 -> 38.260 ms, which understates it, because the
+        # unindexed plan spends two extra parallel workers to get there. With
+        # `max_parallel_workers_per_gather = 0`, which is the state of a box
+        # already serving concurrent home screens, the same statement is
+        # 171.0 ms without and 16.5 ms with.
+        #
+        # The index bounds the scan and cannot supply the order: `DISTINCT ON
+        # (title_id)` forces its own ORDER BY to lead with `title_id`, which
+        # discards the `added_at` ordering, so no LIMIT is pushed down and the
+        # win decays as the window widens (0.7 ms at one day, 92.4 ms at
+        # ninety).
+        #
+        # `compare_metadata` is blind to a partial predicate specifically --
+        # measured: dropping `postgresql_where` from the migration while
+        # leaving it here keeps `test_migration_matches_the_orm_metadata`
+        # green. (It is *not* blind to the null ordering, which is the half
+        # of that assumption that turned out wrong.) So this clause has
+        # exactly one guard, and it is
+        # `test_the_row_read_indexes_carry_the_clauses_that_make_them_work`,
+        # asserting on `pg_indexes.indexdef`.
+        Index(
+            "ix_media_items_recently_added",
+            text("added_at DESC NULLS LAST"),
+            postgresql_where=text("available AND title_id IS NOT NULL"),
+        ),
         CheckConstraint("width IS NULL OR width >= 0", name="ck_media_items_width_non_negative"),
         CheckConstraint("height IS NULL OR height >= 0", name="ck_media_items_height_non_negative"),
         CheckConstraint(

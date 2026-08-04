@@ -110,7 +110,47 @@ class WatchStateRow(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "title_id", name="uq_watch_states_user_title"),
         UniqueConstraint("user_id", "episode_id", name="uq_watch_states_user_episode"),
-        Index("ix_watch_states_user_played", "user_id", "played"),
+        # Continue Watching, and it REPLACED ix_watch_states_user_played
+        # rather than joining it. That index was declared in M1 for a query
+        # nobody wrote: all seven shipped watch_states statements were
+        # EXPLAINed at 1,119,097 rows before the swap and not one used it --
+        # _NEEDING_HISTORY leads with `played` and leaves `user_id` unbound,
+        # and the getters and both merge branches drive off the single-column
+        # title_id/episode_id indexes with `user_id` as a filter. This is a
+        # strict prefix superset of it, so nothing it could serve is lost,
+        # and two indexes where one suffices is a write cost on every merge
+        # of every nightly walk for no read.
+        #
+        # `DESC NULLS LAST` is the correctness content, not the formatting.
+        # `last_played_at` is nullable because a walk's listing cannot
+        # determine it (ADR-0014); Postgres defaults a DESC sort to NULLS
+        # FIRST; and a DESC-NULLS-FIRST btree cannot supply
+        # `ORDER BY last_played_at DESC NULLS LAST` as an ordered scan. So
+        # without the spelled-out clause the index would serve the filter,
+        # the planner would fall back to a full Sort, and Continue Watching
+        # would sort the household's whole per-user set on every home screen
+        # while an index sat there looking like it was helping.
+        #
+        # `compare_metadata` *does* diff this clause -- measured by mutation
+        # in both directions, against the plan's assumption that it does not
+        # -- so `test_migration_matches_the_orm_metadata` is one guard here.
+        # `test_the_row_read_indexes_carry_the_clauses_that_make_them_work`
+        # is the other, and it is the one that does not depend on which
+        # clauses a future Alembic happens to render: it reads
+        # `pg_indexes.indexdef`, i.e. what Postgres will actually do.
+        #
+        # Measured (`scripts/measure_rows.py --scale 1126674`): _IN_PROGRESS
+        # goes from a Parallel Seq Scan at 38.123 ms to an Index Scan under
+        # an Incremental Sort at 0.029 ms, touching 24 buffers.
+        # `list_rediscoverable` borrows it for its equality pair plus range
+        # and gains almost nothing (14.614 -> 13.864 ms), because its
+        # `ORDER BY play_count DESC` is a Sort no index here can serve.
+        Index(
+            "ix_watch_states_user_recent",
+            "user_id",
+            "played",
+            text("last_played_at DESC NULLS LAST"),
+        ),
         # uq_watch_states_user_title leads with user_id, so it can't serve a
         # lookup/delete keyed on title_id alone -- and once title_id is
         # RESTRICT (above), that FK's constraint check runs a lookup on
