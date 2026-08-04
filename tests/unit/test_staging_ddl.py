@@ -112,6 +112,20 @@ def test_every_staging_table_is_temporary_and_drops_at_commit() -> None:
     )
 
 
+# Staging tables introduced *after* `fc6d2b81a794`, which therefore have no
+# `public` leftover for it to drop -- no released version of usher ever ran a
+# `CREATE TABLE public.stg_people`.
+#
+# **An exception list, not a second copy of the rule**, and the distinction is
+# what keeps this guard sharp. The rule below still fails closed: a twelfth
+# staging table added with a DDL and no line *anywhere* is red. What this
+# permits is the one honest answer for a genuinely new table, and the
+# alternative is worse -- adding these three to `_LEFTOVER_STAGING_TABLES`
+# would edit an already-shipped migration so it drops tables that provably
+# cannot exist, which is a migration claiming a cleanup it never performed.
+_NEVER_EXISTED_IN_PUBLIC = {"stg_people", "stg_credits", "stg_collections"}  # M7
+
+
 def test_the_leftover_migration_names_every_staging_table() -> None:
     """Migration `fc6d2b81a794` drops the `public.stg_*` tables a release
     predating the temporary ones may have left behind, and it enumerates them
@@ -126,8 +140,13 @@ def test_the_leftover_migration_names_every_staging_table() -> None:
     here -- which would leave a permanent `public.stg_<new>` on every
     deployment that ever ran the old code.
     """
-    missing = {name for _, name, _ in _staging_ddls()} - set(_LEFTOVER_STAGING_TABLES)
+    missing = (
+        {name for _, name, _ in _staging_ddls()}
+        - set(_LEFTOVER_STAGING_TABLES)
+        - _NEVER_EXISTED_IN_PUBLIC
+    )
     assert not missing, (
         f"{sorted(missing)} stage in src/ but migration fc6d2b81a794 does not drop "
-        "the public leftover a pre-M6 release would have made"
+        "the public leftover a pre-M6 release would have made, and they are not "
+        "listed as post-dating it either"
     )

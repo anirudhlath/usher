@@ -118,7 +118,7 @@ class PersonRepositoryContract:
         assert len(set(resolved.values())) == 2
 
     async def test_a_person_is_updated_rather_than_duplicated_on_a_second_pass(
-        self, repository: PersonRepository
+        self, repository: PersonRepository, seeder: PersonHistorySeeder
     ) -> None:
         """Keyed on `tmdb_id`, not on `Person.id`. The derivation mints a
         fresh UUIDv7 per sighting exactly as ingest does for seasons, so an
@@ -129,6 +129,12 @@ class PersonRepositoryContract:
         `name = COALESCE(excluded.name, people.name)`, under which a corrected
         name is unfixable. `name` is `NOT NULL` and always supplied, so there
         is no null to preserve.
+
+        **That second half has to read the stored name back, and an earlier
+        version of this case did not.** It asserted the counts and the id
+        count only, both of which a COALESCEd `name` satisfies exactly --
+        measured, the mutation survived the whole suite. Counting rows cannot
+        see which value landed in them.
         """
         first = await repository.upsert_many([person(93_000_012, "Someone Invented")])
         again = await repository.upsert_many([person(93_000_012, "Someone Renamed")])
@@ -136,6 +142,7 @@ class PersonRepositoryContract:
         assert (again.inserted, again.updated) == (0, 1)
         resolved = await repository.resolve_tmdb_ids([93_000_012])
         assert len(resolved) == 1
+        assert (await seeder.stored(resolved[93_000_012])).name == "Someone Renamed"
 
     async def test_upsert_never_blanks_a_known_for_department(
         self, repository: PersonRepository, seeder: PersonHistorySeeder
@@ -210,8 +217,15 @@ class PersonRepositoryContract:
         second_film = await seeder.movie()
         for part in ("A Twin", "The Other Twin", "Their Double"):
             await seeder.credit(person_id=crowded, title_id=first_film, character=part)
-        for film in (first_film, second_film):
-            await seeder.credit(person_id=spread, title_id=film, character="A Detective")
+        # Two parts on the first film and one on the second, so B's DISTINCT
+        # count is 2 and its raw row count is 3. Without that asymmetry the
+        # two counts agree for B, and a `count(*)` in the SELECT list alone --
+        # with HAVING and ORDER BY left correct -- reports the wrong number
+        # while ordering and filtering perfectly. Measured: that mutation
+        # survived the whole suite when B had one credit per film.
+        await seeder.credit(person_id=spread, title_id=first_film, character="A Detective")
+        await seeder.credit(person_id=spread, title_id=first_film, character="Their Reflection")
+        await seeder.credit(person_id=spread, title_id=second_film, character="A Detective")
         await seeder.watched(user_id=user_id, title_id=first_film)
         await seeder.watched(user_id=user_id, title_id=second_film)
 

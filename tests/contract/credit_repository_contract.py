@@ -76,31 +76,40 @@ class CreditRepositoryContract:
         self,
         repository: CreditRepository,
         title_id: uuid.UUID,
-        lead_person: uuid.UUID,
         second_person: uuid.UUID,
         third_person: uuid.UUID,
+        other_person: uuid.UUID,
     ) -> None:
         """The wrong implementation this kills: `billing_order` dropped, so
         "top billed" becomes provider-JSON order -- the front matter's second
         named defect for this suite.
 
-        **Inserted in the wrong order deliberately.** This is the technique
+        **Inserted in the wrong order deliberately**, which is the technique
         the front matter names for `list_in_progress`: an implementation
-        ordering by insertion, or by `id` (UUIDv7 insertion order), is
-        *satisfied by a fixture seeded in the right order*, so the fixture
-        must not be. The lead is inserted last.
+        ordering by insertion, or by `id`, is *satisfied by a fixture seeded
+        in the right order*, so the fixture must not be.
+
+        **And the same trap applies to the tiebreak, one column over.** The
+        read's second key is `person_id`, and the fixture's people are created
+        in one order, so their UUIDv7s ascend in that order too -- which means
+        a naive seeding makes person-id order *equal* billing order and
+        `ORDER BY c.person_id` alone passes. Measured: that mutation survived
+        the whole suite. So the billing orders here are assigned **against**
+        the fixture's creation order -- the top-billed role goes to the person
+        created last -- and every wrong ordering this case names now produces
+        a different list.
         """
         await repository.replace_for_titles(
             [title_id],
             [
-                credit(title_id, third_person, billing_order=2),
-                credit(title_id, second_person, billing_order=1),
-                credit(title_id, lead_person, billing_order=0),
+                credit(title_id, second_person, billing_order=2),
+                credit(title_id, third_person, billing_order=1),
+                credit(title_id, other_person, billing_order=0),
             ],
         )
         listed = await repository.list_for_title(title_id, kind=CreditKind.CAST)
         assert [one.billing_order for one in listed] == [0, 1, 2]
-        assert listed[0].person_id == lead_person
+        assert [one.person_id for one in listed] == [other_person, third_person, second_person]
 
     async def test_a_null_billing_order_sorts_last(
         self,
