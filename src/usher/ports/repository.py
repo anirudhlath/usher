@@ -1027,6 +1027,35 @@ class SyncRunRepository(ABC):
         `sync-status`."""
 
 
+@dataclass(frozen=True, slots=True)
+class CachedPayload:
+    """One `raw_payloads` row, as a walk sees it.
+
+    Carries `kind` and `reference` rather than a `title_id`, because the table
+    has neither a `title_id` column nor a foreign key to `titles` (ADR-0016:
+    the cache is keyed `(provider, kind, reference)` and nothing else). The
+    caller resolves back to a title through that pair, and **the pair is the
+    whole key** -- ADR-0011: `tmdb_id` is unique per kind, and 26,968 measured
+    TMDb ids are live in both the movie and the series id space.
+
+    `id` is here so the caller can pass it back as `after`. It is deliberately
+    not a `title_id` in disguise.
+
+    Declared immediately above the port that returns it rather than beside
+    `NeighborSeed`/`StoredEmbedding`, because this module has no
+    `from __future__ import annotations` -- an abstract method's return
+    annotation is evaluated when the class body runs, so the name has to
+    already exist. That is also where `TitleEmbeddingUpsert` sits relative to
+    `TitleEmbeddingRepository`.
+    """
+
+    id: uuid.UUID
+    kind: str
+    reference: str
+    payload: dict[str, Any]
+    fetched_at: AwareDatetime
+
+
 class RawPayloadStore(ABC):
     """The provider response cache (PRD 02's `raw_payloads`).
 
@@ -1075,6 +1104,35 @@ class RawPayloadStore(ABC):
         """The compliance query: the oldest cache entry for a provider, which
         is what PRD 10's dashboard-5 panel plots against TMDb's 6-month
         ceiling. `None` when the provider has no entries at all."""
+
+    @abstractmethod
+    async def iterate(
+        self, provider: str, *, limit: int = 500, after: uuid.UUID | None = None
+    ) -> list[CachedPayload]:
+        """One page of this provider's cached payloads, oldest id first.
+
+        **A keyset cursor, not an offset**, for the reason `list_stale`'s is
+        one: `OFFSET` pagination is measured in this repository at 43.7 ms at
+        offset 0 and 388.9 ms at offset 1,126,574 -- linear per page, quadratic
+        to drain -- and a derivation's entire job is to walk a population to
+        exhaustion. Pass the last `id` of a page as `after` to get the next
+        one; an empty list means drained.
+
+        Ordered by `id`, which is the primary key and therefore a **total**
+        order. `fetched_at` is not: the INSERT arm's `server_default` is
+        `now()` = `transaction_timestamp()`, so every row a bootstrap
+        transaction writes shares one instant, and a page boundary inside that
+        group drops the rest of it with nothing to say so.
+
+        **Scoped by `provider`, and deliberately not by `kind`.** The
+        derivation needs both TMDb id spaces in one walk, and
+        `CachedPayload.kind` is what keeps them apart -- a signature that took
+        `kind` would invite two walks and a caller that forgot the second. It
+        is not scoped by freshness either: a payload outside `EnrichService`'s
+        window is still a payload, and refusing to derive from it would mean a
+        re-derivation that silently covered less of the catalog than the last
+        one.
+        """
 
 
 @dataclass(frozen=True, slots=True)
