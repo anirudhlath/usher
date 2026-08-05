@@ -175,9 +175,23 @@ so a slug-keyed rule couples the composer to the catalog.
 
 A provider returns nothing when it has nothing to say. The home service collects
 all proposals, sorts by score, applies diversity constraints (no three
-consecutive similarity rows; cap per family), builds the top N concurrently,
-drops any that build empty, and returns them.
+consecutive similarity rows; cap per family), builds the top N
+**sequentially**, drops any that build empty, and returns them.
 
+> **"Concurrently" was wrong and is corrected here rather than implemented**
+> ([09](09-roadmap.md)'s M7 boundary call 8). `AsyncSession` is explicitly not
+> safe for concurrent use — two coroutines awaiting on one session interleave
+> on one connection — so `asyncio.gather` over nine providers sharing a
+> request's session is a corruption, and one that *usually works*: two short
+> reads frequently complete, and the failure is an intermittent
+> `InvalidRequestError` or a result set attributed to the wrong query, under
+> load. The two escapes are worse at this scale — a session per row is nine
+> connections for one home screen, and a semaphore has no lane to belong to.
+> Every provider's query is a bounded local read;
+> `usher.home.compose.duration` and the per-provider `usher.row.build.duration`
+> breakdown are what turn revisiting this into a number rather than an
+> argument, and `usher home` measures it.
+>
 > **Built in M7 as `services/home.py`.** The diversity constraints are two
 > rules at two stages, and the split is deliberate: the **per-family cap** is
 > applied at *selection*, because it bounds how many rows get built; the **no

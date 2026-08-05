@@ -46,12 +46,46 @@ it *usually works*, which is how it ships. See boundary call 8;
 in-flight depth rather than on a comment.
 """
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+
+from opentelemetry import metrics, trace
 
 from usher.domain.rows import BuiltRow, RowFamily
 from usher.ports.rows import Row, RowContext, RowProvider, ScoredRow
 from usher.services.rows import ROW_PROVIDERS
+
+_meter = metrics.get_meter("usher.home")
+_tracer = trace.get_tracer("usher.home")
+
+# PRD 10's names, byte for byte. **A metric under a near-miss name is a
+# dashboard panel that is permanently empty, and nothing distinguishes it from
+# a healthy zero** -- the same warning `services/search.py` carries, and M4
+# found three instances of it in PRD 10's own table. The near misses this pair
+# invites are `usher.home.duration`, `usher.rows.build.duration` (plural) and
+# `usher.row.build.seconds`; none raises, and none fails a case asserting "a
+# histogram was recorded".
+_compose_duration = _meter.create_histogram(
+    "usher.home.compose.duration", unit="s", description="Wall time to compose a home screen"
+)
+# Labelled `provider`, and **never the row slug**. PRD 10's dashboard 4 wants
+# "home composition time broken down per row, which finds the one slow
+# provider" -- and `BecauseYouWatchedProvider` mints one slug per seed, so a
+# slug label's cardinality is the household's watch history and, in time, the
+# catalog. A label whose cardinality grows with the catalog is a metrics-backend
+# outage rather than a dashboard. Bounded at nine here; ten when M8 registers
+# `CuratedProvider`.
+_row_build_duration = _meter.create_histogram(
+    "usher.row.build.duration", unit="s", description="Wall time to build one row, by provider"
+)
+
+# `usher.cache.hits` / `usher.cache.misses` are **M9's** (PRD 10) and are
+# deliberately not declared here, in either direction: an unrecorded metric is
+# an empty panel, and a metric recorded a milestone before its dashboard is the
+# `search_queries` failure -- a shape fixed before anything has tried to fill
+# it. `usher home`'s cold/warm pair is this milestone's only measurement of the
+# cache, and it is a printed number rather than an instrument.
 
 # `_MAX_ROWS` and `_MAX_PER_FAMILY` are constants and constructor defaults, not
 # `Settings` fields. The mechanism exists (unlike the concurrency setting PRD
@@ -113,31 +147,52 @@ class HomeService:
 
     async def compose(self, ctx: RowContext) -> tuple[BuiltRow, ...]:
         """Propose, select, build sequentially, drop empties, order."""
-        candidates: list[_Candidate] = []
-        for provider in self._providers:
-            for proposal in await provider.propose(ctx):
-                candidates.append(_Candidate(provider=provider, proposal=proposal))
-        built: list[BuiltRow] = []
-        # **A `for`, not a `gather`.** See the module docstring and boundary
-        # call 8: two coroutines awaiting on one `AsyncSession` interleave on
-        # one connection, and the failure is an intermittent
-        # `InvalidRequestError` or a result set attributed to the wrong query,
-        # under load, after it has usually worked.
-        for candidate in self._select(candidates):
-            row = await self._build(ctx, candidate)
-            # Drops any that build empty -- and substitutes nothing. Padding
-            # the screen back to N is the "generic row" failure wearing the
-            # composer's clothes: the replacement is by construction the
-            # next-best-scoring thing rather than something this household has
-            # a reason to see.
-            if row.cards:
-                built.append(row)
-        return self._order(built)
+        started = time.perf_counter()
+        with _tracer.start_as_current_span("home.compose") as span:
+            candidates: list[_Candidate] = []
+            for provider in self._providers:
+                for proposal in await provider.propose(ctx):
+                    candidates.append(_Candidate(provider=provider, proposal=proposal))
+            built: list[BuiltRow] = []
+            # **A `for`, not a `gather`.** See the module docstring and
+            # boundary call 8: two coroutines awaiting on one `AsyncSession`
+            # interleave on one connection, and the failure is an intermittent
+            # `InvalidRequestError` or a result set attributed to the wrong
+            # query, under load, after it has usually worked.
+            for candidate in self._select(candidates):
+                row = await self._build(ctx, candidate)
+                # Drops any that build empty -- and substitutes nothing.
+                # Padding the screen back to N is the "generic row" failure
+                # wearing the composer's clothes: the replacement is by
+                # construction the next-best-scoring thing rather than
+                # something this household has a reason to see.
+                if row.cards:
+                    built.append(row)
+            screen = self._order(built)
+            span.set_attribute("usher.home.proposed", len(candidates))
+            span.set_attribute("usher.home.built", len(built))
+            span.set_attribute("usher.home.rows", len(screen))
+        _compose_duration.record(time.perf_counter() - started)
+        return screen
 
     async def _build(self, ctx: RowContext, candidate: _Candidate) -> BuiltRow:
-        """One row. A seam rather than an inlined `await`, because Task 30
-        hangs a span and a histogram on it and Task 31 a cache lookup."""
-        return await candidate.row.build(ctx)
+        """One row, timed and traced under its provider's own name.
+
+        `start_as_current_span` rather than `start_span`, so the row's span is
+        a *child* of the composition rather than a second root -- PRD 10's
+        nesting rule is what makes a trace answer "what did this request do"
+        instead of "what happened around then".
+        """
+        started = time.perf_counter()
+        with _tracer.start_as_current_span("row.build") as span:
+            span.set_attribute("usher.row.provider", candidate.provider.slug_prefix)
+            span.set_attribute("usher.row.slug", candidate.row.slug)
+            row = await candidate.row.build(ctx)
+            span.set_attribute("usher.row.cards", len(row.cards))
+        _row_build_duration.record(
+            time.perf_counter() - started, {"provider": candidate.provider.slug_prefix}
+        )
+        return row
 
     def _select(self, candidates: Sequence[_Candidate]) -> list[_Candidate]:
         """Pin, sort, cap, and take the top N.

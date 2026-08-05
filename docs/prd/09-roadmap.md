@@ -221,6 +221,44 @@ of it (a `vote_count` tiebreak in the suggest ordering, because
 follow-up has an owner below. A failed gate that is written down with its
 numbers is a closed item, not an open one.
 
+**M7's boundary calls are recorded as they are executed rather than in one
+pass at the end**, so a call is written down in the commit that makes it. The
+one below is the first to land; the rest arrive with the milestone's
+documentation task.
+
+8. **Rows build SEQUENTIALLY, and [06](06-rows-and-recommendations.md)'s
+   "builds the top N concurrently" is corrected rather than implemented.**
+   `AsyncSession` is explicitly not safe for concurrent use — two coroutines
+   awaiting on one session interleave on one connection — so `asyncio.gather`
+   over nine providers sharing the request's session is not a performance
+   choice, it is a corruption. **And it usually works**, which is how it
+   ships: two short reads frequently complete, and the failure is an
+   intermittent `InvalidRequestError` or a result set attributed to the wrong
+   query, under load, in production. The two ways out are both worse at this
+   scale: a session per row means nine connections for one home screen, i.e.
+   pool exhaustion at one concurrent user against a default pool; and a
+   semaphore has no lane to belong to ([01](01-architecture.md)'s concurrency
+   table has no lane for this, and [08](08-operations.md) already retracted
+   "concurrency per lane" as a setting because *"a setting cannot be added
+   ahead of the mechanism it would bound"*). Every provider's query is a
+   bounded local read.
+
+   **Pinned by a case rather than by a comment, and the case is about the
+   session rather than about the clock.** The repository's usual instrument —
+   measured intersection-over-union of wall-clock windows — is the *weaker*
+   one here, because `asyncio.gather` over coroutines that never suspend
+   produces N disjoint windows and would pass the assertion it exists to
+   kill. The assertion is instead on the shared handle's in-flight depth,
+   which is `AsyncSession`'s actual contract: one statement at a time. A
+   second case scans `services/home.py` for `gather`/`TaskGroup`/
+   `create_task`/`wait`, walking both `ast.Import` and `ast.ImportFrom` and
+   matching the bare name as well as the attribute — the first case is about
+   this implementation, the second about the next one.
+
+   `usher.home.compose.duration` and the per-provider
+   `usher.row.build.duration` are what turn revisiting this into a number
+   rather than an argument, and `usher home` is where the number is taken.
+
 ### The follow-up the gate obliges: a two-tier suggest, owned by M9
 
 **Owner: M9**, alongside the HTTP surface and the `search_queries` table,
