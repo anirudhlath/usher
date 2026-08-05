@@ -445,10 +445,76 @@ the one that gets missed:
 |---|---|
 | `curated_rows` | ⏳ Persisted LLM row output ([06](06-rows-and-recommendations.md)). **Does not exist yet** — M8 owns it, along with the `LLMClient` implementation that fills it |
 | `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, computed_at)`. A **batch artefact**, rebuilt rather than repaired, blending the two signals M6 has data for — embedding cosine plus genre and keyword Jaccard — and not the four [05](05-search-and-similarity.md) specifies. It is the one derived artefact in this schema with no per-row freshness predicate, and it carries a whole-artefact `computed_at` instead, on purpose ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)) |
-| `genome_scores` | ⏳ MovieLens tag-genome relevance vectors, where available. **Does not exist**: no importer, no phase, no table. Owned by M7 — see [09](09-roadmap.md) |
+| `genome_scores` | ✅ One title's MovieLens tag-genome vector: `(title_id, relevance halfvec(1128), genome_revision, computed_at)`. **One dense vector per title, not a tall `(title_id, tag_id, relevance)`** — see below |
 | `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats. One row per *attempt*, so the availability sweep can say which run last finished cleanly |
 | `jobs` | Priority work queue ([03](03-sources-and-sync.md)). A completed job's row is deleted, so there is no `done` status and the table's size is the outstanding work, not the work ever done |
 | `raw_payloads` | JSONB cache of **provider** responses, so reprocessing never refetches. Its `fetched_at` column is also what enforces TMDb's ≤6-month cache term — see [ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md), which is why there is no separate `provider_cache_meta` table and why source payloads are not stored here |
+
+### `genome_scores` is one dense vector per title, and the tall shape is refused with a measurement
+
+An earlier draft of the row above implied a tall
+`(title_id, tag_id, relevance)` table. Priced on a scratch
+`pgvector/pgvector:pg17` (pgvector **0.8.6**) at the real dimensions,
+16,376 rows:
+
+| Form | Rows | Total size |
+|---|---|---|
+| `halfvec(1128)`, one row per title | 16,376 | **45 MB** (1,096 kB heap + 43 MB TOAST + 624 kB index) |
+| `real[]`, one row per title | 16,376 | 88 MB |
+| `(title_id, tag_id smallint, relevance real)`, PK on the pair | **18,472,128** | **2,106 MB** |
+
+**47×**, against a database [08](08-operations.md) budgets at 8–12 GB
+*total*. `real[]` sits between and is worse than both — no operator class, so
+the similarity term stops being a single `<=>` and becomes arithmetic in
+Python. The genome is a genuinely dense matrix (every one of 16,376 movies
+carries a value for every one of 1,128 tags, verified by counting), so the
+tall form stores 16,376 copies of the tag id and the title id to express a
+matrix with no holes in it.
+
+**No HNSW index, and that is a decision rather than an omission.** A full
+pairwise cosine over all 16,376 vectors is **1.190 ms** on a `Seq Scan`; the
+access pattern is a *pair* lookup by `title_id` rather than a KNN, so nothing
+asks this table for its nearest neighbours; and M6 measured a
+planner-*preferred* index costing 4.3× for byte-identical recall. The 624 kB
+of index inside the 45 MB is the primary key. `tests/integration/
+test_genome_repository.py` asserts the index set, so a later migration cannot
+quietly add one.
+
+**The vector is TOASTed.** 1,128 halfvec lanes is 2,256 bytes plus a header,
+past Postgres's ~2 kB inline threshold, so the heap holds pointers and the
+TOAST relation holds 43 MB. Every read pays a TOAST fetch — invisible at
+16,376 rows, and one more reason the population here is the genome's own
+16,376 rather than the catalog's 1.27M.
+
+**`genome_revision` is [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s
+shape.** The tag vocabulary can change between releases, so a vector is only
+comparable to another built from the same 1,128 tags in the same order — and
+two vectors from different releases are type-identical, same-width, and
+otherwise indistinguishable, so a half-migrated table yields cosines that are
+wrong and plausible. Each row carries the archive revision that produced it,
+and `GenomeRepository.get_pair` returns `None` across a mismatch. An operator
+counts a mixed table with
+`SELECT genome_revision, count(*) FROM genome_scores GROUP BY 1`; the fix is a
+re-import. `computed_at` and no `updated_at` and no trigger, following
+`title_neighbors`: this is a batch artefact.
+
+**Absence is the absence of the row, never a zero vector**
+([ADR-0014](decisions/0014-absence-is-not-zero.md)). A zero vector
+is not "no information" — it is a specific vector at cosine 0.0 from every
+other vector, so a title with no genome row would score as *maximally
+dissimilar* from everything. At the measured coverage that is the common case,
+not the edge.
+
+**The tag vocabulary itself is deliberately not stored, and the cost is
+recorded rather than discovered.** Nothing in M7 reads a tag *name*: cosine
+needs the two vectors and the guarantee that their positions mean the same
+thing. `genome-tags.csv` is read by the importer to verify contiguity and
+width, and thrown away. The cost lands on M8 — **an LLM prompt that wants to
+say "atmospheric, thought-provoking" needs the words** — and paying it is a
+1,128-row table plus a loader step in a phase that already reads the file, and
+one migration. What makes that safe rather than a deferral-by-omission is
+`genome_revision`: the vocabulary M8 loads must carry the same revision as the
+vectors it explains, and there is already something to check it against.
 
 ## Relationships
 

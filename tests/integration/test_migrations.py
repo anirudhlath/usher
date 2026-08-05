@@ -36,6 +36,7 @@ it by reading `pg_constraint` directly.
 """
 
 import asyncio
+import functools
 import re
 import uuid
 from typing import cast
@@ -386,6 +387,14 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     this milestone touches: a downgrade that forgets *any* index is the same
     defect, and naming only the new ones would make this case blind to the
     next one.
+
+    **The step-back block has two halves and they answer different
+    questions.** `-1` exercises whatever the *current head* is, so it moves
+    with the chain and is what catches a brand-new migration whose
+    `downgrade()` is a no-op. The named `fe1d40c8b7a3` target below it
+    exercises `ff` specifically, which `-1` stopped reaching the moment `ffa`
+    landed on top -- the failure this case had on the first run after that,
+    and a good illustration of why a step count is the wrong pin.
     """
     admin = postgres_url.rsplit("/", 1)[0]
     scratch = f"cycle_{uuid.uuid4().hex[:12]}"
@@ -408,6 +417,20 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `base` drops the tables, and a table takes its indexes with it, so
         # a downgrade that forgets to drop one is invisible from there.
         await asyncio.to_thread(run_alembic, url, "-1")
+        assert "pk_genome_scores" not in await _index_set(url)
+
+        # Then down to the revision *below* `ff`, which is where M7 group E's
+        # two index changes become observable -- `ffa` sits between head and
+        # them now, and `-1` alone no longer reaches them.
+        #
+        # **Named, not counted in `-N` steps.** Every migration added after
+        # this one shifts what `-2` means, so a step count would silently
+        # re-point this block at an unrelated revision and keep passing for
+        # the wrong reason. A revision id is stable, and reversing more than
+        # `ff` on the way there costs these assertions nothing.
+        await asyncio.to_thread(
+            functools.partial(run_alembic, url, "fe1d40c8b7a3", direction="down")
+        )
         stepped = await _index_set(url)
         assert "ix_watch_states_user_recent" not in stepped
         assert "ix_media_items_recently_added" not in stepped

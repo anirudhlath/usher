@@ -106,12 +106,23 @@ def _upgrade_head(database_url: str) -> None:
         get_settings.cache_clear()
 
 
-def run_alembic(database_url: str, target: str) -> None:
+def run_alembic(database_url: str, target: str, *, direction: str | None = None) -> None:
     """`alembic upgrade`/`downgrade` against an arbitrary database.
 
     Exposed beside `_upgrade_head` so a test can drive the chain in *both*
     directions against a throwaway database, which the session-scoped schema
     cannot survive.
+
+    **Pass `direction` whenever the target is a bare revision id.** Left to
+    infer, this reads `"base"` and `"-N"` as downgrades and *everything else*
+    as an upgrade -- so `run_alembic(url, "fe1d40c8b7a3")` against a database
+    already past that revision runs `upgrade`, which is a **silent no-op**,
+    and the caller then asserts against the schema it meant to leave. That is
+    not hypothetical: it is how
+    `test_a_full_down_and_up_cycle_restores_every_index` failed on the first
+    run after `ffa` landed, and the failure looked like a broken migration
+    rather than a broken harness. Same family as the `-q`/`-qq` and
+    `/tmp`-rootdir traps -- the command ran and measured nothing.
     """
     saved = {key: value for key, value in os.environ.items() if key.startswith(("USHER_", "OTEL_"))}
     for key in saved:
@@ -120,7 +131,12 @@ def run_alembic(database_url: str, target: str) -> None:
     os.environ["USHER_SECRET_KEY"] = "0" * 32
     get_settings.cache_clear()
     try:
-        if target == "base" or target.startswith("-"):
+        going_down = (
+            direction == "down"
+            if direction is not None
+            else (target == "base" or target.startswith("-"))
+        )
+        if going_down:
             downgrade(Config(str(_ALEMBIC_INI)), target)
         else:
             upgrade(Config(str(_ALEMBIC_INI)), target)
