@@ -110,6 +110,59 @@ _SIMILARITY_RUN = 3
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderReport:
+    """What one registered provider contributed to one composition.
+
+    **There is a line for every registered provider, including the ones that
+    proposed nothing.** An absent provider and a silent one are the two states
+    this milestone exists to distinguish, and a report built by iterating the
+    *proposals* makes them identical -- which is exactly how a provider left
+    out of `ROW_PROVIDERS` survives review.
+
+    `selected` and `built` are separate because PRD 06's "drops any that build
+    empty" is otherwise invisible: `proposed 1, selected 1, built 0` is a row
+    that was chosen, hydrated, and found nothing renderable, which is a working
+    provider on a quiet household. `proposed 3, selected 1` is the per-family
+    cap doing its job. One number for both would hide whichever happened.
+    """
+
+    provider: str
+    proposed: int
+    selected: int
+    built: int
+    cards: int
+    propose_seconds: float
+    build_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeReport:
+    """One composition, and what it cost -- for `usher home`.
+
+    Returned by `compose_report` rather than logged, because it is an
+    operator's answer and answers go to stdout. `compose` returns the screen
+    alone, which is what a route wants.
+    """
+
+    rows: tuple[BuiltRow, ...]
+    providers: tuple[ProviderReport, ...]
+    duration_seconds: float
+
+    @property
+    def cards(self) -> int:
+        return sum(len(row.cards) for row in self.rows)
+
+    @property
+    def silent(self) -> int:
+        return sum(1 for one in self.providers if one.proposed == 0)
+
+    @property
+    def dropped(self) -> int:
+        """Rows that were selected, built, and had nothing to show."""
+        return sum(one.selected - one.built for one in self.providers)
+
+
+@dataclass(frozen=True, slots=True)
 class _Candidate:
     """One proposal and the provider that made it.
 
@@ -167,17 +220,36 @@ class HomeService:
         `BuiltRow.ttl`. Both are in-process; `services/rows/cache.py` says what
         that costs and what M9 owns.
         """
+        return (await self.compose_report(ctx)).rows
+
+    async def compose_report(self, ctx: RowContext) -> ComposeReport:
+        """The same composition, with the per-provider breakdown `usher home`
+        prints and PRD 10's dashboard 4 draws.
+
+        One method rather than two paths: a report assembled by a second loop
+        over the providers would describe a composition that never happened,
+        and the first thing it would get wrong is which rows the cap dropped.
+        """
         cached = None if self._cache is None else self._cache.get_screen(ctx.user.id)
         if cached is not None:
             # A screen hit does not re-propose. `propose` is the cheap phase,
             # not the free one -- nine bounded reads is still nine round trips
-            # for an answer already on hand.
-            return cached
+            # for an answer already on hand. The report is empty of providers
+            # for the same reason: none of them ran.
+            return ComposeReport(rows=cached, providers=(), duration_seconds=0.0)
         started = time.perf_counter()
+        # Keyed by `slug_prefix` and seeded from the **registry**, so a provider
+        # that proposed nothing still has a line. See `ProviderReport`.
+        tally = {provider.slug_prefix: _Tally() for provider in self._providers}
         with _tracer.start_as_current_span("home.compose") as span:
             candidates: list[_Candidate] = []
             for provider in self._providers:
-                for proposal in await provider.propose(ctx):
+                at = time.perf_counter()
+                proposals = await provider.propose(ctx)
+                entry = tally[provider.slug_prefix]
+                entry.propose_seconds += time.perf_counter() - at
+                entry.proposed += len(proposals)
+                for proposal in proposals:
                     candidates.append(_Candidate(provider=provider, proposal=proposal))
             built: list[BuiltRow] = []
             # **A `for`, not a `gather`.** See the module docstring and
@@ -186,22 +258,44 @@ class HomeService:
             # `InvalidRequestError` or a result set attributed to the wrong
             # query, under load, after it has usually worked.
             for candidate in self._select(candidates):
+                entry = tally[candidate.provider.slug_prefix]
+                entry.selected += 1
+                at = time.perf_counter()
                 row = await self._build(ctx, candidate)
+                entry.build_seconds += time.perf_counter() - at
                 # Drops any that build empty -- and substitutes nothing.
                 # Padding the screen back to N is the "generic row" failure
                 # wearing the composer's clothes: the replacement is by
                 # construction the next-best-scoring thing rather than
                 # something this household has a reason to see.
                 if row.cards:
+                    entry.built += 1
+                    entry.cards += len(row.cards)
                     built.append(row)
             screen = self._order(built)
             span.set_attribute("usher.home.proposed", len(candidates))
             span.set_attribute("usher.home.built", len(built))
             span.set_attribute("usher.home.rows", len(screen))
-        _compose_duration.record(time.perf_counter() - started)
+        duration = time.perf_counter() - started
+        _compose_duration.record(duration)
         if self._cache is not None:
             self._cache.put_screen(ctx.user.id, screen, ttl=_SCREEN_TTL)
-        return screen
+        return ComposeReport(
+            rows=screen,
+            providers=tuple(
+                ProviderReport(
+                    provider=name,
+                    proposed=entry.proposed,
+                    selected=entry.selected,
+                    built=entry.built,
+                    cards=entry.cards,
+                    propose_seconds=entry.propose_seconds,
+                    build_seconds=entry.build_seconds,
+                )
+                for name, entry in tally.items()
+            ),
+            duration_seconds=duration,
+        )
 
     async def _build(self, ctx: RowContext, candidate: _Candidate) -> BuiltRow:
         """One row, timed and traced under its provider's own name.
@@ -288,6 +382,18 @@ class HomeService:
         return tuple(placed)
 
 
+@dataclass
+class _Tally:
+    """Mutable while a composition runs; frozen into a `ProviderReport` after."""
+
+    proposed: int = 0
+    selected: int = 0
+    built: int = 0
+    cards: int = 0
+    propose_seconds: float = 0.0
+    build_seconds: float = 0.0
+
+
 def _breaks_the_run(placed: Sequence[BuiltRow], row: BuiltRow) -> bool:
     """Would appending `row` make a window of `_SIMILARITY_RUN` all similarity?"""
     if row.family is not RowFamily.SIMILARITY:
@@ -298,4 +404,4 @@ def _breaks_the_run(placed: Sequence[BuiltRow], row: BuiltRow) -> bool:
     )
 
 
-__all__ = ["HomeService"]
+__all__ = ["ComposeReport", "HomeService", "ProviderReport"]

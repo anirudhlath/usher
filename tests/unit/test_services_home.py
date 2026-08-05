@@ -372,3 +372,68 @@ def _has_a_run_of_three(families: Sequence[RowFamily]) -> bool:
         list(families[index : index + 3]) == [RowFamily.SIMILARITY] * 3
         for index in range(len(families) - 2)
     )
+
+
+async def test_the_report_has_a_line_for_every_registered_provider_including_silent_ones(
+    ctx: RowContext,
+) -> None:
+    """**An absent provider and a silent one are the two states this milestone
+    exists to distinguish.** A report assembled by iterating the *proposals*
+    drops the silent ones, which makes them identical to providers that were
+    never registered -- and that is exactly how a provider left out of
+    `ROW_PROVIDERS` survives review, because the report gets shorter and tidier
+    rather than wrong.
+    """
+    service = HomeService(
+        providers=[_stub("recently-added", score=0.9), _silent("seasonal"), _silent("rediscover")]
+    )
+
+    report = await service.compose_report(ctx)
+
+    assert {one.provider for one in report.providers} == {
+        "recently-added",
+        "seasonal",
+        "rediscover",
+    }
+    assert report.silent == 2
+
+
+async def test_a_row_that_built_empty_is_reported_as_selected_but_not_built(
+    ctx: RowContext,
+) -> None:
+    """`selected 1, built 0` is the only place in the system where PRD 06's
+    "drops any that build empty" is visible. Without the pair, a provider that
+    proposes on every request and never builds anything looks identical to one
+    that never fires -- and one of those is a bug."""
+    service = HomeService(
+        providers=[
+            _stub("recently-added", score=0.9),
+            _stub("franchise-dune", score=0.8, cards=0),
+        ]
+    )
+
+    report = await service.compose_report(ctx)
+
+    dropped = next(one for one in report.providers if one.provider == "franchise-dune")
+    assert (dropped.proposed, dropped.selected, dropped.built, dropped.cards) == (1, 1, 0, 0)
+    assert report.dropped == 1
+    assert len(report.rows) == 1
+
+
+async def test_a_proposal_the_cap_declined_is_selected_zero_rather_than_absent(
+    ctx: RowContext,
+) -> None:
+    """The third state, and it is not the same as either of the other two: a
+    provider that proposed and was **not selected** is the per-family cap doing
+    its job, not a quiet household and not a dead provider. One number for
+    `selected` and `built` together would hide whichever happened."""
+    crowd = [
+        _stub(f"byw-{n}", score=0.99 - n / 1000, family=RowFamily.SIMILARITY) for n in range(8)
+    ]
+    service = HomeService(providers=crowd)
+
+    report = await service.compose_report(ctx)
+
+    declined = [one for one in report.providers if one.proposed == 1 and one.selected == 0]
+    assert len(declined) == 4, "the cap declined nothing, so the case proves nothing"
+    assert all(one.built == 0 for one in declined)

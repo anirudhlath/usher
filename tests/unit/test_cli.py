@@ -490,3 +490,40 @@ def test_the_coverage_report_names_every_release_when_there_is_more_than_one(
     assert "MIXED RELEASES" in printed
     assert "an-invented-etag-a: 1" in printed
     assert "an-invented-etag-b: 2" in printed
+
+
+def test_the_parser_knows_the_home_command() -> None:
+    args = parse_args(["home"])
+    assert args.command == "home"
+    assert args.limit == 10
+    assert args.repeat == 1
+
+
+def test_home_refuses_a_limit_below_one() -> None:
+    """Beside the identical checks `search` and `suggest` already carry. A zero
+    limit composes a screen and prints nothing, which reads as a broken
+    catalog rather than as an argument the operator got wrong."""
+    with pytest.raises(SystemExit):
+        parse_args(["home", "--limit", "0"])
+
+
+def test_home_refuses_a_repeat_below_one() -> None:
+    """A zero repeat times nothing and then reports a p95 over an empty list,
+    which is either a crash or a fabricated number depending on how the
+    percentile is spelled."""
+    with pytest.raises(SystemExit):
+        parse_args(["home", "--repeat", "0"])
+
+
+def test_home_has_no_cross_argument_rule_and_that_is_deliberate() -> None:
+    """`usher similar` needs one (`bool(title_id) == bool(rebuild)`) because
+    its two arguments select between two *different operations*, one of which
+    rewrites the whole neighbour table. `usher home` has one operation and two
+    scalars, so every combination of them is meaningful.
+
+    Written down as a case rather than as an absence, because a reader
+    comparing this command to its template will look for the rule and should
+    find the reason it is not there.
+    """
+    both = parse_args(["home", "--limit", "3", "--repeat", "5"])
+    assert (both.limit, both.repeat) == (3, 5)

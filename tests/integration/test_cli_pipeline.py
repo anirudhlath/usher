@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fakes.embedding import FakeEmbedder
 from usher.cli import (
+    _home,
     _open_adapter,
     _push,
     _search,
@@ -631,3 +632,93 @@ async def test_similar_says_whether_the_neighbours_were_ever_computed(
     printed = capsys.readouterr().out
     assert "no neighbours for this title" in printed, printed
     assert "have ever been computed" not in printed, printed
+
+
+async def test_home_composes_a_screen_against_an_empty_database(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**PRD 08's operator rule, and the arithmetic it is hunting.**
+
+    The failure here is not a missing row -- it is that the taste centroid is a
+    mean, and the mean of zero embeddings is `0/0`. An empty household is a
+    fact rather than an error, so this exits 0 and prints a report in which
+    every provider proposed nothing.
+
+    **Driven against real Postgres rather than as a unit case**, which is a
+    correction to this milestone's plan: it specifies
+    `tests/unit/test_cli_home.py` with `empty_db`/`seeded_db` fixtures, and no
+    such seam exists -- every command coroutine in `usher.cli` takes a
+    `Settings` and opens its own engine through `_session_for`. The plan's own
+    "every operator command has to work against an empty database" is also
+    exactly the claim a fake database cannot make.
+    """
+    await _home(cli_settings, limit=10, repeat=1)
+
+    out = capsys.readouterr().out
+    assert "9 providers, 9 proposed nothing" in out
+    assert "screen: 0 rows, 0 cards" in out
+
+
+async def test_home_prints_a_line_for_a_provider_that_proposed_nothing(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**An absent provider and a silent one are the two states this milestone
+    exists to distinguish**, and a report that drops the silent ones makes them
+    indistinguishable from unregistered ones -- which is exactly how a provider
+    left out of `ROW_PROVIDERS` survives review.
+
+    Kills a report built by iterating the *proposals* rather than the registry.
+    Asserted by name for every one of the nine, because a count is satisfied by
+    a report printing one provider nine times.
+    """
+    await _home(cli_settings, limit=10, repeat=1)
+
+    lines = capsys.readouterr().out.splitlines()
+    for slug in (
+        "continue-watching",
+        "next-up",
+        "recently-added",
+        "rediscover",
+        "because-you-watched",
+        "franchise",
+        "genre-affinity",
+        "seasonal",
+        "people",
+    ):
+        assert any(line.startswith(slug) and " 0 " in line for line in lines), slug
+
+
+async def test_home_prints_a_cold_and_a_warm_composition(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**The only measurement of the cache this milestone has**, because
+    `usher.cache.hits`/`.misses` is M9's. A `--repeat` that measured cache hits
+    would report a number near zero and mean nothing, so each repeat clears the
+    cache and the warm read is timed once, separately, and labelled.
+
+    The threshold line is asserted too: a boundary call that promises a
+    measurement and prints no number is a boundary call nobody can act on.
+    """
+    await _home(cli_settings, limit=10, repeat=3)
+
+    out = capsys.readouterr().out
+    assert "compose (cold)" in out
+    assert "over 3 run(s)" in out
+    assert "compose (warm, from cache)" in out
+    assert "p95 > 400 ms" in out
+    # **Every repeat is cold**, and this is what says so: without the clear,
+    # runs 2 and 3 are screen-cache hits, the last report carries no providers
+    # at all, and the table above it is empty -- a measurement that silently
+    # became a benchmark of a dict.
+    assert "seasonal" in out, "the last run was a cache hit, so --repeat measured the cache"
+
+
+async def test_home_prints_and_never_logs_its_answer(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The split every command in this module makes: `loguru` output is
+    operational and goes to a sink an operator may not be reading; a command's
+    answer is stdout, which is what gets piped."""
+    await _home(cli_settings, limit=10, repeat=1)
+
+    assert capsys.readouterr().out.strip()

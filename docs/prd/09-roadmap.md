@@ -259,6 +259,56 @@ documentation task.
    `usher.row.build.duration` are what turn revisiting this into a number
    rather than an argument, and `usher home` is where the number is taken.
 
+   **The number, so the call can be acted on.** `usher home` records
+   `usher.home.compose.duration` and the per-provider `usher.row.build.duration`
+   breakdown, and prints both. **The sequential build is revisited when p95
+   exceeds 400 ms *and* no single provider accounts for ≥ 50% of the total
+   build time.** 400 ms is [ADR-0006](decisions/0006-server-composed-home.md)'s
+   "instant over a slow link" apportioned — ~1 s perceived, of which ~600 ms is
+   network and client render that Usher does not control; M6's 50 ms p95 is
+   deliberately **not** reused, being a keystroke budget for as-you-type
+   suggest, and applying it to a screen paint would condemn the sequential
+   build against a bar nothing in the design promised. The second condition is
+   what makes the first actionable: if one provider dominates, concurrency
+   converges on that provider's latency and buys nothing, so the finding is a
+   **query** to fix. Only when both hold is the redesign a session per row
+   behind a bounded pool — i.e. a lane, and
+   [01](01-architecture.md)'s concurrency table grows the row this call notes
+   it does not have. `usher home` prints the rule beside the numbers, so it is
+   read off the output rather than recomputed.
+
+   **Measured on 2026-08-04, and neither condition fires.** `usher home
+   --repeat 5` against a real `bootstrap --phase imdb` catalog of **1,271,570
+   titles**, with a synthetic household seeded on top of it — 5,200 owned
+   `media_items`, 360 watch states spread over two years (300 films plus 60
+   episodes, so the roll-up is exercised), 50 collections of four owned members,
+   200 people with 1,800 credits, and 6,000 `title_neighbors` rows over 300
+   seeds. **The catalog is real; the household is synthetic and is said so** —
+   a real household's watch history cannot be manufactured by a live run, and a
+   measurement without one would time four providers and report the sequential
+   build as free.
+
+   | | |
+   |---|---|
+   | compose, cold, p50 | **23.9 ms** |
+   | compose, cold, p95 | **35.9 ms** — against a 400 ms budget, **11×** under |
+   | compose, warm (screen cache hit) | **0.0 ms** |
+   | slowest provider | `because-you-watched`, 4.3 ms, **34%** of build time |
+   | screen | 8 rows, 115 cards |
+
+   Per provider, propose / build in ms: `because-you-watched` 3.3 / 4.3 (3
+   rows), `people` 2.3 / 3.7 (2), `franchise` 2.1 / — (proposed 2, **capped
+   out**), `next-up` 1.5 / 1.0, `recently-added` 0.7 / 1.7,
+   `continue-watching` 0.5 / 1.8, `rediscover` 0.3 / — (proposed nothing),
+   `genre-affinity` 0.0 / — (proposed 1, capped out), `seasonal` 0.0 / —
+   (outside every window). **The per-family cap is visible in that table**:
+   eight of ten proposals were selected, and the two that were not are the
+   lowest-scoring `SOURCE` rows rather than anything a provider got wrong.
+
+   So the sequential build stands, and it is not close: p95 would have to grow
+   **11×** before the first condition even applies, at which point the second —
+   no single provider at ≥ 50% — would still have to hold.
+
 ### The follow-up the gate obliges: a two-tier suggest, owned by M9
 
 **Owner: M9**, alongside the HTTP surface and the `search_queries` table,

@@ -13,9 +13,11 @@ the same property: nothing downloads unless an operator asks.
 import argparse
 import asyncio
 import sys
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import httpx
 from loguru import logger
@@ -40,6 +42,7 @@ from usher.composition import (
     metadata_provider,
     nothing,
     open_adapter,
+    search_index,
     selected_sources,
     unit_of_work,
 )
@@ -47,7 +50,7 @@ from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
-from usher.db.users import ensure_default_user
+from usher.db.users import default_user, ensure_default_user
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
@@ -56,9 +59,12 @@ from usher.ports.bulk import GenomeVector, ImdbTitle
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
 from usher.ports.repository import BulkCatalogRepository, GenomeCoverage
+from usher.ports.rows import RowContext
 from usher.ports.search import SearchFilters, SearchMode
 from usher.ports.source import SourceAdapter
 from usher.services.bootstrap import BootstrapService
+from usher.services.home import ComposeReport, HomeService
+from usher.services.rows.cache import RowCache
 from usher.services.search import SemanticSearchUnavailable
 from usher.telemetry import (
     configure_telemetry,
@@ -876,6 +882,141 @@ async def _similar(
             print("no neighbours for this title")
 
 
+async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
+    """Compose the home screen, and time it.
+
+    **Ships alongside `GET /home` rather than instead of it**, which is the
+    reverse of `usher search` and `usher similar`. ADR-0006's claim -- one
+    request paints a screen -- is a property of a request boundary that no
+    command can exhibit, so there the route is the deliverable. What this
+    command is for is PRD 08's rule that every operator command works against
+    an empty database, and the arithmetic that rule is hunting: **the taste
+    centroid is a mean, and the mean of zero embeddings is 0/0.**
+
+    **And it is where boundary call 8's promise is kept.** The rows build
+    sequentially because `AsyncSession` is not safe for concurrent use; whether
+    that is *fast enough* is a measurement rather than an argument, and this is
+    the measurement. Revisit the sequential build when
+    `usher.home.compose.duration` p95 exceeds **400 ms** *and* no single
+    provider accounts for **50%** or more of the total build time -- over
+    budget with a dominant provider is a query to fix, not a build to
+    parallelise, and under budget is neither. If both hold, the redesign is a
+    session per row behind a bounded pool, i.e. a lane, and PRD 01's
+    concurrency table grows the row boundary call 8 says it does not have.
+    Both numbers are printed, so the rule is read off the output rather than
+    recomputed.
+
+    **Every registered provider gets a line, including the ones that proposed
+    nothing.** An absent provider and a silent one are the two states this
+    milestone exists to distinguish, so the report iterates the *registry* and
+    never the proposals -- `HomeService.compose_report` is what makes that
+    possible without a second loop describing a composition that never
+    happened.
+
+    **`--repeat` measures N *cold* compositions**, clearing the cache before
+    each. A repeat that measured cache hits would report a number near zero and
+    mean nothing. The warm read is timed once, separately, and labelled -- and
+    it is the only measurement of the cache this milestone has, because
+    `usher.cache.hits`/`.misses` is M9's.
+    """
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        user = await default_user(session)
+        # The same wiring `api/deps.py` builds per request, minus the request:
+        # `taste` and `affinities` are values the composer hands over, because
+        # a provider may import only `domain/` and `ports/`.
+        ctx = RowContext(
+            user=user,
+            now=lambda: datetime.now(UTC),
+            titles=pipeline.titles,
+            media_items=pipeline.media_items,
+            watch_states=pipeline.watch_states,
+            episodes=pipeline.episodes,
+            neighbors=pipeline.neighbors,
+            search=search_index(session, settings),
+            taste=await pipeline.taste.centroid(user.id),
+            people=pipeline.people,
+            credits=pipeline.credits,
+            collections=pipeline.collections,
+            affinities=await pipeline.taste.genre_affinity(user.id),
+        )
+        cache = RowCache(clock=lambda: datetime.now(UTC))
+        service = HomeService(pipeline.row_providers, cache=cache, max_rows=limit)
+
+        # Collected rather than overwritten so the last one is reachable
+        # without an `Optional` no input can reach -- `parse_args` refuses
+        # `--repeat 0`, and `assert` is not available in shipped code.
+        reports: list[ComposeReport] = []
+        for _ in range(repeat):
+            # Cleared *before* each run, so every one of them is cold. Without
+            # this the second run is a cache hit and the measurement silently
+            # becomes a benchmark of a dict.
+            cache.clear()
+            reports.append(await service.compose_report(ctx))
+        report = reports[-1]
+        cold = [one.duration_seconds for one in reports]
+
+        warm_at = time.perf_counter()
+        await service.compose(ctx)
+        warm = time.perf_counter() - warm_at
+
+        _print_home_report(report, cold=cold, warm=warm)
+
+
+def _print_home_report(report: ComposeReport, *, cold: Sequence[float], warm: float) -> None:
+    """The operator's table. `print`, never `logger` -- the split every command
+    in this module makes: loguru output is operational and goes to a sink an
+    operator may not be reading, and a command's answer is stdout, which is
+    what gets piped."""
+    print(f"{'provider':<22}{'proposed':>9}{'built':>7}{'cards':>7}{'propose':>11}{'build':>11}")
+    for one in sorted(report.providers, key=lambda entry: entry.provider):
+        built = "-" if one.selected == 0 else str(one.built)
+        cards = "-" if one.selected == 0 else str(one.cards)
+        build = "-" if one.selected == 0 else f"{one.build_seconds * 1000:.1f} ms"
+        print(
+            f"{one.provider:<22}{one.proposed:>9}{built:>7}{cards:>7}"
+            f"{one.propose_seconds * 1000:>8.1f} ms{build:>11}"
+        )
+    print()
+    print(
+        f"{len(report.providers)} providers, {report.silent} proposed nothing, "
+        f"{report.dropped} built empty and was dropped"
+    )
+    print(f"screen: {len(report.rows)} rows, {report.cards} cards")
+    ordered = sorted(cold)
+    p50 = ordered[len(ordered) // 2]
+    # The p95 of one sample is that sample, which is honest rather than
+    # flattering -- and `--repeat` is how an operator buys a real one.
+    p95 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
+    print(
+        f"compose (cold)  p50 {p50 * 1000:.1f} ms  p95 {p95 * 1000:.1f} ms "
+        f"over {len(cold)} run(s)     compose (warm, from cache)  {warm * 1000:.1f} ms"
+    )
+    # **The second half of boundary call 8's rule, computed rather than left to
+    # the reader.** If one provider is most of the wall clock, parallelising
+    # nine of them converges on that provider's latency and buys nothing -- the
+    # finding is a query to fix.
+    total_build = sum(one.build_seconds for one in report.providers)
+    if total_build > 0:
+        slowest = max(report.providers, key=lambda entry: entry.build_seconds)
+        share = slowest.build_seconds / total_build
+        print(
+            f"slowest provider: {slowest.provider} at {slowest.build_seconds * 1000:.1f} ms "
+            f"({share:.0%} of build time)"
+        )
+    else:
+        print("nothing was built, so there is no build time to attribute")
+    # **Printed unconditionally**, and that is a correction the empty-database
+    # case caught: guarded on `total_build > 0` the rule an operator needs is
+    # missing from exactly the run where they most need to know what the
+    # numbers mean, which is the one against a household that has watched
+    # nothing.
+    print(
+        "revisit the sequential build only when p95 > 400 ms AND no single provider "
+        "is >= 50% of build time"
+    )
+
+
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
     """Probe a source's push channel once, or run the lanes in the foreground.
 
@@ -1065,6 +1206,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="recompute title_neighbors for the whole embedded population",
     )
 
+    home = sub.add_parser("home", help="compose the home screen, and time it")
+    home.add_argument("--limit", type=int, default=10, help="rows to compose")
+    home.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="cold compositions to time; the cache is cleared before each",
+    )
+
     push = sub.add_parser("push", help="run the push lane, or probe a source's push channel")
     push.add_argument("--source", default=None, help="source name; omit for every enabled source")
     push.add_argument(
@@ -1110,6 +1260,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             parser.error("--limit must be at least 1")
     if args.command == "suggest" and args.limit < 1:
         parser.error("--limit must be at least 1")
+    if args.command == "home":
+        # **No cross-argument rule, and that is stated rather than omitted.**
+        # `usher similar` needs one because its two arguments select between
+        # two *different operations*, one of which rewrites a whole table.
+        # `home` has one operation and two scalars, so only the bounds matter.
+        if args.limit < 1:
+            parser.error("--limit must be at least 1")
+        if args.repeat < 1:
+            parser.error("--repeat must be at least 1")
     if args.command == "similar" and bool(args.title_id) == bool(args.rebuild):
         # Both spellings refused: no arguments is a read of nothing, and both
         # together is a read and a write in one command. `parser.error` again
@@ -1194,6 +1353,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 rebuild=args.rebuild,
             )
         )
+    elif args.command == "home":
+        asyncio.run(_home(settings, limit=args.limit, repeat=args.repeat))
     elif args.command == "push":
         asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
     else:

@@ -223,6 +223,37 @@ uv run usher similar <title id>    # the precomputed neighbours, best first
 uv run usher similar --rebuild     # recompute title_neighbors for the embedded tier
 ```
 
+`usher home` composes the screen `GET /home` returns, and times it.
+
+```bash
+uv run usher home                  # one composition, with a per-provider table
+uv run usher home --repeat 5       # five *cold* compositions; the cache is cleared before each
+```
+
+It ships **alongside** the route rather than instead of it, which is the
+reverse of `usher search`: ADR-0006's claim — one request paints a screen — is
+a property of a request boundary that no command can exhibit, so there the
+route is the deliverable. What the command is for is the rule that every
+operator command works against an empty database, and the arithmetic that rule
+is hunting: the taste centroid is a mean, and the mean of zero embeddings is
+0/0. Against an empty household it exits 0 and prints nine providers that
+proposed nothing.
+
+**Every registered provider gets a line, including the ones that proposed
+nothing** — an absent provider and a silent one are the two states a composed
+home screen cannot otherwise tell apart. `proposed 1, built 0` is a row that
+was chosen, hydrated and found nothing renderable; `proposed 2` with no build
+is the per-family cap. The cold/warm pair is the only measurement of the row
+cache this milestone has, because `usher.cache.hits`/`.misses` is M9's.
+
+Measured 2026-08-04 against a real 1,271,570-title catalog with a synthetic
+household on top of it: **p50 23.9 ms, p95 35.9 ms cold, 0.0 ms warm**, eight
+rows and 115 cards, slowest provider 34% of build time. The rows build
+**sequentially** — `AsyncSession` is not safe for concurrent use — and the
+command prints the rule for revisiting that (p95 > 400 ms *and* no provider
+≥ 50% of build time) beside the numbers, so it is read off the output rather
+than recomputed.
+
 **Nothing runs the rebuild for you**, and that is stated rather than implied.
 A title's neighbours go stale when *some other* title gets an embedding, which
 no per-row predicate can decide — so unlike everything else Usher derives,
