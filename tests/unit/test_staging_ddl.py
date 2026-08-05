@@ -123,7 +123,7 @@ def test_every_staging_table_is_temporary_and_drops_at_commit() -> None:
 # alternative is worse -- adding these three to `_LEFTOVER_STAGING_TABLES`
 # would edit an already-shipped migration so it drops tables that provably
 # cannot exist, which is a migration claiming a cleanup it never performed.
-_NEVER_EXISTED_IN_PUBLIC = {"stg_people", "stg_credits", "stg_collections"}  # M7
+_NEVER_EXISTED_IN_PUBLIC = {"stg_people", "stg_credits", "stg_collections", "stg_genome"}  # M7
 
 
 def test_the_leftover_migration_names_every_staging_table() -> None:

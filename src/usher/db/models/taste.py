@@ -97,20 +97,32 @@ class GenomeScoreRow(Base):
     ("Tiny" is not a reason to build the table now; `search_queries` is the
     standing example of a table built ahead of its writer.)
 
-    **No HNSW index, and this is a decision rather than an omission.** Three
-    reasons, none of which is "it would be slow to build":
+    **No HNSW index, and this is a decision rather than an omission** — and
+    the numbers are measured against the shipped
+    access pattern rather than against a full pairwise scan:
 
-    - **16,376 rows never needs one.** A full pairwise cosine over every one
-      of them — `Seq Scan`, no index — is 1.190 ms, measured.
-    - **The access pattern is a pair lookup by `title_id`, not a KNN.** A
-      similarity blend scores a candidate pair it already holds; nothing asks
-      this table for its nearest neighbours. An index answers a question
-      nobody puts to it.
-    - **M6 measured what an index the planner *prefers* costs.** A GiST index
-      alongside GIN turned 33.3 ms into 141.5 ms p50 — 4.3x — for
-      byte-identical recall, because the planner reached for it. An HNSW
-      index on a 16k-row table is the same shape of harm with the same cause.
-      And an index nothing reads is `ix_titles_popularity` again.
+    - **`get_pair`, the only read this table has, is 0.062 ms.** Two primary
+      key probes under a `BitmapOr`, 2 buffers each. An HNSW index cannot
+      help a lookup *by* `title_id`; it answers a question nobody puts to
+      this table.
+    - **A KNN — one seed against all 15,565 stored vectors, `Seq Scan`, no
+      index — is 59.4-66.2 ms over three warm runs**, at 93,617 buffers,
+      which is dominated by the TOAST fetch per row. Nothing asks for that
+      today. If something ever does, this decision genuinely reopens, and
+      that is the honest statement rather than a number that forecloses it.
+    - **M6 measured what an index the planner *prefers* costs**: a GiST index
+      alongside GIN turned 33.3 ms into 141.5 ms p50, 4.3x, for
+      byte-identical recall. An index nothing reads is `ix_titles_popularity`
+      again.
+
+    **The plan's "a full pairwise cosine over every one of the 16,376 vectors
+    runs in 1.190 ms" is not any of those, and it is not achievable.** A full
+    pairwise scan is 121M unordered pairs of 1,128 lanes; measured here as a
+    self-join it is **384 s**. 1.190 ms is roughly the cost of *one* pair.
+    Corrected rather than repeated, because the "no index" decision rests on
+    it and a reader checking the number would have found it off by five
+    orders of magnitude — the decision survives on the first bullet above,
+    which is the one that was always doing the work.
 
     The 45 MB figure already includes **624 kB of index**: that is the
     primary key on `title_id`, which every read uses. No other index ships,
@@ -132,7 +144,12 @@ class GenomeScoreRow(Base):
     the two mean-centred variants that were measured alongside it. Note that
     the corpus mean is recoverable from *this table*, because the stored
     population is the whole corpus, so a read-side centring needs no
-    re-import and no extra column.
+    re-import and no extra column. **The spelling matters and was verified:**
+    `avg(relevance)` fails (`halfvec` has no `avg` usable this way and does
+    not support subscripting), while
+    `SELECT (avg(relevance::vector)::real[]) FROM genome_scores` returns mu
+    lane by lane. `relevance::real[]` extracts a single row's lanes the same
+    way.
     """
 
     __tablename__ = "genome_scores"

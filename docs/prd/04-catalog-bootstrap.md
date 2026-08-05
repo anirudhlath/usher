@@ -21,7 +21,7 @@ All figures below were measured on 2026-07-28.
 | [TMDb daily ID export](https://developer.themoviedb.org/docs/daily-id-exports) | 1.23M movie + 228k series IDs **with popularity** | 31 MiB gz | < 1 min |
 | Wikidata SPARQL | ~386k verified IMDb↔TMDb↔TVDb ID pairs (CC0) | no download | ~18 s of query time |
 | TMDb API (per-id crawl) | Overviews, artwork, keywords, full credits | — | 1.5–2.5 h for the priority tier |
-| [MovieLens tag genome](https://grouplens.org/datasets/movielens/) | 15.6M movie×tag relevance scores | 250 MiB | ~10 min |
+| [MovieLens tag genome](https://grouplens.org/datasets/movielens/) (`ml-latest.zip`) | **18,472,128** movie×tag relevance scores for **16,376** movies over 1,128 tags | **334.6 MiB** (350,896,731 B) | ~10 min |
 
 > **What Phases 0–2 actually download: ~250 MiB, not 2.2 GiB** (measured
 > 2026-07-30). From IMDb, only `title.basics.tsv.gz` (214.4 MiB) and
@@ -184,19 +184,50 @@ crawl survives restarts.
 
 **This phase is half built, and the halves belong to different milestones.**
 
-⏳ **MovieLens is not built and is owned by M7.** `links.csv` would bridge to
-IMDb/TMDb IDs and `genome-scores.csv` would supply 1,128-dimension relevance
-vectors for 13,816 movies — but there is no `movielens` entry in `PHASES`, no
-`adapters/bulk/movielens.py`, and no `genome_scores` table. It was specified
-in five documents and deferred in none until [09](09-roadmap.md) gave it an
-owner; the cost table and licence row above are what it *will* cost, not what
-it costs today.
+✅ **MovieLens shipped in M7**, and three of the numbers this section carried
+were wrong. `PHASES` gains `movielens`, `adapters/bulk/movielens.py` reads
+`links.csv`/`genome-tags.csv`/`genome-scores.csv` out of `ml-latest.zip`, and
+`genome_scores` holds one dense `halfvec(1128)` per title
+([02](02-data-model.md)).
 
-Coverage is the caveat if it lands: ~7% of the priority tier, skewed pre-2019
-and English, no TV. It is a **bonus signal that fires when present**, never the
-primary similarity index — but it captures tone and feel that plot embeddings
-miss. Until it lands, that ~7% is a plan rather than a measurement and
-[05](05-search-and-similarity.md)'s four-way similarity blend is a two-way one.
+**The three corrections, each with its measurement** (streamed and inflated in
+one pass on 2026-08-04; nothing stored):
+
+| Was | Is | How the old figure arose |
+|---|---|---|
+| "15.6M movie×tag relevance scores" | **18,472,128** | never counted |
+| "250 MiB" | **334.6 MiB** (`ml-latest.zip`, 350,896,731 B) | **250 MiB is `ml-25m`'s size** (261,978,986 B) — right number, wrong archive |
+| "1,128-dimension relevance vectors for 13,816 movies" | **16,376 movies**; the 1,128 is exactly right | never counted |
+
+**The archive choice is forced rather than preferred, and that is new
+information.** `ml-32m.zip` (05/2024) is the newest full release and **dropped
+the genome entirely** — four members only. `ml-25m.zip` still has one, and it
+is the only genome-bearing archive whose licence *forbids* redistribution.
+`ml-latest.zip` is the newest release that has a genome and carries the
+permissive clause, so it is the dataset. Measured, it has not moved in three
+years (`Last-Modified: Thu, 20 Jul 2023 20:20:32 GMT`,
+`ETag: "14ea425b-600f0e149d407"`) despite its own README calling it a
+*development* dataset — the same shape of hazard as IMDb's daily regeneration,
+with the opposite conclusion.
+
+**Coverage now has denominators, and the published "~7%" never did.** 16,376
+genome movies is **1.82%** of a full catalog's 899,828 movies, **1.29%** of all
+1,271,138 titles, and **8.7%** of this document's own "~189k titles with ≥100
+IMDb votes" priority tier — which is the denominator that makes "~7% of the
+priority tier" roughly right. **None of those is the number that matters**,
+which is coverage of the *enriched tier*: an owned household library of 2k–10k
+titles, skewed hard toward exactly the popular, English, pre-2019 movies the
+genome covers. Those three percentages are ceilings the dataset can reach;
+`usher bootstrap --phase movielens` reports what the join actually did against
+this operator's catalog, including the enriched-tier fraction. ⏳ That figure
+has not yet been measured against a real enriched catalog.
+
+It remains a **bonus signal that fires when present**, never the primary
+similarity index — but it captures tone and feel that plot embeddings miss,
+and it does discriminate: measured over all 16,376 vectors and all 268,157,000
+off-diagonal pairs, cosine is mean 0.6101, sd 0.0913, p1 0.4075, with a
+top-10-neighbour gap of 0.2456, against a saturation bar written before the
+run. See `usher.adapters.bulk.movielens`.
 
 ✅ **The embedding half shipped in M6** — with one correction to "embed all
 titles that have overviews". The embedded population is
@@ -250,7 +281,21 @@ rule is now mechanically enforced -- see rule 6 below.
 | IMDb datasets | ✅ explicitly permitted | ❌ | Required exact string |
 | TMDb API | ✅ non-commercial | ❌ + ≤ 6-month cache | Logo + disclaimer |
 | Wikidata | ✅ | ✅ CC0 | — |
-| MovieLens | ✅ non-commercial | ✅ same terms | Cite |
+| MovieLens (**`ml-latest`**) | ✅ non-commercial | ✅ same terms — **`ml-latest`'s clause, not `ml-25m`'s** | Cite (below) |
+
+**The MovieLens row names its archive, because the two genome-bearing
+releases say opposite things.** `ml-latest` (and `ml-32m`): *"The user may
+redistribute the data set, including transformations, so long as it is
+distributed under these same license conditions."* `ml-25m`: *"The user may
+not redistribute the data without separate permission."* `ml-25m` is the only
+genome-bearing archive whose licence forbids redistribution — which changes
+nothing about what Usher ships (nothing) and everything about what this row
+may claim. `ml-32m` has **no genome at all**, so the archive choice is forced.
+The required citation, which `MovieLensGenomeDataset.attribution` serves:
+
+> F. Maxwell Harper and Joseph A. Konstan. 2015. The MovieLens Datasets:
+> History and Context. ACM Transactions on Interactive Intelligent Systems
+> (TiiS) 5, 4: 19:1–19:19. https://doi.org/10.1145/2827872
 
 Hard rules encoded in the project:
 

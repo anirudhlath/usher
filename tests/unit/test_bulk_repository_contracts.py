@@ -4,6 +4,8 @@ tests/integration/test_bulk_repository.py runs the identical assertions
 against Postgres.
 """
 
+import uuid
+
 import pytest
 
 from tests.contract.bulk_catalog_repository_contract import BulkCatalogRepositoryContract
@@ -33,6 +35,24 @@ class TestFakeBulkCatalogRepository(BulkCatalogRepositoryContract):
     async def name_of(self, repo: BulkCatalogRepository, imdb_id: str) -> str | None:
         assert isinstance(repo, FakeBulkCatalogRepository)
         return repo.name(imdb_id)
+
+    async def title_id_of(self, repo: BulkCatalogRepository, imdb_id: str) -> uuid.UUID | None:
+        assert isinstance(repo, FakeBulkCatalogRepository)
+        return repo.title_id(imdb_id)
+
+    async def genome_of(
+        self, repo: BulkCatalogRepository, title_id: uuid.UUID
+    ) -> tuple[float, ...] | None:
+        assert isinstance(repo, FakeBulkCatalogRepository)
+        return repo.genome(title_id)
+
+    async def genome_keys(self, repo: BulkCatalogRepository) -> set[object]:
+        assert isinstance(repo, FakeBulkCatalogRepository)
+        return repo.genome_keys()
+
+    async def enrich(self, repo: BulkCatalogRepository, imdb_id: str) -> None:
+        assert isinstance(repo, FakeBulkCatalogRepository)
+        repo.mark_enriched(imdb_id)
 
     async def indexes_intact(self, repo: BulkCatalogRepository) -> bool:
         """Vacuously true: this fake has no index to suspend. Asserted

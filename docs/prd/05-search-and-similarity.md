@@ -371,10 +371,18 @@ first in-process consumer.
 
 - embedding cosine over overview text,
 - Jaccard over genres, keywords, cast, and crew,
-- ⏳ MovieLens tag-genome cosine where available (~7% coverage, weighted in
-  only when present) — **the importer does not exist; [09](09-roadmap.md)
-  assigns it to M7**, and until then the ~7% is a plan rather than a
-  measurement,
+- MovieLens tag-genome cosine where available, weighted in only when present.
+  **The importer shipped in M7** (`usher bootstrap --phase movielens`,
+  `genome_scores`), and the coverage figure finally has denominators: 16,376
+  genome movies is **1.82%** of a full catalog's 899,828 movies, **1.29%** of
+  all 1,271,138 titles, and **8.7%** of [04](04-catalog-bootstrap.md)'s "~189k
+  titles with ≥100 IMDb votes" priority tier — which is the denominator that
+  makes the "~7%" this line used to carry roughly right. ⏳ The number that
+  matters is coverage of the *enriched tier*, which the phase reports and
+  which has not yet been measured against a real enriched catalog. Two
+  vectors are comparable only when they came from the same release, which is
+  what `genome_scores.genome_revision` records and what
+  `GenomeRepository.get_pair` refuses to blend across,
 - collection membership as a strong signal.
 
 Neighbours are precomputed offline into a `title_neighbors` table — item vectors
@@ -384,9 +392,10 @@ instant and engine-independent.
 **As of M6 two of those four signals have no data in `src/` and the shipped
 blend is the other two**, checked against the code rather than against this
 prose. Cast and crew have no `Person`/`Credit` table, model or port anywhere;
-the MovieLens tag-genome importer has never been built (there is no `movielens`
-bootstrap phase and no `adapters/bulk/movielens.py` — it is now owned by M7,
-see [09](09-roadmap.md)); and `titles.collection_id`
+the MovieLens tag-genome importer had never been built at that point (it
+shipped in M7: `movielens` is a bootstrap phase and
+`adapters/bulk/movielens.py` exists, so this signal now has data — blending it
+in is M7's own similarity work, not M6's); and `titles.collection_id`
 is a bare nullable UUID with no table that nothing in `src/` writes. So M6 ships
 **embedding cosine (0.60) plus keyword Jaccard (0.25) and genre Jaccard
 (0.15)**, written as a sum of weighted terms over an explicit signal list, so

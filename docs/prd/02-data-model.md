@@ -471,14 +471,24 @@ carries a value for every one of 1,128 tags, verified by counting), so the
 tall form stores 16,376 copies of the tag id and the title id to express a
 matrix with no holes in it.
 
-**No HNSW index, and that is a decision rather than an omission.** A full
-pairwise cosine over all 16,376 vectors is **1.190 ms** on a `Seq Scan`; the
-access pattern is a *pair* lookup by `title_id` rather than a KNN, so nothing
-asks this table for its nearest neighbours; and M6 measured a
-planner-*preferred* index costing 4.3× for byte-identical recall. The 624 kB
-of index inside the 45 MB is the primary key. `tests/integration/
-test_genome_repository.py` asserts the index set, so a later migration cannot
-quietly add one.
+**No HNSW index, and that is a decision rather than an omission.** The access
+pattern is a *pair* lookup by `title_id` rather than a KNN, and an HNSW index
+cannot help a lookup by primary key at all. Measured against a real
+15,565-row load: `get_pair` is **0.062 ms** (two primary-key probes under a
+`BitmapOr`); an unindexed KNN over the same table — one seed against all
+15,565 — is **59.4–66.2 ms** at 93,617 buffers, dominated by one TOAST fetch
+per row. Nothing asks for that today; if something ever does, this reopens on
+evidence. M6 separately measured a planner-*preferred* index costing 4.3× for
+byte-identical recall. The 624 kB of index inside the 45 MB is the primary
+key, and `tests/integration/test_genome_repository.py` asserts the index set
+so a later migration cannot quietly add one.
+
+⚠️ **An earlier draft of this section, taken from the M7 plan, said "a full
+pairwise cosine over all 16,376 vectors is 1.190 ms".** That is not
+achievable and is corrected here: a full pairwise scan is 121M unordered
+pairs of 1,128 lanes and measures **384 s** as a self-join. 1.190 ms is about
+the cost of a single pair. The decision is unchanged — it always rested on
+the access pattern, not on the scan.
 
 **The vector is TOASTed.** 1,128 halfvec lanes is 2,256 bytes plus a header,
 past Postgres's ~2 kB inline threshold, so the heap holds pointers and the

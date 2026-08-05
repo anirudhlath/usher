@@ -125,13 +125,18 @@ async def test_genome_scores_carries_no_index_beyond_its_primary_key(
 ) -> None:
     """Pins boundary call 7's index decision.
 
-    16,376 rows scan in 1.190 ms for a *full pairwise* cosine, and the access
-    pattern is a pair lookup by `title_id` rather than a KNN -- nothing asks
-    this table for its nearest neighbours. An index answers a question nobody
-    puts to it, and M6 measured what an index the planner *prefers* costs: a
-    GiST index alongside GIN turned 33.3 ms into 141.5 ms p50, 4.3x, for
-    byte-identical recall. An index nothing reads is `ix_titles_popularity`
-    again.
+    The access pattern is a pair lookup by `title_id`, not a KNN -- nothing
+    asks this table for its nearest neighbours -- and an HNSW index cannot
+    help a lookup by primary key at all. Measured against a real 15,565-row
+    load: `get_pair` is **0.062 ms**, two primary-key probes under a
+    `BitmapOr`. An unindexed KNN over the same table is 59.4-66.2 ms, so if a
+    future consumer ever wants one this reopens on evidence rather than being
+    foreclosed. M6 separately measured a planner-*preferred* index costing
+    4.3x for byte-identical recall, and an index nothing reads is
+    `ix_titles_popularity` again.
+
+    (The plan's "1.190 ms for a full pairwise cosine" is wrong: a real full
+    pairwise self-join measures 384 s. See the migration docstring.)
 
     Kills a later migration that adds one "for similarity". The 624 kB of
     index inside the measured 45 MB is this primary key.

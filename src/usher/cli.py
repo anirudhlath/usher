@@ -22,6 +22,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.adapters.bulk.imdb import IMDbRatingDataset, IMDbTitleDataset
+from usher.adapters.bulk.movielens import GENOME_BATCH_SIZE, MovieLensGenomeDataset
 from usher.adapters.bulk.tmdb_ids import TMDbIdDataset
 from usher.adapters.bulk.wikidata import WikidataCrosswalkDataset
 from usher.api.lanes import LaneSupervisor
@@ -51,10 +52,10 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
-from usher.ports.bulk import ImdbTitle
+from usher.ports.bulk import GenomeVector, ImdbTitle
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
-from usher.ports.repository import BulkCatalogRepository
+from usher.ports.repository import BulkCatalogRepository, GenomeCoverage
 from usher.ports.search import SearchFilters, SearchMode
 from usher.ports.source import SourceAdapter
 from usher.services.bootstrap import BootstrapService
@@ -65,7 +66,11 @@ from usher.telemetry import (
     register_search_gauges,
 )
 
-PHASES = ("imdb", "tmdb-ids", "crosswalk", "all")
+# `movielens` runs **last** in `--phase all`: the genome joins to `titles` on
+# `imdb_id`, and an empty catalog joins to nothing. After `crosswalk` too --
+# it costs nothing and keeps the tuple in execution order, which is what an
+# operator reads it as.
+PHASES = ("imdb", "tmdb-ids", "crosswalk", "movielens", "all")
 # The two lanes `ReconcileService` walks `list_items` for. `watch_state` is a
 # real `SyncRunKind` and is deliberately absent: `sync` always runs it after
 # the item walk, so offering it as an *alternative* would let an operator ask
@@ -146,10 +151,134 @@ async def _bootstrap(settings: Settings, phase: str) -> None:
                     catalog.upsert_crosswalk,
                 )
                 await service.link_crosswalk()
+            if phase in ("movielens", "all"):
+                await _movielens(settings, client, catalog, service)
             logger.info("catalog now holds {count} titles", count=await catalog.count_titles())
     finally:
         await client.aclose()
         await engine.dispose()
+
+
+async def _movielens(
+    settings: Settings,
+    client: httpx.AsyncClient,
+    catalog: BulkCatalogRepository,
+    service: BootstrapService,
+) -> None:
+    """The MovieLens tag genome, and the coverage report that is the actual
+    deliverable of this phase.
+
+    **The precondition is checked before the dataset is constructed, and the
+    outcome it prevents is the worst one available here.** Run against an
+    empty catalog, `import_dataset` would download 350,896,731 B, stream
+    18,472,128 rows, write 0, checkpoint `COMPLETED`, and `bootstrap-status`
+    would show a green phase. Every later `--phase all` would then find a
+    completed checkpoint at the file's end and do nothing, so the failure
+    would be **permanent and invisible**. PRD 08 says every operator command
+    has to work against an empty database -- and "work" means saying why, not
+    succeeding vacuously.
+
+    Three properties of the refusal, each deliberate:
+
+    - **It refuses before the download.** 335 MiB is the cost of finding out
+      late.
+    - **It creates no `ImportRun`.** A `FAILED` row would be a lie -- nothing
+      failed upstream -- and a `COMPLETED` one would be worse. The absence of
+      a row is the honest state, and it is what `bootstrap-status` already
+      renders as "this phase has not run".
+    - **It refuses only on an *empty* catalog.** A non-empty catalog whose
+      join still matches nothing is not an error, it is a *number*, and the
+      coverage report below is where it becomes visible. Refusing on a
+      coverage threshold would be inventing a policy; 1.82% of movies is the
+      expected shape rather than a fault.
+
+    In `--phase all` the precondition is unreachable in the normal case; it
+    exists for the operator who runs `--phase movielens` alone against a
+    fresh database.
+
+    **Measured end to end on 2026-08-04** against a real
+    `pgvector/pgvector:pg17` holding a real `--phase imdb` bootstrap
+    (1,271,570 titles): 16,376 movie runs consumed, **15,565 vectors stored,
+    811 unmatched**, in **23.8 s** wall clock with the archive already
+    cached. The 811 are genome movies whose IMDb id the catalog does not
+    hold -- 5.0% of the genome -- because M2 retains only four `titleType`s
+    and MovieLens carries some it drops. That is the join's miss count doing
+    exactly the job it exists for.
+
+    **A re-run does NOT report updates, and the plan predicted it would.**
+    The first run checkpoints at `position = 16376`, so the second resumes
+    from a *completed* cursor, skips every run, yields no batch, and writes
+    nothing -- 14.7 s of re-parsing to do nothing, and `0 unmatched` because
+    the writer is never called. That is correct and is the same shape
+    `--phase imdb` already has; the insert-vs-update distinction lives in the
+    repository and is covered there, not through a second CLI invocation.
+    """
+    if await catalog.count_titles() == 0:
+        print(
+            "movielens needs a catalog to join against: the genome is keyed "
+            "on imdb_id and titles is empty. Run --phase imdb first."
+        )
+        return
+
+    dataset = MovieLensGenomeDataset(
+        client,
+        settings.bulk_data_dir,
+        # NOT `settings.bulk_batch_size`. That default is 50,000, sized for
+        # ~100-byte rows; a GenomeVector carries 1,128 Python floats (~36 kB),
+        # and the whole dataset is 16,376 rows, so 50,000 would yield exactly
+        # one ~590 MB batch, committed once, checkpointing nothing -- and a
+        # killed run would restart from zero every time.
+        batch_size=GENOME_BATCH_SIZE,
+    )
+    revision = await dataset.revision()
+
+    async def write(rows: Sequence[GenomeVector]) -> int:
+        result = await catalog.upsert_genome_vectors(rows, revision=revision)
+        _GENOME_TALLY["unmatched"] += result.unmatched
+        return result.inserted + result.updated
+
+    _GENOME_TALLY["unmatched"] = 0
+    await service.import_dataset(dataset, write, revision=revision)
+    _report_coverage(await catalog.genome_coverage(), _GENOME_TALLY["unmatched"])
+
+
+# The `unmatched` count has nowhere else to go: `BootstrapService.import_dataset`
+# takes a writer returning `int` (rows written) and knows nothing about a
+# join's misses. A module-level tally rather than a wider port change, because
+# a join's miss count is this one phase's report and not a property of every
+# bulk import -- and the alternative, widening the writer's return type, would
+# touch all four existing call sites for one caller's benefit.
+_GENOME_TALLY = {"unmatched": 0}
+
+
+def _percent(part: int, whole: int) -> str:
+    return "n/a (0 titles)" if whole == 0 else f"{100.0 * part / whole:.2f}%"
+
+
+def _report_coverage(coverage: GenomeCoverage, unmatched: int) -> None:
+    """Four fractions, the enriched-tier one last because it is the one that
+    matters.
+
+    PRD 05 promised "~7% coverage" and PRD 04 repeated it as "~7% of the
+    priority tier", and that figure has never had a denominator. Three of
+    these are ceilings the *dataset* can reach; the fourth is what the join
+    actually did against this operator's catalog.
+    """
+    print(f"movielens: {coverage.with_vector} vectors stored ({unmatched} unmatched)")
+    print(f"  {_percent(coverage.with_vector, coverage.titles)} of {coverage.titles} titles")
+    print(f"  {_percent(coverage.with_vector, coverage.movies)} of {coverage.movies} movies")
+    print(
+        f"  {_percent(coverage.enriched_with_vector, coverage.enriched)} of the enriched "
+        f"tier ({coverage.enriched_with_vector} of {coverage.enriched} titles)"
+    )
+    # Only when there is more than one. A single-revision table is the normal
+    # case and a line reading "revisions: 1" is noise; a table carrying two is
+    # a correctness problem `GenomeRepository.get_pair` is already refusing to
+    # blend across, and the fix is a re-import.
+    if len(coverage.revisions) > 1:
+        print("  MIXED RELEASES -- get_pair refuses to compare across these; re-import:")
+        for name, count in coverage.revisions:
+            print(f"    {name}: {count}")
 
 
 async def _status(settings: Settings) -> None:
@@ -158,12 +287,17 @@ async def _status(settings: Settings) -> None:
     try:
         async with factory() as session:
             runs = await PostgresImportRunRepository(session).list_runs()
-            catalog_size = await PostgresBulkCatalogRepository(session).count_titles()
+            catalog = PostgresBulkCatalogRepository(session)
+            catalog_size = await catalog.count_titles()
+            # A phase whose deliverable is coverage has to be visible in the
+            # command an operator runs to see coverage.
+            genome = await catalog.genome_coverage()
     finally:
         await engine.dispose()
     # Printed, not logged: this is a report an operator asked for, and routing
     # it through the JSON log sink would make it unreadable at a terminal.
     print(f"titles in catalog: {catalog_size}")
+    print(f"genome vectors: {genome.with_vector}")
     if not runs:
         print("no import has been run yet")
         return

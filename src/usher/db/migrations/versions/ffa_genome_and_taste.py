@@ -17,12 +17,23 @@ scratch `pgvector/pgvector:pg17` (pgvector 0.8.6) at the real dimensions:
 
 **47x**, against a database PRD 08 budgets at 8-12 GB *total*. The 45 MB
 splits 1,096 kB heap + 43 MB TOAST + 624 kB index, and that index is this
-table's primary key -- **no other index ships**, deliberately. A full
-pairwise cosine over all 16,376 vectors is 1.190 ms on a `Seq Scan`; the
-access pattern is a pair lookup by `title_id` rather than a KNN; and M6
-measured a planner-*preferred* index costing 4.3x for byte-identical recall.
+table's primary key -- **no other index ships**, deliberately. Measured
+against a real 15,565-row load rather than against a scan nobody runs:
+`get_pair`, the only read this table has, is **0.062 ms** (two primary-key
+probes under a `BitmapOr`), and an HNSW index cannot help a lookup *by*
+`title_id`. A KNN -- one seed against all 15,565, `Seq Scan`, no index -- is
+**59.4-66.2 ms** at 93,617 buffers, dominated by one TOAST fetch per row;
+nothing asks for that today, and if something ever does this decision
+reopens honestly rather than being foreclosed. M6 separately measured a
+planner-*preferred* index costing 4.3x for byte-identical recall.
 `tests/integration/test_genome_repository.py` asserts the index set so a
 later migration cannot quietly add an HNSW one "for similarity".
+
+**The plan's "1.190 ms for a full pairwise cosine" is corrected here rather
+than repeated.** A full pairwise scan is 121M pairs of 1,128 lanes and
+measures at **384 s** as a self-join; 1.190 ms is about the cost of one
+pair. The decision survives on the access pattern, which is what was always
+carrying it.
 
 **This migration creates no extension.** `fa2b6c1e9d30` already creates
 `vector` (plus `pg_trgm` and `fuzzystrmatch`) `IF NOT EXISTS` and never drops

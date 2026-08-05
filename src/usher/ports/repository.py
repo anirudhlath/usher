@@ -24,7 +24,7 @@ from usher.domain.source import MediaItem, Source
 from usher.domain.sync import SyncRun, SyncRunKind
 from usher.domain.title import Title
 from usher.domain.watch import WatchState
-from usher.ports.bulk import IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
+from usher.ports.bulk import GenomeVector, IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
 from usher.ports.ingest import (
     MediaItemTarget,
     MediaItemUpsert,
@@ -259,6 +259,63 @@ class CrosswalkLinkResult:
     conflicted: int
 
 
+@dataclass(frozen=True, slots=True)
+class GenomeWriteResult:
+    """What one batch of genome vectors actually changed.
+
+    `inserted`/`updated` split for the reason every write on this port
+    splits them: rowcount alone reports their sum, so a re-import would be
+    indistinguishable from a first run. That matters more here than
+    anywhere, because "did this phase actually do anything" is the question
+    the whole `movielens` phase exists to answer.
+
+    **`unmatched` is the third field and it is the deliverable.** It counts
+    staged rows whose `imdb_id` is in no title — mirroring
+    `CrosswalkLinkResult(linked, unmatched, conflicted)`, which is this
+    project's precedent for reporting a join's misses as a count rather than
+    as silence. `links.csv` holds 86,537 movies and the catalog holds
+    whatever IMDb's dump retained, so the difference is real and expected;
+    what is not acceptable is a join that matched almost nothing looking
+    identical to one that matched everything.
+    """
+
+    inserted: int
+    updated: int
+    unmatched: int
+
+
+@dataclass(frozen=True, slots=True)
+class GenomeCoverage:
+    """Genome coverage with its denominators, because "~7%" never had one.
+
+    PRD 05 promised *"~7% coverage"* and PRD 04 repeated it as *"~7% of the
+    priority tier"*, and neither named a denominator. Measured against the
+    dataset, 16,376 genome movies is **1.82%** of a full catalog's 899,828
+    movies, **1.29%** of all 1,271,138 titles, and **8.7%** of PRD 04's own
+    *"~189k titles with >=100 IMDb votes"* priority tier — which is the
+    denominator that makes the published figure roughly right.
+
+    **None of those is the number that matters**, which is `enriched` and
+    `enriched_with_vector`: an owned household library of 2k-10k titles,
+    skewed hard toward exactly the popular, English, pre-2019 movies the
+    genome covers. Those three percentages are ceilings the *dataset* can
+    reach; these fields are what the join actually did against *this*
+    operator's catalog.
+
+    `revisions` is `(genome_revision, count)` pairs. More than one entry is a
+    correctness problem rather than a curiosity — `GenomeRepository.get_pair`
+    already refuses to blend across it — and the fix is a re-import. One
+    entry is the normal case and is not worth printing.
+    """
+
+    with_vector: int
+    titles: int
+    movies: int
+    enriched: int
+    enriched_with_vector: int
+    revisions: tuple[tuple[str, int], ...] = ()
+
+
 class BulkCatalogRepository(ABC):
     """Bulk writes into the catalog, deliberately *not* expressed through
     `TitleRepository`.
@@ -400,6 +457,51 @@ class BulkCatalogRepository(ABC):
 
         Idempotent: a second call over unchanged inputs reports
         `linked == 0`.
+        """
+
+    @abstractmethod
+    async def upsert_genome_vectors(
+        self, rows: Sequence[GenomeVector], *, revision: str
+    ) -> GenomeWriteResult:
+        """Store genome vectors against the titles their `imdb_id` resolves
+        to, returning what changed and how many resolved to nothing.
+
+        **The `imdb_id -> titles.id` join lives inside this statement, and
+        that is the whole point of the method.** The dataset cannot do it: it
+        never touches a database, which is what lets it be unit-tested with
+        no Docker. A service doing it would be an ad-hoc `SELECT` in
+        `services/`, which contract three forbids. So the join belongs on the
+        one port whose docstring already reserves the staged, set-based path.
+
+        `revision` is the run's own resolved dataset revision, bound as a
+        parameter and stored on every row it writes. It is not derived from
+        `now()` and not read back out of the file: it is what makes
+        `genome_scores.genome_revision` mean "the release this row came
+        from", which is what `GenomeRepository.get_pair` refuses to blend
+        across.
+
+        **A staged batch may contain two rows resolving to one title, and
+        that is not defensive.** Two MovieLens `movieId`s carrying the same
+        `imdbId` both resolve to one `titles.id`, and a second hit on one
+        conflict target is `CardinalityViolationError` — a runtime abort of
+        the whole batch, not a skipped row. An implementation must pick a
+        single deterministic winner rather than leaving it to whichever row
+        a scan reached first.
+
+        Idempotent in the sense that matters for resume safety: replaying a
+        batch is an upsert, never a duplicate. Unlike `upsert_titles`, a
+        replay is *not* invisible — it reports `updated`, which is the honest
+        answer and the one an operator re-running the phase is asking for.
+        """
+
+    @abstractmethod
+    async def genome_coverage(self) -> GenomeCoverage:
+        """Genome coverage against every denominator that has one.
+
+        Two set-based reads -- the counts, and the `genome_revision`
+        histogram -- run at the end of the `movielens` phase and printed. See
+        `GenomeCoverage` for why the enriched-tier fraction is the one that
+        matters and the other three are ceilings.
         """
 
     @abstractmethod
