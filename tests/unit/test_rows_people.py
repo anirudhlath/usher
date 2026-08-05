@@ -358,3 +358,29 @@ async def test_a_larger_body_of_work_outscores_a_smaller_one_and_saturates() -> 
     scores = {row.row.slug: row.score for row in rows}
     assert scores[f"people-{deep}"] == pytest.approx(PEOPLE_SCORE_CEILING)
     assert scores[f"people-{shallow}"] == pytest.approx(PEOPLE_SCORE_CEILING * 0.5)
+
+
+async def test_the_underived_warning_is_said_once_per_process_not_once_per_propose() -> None:
+    """The people half of CLAUDE.md's "a per-process fact logged in a per-pass
+    function" finding. `test_rows_franchise.py`'s twin carries the arithmetic.
+
+    Three passes on **one** provider instance, because the providers are
+    module-level singletons and a single pass cannot tell "once" from "once per
+    pass".
+    """
+    library = Library()
+    for index in range(6):
+        await _watched_film(library, f"Watched Film {index}", at=index + 1)
+
+    messages: list[str] = []
+    from loguru import logger
+
+    sink = logger.add(messages.append, level="WARNING", format="{message}")
+    provider = PeopleProvider()
+    try:
+        for _ in range(3):
+            assert await provider.propose(library.context()) == []
+    finally:
+        logger.remove(sink)
+
+    assert len([m for m in messages if "usher derive" in m]) == 1

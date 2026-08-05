@@ -232,7 +232,7 @@ async def test_the_provider_is_unaffected_by_a_missing_embedder_or_genome() -> N
     library = Library()
     old = await _long_ago(library)
 
-    proposals = await RediscoverProvider().propose(library.context(taste=None))
-    row = await proposals[0].row.build(library.context(taste=None))
+    proposals = await RediscoverProvider().propose(library.context())
+    row = await proposals[0].row.build(library.context())
 
     assert {card.title_id for card in row.cards} == set(old)

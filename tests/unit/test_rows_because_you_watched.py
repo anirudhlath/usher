@@ -236,7 +236,10 @@ async def test_a_never_built_neighbour_table_names_the_command_that_fixes_it() -
     The provider returns `[]` either way -- it is a home screen, not a
     diagnostic -- but a deployment where this row silently never fires is
     otherwise indistinguishable from a household with thin history, so it says
-    so once per compose and names the command.
+    so **once per process** and names the command. (It said so once per
+    *compose* until M7 Task 35's group priced that at ~8,640 warnings a day
+    across the three providers that carry this shape; see the companion case
+    below.)
 
     Fails the implementation that treats "never computed" as "no neighbours".
     """
@@ -350,3 +353,28 @@ async def test_a_seed_with_too_few_neighbours_is_skipped_rather_than_shown_thin(
     rows = await BecauseYouWatchedProvider().propose(library.context())
 
     assert [row.row.slug for row in rows] == [f"because-you-watched-{full}"]
+
+
+async def test_the_unbuilt_warning_is_said_once_per_process_not_once_per_propose() -> None:
+    """The similarity half of CLAUDE.md's "a per-process fact logged in a
+    per-pass function" finding. `test_rows_franchise.py`'s twin carries the
+    arithmetic.
+
+    Three passes on **one** provider instance: a single pass cannot tell
+    "once" from "once per pass", which is why M5's equivalent case drains
+    three worker passes rather than one.
+    """
+    library = Library()
+    seed_id = await library.title("Dune")
+    await library.finished(seed_id, at=days_ago(3))
+
+    messages: list[str] = []
+    sink = logger.add(messages.append, level="WARNING", format="{message}")
+    provider = BecauseYouWatchedProvider()
+    try:
+        for _ in range(3):
+            assert await provider.propose(library.context()) == []
+    finally:
+        logger.remove(sink)
+
+    assert len([m for m in messages if "usher similar --rebuild" in m]) == 1

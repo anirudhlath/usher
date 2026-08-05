@@ -42,7 +42,6 @@ from usher.composition import (
     metadata_provider,
     nothing,
     open_adapter,
-    search_index,
     selected_sources,
     unit_of_work,
 )
@@ -967,8 +966,6 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
             watch_states=pipeline.watch_states,
             episodes=pipeline.episodes,
             neighbors=pipeline.neighbors,
-            search=search_index(session, settings),
-            taste=await pipeline.taste.centroid(user.id),
             people=pipeline.people,
             credits=pipeline.credits,
             collections=pipeline.collections,

@@ -16,7 +16,7 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.lanes import LaneSupervisor
-from usher.composition import adapter_factory, search_index
+from usher.composition import adapter_factory
 from usher.config import Settings
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
@@ -55,7 +55,6 @@ from usher.ports.repository import (
     WatchStateRepository,
 )
 from usher.ports.rows import RowContext
-from usher.ports.search import SearchIndex
 from usher.ports.source import SourceAdapterFactory
 from usher.services.events import InMemoryEventBus
 from usher.services.home import HomeService
@@ -523,13 +522,6 @@ def get_taste_repository(session: SessionDep) -> TasteRepository:
     return PostgresTasteRepository(session)
 
 
-def get_search_index(session: SessionDep, settings: SettingsDep) -> SearchIndex:
-    """Built through `usher.composition`, not here, and that is contract six:
-    `usher.api` may not name a concrete search implementation. The chain is
-    allowed (`allow_indirect_imports = true`); naming the class twice is not."""
-    return search_index(session, settings)
-
-
 async def get_default_user(session: SessionDep) -> User:
     """The singleton default user as a **model**, not just an id.
 
@@ -583,19 +575,24 @@ async def get_row_context(
     watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
     episodes: Annotated[EpisodeRepository, Depends(get_episode_repository)],
     neighbors: Annotated[TitleNeighborRepository, Depends(get_title_neighbor_repository)],
-    search: Annotated[SearchIndex, Depends(get_search_index)],
     people: Annotated[PersonRepository, Depends(get_person_repository)],
     credits: Annotated[CreditRepository, Depends(get_credit_repository)],
     collections: Annotated[CollectionRepository, Depends(get_collection_repository)],
     taste: Annotated[TasteService, Depends(get_taste_service)],
 ) -> RowContext:
-    """The thirteen values a row may reach, for one request, for one user.
+    """The eleven values a row may reach, for one request, for one user.
 
-    **`taste` and `affinities` are values the composer hands over, not services
-    a provider reaches.** A provider may import only `domain/` and `ports/`, so
+    **`affinities` is a value the composer hands over, not a service a
+    provider reaches.** A provider may import only `domain/` and `ports/`, so
     `TasteService` cannot appear on the context -- and recomputing the affinity
     inside a provider would need a `TasteRepository` field *and* a second copy
-    of the lift arithmetic. `ports/rows.py` argues both at length.
+    of the lift arithmetic. `ports/rows.py` argues it at length.
+
+    **`search` and `taste` used to be here and are not.** No provider read
+    either, and `taste` cost a `user_taste` read on every request to deliver a
+    value that is structurally `None` on this path -- `TasteService.centroid`
+    returns `None` without an embedder and this route deliberately holds none.
+    `TasteService` is still injected, for `genre_affinity`.
 
     **No `AsyncSession` here either**, which is the structural half of trap 4:
     a row holding repositories has no session to share, so there is nothing for
@@ -613,8 +610,6 @@ async def get_row_context(
         watch_states=watch_states,
         episodes=episodes,
         neighbors=neighbors,
-        search=search,
-        taste=await taste.centroid(user.id),
         people=people,
         credits=credits,
         collections=collections,

@@ -18,12 +18,15 @@ failure survives into it: the provider is handed a lift-ordered sequence and
 can still re-rank it by support.
 """
 
+import inspect
+
 import pytest
 
-from tests.unit.rows import NOW, Library, days_ago
+from tests.unit.rows import Library, days_ago
 from usher.domain.enums import TitleKind
 from usher.domain.rows import RowFamily
-from usher.domain.taste import Centroid, GenreAffinity
+from usher.domain.taste import GenreAffinity
+from usher.ports.rows import RowContext
 from usher.services.rows.genre_affinity import (
     GENRE_AFFINITY_SCORE_CEILING,
     GenreAffinityProvider,
@@ -258,32 +261,33 @@ async def test_the_provider_returns_the_same_rows_with_and_without_a_centroid() 
     embedder is optional and off by default (ADR-0022).
 
     Task 23 corrected that, and this is the provider-level half of the same
-    assertion: the rows are identical against a context with a real centroid
-    and against the shipped default's `None`. Kills an "improvement" that
-    reaches for `TasteService.centroid()` here -- which would silently disable
-    the row on most deployments and raise nothing anywhere.
+    assertion: the row fires from `affinities` -- counts over `titles.genres`,
+    which need no embedder -- and there is no centroid on the context for it to
+    reach. Kills an "improvement" that reaches for `TasteService.centroid()`
+    here, which would silently disable the row on most deployments and raise
+    nothing anywhere.
     """
     library = Library()
     for index in range(4):
         await library.title(f"Western {index}", genres=("Western",), popularity=float(index))
     affinities = [_affinity("Western", lift=4.0, support=4)]
-    centroid = Centroid(
-        user_id=library.context().user.id,
-        vector=(0.6, 0.8),
-        model_name="fastembed:test",
-        title_count=9,
-        computed_at=NOW,
-    )
 
-    without = await GenreAffinityProvider().propose(library.context(affinities=affinities))
-    with_one = await GenreAffinityProvider().propose(
-        library.context(affinities=affinities, taste=centroid)
-    )
+    proposed = await GenreAffinityProvider().propose(library.context(affinities=affinities))
+    built = await proposed[0].row.build(library.context(affinities=affinities))
 
-    assert library.context().taste is None
-    assert [row.row.slug for row in without] == [row.row.slug for row in with_one]
-    assert [row.score for row in without] == [row.score for row in with_one]
-    assert [card.title_id for card in (await without[0].row.build(library.context())).cards] == [
-        card.title_id
-        for card in (await with_one[0].row.build(library.context(taste=centroid))).cards
-    ]
+    assert [row.row.slug for row in proposed] == ["genre-affinity-western"]
+    assert built.cards
+
+    # **The structural half, which is now the whole of it.** This case used to
+    # compose twice -- once with a real `Centroid` on the context and once with
+    # `None` -- and assert the two agreed. M7's Task 35 group removed
+    # `RowContext.taste` outright, because no provider read it and on the
+    # request path it was structurally `None` anyway. So "this provider does
+    # not read the centroid" is no longer a behavioural claim two compositions
+    # can agree on; it is a property of the context's shape, and asserting it
+    # directly is what kills the "improvement" that reaches for
+    # `TasteService.centroid()` here.
+    annotations = inspect.get_annotations(RowContext)
+    assert annotations, "the annotation scan found nothing, so it proves nothing"
+    assert "taste" not in annotations
+    assert "affinities" in annotations

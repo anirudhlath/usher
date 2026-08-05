@@ -246,8 +246,8 @@ async def test_the_provider_degrades_with_no_embedder_no_genome_and_no_credits()
     resuming = await library.title("Resuming")
     await library.in_progress(resuming, at=days_ago(1))
 
-    proposals = await ContinueWatchingProvider().propose(library.context(taste=None))
-    row = await proposals[0].row.build(library.context(taste=None))
+    proposals = await ContinueWatchingProvider().propose(library.context())
+    row = await proposals[0].row.build(library.context())
 
     assert [card.title_id for card in row.cards] == [resuming]
 

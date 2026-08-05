@@ -47,13 +47,23 @@ incremented by guesswork.** Counted over `src/` at M7:
    `db/repositories/watch_state.py:133` `COALESCE`s it on merge for exactly
    that reason. Zero is not "no runtime" -- it is a divisor that renders every
    partially-watched title as finished.
-8. **`RowContext.taste`, in `ports/rows.py`.** A deployment with no embedder
-   has no centroid at all (ADR-0022), and every reader drops the signal rather
-   than substituting a zero vector.
+8. `GenomeRepository.get_pair` returning `None` for a title with no genome row,
+   and for two rows from different genome releases -- `ports/repository.py`.
+9. **`NeighborCandidate.tags` -- `ports/repository.py`, `services/similar.py`.**
+   The genome cosine of a *pair*, `None` when either side has no vector. The
+   sharpest site on this list: every genome component is positive, so the true
+   cosine of any real pair is bounded above zero (measured floor **0.2556**
+   over 268,157,000 pairs), which makes `0.0` a value **real data cannot
+   produce** rather than merely an unevidenced reading.
 
-The next site is Group F's `GenomeRepository` returning `None` for a title with
-no genome row; count it against this list at implementation time rather than
-incrementing a number read out of a plan.
+**A site was removed rather than added, which had not happened before.**
+`RowContext.taste` was site 8 in this list at Group A. No provider ever read
+it, and on the request path it was structurally `None` -- so M7's Task 35 group
+deleted the field, and the ordinals below it moved up. That is the reason this
+enumeration exists: the ordinals were being incremented by guesswork, and a
+list that can only grow is a list that lies the first time something is
+deleted. **Count against this list; never against a number read out of a
+plan.**
 """
 
 import uuid

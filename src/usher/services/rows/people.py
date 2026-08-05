@@ -63,12 +63,11 @@ import uuid
 from collections.abc import Sequence
 from datetime import timedelta
 
-from loguru import logger
-
 from usher.domain.people import CreditKind
 from usher.domain.rows import DisplayHint, RowFamily
 from usher.ports.repository import RecurringPerson
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
+from usher.services.rows._derived import SaidOnce
 from usher.services.rows.base import BaseRow
 
 # Three distinct engaged titles, argued in the module docstring.
@@ -192,6 +191,12 @@ class PeopleProvider(RowProvider):
         self._credits = credits
         self._cards = cards
 
+        # One latch per provider instance -- and the providers are module-level
+        # singletons built by `row_providers`, so that is once per *process*,
+        # which is the rate this fact changes at rather than the rate
+        # `propose` runs at. `_derived.SaidOnce` carries the whole argument.
+        self._underived = SaidOnce()
+
     @property
     def slug_prefix(self) -> str:
         return _SLUG_PREFIX
@@ -212,7 +217,7 @@ class PeopleProvider(RowProvider):
                 # `credits` is empty until `usher derive` has run, and a
                 # provider that silently never fires is indistinguishable from
                 # a household with thin history.
-                logger.warning(
+                self._underived.warn(
                     "no credits have been derived, so no people rows can be proposed; "
                     "run `usher derive`"
                 )

@@ -48,15 +48,16 @@ either way.
 absent row are different states, and the composer's metrics count them
 separately.
 
-`RowContext` is a frozen dataclass of ports plus an injected clock — nine
-fields in M7, twelve once `people`/`credits`/`collections` exist:
+`RowContext` is a frozen dataclass of ports plus an injected clock — **eleven
+fields as shipped in M7**:
 
 ```python
 user: User                          now: Callable[[], AwareDatetime]
 titles: TitleRepository             media_items: MediaItemRepository
 watch_states: WatchStateRepository  episodes: EpisodeRepository
-neighbors: TitleNeighborRepository  search: SearchIndex
-taste: Centroid | None
+neighbors: TitleNeighborRepository  people: PersonRepository
+credits: CreditRepository           collections: CollectionRepository
+affinities: Sequence[GenreAffinity]
 ```
 
 - **No `AsyncSession`, and that is checked rather than commented.**
@@ -71,8 +72,23 @@ taste: Centroid | None
   context rather than each provider's constructor because providers are
   registered once, and a per-request clock cannot be a singleton's
   constructor argument.
-- **`taste` is optional** — a deployment with no embedder has no centroid
-  (ADR-0022), and every reader drops the signal rather than zeroing it. Fewer
+- **`search: SearchIndex` and `taste: Centroid | None` were specified here and
+  are not shipped.** Nine providers were built and none read either. Every row
+  turned out to be a *predicate over a repository* rather than a retrieval, so
+  nothing needed the index; and `taste` was worse than unread — on the request
+  path `TasteService.centroid` returns `None` unconditionally, because the
+  centroid needs an embedder and the route deliberately holds none, so every
+  `GET /home` paid a `user_taste` read for a value that was both unused and
+  unusable. A field with no consumer is what this project deletes; the
+  argument is `RowCard`'s absent artwork field, one layer up.
+  `test_every_row_context_field_is_read_by_at_least_one_provider` now scans for
+  the next one rather than counting.
+- **`affinities` replaced `taste` as the taste signal a row actually reads.**
+  This section used to fire `GenreAffinityProvider` on *"taste centroid
+  concentrated in a genre"*; implemented literally that makes the most
+  broadly-useful provider the one that never fires, because the embedder is
+  optional and off by default (ADR-0022). It fires on lift over the owned
+  library instead — counts over `titles.genres`, no embedder required. Fewer
   rows, not worse rows.
 
 So rows are pure functions of context and trivially testable with fakes.

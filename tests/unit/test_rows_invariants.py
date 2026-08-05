@@ -233,8 +233,8 @@ async def test_no_provider_falls_back_to_popular_titles_on_a_household_that_has_
 
 @_REGISTERED
 async def test_every_provider_composes_without_an_embedder(provider: RowProvider) -> None:
-    """The shipped default (ADR-0022). `ctx.taste` is `None`,
-    `title_neighbors` holds metadata-only scores, and no provider raises.
+    """The shipped default (ADR-0022). No embedder, `title_neighbors` holding
+    metadata-only scores, and no provider raises.
 
     Two of the nine change what they *say*: `BecauseYouWatchedProvider` softens
     its sentence, which is a constructor argument and is covered in its own
@@ -245,7 +245,6 @@ async def test_every_provider_composes_without_an_embedder(provider: RowProvider
     library = await _populated()
     await library.finished(await library.title("Something Watched"), at=NOW)
 
-    assert library.context().taste is None
     proposed = await provider.propose(library.context(now=INSIDE_A_WINDOW))
 
     for row in proposed:

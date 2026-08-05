@@ -234,3 +234,37 @@ async def test_a_household_that_has_watched_nothing_still_gets_its_franchise_row
     rows = await FranchiseProvider().propose(library.context())
 
     assert len(rows) == 1
+
+
+async def test_the_underived_warning_is_said_once_per_process_not_once_per_propose() -> None:
+    """**CLAUDE.md's "a per-process fact logged in a per-pass function" finding,
+    in a row provider.**
+
+    `propose` runs once per composed home screen. At the 30 s screen TTL that
+    is ~2,880 screens a day per household, and with three providers each
+    saying this it was ~8,640 warnings a day on a fresh install -- which trains
+    an operator to ignore warnings, the exact failure a log level exists to
+    prevent. M5 hit this at `build_worker`'s 5 s poll and fixed it by moving
+    the line to where the *decision* is made rather than where the loop is.
+
+    **Three passes, not one.** A single pass cannot tell "once" from "once per
+    pass": both spellings emit exactly one warning. That is the same reason
+    `test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass`
+    drains three.
+    """
+    library = Library()
+    for index in range(4):
+        await library.title(f"Owned {index}")
+
+    messages: list[str] = []
+    from loguru import logger
+
+    sink = logger.add(messages.append, level="WARNING", format="{message}")
+    provider = FranchiseProvider()
+    try:
+        for _ in range(3):
+            assert await provider.propose(library.context()) == []
+    finally:
+        logger.remove(sink)
+
+    assert len([m for m in messages if "usher derive" in m]) == 1

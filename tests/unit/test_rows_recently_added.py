@@ -185,7 +185,7 @@ async def test_the_provider_is_unaffected_by_a_missing_embedder_or_genome() -> N
     library = Library()
     arrived = await library.title("Just Arrived", added=days_ago(1))
 
-    proposals = await RecentlyAddedProvider().propose(library.context(taste=None))
-    row = await proposals[0].row.build(library.context(taste=None))
+    proposals = await RecentlyAddedProvider().propose(library.context())
+    row = await proposals[0].row.build(library.context())
 
     assert [card.title_id for card in row.cards] == [arrived]

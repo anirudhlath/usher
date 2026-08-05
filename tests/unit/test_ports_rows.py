@@ -23,7 +23,6 @@ from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.row_provider import FakeRow, FakeRowProvider
-from tests.fakes.search_index import FakeSearchIndex
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
@@ -42,8 +41,6 @@ def _context(*, taste: Centroid | None = None) -> RowContext:
         watch_states=FakeWatchStateRepository(),
         episodes=FakeEpisodeRepository(),
         neighbors=FakeTitleNeighborRepository(),
-        search=FakeSearchIndex(),
-        taste=taste,
         people=FakePersonRepository(),
         credits=FakeCreditRepository(),
         collections=FakeCollectionRepository(),
@@ -138,35 +135,37 @@ def test_a_row_context_is_frozen_so_a_provider_cannot_stash_state_between_the_tw
     ctx = _context()
     assert dataclasses.is_dataclass(ctx)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        ctx.taste = None  # type: ignore[misc]  # the refusal is the assertion
+        ctx.now = None  # type: ignore[misc,assignment]  # the refusal is the assertion
 
 
-def test_a_row_context_with_no_centroid_is_a_legal_context() -> None:
-    """**ADR-0014, eighth site** (the enumeration is in `usher.domain.rows`).
+def test_a_row_context_carries_no_centroid_at_all() -> None:
+    """**A field was removed from an ADR-0014 site list, which had not happened
+    before, and this is the pin that records it.**
 
-    A deployment with no embedder has no taste centroid -- ADR-0022 makes
-    the embedder optional, and this is where that lands on the home screen.
-    Readers drop the signal: GenreAffinityProvider with no centroid proposes
-    *nothing*, rather than falling back to the household's most-watched
-    genre, which is the distractor the plan seeds against it. Fewer rows,
-    not worse rows.
+    `RowContext.taste` was ADR-0014's eighth site and this case used to assert
+    it was legally `None`. M7's Task 35 group deleted the field: no provider
+    ever read it, and on the request path `TasteService.centroid` returns
+    `None` unconditionally (no embedder there), so every `GET /home` paid a
+    `user_taste` read to deliver a value that was both unused and unusable.
 
-    Kills `taste: Centroid` (non-optional), and kills a `__post_init__` that
-    substitutes a zero vector -- a zero centroid is equidistant from
-    everything, so every genre is equally "affine" and the row is noise
-    wearing a reason. The assertion is on the constructed value rather than
-    on the argument, so a substituting `__post_init__` fails it.
+    `GenreAffinityProvider` is the reason that is safe rather than a
+    regression. PRD 06 fires it on *"taste centroid concentrated in a genre"*;
+    Task 23 corrected that to lift over the owned library precisely because the
+    embedder is optional and off by default (ADR-0022), so the most
+    broadly-useful provider must not depend on the least available signal. It
+    reads `affinities`, which is counts over `titles.genres`.
 
-    **The annotation assertion is not decoration, and mutation is what said
-    so.** A dataclass validates nothing at runtime, so `taste: Centroid`
-    with the `| None` dropped still accepts `None` and the value assertion
-    alone **survived** it -- only mypy objected, and only because a caller
-    in this file passes `None`. A port whose optionality is enforced solely
-    by a type checker is one a `# type: ignore` retires.
+    Kills re-adding the field without a reader, which is what
+    `test_every_row_context_field_is_read_by_at_least_one_provider` guards from
+    the other direction -- and kills an "improvement" that puts a
+    `TasteService` on the context, which a provider may not import anyway.
     """
-    ctx = _context(taste=None)
-    assert ctx.taste is None
-    assert inspect.get_annotations(RowContext, eval_str=True)["taste"] == Centroid | None
+    annotations = inspect.get_annotations(RowContext, eval_str=True)
+    assert annotations, "the annotation scan found nothing, so it proves nothing"
+    assert "taste" not in annotations
+    assert "search" not in annotations
+    assert not any("Centroid" in str(annotation) for annotation in annotations.values())
+    assert "affinities" in annotations
 
 
 async def test_a_provider_with_nothing_to_say_proposes_nothing() -> None:
@@ -261,3 +260,48 @@ async def test_a_row_builds_a_row_that_names_its_own_slug_and_family() -> None:
     assert built.slug == row.slug
     assert built.family is row.family
     assert built.ttl == row.ttl
+
+
+def test_every_row_context_field_is_read_by_at_least_one_provider() -> None:
+    """**A field with no consumer is what this project deletes, and until this
+    case existed nothing noticed one.**
+
+    Group I/J found `RowContext.search` and `RowContext.taste` unread by
+    grepping, two groups after they were added -- and one of them cost a
+    `user_taste` query on every `GET /home` to fill a field nobody looked at.
+    A count of thirteen would not have caught either: the count was *correct*.
+    What was wrong was that two of the thirteen were decoration.
+
+    Scanned rather than listed, so it cannot drift: every `ctx.<name>` read
+    anywhere under `services/rows/` is collected off the AST and compared
+    against the dataclass's own annotations.
+
+    **The `assert reads` line is the guard on the guard.** A scan that walked
+    the wrong directory, or matched the wrong node type, would find nothing and
+    pass exactly like a scan that found everything -- the vacuous-pass failure
+    this milestone is named for, and the same shape as the `sitecustomize`
+    installation proof.
+
+    If a future field is genuinely needed before its reader exists, this case
+    is the place to say so out loud and with a reason, rather than letting the
+    field arrive unremarked.
+    """
+    provider_dir = pathlib.Path(inspect.getfile(RowContext)).parents[1] / "services" / "rows"
+    sources = sorted(provider_dir.glob("*.py"))
+    assert len(sources) >= 9, (
+        f"the provider scan found {len(sources)} files; it is looking in the wrong place"
+    )
+
+    reads: set[str] = set()
+    for path in sources:
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "ctx"
+            ):
+                reads.add(node.attr)
+    assert reads, "the ctx-attribute scan found nothing, so it proves nothing"
+
+    unread = set(inspect.get_annotations(RowContext)) - reads
+    assert unread == set(), f"RowContext fields no provider reads: {sorted(unread)}"

@@ -58,10 +58,9 @@ import uuid
 from collections.abc import Sequence
 from datetime import timedelta
 
-from loguru import logger
-
 from usher.domain.rows import DisplayHint, RowFamily
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
+from usher.services.rows._derived import SaidOnce
 from usher.services.rows.base import BaseRow
 
 # **3, and the cap is this provider's rather than the composer's.** The screen
@@ -182,6 +181,12 @@ class BecauseYouWatchedProvider(RowProvider):
         self._max_seeds = max_seeds
         self._window = window
 
+        # One latch per provider instance -- and the providers are module-level
+        # singletons built by `row_providers`, so that is once per *process*,
+        # which is the rate this fact changes at rather than the rate
+        # `propose` runs at. `_derived.SaidOnce` carries the whole argument.
+        self._underived = SaidOnce()
+
     @property
     def slug_prefix(self) -> str:
         return _SLUG_PREFIX
@@ -193,7 +198,7 @@ class BecauseYouWatchedProvider(RowProvider):
             # but a deployment where this provider silently never fires is
             # otherwise indistinguishable from a household with thin history,
             # and nothing in M6 re-runs the rebuild.
-            logger.warning(
+            self._underived.warn(
                 "no title_neighbors have been computed, so no similarity rows can be "
                 "proposed; run `usher similar --rebuild`"
             )

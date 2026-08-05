@@ -33,7 +33,6 @@ from tests.fakes.person_repository import (
     SeededCredit,
     SeededWatchState,
 )
-from tests.fakes.search_index import FakeSearchIndex
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
@@ -42,7 +41,7 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.episode import Episode, Season
 from usher.domain.ids import new_id
 from usher.domain.people import Credit, CreditKind, Person
-from usher.domain.taste import Centroid, GenreAffinity
+from usher.domain.taste import GenreAffinity
 from usher.domain.title import Title
 from usher.domain.watch import User
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
@@ -76,7 +75,6 @@ class Library:
         self.episode_series: dict[uuid.UUID, uuid.UUID] = self.watch_states._episode_series
         self.episodes = FakeEpisodeRepository()
         self.neighbors = FakeTitleNeighborRepository()
-        self.search = FakeSearchIndex()
         self.people = FakePersonRepository()
         # **Wired to the same title store**, which is `FakeCreditRepository`'s
         # own instruction: two independent dicts make a *correct*
@@ -355,7 +353,6 @@ class Library:
     def context(
         self,
         *,
-        taste: Centroid | None = None,
         affinities: Sequence[GenreAffinity] = (),
         now: datetime = NOW,
     ) -> RowContext:
@@ -371,8 +368,6 @@ class Library:
             watch_states=self.watch_states,
             episodes=self.episodes,
             neighbors=self.neighbors,
-            search=self.search,
-            taste=taste,
             people=self.people,
             credits=self.credits,
             collections=self.collections,

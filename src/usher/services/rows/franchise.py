@@ -51,10 +51,9 @@ import uuid
 from collections.abc import Sequence
 from datetime import timedelta
 
-from loguru import logger
-
 from usher.domain.rows import DisplayHint, RowFamily
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
+from usher.services.rows._derived import SaidOnce
 from usher.services.rows.base import BaseRow
 
 # PRD 06's own figure, passed to the port rather than re-derived after the
@@ -145,6 +144,11 @@ class FranchiseProvider(RowProvider):
     def __init__(self, *, limit: int = _MAX_ROWS, candidates: int = _CANDIDATES) -> None:
         self._limit = limit
         self._candidates = candidates
+        # One latch per provider instance -- and the providers are module-level
+        # singletons built by `row_providers`, so that is once per *process*,
+        # which is the rate this fact changes at rather than the rate
+        # `propose` runs at. `_derived.SaidOnce` carries the whole argument.
+        self._underived = SaidOnce()
 
     @property
     def slug_prefix(self) -> str:
@@ -158,7 +162,7 @@ class FranchiseProvider(RowProvider):
                 # shape as `BecauseYouWatchedProvider`'s never-built table and
                 # for the same reason: a provider that silently never fires is
                 # indistinguishable from a household that owns no franchise.
-                logger.warning(
+                self._underived.warn(
                     "no collections have been derived, so no franchise rows can be "
                     "proposed; run `usher derive`"
                 )

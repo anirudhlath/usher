@@ -46,7 +46,8 @@ is the check that does not.
 
 **ADR-0014's site enumeration lives in `usher.domain.rows`**, which lands
 first and holds the other of this milestone's two new sites. `RowContext.taste`
-is the eighth by that count.
+was the eighth by that count and has been removed -- see `RowContext` below for
+why, and note that the count in `domain/rows.py` moves with it.
 """
 
 from abc import ABC, abstractmethod
@@ -57,7 +58,7 @@ from datetime import timedelta
 from pydantic import AwareDatetime
 
 from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
-from usher.domain.taste import Centroid, GenreAffinity
+from usher.domain.taste import GenreAffinity
 from usher.domain.watch import User
 from usher.ports.repository import (
     CollectionRepository,
@@ -69,7 +70,6 @@ from usher.ports.repository import (
     TitleRepository,
     WatchStateRepository,
 )
-from usher.ports.search import SearchIndex
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,21 +104,52 @@ class RowContext:
     code (boundary call 9) -- they are constructed once, and a per-request
     clock cannot be a constructor argument of a singleton.
 
-    **Twelve fields, and the three that were promised have landed.** Group B
-    built `PersonRepository`, `CreditRepository` and `CollectionRepository` and
-    did not put them here; nothing in tasks 22-25 read them, so the gap was
+    **Eleven fields, and two were removed rather than counted.** Group B built
+    `PersonRepository`, `CreditRepository` and `CollectionRepository` and did
+    not put them here; nothing in tasks 22-25 read them, so the gap was
     invisible until `FranchiseProvider` and `PeopleProvider` needed them. They
     are added by the task that first reads them, which is what this docstring's
     original promise -- "a field added later is a one-line change every
     existing provider ignores" -- was asserting is cheap. It was: the four
     providers already shipped are untouched by all three.
 
-    The full list, which is what Task 38 counts against:
+    The full list:
 
         user, now, titles, media_items, watch_states, episodes, neighbors,
-        search, taste, people, credits, collections
+        people, credits, collections, affinities
 
-    **And a thirteenth, `affinities`, which the plan did not foresee.** Task
+    **`search` and `taste` were here and are gone, and that is the other half
+    of the same promise.** Group I/J found by grep that no provider read
+    either, two groups after they were added. A field with no consumer is what
+    this project deletes, and the argument is `RowCard.artwork`'s verbatim, one
+    layer up: a field that is always absent -- or always `None` -- is a branch
+    that never takes its other arm, and the day something fills it every reader
+    written against the empty case is already wrong.
+
+    - **`search: SearchIndex`** was here because PRD 06 puts one on the
+      context. Nine providers later, none retrieves; every one of them reads a
+      *repository* and asks a question with a predicate, which is what a row
+      is. Its wiring existed solely to serve this field --
+      `composition.search_index` was written to dodge contract six on its
+      behalf -- and went with it.
+    - **`taste: Centroid | None`** was worse than unread: on the request path
+      it was structurally `None`, because `TasteService.centroid` returns
+      `None` without an embedder and the route deliberately holds none. So
+      every `GET /home` paid a `user_taste` read to fill a field that no
+      provider looked at and that could not have carried a value there anyway.
+
+    **The consequence, named rather than hidden: `TasteService.centroid` now
+    has no caller in `src/`.** That is a genuinely larger finding than these
+    two fields and it is deliberately *not* acted on here. Deleting it means
+    deleting `user_taste`, `TasteRepository`, `StoredTaste` and a table in
+    migration `ffa` -- a reversal of Group G's Task 22, with PRD 06's whole
+    taste section to rewrite -- and doing that silently as a side effect of
+    removing a context field would be the opposite of the discipline that found
+    it. It belongs to the PRD/verification pass or to M8, whose
+    `CuratedProvider` is the first plausible consumer of a taste vector.
+    `genre_affinity` is unaffected and is read, via `affinities`.
+
+    **`affinities` is the eleventh, and the plan did not foresee it.** Task
     27 says `GenreAffinityProvider` *"reads `TasteService.genre_affinity(
     user_id)`"* -- a **service** result, and a provider may import only
     `domain/` and `ports/`. Every other route was worse:
@@ -133,31 +164,23 @@ class RowContext:
       `TasteRepository` field *and* a second copy of the lift arithmetic --
       and the front matter's rule for the seed list applies verbatim: it
       should exist exactly once.
-    - **Widening `taste` into a bundle.** Twelve fields instead of thirteen,
-      bought by rewriting Group A's `taste: Centroid | None` pin and the
-      ADR-0014 site hanging off it, to hide a field rather than declare one.
+    - **Widening it into a bundle** -- hiding a field rather than declaring
+      one.
 
-    So it is a value the composer computes and hands over, which is exactly
-    what `taste` already is -- that field is not a `TasteRepository` either.
-    **An empty sequence means no genre cleared Task 23's lift and support
-    floors**, a real answer and the common one; it is never a stand-in for
-    "nothing computed this", because there is no deployment in which nothing
-    does (the signal needs no embedder, which is the whole reason Task 23
-    declines PRD 06's centroid formulation).
+    So it is a value the composer computes and hands over, rather than a
+    repository. **An empty sequence means no genre cleared Task 23's lift and
+    support floors**, a real answer and the common one; it is never a stand-in
+    for "nothing computed this", because there is no deployment in which
+    nothing does -- the signal needs no embedder, which is the whole reason
+    Task 23 declines PRD 06's centroid formulation, and the reason
+    `GenreAffinityProvider` reads this rather than the centroid that used to
+    sit beside it. A deployment without an embedder gets a home screen with
+    **fewer rows, not worse rows**.
 
-    Task 38 counts **thirteen**, against the twelve listed above plus this
-    one. A fourteenth arriving without a task is still drift.
-
-    `taste` is `Centroid | None` -- ADR-0014's eighth site. A deployment with
-    no embedder has no centroid at all (ADR-0022), and every reader drops the
-    signal rather than zeroing it. **`GenreAffinityProvider` is *not* an
-    example of that and reads this field not at all** -- Task 23 corrected
-    PRD 06's "taste centroid concentrated in a genre" precisely because
-    implementing it literally makes the most broadly-useful provider the one
-    that never fires on the default deployment. It reads `affinities`, which
-    is counts over `titles.genres` and needs no embedder at all. A deployment
-    without an embedder gets a home screen with **fewer rows, not worse
-    rows**, and this is the field that decides which.
+    A twelfth field arriving without a task is drift, and
+    `test_every_row_context_field_is_read_by_at_least_one_provider` is what
+    now says so -- scanned rather than counted, because the count was correct
+    on the day two of the thirteen were decoration.
     """
 
     user: User
@@ -167,8 +190,6 @@ class RowContext:
     watch_states: WatchStateRepository
     episodes: EpisodeRepository
     neighbors: TitleNeighborRepository
-    search: SearchIndex
-    taste: Centroid | None
     # Group B's three, landing with the providers that read them.
     # `FranchiseProvider` reads `collections.list_owned`; `PeopleProvider`
     # reads `people.list_recurring_for_user` for its rows and
