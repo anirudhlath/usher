@@ -75,8 +75,9 @@ be added if a client turns out to need flexible field selection.
 > data" is visible on the wire.
 >
 > **The route never calls a source, and never loads an embedding model.** Every
-> input is local — watch state, media items, `title_neighbors`, `user_taste`,
-> credits, collections — so [08](08-operations.md)'s "never fails a request
+> input is local — watch state, media items, `title_neighbors`, genre affinity
+> over `titles.genres`, credits, collections — so
+> [08](08-operations.md)'s "never fails a request
 > local state can answer" is structural here, and there is still no 503 for the
 > RFC 9457 envelope below to describe. The model matters because `create_app`
 > builds one only when a worker runs in the same process; every similarity
@@ -116,7 +117,16 @@ be added if a client turns out to need flexible field selection.
 > `Person`/`Credit` land with M7 and `Image` with M9, each re-derived from
 > `raw_payloads` with no second network call ([09](09-roadmap.md)'s M4 boundary
 > call 2), and an empty list would be indistinguishable from a film with no
-> cast. **`GET /titles/{id}/similar` is M9's, not M6's** — this sentence said
+> cast.
+>
+> **M7 landed `Person`, `Credit` and `Collection` and this route still carries
+> none of them**, which is the distinction between a table and a wire field and
+> is stated rather than left for a reader to infer from a milestone number.
+> `people`, `credits` and `collections` are real ([02](02-data-model.md)) and
+> `usher derive` fills them; adding a `credits` key here is a DTO, a hydration
+> read and a shape decision (how many, in what order, cast and crew together or
+> apart) that no M7 task makes. **Owner: M9**, with the rest of this route's
+> unbuilt surface. `Image` is unchanged and still M9's from both ends. **`GET /titles/{id}/similar` is M9's, not M6's** — this sentence said
 > "M6's" until M6 ran and added no HTTP route at all
 > ([09](09-roadmap.md)'s M6 boundary call 1). M6 built the
 > `SimilarityService` and the precomputed `title_neighbors` table that route
@@ -233,9 +243,11 @@ does not carry a `failed` tier.
   "id": "01936f2a-...",
   "name": "Dune",
   "year": 2021,
-  "enrichment_state": "stub",     // overview/credits/artwork not yet fetched
+  "enrichment_state": "stub",     // overview not yet fetched
   "overview": null,
-  "images": { "poster": null },
+  // no "images" key and no "credits" key -- absent, never null.
+  // The earlier draft of this example carried "images": {"poster": null},
+  // which is the exact shape the paragraph above refuses.
   "availability": [ { "source": "Emby", "quality": "2160p HDR10" } ],
   "watch_state": { "position_seconds": 1840, "played": false }
 }
@@ -299,6 +311,19 @@ subsystem narrows functionality, it never fails a request local state can answer
 > playback ticket [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)
 > owes. M5's two ordinary failures are the shapes M3 already ships: a 404 for
 > an unknown title and a 422 for a malformed id or `?titles=`.
+>
+> **Still deferred after M7, and M7 is the milestone that tested the reason
+> rather than restating it.** M7 adds a client-facing route — `GET /home` —
+> and it does not force the envelope either, for the same structural reason
+> one layer along: every input is local state (watch state, media items,
+> `title_neighbors`, genre affinity, credits, collections), the route holds no
+> `SourceAdapter`, and [08](08-operations.md)'s own degradation table says
+> *"LLM call fails → Home composes without them"* — so the one upstream that
+> could be down is one this route already composes without. **There is no 503
+> here to give a `code` to.** Two client routes now, two milestones, and the
+> deferral has survived both on evidence rather than on inertia; the first
+> route whose honest answer is a domain-level failure is still M9's
+> `POST /titles/{id}/play`.
 
 ## Streaming updates (SSE)
 

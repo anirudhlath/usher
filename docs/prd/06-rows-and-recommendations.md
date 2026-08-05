@@ -36,9 +36,11 @@ class BaseRow(Row):
 correction to this section's earlier sentence (*"The `Row` ABC lives in the
 services layer because it has behaviour and dependencies"*). That sentence
 gives a reason for the **base class** to be in `services/` and not for the
-**abstraction**: `hydrate()` needs a `TitleRepository`, a
-`MediaItemRepository` and a `WatchStateRepository`, and a concrete method on a
-port is a port with a dependency — `ports/` has none today. The mechanical
+**abstraction**: `hydrate()` reads a `TitleRepository` and a
+`MediaItemRepository` off the context (**two**, not the three an earlier draft
+of this sentence claimed — the watch-state read is the caller's, per row), and
+a concrete method on a port is a port with a dependency — `ports/` has none
+today. The mechanical
 half is that `test_every_port_abc_is_registered_in_all_ports` walks
 `usher.ports.*` and is the only thing that checks an ABC is an ABC, so a `Row`
 in `services/` would get neither of ADR-0001's two checks. The DTOs stay pure
@@ -207,6 +209,20 @@ consecutive similarity rows; cap per family), builds the top N
 > `usher.home.compose.duration` and the per-provider `usher.row.build.duration`
 > breakdown are what turn revisiting this into a number rather than an
 > argument, and `usher home` measures it.
+>
+> **The number, so the call is a decision rather than a preference.** Measured
+> 2026-08-04 against a real 1,271,570-title catalog with a synthetic household
+> on it (5,200 owned copies, 360 watch states over two years, 50 collections,
+> 1,800 credits and 6,000 neighbour rows): **cold p50 23.9 ms, p95 35.9 ms**, warm
+> 0.0 ms, eight rows and 115 cards. The slowest provider is
+> `because-you-watched` at 4.3 ms — **34% of build time**, so no single
+> provider dominates. **p95 is 11× under the 400 ms budget.** The rule for
+> revisiting this was written before the run and both clauses must fire: p95
+> above 400 ms *and* no single provider at ≥ 50% of build time. Neither does,
+> so sequential stands on evidence rather than on the argument alone —
+> [ADR-0025](decisions/0025-rows-build-sequentially.md), which also records
+> what would make this the wrong answer (thirty providers, or one that calls
+> out of process).
 >
 > **Built in M7 as `services/home.py`.** The diversity constraints are two
 > rules at two stages, and the split is deliberate: the **per-family cap** is
@@ -472,7 +488,22 @@ table left open.** M7's `WatchStateRepository.list_in_progress` settles them.
   **films only**, on a library where 999,827 of 1,126,674 measured items are
   episodes.
 
-Adding a row type is a subclass and a registration. Nothing else changes.
+Adding a row type is a subclass and a registration. Nothing else changes — and
+as of M7 that is **a checked claim rather than an aspiration**. The registry
+holds nine providers, asserted by name *and* by count, the composition point is
+one tuple in `services/rows/__init__.py`, and **five cross-provider invariants
+are parametrised over that registry**, so a tenth provider inherits five cases
+on the day it is written: that it returns nothing against an empty database,
+that it does not fall back to popular titles on a household that has watched
+nothing, that it composes with no embedder, that its cases name the wrong
+implementation they rule out, and that it reaches no port the context does not
+carry. (Two further invariants are asserted over the registry's *scores* rather
+than parametrised over its members — that only Continue Watching can reach the
+top score, and that every score is on one comparable scale.) The half of the
+sentence that was
+*not* free is `RowContext`: two of its specified fields had no reader and were
+deleted rather than kept, so "nothing else changes" holds for the composer and
+did not hold for the context.
 
 ## Taste
 
@@ -598,10 +629,10 @@ the model sees 200 titles it might plausibly recommend, not a catalog.
 
 | Layer | Lifetime |
 |---|---|
-| Built rows | Per-row TTL, in-process |
-| Composed home screen | ~30 s per user |
-| Neighbour tables | Rebuilt on embedding change |
-| Curated rows | Until regenerated |
+| Built rows | ✅ Per-row TTL, in-process — 60 s (Continue Watching, Next Up) to 12 h (Seasonal), each row's own |
+| Composed home screen | ✅ 30 s per user, in-process |
+| **Neighbour tables** | ⚠️ **Not rebuilt on anything.** This row was false in M6 and is false now; what changed is that half of it is finally *observable* — see below |
+| Curated rows | ⏳ **M8**, with `CuratedProvider` and `curated_rows` |
 | Taste centroid | ⏳ **Recomputed when the household's `max(watch_states.updated_at)` moves** — a fingerprint, not an event |
 | Genre affinity | ⏳ **Not cached at all** |
 
@@ -646,6 +677,29 @@ never blocks on a slow row.
 > `because-you-watched-<seed>` is one slug per seed and expired entries are read
 > past rather than removed: without a ceiling the TTL reclaims nothing and the
 > dict grows with the household's watch history.
+
+⚠️ **"Neighbour tables — rebuilt on embedding change" describes a trigger that
+has never existed**, and it is worth correcting loudly rather than quietly,
+because it is the one row in this table an operator could act on wrongly.
+Nothing rebuilds `title_neighbors` on any event: `usher similar --rebuild` is
+an operator's command or a cron entry, and M6 recorded this as *"the
+milestone's one honest freshness gap"*.
+
+**M7 narrows it to one half and makes the other half countable.** Staleness has
+two causes, and they are not the same kind of problem:
+
+- *The blend changed.* M7's fourth signal re-weighted the other three, so every
+  row written before it means something different from every row written after
+  — and until `title_neighbors.blend_fingerprint` (migration `ffb`) nothing
+  distinguished them. That half is now **a query**: `usher similar <title id>`
+  says so per title and `usher.similarity.neighbors.stale` counts the table.
+- *Some other title was embedded.* A title's neighbours go stale when a
+  *different* title gets a vector, which no per-row predicate can decide
+  without recomputing the row. That half remains undecidable, `computed_at`
+  remains beside the fingerprint for it, and it stays an operator's job.
+
+So the honest statement is: **one cause is now visible and neither is
+automatic.** [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md).
 
 ⏳ **"Invalidated on watch-state change" was an event this project has already
 refused to publish.** The nightly walk merges up to **1,126,789** watch states,

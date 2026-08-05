@@ -9,7 +9,7 @@ otherwise be lost and re-litigated in six months.
 | ADR | Decision | Status |
 |---|---|---|
 | [0001](0001-abc-over-protocol.md) | ABCs, not Protocols, for ports | Accepted |
-| [0002](0002-postgres-first-search.md) | Postgres-first search; Meilisearch gated | Accepted — reverses an earlier call; ⏳ gate not yet run |
+| [0002](0002-postgres-first-search.md) | Postgres-first search; Meilisearch gated | Accepted — reverses an earlier call; **gate run 2026-08-03 and failed**, follow-up owned by M9 |
 | [0003](0003-own-uuid-identity.md) | Usher-owned UUIDs, provider IDs as attributes | Accepted |
 | [0004](0004-push-over-polling.md) | Push events primary, reconcile as backstop | Accepted |
 | [0005](0005-bulk-bootstrap.md) | Pre-build the catalog from bulk datasets | Accepted |
@@ -31,6 +31,8 @@ otherwise be lost and re-litigated in six months.
 | [0021](0021-the-suggest-path-is-its-own-port.md) | The suggest path is its own port, so a dual write cannot arrive quietly | Accepted — settles a provisional marker |
 | [0022](0022-the-embedder-is-optional-and-its-contract-is-measured.md) | The embedder is optional, and its contract is measured rather than asserted | Accepted — corrects PRD 05 and 01 |
 | [0023](0023-a-provider-proposes-it-does-not-decide.md) | A provider proposes; the composer decides | Accepted — settles PRD 06's composition sketch |
+| [0024](0024-the-genome-is-one-dense-vector-per-title.md) | The tag genome is one dense `halfvec(1128)` per title, not a tall relevance table | Accepted — corrects PRD 02 |
+| [0025](0025-rows-build-sequentially.md) | Rows build sequentially, because `AsyncSession` is not concurrency-safe | Accepted — corrects PRD 06 |
 
 Format: context → decision → consequences → evidence. Short is fine.
 

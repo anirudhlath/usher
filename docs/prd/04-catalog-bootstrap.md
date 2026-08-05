@@ -182,7 +182,9 @@ crawl survives restarts.
 
 ### Phase 4 — Signals (~15 min + embedding)
 
-**This phase is half built, and the halves belong to different milestones.**
+**Both halves are now built, and they belong to different milestones** — the
+embedding half to M6, the MovieLens half to M7. This sentence said "half
+built" until M7 finished it.
 
 ✅ **MovieLens shipped in M7**, and three of the numbers this section carried
 were wrong. `PHASES` gains `movielens`, `adapters/bulk/movielens.py` reads
@@ -219,8 +221,64 @@ which is coverage of the *enriched tier*: an owned household library of 2k–10k
 titles, skewed hard toward exactly the popular, English, pre-2019 movies the
 genome covers. Those three percentages are ceilings the dataset can reach;
 `usher bootstrap --phase movielens` reports what the join actually did against
-this operator's catalog, including the enriched-tier fraction. ⏳ That figure
-has not yet been measured against a real enriched catalog.
+this operator's catalog, including the enriched-tier fraction.
+
+**Task 36 measured it on 2026-08-05, against a `--phase all` catalog of
+1,271,570 titles with a real household's 5,020 owned copies on top**, and the
+three ceilings above came down slightly because the catalog is a different
+snapshot: 15,565 genome vectors joined, which is **1.22%** of all titles,
+**1.73%** of 899,991 movies, **7.61%** of the ≥100-vote priority tier (measured
+at 204,494 titles rather than estimated at ~189k), and **10.68%** of owned
+titles. **The number that decides whether the signal does anything is none of
+those** — it is the *candidate-pair* rate, since the similarity term needs both
+sides of a pair to carry a vector: **1.81%** (9,069 of 502,000 pairs), measured
+rather than squared, because `coverage²` would have said 1.14% and a real pool
+is not an independent draw. See [05](05-search-and-similarity.md) for what that
+does to the term's weight.
+
+⏳ **Still not measured: coverage against a genuinely *enriched* tier.** That
+run had no TMDb key, so its "owned" titles are name-shaped skeletons and its
+candidate pools are name-selected — which weakens exactly the correlation being
+measured, making 1.81% a conservative floor rather than an estimate.
+
+**Two physical properties of this snapshot the importer verifies rather than
+assumes.** Both were measured for M7 and neither is documented by GroupLens
+anywhere, so both are properties of *this* archive rather than promises about
+the format — which is precisely why the code checks them.
+
+> **`genome-scores.csv` is physically grouped and ordered.** 16,376 contiguous
+> `movieId` runs, strictly increasing, every run exactly 1,128 rows carrying
+> `tagId` 1…1128. That is what makes a single-pass streaming importer possible:
+> one dense 1,128-lane vector assembled per run, with the whole 18.5M-row
+> matrix never in memory. **The importer refuses rather than trusting it** — a
+> run of the wrong length, a duplicate `tagId` within a run, or a `movieId`
+> that reappears after its run closed is a hard failure naming the offending
+> `movieId`. A vector assembled from a file that changed shape is a wrong
+> answer that renders identically to a right one. (What is *not* enforced is
+> the `tagId` ordering *within* a run: the vector is built by index rather than
+> by append, so a shuffled run must be accepted — that property is what makes
+> the by-index build provable.)
+
+> **`links.csv`'s `tmdbId` is not unique — 162 duplicate rows over 38 ids —
+> while `imdbId` is.** So the join to `titles` goes through
+> `'tt' || lpad(imdbId, 7, '0')` and **never** through `tmdbId`: a `tmdbId`
+> join fans one TMDb id out across several MovieLens movies and attaches one
+> film's genome vector to another's title, on ids that are all real. The
+> `lpad` is the second half and is not decoration — measured over all 86,537
+> rows, `imdbId` is 7 characters wide on 79,978 and 8 on 6,559, never shorter
+> and never empty, so `'tt' || imdbId` happens to be correct *today* while
+> silently depending on a padding convention the file documents nowhere, and a
+> single unpadded row would join to nothing rather than raise. Same family as
+> M4's finding that 11 of 885 live Emby `Imdb` values were bare digits.
+
+**Range-fetching only the three members the importer reads was measured and
+declined.** `links.csv`, `genome-tags.csv` and `genome-scores.csv` are ~96 MB
+of the 335 MB archive, and fetching only those is possible over HTTP range
+requests. `CachedDatasetFile` already handles resume, `If-Range` and the
+stale-snapshot interlock; re-implementing all three against per-member local
+headers to save 239 MB on a *first bootstrap* is new failure surface for a
+saving an operator pays once. Recorded as measured-and-declined rather than
+unconsidered.
 
 It remains a **bonus signal that fires when present**, never the primary
 similarity index — but it captures tone and feel that plot embeddings miss,

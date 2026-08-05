@@ -191,6 +191,30 @@ class Credit(BaseModel):
     created_at: datetime
 ```
 
+✅ **Shipped in M7** (migration `fd7c3a5b9e12`), and three shapes in that
+sketch are load-bearing rather than incidental.
+
+**Identity is `(tmdb_id)`, partial-unique, and deliberately not `(tmdb_id,
+kind)`.** `titles` needs the kind because TMDb's movie and series id spaces
+overlap on 26,968 ids ([ADR-0011](decisions/0011-tmdb-id-is-namespaced-by-kind.md));
+`/person/{id}` is one space, so a person carries one id. It is an index
+`WHERE tmdb_id IS NOT NULL` rather than a column constraint, because a person
+derived from a payload that carried no id must still be storable. **And it is
+not `name`:** two people share a name often enough that a unique index on it
+would refuse a real derivation, and Group B's contract suite proves the
+identity is the id by writing two rows with the same name and different ids.
+
+**`credits.kind` is a `cast`/`crew` discriminator and `billing_order` is a
+rank, and neither is indexed.** `kind` has two values over a table that is
+always read `WHERE title_id = …` or `WHERE person_id = …` first, so an index on
+it would be a scan of half the table wearing an index's name. `billing_order`
+is `CHECK (>= 0)` and nullable, because a crew credit has no billing.
+
+**`credits` has no `updated_at` and no trigger**, unlike `people` and
+`collections`. A credit row is derived from a cached payload and replaced
+wholesale when that payload is re-derived; there is no update path for a
+trigger to fire on.
+
 ⏳ **`imdb_id`, `birth_year`, `death_year` and `biography` are not built, and
 they are not deferred pending a decision — they are a different milestone's
 network budget.** None of them is on a `credits.cast[]`, `credits.crew[]` or
@@ -232,6 +256,14 @@ class Collection(BaseModel):
     name: str
     created_at: datetime; updated_at: datetime
 ```
+
+✅ **Shipped in M7** (migration `fd7c3a5b9e12`), with `tmdb_id` partial-unique
+for the same reason `people` has it and **not** composite with `kind`, because
+`belongs_to_collection` is a field of `/movie/{id}` and there is no series
+counterpart to collide with. The migration also gave `titles.collection_id` the
+foreign key it had waited for since M1 (`ON DELETE SET NULL`) and the partial
+index that serves both `FranchiseProvider`'s read and the referencing-side
+lookup that `SET NULL` performs on every collection delete.
 
 **`belongs_to_collection` is movies-only and has no `/tv/{id}` counterpart** —
 verified against the recorded payloads, where `series.json` carries no such key
@@ -439,12 +471,40 @@ the one that gets missed:
 | **`update()`'s mutation loop** | it `setattr`s every column, so Postgres answers `ERROR: column "search_document" can only be updated to DEFAULT`. **This fires on writes**, so a change that only tested reading a seeded row will not see it. |
 | the 1:1 assertion in the model tests | fails — and, spelled as `columns - DERIVED_COLUMNS == model_fields`, it *also* fails if someone adds a name to `DERIVED_COLUMNS` that `Title` does model. |
 
+**M7 put a second name in `DERIVED_COLUMNS`, and it is a different kind of
+thing from the first.** `DERIVED_COLUMNS` is now
+`{"search_document", "credit_names"}`. `search_document` is
+`GENERATED ALWAYS AS (…) STORED`, so **Postgres maintains it** and no code
+could write it if it tried. `titles.credit_names text[]` is **maintained by
+code** — by the same call in `db/repositories/people.py` that writes `credits`, inside
+one transaction, holding the top ten billed plus every stored crew name — so nothing
+in the database stops a caller writing it, and its membership here is what
+does: `_to_domain` filters it out (so `Title` does not carry a cast list that
+is not the cast) and `_NOT_UPDATABLE` — which is
+`{"id", "created_at", "updated_at"} | DERIVED_COLUMNS` — keeps `update()`'s
+mutation loop off it, so a `Title` round-trip cannot blank it.
+
+Both belong here and the shared reason is the 1:1 rule, not the mechanism:
+**a column is in `DERIVED_COLUMNS` when it is derived from domain state rather
+than being domain state**, whoever derives it. The distinction matters the day
+someone adds a third: a generated column that is not listed fails loudly on
+every read, while a code-maintained one that is not listed fails on the *write*
+path only — `update()`'s mutation loop would happily set it to `None`, and
+`usher_array_text` is `STRICT`, so one NULL nulls the whole search document for
+that row and nothing raises. That is why `credit_names` is `NOT NULL` with a
+`'{}'` server default as well as being listed here: two independent guards for
+a failure that is silent under either one alone.
+
 ### Supporting tables
 
 | Table | Purpose |
 |---|---|
 | `curated_rows` | ⏳ Persisted LLM row output ([06](06-rows-and-recommendations.md)). **Does not exist yet** — M8 owns it, along with the `LLMClient` implementation that fills it |
-| `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, computed_at)`. A **batch artefact**, rebuilt rather than repaired, blending the two signals M6 has data for — embedding cosine plus genre and keyword Jaccard — and not the four [05](05-search-and-similarity.md) specifies. It is the one derived artefact in this schema with no per-row freshness predicate, and it carries a whole-artefact `computed_at` instead, on purpose ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)) |
+| `people` | ✅ Canonical people: `(id, tmdb_id, name, sort_name, known_for_department, created_at, updated_at)`. Identity is a **partial-unique `tmdb_id`** (`WHERE tmdb_id IS NOT NULL`), never `name` — see below |
+| `credits` | ✅ The `people`↔`titles` join, one row per credit: `(id, person_id, title_id, kind, tmdb_credit_id, character, job, department, billing_order, created_at)`. `kind` is the `cast`/`crew` discriminator and `billing_order` is the cast's billing rank. **No `updated_at` and no trigger** — every write is an insert, because a credit is a fact about a payload rather than a mutable row |
+| `collections` | ✅ TMDb franchise grouping: `(id, tmdb_id, name, created_at, updated_at)`, `tmdb_id` partial-unique. `titles.collection_id`'s foreign-key target, at last |
+| `user_taste` | ✅ One centroid per user: `(user_id PK, centroid halfvec(384), model_name, source_watermark, title_count, computed_at)`. `centroid` and `source_watermark` are both **nullable on purpose** — a household below five engaged titles gets a written refusal rather than a skipped row, and a household with no watch state at all has no watermark to record. `(model_name, source_watermark)` together are [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s fingerprint here |
+| `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, blend_fingerprint, computed_at)`. A **batch artefact**, rebuilt rather than repaired. M6 blended the two signals it had data for; M7 makes it three of the four [05](05-search-and-similarity.md) specifies and adds **`blend_fingerprint`** (migration `ffb`), so "was this row computed under the current blend?" stopped being undecidable. `computed_at` stays beside it for the half that is still undecidable per row — *some other title was embedded since* ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)) |
 | `genome_scores` | ✅ One title's MovieLens tag-genome vector: `(title_id, relevance halfvec(1128), genome_revision, computed_at)`. **One dense vector per title, not a tall `(title_id, tag_id, relevance)`** — see below |
 | `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats. One row per *attempt*, so the availability sweep can say which run last finished cleanly |
 | `jobs` | Priority work queue ([03](03-sources-and-sync.md)). A completed job's row is deleted, so there is no `done` status and the table's size is the outstanding work, not the work ever done |
@@ -536,6 +596,8 @@ Title      1─* Image
 Title      1─* MediaItem *─1 Source
 Title      1─* WatchState *─1 User
 Title      1─1 TitleEmbedding
+Title      1─1 GenomeVector  (sparse — 15,565 of 1,271,570; genome_scores)
+User       1─1 UserTaste     (nullable centroid; user_taste)
 Title      *─* Title        (through title_neighbors, directed, precomputed)
 ```
 

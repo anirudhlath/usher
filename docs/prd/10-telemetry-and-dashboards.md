@@ -49,6 +49,9 @@ job.enrich · job.match · job.watch_history   ← a worker's root span,
 index.title                       ← M6, a child of job.index
 └── index.embed
 
+home.compose                      ← M7, one per GET /home or usher home
+└── row.build                        one per row actually built
+
 bootstrap.import
 ├── bootstrap.batch
 └── bootstrap.link_crosswalk
@@ -83,6 +86,28 @@ call) and their child `bootstrap.batch` spans carry `usher.dataset` and
 `usher.revision` as attributes — the same "why was this slow" query the
 ingest pipeline's spans answer, for the M2 bulk importers.
 
+**The `home.compose` tree was confirmed by reading the emitting code rather
+than by remembering the plan**, and three of its properties are not what a
+reader would assume:
+
+- **The provider is an *attribute*, not part of the span name.** `row.build`
+  carries `usher.row.provider` (the `slug_prefix`), `usher.row.slug` and
+  `usher.row.cards`; `home.compose` carries `usher.home.proposed`,
+  `usher.home.built` and `usher.home.rows`. So "find the one slow provider" is
+  a group-by on an attribute, not a scan of span names — which is what keeps
+  the name cardinality at two where `because-you-watched-<seed>` would have
+  made it catalog-sized. **Dashboard 4 can have its breakdown**, from either
+  side: the histogram's `provider` label or this attribute.
+- **There is no `propose` span.** Proposal runs inside `home.compose` and is
+  untraced individually, so a provider that is slow to *propose* and cheap to
+  *build* shows up only in the parent's duration. Recorded as a gap rather
+  than drawn, because an unwritten span in a documented tree is the trace-side
+  version of the permanently empty panel this file's preamble argues against.
+- **A cached row produces no `row.build` span**, for the same reason it records
+  no histogram point: the cache returns before the span opens. So the number of
+  `row.build` children of a `home.compose` is the number of *misses*, and a
+  warm request is a lone parent with none.
+
 Spans carry `title_id`, `source`, and `trigger` (`demand` vs `background`) as
 attributes, so "why did the title I just opened take 45 seconds" is one query.
 
@@ -98,8 +123,8 @@ is maintained rather than aspirational.
 | `usher.http.server.duration` | histogram | route, status | M9 |
 | `usher.search.duration` | histogram | mode | ✅ M6 |
 | `usher.search.results` | histogram | mode | ✅ M6 |
-| `usher.home.compose.duration` | histogram | — | M7 |
-| `usher.row.build.duration` | histogram | provider | M7 |
+| `usher.home.compose.duration` | histogram | — | ✅ M7 |
+| `usher.row.build.duration` | histogram | provider | ✅ M7 |
 | `usher.jobs.queued` | gauge | kind | ✅ M4 |
 | `usher.jobs.duration` | histogram | kind | ✅ M4 |
 | `usher.jobs.parked` | gauge | kind | ✅ M4 |
@@ -144,11 +169,46 @@ dashboard query has to know:
   path at all. `suggest` is a separate port with its own latency budget
   ([ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md)), and M6
   emits nothing for it — a gap named here rather than left to be discovered
-  from an empty panel, and one the gate's ⏳ latency finding makes worth
-  closing.
+  from an empty panel, and one **the gate's measured latency makes worth
+  closing rather than merely worth noting**: the shipped suggest path measures
+  p50 33.6 ms / p95 211 ms / max 730 ms at 1.27M names, against the 50 ms
+  as-you-type budget [ADR-0002](decisions/0002-postgres-first-search.md) was
+  gated on. A path that misses its budget by 4× at p95 and has no series is a
+  regression nobody would see.
 
 A blank query is deliberately not a data point: a search box sends one between
 every keystroke.
+
+**`provider`'s vocabulary is the nine `slug_prefix` constants**, and it is
+written down here for the reason the paragraph above gives — `continue-watching`,
+`next-up`, `recently-added`, `rediscover`, `because-you-watched`, `franchise`,
+`genre-affinity`, `seasonal`, `people`. Ten when M8 registers
+`CuratedProvider`. Four things a dashboard query has to know:
+
+- **It is the provider's prefix, never the row's slug.** `because-you-watched`
+  emits one row *per seed* — `because-you-watched-<title id>` — so a slug-keyed
+  label would be bounded by the catalog rather than by the registry. Bounded at
+  nine is the whole reason the label is affordable on a per-request histogram.
+- **It is not the class name.** `services/rows/__init__.py` also keys a
+  `BASE_SCORES` map by `__name__`; that is a different vocabulary for a
+  different purpose, and confusing the two produces a panel with nine empty
+  series and nine populated ones.
+- **`provider` on this metric and `provider` on `usher.provider.requests` are
+  different vocabularies under one label name.** The latter is a *metadata*
+  provider (`tmdb`). They never appear on the same series, but a dashboard
+  variable defined as "all values of `provider`" collects both.
+- **A cache hit records no point at all.** `HomeService` returns a cached row
+  before it opens the timer, deliberately, so this histogram measures the cost
+  of *building* a row and not the cost of serving one. The population is
+  therefore misses, and the hit rate is not recoverable from it —
+  `usher.cache.hits`/`.misses` is M9's, and until then the cold/warm pair
+  `usher home` prints is the only measurement of the row cache there is.
+
+`usher.home.compose.duration` carries **no labels**, and that is a decision:
+the natural one would be the row count or the user, and the first is an
+outcome rather than a dimension while the second is unbounded by construction.
+The per-provider breakdown Dashboard 4 wants comes from
+`usher.row.build.duration` beside it, not from a label on this one.
 
 `usher.search.embeddings.stale` and `.refused` are the two backlog gauges, and
 they are fed by **the same predicate that drives the backfill and the contract
@@ -319,11 +379,19 @@ result count without needing a durable row per query. Said explicitly so a
 reader does not conclude M6 measured nothing about search.
 
 And the synthetic typo set this paragraph compares itself favourably to is
-[ADR-0002](decisions/0002-postgres-first-search.md)'s gate, which is **⏳ still
-to be run against the real catalog**. The comparison is fair and it is not a
-criticism: the gate is the best evidence available *until* M9 lands this
-table, and this paragraph is a plan to replace it rather than a reason not to
-run it.
+[ADR-0002](decisions/0002-postgres-first-search.md)'s gate. **It ran on
+2026-08-03 against a real 1,271,138-title catalog and it failed** — 27.8%
+recall@5 on 2–4-character names against a bar of 0.75, 68.3% on 5–7 against
+0.85, transposition on a short name at 0.0%, and a p95 of 211 ms against the
+50 ms latency half, which no configuration clearing the recall half beats. The comparison is fair and it is not a criticism; what the
+result changes is that this paragraph's argument is now **stronger, not
+weaker**. A synthetic typo set answers "can the index find a name somebody
+misspelled"; `search_queries` answers "what did people actually type and did
+they play anything" — and the gate demonstrated the gap between the two by
+producing a decisive number that still cannot say whether real users type
+2–4-character queries at all. The gate is the best evidence available *until*
+M9 lands this table, and there is now a measured result for this table to be
+better than.
 
 Row attribution (`played` joined back to the row a title was launched from) does
 the same for [06](06-rows-and-recommendations.md) — it shows which
@@ -387,6 +455,16 @@ API latency by endpoint · **home composition time broken down per row**, which
 finds the one slow provider · search latency by mode · **zero-result rate** and
 search→play conversion · DB query time and pool saturation · cache hit rates ·
 image proxy hit rate and cache size.
+
+**Home composition time is backed by real data as of M7**, from both sides:
+`usher.home.compose.duration` for the total and `usher.row.build.duration`'s
+`provider` label for the breakdown, with `home.compose → row.build` spans for
+the drill-down. Three panels on this dashboard are **not** backed: API latency
+by endpoint needs `usher.http.server.duration` (M9), cache hit rates need
+`usher.cache.hits`/`.misses` (M9), and search→play conversion needs
+`search_queries`' outcome columns (M9). And one caveat travels with the home
+panels — the build histogram's population is cache *misses* only, so a p50
+that rises after a deploy may be a colder cache rather than a slower provider.
 
 ### 5 — Cost & Compliance
 

@@ -63,10 +63,10 @@ a bigger one than the sentence implies.** Filling B cost three things:
   `IMMUTABLE`-declared SQL function that reads `credits` is **accepted in
   silence**, and is the worst of the three: the column it feeds then reflects
   credits as of whenever each row was last written, permanently, with no
-  migration to blame. `credit_names` is maintained by the one statement that
-  also writes `credits`, holds the top ten billed plus every stored crew name,
-  and is `NOT NULL` because `usher_array_text` is `STRICT` and one NULL nulls
-  the entire document.
+  migration to blame. `credit_names` is maintained by the one call that also
+  writes `credits`, inside the same transaction, holds the top ten billed plus
+  every stored crew name, and is `NOT NULL` because `usher_array_text` is
+  `STRICT` and one NULL nulls the entire document.
 - **A forced full-column rewrite.** `CREATE OR REPLACE FUNCTION` does not
   recompute stored generated values, and neither does changing the expression:
   the migration drops the GIN index, drops the column, re-adds it and
@@ -135,14 +135,30 @@ that capped set, ordered by popularity.
 directly on `titles`.** This section used to specify a narrow
 `(title_id, name, kind, popularity)` table "over names and aliases", and its
 justification is exactly that — *aliases and people names*, one title
-contributing many rows. Neither has a data source in M6 (see weight class B
-above), so the table would hold exactly one row per title duplicating
+contributing many rows. Neither had a data source in M6 (see weight class B
+above), so the table would have held exactly one row per title duplicating
 `titles(id, name, kind, popularity)`: a second copy of the same data, a
 second thing to keep fresh, and a new instance of precisely the staleness
-problem this milestone exists to eliminate. **When M7 lands aliases and
-people, the narrow table is the migration that adds them** — and at that
-point it holds rows `titles` does not, which is what its justification always
-was. Boundary call 3.
+problem this milestone exists to eliminate. Boundary call 3.
+
+⏳ **Still not built after M7, and the condition is restated rather than
+renewed.** M6 deferred this to *"the day M7 lands aliases and people"*. **M7
+landed people and not aliases**, so the condition is not met — and a deferral
+silently rolled forward is the exact failure [09](09-roadmap.md) names for the
+tag genome (*"an obligation recorded only where it was postponed is one nobody
+plans"*). Both halves, with an owner:
+
+- **Aliases are not merely unbuilt, they are not in the cache.**
+  `alternative_titles` is in neither `append_to_response` list
+  ([03](03-sources-and-sync.md)), so aliases are absent from `raw_payloads`
+  entirely — landing them changes the crawl's *request shape* and re-fetches
+  the whole enriched tier. **Unassigned**, and named in PRD 03 rather than
+  left implied by this deferral.
+- **The people half now belongs with M9's two-tier suggest**, which
+  [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges and
+  which *replaces* the shipped suggest path rather than extending it. Building
+  the narrow table now means M9 redesigns it against a table built for the
+  design it is replacing. **Owner: M9**, together with the two-tier suggest.
 
 Stated honestly: **that call rests on a structural argument, not on a
 latency measurement.** No variant was built and timed against the direct
@@ -239,6 +255,25 @@ popularity) recovers all 1.3 points and does not hurt the all-NULL arm, but
 its behaviour on a genuinely *enriched* tier could not be measured on this
 skeleton catalog, so it is an M9 change to re-measure rather than a shipped
 one; `NULLIF(popularity, 0)` recovers nothing, since only 3 zeros exist.
+
+**Two numbers in this section are from different runs and must not be
+subtracted from each other.** The gate table below reports **82.5%** for the
+shipped configuration; Task 36's arms are **83.4% → 82.1%**. They are the same
+statement over the same 2,993 cases at the same seed, measured two days apart
+against two *different catalogs* — the gate's was a `--phase imdb` bootstrap of
+1,271,138 titles, Task 36's a `--phase all` one of 1,271,570 — and the catalog
+is the independent variable in both. The comparison that means something is
+within a run (83.4 against 82.1, one arm against the other); the comparison
+that does not is across them.
+
+**And `ix_titles_popularity` was dropped in the same task** (migration `ffc`).
+It was not merely unused: it was **unusable as declared** — a `DESC` btree,
+which Postgres builds NULLS FIRST, while every consumer asks
+`DESC NULLS LAST`, a different pathkey the planner can never satisfy from it.
+`list_owned_by_tag`, added in M7 and the one statement that genuinely orders by
+`titles.popularity`, plans as a Merge Semi Join over `pk_titles` and never
+touches it. 9,536 kB of index that no statement could take; the migration's
+docstring carries the `EXPLAIN`.
 
 **`<%` (`word_similarity`) was measured and not taken.** It separates
 fixture-scale examples better than `%` (0.8 / 0.4 / 0.2 against
@@ -421,7 +456,8 @@ instant and engine-independent.
 
 **As of M6 two of those four signals have no data in `src/` and the shipped
 blend is the other two**, checked against the code rather than against this
-prose. Cast and crew have no `Person`/`Credit` table, model or port anywhere;
+prose. Cast and crew had no `Person`/`Credit` table, model or port anywhere at
+that point (**M7 landed all three — see the note below the M7 table**);
 the MovieLens tag-genome importer had never been built at that point (it
 shipped in M7: `movielens` is a bootstrap phase and
 `adapters/bulk/movielens.py` exists, so this signal now has data — blending it
@@ -438,6 +474,20 @@ is a bare nullable UUID with no table that nothing in `src/` writes. So M6 shipp
 | `tags` | — | **0.25** | absent |
 | `keywords` | 0.25 | 0.20 | 0.20 / 0.75 = **0.267** |
 | `genres` | 0.15 | 0.10 | 0.10 / 0.75 = **0.133** |
+
+⏳ **Cast/crew Jaccard and collection membership are still not terms, and M7 is
+the milestone where the distinction between "the data landed" and "the term
+landed" has to be said out loud.** `people`, `credits` and `collections` are
+real tables as of M7 ([02](02-data-model.md)), so the *data* both signals need
+now exists — and `SimilarityService._WEIGHTS` has four keys, not six.
+`NeighborSeed`/`NeighborCandidate` carry no cast, crew or collection field, so
+adding either is the same port-plus-two-fakes-plus-a-surface-pin change the tag
+genome turned out to be, **plus** a full `usher similar --rebuild` because
+adding a term re-weights the other four and moves every stored score. It is
+therefore a change with a fingerprint bump attached rather than a small one,
+and it is **unassigned** — recorded here at the moment its blocker was removed,
+so nobody later reads the four-signal blend as the four signals this section
+specifies.
 
 **The three carried-over weights sum to 0.75, and that is the whole argument
 for these numbers rather than round ones.** `_blend` renormalises over the
@@ -554,6 +604,32 @@ rather than a measurement — TMDb's `popularity` is a rolling engagement figure
 and already leans recent. **Taste-centroid proximity** has no centroid; PRD 06
 owns the taste model and nothing computes one.
 
+⏳ **M7 built the centroid and wired none of the three into ranking, and
+saying so is the point of this paragraph.** `TasteService` and `user_taste`
+exist ([06](06-rows-and-recommendations.md)), so *"nothing computes one"* has
+stopped being true — but wiring it into ranking is a `SearchService` change no
+M7 task makes, and leaving the sentence above unqualified would claim a
+capability that does not exist. What actually changed, term by term:
+
+- **Taste-centroid proximity** — the centroid *table* exists and **is not a
+  ranking term**; in fact `TasteService.centroid` has no caller anywhere in
+  `src/` as of M7, so nothing writes `user_taste` either. Two things stand in
+  the way beyond the wiring: `SearchRequest` carries no user, and on the
+  request path the centroid is structurally `None`
+  anyway, because it needs an embedder and the route deliberately holds none
+  ([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)).
+  So a naive wiring would ship a term that is inert on the default deployment
+  — the failure [06](06-rows-and-recommendations.md) already corrected once,
+  for `GenreAffinityProvider`. **Owner: M9**, with the user identity the
+  authentication seam owes.
+- **Watch state** — still no user on `SearchRequest`. M7's calls hold a user
+  identity, but they are *row* calls, not search calls; nothing narrowed the
+  gap. **Owner: M9.**
+- **Recency** — unchanged, and still blocked on the same thing: nothing
+  measures ranking, so there is no evidence to pick a decay constant from.
+  M9's `search_queries` ([10](10-telemetry-and-dashboards.md)) is what would
+  supply it. **Owner: M9.**
+
 **Relevance enters the blend as a rank, never as a raw score.** A `ts_rank` is
 around 0.06, an RRF score around 0.016–0.033 and a cosine is in [-1, 1];
 adding any of those to a popularity term in [0, 1) is
@@ -563,8 +639,10 @@ service reads the outcome as an *ordering* and derives `1 / (1 + rank)` from
 the position, with equal index scores sharing a rank.
 
 **An absent signal is excluded from the blend, not scored zero.**
-`titles.popularity` is null for every title TMDb has never described, which is
-most of the catalog, and `popularity or 0.0` would rank a title nobody measured
+`titles.popularity` is null for every title TMDb has never described — **77.1%
+of a `--phase all` catalog and 100% of a `--phase imdb` one**, measured above
+rather than described as "most of it" — and `popularity or 0.0` would rank a
+title nobody measured
 identically to one measured as unpopular — the same rule
 [ADR-0014](decisions/0014-absence-is-not-zero.md) states for watch
 history, applied to a ranking term. The observable consequence: at equal

@@ -7,7 +7,7 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M6 complete, gate included — and the gate failed.** The project scaffold, environment
+**Status: M7 complete.** The project scaffold, environment
 config, domain models, port ABCs, persistence (SQLAlchemy schema + Alembic
 migrations + title repository), the telemetry bootstrap, a FastAPI app
 with liveness/readiness endpoints, the container image + compose stack + CI
@@ -33,16 +33,44 @@ PRD 03's fourth pipeline stage, which every earlier milestone deferred: the
 handler, an optional `fastembed` embedder, `PostgresSearchIndex`/
 `PostgresSuggestIndex`, RRF fusion with reported coverage, `SearchService`
 and `SimilarityService`, and the `index`/`search`/`suggest`/`similar` CLI
-(M6). See
+(M6) — and the composed home screen: `Row`/`RowProvider` as ports with **nine
+registered providers**, `HomeService`'s propose→score→diversify→build with
+in-process row and screen caches, `TasteService`'s fingerprinted centroid and
+its genre affinity, `DeriveService` re-deriving `Person`/`Credit`/`Collection`
+from `raw_payloads` with **no second network call**, search weight class B
+filled via `titles.credit_names`, the MovieLens tag genome as one dense
+`halfvec(1128)` per title and the similarity blend's third live signal,
+`title_neighbors.blend_fingerprint`, `GET /home` — the first client-facing
+route since M5 — `row.invalidated`, and the `derive`/`home` CLI plus
+`bootstrap --phase movielens` (M7). See
 `docs/plans/2026-07-28-m1-foundation.md`,
 `docs/plans/2026-07-30-m2-bootstrap.md`,
 `docs/plans/2026-07-30-m3-emby-adapter.md`,
 `docs/plans/2026-07-31-m4-ingest.md`,
 `docs/plans/2026-08-01-m5-push.md` and
-`docs/plans/2026-08-02-m6-search.md` for the task breakdowns and
-`docs/prd/09-roadmap.md` for what's next (M7 — rows). Do not invent
+`docs/plans/2026-08-02-m6-search.md`,
+`docs/plans/2026-08-03-m7-rows.md` for the task breakdowns and
+`docs/prd/09-roadmap.md` for what's next (M8 — LLM curation). Do not invent
 commands for tooling that does not exist yet — check the Commands section
 below before assuming something runs.
+
+**M7's nine deliberate boundary calls**, each stated with its reason in the
+M7 plan's Scope section and in PRD 09: **`GET /home` IS built** (the first
+client-facing route since M5, because ADR-0006's *"one request paints a
+screen"* is a property of a request boundary no CLI can exhibit); **the
+`curated_rows`/`LLMRow`/`CuratedProvider` family is M8's whole** and
+`RowFamily` ships with two members rather than a `CURATED` nobody can emit;
+**`RowCard` carries no artwork field**, absent rather than null, the same call
+`GET /titles/{id}` made for `images`; **`Person`/`Credit`/`Collection` ARE
+built**, re-derived from `raw_payloads` with no second network call, minus
+`Person`'s four `/person/{id}` fields; **weight class B is filled** and needs a
+denormalised `titles.credit_names` because a generated column cannot reach
+another table; **`title_search_names` is still not built** and M6's condition is
+restated rather than renewed (M7 lands people, not aliases); **the tag genome
+IS built** as one dense `halfvec(1128)` per title rather than a tall table;
+**rows build sequentially** because `AsyncSession` is not concurrency-safe;
+and **row provider enable/disable does not become a table**, because its only
+writer would be an M9 route.
 
 **ADR-0002's typo-tolerance gate ran on 2026-08-03 against a real
 1,271,138-title catalog and FAILED**, on both halves of a bar written down
@@ -132,6 +160,172 @@ load automatically when working in `docs/`.
   logged" rule is enforced rather than merely asserted.
 
 ## Verified facts worth not re-deriving
+
+**M7's measurements, taken 2026-08-04/05 on this host against
+`pgvector/pgvector:pg17` (pgvector 0.8.6) unless stated otherwise. The
+`titles.popularity` re-measure has its own entry inside M6's gate section
+below, because it is a correction to that gate's headline.**
+
+**A stored generated column cannot reach another table, and that is the
+finding that made weight class B a denormalised column.** Measured on
+PostgreSQL 17.10: `setweight(to_tsvector('english', (SELECT … FROM credits …)),
+'B')` inside `GENERATED ALWAYS AS (…) STORED` answers `ERROR: cannot use
+subquery in column generation expression` — **not** the immutability error this
+schema's `usher_array_text` wrapper trains a reader to expect, because Postgres
+refuses it *syntactically*, before volatility is considered. A bare cross-table
+reference answers `ERROR: missing FROM-clause entry for table "credits"`. **The
+third spelling is the dangerous one**: an `IMMUTABLE`-declared SQL function
+that reads `credits` is **accepted in silence**, and the column it feeds then
+reflects credits as of whenever each row was last written, permanently, with no
+migration to blame. So class B is a `setweight` over `titles.credit_names
+text[]`, maintained by the same call and the same transaction that writes
+`credits`, `NOT NULL`
+with a `'{}'` default because `usher_array_text` is `STRICT` and one NULL nulls
+the whole document. Measured class weights, one term in three classes: name
+**0.991** (A), `credit_names` **0.396** (B), overview **0.198** (C).
+
+**The genome cosine does NOT saturate, measured against a bar written before
+the run — so the vectors ship raw and are not mean-centred.** Over all 16,376
+vectors and all **268,157,000** ordered off-diagonal pairs: **mean 0.6101, sd
+0.0913, min 0.2556, p1 0.4075, p50 0.6095, p99 0.8165, max 0.9913**, top-10
+neighbour gap **0.2456**. The bar, written first: saturated if mean ≥ 0.70, or
+p1 ≥ 0.50, or sd < 0.05, or the top-10 gap < 0.15. **No clause fired**, and it
+is measurably better-ordered than a signal this repository already shipped
+(name-only skeleton embeddings, mean 0.5867 / sd 0.055). Both centred variants
+were measured and neither ships — per-vector `v − mean(v)` gives 0.3875 /
+0.1249 / gap 0.3813, per-tag `v − μ` gives 0.0034 / 0.1887 / gap 0.6313 — and
+**nothing is foreclosed**, because the stored population *is* the corpus:
+`SELECT avg(relevance::vector)::real[] FROM genome_scores` recovers μ (a bare
+`avg(relevance)` is not usable and `halfvec` has no subscripting).
+
+**"A full pairwise cosine over all 16,376 vectors runs in 1.190 ms" is wrong
+by five orders of magnitude**, and it was repeated in five places in the M7
+plan. A real self-join is 121M unordered pairs of 1,128 lanes and measures
+**384 s**. The numbers that matter, on a real 15,565-row table: **`get_pair` is
+0.062 ms** (two primary-key probes under a `BitmapOr`, the only read this table
+has), and an **unindexed KNN — one seed against all 15,565 — is 59.4–66.2 ms**
+at 93,617 buffers, dominated by one TOAST fetch per row. The no-HNSW decision
+is unchanged and always rested on the access pattern; but 1.190 ms would have
+foreclosed the question of whether a consumer could want KNN, and 384 s
+reopens it.
+
+**The genome's real coverage, with its denominators — measured 2026-08-05
+against a `--phase all` catalog of 1,271,570 titles.** 15,565 genome vectors
+joined: **1.22%** of all titles, **1.73%** of 899,991 movies, **7.61%** of the
+≥100-IMDb-vote priority tier (measured at 204,494 titles, not the ~189k PRD 04
+estimated), **10.68%** of a real household's 5,020 owned titles. **The number
+that decides whether the term does anything is none of those** — it is the
+*candidate-pair* rate, because both sides of a pair need a vector: **1.81%**
+(9,069 of 502,000 pairs), **measured, never squared** (`coverage²` would have
+said 1.14% and a real pool is not an independent draw). That is far below the
+10% floor the weight assumes, so at 0.25 the genome reorders about one
+neighbour list in fifty-five. **The term is kept anyway and the choice deferred
+to M9**: 1.81% is a conservative floor (no TMDb key ran, so documents are
+name-shaped and the pool is name-selected, which weakens exactly the
+correlation being measured), and `blend_fingerprint` makes reverting cheap and
+detectable. The genome is **movies-only and frozen at 2023-07-20**, so coverage
+of anything newer is structurally zero and decays.
+
+**`links.csv`'s `tmdbId` is NOT unique — 162 duplicate rows over 38 ids —
+while `imdbId` is.** So the genome joins `titles` through
+`'tt' || lpad(imdbId, 7, '0')` and **never** through `tmdbId`: a `tmdbId` join
+fans one TMDb id out across several MovieLens movies and attaches one film's
+genome vector to another's title, on ids that are all real. The `lpad` is the
+second half and is not decoration — over all 86,537 rows `imdbId` is 7
+characters wide on 79,978 and 8 on 6,559, never shorter and never empty, so
+`'tt' || imdbId` happens to be correct *today* while silently depending on a
+padding convention the file documents nowhere, and one unpadded row would join
+to nothing rather than raise. Same family as M4's 11-of-885 bare-digit `Imdb`
+values.
+
+**`genome-scores.csv`'s physical grouping is a property of the snapshot, not a
+promise, and the importer verifies it.** 16,376 contiguous `movieId` runs,
+strictly increasing, every run exactly 1,128 rows with `tagId` 1…1128 — which
+is what makes a single-pass streaming importer possible without buffering an
+18.5M-row matrix. A run of the wrong length, a duplicate `tagId` within a run,
+or a `movieId` that reappears after its run closed is a **hard failure naming
+the offending `movieId`**. What is deliberately *not* enforced is `tagId` ordering
+*within* a run: the vector is built by index rather than by append, and the
+case that proves that shuffles a run and expects the right vector — so
+enforcing the observed order would make the by-index property unprovable. The
+run check is `len(run) == n and |{tagIds}| == n`.
+
+**`ml-32m` has no genome and `ml-25m` may not be redistributed, so `ml-latest`
+is forced rather than preferred.** `ml-32m.zip` (05/2024) is the newest full
+release and dropped the genome entirely — four members only. `ml-25m` has one
+and is the only genome-bearing archive whose licence says *"the user may not
+redistribute the data without separate permission."* `ml-latest` has a genome
+**and** the permissive clause. Three of PRD 04's numbers were wrong on the
+strength of the archive confusion: **18,472,128** relevance scores (not
+"15.6M"), **334.6 MiB** (not "250 MiB" — that is `ml-25m`'s size, the right
+number for the wrong archive, which is why it survived review), and **16,376**
+movies (not 13,816). The 1,128 tags was exactly right. **Measured, `ml-latest`
+has not moved in three years** (`Last-Modified: Thu, 20 Jul 2023 20:20:32 GMT`)
+despite its own README calling it a *development* dataset — the same
+`CachedDatasetFile` hazard shape as IMDb's daily regeneration, opposite
+conclusion. Range-fetching only the three members the importer reads (~96 MB of
+335 MB) is possible and was **measured and declined**: re-implementing resume,
+`If-Range` and the stale-snapshot interlock against per-member local headers is
+new failure surface for a saving an operator pays once.
+
+**`halfvec` crosses asyncpg's binary `COPY` as `real[]` plus a cast — no codec
+needed.** `pg_cast` carries `real[] → halfvec` and asyncpg has a native
+`float4[]` codec, so the staging column is `real[]` and the cast is in the
+`INSERT … SELECT`. The surprise: staging as **`text` is 1.7× faster** (median
+25.5 ms against 43.2 ms over 7 runs of 250 rows) despite the larger payload,
+because asyncpg's array encoder walks 250 × 1,128 Python floats where a
+pre-built string is one `memcpy`. Not taken — ~1.2 s across a whole import.
+Reading it back needs `.columns()` on the `text()` construct or the driver
+hands the vector over as a **string**, and even then the result is a plain
+`list[float]`, not a `HalfVector`.
+
+**The sequential row build's cost, so boundary call 8 is a decision rather than
+a preference.** Measured 2026-08-04 via `usher home --repeat 5` against a real
+**1,271,570**-title catalog with a synthetic household (5,200 owned copies, 360
+watch states over two years including 60 episodes, 50 collections, 1,800
+credits and 6,000 `title_neighbors` rows): **cold p50
+23.9 ms, p95 35.9 ms**, warm 0.0 ms, 8 rows / 115 cards, slowest provider
+`because-you-watched` at 4.3 ms = **34%** of build time. The revisit rule was
+written before the run and needs **both** clauses: p95 > 400 ms *and* no single
+provider at ≥ 50%. p95 is **11× under** the budget, so the second never
+applies.
+[ADR-0025](docs/prd/decisions/0025-rows-build-sequentially.md).
+
+**A non-overlap assertion passes against the exact `gather` it exists to
+kill.** `asyncio.gather` over coroutines that never suspend produces N
+*disjoint* windows, so "these did not overlap" is satisfied by the concurrency
+the case forbids. What has teeth is a **depth recorder shared by the
+providers** asserting `max_in_flight == 1` — `AsyncSession`'s real contract,
+one statement in flight at a time — which a `gather` drives to 9 on the first
+pass; and it needs its own control, because deleting the recorder's
+`await asyncio.sleep(0)` makes every implementation look sequential. A second
+case AST-scans `services/home.py` for `gather`/`TaskGroup`/`create_task`/`wait`,
+walking `ast.Import` **and** `ast.ImportFrom` and matching the bare name as
+well as the attribute.
+
+**The revision-id convention ran out during M7, and M7 shipped six migrations
+against a plan budgeting four.** The hand-written short ids `fd`/`fe`/`ff` were
+the last three the twelve-hex-character convention left room for, so M7's
+fourth, fifth and sixth are spelled `ffa`, `ffb`, `ffc`. In order:
+`fd7c3a5b9e12` (people/credits/collections + the `titles.collection_id` FK),
+`fe1d40c8b7a3` (`titles.credit_names`, weight class B), `ff` (the row-read
+indexes), `ffa` (`genome_scores` + `user_taste`), `ffb`
+(`title_neighbors.blend_fingerprint` — named in advance as the fifth), and
+`ffc` (dropping `ix_titles_popularity`, found by Task 36). **The next milestone
+needs a new id convention**, recorded here so it is not rediscovered.
+
+**`tests/integration/test_migrations.py`'s down/up cycle needs attention from
+every group that adds a migration, and its two halves fail differently.** The
+`-1`-from-head half self-maintains — it asserts on whatever the *current* head
+reverses — so adding a migration silently re-points it at a different artefact
+and it fails on the *previous* head's column. The named-revision half does not
+drift. Both hit this in M7: `ffa` broke it once (Group F) and `ffc` broke it
+again, because the prior session added the migration without running the
+integration suite. The repair is to re-point the `-1` half at the new head's
+own artefact and move the displaced assertion into the revision-pinned block.
+Related: `run_alembic` used to infer its direction from the target string, so a
+bare revision id ran `upgrade` — a silent no-op — and it now takes an explicit
+`direction`.
 
 **M6's measurements, all taken 2026-08-02 on this host against
 `pgvector/pgvector:pg17` (PostgreSQL 17.10, pgvector **0.8.6** — not the

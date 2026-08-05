@@ -10,22 +10,34 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 ## Status
 
 Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
-adapter), M4 (ingest pipeline), M5 (push and read-through) and M6 (search)
-are complete — see [`docs/plans/`](docs/plans/) for the task breakdowns and
+adapter), M4 (ingest pipeline), M5 (push and read-through), M6 (search) and
+M7 (rows and recommendations) are complete — see
+[`docs/plans/`](docs/plans/) for the task breakdowns and
 [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's next.
 
 M3, M4 and M5 are each verified against a live Emby server, and M4's metadata
 half against the live TMDb API. M5's run is the first in this repository to
-have parsed a real `/embywebsocket` message. **M6's one outstanding item is
-its own typo-tolerance gate**, which is built but has not yet been run
-against a real 1.27M-title catalog
+have parsed a real `/embywebsocket` message. **M6's typo-tolerance gate ran on
+2026-08-03 against a real 1,271,138-title catalog and failed** — short names
+are the weak band and no configuration comes close to an as-you-type latency
+budget. The result is recorded with its numbers and the follow-up (a two-tier
+suggest) has an owner in M9
 ([ADR-0002](docs/prd/decisions/0002-postgres-first-search.md)).
 
-**The HTTP surface is deliberately small so far**: `/health`,
-`/health/ready`, `/titles/{id}`, `/events` (SSE) and the `/admin/sources`
-routes. **M6 adds none** — search, suggest, similarity and indexing are all
-command-line, and M9 owns the routers. Everything the ingest pipeline does is
-driven from the command line until then — see below.
+**M7 composes a home screen**: nine row providers, scored and diversified
+server-side, plus the taste centroid, the MovieLens tag genome as a third
+similarity signal, and `Person`/`Credit`/`Collection` re-derived from the
+payload cache with no second network call.
+
+**The HTTP surface is deliberately small, and M7 is the first milestone since
+M5 to grow it**: `/health`, `/health/ready`, `/titles/{id}`, **`/home`**,
+`/events` (SSE) and the `/admin/sources` routes. `GET /home` returns the whole
+screen in one response — **no cursor**, which is what
+[ADR-0006](docs/prd/decisions/0006-server-composed-home.md) specifies, and no
+error envelope, because every input is local state and there is no upstream
+failure it can be asked about. Still M9's: search, suggest, similarity,
+browse, the image proxy, and the RFC 9457 envelope. Everything else is driven
+from the command line — see below.
 
 ## Requirements
 
@@ -104,10 +116,17 @@ checkpoint. See
 [`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md).
 
 ```bash
-uv run usher bootstrap                     # all three phases
-uv run usher bootstrap --phase imdb        # one at a time: imdb | tmdb-ids | crosswalk | all
+uv run usher bootstrap                     # every phase
+uv run usher bootstrap --phase imdb        # one at a time: imdb | tmdb-ids | crosswalk | movielens | all
+uv run usher bootstrap --phase movielens   # the MovieLens tag genome (M7), ~335 MB, ~10 min
 uv run usher bootstrap-status              # progress per dataset, and catalog size
 ```
+
+`movielens` runs **last** under `--phase all`, and refuses outright against an
+empty catalog: the genome joins `titles` on `imdb_id`, so there is nothing to
+join to until the IMDb phase has run. It downloads `ml-latest.zip` and reads
+three of its seven members — the only archive that has a genome *and* a
+licence permitting redistribution, which is why the phase names it.
 
 **Sync a source** — walks a registered media server into the catalog
 (matching, ingest, availability sweep), then walks its watch state.

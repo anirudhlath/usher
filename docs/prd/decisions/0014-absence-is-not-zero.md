@@ -135,9 +135,21 @@ of the 25 shared contract cases.
 
 ### The site where `0.0` is not merely uninformative but unreachable
 
-Added by M7's similarity work, and it is worth its own section because it is
-the first application where the wrong answer is a value **the true
-distribution cannot produce**.
+Added by M7's similarity work — **two sites, one at the port and one in the
+blend** — and it is worth its own section because it is the first application
+where the wrong answer is a value **the true distribution cannot produce**.
+
+**At the port, `GenomeRepository.get_pair` returns `None` rather than a zero
+vector**, and it does so for two different reasons that must not be collapsed:
+a title with no `genome_scores` row (the common case at 1.22% coverage), and a
+pair whose rows carry *different* `genome_revision`s. The second is the subtler
+one — two vectors from different MovieLens releases are type-identical,
+same-width and otherwise indistinguishable, so a half-migrated table would
+yield cosines that are wrong *and plausible*, which is worse than a missing
+signal in exactly the way this ADR keeps finding.
+[ADR-0024](0024-the-genome-is-one-dense-vector-per-title.md).
+
+**In the blend, `NeighborCandidate.tags` is `None` for a half-covered pair.**
 
 `NeighborCandidate.tags` is the MovieLens tag-genome cosine for a *pair* of
 titles, and it is `None` when **either** side has no `genome_scores` row. Every
