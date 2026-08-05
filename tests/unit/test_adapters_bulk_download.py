@@ -1,13 +1,22 @@
 """CachedDatasetFile, driven entirely by an httpx MockTransport.
 
-No network, and no real dataset: every byte here is gzipped in the test.
-That is the licensing rule, not a convenience -- PRD 04's "never a full
-download in tests".
+No network, and no real dataset: every byte here is gzipped -- or zipped --
+in the test. That is the licensing rule, not a convenience -- PRD 04's
+"never a full download in tests".
+
+The zip fixtures below are **assembled here from string literals rather than
+committed as a binary**, and that is also a licensing decision.
+`tests/unit/test_no_third_party_data.py::_every_text_file` skips any file
+that fails `read_text()`, and its other three checks read only
+`_SCANNED_SUFFIXES`, so a committed `.zip` is invisible to all four guards --
+precisely the shape "ship importers, never data" cannot enforce. A zip built
+in a `.py` file is fully scanned by two of the four, and is diffable besides.
 """
 
 import datetime as dt
 import email.utils
 import gzip
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -19,6 +28,13 @@ from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailab
 
 BODY = gzip.compress(b"alpha\nbravo\ncharlie\n")
 URL = "https://example.invalid/slice.tsv.gz"
+
+# Two members, both invented, both tiny. `_ROOT` mirrors the real archive's
+# one-directory layout so the member-naming path is the production one.
+_ROOT = "synthetic-latest/"
+_ALPHA = "id,value\n90000001,first\n90000002,second\n90000003,third\n"
+_BETA = "id\n90000004\n"
+ZIP_URL = "https://example.invalid/sample.zip"
 
 
 def _transport(handler: object) -> httpx.MockTransport:
@@ -325,4 +341,114 @@ async def test_lines_translates_a_non_gzip_body_instead_of_raising_a_raw_error(
         dataset_file = CachedDatasetFile(client, URL, cache)
         await dataset_file.ensure_local('"v1"')
         with pytest.raises(PortDataMalformed):
+            list(dataset_file.lines())
+
+
+def _offline() -> httpx.MockTransport:
+    """A transport that fails the test if anything reaches it.
+
+    `member_lines` reads the already-cached file and must issue no request
+    at all; a handler that merely returned 200 would let a reader that
+    re-downloaded on every call pass silently.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"member_lines issued a request: {request.method} {request.url}")
+
+    return _transport(handler)
+
+
+def _archive(cache: Path, name: str, members: dict[str, str]) -> Path:
+    """Write a real zip into the cache directory, from literals above."""
+    cache.mkdir(parents=True, exist_ok=True)
+    path = cache / name
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for member, body in members.items():
+            archive.writestr(member, body)
+    return path
+
+
+async def test_member_lines_reads_one_member_of_a_multi_member_archive(cache: Path) -> None:
+    """Kills a reader that returns the concatenation of every member, and a
+    reader that returns the *first* member whatever it was asked for. The
+    real archive holds seven files and this importer reads three of them."""
+    _archive(cache, "sample.zip", {f"{_ROOT}alpha.csv": _ALPHA, f"{_ROOT}beta.csv": _BETA})
+    async with httpx.AsyncClient(transport=_offline()) as client:
+        dataset_file = CachedDatasetFile(client, ZIP_URL, cache)
+        assert list(dataset_file.member_lines(f"{_ROOT}beta.csv")) == ["id", "90000004"]
+
+
+async def test_member_lines_skips_by_line_count_not_by_byte_offset(cache: Path) -> None:
+    """`skip` is a line count. Kills an implementation that seeks `skip`
+    bytes into the member -- which a zip, unlike a gzip, would actually
+    permit -- and lands mid-line."""
+    _archive(cache, "sample.zip", {f"{_ROOT}alpha.csv": _ALPHA})
+    async with httpx.AsyncClient(transport=_offline()) as client:
+        dataset_file = CachedDatasetFile(client, ZIP_URL, cache)
+        assert list(dataset_file.member_lines(f"{_ROOT}alpha.csv", skip=2)) == [
+            "90000002,second",
+            "90000003,third",
+        ]
+
+
+async def test_a_body_that_is_not_a_zip_is_port_data_malformed(cache: Path) -> None:
+    """A CDN or proxy serving an error page with HTTP 200 instead of the
+    dataset. Kills an implementation that lets `zipfile.BadZipFile` escape:
+    it is not a `usher.ports.errors` type, so no caller written against the
+    port can catch it, and it surfaces from inside a batching loop."""
+    cache.mkdir(parents=True)
+    (cache / "sample.zip").write_bytes(b"<html><body>503 Service Unavailable</body></html>")
+    async with httpx.AsyncClient(transport=_offline()) as client:
+        dataset_file = CachedDatasetFile(client, ZIP_URL, cache)
+        with pytest.raises(PortDataMalformed):
+            list(dataset_file.member_lines(f"{_ROOT}alpha.csv"))
+
+
+async def test_a_member_that_is_not_in_the_archive_names_the_member(cache: Path) -> None:
+    """Kills an implementation that lets `KeyError` escape. A renamed
+    archive root is the realistic cause -- the members are named
+    `ml-latest/...` and a future release could name them otherwise -- and a
+    bare KeyError from inside a generator names nothing an operator can act
+    on. The `detail` assertion additionally kills a translation that raises
+    `PortDataMalformed` with the *archive* path as its detail, which is the
+    outer handler's message and does not say which member was missing."""
+    _archive(cache, "sample.zip", {f"{_ROOT}alpha.csv": _ALPHA})
+    async with httpx.AsyncClient(transport=_offline()) as client:
+        dataset_file = CachedDatasetFile(client, ZIP_URL, cache)
+        with pytest.raises(PortDataMalformed) as exc_info:
+            list(dataset_file.member_lines(f"{_ROOT}absent.csv"))
+    assert exc_info.value.detail == f"{_ROOT}absent.csv"
+
+
+async def test_a_corrupt_member_body_is_port_data_malformed(cache: Path) -> None:
+    """A truncated deflate stream fails during *iteration*, not at open --
+    `zipfile.ZipFile` validates the central directory eagerly and the member
+    bodies lazily. Kills a translation written as a `try` around the open
+    call only, which would let `zlib.error`/`EOFError` escape from inside
+    the batching loop exactly as the untranslated `BadZipFile` would."""
+    path = _archive(cache, "sample.zip", {f"{_ROOT}alpha.csv": _ALPHA * 200})
+    intact = path.read_bytes()
+    # Corrupt the compressed payload in place: the local header is 30 bytes
+    # plus the member name, so this lands inside the deflate stream while
+    # leaving the central directory (at the end of the file) readable.
+    damaged = bytearray(intact)
+    for offset in range(60, 90):
+        damaged[offset] ^= 0xFF
+    path.write_bytes(bytes(damaged))
+    async with httpx.AsyncClient(transport=_offline()) as client:
+        dataset_file = CachedDatasetFile(client, ZIP_URL, cache)
+        with pytest.raises(PortDataMalformed):
+            list(dataset_file.member_lines(f"{_ROOT}alpha.csv"))
+
+
+async def test_lines_still_refuses_a_zip_and_says_so(cache: Path) -> None:
+    """The safety a separate `CachedZipArchive` class would have bought,
+    bought by the error instead: a zip begins `PK`, gzip magic is `\\x1f\\x8b`,
+    and `lines()` already translates that. Kills a refactor that widens
+    `lines()` to sniff the container and silently do the right thing --
+    which would make calling the wrong reader untestable."""
+    _archive(cache, "sample.zip", {f"{_ROOT}alpha.csv": _ALPHA})
+    async with httpx.AsyncClient(transport=_offline()) as client:
+        dataset_file = CachedDatasetFile(client, ZIP_URL, cache)
+        with pytest.raises(PortDataMalformed, match="gzip"):
             list(dataset_file.lines())
