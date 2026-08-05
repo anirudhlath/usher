@@ -1178,6 +1178,42 @@ class WatchStateRepository(ABC):
         hours.
         """
 
+    @abstractmethod
+    async def played_title_ids(
+        self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        """Which of these titles this user has already played.
+
+        **The mirror of `MediaItemRepository.owned_title_ids`, and shaped like
+        it for the same reason**: one statement for a whole shelf, bounded by
+        what the caller is holding rather than by the household's history. It
+        exists because three providers need to *subtract* -- a "you love
+        westerns" shelf made of the four westerns already finished, or a "more
+        from this director" shelf made of the films that established the
+        affinity, is circular and has nothing to offer.
+
+        **An episode's played state counts for its series**, through
+        `COALESCE(ws.title_id, e.title_id)`. Trap 7 again, and the direction
+        of the damage is the reverse of `list_recent`'s: this read *excludes*,
+        so a title-only implementation returns too few ids and every series
+        the household is halfway through is offered back as something new.
+        The row is populated, plausible and about things they have seen.
+
+        **`played`, never "has a watch state".** A sync writes a row per item
+        it observed, so "has a state" is the owned library and the shelf built
+        on it is permanently empty. Note this is the same predicate
+        `list_recent` uses and deliberately *not* `list_in_progress`': a
+        title abandoned twenty minutes in is not "already seen", and offering
+        it again is right.
+
+        No `limit`: the answer is bounded by `title_ids`, and a limit would
+        make a partial answer indistinguishable from a full one -- which for
+        a set used to subtract means silently showing a title back.
+
+        An empty `title_ids` answers with an empty set without reading
+        anything.
+        """
+
 
 class TitleMatchRepository(ABC):
     """Batch lookups over `titles`, for the ingest pipeline.

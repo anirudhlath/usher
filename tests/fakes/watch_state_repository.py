@@ -218,6 +218,26 @@ class FakeWatchStateRepository(WatchStateRepository):
             for state in _recency_ordered(list(newest.values()))[:limit]
         ]
 
+    async def played_title_ids(
+        self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        # The rollup again, and it is spelled the same way `list_recent`
+        # spells it rather than by reaching for that method: the two reads
+        # answer different questions (one is recency-ordered and limited, this
+        # one is a membership test bounded by its argument) and routing one
+        # through the other would make the limit silently part of this answer.
+        wanted = set(title_ids)
+        if not wanted:
+            return set()
+        played: set[uuid.UUID] = set()
+        for state in self._states.values():
+            if state.user_id != user_id or not state.played:
+                continue
+            key = state.title_id or self._episode_series.get(state.episode_id or _NO_EPISODE)
+            if key in wanted and key is not None:
+                played.add(key)
+        return played
+
     async def list_rediscoverable(
         self, user_id: uuid.UUID, *, before: AwareDatetime, limit: int = 24
     ) -> list[RecentWatch]:

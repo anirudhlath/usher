@@ -23,10 +23,15 @@ from collections.abc import Mapping
 
 from usher.ports.rows import RowProvider
 from usher.services.rows.base import BaseRow, Chapter, Progress
+from usher.services.rows.because_you_watched import (
+    BECAUSE_YOU_WATCHED_SCORE_CEILING,
+    BecauseYouWatchedProvider,
+)
 from usher.services.rows.continue_watching import (
     CONTINUE_WATCHING_SCORE,
     ContinueWatchingProvider,
 )
+from usher.services.rows.franchise import FRANCHISE_SCORE_CEILING, FranchiseProvider
 from usher.services.rows.next_up import NEXT_UP_SCORE, NextUpProvider
 from usher.services.rows.recently_added import (
     RECENTLY_ADDED_SCORE_CEILING,
@@ -44,38 +49,69 @@ BASE_SCORES: Mapping[str, float] = {
     NextUpProvider.__name__: NEXT_UP_SCORE,
     RecentlyAddedProvider.__name__: RECENTLY_ADDED_SCORE_CEILING,
     RediscoverProvider.__name__: REDISCOVER_SCORE,
+    BecauseYouWatchedProvider.__name__: BECAUSE_YOU_WATCHED_SCORE_CEILING,
+    FranchiseProvider.__name__: FRANCHISE_SCORE_CEILING,
 }
 
 __all__ = [
     "BASE_SCORES",
+    "BECAUSE_YOU_WATCHED_SCORE_CEILING",
     "CONTINUE_WATCHING_SCORE",
+    "FRANCHISE_SCORE_CEILING",
     "NEXT_UP_SCORE",
     "RECENTLY_ADDED_SCORE_CEILING",
     "REDISCOVER_SCORE",
     "ROW_PROVIDERS",
     "BaseRow",
+    "BecauseYouWatchedProvider",
     "Chapter",
     "ContinueWatchingProvider",
+    "FranchiseProvider",
     "NextUpProvider",
     "Progress",
     "RecentlyAddedProvider",
     "RediscoverProvider",
+    "row_providers",
 ]
 
-# **The registry, and it is the composition point.** A provider that is not
-# registered is dead code -- and dead code that looks exactly like a provider
-# with nothing to say, which is the one failure this milestone cannot see from
-# the outside. Group I's own case asserts this holds nine once every provider
-# exists; it holds four here, and the five that are missing are named rather
-# than implied: `BecauseYouWatched`, `Franchise`, `GenreAffinity`, `Seasonal`
-# and `People`, tasks 26-28. `CuratedProvider` is M8's whole family (boundary
-# call 2) and is deliberately not among them.
-#
-# A tuple rather than a list: it is read by every request and written by none,
-# and a composition root that could append to it would be a second registry.
-ROW_PROVIDERS: tuple[RowProvider, ...] = (
-    ContinueWatchingProvider(),
-    NextUpProvider(),
-    RecentlyAddedProvider(),
-    RediscoverProvider(),
-)
+
+def row_providers(*, semantic: bool = False) -> tuple[RowProvider, ...]:
+    """**The registry, and it is the composition point.**
+
+    A provider that is not registered is dead code -- and dead code that looks
+    exactly like a provider with nothing to say, which is the one failure this
+    milestone cannot see from the outside. Group I's own case asserts this
+    holds nine once every provider exists; it holds six here, and the three
+    that are missing are named rather than implied: `GenreAffinity`,
+    `Seasonal` and `People`, tasks 27-28. `CuratedProvider` is M8's whole
+    family (boundary call 2) and is deliberately not among them.
+
+    **A function rather than a bare tuple, and exactly one deployment fact
+    reaches it.** `BecauseYouWatchedProvider` says a different sentence when
+    the neighbour blend had no cosine term to include, and that is a property
+    of the *deployment* (is an embedder installed) rather than of a request or
+    of a household -- so it cannot ride on `RowContext`, and a provider
+    constructed once at import cannot read it either. The alternative was a
+    second list in `composition.build_pipeline`, which is precisely the "a
+    list a composition root assembles by hand is a list a new provider is
+    forgotten from" failure this module exists to refuse. There is one list,
+    here, and the composition root passes an argument to it.
+
+    A tuple rather than a list: it is read by every request and written by
+    none, and a composition root that could append to it would be a second
+    registry.
+    """
+    return (
+        ContinueWatchingProvider(),
+        NextUpProvider(),
+        RecentlyAddedProvider(),
+        RediscoverProvider(),
+        BecauseYouWatchedProvider(semantic=semantic),
+        FranchiseProvider(),
+    )
+
+
+# The default wiring, derived from the function above rather than restated:
+# `semantic=False` is the shipped default (no embedding extra, ADR-0022), and
+# it is also the *safe* default, because the sentence it selects claims less.
+ROW_PROVIDERS: tuple[RowProvider, ...] = row_providers()

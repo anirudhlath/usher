@@ -297,6 +297,30 @@ LIMIT :limit
 """
 
 
+# "Which of these has the household seen", and the third statement in this
+# module to carry `COALESCE(ws.title_id, e.title_id)`.
+#
+# The rollup is in the WHERE as well as the SELECT, and that is the whole
+# statement: `WHERE ws.title_id = ANY(:title_ids)` is the natural spelling,
+# is green on every movie fixture, and answers **films only** on a library
+# that is 89% episodes.
+#
+# Bounded by `:title_ids` rather than by a LIMIT. This set is used to
+# *subtract*, so a truncated answer silently puts a watched title back on a
+# shelf -- where a truncated `list_recent` merely shortens one.
+#
+# `DISTINCT` rather than a GROUP BY: a series with twelve watched episodes is
+# one id, and the caller wants membership rather than a count.
+_PLAYED_TITLE_IDS = """
+SELECT DISTINCT COALESCE(ws.title_id, e.title_id) AS title_id
+FROM watch_states ws
+LEFT JOIN episodes e ON e.id = ws.episode_id
+WHERE ws.user_id = CAST(:user_id AS uuid)
+  AND ws.played
+  AND COALESCE(ws.title_id, e.title_id) = ANY(:title_ids)
+"""
+
+
 class PostgresWatchStateRepository(WatchStateRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -396,6 +420,22 @@ class PostgresWatchStateRepository(WatchStateRepository):
                 )
             ).all()
         return [RecentWatch(row.title_id, row.last_played_at, row.play_count) for row in rows]
+
+    async def played_title_ids(
+        self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        wanted = list(dict.fromkeys(title_ids))
+        if not wanted:
+            # No statement at all, matching `owned_title_ids`' own guard: an
+            # `= ANY('{}')` is a table scan that answers nothing.
+            return set()
+        with self._session.no_autoflush:
+            rows = (
+                await self._session.execute(
+                    text(_PLAYED_TITLE_IDS), {"user_id": user_id, "title_ids": wanted}
+                )
+            ).all()
+        return {row.title_id for row in rows}
 
     async def get_for_title(self, user_id: uuid.UUID, title_id: uuid.UUID) -> WatchState | None:
         return await self._get("title_id", user_id, title_id)

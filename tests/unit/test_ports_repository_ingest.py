@@ -82,6 +82,13 @@ def test_watch_state_repository_surface() -> None:
             "list_in_progress",
             "list_recent",
             "list_rediscoverable",
+            # And the subtraction half of that surface, which three providers
+            # need to *drop* what the household has already seen. Dropping it
+            # from the ABC is worse than the reads above rather than the same:
+            # a provider would then show a shelf of titles the household
+            # already watched, which is populated and plausible, where an
+            # absent `list_in_progress` at least renders as nothing.
+            "played_title_ids",
         }
     )
 

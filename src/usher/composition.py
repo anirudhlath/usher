@@ -119,7 +119,7 @@ from usher.services.jobs import JobWorker
 from usher.services.matching import MatchService
 from usher.services.push import PushApplyService
 from usher.services.reconcile import ReconcileService
-from usher.services.rows import ROW_PROVIDERS
+from usher.services.rows import row_providers
 from usher.services.search import SearchService
 from usher.services.similar import SimilarityService
 from usher.services.taste import TasteService
@@ -365,7 +365,13 @@ def build_pipeline(
         # `genre_affinity` is unaffected because it reads counts rather than
         # vectors -- which is the whole reason Task 23 declines PRD 06's
         # "taste centroid concentrated in a genre".
-        row_providers=ROW_PROVIDERS,
+        # **The one deployment fact a provider is told about.** Same
+        # `embedder is None` test `SearchService` uses, and the same one
+        # `TasteService` acts on: with no embedder `title_neighbors` holds
+        # genre and keyword overlap alone (M6's blend drops the absent cosine
+        # term rather than zeroing it), so "Because you watched Dune" is a
+        # causal claim nothing computed and the sentence softens.
+        row_providers=row_providers(semantic=embedder is not None),
         taste=TasteService(
             watch_states=watch_states,
             embeddings=embeddings,

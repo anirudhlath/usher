@@ -17,8 +17,11 @@ from datetime import UTC, datetime
 
 import pytest
 
+from tests.fakes.collection_repository import FakeCollectionRepository
+from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.row_provider import FakeRow, FakeRowProvider
 from tests.fakes.search_index import FakeSearchIndex
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
@@ -41,6 +44,9 @@ def _context(*, taste: Centroid | None = None) -> RowContext:
         neighbors=FakeTitleNeighborRepository(),
         search=FakeSearchIndex(),
         taste=taste,
+        people=FakePersonRepository(),
+        credits=FakeCreditRepository(),
+        collections=FakeCollectionRepository(),
     )
 
 

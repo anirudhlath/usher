@@ -24,15 +24,24 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
+from tests.fakes.collection_repository import FakeCollectionRepository, SeededMediaItem
+from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.person_repository import (
+    FakePersonRepository,
+    SeededCredit,
+    SeededWatchState,
+)
 from tests.fakes.search_index import FakeSearchIndex
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
+from usher.domain.collection import Collection
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.episode import Episode, Season
 from usher.domain.ids import new_id
+from usher.domain.people import Credit, CreditKind, Person
 from usher.domain.taste import Centroid
 from usher.domain.title import Title
 from usher.domain.watch import User
@@ -68,6 +77,17 @@ class Library:
         self.episodes = FakeEpisodeRepository()
         self.neighbors = FakeTitleNeighborRepository()
         self.search = FakeSearchIndex()
+        self.people = FakePersonRepository()
+        # **Wired to the same title store**, which is `FakeCreditRepository`'s
+        # own instruction: two independent dicts make a *correct*
+        # implementation fail rather than a wrong one pass.
+        self.credits = FakeCreditRepository(self.people, self.titles)
+        self.collections = FakeCollectionRepository()
+        # `replace_for_titles` is a replace, so incremental seeding has to hold
+        # the accumulated set per title and re-send it. Keeping the accumulator
+        # here rather than reaching into the fake's private list is what makes
+        # `credit()` go through the port the way a derivation does.
+        self._credits: dict[uuid.UUID, list[Credit]] = {}
         self._observed = 0
 
     # -- the catalog ------------------------------------------------------
@@ -95,6 +115,14 @@ class Library:
             enrichment_state=EnrichmentState.ENRICHED,
         )
         await self.titles.add(title)
+        # `FakeCollectionRepository` models `titles.kind` and the catalog's own
+        # order because `attach_titles` refuses a series and `list_owned`
+        # returns members "in release order" -- both are facts about `titles`
+        # that a collection fake cannot invent. Registered here so no case has
+        # to remember to, which is how the four vacuous fixtures Group G found
+        # were written.
+        self.collections.catalog.kinds[title.id] = kind
+        self.collections.catalog.order.append(title.id)
         if owned:
             await self.copy(title.id, added=added, seen=seen)
         return title.id
@@ -133,6 +161,9 @@ class Library:
                 )
             ]
         )
+        self.collections.catalog.media_items.append(
+            SeededMediaItem(title_id=title_id, episode_id=episode_id, available=True)
+        )
 
     # -- the series tree --------------------------------------------------
 
@@ -164,6 +195,11 @@ class Library:
         )
         await self.episodes.upsert_episodes([one])
         self.episode_series[one.id] = series_id
+        # **Trap 7's third fake.** `FakePersonRepository._title_of` reproduces
+        # `COALESCE(w.title_id, e.title_id)` and reads this map; without it an
+        # episode watch state reaches no credits at all, which is precisely the
+        # films-only answer `list_recurring_for_user` exists to refuse.
+        self.people.household.episode_titles[one.id] = series_id
         if owned:
             await self.copy(series_id, episode_id=one.id)
         if played:
@@ -204,6 +240,15 @@ class Library:
                 )
             ]
         )
+        # The same row, in the shape `FakePersonRepository` joins across. Two
+        # fakes modelling one table again -- and here the mutually-exclusive
+        # `(title_id, episode_id)` pair is the whole point, so it is carried
+        # through verbatim rather than collapsed to a series id.
+        self.people.household.watch_states.append(
+            SeededWatchState(
+                user_id=USER.id, title_id=title_id, episode_id=episode_id, played=played
+            )
+        )
 
     async def in_progress(
         self, title_id: uuid.UUID, *, at: datetime, position_seconds: int = 1800
@@ -228,6 +273,67 @@ class Library:
         predicate, alone."""
         await self.watched(title_id, played=False, position_seconds=0, at=days_ago(0.5))
 
+    # -- people, credits and collections -----------------------------------
+
+    async def person(self, name: str, *, tmdb_id: int | None = None) -> uuid.UUID:
+        one = Person(id=new_id(), tmdb_id=tmdb_id, name=name, sort_name=name.lower())
+        await self.people.upsert_many([one])
+        # `upsert_many` keys anonymous people on their own id and tmdb-keyed
+        # ones on the provider id, so the stored id is the minted one either
+        # way -- but only because nothing here re-seeds one tmdb_id twice.
+        return one.id
+
+    async def credit(
+        self,
+        person_id: uuid.UUID,
+        title_id: uuid.UUID,
+        *,
+        kind: CreditKind = CreditKind.CAST,
+        job: str | None = None,
+        character: str | None = None,
+        billing_order: int | None = None,
+    ) -> None:
+        """One credit, written through both fakes that model `credits`.
+
+        `FakeCreditRepository` holds the rows `list_for_person` reads;
+        `FakePersonRepository.household.credits` holds what
+        `list_recurring_for_user` groups. They are one table in Postgres and a
+        case that seeded one would make a *correct* provider look broken from
+        whichever side it did not seed.
+        """
+        one = Credit(
+            id=new_id(),
+            person_id=person_id,
+            title_id=title_id,
+            kind=kind,
+            tmdb_credit_id=str(new_id()),
+            character=character,
+            job=job,
+            billing_order=billing_order,
+        )
+        held = self._credits.setdefault(title_id, [])
+        held.append(one)
+        await self.credits.replace_for_titles(
+            [title_id],
+            held,
+            credit_names={title_id: [self.people.stored(c.person_id).name for c in held]},
+        )
+        self.people.household.credits.append(
+            SeededCredit(
+                person_id=person_id,
+                title_id=title_id,
+                kind=kind,
+                job=job,
+                character=character,
+            )
+        )
+
+    async def collection(self, name: str, title_ids: Sequence[uuid.UUID]) -> uuid.UUID:
+        one = Collection(id=new_id(), tmdb_id=None, name=name)
+        await self.collections.upsert_many([one])
+        await self.collections.attach_titles([(title_id, one.id) for title_id in title_ids])
+        return one.id
+
     # -- the context ------------------------------------------------------
 
     def context(self, *, taste: Centroid | None = None) -> RowContext:
@@ -241,4 +347,7 @@ class Library:
             neighbors=self.neighbors,
             search=self.search,
             taste=taste,
+            people=self.people,
+            credits=self.credits,
+            collections=self.collections,
         )

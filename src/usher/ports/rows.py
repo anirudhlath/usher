@@ -60,8 +60,11 @@ from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
 from usher.domain.taste import Centroid
 from usher.domain.watch import User
 from usher.ports.repository import (
+    CollectionRepository,
+    CreditRepository,
     EpisodeRepository,
     MediaItemRepository,
+    PersonRepository,
     TitleNeighborRepository,
     TitleRepository,
     WatchStateRepository,
@@ -101,12 +104,22 @@ class RowContext:
     code (boundary call 9) -- they are constructed once, and a per-request
     clock cannot be a constructor argument of a singleton.
 
-    **Nine fields now, twelve by the end of the milestone.** Group B adds
-    `people`, `credits` and `collections` when those repositories exist.
-    Stating that here is deliberate: a field added later is a one-line change
-    every existing provider ignores, and that property is the *reason* this is
-    a bag rather than nine per-provider constructor signatures. A thirteenth
-    arriving without a task is a finding rather than drift.
+    **Twelve fields, and the three that were promised have landed.** Group B
+    built `PersonRepository`, `CreditRepository` and `CollectionRepository` and
+    did not put them here; nothing in tasks 22-25 read them, so the gap was
+    invisible until `FranchiseProvider` and `PeopleProvider` needed them. They
+    are added by the task that first reads them, which is what this docstring's
+    original promise -- "a field added later is a one-line change every
+    existing provider ignores" -- was asserting is cheap. It was: the four
+    providers already shipped are untouched by all three.
+
+    The full list, which is what Task 38 counts against:
+
+        user, now, titles, media_items, watch_states, episodes, neighbors,
+        search, taste, people, credits, collections
+
+    A thirteenth arriving without a task is still a finding rather than
+    drift.
 
     `taste` is `Centroid | None` -- ADR-0014's eighth site. A deployment with
     no embedder has no centroid at all (ADR-0022), and every reader drops the
@@ -125,6 +138,14 @@ class RowContext:
     neighbors: TitleNeighborRepository
     search: SearchIndex
     taste: Centroid | None
+    # Group B's three, landing with the providers that read them.
+    # `FranchiseProvider` reads `collections.list_owned`; `PeopleProvider`
+    # reads `people.list_recurring_for_user` for its rows and
+    # `credits.list_for_person` for their cards. The other seven providers do
+    # not mention them, which is the property this bag exists to have.
+    people: PersonRepository
+    credits: CreditRepository
+    collections: CollectionRepository
 
 
 class Row(ABC):

@@ -1236,3 +1236,121 @@ class WatchStateRepositoryInProgressContract:
         rows = await repository.list_rediscoverable(user_id, before=TWO_YEARS_AGO, limit=2)
 
         assert [row.title_id for row in rows] == [third_title_id, other_title_id]
+
+    async def test_played_title_ids_answers_only_about_the_titles_it_was_asked_about(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """The bound is the argument, not the household's history.
+
+        `GenreAffinityProvider` and `PeopleProvider` both ask "which of these
+        twenty candidates has this household already seen" to drop them from a
+        shelf. The wrong implementation returns *every* played title, which on
+        the one measured deployment is up to 1,126,789 ids -- and it is
+        invisible to a caller that only ever intersects the answer with its own
+        candidate list, because the intersection is identical. It shows up as a
+        home screen that reads a million rows per request.
+        """
+        await _seed_progress(repository, user_id, title_id, played=True, last_played_at=LAST_PLAYED)
+        await _seed_progress(
+            repository, user_id, other_title_id, played=True, last_played_at=LAST_PLAYED
+        )
+
+        played = await repository.played_title_ids(user_id, [title_id])
+
+        assert played == {title_id}
+
+    async def test_played_title_ids_rolls_a_watched_episode_up_to_its_series(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        episode_id: uuid.UUID,
+        episode_series_id: uuid.UUID,
+    ) -> None:
+        """Trap 7, on the read whose whole job is "has this household seen
+        this".
+
+        An episode's state is `(episode_id = ..., title_id = NULL)`, so the
+        obvious `WHERE title_id = ANY(:ids)` answers **films only** -- and the
+        consequence here is the opposite direction from `list_recent`'s. This
+        read is used to *exclude*, so a title-only implementation returns too
+        few ids and every series the household is halfway through is offered
+        back to it as something new. A populated, plausible, correctly-shaped
+        shelf of things they have already watched.
+
+        The wrong implementation this kills: `WHERE ws.title_id = ANY(:ids)`
+        with no join to `episodes`, which is green on every movie fixture.
+        """
+        await repository.merge_from_source(
+            [
+                merge(
+                    user_id,
+                    None,
+                    episode_id=episode_id,
+                    played=True,
+                    last_played_at=LAST_PLAYED,
+                )
+            ]
+        )
+
+        played = await repository.played_title_ids(user_id, [episode_series_id])
+
+        assert played == {episode_series_id}
+
+    async def test_played_title_ids_excludes_a_title_the_household_merely_started(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """`played`, never "has a watch state", and the distractor varies
+        exactly one thing.
+
+        Both titles carry a state, both carry the same position and the same
+        instant; only `played` differs. The wrong implementation -- `WHERE
+        user_id = :u AND title_id = ANY(:ids)` with the predicate dropped --
+        excludes every title a sync ever created a row for, which on a source
+        that reports a row per item is the whole owned library. The shelf is
+        then permanently empty, which no assertion about a row's *contents*
+        can see.
+        """
+        await _seed_progress(repository, user_id, title_id, played=True, last_played_at=LAST_PLAYED)
+        await _seed_progress(
+            repository, user_id, other_title_id, played=False, last_played_at=LAST_PLAYED
+        )
+
+        played = await repository.played_title_ids(user_id, [title_id, other_title_id])
+
+        assert played == {title_id}
+
+    async def test_played_title_ids_is_scoped_to_one_household_member(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        other_user_id: uuid.UUID,
+        title_id: uuid.UUID,
+    ) -> None:
+        """One member's viewing does not delete a title from another's shelf."""
+        await _seed_progress(
+            repository, other_user_id, title_id, played=True, last_played_at=LAST_PLAYED
+        )
+
+        played = await repository.played_title_ids(user_id, [title_id])
+
+        assert played == set()
+
+    async def test_played_title_ids_is_empty_for_an_empty_request(
+        self,
+        repository: WatchStateRepository,
+        user_id: uuid.UUID,
+        title_id: uuid.UUID,
+    ) -> None:
+        """No candidates is not a licence to read the table. The provider
+        calling it has already decided it has nothing to filter."""
+        await _seed_progress(repository, user_id, title_id, played=True, last_played_at=LAST_PLAYED)
+
+        assert await repository.played_title_ids(user_id, []) == set()

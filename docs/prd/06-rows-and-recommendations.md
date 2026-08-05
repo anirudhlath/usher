@@ -183,13 +183,42 @@ drops any that build empty, and returns them.
 | `ContinueWatchingProvider` | Anything in progress | 1 row, always ranked first |
 | `NextUpProvider` | Series with an unwatched next episode — **started, never merely owned**; see below | 1 row |
 | `RecentlyAddedProvider` | New items in the window | 1 row |
-| `BecauseYouWatchedProvider` | Recent high-engagement titles | 1 row *per seed* |
-| `FranchiseProvider` | ≥ 2 owned titles in a collection — **movies only** | 1 row per franchise |
+| `BecauseYouWatchedProvider` | Recent high-engagement titles carrying neighbours | 1 row *per seed*, **capped at 3**; see below |
+| `FranchiseProvider` | ≥ 2 owned titles in a collection **and ≥ 1 of them unplayed** — **movies only** | 1 row per franchise, capped at 2 |
 | `GenreAffinityProvider` | ⏳ **The household watches a genre disproportionately to its share of their library** — *not* "taste centroid concentrated in a genre"; see the Taste section | 1–3 rows |
 | `SeasonalProvider` | Calendar window (Halloween, holidays) | 0–1 rows |
 | `PeopleProvider` | Recurring director or actor in history | 0–2 rows |
 | `CuratedProvider` | Fresh LLM rows exist | 0–5 rows |
 | `RediscoverProvider` | Watched > 2 years ago, **most-rewatched first** — there is no rating column; see below | 0–1 rows |
+
+**`BecauseYouWatchedProvider`'s seed cap is the provider's own, and it is not
+the diversity constraint.** The diversity rule above bounds how many similarity
+rows sit *next to each other*; it does not bound how many exist to be spaced
+out, and a provider emitting one row per engaged title proposes up to fifty,
+every one scored near the top. Three is the most it may claim before "things
+like the things you watched" *is* the home screen. A second, subtler cap goes
+with it: two seeds from one franchise produce two rows with largely the same
+cards, so a candidate seed whose neighbour set overlaps an already-emitted
+row's by more than half is skipped and the next seed promoted.
+
+**And its `reason` changes with the signal that was available**, because the
+sentence is written to be spoken. `title_neighbors` is computed with or without
+an embedder — the blend drops the absent cosine term rather than zeroing it
+(ADR-0014) — so on the shipped default the neighbours are genre and keyword
+overlap alone. "Because you watched Dune" is a causal claim about the
+household; with nothing semantic computed the row says "Similar genres and
+themes to Dune" instead.
+
+**`FranchiseProvider` fires on ≥ 2 owned members *and* ≥ 1 unplayed.** A
+franchise the household has finished has nothing to offer: every card is a
+rewatch, and the row is indistinguishable from a "you have seen these" shelf
+nobody asked for. The row still *lists* every owned member, watched ones
+included, because a franchise reads in order and hiding chapters breaks the
+sequence — it is the firing condition that requires something left, not the
+card list. The unplayed check rolls an episode's watch state up to its series
+(`WatchStateRepository.played_title_ids`), which matters even though
+collections hold only movies: the alternative is a check whose absence is
+indistinguishable from having forgotten it.
 
 **`FranchiseProvider` is movies only, and on a television-only household its
 condition is unsatisfiable *by construction* rather than by absence of data.**
