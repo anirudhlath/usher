@@ -40,6 +40,52 @@ be added if a client turns out to need flexible field selection.
 | `GET /search/suggest?q=` | Type-ahead — the cheap narrow path from [05](05-search-and-similarity.md) |
 | `GET /browse?genre=&year=&sort=&owned=&cursor=` | Faceted paging with facet counts |
 
+> **Built in M7: `GET /home`.** ✅ Ordered, hydrated rows — `slug`, `title`,
+> `reason`, `display_hint` and cards — composed server-side and rendered in
+> order ([ADR-0006](decisions/0006-server-composed-home.md)). **This is the
+> first client-facing route since M5, and the default in this project is
+> CLI-only**: ADR-0006's central claim, *"one request paints a screen"*, is a
+> property of a request boundary that no command can exhibit, which is the
+> first time that has been true. `usher home` ships alongside it as the proxy,
+> not instead of it.
+>
+> **No cursor**, which is what that ADR specifies and what the table above
+> already shows: `/browse` carries one and `/home` does not. Nine of PRD
+> [06](06-rows-and-recommendations.md)'s ten providers are behind it;
+> `CuratedProvider` and `curated_rows` are M8's whole family
+> ([09](09-roadmap.md)'s M7 boundary call 2).
+>
+> **A card carries no artwork**, absent rather than null, for the reason
+> `GET /titles/{id}` carries no `images` key: there is no `Image` table and no
+> `poster_path`, M9 owns the proxy, and an always-null field is a client-side
+> branch that never takes its other arm.
+>
+> **`display_hint` is a hint and never a layout** —
+> `portrait | landscape | wide | square`, ADR-0006's only concrete vocabulary,
+> and it reaches `/openapi.json` as an enum rather than as a string. No column
+> count, no card width. If a client ever needs one, ADR-0006's own mitigation
+> is the route: an optional layout *profile* that constrains composition, which
+> is strictly additive.
+>
+> **An empty database answers `200 {"rows": []}`.** Not a 404 — a screen with
+> nothing on it is a fact about the household — and deliberately not padded
+> with a generic row, which would look personalised on a household that has
+> watched nothing. A synced library with no watch state is *not* empty:
+> `RecentlyAddedProvider` fires, so the difference between "no signal" and "no
+> data" is visible on the wire.
+>
+> **The route never calls a source, and never loads an embedding model.** Every
+> input is local — watch state, media items, `title_neighbors`, `user_taste`,
+> credits, collections — so [08](08-operations.md)'s "never fails a request
+> local state can answer" is structural here, and there is still no 503 for the
+> RFC 9457 envelope below to describe. The model matters because `create_app`
+> builds one only when a worker runs in the same process; every similarity
+> input this route reads is *precomputed*, which is the same property
+> `usher index` has.
+>
+> **Still M9's:** the RFC 9457 envelope, `usher.http.server.duration`,
+> `usher.cache.hits`/`.misses`, HTTP cache headers, and pagination.
+
 > ⏳ **`GET /search` and `GET /search/suggest` are M9's.** M6 built everything
 > behind them — `SearchService`, `PostgresSearchIndex`, `PostgresSuggestIndex`,
 > RRF fusion and the ranking blend — and **added no HTTP route**, delivering

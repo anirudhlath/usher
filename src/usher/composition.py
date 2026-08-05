@@ -102,6 +102,7 @@ from usher.ports.repository import (
     WatchStateRepository,
 )
 from usher.ports.rows import RowProvider
+from usher.ports.search import SearchIndex
 from usher.ports.source import SourceAdapter, SourceAdapterFactory
 from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
@@ -223,6 +224,31 @@ def adapter_factory(settings: Settings) -> SourceAdapterFactory:
         reauth_cooldown_seconds=settings.source_reauth_cooldown_seconds,
         push_stale_after_seconds=settings.push_stale_after_seconds,
         push_poll_seconds=settings.push_poll_seconds,
+    )
+
+
+def search_index(session: AsyncSession, settings: Settings) -> SearchIndex:
+    """This deployment's retrieval index, for a caller that needs the port
+    rather than the service above it.
+
+    **Here rather than in `api/deps.py`, and that is contract six.** `usher.api`
+    may not import `usher.adapters.search` -- no concrete search implementation
+    escapes its package -- and this module sits outside every contract's source
+    list precisely so a composition root has one place to know which
+    implementation fills a port. The contract allows the indirect chain
+    (`allow_indirect_imports = true`), so the rule being enforced is "name the
+    concrete class in exactly one place", which is what this function is.
+
+    `RowContext` carries a `SearchIndex` because PRD 06 puts one there. **No
+    provider registered in M7 reads it** -- recorded rather than quietly
+    supplied, because a field with no reader is a field whose wiring nothing
+    would notice being wrong. It costs one object holding the request's own
+    session, and no query.
+    """
+    return PostgresSearchIndex(
+        session,
+        ef_search=settings.search_hnsw_ef_search,
+        rrf_k=settings.search_rrf_k,
     )
 
 

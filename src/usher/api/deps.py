@@ -9,42 +9,62 @@ direct naming of a *concrete* adapter, which is why the factory below is
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Annotated, cast
 
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.lanes import LaneSupervisor
-from usher.composition import adapter_factory
+from usher.composition import adapter_factory, search_index
 from usher.config import Settings
+from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
+from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
+from usher.db.repositories.search import (
+    PostgresTitleEmbeddingRepository,
+    PostgresTitleNeighborRepository,
+)
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
+from usher.db.repositories.taste import PostgresTasteRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
-from usher.db.users import ensure_default_user
+from usher.db.users import default_user, ensure_default_user
+from usher.domain.watch import User
 from usher.ports.events import EventPublisher
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import (
+    CollectionRepository,
+    CreditRepository,
     EpisodeRepository,
     MediaItemRepository,
+    PersonRepository,
     RawPayloadStore,
     SourceRepository,
     SyncRunRepository,
+    TasteRepository,
+    TitleEmbeddingRepository,
     TitleMatchRepository,
+    TitleNeighborRepository,
     TitleRepository,
     WatchStateRepository,
 )
+from usher.ports.rows import RowContext
+from usher.ports.search import SearchIndex
 from usher.ports.source import SourceAdapterFactory
 from usher.services.events import InMemoryEventBus
+from usher.services.home import HomeService
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
+from usher.services.rows.cache import RowCache
 from usher.services.sources import SourceService
+from usher.services.taste import TasteService
 from usher.services.titles import TitleReadService
 from usher.services.watch_sync import WatchStateSyncService
 
@@ -465,3 +485,177 @@ def get_title_read_service(
 
 
 TitleReadServiceDep = Annotated[TitleReadService, Depends(get_title_read_service)]
+
+
+# ---------------------------------------------------------------------------
+# The composed home screen (M7). `GET /home` is the first client-facing route
+# since M5, and ADR-0006 is why: "one request paints a screen" is a property of
+# a request boundary, which no CLI can exhibit.
+#
+# **Each provider is declared above its first user.** `Depends(...)` is
+# evaluated when the `def` below it executes, so appending a provider after its
+# consumer is a `NameError` at import of this module rather than a puzzle at
+# request time.
+# ---------------------------------------------------------------------------
+
+
+def get_title_neighbor_repository(session: SessionDep) -> TitleNeighborRepository:
+    return PostgresTitleNeighborRepository(session)
+
+
+def get_title_embedding_repository(session: SessionDep) -> TitleEmbeddingRepository:
+    return PostgresTitleEmbeddingRepository(session)
+
+
+def get_person_repository(session: SessionDep) -> PersonRepository:
+    return PostgresPersonRepository(session)
+
+
+def get_credit_repository(session: SessionDep) -> CreditRepository:
+    return PostgresCreditRepository(session)
+
+
+def get_collection_repository(session: SessionDep) -> CollectionRepository:
+    return PostgresCollectionRepository(session)
+
+
+def get_taste_repository(session: SessionDep) -> TasteRepository:
+    return PostgresTasteRepository(session)
+
+
+def get_search_index(session: SessionDep, settings: SettingsDep) -> SearchIndex:
+    """Built through `usher.composition`, not here, and that is contract six:
+    `usher.api` may not name a concrete search implementation. The chain is
+    allowed (`allow_indirect_imports = true`); naming the class twice is not."""
+    return search_index(session, settings)
+
+
+async def get_default_user(session: SessionDep) -> User:
+    """The singleton default user as a **model**, not just an id.
+
+    `RowContext` carries a `User`, and `User.id` is `default_factory=new_id` --
+    so `User(name="default", is_default=True)` built here would compose a screen
+    for a household that has never existed. Every read would return nothing and
+    the screen would render empty, which is indistinguishable from a household
+    that has watched nothing. That is this milestone's headline failure arriving
+    through a constructor default, which is why the row is read.
+    """
+    return await default_user(session)
+
+
+def get_taste_service(
+    watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
+    embeddings: Annotated[TitleEmbeddingRepository, Depends(get_title_embedding_repository)],
+    titles: Annotated[TitleRepository, Depends(get_title_repository)],
+    taste: Annotated[TasteRepository, Depends(get_taste_repository)],
+) -> TasteService:
+    """**No embedder, and that is the same call `get_home_service` makes.**
+
+    `create_app`'s lifespan builds the model only when `worker_enabled`, so a
+    request-scoped dependency that reached for one would work in development and
+    500 in exactly the push-only deployment PRD 08 describes. It is also a
+    once-per-*process* resource -- a 65 MB ONNX session and a 4.84 s cold load --
+    which `deps.py` already argues about the TMDb token bucket one section up.
+
+    What that costs, stated rather than hidden: `TasteService.centroid` returns
+    `None` when there is no embedder, so `RowContext.taste` is `None` on every
+    request. **No provider registered in M7 reads that field**, so nothing on
+    the screen changes -- but a deployment whose worker *did* compute a centroid
+    cannot serve it from here, and closing that is a change to `centroid`'s own
+    contract rather than to this wiring. `genre_affinity` is unaffected: it is
+    counts over `titles.genres` and needs no model at all, which is the whole
+    reason M7 declined PRD 06's "taste centroid concentrated in a genre".
+    """
+    return TasteService(
+        watch_states=watch_states,
+        embeddings=embeddings,
+        titles=titles,
+        taste=taste,
+        embedder=None,
+        now=lambda: datetime.now(UTC),
+    )
+
+
+async def get_row_context(
+    user: Annotated[User, Depends(get_default_user)],
+    titles: Annotated[TitleRepository, Depends(get_title_repository)],
+    media_items: MediaItemRepositoryDep,
+    watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
+    episodes: Annotated[EpisodeRepository, Depends(get_episode_repository)],
+    neighbors: Annotated[TitleNeighborRepository, Depends(get_title_neighbor_repository)],
+    search: Annotated[SearchIndex, Depends(get_search_index)],
+    people: Annotated[PersonRepository, Depends(get_person_repository)],
+    credits: Annotated[CreditRepository, Depends(get_credit_repository)],
+    collections: Annotated[CollectionRepository, Depends(get_collection_repository)],
+    taste: Annotated[TasteService, Depends(get_taste_service)],
+) -> RowContext:
+    """The thirteen values a row may reach, for one request, for one user.
+
+    **`taste` and `affinities` are values the composer hands over, not services
+    a provider reaches.** A provider may import only `domain/` and `ports/`, so
+    `TasteService` cannot appear on the context -- and recomputing the affinity
+    inside a provider would need a `TasteRepository` field *and* a second copy
+    of the lift arithmetic. `ports/rows.py` argues both at length.
+
+    **No `AsyncSession` here either**, which is the structural half of trap 4:
+    a row holding repositories has no session to share, so there is nothing for
+    a `gather` to interleave. That the repositories underneath share one is the
+    composer's problem, stated once in `HomeService`.
+    """
+    return RowContext(
+        user=user,
+        # The wall clock, bound per request. `SeasonalProvider` fires on a
+        # calendar window and `RediscoverProvider` on "watched > 2 years ago";
+        # a fixture-friendly clock is exactly why this is a callable.
+        now=lambda: datetime.now(UTC),
+        titles=titles,
+        media_items=media_items,
+        watch_states=watch_states,
+        episodes=episodes,
+        neighbors=neighbors,
+        search=search,
+        taste=await taste.centroid(user.id),
+        people=people,
+        credits=credits,
+        collections=collections,
+        affinities=await taste.genre_affinity(user.id),
+    )
+
+
+RowContextDep = Annotated[RowContext, Depends(get_row_context)]
+
+
+def get_row_cache(request: Request) -> RowCache:
+    """The process's one row cache, off `app.state`.
+
+    On `app.state` rather than request-scoped for the reason the event bus is:
+    **a request-scoped cache caches nothing**, exactly as a request-scoped bus
+    fans out to nobody. Same defensive `getattr`/`cast` shape as
+    `get_event_bus`, and for the same reason -- `app.state` is typed `Any`, so
+    without it a missing lifespan is an `AttributeError` deep inside a handler
+    rather than a sentence naming the cause.
+    """
+    cache = getattr(request.app.state, "row_cache", None)
+    if not isinstance(cache, RowCache):
+        raise RuntimeError(
+            "app.state.row_cache is not set -- this app was not built by "
+            "create_app, or its lifespan has not run."
+        )
+    return cache
+
+
+def get_home_service(cache: Annotated[RowCache, Depends(get_row_cache)]) -> HomeService:
+    """The composer, over the registry `services/rows/__init__.py` owns.
+
+    The provider list is **not** assembled here: a list a composition root
+    builds by hand is a list the tenth provider is forgotten from, which is dead
+    code that looks exactly like a provider with nothing to say (boundary call
+    9). `HomeService`'s own default is `ROW_PROVIDERS`.
+
+    **And no embedder**, on the terms `get_taste_service` states: every
+    similarity input this route reads is a precomputed artefact.
+    """
+    return HomeService(cache=cache)
+
+
+HomeServiceDep = Annotated[HomeService, Depends(get_home_service)]
