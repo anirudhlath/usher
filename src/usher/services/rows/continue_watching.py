@@ -133,6 +133,10 @@ class ContinueWatchingProvider(RowProvider):
     def __init__(self, *, limit: int = _DEFAULT_LIMIT) -> None:
         self._limit = limit
 
+    @property
+    def slug_prefix(self) -> str:
+        return _SLUG
+
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         states = await ctx.watch_states.list_in_progress(ctx.user.id, limit=self._limit)
         if not states:

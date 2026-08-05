@@ -110,6 +110,10 @@ class NextUpProvider(RowProvider):
     def __init__(self, *, seeds: int = _DEFAULT_SEEDS) -> None:
         self._seeds = seeds
 
+    @property
+    def slug_prefix(self) -> str:
+        return _SLUG
+
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         # **Two calls, both batch, and the count does not move with the number
         # of series in progress.** `list_recent` rolls watched episodes up to

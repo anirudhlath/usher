@@ -85,8 +85,17 @@ _MAX_CARDS = 20
 _TTL = timedelta(hours=1)
 
 
+# **The provider's own stable identifier**, and every row it proposes carries a
+# slug that starts with it. It is the `provider` label on
+# `usher.row.build.duration` and the leftmost column of `usher home`'s report,
+# so it is bounded at one value per provider where the *row* slug below is one
+# per genre -- a label whose cardinality grows with the catalog is a
+# metrics-backend outage rather than a dashboard.
+_SLUG_PREFIX = "genre-affinity"
+
+
 def _slug(genre: str) -> str:
-    return "genre-affinity-" + genre.lower().replace(" ", "-")
+    return f"{_SLUG_PREFIX}-" + genre.lower().replace(" ", "-")
 
 
 class GenreAffinityRow(BaseRow):
@@ -146,6 +155,10 @@ class GenreAffinityProvider(RowProvider):
         self._limit = limit
         self._candidates = candidates
         self._cards = cards
+
+    @property
+    def slug_prefix(self) -> str:
+        return _SLUG_PREFIX
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         # `ctx.affinities` is Task 23's answer, already filtered by `_MIN_LIFT`

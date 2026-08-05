@@ -316,6 +316,34 @@ class RowProvider(ABC):
     See [ADR-0023](../../../docs/prd/decisions/0023-a-provider-proposes-it-does-not-decide.md).
     """
 
+    @property
+    @abstractmethod
+    def slug_prefix(self) -> str:
+        """This provider's stable identifier: `"continue-watching"`,
+        `"because-you-watched"`.
+
+        **Declared rather than derived, because two things outside the
+        codebase read it.** It is the `provider` label on
+        `usher.row.build.duration` and the leftmost column of `usher home`'s
+        report, so it is a name a dashboard and an operator hold -- and
+        deriving it from `type(self).__name__` would make a class rename a
+        silent dashboard break with no schema anywhere to notice in. PRD 07's
+        rule for the wire ("internal refactors don't break clients; wire
+        changes are deliberate") applied to telemetry.
+
+        **Bounded at nine, and that is the point.** The tempting label is the
+        *row's* slug -- but `BecauseYouWatchedProvider` mints one per seed
+        (`because-you-watched-<seed>`), so a slug label's cardinality is the
+        household's watch history and, in time, the catalog. A label whose
+        cardinality grows with the catalog is a metrics-backend outage rather
+        than a dashboard.
+
+        Every row a provider proposes carries a slug that **starts with this
+        string**, which is what makes the label provably about the rows it
+        measures rather than merely alongside them;
+        `tests/unit/test_rows_invariants.py` asserts it over the registry.
+        """
+
     @abstractmethod
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         """Return 0..n candidate rows with relevance scores.

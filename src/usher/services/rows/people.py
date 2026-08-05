@@ -111,6 +111,15 @@ def _qualifies(person: RecurringPerson) -> bool:
     return person.job in _QUALIFYING_JOBS
 
 
+# **The provider's own stable identifier**, and every row it proposes carries a
+# slug that starts with it. It is the `provider` label on
+# `usher.row.build.duration` and the leftmost column of `usher home`'s report,
+# so it is bounded at one value per provider where the *row* slug below is one
+# per person -- a label whose cardinality grows with the catalog is a
+# metrics-backend outage rather than a dashboard.
+_SLUG_PREFIX = "people"
+
+
 class PeopleRow(BaseRow):
     def __init__(self, person: RecurringPerson, *, candidates: int, cards: int) -> None:
         self._person = person
@@ -119,7 +128,7 @@ class PeopleRow(BaseRow):
 
     @property
     def slug(self) -> str:
-        return f"people-{self._person.person_id}"
+        return f"{_SLUG_PREFIX}-{self._person.person_id}"
 
     @property
     def title(self) -> str:
@@ -182,6 +191,10 @@ class PeopleProvider(RowProvider):
         self._candidates = candidates
         self._credits = credits
         self._cards = cards
+
+    @property
+    def slug_prefix(self) -> str:
+        return _SLUG_PREFIX
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         # **One statement for the whole household**, whatever its history size.

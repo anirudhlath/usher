@@ -114,6 +114,10 @@ class RediscoverProvider(RowProvider):
         self._limit = limit
         self._minimum = minimum
 
+    @property
+    def slug_prefix(self) -> str:
+        return _SLUG
+
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         # `ctx.now()` rather than a wall-clock read, and it is load-bearing
         # rather than stylistic: the alternative is a fixture dated two years

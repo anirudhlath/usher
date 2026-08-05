@@ -178,6 +178,42 @@ all proposals, sorts by score, applies diversity constraints (no three
 consecutive similarity rows; cap per family), builds the top N concurrently,
 drops any that build empty, and returns them.
 
+> **Built in M7 as `services/home.py`.** The diversity constraints are two
+> rules at two stages, and the split is deliberate: the **per-family cap** is
+> applied at *selection*, because it bounds how many rows get built; the **no
+> three consecutive similarity rows** rule is applied to the *returned
+> sequence*, after rows that built empty are dropped. Applied at selection
+> instead, the sequence `[S, X, S, S]` with `X` building empty returns
+> `[S, S, S]` — a violated constraint with nothing raised anywhere, on a
+> screen that still looks fine. A row that would be the third is **deferred**
+> and re-offered at every later position rather than dropped; with nothing to
+> interleave, the screen stops at two similarity rows, which is the constraint
+> taking precedence over screen length.
+>
+> The sort key is `(-score, slug)`. **The tie is broken by the slug and never
+> by registration order** — a screen ordered by the order a registry happened
+> to yield is a screen whose order is a property of a tuple literal.
+>
+> `ContinueWatchingProvider`'s "always ranked first" is a **rule the composer
+> applies**, not a score. Provider scores are not on a common scale and nothing
+> normalises them, so a positional guarantee spelled as a large float is one
+> that another provider's arithmetic can silently take away.
+>
+> `_MAX_ROWS` (10) and `_MAX_PER_FAMILY` (4) are module constants and
+> constructor defaults rather than settings: the mechanism exists, but the
+> reason to move either is an operator looking at a screen, which is M9's admin
+> surface, and `Settings` is `extra="forbid"` so every field there owes a
+> reader *and* a reason. **With two families the longest screen reachable
+> today is nine rows** — one pinned plus four per family — and `_MAX_ROWS`
+> becomes reachable when M8 registers `CuratedProvider` and `RowFamily` grows
+> its third member.
+>
+> Each provider declares a `slug_prefix` (`continue-watching`,
+> `because-you-watched`), and every row it proposes mints its slug from that
+> constant. It is what `usher.row.build.duration`'s `provider` label and
+> `usher home`'s report both carry: bounded at nine, where a row slug is
+> bounded by the catalog.
+
 | Provider | Fires when | Emits |
 |---|---|---|
 | `ContinueWatchingProvider` | Anything in progress | 1 row, always ranked first |

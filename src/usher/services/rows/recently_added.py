@@ -100,6 +100,10 @@ class RecentlyAddedProvider(RowProvider):
     def __init__(self, *, limit: int = _DEFAULT_LIMIT) -> None:
         self._limit = limit
 
+    @property
+    def slug_prefix(self) -> str:
+        return _SLUG
+
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         now = ctx.now()
         # **`since` is the caller's, not the statement's**, and the clock is

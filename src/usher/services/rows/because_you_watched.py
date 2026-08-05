@@ -117,6 +117,15 @@ def _jaccard(left: frozenset[uuid.UUID], right: frozenset[uuid.UUID]) -> float:
     return len(left & right) / len(union)
 
 
+# **The provider's own stable identifier**, and every row it proposes carries a
+# slug that starts with it. It is the `provider` label on
+# `usher.row.build.duration` and the leftmost column of `usher home`'s report,
+# so it is bounded at one value per provider where the *row* slug below is one
+# per seed -- a label whose cardinality grows with the catalog is a
+# metrics-backend outage rather than a dashboard.
+_SLUG_PREFIX = "because-you-watched"
+
+
 class BecauseYouWatchedRow(BaseRow):
     def __init__(
         self, seed_id: uuid.UUID, seed_name: str, neighbours: Sequence[uuid.UUID], *, semantic: bool
@@ -131,7 +140,7 @@ class BecauseYouWatchedRow(BaseRow):
         # Per seed, which is why `ScoredRow` carries the `Row` itself rather
         # than a slug the composer looks up: this string varies with the
         # catalog and nothing may branch on it.
-        return f"because-you-watched-{self._seed_id}"
+        return f"{_SLUG_PREFIX}-{self._seed_id}"
 
     @property
     def title(self) -> str:
@@ -172,6 +181,10 @@ class BecauseYouWatchedProvider(RowProvider):
         self._semantic = semantic
         self._max_seeds = max_seeds
         self._window = window
+
+    @property
+    def slug_prefix(self) -> str:
+        return _SLUG_PREFIX
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         if await ctx.neighbors.computed_at() is None:

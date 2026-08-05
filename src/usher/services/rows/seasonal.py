@@ -85,6 +85,15 @@ class Window:
 # Public rather than `_WINDOWS`: two of this module's cases assert properties
 # of the *table* rather than of a build, because both failures they guard
 # against produce a row that is permanently absent with no error anywhere.
+# **The provider's own stable identifier**, and every row it proposes carries a
+# slug that starts with it. It is the `provider` label on
+# `usher.row.build.duration` and the leftmost column of `usher home`'s report,
+# so it is bounded at one value per provider where the *row* slug below is one
+# per window -- a label whose cardinality grows with the catalog is a
+# metrics-backend outage rather than a dashboard.
+_SLUG_PREFIX = "seasonal"
+
+
 WINDOWS: tuple[Window, ...] = (
     Window(
         start=(10, 1),
@@ -93,7 +102,7 @@ WINDOWS: tuple[Window, ...] = (
         keyword=None,
         title="Halloween",
         reason="It's Halloween season.",
-        slug="seasonal-halloween",
+        slug=f"{_SLUG_PREFIX}-halloween",
     ),
     Window(
         start=(12, 1),
@@ -104,7 +113,7 @@ WINDOWS: tuple[Window, ...] = (
         keyword="christmas",
         title="Holiday viewing",
         reason="It's nearly Christmas.",
-        slug="seasonal-christmas",
+        slug=f"{_SLUG_PREFIX}-christmas",
     ),
     Window(
         start=(2, 7),
@@ -113,7 +122,7 @@ WINDOWS: tuple[Window, ...] = (
         keyword=None,
         title="Valentine's",
         reason="It's Valentine's week.",
-        slug="seasonal-valentines",
+        slug=f"{_SLUG_PREFIX}-valentines",
     ),
 )
 
@@ -189,6 +198,10 @@ class SeasonalProvider(RowProvider):
         had to fire the provider first could only check it in October.
         """
         return _TTL
+
+    @property
+    def slug_prefix(self) -> str:
+        return _SLUG_PREFIX
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         # **`ctx.now()`, never `datetime.now()`.** The single most important

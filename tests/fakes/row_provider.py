@@ -95,11 +95,23 @@ class FakeRow(Row):
 
 
 class FakeRowProvider(RowProvider):
-    """Proposes exactly what it was constructed with -- including nothing."""
+    """Proposes exactly what it was constructed with -- including nothing.
 
-    def __init__(self, *, proposals: Sequence[ScoredRow] = ()) -> None:
+    `rows` is the rows it proposed, in order, so a composer case can assert
+    `provider.rows[0].builds == 0` -- which is the only way to see the
+    two-phase property from outside: a one-phase composer that builds
+    everything and then ranks passes every ordering assertion.
+    """
+
+    def __init__(self, *, proposals: Sequence[ScoredRow] = (), slug_prefix: str = "fake") -> None:
         self._proposals = tuple(proposals)
+        self._slug_prefix = slug_prefix
+        self.rows: tuple[Row, ...] = tuple(proposal.row for proposal in self._proposals)
         self.contexts: list[RowContext] = []
+
+    @property
+    def slug_prefix(self) -> str:
+        return self._slug_prefix
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         self.contexts.append(ctx)

@@ -88,6 +88,15 @@ _SATURATION = 4
 _TTL = timedelta(hours=1)
 
 
+# **The provider's own stable identifier**, and every row it proposes carries a
+# slug that starts with it. It is the `provider` label on
+# `usher.row.build.duration` and the leftmost column of `usher home`'s report,
+# so it is bounded at one value per provider where the *row* slug below is one
+# per franchise -- a label whose cardinality grows with the catalog is a
+# metrics-backend outage rather than a dashboard.
+_SLUG_PREFIX = "franchise"
+
+
 class FranchiseRow(BaseRow):
     def __init__(self, collection_id: uuid.UUID, name: str, owned: Sequence[uuid.UUID]) -> None:
         self._collection_id = collection_id
@@ -96,7 +105,7 @@ class FranchiseRow(BaseRow):
 
     @property
     def slug(self) -> str:
-        return f"franchise-{self._collection_id}"
+        return f"{_SLUG_PREFIX}-{self._collection_id}"
 
     @property
     def title(self) -> str:
@@ -136,6 +145,10 @@ class FranchiseProvider(RowProvider):
     def __init__(self, *, limit: int = _MAX_ROWS, candidates: int = _CANDIDATES) -> None:
         self._limit = limit
         self._candidates = candidates
+
+    @property
+    def slug_prefix(self) -> str:
+        return _SLUG_PREFIX
 
     async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
         owned = await ctx.collections.list_owned(min_owned=_MIN_OWNED, limit=self._candidates)

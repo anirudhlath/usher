@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from tests.unit.rows import NOW, Library
+from tests.unit.rows import NOW, Library, days_ago
 from usher.ports.rows import RowProvider
 from usher.services.rows import BASE_SCORES, ROW_PROVIDERS, row_providers
 from usher.services.rows.continue_watching import CONTINUE_WATCHING_SCORE
@@ -63,6 +63,44 @@ def test_the_registry_holds_every_provider_this_milestone_ships() -> None:
     }
     assert len(ROW_PROVIDERS) == 9
     assert set(BASE_SCORES) == {_named(provider) for provider in ROW_PROVIDERS}
+
+
+async def test_every_proposed_row_carries_its_providers_slug_prefix() -> None:
+    """**The property that makes `usher.row.build.duration`'s label provably
+    about the rows it measures**, rather than merely alongside them.
+
+    A provider declares one `slug_prefix`; the rows it proposes mint slugs from
+    it (`because-you-watched-<seed>`, `franchise-<id>`, `seasonal-halloween`).
+    So the metric label is bounded at nine where the row slug is bounded by the
+    catalog, and the two are still known to be the same provider.
+
+    The failure this kills is a provider whose prefix and whose rows have
+    drifted apart -- a dashboard panel labelled `people` charting nothing,
+    beside `people-<id>` rows nobody can find, with no error anywhere. It is
+    unreachable while the row builds its slug *from* the constant, which is why
+    all five per-seed providers were rewired to do that rather than repeat the
+    literal.
+
+    Seeded from `_populated()` plus a finished title and a resume, inside a
+    seasonal window, so the sweep is not vacuous -- and the observation count
+    is asserted for the reason every sweep in this file states one: a sweep
+    that proposed nothing passes exactly like a sweep that passed.
+    """
+    library = await _populated()
+    watched = await library.title("Something Watched", genres=("Horror",))
+    await library.finished(watched, at=days_ago(400))
+    await library.in_progress(await library.title("Something Started"), at=days_ago(2))
+
+    observed = 0
+    for provider in ROW_PROVIDERS:
+        for proposal in await provider.propose(library.context(now=INSIDE_A_WINDOW)):
+            observed += 1
+            assert proposal.row.slug.startswith(provider.slug_prefix), (
+                f"{_named(provider)} proposed {proposal.row.slug!r} under the prefix "
+                f"{provider.slug_prefix!r}"
+            )
+
+    assert observed >= 4, f"the sweep saw {observed} proposals, so it proves nothing"
 
 
 def test_the_registry_is_the_same_set_however_the_deployment_is_wired() -> None:
