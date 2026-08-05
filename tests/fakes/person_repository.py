@@ -45,6 +45,7 @@ the port itself never does.
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from usher.domain.people import CreditKind, Person
 from usher.ports.repository import BulkWriteResult, PersonRepository, RecurringPerson
@@ -85,6 +86,11 @@ class SeededWatchState:
     title_id: uuid.UUID | None
     episode_id: uuid.UUID | None
     played: bool
+    # `max(last_played_at)` per person is the read's recency tiebreak.
+    # Nullable and defaulted, because `watch_states.last_played_at` is
+    # nullable (a walk's listing cannot determine it) and because every
+    # existing seeder predates the column.
+    last_played_at: datetime | None = None
 
 
 @dataclass
@@ -208,10 +214,40 @@ class FakePersonRepository(PersonRepository):
                 kind=kind,
                 job=job,
                 watched_title_count=len(titles),
+                last_watched_at=self._last_watched(titles),
             )
             for (person_id, kind, job), titles in grouped.items()
             if len(titles) >= min_titles
         ]
-        # Ties break on person_id so two reads of one catalog agree.
-        rows.sort(key=lambda row: (-row.watched_title_count, row.person_id))
+        # `max(w.last_played_at)` DESC NULLS LAST, then person_id. Written as
+        # a three-part key rather than relied on: the tempting Python spelling
+        # sorts on the datetime directly and raises on a None, and the
+        # tempting repair -- a `datetime.min` sentinel -- sorts an undatable
+        # person *below* everyone, which is right, while `or now()` would sort
+        # them above. Two reads of one catalog must agree, hence the id tail.
+        rows.sort(
+            key=lambda row: (
+                -row.watched_title_count,
+                row.last_watched_at is None,
+                -(row.last_watched_at.timestamp() if row.last_watched_at else 0.0),
+                row.person_id,
+            )
+        )
         return rows[:limit]
+
+    def _last_watched(self, title_ids: set[uuid.UUID]) -> datetime | None:
+        """`max(w.last_played_at)` over the states that reach these titles.
+
+        Through `_title_of` again rather than through `title_id`, so an
+        episode's state contributes its series' recency -- trap 7 inside the
+        tiebreak, where a films-only spelling makes every television person
+        undatable and therefore last.
+        """
+        stamps = [
+            state.last_played_at
+            for state in self.household.watch_states
+            if state.played
+            and state.last_played_at is not None
+            and self._title_of(state) in title_ids
+        ]
+        return max(stamps) if stamps else None

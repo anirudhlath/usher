@@ -258,7 +258,11 @@ class Library:
         # through verbatim rather than collapsed to a series id.
         self.people.household.watch_states.append(
             SeededWatchState(
-                user_id=USER.id, title_id=title_id, episode_id=episode_id, played=played
+                user_id=USER.id,
+                title_id=title_id,
+                episode_id=episode_id,
+                played=played,
+                last_played_at=at if at is not None else days_ago(1),
             )
         )
 

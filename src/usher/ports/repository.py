@@ -2271,6 +2271,17 @@ class RecurringPerson:
     kind: CreditKind
     job: str | None
     watched_title_count: int
+    # **The most recent watch that credits them, and it is a tiebreak the row
+    # cannot compute for itself.** Two directors at four titles each, one from
+    # last month and one from 2019, is the front matter's opening failure with
+    # a person's name on it -- a beautifully constructed row about a film
+    # watched three years ago -- and `watched_title_count` alone cannot
+    # separate them, so "whatever the aggregate returned" would decide.
+    #
+    # Nullable, because `watch_states.last_played_at` is (ADR-0014: a walk's
+    # listing cannot determine it), and a person known only through undatable
+    # states is a real state rather than a bug. Readers sort it last.
+    last_watched_at: AwareDatetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2404,8 +2415,20 @@ class PersonRepository(ABC):
         "has a watch state": a row with `played = false, position_seconds = 0`
         is a state a sync created, not something the user watched.
 
-        Ordered by count descending, ties broken by `person_id` so two reads
-        of one catalog agree -- the `list_for`/`nearest_for` rule.
+        Ordered by count descending, then by `last_watched_at` descending
+        with nulls last, then by `person_id` so two reads of one catalog
+        agree -- the `list_for`/`nearest_for` rule with the recency key the
+        row above it needs.
+
+        **`billing_order` is deliberately not here and not filterable.** The
+        grouping is `(person_id, name, kind, job)`, which is what makes a
+        person credited twice on one film one row rather than two, and a
+        billing bound would have to be applied *before* that grouping to mean
+        anything. So "top billed" is not expressible through this port; what
+        is expressible is `kind` and `job`, which is what `PeopleProvider`
+        filters on. `mapping._CAST_LIMIT` already bounds a title's stored cast
+        at 50, so the population is bounded even though the billing rank is
+        not readable. Recorded rather than worked around.
         """
 
 

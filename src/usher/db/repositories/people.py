@@ -173,7 +173,11 @@ JOIN people p ON p.tmdb_id = q.tmdb_id
 # Ties break on p.id so two reads of one catalog agree.
 _RECURRING_PEOPLE = """
 SELECT p.id AS person_id, p.name AS name, c.kind AS kind, c.job AS job,
-       count(DISTINCT c.title_id) AS watched_title_count
+       count(DISTINCT c.title_id) AS watched_title_count,
+       -- `max`, so a person's recency is their *most recent* qualifying
+       -- watch. NULL only when every contributing state is undatable, which
+       -- is a real state on a freshly-walked deployment rather than an error.
+       max(w.last_played_at) AS last_watched_at
 FROM watch_states w
 LEFT JOIN episodes e ON e.id = w.episode_id
 JOIN credits c ON c.title_id = coalesce(w.title_id, e.title_id)
@@ -182,7 +186,10 @@ WHERE w.user_id = CAST(:user_id AS uuid)
   AND w.played
 GROUP BY p.id, p.name, c.kind, c.job
 HAVING count(DISTINCT c.title_id) >= :min_titles
-ORDER BY count(DISTINCT c.title_id) DESC, p.id
+-- The recency key, and `NULLS LAST` is spelled out: Postgres defaults a
+-- DESC sort to NULLS FIRST, which would put every person known only through
+-- undatable states above everyone the household actually watched last month.
+ORDER BY count(DISTINCT c.title_id) DESC, max(w.last_played_at) DESC NULLS LAST, p.id
 LIMIT :limit
 """
 
@@ -392,6 +399,7 @@ class PostgresPersonRepository(PersonRepository):
                 kind=CreditKind(row.kind),
                 job=row.job,
                 watched_title_count=int(row.watched_title_count),
+                last_watched_at=row.last_watched_at,
             )
             for row in rows
         ]

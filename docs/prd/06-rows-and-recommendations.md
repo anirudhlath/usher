@@ -187,9 +187,23 @@ drops any that build empty, and returns them.
 | `FranchiseProvider` | ≥ 2 owned titles in a collection **and ≥ 1 of them unplayed** — **movies only** | 1 row per franchise, capped at 2 |
 | `GenreAffinityProvider` | ⏳ **The household watches a genre disproportionately to its share of their library** — *not* "taste centroid concentrated in a genre"; see the Taste section | 1–3 rows |
 | `SeasonalProvider` | Calendar window (Halloween, holidays) — **curated by the author, not derived**; see below | 0–1 rows |
-| `PeopleProvider` | Recurring director or actor in history | 0–2 rows |
-| `CuratedProvider` | Fresh LLM rows exist | 0–5 rows |
+| `PeopleProvider` | Recurring director or actor in history — **3 distinct engaged titles, in a cast or directing credit**; see below | 0–2 rows |
+| `CuratedProvider` | ⏳ **not built in M7 — M8 owns it**, with `curated_rows`/`LLMRow`/`POST /admin/rows/regenerate`; see below | 0–5 rows |
 | `RediscoverProvider` | Watched > 2 years ago, **most-rewatched first** — there is no rating column; see below | 0–1 rows |
+
+**Nine of these ten are registered as of M7; `CuratedProvider` is the tenth
+and M8 owns it whole** (boundary call 2, and the table above is annotated
+rather than silently shipped short). The registry is
+`services/rows/__init__.py`'s `ROW_PROVIDERS`, and it is the composition
+point: **a provider that is not registered is dead code, and dead code that
+looks exactly like a provider with nothing to say** — which is the one failure
+a composed home screen cannot show from the outside. It holds nine, asserted by
+name rather than by count, and four cross-provider invariants are parametrised
+over it, so a tenth provider is covered by four cases the day it is written:
+that only Continue Watching reaches the top score, that every provider returns
+nothing against an empty database, that none falls back to popular titles on a
+household that has watched nothing, and that every one composes with no
+embedder.
 
 **`SeasonalProvider`'s calendar→signal mapping is a taste judgement with no
 data source, and it is the only thing in `services/` of that kind.** Nothing in
@@ -210,6 +224,24 @@ row, because both failures produce a row that is permanently absent with no
 error anywhere: no window may wrap the year end (`(12,27) <= today <= (1,2)`
 is false for every date), and no row TTL may outlive the shortest window (a
 cached Halloween row is correct when built and wrong when served in November).
+
+**`PeopleProvider` means three distinct engaged *titles* in a cast or
+directing credit, and both halves are argued.** Two is a coincidence in any
+household that watches a studio's output — two films from one franchise share
+dozens of crew — so a threshold of two makes "recurring" mean "appeared in a
+sequel". And *distinct titles*, never credits: a person credited twice on one
+film is one title's worth of evidence, and counting credits returns a real
+person the household really watched, ranked first, wrongly. The role half
+matters as much: a person credited on six films as a gaffer is recurring under
+any counting rule and means nothing, because below the line crews repeat when
+studios repeat. **A billing-order bound is not part of it and cannot be** —
+`list_recurring_for_user` groups by `(person_id, name, kind, job)` and the row
+it returns carries no billing rank, so "top billed" would have to be applied
+before that grouping. The stored cast is already bounded at 50 per title by
+the derivation. Rows are picked by title count, then by the most recent title
+crediting the person, then by id: two directors at four titles each, one from
+last month and one from 2019, is otherwise decided by whatever the aggregate
+returned.
 
 **`GenreAffinityProvider`'s row is proposed on the affinity and its cards are
 read when it builds**, which is why a genre whose owned titles the household

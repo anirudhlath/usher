@@ -8,6 +8,7 @@ forgiving than the other.
 """
 
 import uuid
+from datetime import datetime
 
 import pytest
 
@@ -77,10 +78,15 @@ class FakePersonHistorySeeder(PersonHistorySeeder):
         title_id: uuid.UUID | None = None,
         episode_id: uuid.UUID | None = None,
         played: bool = True,
+        last_played_at: datetime | None = None,
     ) -> None:
         self._repository.household.watch_states.append(
             SeededWatchState(
-                user_id=user_id, title_id=title_id, episode_id=episode_id, played=played
+                user_id=user_id,
+                title_id=title_id,
+                episode_id=episode_id,
+                played=played,
+                last_played_at=last_played_at,
             )
         )
 

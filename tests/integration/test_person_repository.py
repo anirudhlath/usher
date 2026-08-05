@@ -18,6 +18,7 @@ cases `FakePersonRepository` documents itself as unable to express:
 """
 
 import uuid
+from datetime import datetime
 
 import pytest
 import pytest_asyncio
@@ -137,14 +138,16 @@ class PostgresPersonHistorySeeder(PersonHistorySeeder):
         title_id: uuid.UUID | None = None,
         episode_id: uuid.UUID | None = None,
         played: bool = True,
+        last_played_at: datetime | None = None,
     ) -> None:
         await self._session.execute(
             text(
                 "INSERT INTO watch_states "
                 "(id, user_id, title_id, episode_id, played, position_seconds, play_count, "
-                " origin, updated_at) "
+                " last_played_at, origin, updated_at) "
                 "VALUES (CAST(:id AS uuid), CAST(:user_id AS uuid), CAST(:title_id AS uuid), "
-                "CAST(:episode_id AS uuid), :played, 0, 0, 'source', now())"
+                "CAST(:episode_id AS uuid), :played, 0, 0, "
+                "CAST(:last_played_at AS timestamptz), 'source', now())"
             ),
             {
                 "id": new_id(),
@@ -152,6 +155,7 @@ class PostgresPersonHistorySeeder(PersonHistorySeeder):
                 "title_id": title_id,
                 "episode_id": episode_id,
                 "played": played,
+                "last_played_at": last_played_at,
             },
         )
 

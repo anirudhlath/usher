@@ -20,6 +20,7 @@ which is ADR-0001's argument applied to a test double.
 
 import uuid
 from abc import ABC, abstractmethod
+from datetime import UTC, datetime, timedelta
 
 from usher.domain.people import CreditKind, Person
 from usher.ports.repository import PersonRepository
@@ -27,6 +28,10 @@ from usher.ports.repository import PersonRepository
 
 def person(tmdb_id: int | None, name: str, **changes: object) -> Person:
     return Person.model_validate({"tmdb_id": tmdb_id, "name": name, "sort_name": name, **changes})
+
+
+LONG_AGO = datetime(2019, 4, 2, 20, 30, tzinfo=UTC)
+RECENTLY = datetime(2026, 7, 2, 20, 30, tzinfo=UTC)
 
 
 class PersonHistorySeeder(ABC):
@@ -88,6 +93,7 @@ class PersonHistorySeeder(ABC):
         title_id: uuid.UUID | None = None,
         episode_id: uuid.UUID | None = None,
         played: bool = True,
+        last_played_at: datetime | None = None,
     ) -> None:
         """One watch state.
 
@@ -446,3 +452,85 @@ class PersonRepositoryContract:
     async def test_an_empty_person_batch_is_a_no_op(self, repository: PersonRepository) -> None:
         result = await repository.upsert_many([])
         assert (result.inserted, result.updated) == (0, 0)
+
+    async def test_two_people_at_equal_counts_are_ordered_by_recency_then_id(
+        self,
+        repository: PersonRepository,
+        seeder: PersonHistorySeeder,
+        user_id: uuid.UUID,
+    ) -> None:
+        """**The front matter's opening failure with a person's name on it.**
+
+        Two actors at three titles each, one of them last watched a month ago
+        and the other in 2019. Without the recency key the answer is "whatever
+        the aggregate returned", and the row that renders is a beautifully
+        constructed shelf about a person the household was into three years
+        ago -- populated, correctly shaped, and about the wrong person.
+
+        The 2019 person is seeded **first**, so insertion order and id order
+        both favour the wrong answer; `count(DISTINCT title_id)` is identical
+        by construction, so the count key cannot break the tie either.
+        """
+        await repository.upsert_many(
+            [person(93_000_041, "Older Favourite"), person(93_000_042, "Recent Favourite")]
+        )
+        ids = await repository.resolve_tmdb_ids([93_000_041, 93_000_042])
+        old_id, recent_id = ids[93_000_041], ids[93_000_042]
+
+        for index in range(3):
+            film = await seeder.movie()
+            await seeder.credit(person_id=old_id, title_id=film)
+            await seeder.watched(
+                user_id=user_id, title_id=film, last_played_at=LONG_AGO + timedelta(days=index)
+            )
+        for index in range(3):
+            film = await seeder.movie()
+            await seeder.credit(person_id=recent_id, title_id=film)
+            await seeder.watched(
+                user_id=user_id, title_id=film, last_played_at=RECENTLY + timedelta(days=index)
+            )
+
+        rows = await repository.list_recurring_for_user(user_id, min_titles=3)
+
+        assert [row.person_id for row in rows] == [recent_id, old_id]
+        assert rows[0].last_watched_at is not None
+        assert rows[1].last_watched_at is not None
+        assert rows[0].last_watched_at > rows[1].last_watched_at
+
+    async def test_a_person_known_only_through_undatable_states_sorts_last(
+        self,
+        repository: PersonRepository,
+        seeder: PersonHistorySeeder,
+        user_id: uuid.UUID,
+    ) -> None:
+        """`watch_states.last_played_at` is nullable because a walk's listing
+        cannot determine it (ADR-0014), so `max(...)` over a person's states is
+        genuinely NULL on a freshly-walked deployment.
+
+        Postgres defaults a `DESC` sort to **NULLS FIRST**, which would put
+        every such person above everyone the household demonstrably watched
+        last month -- and on a deployment mid-backfill that is most of them.
+        The datable person is seeded second so id order favours the wrong
+        answer here too.
+        """
+        await repository.upsert_many(
+            [person(93_000_043, "Undated Person"), person(93_000_044, "Dated Person")]
+        )
+        ids = await repository.resolve_tmdb_ids([93_000_043, 93_000_044])
+        undated_id, dated_id = ids[93_000_043], ids[93_000_044]
+
+        for _ in range(3):
+            film = await seeder.movie()
+            await seeder.credit(person_id=undated_id, title_id=film)
+            await seeder.watched(user_id=user_id, title_id=film, last_played_at=None)
+        for index in range(3):
+            film = await seeder.movie()
+            await seeder.credit(person_id=dated_id, title_id=film)
+            await seeder.watched(
+                user_id=user_id, title_id=film, last_played_at=LONG_AGO + timedelta(days=index)
+            )
+
+        rows = await repository.list_recurring_for_user(user_id, min_titles=3)
+
+        assert [row.person_id for row in rows] == [dated_id, undated_id]
+        assert rows[1].last_watched_at is None

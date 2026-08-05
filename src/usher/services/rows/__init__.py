@@ -37,6 +37,7 @@ from usher.services.rows.genre_affinity import (
     GenreAffinityProvider,
 )
 from usher.services.rows.next_up import NEXT_UP_SCORE, NextUpProvider
+from usher.services.rows.people import PEOPLE_SCORE_CEILING, PeopleProvider
 from usher.services.rows.recently_added import (
     RECENTLY_ADDED_SCORE_CEILING,
     RecentlyAddedProvider,
@@ -58,6 +59,7 @@ BASE_SCORES: Mapping[str, float] = {
     FranchiseProvider.__name__: FRANCHISE_SCORE_CEILING,
     GenreAffinityProvider.__name__: GENRE_AFFINITY_SCORE_CEILING,
     SeasonalProvider.__name__: SEASONAL_SCORE,
+    PeopleProvider.__name__: PEOPLE_SCORE_CEILING,
 }
 
 __all__ = [
@@ -67,6 +69,7 @@ __all__ = [
     "FRANCHISE_SCORE_CEILING",
     "GENRE_AFFINITY_SCORE_CEILING",
     "NEXT_UP_SCORE",
+    "PEOPLE_SCORE_CEILING",
     "RECENTLY_ADDED_SCORE_CEILING",
     "REDISCOVER_SCORE",
     "ROW_PROVIDERS",
@@ -78,6 +81,7 @@ __all__ = [
     "FranchiseProvider",
     "GenreAffinityProvider",
     "NextUpProvider",
+    "PeopleProvider",
     "Progress",
     "RecentlyAddedProvider",
     "RediscoverProvider",
@@ -120,6 +124,7 @@ def row_providers(*, semantic: bool = False) -> tuple[RowProvider, ...]:
         FranchiseProvider(),
         GenreAffinityProvider(),
         SeasonalProvider(),
+        PeopleProvider(),
     )
 
 
