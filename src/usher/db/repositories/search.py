@@ -390,6 +390,37 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
             source_fingerprint=source_fingerprint,
         )
 
+    async def list_for_titles(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[float, ...]]:
+        # One statement for a named set, because `TasteService` averages ~50
+        # titles and `get()` in a loop is 50 round trips to build one
+        # centroid. `IN` rather than a staged join: the set is bounded by the
+        # taste window, not by the catalog.
+        if not title_ids:
+            # An empty `IN ()` is a syntax error rather than an empty answer,
+            # so the guard is required and is not an optimisation.
+            return {}
+        with self._session.no_autoflush:
+            result = await self._session.execute(
+                select(TitleEmbeddingRow.title_id, TitleEmbeddingRow.embedding).where(
+                    TitleEmbeddingRow.title_id.in_(list(title_ids)),
+                    # NULL vectors excluded here rather than by the caller, the
+                    # same call `list_embedded` makes: a *refused* title is
+                    # written with a NULL embedding precisely so it stops
+                    # matching the stale predicate, and it has no vector to
+                    # contribute to any mean. Excluding it in the caller means
+                    # every future caller has to remember.
+                    TitleEmbeddingRow.embedding.is_not(None),
+                )
+            )
+        # `float(value)` for `get()`'s reason: pgvector hands `halfvec` back as
+        # float16, and a caller comparing that against a freshly embedded
+        # vector must not be handed something whose `==` returns an array.
+        return {
+            row.title_id: tuple(float(value) for value in row.embedding) for row in result.all()
+        }
+
     async def list_stale(
         self, model_name: str, *, limit: int = 100, after: uuid.UUID | None = None
     ) -> list[Title]:

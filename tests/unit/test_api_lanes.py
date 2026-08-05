@@ -44,6 +44,7 @@ from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
+from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_match_repository import FakeTitleMatchRepository
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
@@ -72,6 +73,7 @@ from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
 from usher.services.search import SearchService
 from usher.services.similar import SimilarityService
+from usher.services.taste import TasteService
 from usher.services.watch_sync import WatchStateSyncService
 
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
@@ -238,6 +240,7 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
         queue=queue,
         embeddings=embeddings,
         neighbors=neighbors,
+        taste_rows=FakeTasteRepository(watch_states),
         people=people,
         credits=FakeCreditRepository(people, titles),
         collections=FakeCollectionRepository(),
@@ -269,6 +272,14 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
             result_limit=settings.search_result_limit,
         ),
         similar=SimilarityService(embeddings, neighbors, titles, commit),
+        taste=TasteService(
+            watch_states=watch_states,
+            embeddings=embeddings,
+            titles=titles,
+            taste=FakeTasteRepository(watch_states),
+            embedder=None,
+            now=lambda: datetime.now(UTC),
+        ),
         events=fakes.events,
         commit=commit,
     )

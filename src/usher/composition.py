@@ -51,6 +51,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import httpx
 from loguru import logger
@@ -73,6 +74,7 @@ from usher.db.repositories.search import (
 )
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
+from usher.db.repositories.taste import PostgresTasteRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
@@ -92,6 +94,7 @@ from usher.ports.repository import (
     RawPayloadStore,
     SourceRepository,
     SyncRunRepository,
+    TasteRepository,
     TitleEmbeddingRepository,
     TitleMatchRepository,
     TitleNeighborRepository,
@@ -117,6 +120,7 @@ from usher.services.push import PushApplyService
 from usher.services.reconcile import ReconcileService
 from usher.services.search import SearchService
 from usher.services.similar import SimilarityService
+from usher.services.taste import TasteService
 from usher.services.watch_sync import WatchStateSyncService
 from usher.telemetry import QueueSnapshot, SearchSnapshot
 
@@ -180,6 +184,7 @@ class Pipeline:
     queue: JobQueue
     embeddings: TitleEmbeddingRepository
     neighbors: TitleNeighborRepository
+    taste_rows: TasteRepository
     people: PersonRepository
     credits: CreditRepository
     collections: CollectionRepository
@@ -190,6 +195,7 @@ class Pipeline:
     watch: WatchStateSyncService
     search: SearchService
     similar: SimilarityService
+    taste: TasteService
     events: EventPublisher
     commit: Callable[[], Awaitable[None]]
 
@@ -260,6 +266,7 @@ def build_pipeline(
     runs = PostgresSyncRunRepository(session)
     embeddings = PostgresTitleEmbeddingRepository(session)
     neighbors = PostgresTitleNeighborRepository(session)
+    taste_rows = PostgresTasteRepository(session)
     queue = PostgresJobQueue(
         session,
         max_attempts=settings.job_max_attempts,
@@ -289,6 +296,7 @@ def build_pipeline(
         queue=queue,
         embeddings=embeddings,
         neighbors=neighbors,
+        taste_rows=taste_rows,
         people=people,
         credits=credits,
         collections=collections,
@@ -343,6 +351,20 @@ def build_pipeline(
         # and why a deployment with no embedding extra can still read and
         # rebuild neighbours for whatever the worker did index.
         similar=SimilarityService(embeddings, neighbors, titles, session.commit),
+        # **The embedder is passed and may be `None`, which is the shipped
+        # default.** `TasteService.centroid` then returns `None` rather than a
+        # zero vector, every consumer drops the signal (ADR-0014), and
+        # `genre_affinity` is unaffected because it reads counts rather than
+        # vectors -- which is the whole reason Task 23 declines PRD 06's
+        # "taste centroid concentrated in a genre".
+        taste=TasteService(
+            watch_states=watch_states,
+            embeddings=embeddings,
+            titles=titles,
+            taste=taste_rows,
+            embedder=embedder,
+            now=lambda: datetime.now(UTC),
+        ),
         events=publisher,
         commit=session.commit,
     )

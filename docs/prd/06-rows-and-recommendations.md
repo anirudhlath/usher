@@ -173,7 +173,7 @@ drops any that build empty, and returns them.
 | `RecentlyAddedProvider` | New items in the window | 1 row |
 | `BecauseYouWatchedProvider` | Recent high-engagement titles | 1 row *per seed* |
 | `FranchiseProvider` | ≥ 2 owned titles in a collection — **movies only** | 1 row per franchise |
-| `GenreAffinityProvider` | Taste centroid concentrated in a genre | 1–3 rows |
+| `GenreAffinityProvider` | ⏳ **The household watches a genre disproportionately to its share of their library** — *not* "taste centroid concentrated in a genre"; see the Taste section | 1–3 rows |
 | `SeasonalProvider` | Calendar window (Halloween, holidays) | 0–1 rows |
 | `PeopleProvider` | Recurring director or actor in history | 0–2 rows |
 | `CuratedProvider` | Fresh LLM rows exist | 0–5 rows |
@@ -308,15 +308,99 @@ Adding a row type is a subclass and a registration. Nothing else changes.
 
 ## Taste
 
-The **taste centroid** is the mean embedding of recently watched and highly
-rated titles, computed per user and cached. It is cheap, local, and reused for:
+The **taste centroid** is the mean embedding of recently watched, ⏳ **highly
+*engaged*** titles, computed per user and cached. It is cheap, local, and
+reused for:
 
 - seeding similarity rows,
 - ranking search results,
-- selecting genre affinity rows,
+- ~~selecting genre affinity rows~~ — ⏳ **not this; see below**,
 - pre-filtering the LLM candidate pool.
 
 Recency-weighted so it tracks changing taste rather than averaging a lifetime.
+
+⏳ **"Highly rated" is a substitution, and this is the third of three sites
+where a rating this schema does not have was assumed.** The other two are
+`RowCard` (no `rating` field) and `RediscoverProvider` (above). `watch_states`
+carries no `rating`, no `favorite` and no `user_score`; `SourceWatchState`
+carries none either, and the Emby adapter reads neither of the two fields Emby
+does expose. M7 does not invent the column — landing a real rating is a
+source-port change plus a contract case plus a live verification against a
+field no client can set yet.
+
+**So "highly rated" becomes "finished, and finished twice is better."** Two
+tiers over the engagement signal this schema actually holds: a title the
+household **rewatched** (`play_count >= 2`) weighs 1.00, one it merely
+**finished** weighs 0.60. A rewatch is the only *loved* signal here and it
+costs the household the entire runtime to emit — revealed preference, paid for
+in hours, and a stronger endorsement than any five-star widget.
+
+**Abandonment is expressed by absence, never by a negative weight.** A title
+started and dropped twelve minutes in is not evidence of dislike strong enough
+to point a vector away from it; it is evidence of nothing much, and the
+household has no way to say otherwise. A signal whose sign is a guess is worse
+than one that is absent ([ADR-0014](decisions/0014-absence-is-not-zero.md)).
+
+**Recency is a 50-title rank window with a linear ramp to a 0.25 floor, not a
+half-life.** A 30-day half-life gives a two-year-old watch a weight of 6e-8,
+which is numerically indistinguishable from exclusion — so the half-life *is* a
+window, with an edge nobody wrote down and nobody can see. A window states its
+edge, and ranking by recency rather than by wall-clock normalises by the
+household's **own viewing pace**, which is the variable no per-deployment
+measurement exists for.
+
+⏳ **A household below five engaged titles gets no centroid, and the refusal is
+written rather than skipped.** A centroid over one title *is* that title's
+vector. The stored row carries a NULL centroid so that household is re-claimed
+exactly once when its history moves, rather than recomputed on every read
+forever — `title_embeddings`' argument for a nullable vector, on a different
+key.
+
+⏳ **With no embedder there is no centroid at all — `None`, never a zero
+vector.** The embedder is optional and off by default, so this is the shipped
+configuration rather than an edge case. Every consumer drops the signal rather
+than zeroing it: a deployment without an embedder gets a home screen with
+**fewer rows, not worse rows**.
+
+### Genre affinity is not computed from the centroid
+
+⏳ **This corrects `GenreAffinityProvider`'s firing condition in the table
+above.** Read literally — *"taste centroid concentrated in a genre"* — the most
+broadly-useful provider becomes the one that **never fires** on the default
+deployment, because the centroid needs an embedder and the embedder is
+optional. Worse, it fails in the direction hardest to notice: the home screen
+still renders, the other providers still fire, and the row that would have said
+something true about the household is simply absent, forever, with nothing
+counting its absence.
+
+Genre affinity is therefore **counts over `titles.genres`**, and it fires when
+*the household watches a genre disproportionately to its share of their
+library*:
+
+```
+share_watched(g) = weighted engaged titles carrying g / weighted engaged titles
+share_library(g) = owned titles carrying g           / owned titles
+lift(g)          = share_watched(g) / share_library(g)
+```
+
+**The baseline is the owned library, and the two alternatives are both wrong.**
+The household's own distribution makes every lift exactly 1.0 by construction,
+so the provider would never fire on any household. The whole 1.27M-row catalog
+tells a household that owns nothing but horror that it loves horror — but the
+library made that choice and the person emitted no information, so the row's
+reason string would be word-for-word false. The owned library is the
+household's actual **choice set**, which makes affinity *lift over
+opportunity*.
+
+Fires at `lift >= 1.5` with at least 4 supporting titles. The support floor is
+what kills a genre watched once, whose lift in a thin library is in the tens. A
+genre the library does not carry at all yields no lift rather than an infinite
+one.
+
+It reads the **same** engaged window the centroid does, so the recency
+weighting is shared and there is one definition of what this household watches.
+Two windows would be two definitions, and on the day they disagreed the
+disagreement would be invisible.
 
 ## LLM curation
 
@@ -350,10 +434,38 @@ the model sees 200 titles it might plausibly recommend, not a catalog.
 | Composed home screen | ~30 s per user |
 | Neighbour tables | Rebuilt on embedding change |
 | Curated rows | Until regenerated |
-| Taste centroid | Invalidated on watch-state change |
+| Taste centroid | ⏳ **Recomputed when the household's `max(watch_states.updated_at)` moves** — a fingerprint, not an event |
+| Genre affinity | ⏳ **Not cached at all** |
 
 Rows are recomputed lazily and served stale while refreshing, so the home screen
 never blocks on a slow row.
+
+⏳ **"Invalidated on watch-state change" was an event this project has already
+refused to publish.** The nightly walk merges up to **1,126,789** watch states,
+so one invalidation per merged row is a million messages a night for at most
+one useful recomputation per user — the exact fan-out
+[07](07-client-api.md) declines for `watchstate.updated`.
+
+So `user_taste` stores the `max(watch_states.updated_at)` its centroid was
+computed from, and a demand read recomputes when the household's current max
+**`IS DISTINCT FROM`** it —
+[ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s scheme,
+per user rather than per title. `IS DISTINCT FROM` rather than `<`, and only
+the first of its three reasons is obvious: a *newer* state raises the max; a
+*deleted* state **lowers** it, and `<` would serve a centroid computed over a
+row that no longer exists forever; and a *cleared* history makes the aggregate
+`NULL`, where `stored < NULL` is `NULL` and therefore never true. The merge
+path publishes nothing and does not know `user_taste` exists.
+
+⏳ **Genre affinity is not cached, and sharing the centroid's row would be
+wrong rather than merely wasteful.** That row is invalidated on `model_name IS
+DISTINCT FROM`; genre affinity has no model. Sharing it would make an
+embedding-checkpoint swap invalidate a count no model touched, and — the worse
+half — would require a deployment with **no embedder** to write a `model_name`
+for a model it does not have. There is no honest value for that column. A
+*separate* cache would cost more than the answer: the affinity is a count over
+≤ 50 `text[]` values plus one library-wide aggregate, and the validity check
+guarding it would itself be the `max(updated_at)` read.
 
 ## Alfred
 

@@ -125,6 +125,20 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
     async def get(self, title_id: uuid.UUID) -> StoredEmbedding | None:
         return self.rows.get(title_id)
 
+    async def list_for_titles(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[float, ...]]:
+        # A title with no row and a title whose row carries a NULL vector are
+        # both simply absent -- never a key mapped to `None` and never one
+        # mapped to a zero vector. ADR-0014, and the caller drops the title
+        # from its mean rather than averaging in an origin.
+        found: dict[uuid.UUID, tuple[float, ...]] = {}
+        for title_id in title_ids:
+            row = self.rows.get(title_id)
+            if row is not None and row.embedding is not None:
+                found[title_id] = row.embedding
+        return found
+
     def _population(self) -> list[Title]:
         return sorted(
             (t for t in self.titles if t.enrichment_state is not EnrichmentState.SKELETON),

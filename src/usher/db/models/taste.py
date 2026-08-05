@@ -1,20 +1,22 @@
-"""Taste-side derived state: the MovieLens tag genome, and (from group G)
-the per-user taste centroid.
+"""Taste-side derived state: the MovieLens tag genome, and the per-user taste
+centroid.
 
 Both are *derived* — recomputable from inputs the catalog already holds — and
-both therefore carry provenance rather than an `updated_at` trigger. This
-module holds `genome_scores`; `user_taste` joins it in the same revision.
+both therefore carry provenance rather than an `updated_at` trigger. Group F
+landed `genome_scores`; Group G added `user_taste` to this module and to the
+same revision (`ffa`), which is what that migration's own docstring instructs.
 """
 
 import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import HALFVEC
-from sqlalchemy import DateTime, ForeignKey, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from usher.db.base import Base
+from usher.db.models.search import EMBEDDING_DIMENSIONS
 from usher.ports.bulk import GENOME_TAG_COUNT
 
 
@@ -171,6 +173,93 @@ class GenomeScoreRow(Base):
     # `tests/integration/test_migrations.py::
     # test_migration_creates_the_updated_at_triggers` asserts the trigger set
     # *exactly*, so this table must add none and that test must not change.
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class UserTasteRow(Base):
+    """One user's taste centroid, and the fingerprint that invalidates it.
+
+    **The invalidation is a predicate, not an event, and that is trap 5.** PRD
+    06's caching table says the centroid is *"invalidated on watch-state
+    change"*. The nightly walk merges up to 1,126,789 watch states; one
+    invalidation per merged row is the fan-out PRD 07 explicitly refuses for
+    `watchstate.updated`, spent on at most one useful recomputation per user
+    per night. So the merge path publishes nothing, writes nothing here, and
+    does not know this table exists. `source_watermark` carries the
+    `max(watch_states.updated_at)` the row was computed from and
+    `TasteService` recomputes when the household's current max differs --
+    ADR-0020's scheme, per user rather than per title.
+
+    **`centroid` is nullable and that is load-bearing**, for
+    `title_embeddings.embedding`'s reason one module over. A household below
+    the minimum engaged-title count is a **written refusal**, not a missing
+    row. Without somewhere to write it, a four-title household is recomputed on
+    every read of every home screen forever, and the fifth title does not
+    re-claim the centroid once -- it re-claims it always. This project has
+    shipped that exact bug before, in the watch-history repair.
+
+    **`source_watermark` is nullable, and the plan specified `NOT NULL`.** The
+    aggregate it stores is `max()` over a possibly-empty set, so a household
+    that has watched nothing has no honest value for it. Under `NOT NULL` the
+    refusal for that household cannot be written at all, which makes it the one
+    household recomputed on every single read -- the bug the nullable
+    `centroid` column two lines up exists to prevent, arriving through the
+    other column. Nullable also makes the predicate correct by itself: `NULL IS
+    DISTINCT FROM NULL` is false, so a stored empty-history refusal reads as
+    current, and the first watch state that lands moves the max off `NULL` and
+    re-claims it exactly once.
+
+    **`model_name` records runtime *and* checkpoint** (`fastembed:BAAI/
+    bge-small-en-v1.5`), exactly as `title_embeddings` does. The fastembed and
+    sentence-transformers vectors for one checkpoint differ by up to 1.41e-03
+    in pairwise similarity, so the two are not interchangeable; putting the
+    runtime in the name means a swap invalidates every centroid through the
+    same `IS DISTINCT FROM` clause rather than through a migration somebody
+    has to remember to write.
+
+    **`halfvec(384)`, matching `title_embeddings.embedding` exactly.** A
+    centroid is a mean of vectors from that column and is compared against it,
+    so a different type or width would make the one comparison this table
+    exists for a cast. The measured `halfvec` round-trip cost is a max cosine
+    error of 1.21e-04, three orders of magnitude below the useful signal --
+    which is also why `tests/unit/test_services_taste.py` asserts to 1e-9 and
+    the integration file to 1e-3.
+
+    **No `updated_at` and no trigger.** One writer, one statement, which sets
+    `computed_at` in its own `ON CONFLICT DO UPDATE` -- `title_embeddings`'
+    precedent, and mechanically required:
+    `tests/integration/test_migrations.py::
+    test_migration_creates_the_updated_at_triggers` asserts the trigger set
+    *exactly*, so a trigger here is a failing case elsewhere.
+    """
+
+    __tablename__ = "user_taste"
+
+    # The primary key *is* the foreign key, exactly as
+    # `title_embeddings.title_id` and `genome_scores.title_id` are. One
+    # centroid per user; a surrogate id would permit two rows for one user,
+    # which is a state no consumer could interpret.
+    #
+    # CASCADE because a centroid protects no user state and is fully
+    # re-derivable from `watch_states` and `title_embeddings`. Contrast
+    # ADR-0010's RESTRICT on `watch_states.title_id`, which guards state a
+    # delete would destroy irrecoverably.
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    centroid: Mapped[list[float] | None] = mapped_column(HALFVEC(EMBEDDING_DIMENSIONS))
+    model_name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_watermark: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # How many titles went into the mean. Makes the refusal *countable*: a
+    # gauge reading "N households have too little history for a centroid" is
+    # how an operator learns that half the deployment gets no taste rows,
+    # which is otherwise indistinguishable from taste rows nobody clicked.
+    title_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    # The artefact's age, for the operator -- and deliberately *not* the
+    # invalidation. A TTL here would recompute a centroid whose inputs have
+    # not moved and serve a stale one whose inputs have.
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

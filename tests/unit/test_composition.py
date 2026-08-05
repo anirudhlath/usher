@@ -32,6 +32,7 @@ from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
+from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.composition import (
@@ -84,6 +85,7 @@ def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipelin
         queue=queue,
         embeddings=FakeTitleEmbeddingRepository(),
         neighbors=unused,
+        taste_rows=FakeTasteRepository(),
         people=people,
         credits=FakeCreditRepository(people, titles_store),
         collections=FakeCollectionRepository(),
@@ -94,6 +96,7 @@ def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipelin
         watch=unused,
         search=unused,
         similar=unused,
+        taste=unused,
         events=NullEventPublisher(),
         commit=commit,
     )
