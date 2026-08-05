@@ -17,6 +17,7 @@ earns an ADR of its own.
 """
 
 import uuid
+from dataclasses import dataclass
 
 from pydantic import AwareDatetime, Field
 
@@ -59,4 +60,29 @@ class Centroid(DomainModel):
     computed_at: AwareDatetime
 
 
-__all__ = ["Centroid"]
+@dataclass(frozen=True, slots=True)
+class GenreAffinity:
+    """One genre the household watches disproportionately to its own library.
+
+    **In `domain/` rather than beside the service that computes it**, and the
+    reason is `Centroid`'s exactly: `RowContext` carries it, `ports/rows.py`
+    must name the type, and a port may name a domain type or one of its own
+    and nothing else. `services/taste.py` re-exports it, because that is
+    where it is *computed* and where every existing caller names it.
+
+    A plain frozen dataclass rather than a `DomainModel`, unlike `Centroid`:
+    it is never stored, never validated at a boundary, and never round-trips
+    through a repository -- it is the return shape of one method.
+
+    All three fields are read by `GenreAffinityProvider`: `lift` for the score,
+    `genre` for the query and the sentence, and `support` because a row built
+    from four titles and a row built from forty are different claims and the
+    reason string must not pretend otherwise.
+    """
+
+    genre: str
+    lift: float
+    support: float
+
+
+__all__ = ["Centroid", "GenreAffinity"]

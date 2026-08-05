@@ -42,7 +42,7 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.episode import Episode, Season
 from usher.domain.ids import new_id
 from usher.domain.people import Credit, CreditKind, Person
-from usher.domain.taste import Centroid
+from usher.domain.taste import Centroid, GenreAffinity
 from usher.domain.title import Title
 from usher.domain.watch import User
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
@@ -99,6 +99,9 @@ class Library:
         kind: TitleKind = TitleKind.MOVIE,
         year: int | None = 2024,
         genres: Sequence[str] = (),
+        keywords: Sequence[str] = (),
+        popularity: float | None = None,
+        vote_count: int | None = None,
         owned: bool = True,
         added: datetime | None = None,
         seen: datetime | None = None,
@@ -111,6 +114,9 @@ class Library:
             sort_name=name.lower(),
             year=year,
             genres=tuple(genres),
+            keywords=tuple(keywords),
+            popularity=popularity,
+            vote_count=vote_count,
             runtime_minutes=runtime_minutes,
             enrichment_state=EnrichmentState.ENRICHED,
         )
@@ -164,6 +170,12 @@ class Library:
         self.collections.catalog.media_items.append(
             SeededMediaItem(title_id=title_id, episode_id=episode_id, available=True)
         )
+        # The third fake modelling `media_items`, and the one whose read
+        # deliberately does *not* bound itself to `episode_id IS NULL`: a
+        # series owned only through its episode files is owned here, which is
+        # what keeps `GenreAffinityProvider` and `SeasonalProvider` from being
+        # films-only on a library that is 89% episodes.
+        self.titles.available_copies.setdefault(title_id, []).append(episode_id)
 
     # -- the series tree --------------------------------------------------
 
@@ -336,10 +348,20 @@ class Library:
 
     # -- the context ------------------------------------------------------
 
-    def context(self, *, taste: Centroid | None = None) -> RowContext:
+    def context(
+        self,
+        *,
+        taste: Centroid | None = None,
+        affinities: Sequence[GenreAffinity] = (),
+        now: datetime = NOW,
+    ) -> RowContext:
         return RowContext(
             user=USER,
-            now=lambda: NOW,
+            # Bound at call time rather than read from the module: a
+            # provider whose firing condition is "is it October" and which
+            # reads the wall clock is testable only in October, and
+            # `SeasonalProvider`'s *entire* behaviour is window boundaries.
+            now=lambda: now,
             titles=self.titles,
             media_items=self.media_items,
             watch_states=self.watch_states,
@@ -350,4 +372,5 @@ class Library:
             people=self.people,
             credits=self.credits,
             collections=self.collections,
+            affinities=tuple(affinities),
         )

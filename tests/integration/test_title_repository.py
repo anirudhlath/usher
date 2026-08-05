@@ -1,15 +1,24 @@
 import uuid
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import cast
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import Table, event, insert, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from tests.contract.title_repository_contract import TitleRepositoryContract
+from tests.contract.title_repository_contract import (
+    TitleRepositoryContract,
+    TitleRepositoryOwnedContract,
+)
+from usher.db.models.source import MediaItemRow
 from usher.db.models.title import TitleRow
+from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.title import PostgresTitleRepository
-from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
+from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
 
@@ -371,3 +380,61 @@ class TestPostgresTitleRepositoryContract(TitleRepositoryContract):
             {"id": collection_id},
         )
         return collection_id
+
+
+class TestPostgresTitleRepositoryOwned(TitleRepositoryOwnedContract):
+    """`list_owned_by_tag` against real Postgres.
+
+    The half with teeth: `@>` on `text[]`, `NULLS LAST` under a descending
+    sort, and the `EXISTS` semi-join with no `episode_id IS NULL` bound are
+    all Postgres behaviours the fake reproduces in Python and could
+    reproduce wrongly. Group E's `ff_row_read_indexes` also names this read
+    by name -- *"if either of `GenreAffinityProvider`'s two statements shows
+    a `Seq Scan on titles`, that is a finding against the provider's shape"*
+    -- which is a claim about a statement that has to exist to be checked.
+    """
+
+    @pytest.fixture
+    def repo(self, session: AsyncSession) -> PostgresTitleRepository:
+        return PostgresTitleRepository(session)
+
+    @pytest_asyncio.fixture
+    async def owning_source_id(self, session: AsyncSession) -> uuid.UUID:
+        source = Source(
+            kind=SourceKind.EMBY,
+            name=f"Owned Contract Source {new_id()}",
+            base_url="https://emby.invalid",
+            credentials_ref=f"ref-{new_id()}",
+            device_id=str(new_id()),
+        )
+        await PostgresSourceRepository(session).add(source)
+        return source.id
+
+    @pytest.fixture
+    def own(
+        self, session: AsyncSession, owning_source_id: uuid.UUID
+    ) -> Callable[..., Awaitable[None]]:
+        async def _own(title_id: uuid.UUID, *, episode: bool = False) -> None:
+            # A real `media_items` row rather than a flag, because the whole
+            # point of the read is the semi-join. `episode_id` is left NULL
+            # even for the episode case: `episodes` needs a `seasons` row and
+            # a `titles` row and none of that changes what this statement
+            # sees, which is that the title has an available copy. What the
+            # episode case must *not* do is write a title-level row where the
+            # implementation under test would demand one -- so it writes a row
+            # that a `episode_id IS NULL` bound would still accept, and the
+            # divergence is pinned in the fake's half where it is expressible
+            # without three parent rows.
+            await session.execute(
+                insert(cast(Table, MediaItemRow.__table__)).values(
+                    id=new_id(),
+                    source_id=owning_source_id,
+                    external_id=str(new_id()),
+                    title_id=title_id,
+                    episode_id=None,
+                    available=True,
+                    last_seen_at=datetime.now(UTC),
+                )
+            )
+
+        return _own

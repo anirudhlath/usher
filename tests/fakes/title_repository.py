@@ -91,6 +91,20 @@ class FakeTitleRepository(TitleRepository):
         # `FakeCollectionRepository` is handed a catalog. A test that writes
         # it directly is standing in for a derivation, not for the port.
         self.credit_names: dict[uuid.UUID, tuple[str, ...]] = {}
+        # `media_items`, as much of it as `list_owned_by_tag` reads: a title
+        # maps to the episode ids of its available copies, with `None` for a
+        # title-level one. Public and seeded directly, the affordance
+        # `FakeCollectionRepository.catalog` and `FakePersonRepository.
+        # household` already are -- this fake models one table and the read
+        # semi-joins another, so the alternative is a fake that answers
+        # "unowned" for everything and a contract case that cannot be written.
+        #
+        # **Episode ids are modelled rather than collapsed to a bool**, and
+        # that is the point of the shape: the real statement deliberately does
+        # *not* carry `episode_id IS NULL`, so a series owned only through its
+        # episodes is owned, and a fake holding a bare set could not tell that
+        # implementation from the one that reports every series unowned.
+        self.available_copies: dict[uuid.UUID, list[uuid.UUID | None]] = {}
 
     async def add(self, title: Title) -> None:
         if title.id in self._titles:
@@ -211,6 +225,39 @@ class FakeTitleRepository(TitleRepository):
         fake's own docstring.
         """
         return list(self._titles.values())
+
+    async def list_owned_by_tag(
+        self,
+        *,
+        genre: str | None = None,
+        keyword: str | None = None,
+        limit: int = 20,
+    ) -> list[Title]:
+        if genre is None and keyword is None:
+            # The port's refusal, reproduced rather than inherited: an
+            # unpredicated call is the popular-titles fallback as a query.
+            return []
+        matching = [
+            title
+            for title in self._titles.values()
+            if self.available_copies.get(title.id)
+            and (genre is None or genre in title.genres)
+            and (keyword is None or keyword in title.keywords)
+        ]
+        # `NULLS LAST` under a descending sort, spelled as a two-part key --
+        # the tempting `key=lambda t: t.popularity` raises on a None and the
+        # tempting repair `or 0.0` sorts an unknown above a genuinely
+        # unpopular title, which is the wrong answer rather than a crash.
+        matching.sort(
+            key=lambda title: (
+                title.popularity is None,
+                -(title.popularity or 0.0),
+                title.vote_count is None,
+                -(title.vote_count or 0),
+                title.id,
+            )
+        )
+        return matching[: max(limit, 0)]
 
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         counts: dict[EnrichmentState, int] = dict.fromkeys(EnrichmentState, 0)

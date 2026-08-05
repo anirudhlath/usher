@@ -186,10 +186,39 @@ drops any that build empty, and returns them.
 | `BecauseYouWatchedProvider` | Recent high-engagement titles carrying neighbours | 1 row *per seed*, **capped at 3**; see below |
 | `FranchiseProvider` | ≥ 2 owned titles in a collection **and ≥ 1 of them unplayed** — **movies only** | 1 row per franchise, capped at 2 |
 | `GenreAffinityProvider` | ⏳ **The household watches a genre disproportionately to its share of their library** — *not* "taste centroid concentrated in a genre"; see the Taste section | 1–3 rows |
-| `SeasonalProvider` | Calendar window (Halloween, holidays) | 0–1 rows |
+| `SeasonalProvider` | Calendar window (Halloween, holidays) — **curated by the author, not derived**; see below | 0–1 rows |
 | `PeopleProvider` | Recurring director or actor in history | 0–2 rows |
 | `CuratedProvider` | Fresh LLM rows exist | 0–5 rows |
 | `RediscoverProvider` | Watched > 2 years ago, **most-rewatched first** — there is no rating column; see below | 0–1 rows |
+
+**`SeasonalProvider`'s calendar→signal mapping is a taste judgement with no
+data source, and it is the only thing in `services/` of that kind.** Nothing in
+the catalog, in TMDb, in MovieLens or in the household's history says October
+means horror. It ships as a module-level table of three windows curated by the
+author — Halloween/Horror, December/`christmas`, Valentine's/Romance — marked
+as curated in the module that holds it. The table is Gregorian,
+northern-hemisphere and anglophone by construction: there is no Diwali window,
+no Lunar New Year window and no southern-hemisphere summer, because adding them
+would be the same guess made less carefully rather than a measurement. It is
+code rather than configuration so that changing it is a change with a diff.
+
+**Those three windows are 46 days, so this provider returns nothing for
+roughly 320 days of the year.** That is the correct behaviour and is written
+down here so an operator does not read a missing seasonal row in March as a
+fault. Two properties are asserted about the table rather than about a built
+row, because both failures produce a row that is permanently absent with no
+error anywhere: no window may wrap the year end (`(12,27) <= today <= (1,2)`
+is false for every date), and no row TTL may outlive the shortest window (a
+cached Halloween row is correct when built and wrong when served in November).
+
+**`GenreAffinityProvider`'s row is proposed on the affinity and its cards are
+read when it builds**, which is why a genre whose owned titles the household
+has all watched produces a row that builds *empty* and is dropped, rather than
+one that was never proposed. The two are different states and the metrics have
+to tell them apart. Its cards are owned *and* unwatched — a "you love westerns"
+shelf made of the four westerns that established the affinity is circular — and
+the unwatched check rolls episode watch states up to their series, so a show
+the household is partway through is not offered back as something new.
 
 **`BecauseYouWatchedProvider`'s seed cap is the provider's own, and it is not
 the diversity constraint.** The diversity rule above bounds how many similarity

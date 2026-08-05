@@ -32,12 +32,17 @@ from usher.services.rows.continue_watching import (
     ContinueWatchingProvider,
 )
 from usher.services.rows.franchise import FRANCHISE_SCORE_CEILING, FranchiseProvider
+from usher.services.rows.genre_affinity import (
+    GENRE_AFFINITY_SCORE_CEILING,
+    GenreAffinityProvider,
+)
 from usher.services.rows.next_up import NEXT_UP_SCORE, NextUpProvider
 from usher.services.rows.recently_added import (
     RECENTLY_ADDED_SCORE_CEILING,
     RecentlyAddedProvider,
 )
 from usher.services.rows.rediscover import REDISCOVER_SCORE, RediscoverProvider
+from usher.services.rows.seasonal import SEASONAL_SCORE, SeasonalProvider
 
 # The **ceiling** each provider can return, keyed by class name. A ceiling
 # rather than a fixed value because `RecentlyAddedProvider` is the one provider
@@ -51,6 +56,8 @@ BASE_SCORES: Mapping[str, float] = {
     RediscoverProvider.__name__: REDISCOVER_SCORE,
     BecauseYouWatchedProvider.__name__: BECAUSE_YOU_WATCHED_SCORE_CEILING,
     FranchiseProvider.__name__: FRANCHISE_SCORE_CEILING,
+    GenreAffinityProvider.__name__: GENRE_AFFINITY_SCORE_CEILING,
+    SeasonalProvider.__name__: SEASONAL_SCORE,
 }
 
 __all__ = [
@@ -58,19 +65,23 @@ __all__ = [
     "BECAUSE_YOU_WATCHED_SCORE_CEILING",
     "CONTINUE_WATCHING_SCORE",
     "FRANCHISE_SCORE_CEILING",
+    "GENRE_AFFINITY_SCORE_CEILING",
     "NEXT_UP_SCORE",
     "RECENTLY_ADDED_SCORE_CEILING",
     "REDISCOVER_SCORE",
     "ROW_PROVIDERS",
+    "SEASONAL_SCORE",
     "BaseRow",
     "BecauseYouWatchedProvider",
     "Chapter",
     "ContinueWatchingProvider",
     "FranchiseProvider",
+    "GenreAffinityProvider",
     "NextUpProvider",
     "Progress",
     "RecentlyAddedProvider",
     "RediscoverProvider",
+    "SeasonalProvider",
     "row_providers",
 ]
 
@@ -81,9 +92,8 @@ def row_providers(*, semantic: bool = False) -> tuple[RowProvider, ...]:
     A provider that is not registered is dead code -- and dead code that looks
     exactly like a provider with nothing to say, which is the one failure this
     milestone cannot see from the outside. Group I's own case asserts this
-    holds nine once every provider exists; it holds six here, and the three
-    that are missing are named rather than implied: `GenreAffinity`,
-    `Seasonal` and `People`, tasks 27-28. `CuratedProvider` is M8's whole
+    holds nine once every provider exists; it holds eight here, and the one
+    that is missing is named rather than implied: `People`, task 28. `CuratedProvider` is M8's whole
     family (boundary call 2) and is deliberately not among them.
 
     **A function rather than a bare tuple, and exactly one deployment fact
@@ -108,6 +118,8 @@ def row_providers(*, semantic: bool = False) -> tuple[RowProvider, ...]:
         RediscoverProvider(),
         BecauseYouWatchedProvider(semantic=semantic),
         FranchiseProvider(),
+        GenreAffinityProvider(),
+        SeasonalProvider(),
     )
 
 

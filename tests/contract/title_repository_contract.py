@@ -440,3 +440,201 @@ class TitleRepositoryContract:
         and `WHERE tmdb_id = ANY('{}')` is a statement issued to learn
         nothing."""
         assert await repo.resolve_tmdb_ids(TitleKind.MOVIE, []) == {}
+
+
+class TitleRepositoryOwnedContract:
+    """`list_owned_by_tag`, the read two row providers are built on.
+
+    A separate mixin because it is the one `TitleRepository` method whose
+    answer depends on a table `titles` does not contain: a subclass must
+    supply `own`, which makes a title playable the way its own backend spells
+    it -- a set for the fake, a real `media_items` row for Postgres.
+
+    Every case here seeds a **distractor the wrong implementation ranks
+    first**, because the wrong implementations are all populated: a catalog
+    read that forgets the ownership join returns twenty beautifully-shaped
+    cards nobody can play, and one that forgets the ordering returns the right
+    set in insertion order.
+    """
+
+    @pytest.fixture
+    def repo(self) -> TitleRepository:  # pragma: no cover - supplied by subclasses
+        raise NotImplementedError
+
+    @pytest.fixture
+    def own(self) -> object:  # pragma: no cover - supplied by subclasses
+        raise NotImplementedError
+
+    @staticmethod
+    def _tagged(
+        name: str,
+        *,
+        genres: tuple[str, ...] = (),
+        keywords: tuple[str, ...] = (),
+        popularity: float | None = None,
+        vote_count: int | None = None,
+        kind: TitleKind = TitleKind.MOVIE,
+    ) -> Title:
+        return Title(
+            id=new_id(),
+            kind=kind,
+            name=name,
+            sort_name=name.lower(),
+            genres=genres,
+            keywords=keywords,
+            popularity=popularity,
+            vote_count=vote_count,
+            enrichment_state=EnrichmentState.ENRICHED,
+        )
+
+    async def test_an_unowned_title_is_absent_however_popular_it_is(
+        self, repo: TitleRepository, own: object
+    ) -> None:
+        """**The distractor `SeasonalProvider`'s own case seeds**, one layer
+        down: the *best* match in the catalog, highest popularity, exact
+        genre, and no copy.
+
+        The wrong implementation matches the predicate against the whole
+        catalog -- 1.27M titles, of which the household can play none, in a
+        correctly-shaped and beautifully-themed row. It is `[0]` under that
+        implementation and absent under this one, so the assertion is
+        positional and cannot be satisfied by membership.
+        """
+        best = self._tagged("An Unowned Masterpiece", genres=("Horror",), popularity=99.0)
+        owned = self._tagged("An Owned Horror", genres=("Horror",), popularity=1.0)
+        await repo.add(best)
+        await repo.add(owned)
+        await own(owned.id)  # type: ignore[operator]
+
+        rows = await repo.list_owned_by_tag(genre="Horror")
+
+        assert [row.id for row in rows] == [owned.id]
+
+    async def test_the_answer_is_ordered_by_popularity_rather_than_by_insertion(
+        self, repo: TitleRepository, own: object
+    ) -> None:
+        """Insertion order is id order -- every id here is a UUIDv7 -- so a
+        fixture seeded best-first is satisfied by `ORDER BY id` and by no
+        ordering at all. These are seeded worst-first.
+        """
+        worst = self._tagged("Least", genres=("Horror",), popularity=1.0)
+        middle = self._tagged("Middling", genres=("Horror",), popularity=5.0)
+        best = self._tagged("Most", genres=("Horror",), popularity=9.0)
+        for one in (worst, middle, best):
+            await repo.add(one)
+            await own(one.id)  # type: ignore[operator]
+
+        rows = await repo.list_owned_by_tag(genre="Horror")
+
+        assert [row.id for row in rows] == [best.id, middle.id, worst.id]
+
+    async def test_vote_count_orders_titles_whose_popularity_is_unknown(
+        self, repo: TitleRepository, own: object
+    ) -> None:
+        """`titles.popularity` was measured NULL on all 1,271,138 rows of a
+        bootstrap-only catalog, so an ordering with only that key is an
+        ordering by `id` on the deployment most likely to exist.
+
+        Seeded worst-first again, and with the *popular* title third so a
+        `NULLS FIRST` default -- Postgres's, under `DESC` -- puts the two
+        unknowns above it and fails.
+        """
+        quiet = self._tagged("Barely Voted", genres=("Horror",), vote_count=5)
+        loud = self._tagged("Much Voted", genres=("Horror",), vote_count=500_000)
+        known = self._tagged("Known Popular", genres=("Horror",), popularity=3.0)
+        for one in (quiet, loud, known):
+            await repo.add(one)
+            await own(one.id)  # type: ignore[operator]
+
+        rows = await repo.list_owned_by_tag(genre="Horror")
+
+        assert [row.id for row in rows] == [known.id, loud.id, quiet.id]
+
+    async def test_a_keyword_predicate_does_not_match_the_genres_array(
+        self, repo: TitleRepository, own: object
+    ) -> None:
+        """Two arrays, two predicates. The wrong implementation searches
+        whichever array it was written against and answers plausibly for the
+        other -- a "christmas" row of films whose *genre* happens to be the
+        word is populated and wrong.
+        """
+        by_keyword = self._tagged("A Keyworded Film", keywords=("christmas",))
+        by_genre = self._tagged("A Genred Film", genres=("christmas",))
+        for one in (by_keyword, by_genre):
+            await repo.add(one)
+            await own(one.id)  # type: ignore[operator]
+
+        rows = await repo.list_owned_by_tag(keyword="christmas")
+
+        assert [row.id for row in rows] == [by_keyword.id]
+
+    async def test_both_predicates_together_narrow_rather_than_widen(
+        self, repo: TitleRepository, own: object
+    ) -> None:
+        """The natural wrong spelling is `OR`, which on a window carrying both
+        a genre and a keyword returns the union -- a strictly larger, less
+        relevant row that still looks correct."""
+        both = self._tagged("Both", genres=("Horror",), keywords=("slasher",))
+        genre_only = self._tagged("Genre Only", genres=("Horror",))
+        keyword_only = self._tagged("Keyword Only", keywords=("slasher",))
+        for one in (both, genre_only, keyword_only):
+            await repo.add(one)
+            await own(one.id)  # type: ignore[operator]
+
+        rows = await repo.list_owned_by_tag(genre="Horror", keyword="slasher")
+
+        assert [row.id for row in rows] == [both.id]
+
+    async def test_a_request_with_no_predicate_answers_with_nothing(
+        self, repo: TitleRepository, own: object
+    ) -> None:
+        """An unpredicated call is "the library ordered by popularity", which
+        is the popular-titles fallback wearing a query's clothes. The library
+        is deliberately populated and owned, so the empty answer is the port
+        declining rather than the fixture being empty."""
+        for index in range(3):
+            one = self._tagged(f"Owned {index}", genres=("Horror",), popularity=float(index))
+            await repo.add(one)
+            await own(one.id)  # type: ignore[operator]
+
+        assert await repo.list_owned_by_tag() == []
+
+    async def test_the_limit_is_honoured_and_keeps_the_best(
+        self, repo: TitleRepository, own: object
+    ) -> None:
+        """A limit applied before the ordering keeps whichever rows the scan
+        reached first, which is the same failure `list_recent`'s own limit
+        case is about."""
+        seeded = []
+        for index in range(5):
+            one = self._tagged(f"Owned {index}", genres=("Horror",), popularity=float(index))
+            await repo.add(one)
+            await own(one.id)  # type: ignore[operator]
+            seeded.append(one)
+
+        rows = await repo.list_owned_by_tag(genre="Horror", limit=2)
+
+        assert [row.id for row in rows] == [seeded[4].id, seeded[3].id]
+
+    async def test_a_series_owned_only_through_its_episodes_is_owned(
+        self, repo: TitleRepository, own: object
+    ) -> None:
+        """**The divergence from `owned_title_ids`, asserted rather than
+        commented.** A series' copies are its episode files, so a semi-join
+        carrying `episode_id IS NULL` -- which that method does carry, for its
+        own good reason -- reports every series in the library as unowned, and
+        every row built on this read becomes films-only on a library that is
+        89% episodes.
+
+        The distractor is a series with **no** copy at all, so this cannot
+        pass by an implementation that dropped the ownership join entirely.
+        """
+        watched = self._tagged("An Owned Series", genres=("Horror",), kind=TitleKind.SERIES)
+        absent = self._tagged("An Unowned Series", genres=("Horror",), kind=TitleKind.SERIES)
+        await repo.add(watched)
+        await repo.add(absent)
+        await own(watched.id, episode=True)  # type: ignore[operator]
+
+        rows = await repo.list_owned_by_tag(genre="Horror")
+
+        assert [row.id for row in rows] == [watched.id]

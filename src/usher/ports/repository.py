@@ -218,6 +218,59 @@ class TitleRepository(ABC):
         """
 
     @abstractmethod
+    async def list_owned_by_tag(
+        self,
+        *,
+        genre: str | None = None,
+        keyword: str | None = None,
+        limit: int = 20,
+    ) -> list[Title]:
+        """Owned titles carrying a genre and/or a keyword, best first.
+
+        **The retrieval half of `GenreAffinityProvider` and the whole of
+        `SeasonalProvider`, and it did not exist.** `ff_row_read_indexes`
+        reasons about it from the other side -- *"its retrieval half is
+        bounded to owned titles (single-digit thousands) before array
+        containment is consulted"* -- which is the shape this signature makes
+        mandatory rather than hoped for: the ownership semi-join is inside the
+        statement, not a filter the caller applies to the catalog's top N. The
+        difference is not style. Taking the twenty most popular horror films
+        in a 1.27M-row catalog and *then* asking which are owned returns
+        nothing at all on a normal household.
+
+        **Owned here means "has an available copy", with no `episode_id IS
+        NULL` bound, and that is a deliberate divergence from
+        `MediaItemRepository.owned_title_ids`.** That method answers about one
+        row per title and carries the bound so that asking it about an episode
+        cannot report a missing episode file as owned. This one asks "can the
+        household play something of this title", and for a series the answer
+        is yes when any episode file exists -- a series owned only through its
+        episodes is the normal case on a library that is 89% episodes, and
+        excluding it would make every television title unreachable by every
+        row built on this read. A semi-join, so a 20,000-episode series costs
+        one probe rather than 20,000 rows.
+
+        **Both predicates given means both must match**; neither given returns
+        `[]` and reads nothing. An unpredicated call is a request for the
+        library ordered by popularity, which is the popular-titles fallback
+        spelled as a query -- so the port declines to express it.
+
+        Ordered `popularity DESC NULLS LAST, vote_count DESC NULLS LAST, id`.
+        The second key is not decoration: `titles.popularity` was measured
+        NULL on all 1,271,138 rows of a bootstrap-only catalog and is
+        `NOT NULL DEFAULT 0` in `tmdb_ids`, so on a partially-linked catalog a
+        crosswalk-linked skeleton at 0.0 outranks an unlinked title with half
+        a million votes. That hazard is recorded rather than solved here --
+        it is the same one M6's suggest path took `vote_count` for -- and the
+        `id` tail is what makes two reads of one unchanged catalog agree.
+
+        Nothing about *watched* is expressed here. `played_title_ids` answers
+        that, over the ids this returns, because the two questions have
+        different bounds and folding them together would make the limit mean
+        something different on every household.
+        """
+
+    @abstractmethod
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         """Catalog size broken down by enrichment tier.
 

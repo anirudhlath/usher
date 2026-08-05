@@ -66,7 +66,7 @@ from dataclasses import dataclass
 
 from pydantic import AwareDatetime
 
-from usher.domain.taste import Centroid
+from usher.domain.taste import Centroid, GenreAffinity
 from usher.ports.embedding import Embedder
 from usher.ports.repository import (
     StoredTaste,
@@ -163,21 +163,6 @@ _MIN_SUPPORT = 4
 # composer's: a provider that emits one row per genre can claim the whole
 # screen before the diversity pass ever sees it.
 _MAX_AFFINITY_ROWS = 3
-
-
-@dataclass(frozen=True, slots=True)
-class GenreAffinity:
-    """One genre the household watches disproportionately to its own library.
-
-    All three fields are read by `GenreAffinityProvider`: `lift` for the score,
-    `genre` for the query and the sentence, and `support` because a row built
-    from four titles and a row built from forty are different claims and the
-    reason string must not pretend otherwise.
-    """
-
-    genre: str
-    lift: float
-    support: float
 
 
 class TasteService:
@@ -471,4 +456,7 @@ def _as_centroid(stored: StoredTaste) -> Centroid | None:
     )
 
 
+# Re-exported: `GenreAffinity` is a `domain` value now (a provider may import
+# `domain/` and `ports/` and nothing else, and `RowContext` carries it), but
+# this module is where it is computed and every existing caller names it here.
 __all__ = ["GenreAffinity", "TasteService"]

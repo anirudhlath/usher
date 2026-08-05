@@ -47,6 +47,7 @@ def _context(*, taste: Centroid | None = None) -> RowContext:
         people=FakePersonRepository(),
         credits=FakeCreditRepository(),
         collections=FakeCollectionRepository(),
+        affinities=(),
     )
 
 

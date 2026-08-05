@@ -57,7 +57,7 @@ from datetime import timedelta
 from pydantic import AwareDatetime
 
 from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
-from usher.domain.taste import Centroid
+from usher.domain.taste import Centroid, GenreAffinity
 from usher.domain.watch import User
 from usher.ports.repository import (
     CollectionRepository,
@@ -118,15 +118,46 @@ class RowContext:
         user, now, titles, media_items, watch_states, episodes, neighbors,
         search, taste, people, credits, collections
 
-    A thirteenth arriving without a task is still a finding rather than
-    drift.
+    **And a thirteenth, `affinities`, which the plan did not foresee.** Task
+    27 says `GenreAffinityProvider` *"reads `TasteService.genre_affinity(
+    user_id)`"* -- a **service** result, and a provider may import only
+    `domain/` and `ports/`. Every other route was worse:
+
+    - **A constructor argument on the provider.** Providers are enabled by
+      registration in code (boundary call 9), so they are constructed once,
+      and this is per-request, per-user data. That is the same argument that
+      put the clock on this context rather than on nine constructors.
+    - **Recomputing it inside the provider.** Two of `genre_affinity`'s three
+      inputs are already here; the third is
+      `TasteRepository.library_genre_counts()`. So the provider would need a
+      `TasteRepository` field *and* a second copy of the lift arithmetic --
+      and the front matter's rule for the seed list applies verbatim: it
+      should exist exactly once.
+    - **Widening `taste` into a bundle.** Twelve fields instead of thirteen,
+      bought by rewriting Group A's `taste: Centroid | None` pin and the
+      ADR-0014 site hanging off it, to hide a field rather than declare one.
+
+    So it is a value the composer computes and hands over, which is exactly
+    what `taste` already is -- that field is not a `TasteRepository` either.
+    **An empty sequence means no genre cleared Task 23's lift and support
+    floors**, a real answer and the common one; it is never a stand-in for
+    "nothing computed this", because there is no deployment in which nothing
+    does (the signal needs no embedder, which is the whole reason Task 23
+    declines PRD 06's centroid formulation).
+
+    Task 38 counts **thirteen**, against the twelve listed above plus this
+    one. A fourteenth arriving without a task is still drift.
 
     `taste` is `Centroid | None` -- ADR-0014's eighth site. A deployment with
     no embedder has no centroid at all (ADR-0022), and every reader drops the
-    signal rather than zeroing it: `GenreAffinityProvider` with no centroid
-    proposes *nothing* rather than falling back to the household's
-    most-watched genre. A deployment without an embedder gets a home screen
-    with **fewer rows, not worse rows**.
+    signal rather than zeroing it. **`GenreAffinityProvider` is *not* an
+    example of that and reads this field not at all** -- Task 23 corrected
+    PRD 06's "taste centroid concentrated in a genre" precisely because
+    implementing it literally makes the most broadly-useful provider the one
+    that never fires on the default deployment. It reads `affinities`, which
+    is counts over `titles.genres` and needs no embedder at all. A deployment
+    without an embedder gets a home screen with **fewer rows, not worse
+    rows**, and this is the field that decides which.
     """
 
     user: User
@@ -146,6 +177,11 @@ class RowContext:
     people: PersonRepository
     credits: CreditRepository
     collections: CollectionRepository
+    # The thirteenth, argued above. A `Sequence` rather than a `tuple` for the
+    # reason `propose` returns one: a provider must not mutate what the
+    # composer handed it, and the composer must not have to copy a list to
+    # hand it over.
+    affinities: Sequence[GenreAffinity]
 
 
 class Row(ABC):
