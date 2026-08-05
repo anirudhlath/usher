@@ -50,12 +50,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from tests.fakes.embedding import FakeEmbedder, planted_pair
+from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
+from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.taste import Centroid
-from usher.ports.ingest import WatchStateMerge
+from usher.domain.title import Title
+from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.services.taste import TasteService
 
 NOW = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
@@ -117,8 +120,12 @@ class _Household:
         self.titles = FakeTitleRepository()
         self.embeddings = FakeTitleEmbeddingRepository(catalog=self.titles)
         self.watch_states = FakeWatchStateRepository()
-        self.taste = FakeTasteRepository(self.watch_states)
+        self.media_items = FakeMediaItemRepository()
+        self.taste = FakeTasteRepository(
+            self.watch_states, titles=self.titles, media_items=self.media_items
+        )
         self._seeded = 0
+        self._source_id = uuid.UUID("00000000-0000-7000-8000-0000000000ff")
 
     async def watched(
         self,
@@ -159,6 +166,53 @@ class _Household:
         title_id = uuid.uuid4()
         await self.embeddings.given(title_id, vector, genres=genres)
         return title_id
+
+    async def owned(self, genres: Sequence[str]) -> uuid.UUID:
+        """One title the household has a copy of, watched by nobody.
+
+        **Owned and watched are seeded separately on purpose.** The library is
+        the *baseline*, so a fixture that could only add owned titles by
+        watching them could not express this section's whole distractor -- a
+        household whose most-watched genre is simply what its shelf is made of.
+        It is also what makes the reachable `share_library == 0` case
+        expressible: a watched title with no owned copy.
+        """
+        title = Title(
+            id=uuid.uuid4(),
+            kind=TitleKind.MOVIE,
+            name="An Invented Title",
+            sort_name="an invented title",
+            genres=tuple(genres),
+            enrichment_state=EnrichmentState.ENRICHED,
+        )
+        await self.titles.add(title)
+        await self.media_items.upsert_many(
+            [
+                MediaItemUpsert(
+                    source_id=self._source_id,
+                    external_id=str(title.id),
+                    title_id=title.id,
+                    # `episode_id=None` is the whole of "a title's own row",
+                    # which is what `owned_title_ids` means by owned: an
+                    # episode's `MediaItem` carries its series' `title_id`, so
+                    # without the bound one 20,000-episode series would decide
+                    # the entire genre baseline.
+                    episode_id=None,
+                    container=None,
+                    video_codec=None,
+                    audio_codec=None,
+                    width=None,
+                    height=None,
+                    hdr_format=None,
+                    audio_channels=None,
+                    file_size_bytes=None,
+                    runtime_seconds=None,
+                    added_at=NOW,
+                    last_seen_at=NOW,
+                )
+            ]
+        )
+        return title.id
 
     def service(self, *, embedder: FakeEmbedder | None = _DEFAULT_EMBEDDER) -> TasteService:
         return TasteService(
@@ -494,3 +548,294 @@ async def test_the_centroid_records_the_embedder_that_produced_it() -> None:
     assert centroid is not None
     assert centroid.model_name == "fake:other-checkpoint"
     assert isinstance(centroid, Centroid)
+
+
+# --- Task 23: genre affinity, the taste signal that needs no embedder -----
+
+
+async def _owned(house: "_Household", genres: Sequence[str], *, count: int = 1) -> None:
+    """`count` owned library titles carrying `genres`, watched by nobody.
+
+    The library is the *baseline*, so it is seeded separately from the watch
+    history on purpose: a fixture that could only add owned titles by watching
+    them could not express the distractor this whole section is about -- a
+    household whose most-watched genre is simply what its shelf is made of.
+    """
+    for _ in range(count):
+        await house.owned(genres)
+
+
+async def test_the_most_watched_genre_is_not_the_affinity_when_the_library_is_made_of_it() -> None:
+    """**The front matter's GenreAffinity distractor, as arithmetic.**
+
+    Forty engaged dramas and six engaged westerns, against a library that is
+    78% drama and 3% western. Drama is the household's most-watched genre by a
+    factor of nearly seven -- and it is not an affinity, because it is what the
+    shelf is made of.
+
+    Fails the implementation that ranks by raw watched count. That one returns
+    the household's most common genre, which is the *library's* most common
+    genre, on every household in every deployment -- and it renders as a
+    completely ordinary row saying something true of the shelf and nothing of
+    the person. Asserted as the full list rather than as membership: drama must
+    be **absent**, not merely second.
+    """
+    house = _Household()
+    for index in range(46):
+        # Interleaved rather than blocked, so the recency ramp cannot be what
+        # decides this: a distractor that varies two things at once is not a
+        # distractor.
+        await house.watched(None, genres=("western",) if index % 8 == 0 else ("drama",))
+    await _owned(house, ("drama",), count=78)
+    await _owned(house, ("western",), count=3)
+    await _owned(house, ("comedy",), count=19)
+
+    affinities = await house.service().genre_affinity(USER)
+
+    assert [one.genre for one in affinities] == ["western"]
+
+
+async def test_a_genre_watched_once_does_not_fire_however_high_its_lift() -> None:
+    """The support floor, and it is the half that kills "a genre watched once".
+
+    One western in a library holding one western has a lift in the tens. Fails
+    the implementation with `_MIN_LIFT` and no `_MIN_SUPPORT` -- which is the
+    natural thing to write, and which makes the provider's output dominated by
+    whatever the household happened to try once, forever, at the top of the
+    list because its lift is the highest thing on the screen.
+    """
+    house = _Household()
+    await house.watched(None, genres=("western",))
+    for _ in range(20):
+        await house.watched(None, genres=("drama",))
+    await _owned(house, ("western",), count=1)
+    await _owned(house, ("drama",), count=99)
+
+    affinities = await house.service().genre_affinity(USER)
+
+    assert [one.genre for one in affinities] == []
+
+
+async def test_a_genre_the_library_does_not_carry_is_dropped_rather_than_infinite() -> None:
+    """`share_library == 0`, which is reachable through a watch state whose
+    media item was removed.
+
+    Two wrong spellings, and neither raises anything a caller would recognise:
+    a `ZeroDivisionError` in the request path, and a `coalesce` that puts a
+    genre nobody owns at the very top of the affinity list with total
+    confidence. Same decision `SimilarityService._jaccard` makes one module
+    over, for the same reason.
+    """
+    house = _Household()
+    for _ in range(10):
+        await house.watched(None, genres=("western",))
+    await _owned(house, ("drama",), count=10)
+
+    affinities = await house.service().genre_affinity(USER)
+
+    assert affinities == []
+
+
+async def test_genre_affinity_is_identical_with_and_without_an_embedder() -> None:
+    """**The reason this is not computed from the centroid.**
+
+    The same household, the same library, asked twice -- once with an embedder
+    and once with none -- returns the same affinities in the same order. A
+    centroid-derived implementation returns the right answer in the first case
+    and **nothing at all** in the second, which is the shipped default
+    configuration: the embedder is optional and off by default, so obeying PRD
+    06 literally makes the most broadly-useful provider the one that never
+    fires.
+    """
+    house = _Household()
+    for index in range(20):
+        await house.watched(None, genres=("western",) if index % 4 == 0 else ("drama",))
+    await _owned(house, ("drama",), count=60)
+    await _owned(house, ("western",), count=4)
+    await _owned(house, ("comedy",), count=36)
+
+    with_embedder = await house.service().genre_affinity(USER)
+    without = await house.service(embedder=None).genre_affinity(USER)
+
+    assert [one.genre for one in with_embedder] == ["western"]
+    assert [one.genre for one in without] == [one.genre for one in with_embedder]
+    assert [one.lift for one in without] == [one.lift for one in with_embedder]
+
+
+async def test_recent_engagement_outweighs_old_engagement_in_the_affinity() -> None:
+    """The same counts in two orders, and the recent genre wins in each.
+
+    **The plan's own seeding for this case cannot pass and the arithmetic says
+    why.** It asks for forty dramas at the old end against twelve horrors at
+    the new end, and expects horror. The ramp runs `1.0 -> 0.25`, so its
+    steepest possible verdict is 4:1 per title -- twelve recent titles cannot
+    outweigh forty old ones (or the thirty-eight that survive the 50-title
+    window) under any floor above zero, and drama wins at a lift of 2.35
+    against 1.65. A floor low enough to flip it would be the silent second
+    edge `_RECENCY_FLOOR` exists to refuse.
+
+    So the recency claim is tested the way it can be true: **fourteen of each,
+    seeded in both orders.** Whichever genre is recent has the higher lift, and
+    the two runs are otherwise identical.
+
+    Fails the implementation that runs its own unweighted lifetime `GROUP BY`,
+    which returns the *same* two lifts in both runs -- an exact tie, resolved
+    by the name tiebreak to `["drama", "horror"]` both times. That is what PRD
+    06's "tracks changing taste rather than averaging a lifetime" means for the
+    count-based signal, and it is free only because the affinity reads the same
+    weighted window the centroid does.
+    """
+
+    async def _run(recent: str, older: str) -> list[str]:
+        house = _Household()
+        for day in range(14):
+            await house.watched(None, genres=(recent,), days_ago=1 + day)
+        for day in range(14):
+            await house.watched(None, genres=(older,), days_ago=200 + day)
+        await _owned(house, ("horror",), count=20)
+        await _owned(house, ("drama",), count=20)
+        await _owned(house, ("comedy",), count=60)
+        return [one.genre for one in await house.service().genre_affinity(USER)]
+
+    assert await _run("horror", "drama") == ["horror", "drama"]
+    assert await _run("drama", "horror") == ["drama", "horror"]
+
+
+async def test_equal_lifts_are_ordered_by_genre_name_so_two_screens_agree() -> None:
+    """Determinism, and ties here are ordinary rather than exotic: two genres
+    carried by the *same* titles have identical lift by construction.
+
+    "Whatever the aggregate returned" is not an order, and without the tiebreak
+    two renders of one unchanged household disagree about which row comes
+    first. Same decision `SimilarityService` makes when it breaks a distance
+    tie on id.
+    """
+    house = _Household()
+    for _ in range(10):
+        await house.watched(None, genres=("zeppelin", "airship"))
+    await _owned(house, ("zeppelin", "airship"), count=5)
+    await _owned(house, ("drama",), count=95)
+
+    affinities = await house.service().genre_affinity(USER)
+
+    assert [one.genre for one in affinities] == ["airship", "zeppelin"]
+
+
+async def test_an_untagged_library_title_contributes_to_neither_side() -> None:
+    """`titles.genres` is `NOT NULL DEFAULT '{}'` and the skeleton tier is
+    largely empty, so untagged titles are most of a real library.
+
+    They are excluded from **both** the counts and the total rather than only
+    from the counts. Left in the denominator they would divide every
+    `share_library` by the tagged fraction and inflate every lift uniformly --
+    which on a mostly-skeleton catalog makes `_MIN_LIFT` fire for everything at
+    once, on every household. Asserted by adding a hundred untagged owned
+    titles to a household whose answer must not move by a single float.
+    """
+    house = _Household()
+    for index in range(20):
+        await house.watched(None, genres=("western",) if index % 4 == 0 else ("drama",))
+    await _owned(house, ("drama",), count=60)
+    await _owned(house, ("western",), count=4)
+    await _owned(house, ("comedy",), count=36)
+    before = await house.service().genre_affinity(USER)
+
+    await _owned(house, (), count=100)
+    after = await house.service().genre_affinity(USER)
+
+    assert [(one.genre, one.lift) for one in after] == [(one.genre, one.lift) for one in before]
+
+
+async def test_an_untagged_watched_title_is_not_a_genre_named_empty_string() -> None:
+    """The other half, and the one that would be the *largest* "genre" in most
+    libraries if it were counted.
+
+    An untagged engaged title occupies a recency rank -- it is genuinely part
+    of the household's history and the ramp is a fact about that history, so
+    the surrounding weights do shift. What must not happen is a `""` bucket,
+    which an implementation iterating `title.genres or ("",)` produces and
+    which would outrank every real genre on a skeleton-heavy catalog.
+    """
+    house = _Household()
+    for _ in range(10):
+        await house.watched(None, genres=("western",))
+    for _ in range(30):
+        await house.watched(None, genres=())
+    await _owned(house, ("western",), count=4)
+    await _owned(house, ("drama",), count=96)
+
+    affinities = await house.service().genre_affinity(USER)
+
+    assert "" not in {one.genre for one in affinities}
+    assert [one.genre for one in affinities] == ["western"]
+    # **The lift, not just the genre**, and that is what makes the mutation
+    # visible. Every *tagged* engaged title here is a western, so
+    # `share_watched` is exactly 1.0 and the lift is exactly `1 / 0.04`. An
+    # implementation counting the thirty untagged titles in the denominator
+    # still returns `["western"]` -- it just returns a lift near 6, which no
+    # assertion about membership or order can see.
+    assert affinities[0].lift == pytest.approx(25.0, abs=1e-9)
+
+
+async def test_a_household_that_has_watched_nothing_gets_no_affinities() -> None:
+    """Not "the library's most common genres". A provider with nothing to say
+    returns nothing, and the fallback that looks personalised is the bug."""
+    house = _Household()
+    await _owned(house, ("drama",), count=50)
+
+    assert await house.service().genre_affinity(USER) == []
+
+
+async def test_an_empty_catalog_yields_no_affinities_rather_than_a_zero_division() -> None:
+    """`library_genre_counts()` is empty, so every `share_library` is absent and
+    every lift is dropped. The naive spelling divides by the owned-title total
+    and raises in the request path."""
+    house = _Household()
+    for _ in range(10):
+        await house.watched(None, genres=("drama",))
+
+    assert await house.service().genre_affinity(USER) == []
+
+
+async def test_at_most_three_affinity_rows_are_returned() -> None:
+    """PRD 06 says 1-3 rows, and the cap is the provider's own rather than the
+    composer's: a signal that can emit one row per genre can claim the whole
+    screen before diversity ever sees it."""
+    house = _Household()
+    for genre in ("alpha", "beta", "gamma", "delta", "epsilon"):
+        for _ in range(6):
+            await house.watched(None, genres=(genre,))
+    for genre in ("alpha", "beta", "gamma", "delta", "epsilon"):
+        await _owned(house, (genre,), count=2)
+    await _owned(house, ("drama",), count=90)
+
+    affinities = await house.service().genre_affinity(USER)
+
+    assert len(affinities) == 3
+    assert [one.lift for one in affinities] == sorted(
+        (one.lift for one in affinities), reverse=True
+    )
+
+
+async def test_support_counts_engaged_titles_rather_than_a_weight() -> None:
+    """`GenreAffinity.support` is a count of titles, and the plan's own text
+    says both "the weighted count" and "4 engaged titles" for the same number.
+
+    The count is what ships. `_MIN_SUPPORT = 4` is argued in *titles* ("where a
+    genre stops being a weekend"), and a weighted floor of 4 would be a much
+    stricter and entirely different rule -- six finished titles at the old end
+    of the window weigh under 1.0 between them. It is also the number a reason
+    string can honestly speak: "you have watched six westerns" is true and "you
+    have watched 2.7 westerns" is not.
+    """
+    house = _Household()
+    for _ in range(6):
+        await house.watched(None, genres=("western",))
+    for _ in range(20):
+        await house.watched(None, genres=("drama",))
+    await _owned(house, ("western",), count=2)
+    await _owned(house, ("drama",), count=98)
+
+    affinities = await house.service().genre_affinity(USER)
+
+    assert [one.support for one in affinities] == [6]

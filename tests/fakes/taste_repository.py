@@ -35,14 +35,29 @@ from datetime import UTC, datetime
 
 from pydantic import AwareDatetime
 
-from usher.ports.repository import StoredTaste, TasteRepository, WatchStateRepository
+from usher.ports.repository import (
+    LibraryGenres,
+    MediaItemRepository,
+    StoredTaste,
+    TasteRepository,
+    TitleRepository,
+    WatchStateRepository,
+)
 
 
 class FakeTasteRepository(TasteRepository):
-    def __init__(self, watch_states: WatchStateRepository | None = None) -> None:
+    def __init__(
+        self,
+        watch_states: WatchStateRepository | None = None,
+        *,
+        titles: TitleRepository | None = None,
+        media_items: MediaItemRepository | None = None,
+    ) -> None:
         self.rows: dict[uuid.UUID, StoredTaste] = {}
         self.writes = 0
         self._watch_states = watch_states
+        self._titles = titles
+        self._media_items = media_items
 
     def bind(self, watch_states: WatchStateRepository) -> None:
         """Attach the history this fake's watermark is computed from.
@@ -75,6 +90,31 @@ class FakeTasteRepository(TasteRepository):
     async def put(self, taste: StoredTaste) -> None:
         self.writes += 1
         self.rows[taste.user_id] = taste
+
+    async def library_genre_counts(self) -> LibraryGenres:
+        # Fourth divergence: the real one is a join, and this walks two other
+        # fakes. `owned_title_ids` is asked rather than reimplemented, so the
+        # `episode_id IS NULL` bound and the deliberate *absence* of an
+        # availability filter are modelled once, by the fake that owns them,
+        # rather than twice and eventually differently.
+        if self._titles is None or self._media_items is None:
+            return LibraryGenres(counts={}, tagged_titles=0)
+        stored = getattr(self._titles, "stored", None)
+        catalog = stored() if callable(stored) else []
+        owned = await self._media_items.owned_title_ids([title.id for title in catalog])
+        counts: dict[str, int] = {}
+        tagged = 0
+        for title in catalog:
+            # An untagged title is in neither the counts nor the total -- not
+            # a genre named "". `titles.genres` defaults to `{}` and the
+            # skeleton tier is largely empty, so a "" bucket would be the
+            # single largest genre in most libraries.
+            if title.id not in owned or not title.genres:
+                continue
+            tagged += 1
+            for genre in set(title.genres):
+                counts[genre] = counts.get(genre, 0) + 1
+        return LibraryGenres(counts=counts, tagged_titles=tagged)
 
     async def watermark(self, user_id: uuid.UUID) -> AwareDatetime | None:
         if self._watch_states is None:

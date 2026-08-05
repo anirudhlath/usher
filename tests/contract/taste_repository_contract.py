@@ -66,6 +66,33 @@ class TasteRepositoryContract:
         """Remove the state `add_history` returned."""
         raise NotImplementedError
 
+    async def add_title(self, genres: tuple[str, ...], *, owned: bool) -> uuid.UUID:
+        """A catalog title carrying `genres`, with or without an owned copy.
+
+        `owned=False` is not decoration: the whole point of the baseline is
+        that it is the household's **choice set**, so a suite that could only
+        create owned titles could not tell the owned library from the catalog
+        -- which is the distinction the baseline decision turns on.
+        """
+        raise NotImplementedError
+
+    async def add_owned_copy(self, title_id: uuid.UUID) -> None:
+        """A second title-level media item for `title_id`.
+
+        A title owned on three sources is owned once, and only a *second* copy
+        can show that -- which the first draft of this suite got wrong by
+        asking for zero of them.
+        """
+        raise NotImplementedError
+
+    async def add_owned_episode_copy(self, title_id: uuid.UUID, *, copies: int) -> None:
+        """`copies` media items for `title_id` that each name an **episode**.
+
+        The bound `owned_title_ids` spells `episode_id IS NULL`, and this is
+        what makes its absence visible.
+        """
+        raise NotImplementedError
+
     def stored(
         self,
         user_id: uuid.UUID,
@@ -286,3 +313,143 @@ class TasteRepositoryContract:
         await repository.put(self.stored(user_id, centroid=_vector(0.5), watermark=EARLIER))
 
         assert await repository.get(other_user_id, model_name=MODEL) is None
+
+    # -- the genre baseline ------------------------------------------------
+
+    async def test_the_baseline_counts_owned_titles_and_not_the_catalog(
+        self, repository: TasteRepository
+    ) -> None:
+        """**The decision the whole affinity rests on.**
+
+        A household cannot watch what it does not own, so the baseline is the
+        owned shelf rather than the 1.27M-row catalog. Against a global
+        baseline a household that owns nothing but horror reads as an
+        overwhelming horror affinity — and the library made that choice, so the
+        row's reason string would be word-for-word false.
+        """
+        await self.add_title(("horror",), owned=True)
+        await self.add_title(("horror",), owned=True)
+        await self.add_title(("drama",), owned=False)
+        await self.add_title(("drama",), owned=False)
+        await self.add_title(("drama",), owned=False)
+
+        library = await repository.library_genre_counts()
+
+        assert library.counts == {"horror": 2}
+        assert library.tagged_titles == 2
+
+    async def test_a_title_carrying_two_genres_counts_once_under_each(
+        self, repository: TasteRepository
+    ) -> None:
+        """The shares deliberately do not partition, so `tagged_titles` is
+        **not** `sum(counts.values())` and must not be derived from it.
+
+        Dividing by a title's genre count to force a partition would make a
+        two-genre title contribute half the evidence of a one-genre title,
+        which is a statement about TMDb's tagging density rather than about the
+        household.
+        """
+        await self.add_title(("horror", "comedy"), owned=True)
+        await self.add_title(("horror",), owned=True)
+
+        library = await repository.library_genre_counts()
+
+        assert library.counts == {"horror": 2, "comedy": 1}
+        assert library.tagged_titles == 2
+
+    async def test_an_untagged_owned_title_is_in_neither_the_counts_nor_the_total(
+        self, repository: TasteRepository
+    ) -> None:
+        """`titles.genres` is `ARRAY(Text) NOT NULL DEFAULT '{}'` and the
+        skeleton tier is largely empty, so untagged titles are most of a real
+        library.
+
+        Left in the denominator they divide every `share_library` by the tagged
+        fraction and inflate every lift uniformly — which on a mostly-skeleton
+        catalog makes the minimum-lift floor fire for everything at once. And a
+        `""` bucket would be the single largest "genre" in most deployments.
+        """
+        await self.add_title(("horror",), owned=True)
+        for _ in range(9):
+            await self.add_title((), owned=True)
+
+        library = await repository.library_genre_counts()
+
+        assert library.counts == {"horror": 1}
+        assert library.tagged_titles == 1
+        assert "" not in library.counts
+
+    async def test_a_title_owned_many_times_over_counts_once(
+        self, repository: TasteRepository
+    ) -> None:
+        """A title owned on three sources is owned once.
+
+        Fails the join-plus-no-dedup spelling, which counts it three times —
+        inflating `tagged_titles` and every genre that title carries, unequally,
+        by however many copies the household happens to hold.
+        """
+        title_id = await self.add_title(("horror",), owned=True)
+        await self.add_owned_copy(title_id)
+        await self.add_owned_copy(title_id)
+        await self.add_title(("horror",), owned=True)
+
+        library = await repository.library_genre_counts()
+
+        assert library.counts == {"horror": 2}
+        assert library.tagged_titles == 2
+
+    async def test_an_episode_copy_does_not_make_its_series_count_many_times(
+        self, repository: TasteRepository
+    ) -> None:
+        """**`episode_id IS NULL`, and it is the whole bound.**
+
+        An episode's `MediaItem` carries its *series'* `title_id`, so without
+        the clause one 20,000-episode series decides the entire genre baseline
+        on its own — and the resulting affinities are populated, plausible and
+        about one show.
+        """
+        series_id = await self.add_title(("drama",), owned=True)
+        await self.add_owned_episode_copy(series_id, copies=12)
+        await self.add_title(("horror",), owned=True)
+
+        library = await repository.library_genre_counts()
+
+        assert library.counts == {"drama": 1, "horror": 1}
+        assert library.tagged_titles == 2
+
+    async def test_a_series_owned_only_through_its_episodes_is_not_in_the_baseline(
+        self, repository: TasteRepository
+    ) -> None:
+        """The **cost** of `episode_id IS NULL`, pinned as behaviour rather
+        than left as a comment.
+
+        `owned_title_ids` states it exactly — *"a library that reported
+        episodes but never their series row reads as not-owned for that
+        series"* — and the baseline inherits that definition on purpose: one
+        definition of "owned", or the affinity's denominator and every other
+        ownership question in the codebase drift apart silently.
+
+        Without this case an `EXISTS` spelling with the clause dropped is an
+        equivalent mutant: `EXISTS` already answers once per title, so the
+        clause changes nothing at all unless a series has episode copies and no
+        title-level copy of its own.
+        """
+        series_id = await self.add_title(("drama",), owned=False)
+        await self.add_owned_episode_copy(series_id, copies=6)
+        await self.add_title(("horror",), owned=True)
+
+        library = await repository.library_genre_counts()
+
+        assert library.counts == {"horror": 1}
+        assert library.tagged_titles == 1
+
+    async def test_an_empty_catalog_has_an_empty_baseline_rather_than_raising(
+        self, repository: TasteRepository
+    ) -> None:
+        """The denominator a caller must not divide by. `TasteService` checks
+        `tagged_titles == 0` and returns no affinities; a naive caller divides
+        and raises in the request path."""
+        library = await repository.library_genre_counts()
+
+        assert library.counts == {}
+        assert library.tagged_titles == 0

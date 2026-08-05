@@ -138,6 +138,32 @@ _REWATCH_COUNT = 2
 # a new install has one.
 _MIN_TITLES = 5
 
+# --- genre affinity: the taste signal that needs no embedder --------------
+#
+# Below this the row is describing the library rather than the household. 1.5:
+# a genre half again as present in what they watched as in what they own is the
+# smallest gap a sentence like "you watch a lot more X" can honestly carry.
+# **Chosen with an argument, not measured.**
+_MIN_LIFT = 1.5
+
+# Support, and it is the half that kills "a genre watched once". One western in
+# a library holding one western has a lift of ~50 and means nothing at all. 4
+# engaged titles is where a genre stops being a weekend.
+#
+# **Compared against a count of titles, not against a weight**, and the plan
+# says both for the same number. The count is what ships: this constant's own
+# argument is in titles, six finished titles at the old end of the window weigh
+# under 1.0 between them (so a weighted floor of 4 would be a far stricter and
+# entirely different rule), and "you have watched six westerns" is a sentence a
+# reason string can speak where "you have watched 2.7 westerns" is not. The
+# weighting is already inside `lift`, where it belongs.
+_MIN_SUPPORT = 4
+
+# PRD 06 says 1-3 rows, and the cap is this signal's own rather than the
+# composer's: a provider that emits one row per genre can claim the whole
+# screen before the diversity pass ever sees it.
+_MAX_AFFINITY_ROWS = 3
+
 
 @dataclass(frozen=True, slots=True)
 class GenreAffinity:
@@ -253,6 +279,119 @@ class TasteService:
         )
         await self._taste.put(taste)
         return _as_centroid(taste)
+
+    async def genre_affinity(self, user_id: uuid.UUID) -> list[GenreAffinity]:
+        """Genres this household watches disproportionately to its own library.
+
+        **Not computed from the centroid, and that is the decision this method
+        exists to make.** PRD 06 fires `GenreAffinityProvider` on *"taste
+        centroid concentrated in a genre"*. Implemented literally it is
+        elegant, it reuses the centroid wholesale, and it makes the most
+        broadly-useful provider **the one that never fires**: the centroid
+        needs an embedder, the embedder is optional and off by default, and
+        that default is what most deployments run. It also fails in the
+        direction hardest to notice -- the home screen still renders, the other
+        providers still fire, and the row that would have said something true
+        about the household is simply absent, forever, with nothing counting
+        its absence. PRD 06's firing condition is corrected rather than obeyed.
+
+        So this is counts over `titles.genres`, and *lift over opportunity*:
+
+            share_watched(g) = weighted engaged titles carrying g / total
+            share_library(g) = owned titles carrying g            / total
+            lift(g)          = share_watched(g) / share_library(g)
+
+        **The shares do not partition, and that is fine.** A title carries two
+        to four genres, so `sum(share) > 1`. Both sides are computed the same
+        way -- fraction of titles *carrying* the genre -- so their ratio is
+        still the quantity wanted. Dividing by a title's genre count to force a
+        partition would make a two-genre title contribute half the evidence of
+        a one-genre title, which is a statement about TMDb's tagging density
+        rather than about the household.
+
+        **Reads the centroid's own engaged window**, so the recency weighting
+        is shared and there is one definition of what this household watches.
+        Two windows would be two definitions, and the day they disagreed the
+        disagreement would be invisible. It is also what makes *"tracks
+        changing taste rather than averaging a lifetime"* free for the
+        count-based signal: forty dramas in 2019 and twelve horrors last month
+        is a horror affinity, where a lifetime `GROUP BY` gets it backwards.
+
+        **Not cached, and sharing `user_taste`'s row would be wrong rather than
+        merely wasteful.** That row is invalidated on `model_name IS DISTINCT
+        FROM`; genre affinity has no model. Sharing it makes an
+        embedding-checkpoint swap invalidate a count no model touched, and --
+        the worse half -- requires a deployment with *no embedder* to write a
+        `model_name` for a model it does not have. There is no honest value for
+        that column. A separate fingerprint would cost more than the answer:
+        this is a count over <= 50 `text[]` values plus one aggregate, and the
+        check guarding it would itself be the `max(updated_at)` read.
+        """
+        window = await self._engaged(user_id)
+        if not window:
+            # A household that has watched nothing gets nothing -- never "the
+            # library's most common genres", which is the popular-titles
+            # fallback wearing a taste row's title.
+            return []
+
+        catalog = await self._titles.list_by_ids([entry.title_id for entry in window])
+        by_id = {title.id: title for title in catalog}
+        weighted: dict[str, float] = {}
+        supporting: dict[str, int] = {}
+        total_weight = 0.0
+        for rank, entry in enumerate(window):
+            title = by_id.get(entry.title_id)
+            # An untagged engaged title is in neither the numerator nor the
+            # denominator, exactly as an untagged owned one is. Left in the
+            # denominator it would shrink every `share_watched` by the tagged
+            # fraction, which on a skeleton-heavy catalog suppresses every
+            # genre at once.
+            if title is None or not title.genres:
+                continue
+            weight = _weight(rank, len(window), entry.play_count)
+            total_weight += weight
+            # `dict.fromkeys`, never `set`: it deduplicates *and* keeps the
+            # title's own genre order, and `str.__hash__` is
+            # PYTHONHASHSEED-salted -- so a set here makes the insertion order
+            # of `weighted` vary between processes, which makes any tie
+            # resolved by "whatever came first" a cross-process flake rather
+            # than a wrong answer. The sort below breaks ties by name and this
+            # is what makes that sort's absence *observable*.
+            for genre in dict.fromkeys(title.genres):
+                weighted[genre] = weighted.get(genre, 0.0) + weight
+                supporting[genre] = supporting.get(genre, 0) + 1
+        if total_weight == 0.0:
+            return []
+
+        library = await self._taste.library_genre_counts()
+        if library.tagged_titles == 0:
+            # An empty catalog is `[]`, never a `ZeroDivisionError` in the
+            # request path -- the naive spelling divides by the owned total.
+            return []
+
+        affinities: list[GenreAffinity] = []
+        for genre, weight in weighted.items():
+            owned = library.counts.get(genre, 0)
+            if owned == 0:
+                # `share_library == 0`, reachable through a watch state whose
+                # media item was removed. Dropped, never `inf` and never a
+                # coalesce to something large -- which would put a genre the
+                # household owns none of at the top of the list with total
+                # confidence. `SimilarityService._jaccard`'s decision, one
+                # module over, for the same reason.
+                continue
+            lift = (weight / total_weight) / (owned / library.tagged_titles)
+            if lift < _MIN_LIFT or supporting[genre] < _MIN_SUPPORT:
+                continue
+            affinities.append(GenreAffinity(genre=genre, lift=lift, support=supporting[genre]))
+
+        # Ties broken by genre name, for the reason `SimilarityService` breaks
+        # a distance tie on id: ties here are ordinary rather than exotic --
+        # two genres carried by the same four titles have identical lift by
+        # construction -- and "whatever the aggregate returned" is not an
+        # order. Without it two renders of one unchanged household disagree.
+        affinities.sort(key=lambda one: (-one.lift, one.genre))
+        return affinities[:_MAX_AFFINITY_ROWS]
 
     async def _engaged(self, user_id: uuid.UUID) -> Sequence["_Engaged"]:
         """The recency-ordered engaged window, and the *only* history read in

@@ -26,7 +26,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.models.search import EMBEDDING_DIMENSIONS
-from usher.ports.repository import StoredTaste, TasteRepository
+from usher.ports.repository import LibraryGenres, StoredTaste, TasteRepository
 
 # The whole invalidation, in one place, so a second consumer cannot spell it
 # differently. Three disjuncts, and each answers a different question a caller
@@ -107,6 +107,46 @@ ON CONFLICT (user_id) DO UPDATE SET
     computed_at = excluded.computed_at
 """
 
+# Task 23's baseline: how the OWNED library is composed by genre.
+#
+# **"Owned" is `owned_title_ids`' definition, deliberately.** `episode_id IS
+# NULL` bounds a series to one row -- an episode's `MediaItem` carries its
+# series' `title_id`, so without it the measured pathological series counts
+# 20,000 times and one show decides the whole baseline. And there is **no**
+# `available` filter, which is the opposite call `list_recently_added` makes:
+# a copy the nightly sweep retracted is still a copy you have, but it is not
+# something that "arrived this week". Two statements, two answers, both
+# deliberate.
+#
+# **`EXISTS` rather than a join plus `DISTINCT`.** A title owned on three
+# sources is owned once, and a join would count it three times -- inflating
+# `tagged_titles` and every genre that title carries, unequally, by however
+# many copies the household happens to hold.
+#
+# **The genre total rides on the same statement, under a NULL sentinel.**
+# `sum(counts)` is not it: a title carries two to four genres, so the shares
+# deliberately do not partition. Two separate statements could disagree -- a
+# title landing between them makes a `share_library` exceed 1 for a genre
+# nobody added, which reads as a plausible number rather than as a fault.
+# `titles.genres` is `text[] NOT NULL`, so `unnest` never yields NULL and the
+# sentinel row is unambiguous.
+_LIBRARY_GENRES = """
+WITH owned AS (
+    SELECT t.id, t.genres
+    FROM titles AS t
+    WHERE cardinality(t.genres) > 0
+      AND EXISTS (
+          SELECT 1 FROM media_items AS m
+          WHERE m.title_id = t.id AND m.episode_id IS NULL
+      )
+)
+SELECT genre, count(*)::int AS n
+FROM owned, unnest(owned.genres) AS genre
+GROUP BY genre
+UNION ALL
+SELECT NULL, (SELECT count(*)::int FROM owned)
+"""
+
 _WATERMARK = """
 SELECT max(updated_at) AS watermark
 FROM watch_states
@@ -169,3 +209,15 @@ class PostgresTasteRepository(TasteRepository):
             row = (await self._session.execute(text(_WATERMARK), {"user_id": user_id})).one()
         watermark: AwareDatetime | None = row.watermark
         return watermark
+
+    async def library_genre_counts(self) -> LibraryGenres:
+        with self._session.no_autoflush:
+            rows = (await self._session.execute(text(_LIBRARY_GENRES))).all()
+        counts: dict[str, int] = {}
+        tagged = 0
+        for row in rows:
+            if row.genre is None:
+                tagged = row.n
+                continue
+            counts[row.genre] = row.n
+        return LibraryGenres(counts=counts, tagged_titles=tagged)

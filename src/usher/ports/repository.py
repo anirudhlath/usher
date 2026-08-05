@@ -1955,6 +1955,33 @@ class StoredTaste:
     computed_at: AwareDatetime
 
 
+@dataclass(frozen=True, slots=True)
+class LibraryGenres:
+    """The genre baseline: how the household's **owned** shelf is composed.
+
+    Task 23's denominator, and it is a taste question rather than a catalog
+    one, which is why it lives on this port rather than on `TitleRepository`.
+
+    **`tagged_titles` is carried alongside `counts` rather than being derivable
+    from it, and it must come from the same read.** `sum(counts.values())`
+    over-counts: a title carries two to four genres, so the shares deliberately
+    do not partition. And two separate statements could disagree -- a title
+    landing between them makes `share_library` exceed 1 for a genre nobody
+    added, which reads as a plausible number rather than as a fault.
+
+    **An untagged title is in neither the counts nor the total.** `titles.
+    genres` is `ARRAY(Text) NOT NULL DEFAULT '{}'` and the skeleton tier is
+    largely empty, so leaving untagged titles in the denominator would dilute
+    every `share_library` by the tagged fraction and inflate every lift
+    uniformly -- which on a mostly-skeleton catalog makes the minimum-lift
+    floor fire for everything at once. Excluded from both sides, an untagged
+    title changes no answer at all.
+    """
+
+    counts: Mapping[str, int]
+    tagged_titles: int
+
+
 class TasteRepository(ABC):
     """`user_taste` — the per-user centroid, invalidated by fingerprint.
 
@@ -1975,6 +2002,35 @@ class TasteRepository(ABC):
     Same session ownership as every other repository here: methods flush and
     return, and never commit.
     """
+
+    @abstractmethod
+    async def library_genre_counts(self) -> LibraryGenres:
+        """How the **owned** library is composed by genre.
+
+        Task 23's baseline, and the choice of population is the decision.
+        *Not* the household's own watched distribution -- normalising by the
+        quantity being measured makes every lift exactly 1.0 by construction,
+        so the provider would propose nothing on every household forever.
+        *Not* the whole 1.27M-row catalog either: a household cannot watch what
+        it does not own, so a household that owns nothing but horror and
+        watches nothing but horror has emitted **zero** bits of taste
+        information -- the library made that choice. Against a global baseline
+        it reads as an overwhelming horror affinity and the row says *"you
+        watch a lot more Horror than your library would suggest"* to somebody
+        whose library suggested exactly that. Word for word false.
+
+        The owned library is the household's actual **choice set**, which makes
+        affinity *lift over opportunity*.
+
+        "Owned" is `owned_title_ids`' definition and not
+        `list_recently_added`'s: a title's own row (`episode_id IS NULL`),
+        with **no** availability filter, because a copy the nightly sweep
+        retracted is still a copy you have. The two statements diverge
+        deliberately and each says so.
+
+        Household-wide, so no `user_id`: availability is not per-user. It is
+        also not per-source -- a title owned twice is owned once.
+        """
 
     @abstractmethod
     async def get(self, user_id: uuid.UUID, *, model_name: str) -> StoredTaste | None:

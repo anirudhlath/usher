@@ -41,6 +41,7 @@ from usher.ports.repository import StoredTaste
 
 USER = uuid.UUID("00000000-0000-7000-8000-00000000000a")
 OTHER_USER = uuid.UUID("00000000-0000-7000-8000-00000000000b")
+SOURCE = uuid.UUID("00000000-0000-7000-8000-0000000000ff")
 
 
 async def _seed_users(session: AsyncSession) -> None:
@@ -68,6 +69,15 @@ class TestPostgresTasteRepository(TasteRepositoryContract):
     async def _schema(self, session: AsyncSession) -> None:
         self._session = session
         await _seed_users(session)
+        await session.execute(
+            text(
+                "INSERT INTO sources "
+                "(id, kind, name, base_url, credentials_ref, device_id) VALUES ("
+                "CAST(:id AS uuid), 'emby', 'An Invented Source', "
+                "'https://source.invalid', 'an-invented-ref', 'an-invented-device')"
+            ),
+            {"id": SOURCE},
+        )
 
     @pytest.fixture
     def repository(self, session: AsyncSession) -> PostgresTasteRepository:
@@ -99,6 +109,70 @@ class TestPostgresTasteRepository(TasteRepositoryContract):
     async def drop_history(self, handle: uuid.UUID) -> None:
         await self._session.execute(
             text("DELETE FROM watch_states WHERE id = CAST(:id AS uuid)"), {"id": handle}
+        )
+
+    async def add_title(self, genres: tuple[str, ...], *, owned: bool) -> uuid.UUID:
+        title_id = new_id()
+        await self._session.execute(
+            text(
+                "INSERT INTO titles (id, kind, name, sort_name, genres) VALUES ("
+                "CAST(:id AS uuid), 'movie', 'An Invented Title', 'An Invented Title', "
+                "CAST(:genres AS text[]))"
+            ),
+            {"id": title_id, "genres": list(genres)},
+        )
+        if owned:
+            await self._copy(title_id, episode_id=None)
+        return title_id
+
+    async def add_owned_copy(self, title_id: uuid.UUID) -> None:
+        await self._copy(title_id, episode_id=None)
+
+    async def add_owned_episode_copy(self, title_id: uuid.UUID, *, copies: int) -> None:
+        # A real `episodes` row per copy, because `media_items.episode_id` is a
+        # foreign key -- the fake has no such constraint, which is the third
+        # thing only this arm can express.
+        for number in range(copies):
+            season_id = new_id()
+            episode_id = new_id()
+            await self._session.execute(
+                text(
+                    "INSERT INTO seasons (id, title_id, season_number) VALUES ("
+                    "CAST(:id AS uuid), CAST(:title_id AS uuid), :n)"
+                ),
+                {"id": season_id, "title_id": title_id, "n": number + 1},
+            )
+            await self._session.execute(
+                text(
+                    "INSERT INTO episodes "
+                    "(id, title_id, season_id, season_number, episode_number) VALUES ("
+                    "CAST(:id AS uuid), CAST(:title_id AS uuid), CAST(:season_id AS uuid), "
+                    ":n, 1)"
+                ),
+                {
+                    "id": episode_id,
+                    "title_id": title_id,
+                    "season_id": season_id,
+                    "n": number + 1,
+                },
+            )
+            await self._copy(title_id, episode_id=episode_id)
+
+    async def _copy(self, title_id: uuid.UUID, *, episode_id: uuid.UUID | None) -> None:
+        await self._session.execute(
+            text(
+                "INSERT INTO media_items "
+                "(id, source_id, title_id, episode_id, external_id, last_seen_at) VALUES ("
+                "CAST(:id AS uuid), CAST(:source_id AS uuid), CAST(:title_id AS uuid), "
+                "CAST(:episode_id AS uuid), :external_id, now())"
+            ),
+            {
+                "id": new_id(),
+                "source_id": SOURCE,
+                "title_id": title_id,
+                "episode_id": episode_id,
+                "external_id": str(new_id()),
+            },
         )
 
 
