@@ -28,6 +28,11 @@ from usher.services.rows.continue_watching import (
     ContinueWatchingProvider,
 )
 from usher.services.rows.next_up import NEXT_UP_SCORE, NextUpProvider
+from usher.services.rows.recently_added import (
+    RECENTLY_ADDED_SCORE_CEILING,
+    RecentlyAddedProvider,
+)
+from usher.services.rows.rediscover import REDISCOVER_SCORE, RediscoverProvider
 
 # The **ceiling** each provider can return, keyed by class name. A ceiling
 # rather than a fixed value because `RecentlyAddedProvider` is the one provider
@@ -37,18 +42,24 @@ from usher.services.rows.next_up import NEXT_UP_SCORE, NextUpProvider
 BASE_SCORES: Mapping[str, float] = {
     ContinueWatchingProvider.__name__: CONTINUE_WATCHING_SCORE,
     NextUpProvider.__name__: NEXT_UP_SCORE,
+    RecentlyAddedProvider.__name__: RECENTLY_ADDED_SCORE_CEILING,
+    RediscoverProvider.__name__: REDISCOVER_SCORE,
 }
 
 __all__ = [
     "BASE_SCORES",
     "CONTINUE_WATCHING_SCORE",
     "NEXT_UP_SCORE",
+    "RECENTLY_ADDED_SCORE_CEILING",
+    "REDISCOVER_SCORE",
     "ROW_PROVIDERS",
     "BaseRow",
     "Chapter",
     "ContinueWatchingProvider",
     "NextUpProvider",
     "Progress",
+    "RecentlyAddedProvider",
+    "RediscoverProvider",
 ]
 
 # **The registry, and it is the composition point.** A provider that is not
@@ -56,9 +67,8 @@ __all__ = [
 # with nothing to say, which is the one failure this milestone cannot see from
 # the outside. Group I's own case asserts this holds nine once every provider
 # exists; it holds four here, and the five that are missing are named rather
-# than implied: `RecentlyAdded`, `Rediscover`,
-# `BecauseYouWatched`, `Franchise`, `GenreAffinity`, `Seasonal` and `People`,
-# tasks 25-28. `CuratedProvider` is M8's whole family (boundary
+# than implied: `BecauseYouWatched`, `Franchise`, `GenreAffinity`, `Seasonal`
+# and `People`, tasks 26-28. `CuratedProvider` is M8's whole family (boundary
 # call 2) and is deliberately not among them.
 #
 # A tuple rather than a list: it is read by every request and written by none,
@@ -66,4 +76,6 @@ __all__ = [
 ROW_PROVIDERS: tuple[RowProvider, ...] = (
     ContinueWatchingProvider(),
     NextUpProvider(),
+    RecentlyAddedProvider(),
+    RediscoverProvider(),
 )
