@@ -482,11 +482,16 @@ def _popularity_term(popularity: float | None) -> float | None:
     """`p / (p + midpoint)`, or `None` when nobody has measured it.
 
     **`None` is not 0.0** -- ADR-0014, in a fourth place. `titles.popularity`
-    is null for every title TMDb has never described, which on the measured
-    catalog is most of 1,271,138 rows, and `popularity or 0.0` ranks a title
-    nobody measured identically to one measured as unpopular. That buries the
-    whole un-enriched catalog beneath the enriched tier while looking like
-    arithmetic and raising nothing.
+    is null for every title TMDb's daily export has never described: **all**
+    of a `--phase imdb` catalog and **~77%** of a `--phase all` one (Task 36
+    measured 291,584 of 1,271,570 titles carrying a popularity, 2026-08-05).
+    `popularity or 0.0` would rank a title nobody measured identically to one
+    measured as unpopular, burying the whole un-enriched catalog beneath the
+    enriched tier while looking like arithmetic and raising nothing. `_blend`
+    below was re-checked against the populated catalog and is unchanged: it
+    drops an absent signal from numerator and denominator, so a partially
+    populated catalog scores each title on what is known about it, not on a
+    zero it never measured.
     """
     if popularity is None:
         return None

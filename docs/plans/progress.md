@@ -1448,3 +1448,77 @@ lane of its own**; PRD 08's two TOML rows that will not become settings.
 
 **Merge readiness: no unfixed finding.** The one repository change this step made is the strengthened
 `Embedder` docstring guard, written because the sweep found the gap. Everything else is recorded.
+
+## ✅ M7 Task 36 — the `titles.popularity` re-measure and the genome's real coverage (2026-08-05)
+
+**A measurement task in the shape of M6's gate: the bar was written down before the numbers were
+known** (`/tmp/m7-gate/BAR.md`, committed to nothing), and the deliverable is the recorded result
+whichever way it fell. Driven from throwaway scripts outside the working tree against two controlled
+catalogs in a scratch `pgvector/pgvector:pg17`: **Arm NULL** (`m7home`, `--phase imdb` only,
+popularity NULL throughout) and **Arm ALL** (`m7gate`, `CREATE DATABASE … TEMPLATE m7home` then
+advanced through `tmdb-ids`/`crosswalk`/`movielens`), so the `titles` rows are identical in origin
+and the only difference is what `link_crosswalk` wrote. The typo test set is third-party data by
+construction and is **not committed**; the measurement is.
+
+**The popularity distribution, settled rather than inferred.** `--phase all` catalog, 1,271,570
+titles: **291,584 (22.9%) carry a popularity, of which exactly 3 are 0.0.** So the daily export ships
+real values, not the `NOT NULL DEFAULT 0` filler the "mostly-0.0 skeletons" fear assumed — the
+`vote_count`-populated column is 539,350 rows.
+
+**Suggest recall, same 2,993 cases at seed 20260803, both arms in one process (all `%` @0.3, cap
+200, driven through the shipped `PostgresSuggestIndex`):**
+
+| config | 2–4 | 5–7 | 8–11 | 12–19 | 20+ | all | p50 |
+|---|---|---|---|---|---|---|---|
+| NULL / shipped | 36.9 | 81.0 | 98.8 | 99.8 | 99.8 | **83.4** | 38.6 |
+| ALL / shipped | 34.1 | 78.5 | 97.8 | 99.8 | 99.8 | **82.1** | 43.0 |
+| ALL / R1 `NULLIF(pop,0)` | 34.1 | 78.5 | 97.8 | 99.8 | 99.8 | **82.1** | 43.0 |
+| ALL / R2 drop-popularity | 36.9 | 81.0 | 98.8 | 99.8 | 99.8 | **83.4** | 43.1 |
+
+Arm NULL reproduces M6's shipped-config recall within ~1 pt (82.5 → 83.4), the intended cross-check.
+The realistic catalog costs **1.3 pts overall (−2.8 worst band), entirely out-ranked misses** (the 38
+extra misses, 535 vs 497, are exactly the ones R2 recovers, and an `ORDER BY` change can only rescue a
+candidate already in the set) — **within Bar A's 2.0-pt tolerance**, so the shipped ordering is **kept
+unchanged**. R2 clears Bar B numerically but its enriched-tier behaviour is unmeasurable on a skeleton
+catalog → recorded as an M9 change, not shipped. p50 moved +11.4% (data, not ordering — identical
+across the three orderings within each arm; the host carried other load, tail 1773 ms vs M6's quiet
+734 ms), so absolute latency is the noisy half and recall the trustworthy one.
+
+**`ix_titles_popularity` — dropped, migration `ffc`.** Not merely unread (M7 Group H's
+`list_owned_by_tag` *does* order by `titles.popularity`) but **unusable as declared**: a
+`DESC`/NULLS-FIRST btree while every consumer asks `DESC NULLS LAST`, a pathkey the planner never
+takes (`ORDER BY popularity DESC` → Index Scan cost 0.42..20.97; `DESC NULLS LAST` → Parallel Seq
+Scan + Sort, cost 86,142). Rebuilding it `DESC NULLS LAST` leaves `list_owned_by_tag`'s plan
+byte-identical. 9,536 kB, not in `_SUSPENDABLE_INDEXES`. Bar E: `list_owned_by_tag('Drama', 60)` is a
+**Merge Semi Join over `pk_titles` + `ix_media_items_title_id`, no Seq Scan on titles**, 84.9 ms at
+2,569 owned titles — the provider's shape holds, no `titles.genres` GIN warranted.
+
+**Genome coverage (Bar C), read out of `usher similar --rebuild`'s own counters over a 5,020-title
+owned population:** 15,565 genome vectors = 1.22% of titles / 1.73% of movies; **7.61%** of the
+204,494-title ≥100-vote priority tier (makes PRD's "~7%" roughly right); **10.68%** of owned titles.
+The number that decides the weight is the **candidate-pair rate: 1.81%** (9,069 of 502,000 pairs),
+measured not squared (`coverage²` = 1.14%). **Below the 10% floor → Bar C FAILS**, but 1.81% is a
+*conservative* floor (no TMDb key ran, so documents are name-shaped and the pool name-selected).
+**The genome term is kept at weight 0.25** for now; the genome-aware-pool-vs-weight-revert choice is
+deferred to M9 (a real enriched tier), cheap and detectable via `blend_fingerprint`.
+
+**Guess by guess, refutations first** (a run that confirms everything looked too little):
+
+| # | guess | verdict | evidence |
+|---|---|---|---|
+| 2 | most popularity is 0.0 on skeletons | **refuted** | exactly 3 zeros in 291,584 |
+| 3 | partial catalog is worse than either extreme | **refuted** | −1.3 pts, within the 2.0 bar |
+| 5 | `NULLIF(popularity,0)` recovers the loss | **refuted** | recovers 0 (only 3 zeros to remap) |
+| 6 | `ix_titles_popularity` read by nothing | **sharpened** | read by `list_owned_by_tag`, but unusable as declared |
+| 1 | ~23% of `--phase all` carries a popularity | confirmed | 22.9% |
+| 4 | lost recall is out-ranked, not floor | confirmed | R2 recovers exactly the 38 marginal misses |
+| 7 | enriched-tier genome coverage ≫ 1.82% | confirmed | 10.68% of owned |
+| 8 | pair rate above `coverage²` | confirmed | 1.81% vs 1.14% |
+
+**Source corrections in the same task:** `adapters/search/postgres.py`'s stale `_SUGGEST` comment and
+`SearchService._popularity_term`'s "most of 1,271,138 rows" both fixed and scoped to the phase each
+number belongs to; `_blend` re-checked against the populated catalog and unchanged. `ix_titles_popularity`
+justification in `ports/repository.py` corrected (it named an enrichment-queue consumer that never
+existed — the queue is `jobs`, claimed by `ix_jobs_claim`). **Not verified in this run, named rather
+than implied:** popularity after real TMDb enrichment fills the enriched tier (boundary call 4's actual
+state); R2 and the genome term's behaviour on a genuinely enriched catalog at scale; non-Latin scripts.

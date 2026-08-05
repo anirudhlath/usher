@@ -293,21 +293,34 @@ class TitleRow(Base):
             "enrichment_state",
             postgresql_where=text("enrichment_state <> 'skeleton'"),
         ),
-        # Descending and partial, not a plain ascending index: "most popular
-        # first" is ORDER BY popularity DESC NULLS LAST, which a plain
-        # ascending btree cannot serve in either scan direction (forward
-        # gives ASC NULLS LAST, backward gives DESC NULLS FIRST -- neither
-        # matches). Excluding NULLs means there is nothing to place "last"
-        # inside the index at all, so a backward scan is directly usable.
-        # Measured: the plain-ascending version fell back to a 24.8 ms seq
-        # scan at 300k rows for a query a matching index serves in 0.19 ms,
-        # and would cost ~340 MB at 12.7M rows indexing millions of
-        # NULL-popularity skeleton rows no such query ever wants first.
-        Index(
-            "ix_titles_popularity",
-            text("popularity DESC"),
-            postgresql_where=text("popularity IS NOT NULL"),
-        ),
+        # **`ix_titles_popularity` was here and is dropped in `ffc`, because
+        # the reasoning that shaped it does not survive contact with the
+        # planner.** It read, in part: *"Excluding NULLs means there is
+        # nothing to place 'last' inside the index at all, so a backward scan
+        # is directly usable."* That is the load-bearing claim and it is
+        # **refuted**, measured on pg17.10 against 1,271,570 real titles with
+        # 291,584 popularities:
+        #
+        #   ORDER BY popularity DESC            -> Index Scan, cost 0.42..20.97
+        #   ORDER BY popularity DESC NULLS LAST -> Parallel Seq Scan + Sort,
+        #                                          cost 86,142
+        #
+        # Postgres matches pathkeys rather than reasoning that a partial index
+        # excluding NULLs makes the two orderings equivalent. Every consumer in
+        # `src/` writes `DESC NULLS LAST` -- correctly, since without it the
+        # whole unknown population sorts above every known one -- so the index
+        # could never serve a single shipped statement.
+        #
+        # Rebuilding it as `(popularity DESC NULLS LAST)` was measured too and
+        # does not rescue it: `list_owned_by_tag`, the one statement that
+        # orders by this column, keeps a byte-identical `Merge Semi Join` plus
+        # 2,569-row `top-N heapsort` plan either way, because it filters by
+        # ownership and genre first. See `ffc`'s docstring for the full table
+        # and for what would bring an index back.
+        #
+        # The ~340 MB this comment used to quote was for a hypothetical 12.7M
+        # rows; the real figure was **9,536 kB**, and 8,192 bytes on a
+        # bootstrap-only catalog where the partial predicate matches nothing.
         # PRD 03 stage 3 matches bulk-imported titles on normalised name +
         # year and calls this "why matching is fast and mostly offline" --
         # but sort_name has an explicit no-normalisation contract (Title's

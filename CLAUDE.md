@@ -212,20 +212,30 @@ Every configuration measured, same 2,993 cases:
   because it was bootstrapped `title.basics` + `title.ratings` only — **the
   IMDb phase, not `--phase all`.** M2's live run linked **291,737 of
   1,271,138** titles, so a full bootstrap leaves roughly **23%** carrying a
-  popularity, most of it on skeletons. **The partially-populated catalog is the
-  case nobody has measured and it is worse than either extreme**: popularity is
-  a *hard* key above `vote_count`, and `tmdb_ids.popularity` is
-  `NOT NULL DEFAULT 0`, so a crosswalk-linked skeleton at `0.0` sorts **above**
-  an unlinked title with 500,000 votes — the exact "whichever skeleton the scan
-  reached first" failure `NULLS LAST` is there to prevent, from the other side.
-  The +4.2/+8.3 win was measured where the new key was never contested. M7 owns
-  re-measuring it; `adapters/search/postgres.py:752` still carries the
-  uncorrected sentence, deliberately left for that change.
-  Two smaller items in the same family: **`ix_titles_popularity` is read by
-  nothing in `src/`** — no statement anywhere orders by `titles.popularity` —
-  though `ports/repository.py:319` justifies it as what "gives M4's enrichment
-  queue a real ordering"; and `SearchService._popularity_term`'s docstring says
-  "most of 1,271,138 rows" where a bootstrap-only catalog is all of them.
+  popularity, most of it written onto skeleton rows. **That hypothesis — that
+  the partially-populated catalog is worse than either extreme — was M7 Task
+  36's headline to test, and it is now REFUTED, measured 2026-08-05** on a
+  `--phase all` catalog of 1,271,570 titles. The mechanism was real (popularity
+  is a *hard* key above `vote_count`), but its cost is small: **291,584 (22.9%)
+  carry a popularity and exactly 3 are 0.0** — the daily export ships real
+  values, not the `NOT NULL DEFAULT 0` filler the `0.0`-skeleton fear assumed —
+  so the "crosswalk-linked skeleton at 0.0 outranks a 500,000-vote title" case
+  is 3 rows, not a population. Re-run over M6's exact 2,993 typo cases at seed
+  20260803, the populated catalog costs **1.3 points overall (83.4 → 82.1)**,
+  entirely out-ranked misses, **within Task 36's 2.0-point bar** — so the
+  shipped ordering is **kept unchanged**. `vote_count`-as-primary-key (dropping
+  popularity) recovers all 1.3 points and does not hurt the all-NULL arm, but
+  its enriched-tier behaviour is unmeasurable on a skeleton catalog and is an
+  **M9** change; `NULLIF(popularity, 0)` recovers nothing (3 zeros). The
+  uncorrected comment at `adapters/search/postgres.py` and
+  `SearchService._popularity_term`'s "most of 1,271,138 rows" are both
+  **corrected in the same task**. And the third item is sharper than "unread":
+  **`ix_titles_popularity` is not merely read by nothing — it is unusable as
+  declared** (a `DESC`/NULLS-FIRST btree while every consumer asks `DESC NULLS
+  LAST`, a different pathkey the planner never takes; `list_owned_by_tag`, added
+  in M7 Group H, *does* order by `titles.popularity` but its plan is a Merge
+  Semi Join over `pk_titles` that never touches the index), and it is **dropped
+  in migration `ffc`** with the full measurement in its docstring.
   **`SearchService._blend` is unaffected and was checked rather than assumed**:
   `_popularity_term` returns `None`, never `0.0`, and `_blend` drops an absent
   signal from numerator *and* denominator, so an all-NULL catalog collapses to

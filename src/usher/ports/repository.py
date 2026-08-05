@@ -496,8 +496,28 @@ class BulkCatalogRepository(ABC):
         already stored: a title that already carries a *different* value
         does not get overwritten either, and is reported as `conflicted`,
         not `linked`. Copies `popularity` across from the TMDb id universe
-        at the same time, which is what makes `ix_titles_popularity` usable
-        and gives M4's enrichment queue a real ordering.
+        at the same time.
+
+        **That last clause used to continue "…which is what makes
+        `ix_titles_popularity` usable and gives M4's enrichment queue a real
+        ordering", and both halves were false.** The enrichment queue is
+        `jobs`, claimed through `ix_jobs_claim` (`priority DESC, created_at`);
+        no statement anywhere orders it by `titles.popularity`, so the named
+        consumer never existed. And the index could not have served one
+        anyway — it was declared `(popularity DESC)`, i.e. NULLS FIRST, while
+        every consumer in `src/` asks `DESC NULLS LAST`, which is a different
+        pathkey. Measured against 1,271,570 real titles: the favourable
+        spelling takes an `Index Scan` at cost 0.42..20.97 and the shipped one
+        a `Parallel Seq Scan` + `Sort` at 86,142. Migration `ffc` drops it and
+        records what would bring one back.
+
+        **What the write itself is for is still real, and is now stated
+        without the index:** it is what gives 22.93% of a `--phase all`
+        catalog a popularity at all, which is the signal
+        `PostgresSuggestIndex` orders on and `SearchService._popularity_term`
+        reads. Measured 2026-08-05: 291,584 of 1,271,570 rows, of which
+        exactly **3** are `0.0` — the daily export carries real values, not
+        the `NOT NULL DEFAULT 0` filler the column's declaration permits.
 
         Both `titles.tmdb_id` (scoped by `kind`, ADR-0011) and
         `titles.tvdb_id` are globally unique where not NULL

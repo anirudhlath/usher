@@ -215,16 +215,30 @@ no competitors, so 0.1 rescues a case there that it cannot rescue at scale.
 The divergence is stated in that constant's own comment rather than left to
 be discovered.
 
-**The result is ordered by popularity *and then by vote count*, because on a
-real catalog popularity is empty.** `titles.popularity` is NULL on all
-1,271,138 rows of a bootstrapped catalog — nothing writes it but TMDb
-enrichment, and the enriched tier is 2k–10k titles by design — so
-`ORDER BY dist ASC, popularity DESC NULLS LAST, id ASC` degenerates to
-ordering equal-distance candidates by a UUIDv7, which is insertion order.
-`vote_count DESC NULLS LAST` goes *under* popularity, is filled by the
-bootstrap itself (538,937 rows), and is worth **+4.2 points of recall@5
-overall and +8.3 on 2–4-character names at unchanged latency**. Shipped
-2026-08-03 with the gate that found it.
+**The result is ordered by popularity *and then by vote count*, because
+popularity is sparse.** `titles.popularity` is NULL on all 1,271,138 rows of
+a **`--phase imdb`** catalog — the one M6's gate ran against — and on ~77% of
+a **`--phase all`** one: `link_crosswalk` writes it from `tmdb_ids`, and Task
+36 measured **291,584 of 1,271,570 titles (22.9%) carrying a popularity, of
+which exactly 3 are 0.0** (2026-08-05, so the daily export ships real values,
+not `NOT NULL DEFAULT 0` filler). So `ORDER BY dist ASC, popularity DESC NULLS
+LAST, id ASC` degenerates to ordering equal-distance candidates by a UUIDv7
+(insertion order) on the NULL majority, and `vote_count DESC NULLS LAST` goes
+*under* popularity, is filled by the bootstrap itself (539,350 rows), and was
+worth **+4.2 points of recall@5 overall and +8.3 on 2–4-character names** when
+M6 shipped it 2026-08-03.
+
+**Task 36 re-measured the ordering on the populated catalog and kept it
+unchanged (2026-08-05).** Same 2,993 typo cases at seed 20260803, the
+populated arm against the all-NULL one: the populated catalog costs **1.3
+points overall (83.4 → 82.1)**, entirely out-ranked misses where a real
+popularity promotes a wrong candidate — within the 2.0-point regression bar,
+so the earlier position that a *partially* populated catalog is worse than
+either extreme is **refuted**. Making `vote_count` the primary key (dropping
+popularity) recovers all 1.3 points and does not hurt the all-NULL arm, but
+its behaviour on a genuinely *enriched* tier could not be measured on this
+skeleton catalog, so it is an M9 change to re-measure rather than a shipped
+one; `NULLIF(popularity, 0)` recovers nothing, since only 3 zeros exist.
 
 **`<%` (`word_similarity`) was measured and not taken.** It separates
 fixture-scale examples better than `%` (0.8 / 0.4 / 0.2 against
@@ -373,15 +387,29 @@ first in-process consumer.
 - Jaccard over genres, keywords, cast, and crew,
 - MovieLens tag-genome cosine where available, weighted in only when present.
   **The importer shipped in M7** (`usher bootstrap --phase movielens`,
-  `genome_scores`), and the coverage figure finally has denominators: 16,376
-  genome movies is **1.82%** of a full catalog's 899,828 movies, **1.29%** of
-  all 1,271,138 titles, and **8.7%** of [04](04-catalog-bootstrap.md)'s "~189k
-  titles with ≥100 IMDb votes" priority tier — which is the denominator that
-  makes the "~7%" this line used to carry roughly right. **M7 blends it in at
-  weight 0.25** — see the four-way blend below. The number that matters is
-  coverage of the *enriched tier* and of the **candidate pairs** a rebuild
-  actually scores; both are reported by `usher similar --rebuild` itself, and
-  the measured figures are in [09](09-roadmap.md)'s M7 section. Two
+  `genome_scores`), and Task 36 measured every denominator (2026-08-05, a
+  `--phase all` catalog of 1,271,570 titles): 15,565 genome vectors are
+  **1.22%** of all titles and **1.73%** of the 899,991 movies; **7.61%** of
+  [04](04-catalog-bootstrap.md)'s "≥100 IMDb votes" priority tier (measured at
+  204,494 titles) — the denominator that makes the "~7%" this line used to
+  carry roughly right; and **10.68%** of a real household's 5,020 owned titles
+  (10.72% of its owned movies). **The number that actually decides the term's
+  weight is the candidate-pair rate** — of the 100 candidates each seed's pool
+  holds, how many carry a `tags` value — measured (never squared: `coverage²`
+  would say 1.14%) at **1.81%** (9,069 of 502,000 pairs). **That is far below
+  the 10% floor the weight assumes**, so at 0.25 the genome reorders about one
+  neighbour list in fifty-five while costing a `<=>` and a TOAST fetch on every
+  candidate pair of every rebuild. **The term is kept for now, with two
+  caveats and a deferral**: the 1.81% is a *conservative* floor (no TMDb key
+  ran, so documents are name-shaped and the pool is name-selected, which
+  weakens exactly the correlation being measured); the genome is
+  **movies-only** and **frozen at 2023-07-20**, so its coverage of anything
+  newer is structurally zero and decays; and the choice between a genome-aware
+  candidate pool and reverting `_WEIGHTS` to M6's three signals is an **M9
+  decision** to make once a genuinely enriched tier can be measured — cheap and
+  detectable either way, because `title_neighbors.blend_fingerprint` records
+  which blend produced each row. **M7 blends it in at weight 0.25** — see the
+  four-way blend below. Two
   vectors are comparable only when they came from the same release, which is
   what `genome_scores.genome_revision` records and what
   `GenomeRepository.get_pair` refuses to blend across,

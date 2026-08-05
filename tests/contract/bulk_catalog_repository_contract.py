@@ -422,8 +422,19 @@ class BulkCatalogRepositoryContract:
     async def test_link_crosswalk_copies_popularity_from_the_tmdb_universe(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """What makes ix_titles_popularity useful and gives M4's enrichment
-        queue an ordering derived from real-world relevance."""
+        """The write that gives a `--phase all` catalog a popularity at all.
+
+        **This docstring used to say "what makes ix_titles_popularity useful
+        and gives M4's enrichment queue an ordering", and both halves were
+        false** -- no statement orders that queue by popularity, and the index
+        was declared with a pathkey no consumer asks for. Migration `ffc`
+        drops it; `ports/repository.py` carries the measurement.
+
+        What the write is genuinely for: `PostgresSuggestIndex` orders on this
+        column and `SearchService._popularity_term` reads it. Measured on a
+        real `--phase all` catalog, 2026-08-05: 291,584 of 1,271,570 titles
+        carry one, of which exactly **3** are `0.0`.
+        """
         await repo.upsert_titles([SHAWSHANK])
         await repo.upsert_tmdb_ids(
             [TmdbId(tmdb_id=90000020, kind=TitleKind.MOVIE, original_name="x", popularity=12.5)]
