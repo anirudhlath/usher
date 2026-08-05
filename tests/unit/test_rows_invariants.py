@@ -22,6 +22,13 @@ from usher.ports.rows import RowProvider
 from usher.services.rows import BASE_SCORES, ROW_PROVIDERS, row_providers
 from usher.services.rows.continue_watching import CONTINUE_WATCHING_SCORE
 
+# The blend these arranged rows claim to have been computed under. A literal,
+# never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
+# express "this row came from a different blend", which is the whole state the
+# column exists to describe.
+_FP = "arranged-by-a-test"
+
+
 pytestmark = pytest.mark.anyio
 
 
@@ -364,6 +371,7 @@ async def _populated() -> Library:
                 ScoredNeighbor(title_id=title_id, neighbor_title_id=other, score=0.8, rank=rank)
                 for rank, other in enumerate(one for one in horror if one != title_id)
             ],
+            blend_fingerprint=_FP,
         )
     series_id = await library.series("An Owned Series")
     await library.episode(series_id, season=1, number=1)

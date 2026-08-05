@@ -417,7 +417,15 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # `base` drops the tables, and a table takes its indexes with it, so
         # a downgrade that forgets to drop one is invisible from there.
         await asyncio.to_thread(run_alembic, url, "-1")
-        assert "pk_genome_scores" not in await _index_set(url)
+        # **Asserted against whatever the current head actually removes**, and
+        # that target moves with every migration -- `ffb` adds a *column* where
+        # `ffa` added a table, so the previous spelling
+        # (`"pk_genome_scores" not in ...`) silently stopped exercising the
+        # head's own `downgrade()` the moment `ffb` landed on top and started
+        # failing instead. Group F recorded exactly this for `ffa`; it is the
+        # cost of a self-maintaining half, and it is cheaper than a step count
+        # that keeps passing for the wrong reason.
+        assert "blend_fingerprint" not in await _column_set(url, "title_neighbors")
 
         # Then down to the revision *below* `ff`, which is where M7 group E's
         # two index changes become observable -- `ffa` sits between head and
@@ -432,6 +440,11 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
             functools.partial(run_alembic, url, "fe1d40c8b7a3", direction="down")
         )
         stepped = await _index_set(url)
+        # `ffa`'s own artefact, checked here rather than after `-1`. This
+        # target is a **revision id**, so unlike the step-back above it does
+        # not drift when a migration lands on top -- which is precisely why
+        # the genome assertion belongs on this half rather than on that one.
+        assert "pk_genome_scores" not in stepped
         assert "ix_watch_states_user_recent" not in stepped
         assert "ix_media_items_recently_added" not in stepped
         assert "ix_watch_states_user_played" in stepped
@@ -448,6 +461,27 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         async with engine.connect() as conn:
             await conn.execution_options(isolation_level="AUTOCOMMIT")
             await conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch}" WITH (FORCE)'))
+        await engine.dispose()
+
+
+async def _column_set(url: str, table: str) -> set[str]:
+    """One table's column names. The sibling of `_index_set`, for the
+    migrations that add a column rather than an index -- without it, a
+    column-only migration's `downgrade()` has nothing that can observe it
+    short of the whole-chain `base`/`head` round trip, which passes against a
+    no-op downgrade because `base` drops the table anyway."""
+    engine = build_engine(url)
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = :table"
+                ),
+                {"table": table},
+            )
+            return {row[0] for row in rows}
+    finally:
         await engine.dispose()
 
 

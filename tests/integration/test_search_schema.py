@@ -193,8 +193,9 @@ async def test_deleting_a_title_removes_it_from_every_other_neighbour_list(
     doomed = await _title(session, "Autumn Iron")
     await session.execute(
         text(
-            "INSERT INTO title_neighbors (title_id, neighbor_id, score, rank) "
-            "VALUES (:a, :b, 0.8, 0)"
+            "INSERT INTO title_neighbors "
+            "(title_id, neighbor_id, score, rank, blend_fingerprint) "
+            "VALUES (:a, :b, 0.8, 0, 'arranged-by-a-test')"
         ),
         {"a": keeper, "b": doomed},
     )

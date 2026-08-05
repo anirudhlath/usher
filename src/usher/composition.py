@@ -123,7 +123,7 @@ from usher.services.reconcile import ReconcileService
 from usher.services.rows import row_providers
 from usher.services.rows.cache import RowCache
 from usher.services.search import SearchService
-from usher.services.similar import SimilarityService
+from usher.services.similar import SimilarityService, blend_fingerprint
 from usher.services.taste import TasteService
 from usher.services.watch_sync import WatchStateSyncService
 from usher.telemetry import QueueSnapshot, SearchSnapshot
@@ -895,10 +895,23 @@ class SearchGauges:
     def read(self) -> SearchSnapshot:
         return self._snapshot
 
-    async def refresh(self, embeddings: TitleEmbeddingRepository, model_name: str) -> None:
+    async def refresh(
+        self,
+        embeddings: TitleEmbeddingRepository,
+        neighbors: TitleNeighborRepository,
+        model_name: str,
+    ) -> None:
         self._snapshot = SearchSnapshot(
             stale=await embeddings.count_stale(model_name),
             refused=await embeddings.count_refused(model_name),
+            # The third count is over `title_neighbors` and is the one thing
+            # here that is *not* about the embedding backlog. It is refreshed
+            # in the same pass because it is read from the same session and
+            # answers the same operator question -- "is my derived state
+            # current" -- and `blend_fingerprint()` is resolved here rather
+            # than passed in so there is exactly one definition of the running
+            # blend, which is the whole of ADR-0020's argument.
+            neighbors_stale=await neighbors.count_stale(blend_fingerprint=blend_fingerprint()),
         )
 
 

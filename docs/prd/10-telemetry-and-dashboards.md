@@ -120,6 +120,7 @@ is maintained rather than aspirational.
 | `usher.cache.hits` / `.misses` | counter | cache | M9 |
 | `usher.search.embeddings.stale` | gauge | — | ✅ M6 |
 | `usher.search.embeddings.refused` | gauge | — | ✅ M6 |
+| `usher.similarity.neighbors.stale` | gauge | — | ✅ M7 |
 | `usher.sse.connections` | gauge | — | ✅ M5 |
 | `usher.bootstrap.rows` | counter | dataset | ✅ M2 |
 | `usher.bootstrap.batch.duration` | histogram | dataset | ✅ M2 |
@@ -156,6 +157,24 @@ case** — one definition, three consumers, which is
 argument in one metric. They are two gauges rather than one because a refused
 title is *current*, not behind: summing them would put the total above the
 population and "the backfill has drained" would stop being observable.
+
+`usher.similarity.neighbors.stale` is the same shape for a **different table**
+and it is deliberately not grouped with the two above: it counts
+`title_neighbors` rows whose `blend_fingerprint` is not the running one, and it
+is drained by `usher similar --rebuild` rather than by `usher index
+--backfill`. A dashboard putting all three under one "index backlog" panel
+would suggest one command drains them, and it does not.
+
+**Two things a reader of this gauge must not conclude.** A zero does not mean
+the neighbour artefact is current — it means no row disagrees with the *running
+blend*; a row can carry the right fingerprint and still be stale because some
+other title was embedded into its neighbourhood since, which is undecidable per
+row and is what `computed_at()` is for. And a non-zero value is not an outage:
+the rows are readable and internally consistent, they were computed under a
+different meaning, and `usher similar` narrows rather than refuses. **Nothing
+schedules the rebuild**, so this series is expected to sit at a plateau after
+an upgrade that moves the blend until an operator or a cron entry acts on it —
+which is precisely what makes it worth plotting.
 
 Three label corrections M4 made, each because the code that emits the metric
 can only answer the question it actually has:

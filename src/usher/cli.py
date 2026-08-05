@@ -513,14 +513,16 @@ async def _work(settings: Settings, *, once: bool) -> None:
             await worker.startup()
             ran = await worker.run_once()
             await gauges.refresh(pipeline.queue)
-            await backlog.refresh(pipeline.embeddings, settings.embedding_model)
+            await backlog.refresh(pipeline.embeddings, pipeline.neighbors, settings.embedding_model)
             print(f"{ran} jobs")
             while not once:
                 if ran == 0:
                     await asyncio.sleep(_IDLE_SLEEP_SECONDS)
                 ran = await worker.run_once()
                 await gauges.refresh(pipeline.queue)
-                await backlog.refresh(pipeline.embeddings, settings.embedding_model)
+                await backlog.refresh(
+                    pipeline.embeddings, pipeline.neighbors, settings.embedding_model
+                )
         finally:
             await registry.aclose()
             await aclose()
@@ -629,7 +631,7 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
         pipeline = build_pipeline(session, settings)
         model = settings.embedding_model
         if not backfill:
-            await gauges.refresh(pipeline.embeddings, model)
+            await gauges.refresh(pipeline.embeddings, pipeline.neighbors, model)
             snapshot = gauges.read()
             print(f"model: {model}")
             print(f"stale embeddings: {snapshot.stale}")
@@ -687,7 +689,7 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
         # cheaper still not to count per page, and the number an operator wants
         # is the backlog *left over* -- the same reason `QueueGauges` refreshes
         # after a worker pass rather than before it.
-        await gauges.refresh(pipeline.embeddings, model)
+        await gauges.refresh(pipeline.embeddings, pipeline.neighbors, model)
         print(f"{seen} stale titles swept, {written} index jobs written")
 
 
@@ -857,6 +859,28 @@ async def _similar(
         if rebuild:
             report = await pipeline.similar.rebuild()
             print(f"rebuilt {report.seeds} seeds, wrote {report.rows} neighbour rows")
+            # **The genome's coverage, with its denominators, printed by the
+            # thing that consumed the vectors.** PRD 05 promised "~7%" since
+            # before an importer existed and never said of what; these are the
+            # two numbers that answer it, and the second is the one that
+            # decides whether the term can promote anything.
+            #
+            # The pair rate is *measured*, never squared: genome membership
+            # and candidate-pool membership both correlate with popularity and
+            # with enrichment, so `coverage ** 2` is wrong in an unknown
+            # direction.
+            if report.seeds:
+                share = 100.0 * report.seeds_with_genome / report.seeds
+                print(
+                    f"{report.seeds_with_genome} of {report.seeds} seeds carried a genome "
+                    f"vector ({share:.2f}%)"
+                )
+            if report.candidate_pairs:
+                pair_share = 100.0 * report.pairs_with_tags / report.candidate_pairs
+                print(
+                    f"{report.pairs_with_tags} of {report.candidate_pairs} candidate pairs "
+                    f"scored a genome cosine ({pair_share:.2f}%)"
+                )
             if report.without_embedding:
                 # Excluded *and* counted. A rebuild that silently skipped a
                 # growing swathe of the catalog reads exactly like one with
@@ -873,6 +897,16 @@ async def _similar(
         for row in rows:
             year = f" ({row.year})" if row.year else ""
             print(f"{row.score:.3f}  {row.name}{year}  {row.title_id}")
+        # **Narrowed, not broken** -- PRD 08's degradation rule, the same shape
+        # `--mode fused` takes when it cannot reach the semantic lane. The
+        # neighbours still print: they are internally consistent and perfectly
+        # readable, they were simply computed under a different blend, and
+        # refusing to show them would turn "out of date" into "regressed".
+        if rows and await pipeline.similar.stale_neighbors(title_id=title_id):
+            print(
+                "these neighbours were computed under a different blend; "
+                "run `usher similar --rebuild`"
+            )
         if not rows and await pipeline.similar.computed_at() is None:
             # Two causes for an empty answer and only one is a fact about the
             # title. One message for both sends an operator to look at the

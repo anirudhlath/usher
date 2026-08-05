@@ -67,6 +67,12 @@ from usher.ports.jobs import JobRequest
 from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
 from usher.ports.search import SearchFilters
 
+# The blend these arranged rows claim to have been computed under. A literal,
+# never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
+# express "this row came from a different blend", which is the whole state the
+# column exists to describe.
+_FP = "arranged-by-a-test"
+
 
 @pytest.fixture
 def cli_settings(postgres_url: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[Settings]:
@@ -625,6 +631,7 @@ async def test_similar_says_whether_the_neighbours_were_ever_computed(
         await pipeline.neighbors.replace(
             [other.id],
             [ScoredNeighbor(title_id=other.id, neighbor_title_id=seed.id, score=0.5, rank=0)],
+            blend_fingerprint=_FP,
         )
         await session.commit()
 

@@ -22,6 +22,7 @@ rows up the same table, and `usher.search.hits`, and
 import inspect
 import re
 import sys
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -39,16 +40,19 @@ from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
+from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.title import Title
 from usher.ports.jobs import JobRequest
+from usher.ports.repository import ScoredNeighbor
 from usher.ports.search import SearchDocument, SearchMode
 from usher.services.handlers import index_handler
 from usher.services.index import IndexService
 from usher.services.jobs import JobWorker
 from usher.services.search import SearchService
+from usher.services.similar import blend_fingerprint
 from usher.telemetry import (
     SearchSnapshot,
     _observe_embeddings_refused,
@@ -441,11 +445,44 @@ async def test_the_gauges_hold_the_last_complete_re_read(
     register_search_gauges(gauges.read)
     assert _points(meter_reader, "usher.search.embeddings.stale") == [0.0]
 
-    await gauges.refresh(embeddings, "fastembed:BAAI/bge-small-en-v1.5")
+    neighbors = FakeTitleNeighborRepository()
+    await gauges.refresh(embeddings, neighbors, "fastembed:BAAI/bge-small-en-v1.5")
     assert gauges.read() == SearchSnapshot(
         stale=await embeddings.count_stale("fastembed:BAAI/bge-small-en-v1.5"),
         refused=await embeddings.count_refused("fastembed:BAAI/bge-small-en-v1.5"),
+        neighbors_stale=await neighbors.count_stale(blend_fingerprint=blend_fingerprint()),
     )
+
+
+async def test_the_neighbour_gauge_counts_rows_from_another_blend(
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """`usher.similarity.neighbors.stale`, and the case that makes it mean
+    something.
+
+    A gauge asserted only at zero is satisfied by a reader that returns zero,
+    so this arranges the state the column exists to detect -- rows written
+    under a *previous* blend -- and asserts the gauge moves. That state is not
+    hypothetical: every row in every `title_neighbors` on disk before M7 is
+    exactly it.
+    """
+    from usher.composition import SearchGauges
+
+    neighbors = FakeTitleNeighborRepository()
+    seed, neighbour = uuid.UUID(int=0xA1), uuid.UUID(int=0xA2)
+    await neighbors.replace(
+        [seed],
+        [ScoredNeighbor(title_id=seed, neighbor_title_id=neighbour, score=0.9, rank=0)],
+        blend_fingerprint="a-fingerprint-from-m6",
+    )
+    gauges = SearchGauges()
+    register_search_gauges(gauges.read)
+
+    await gauges.refresh(
+        FakeTitleEmbeddingRepository(), neighbors, "fastembed:BAAI/bge-small-en-v1.5"
+    )
+    assert gauges.read().neighbors_stale == 1
+    assert _points(meter_reader, "usher.similarity.neighbors.stale") == [1.0]
 
 
 def test_the_snapshot_defaults_to_zero_and_that_is_not_a_reading(

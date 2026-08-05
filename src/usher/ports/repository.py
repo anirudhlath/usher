@@ -1760,11 +1760,29 @@ class StoredEmbedding:
 class NeighborSeed:
     """One embedded title, carrying the tag sets the blend needs — so a page
     read answers the seed half in one statement rather than ids here plus a
-    second `list_by_ids` pulling 31 columns per row for two of them."""
+    second `list_by_ids` pulling 31 columns per row for two of them.
+
+    **`has_genome` is not read by the blend**, and that is deliberate rather
+    than an oversight: the genome cosine is a property of a *pair*, so it
+    rides on `NeighborCandidate`. This flag is read by the **rebuild**, which
+    counts it, so "what fraction of the seeds this rebuild processed carried a
+    genome vector" is a number the rebuild *reports* rather than a second
+    query somebody has to think to run.
+
+    That is the coverage figure PRD 05 has promised since before an importer
+    existed and has never had a denominator for — arriving from the code path
+    that consumes the vectors.
+
+    **Required rather than defaulted**, following `CreditRepository.
+    replace_for_titles`' `credit_names`: a default of `False` would let a port
+    implementation that never learned about the genome report 0% coverage on a
+    fully covered catalog, and report it silently.
+    """
 
     title_id: uuid.UUID
     genres: tuple[str, ...]
     keywords: tuple[str, ...]
+    has_genome: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1781,12 +1799,30 @@ class NeighborCandidate:
     rather than this port's: `title_neighbors.score` is `CHECK (score >= 0 AND
     score <= 1)`, so the clamp has to hold for every implementation of this
     port rather than for the one that remembered.
+
+    **`tags` is the MovieLens tag-genome cosine, and it is `None` when *either*
+    side has no `genome_scores` row.** A cosine here too, never a distance, for
+    the reason above.
+
+    **Not `0.0` — [ADR-0014](../../../docs/prd/decisions/0014-absence-is-not-zero.md),
+    and this is the site where `0.0` is not merely uninformative but
+    *unreachable by real data*.** Every component of a genome vector is
+    positive, so the true cosine of any real pair is well above zero: Group F
+    measured the floor at **0.2556** over all 268,157,000 ordered off-diagonal
+    pairs, against a mean of 0.6101. `0.0` would therefore be the single most
+    confident *wrong* statement in the blend — it claims two films share no
+    tags, which no pair can truthfully say — and its effect is structural
+    rather than marginal: a genome-bearing title's neighbours would be
+    reordered to put every other genome-bearing title above every un-genomed
+    one, which at the measured coverage is a small clique pinned to the top of
+    the overwhelming majority of lists.
     """
 
     title_id: uuid.UUID
     cosine: float
     genres: tuple[str, ...]
     keywords: tuple[str, ...]
+    tags: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1993,14 +2029,20 @@ class TitleEmbeddingRepository(ABC):
 class TitleNeighborRepository(ABC):
     """`title_neighbors` — the precomputed similarity artefact (PRD 05).
 
-    **The one derived artefact in M6 whose freshness is not a per-row
-    predicate**, and the port says so rather than implying otherwise. A row is
-    stale when either title's embedding moved — which is a predicate, and
-    which subsumes the metadata case for free because `compose_document`
-    includes genres and keywords. But a row is *also* stale when some third
-    title's embedding moved into its neighbourhood, and that is not decidable
-    without recomputing the row. So the artefact carries an age, not a
-    fingerprint, and it is rebuilt rather than repaired.
+    **Two causes of staleness, and as of M7 exactly one of them is a query.**
+    A row is stale when the *blend's own meaning* changed — different weights,
+    a different stored count, a different candidate pool — and that is now
+    `blend_fingerprint`, written by `replace` and counted by `count_stale`.
+    A row is *also* stale when some third title's embedding moved into its
+    neighbourhood, and that is not decidable without recomputing the row: it is
+    a fact about the whole other table rather than about this one.
+
+    So the artefact carries **both** an age and a fingerprint, and neither
+    subsumes the other. `computed_at()` is the weaker, whole-artefact signal
+    that covers the undecidable half; `count_stale` is the exact one that
+    covers the half M7 made urgent by changing what a score means. M6 shipped
+    only the first and wrote the gap down honestly; M7 closes what it can and
+    says which.
 
     Same session ownership as every other repository here: methods flush and
     return counts, and never commit.
@@ -2008,9 +2050,21 @@ class TitleNeighborRepository(ABC):
 
     @abstractmethod
     async def replace(
-        self, seed_ids: Sequence[uuid.UUID], neighbors: Sequence[ScoredNeighbor]
+        self,
+        seed_ids: Sequence[uuid.UUID],
+        neighbors: Sequence[ScoredNeighbor],
+        *,
+        blend_fingerprint: str,
     ) -> int:
         """Replace every stored row for `seed_ids` with `neighbors`.
+
+        **`blend_fingerprint` is required and keyword-only**, following
+        `CreditRepository.replace_for_titles`' `credit_names`: it is what makes
+        "write the rows now and stamp them in a second statement afterwards"
+        unspellable rather than merely discouraged. A page that committed its
+        rows and then failed before the stamp would leave rows claiming a blend
+        that did not produce them, which is the exact state the column exists
+        to detect, minted by the thing detecting it.
 
         **`seed_ids` is passed separately from the rows and that is not
         redundancy.** A seed whose neighbours all disappeared — the other
@@ -2046,6 +2100,32 @@ class TitleNeighborRepository(ABC):
         `None` means *never computed*, which is a different fact from "this
         title has no neighbours" and is what stops `usher similar` sending an
         operator to look at the wrong thing.
+        """
+
+    @abstractmethod
+    async def count_stale(
+        self, *, blend_fingerprint: str, title_id: uuid.UUID | None = None
+    ) -> int:
+        """Stored rows whose `blend_fingerprint` is not the one passed in.
+
+        **One predicate, three consumers**, which is ADR-0020's whole argument
+        expressed as a method rather than restated three times:
+        `usher.similarity.neighbors.stale` reads it whole-table, `usher similar
+        <title id>` reads it scoped to one seed, and `usher similar --rebuild`
+        is what drives it back to zero.
+
+        `title_id=None` is the whole table. A scoped call is not a convenience
+        twin — it is what lets a per-title command answer "these neighbours
+        were computed under a different blend" without minting a second
+        definition of *different*, which is how two consumers of one fact drift
+        apart.
+
+        **This answers the meaning-changed half of staleness and not the
+        other-title-was-embedded half**, and the port says so rather than
+        letting a zero here read as "the artefact is current". A row can carry
+        the running fingerprint and still be wrong, because some third title
+        was embedded into its neighbourhood since — that is undecidable per row
+        and is why `computed_at()` still exists beside this.
         """
 
 

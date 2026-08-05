@@ -33,9 +33,11 @@ from usher.ports.repository import NeighborCandidate, NeighborSeed
 from usher.services.similar import (
     _CANDIDATE_POOL,
     _NEIGHBORS_PER_TITLE,
+    _WEIGHTS,
     SimilarityService,
     _jaccard,
     _neighbors_for,
+    blend_fingerprint,
 )
 
 _SEED = uuid.UUID(int=0x10)
@@ -52,6 +54,13 @@ _LOW = uuid.UUID(int=0x17)
 _HIGH = uuid.UUID(int=0x18)
 _GENRE_TWIN = uuid.UUID(int=0x19)
 _KEYWORD_TWIN = uuid.UUID(int=0x1A)
+# `_GENOME_TWIN < _NO_GENOME < _HALF_GENOME`, so every genome case below is
+# seeded such that the tiebreak resolves a cosine-only blend to the *wrong*
+# order rather than coin-flipping it. Group C/D's class-B finding, one file
+# over: a case decided by creation order is a case that ratifies the bug.
+_GENOME_TWIN = uuid.UUID(int=0x1B)
+_NO_GENOME = uuid.UUID(int=0x1C)
+_HALF_GENOME = uuid.UUID(int=0x1D)
 
 _EPOCH = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
 
@@ -94,9 +103,14 @@ def _candidate(
     *,
     genres: Sequence[str] = (),
     keywords: Sequence[str] = (),
+    tags: float | None = None,
 ) -> NeighborCandidate:
     return NeighborCandidate(
-        title_id=title_id, cosine=cosine, genres=tuple(genres), keywords=tuple(keywords)
+        title_id=title_id,
+        cosine=cosine,
+        genres=tuple(genres),
+        keywords=tuple(keywords),
+        tags=tags,
     )
 
 
@@ -232,7 +246,7 @@ def test_a_negative_cosine_cannot_produce_a_negative_score() -> None:
     A negative cosine is not a near neighbour at all, so 0.0 loses nothing.
     """
     rows = _neighbors_for(
-        NeighborSeed(title_id=_SEED, genres=(), keywords=()),
+        NeighborSeed(title_id=_SEED, genres=(), keywords=(), has_genome=False),
         [_candidate(_OTHER, -0.8)],
     )
     assert rows[0].score == 0.0
@@ -344,7 +358,7 @@ def test_equal_scores_are_broken_by_id_so_two_rebuilds_agree() -> None:
     service's own tiebreak would be unobservable. `list.sort` is stable, so the
     mutation keeps whatever order it was handed.
     """
-    seed = NeighborSeed(title_id=_SEED, genres=("drama",), keywords=())
+    seed = NeighborSeed(title_id=_SEED, genres=("drama",), keywords=(), has_genome=False)
     rows = _neighbors_for(
         seed, [_candidate(_HIGH, 0.5, genres=("drama",)), _candidate(_LOW, 0.5, genres=("drama",))]
     )
@@ -475,3 +489,245 @@ async def test_the_rebuild_walks_every_page_of_the_population() -> None:
     assert report.rows == len(ids) * (len(ids) - 1)
     for title_id in ids:
         assert len(await neighbors.list_for(title_id, limit=100)) == len(ids) - 1
+
+
+# --- the genome, the fourth signal -----------------------------------------
+#
+# Group F measured the genome's off-diagonal spread against a bar written
+# before any vector existed and **no clause fired**: mean 0.6101, sd 0.0913,
+# min 0.2556, p1 0.4075, p99 0.8165, top-10 gap 0.2456, over all 268,157,000
+# ordered off-diagonal pairs. So Task 35's Step 1 is already answered -- the
+# term is not saturated, the vectors ship raw, and these cases size the
+# distractors against sd 0.0913 rather than against a guess.
+
+
+def test_a_genome_pair_outranks_an_equally_close_pair_without_one() -> None:
+    """Kills a fourth term that never reaches `_blend`.
+
+    The distractor carries a **marginally higher** embedding cosine and no
+    genome row, so a membership assertion (`_GENOME_TWIN in {...}`) passes
+    against every implementation, and a cosine-only scorer ranks the
+    *distractor* first. Only a blend that actually reads `tags` puts the
+    genome-bearing candidate on top.
+    """
+    rows = _neighbors_for(
+        NeighborSeed(title_id=_SEED, genres=(), keywords=(), has_genome=True),
+        [
+            _candidate(_NO_GENOME, 0.82, tags=None),
+            _candidate(_GENOME_TWIN, 0.80, tags=0.90),
+        ],
+    )
+    assert [row.neighbor_title_id for row in rows] == [_GENOME_TWIN, _NO_GENOME]
+
+
+def test_a_pair_with_one_genome_vector_scores_none_not_zero() -> None:
+    """Kills `tags=0.0` on a half-covered pair -- ADR-0014's newest site, and
+    the first where `0.0` is a value the true distribution **cannot produce**.
+
+    Every genome component is positive, so the real cosine of any real pair is
+    well above zero (Group F measured the floor at 0.2556 over 268M pairs).
+    `0.0` therefore says something no pair can say, and it says it
+    confidently.
+
+    The distractor is the third candidate: **both sides genomed at a mediocre
+    cosine**. A `0.0` implementation scores the half-missing pair on a genome
+    term of zero and ranks it *below* the mediocre-but-covered one; a correct
+    implementation drops the term for the half-missing pair, scores it on its
+    vector alone, and ranks it *above*. The two implementations therefore
+    disagree on order rather than merely on a number.
+    """
+    rows = _neighbors_for(
+        NeighborSeed(title_id=_SEED, genres=(), keywords=(), has_genome=True),
+        [
+            _candidate(_HALF_GENOME, 0.80, tags=None),
+            _candidate(_GENOME_TWIN, 0.80, tags=0.30),
+        ],
+    )
+    assert [row.neighbor_title_id for row in rows] == [_HALF_GENOME, _GENOME_TWIN]
+
+
+def test_a_pair_with_no_genome_is_scored_within_the_reweighting_bound() -> None:
+    """The only case that can see the **re-weighting** rather than the
+    addition, and the population it covers is the 98% of pairs that carry no
+    genome at all.
+
+    M6's weights are recomputed inline here rather than imported, precisely so
+    this case still means something after `_WEIGHTS` moves again: it is a claim
+    about what happened to the catalog an operator already has, not a
+    restatement of the constant.
+
+    The three carried-over weights sum to 0.75, so a no-genome pair
+    renormalises its cosine share to exactly 0.45/0.75 = 0.600 -- unchanged --
+    and `keywords`/`genres` move by +0.0167 and -0.0167. The score therefore
+    moves by `0.0167 x (keywords - genres)`, bounded by +/-0.0167.
+    """
+    m6_weights = {"cosine": 0.60, "keywords": 0.25, "genres": 0.15}
+    # A pair where the two Jaccards are maximally far apart, which is where the
+    # bound is tight: keywords 1.0 against genres 0.0.
+    seed = NeighborSeed(title_id=_SEED, genres=("drama",), keywords=("heist",), has_genome=False)
+    candidate = _candidate(_NO_GENOME, 0.5, genres=("comedy",), keywords=("heist",), tags=None)
+    signals = {"cosine": 0.5, "keywords": 1.0, "genres": 0.0}
+
+    old = sum(m6_weights[name] * value for name, value in signals.items()) / sum(
+        m6_weights.values()
+    )
+    new = _neighbors_for(seed, [candidate])[0].score
+
+    assert abs(new - old) <= 0.0167
+    # And the cosine share itself is untouched to three decimal places, which
+    # is the whole argument for 0.45/0.25/0.20/0.10 rather than round numbers.
+    assert _WEIGHTS["cosine"] / (1 - _WEIGHTS["tags"]) == pytest.approx(0.600, abs=5e-4)
+
+
+@pytest.mark.parametrize(
+    ("cosine", "planted", "expected", "unclamped"),
+    [(0.0, -0.4, 0.0, -0.142857), (1.0, 1.4, 1.0, 1.142857)],
+)
+def test_the_genome_term_is_clamped_to_the_unit_interval(
+    cosine: float, planted: float, expected: float, unclamped: float
+) -> None:
+    """`title_neighbors.score` is `CHECK (score >= 0 AND score <= 1)`, so an
+    unclamped term is a `RepositoryConflict` mid-rebuild -- a table left half
+    old and half new -- rather than a bad ordering.
+
+    Real data cannot produce either planted value: a genome vector is
+    non-negative, so the true cosine is in `[0, 1]`. **A port implementation
+    can**, which is exactly why the clamp is the service's job rather than
+    SQL's -- the same argument `cosine`'s own clamp already carries, and the
+    reason it holds for every implementation of the port rather than for the
+    one that remembered.
+
+    **The companion cosine is load-bearing and the first draft of this case
+    did not have it.** With `cosine=0.0` an unclamped `tags=1.4` blends to
+    0.5, comfortably inside `[0, 1]` -- so the case would have passed against
+    an unclamped implementation and proved nothing, which is this milestone's
+    own vacuous-fixture failure. The parameters are chosen so the *unclamped*
+    blend lands strictly outside the CHECK on both sides (`unclamped` below,
+    asserted so the fixture cannot silently stop being able to fail), and the
+    clamped blend lands exactly *on* each bound.
+    """
+    denominator = _WEIGHTS["cosine"] + _WEIGHTS["tags"]
+    assert not 0.0 <= (_WEIGHTS["cosine"] * cosine + _WEIGHTS["tags"] * planted) / denominator <= 1
+    assert (
+        _WEIGHTS["cosine"] * cosine + _WEIGHTS["tags"] * planted
+    ) / denominator == pytest.approx(unclamped, abs=1e-6)
+
+    rows = _neighbors_for(
+        NeighborSeed(title_id=_SEED, genres=(), keywords=(), has_genome=True),
+        [_candidate(_OTHER, cosine, tags=planted)],
+    )
+    assert rows[0].score == pytest.approx(expected)
+
+
+async def test_the_rebuild_reports_how_many_seeds_carried_a_genome() -> None:
+    """Kills `has_genome` filled but never counted.
+
+    The coverage figure PRD 05 has promised since before an importer existed
+    has never had a denominator, and this is the counter that produces it --
+    from the code path that consumes the vectors, rather than from a second
+    query somebody has to think to run.
+
+    Five seeds, two genomed. A rebuild reporting `seeds` alone cannot tell a
+    1.8%-covered catalog from a fully covered one.
+    """
+    service, embeddings, _ = _service()
+    ids = [uuid.UUID(int=0x300 + index) for index in range(5)]
+    step = (math.pi / 2) / 9
+    for index, title_id in enumerate(ids):
+        _, vector = planted_pair(step * (index + 1))
+        # A genome vector rather than a flag: the fake derives `has_genome`
+        # from the row, exactly as the statement derives it from an EXISTS.
+        await embeddings.given(title_id, vector, genome=(1.0, float(index)) if index < 2 else None)
+
+    report = await service.rebuild()
+
+    assert report.seeds == 5
+    assert report.seeds_with_genome == 2
+
+
+# --- the blend fingerprint -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("_WEIGHTS", {"cosine": 0.50, "tags": 0.20, "keywords": 0.20, "genres": 0.10}),
+        ("_NEIGHBORS_PER_TITLE", 26),
+        ("_CANDIDATE_POOL", 101),
+    ],
+)
+def test_the_blend_fingerprint_moves_when_any_of_the_three_constants_moves(
+    monkeypatch: pytest.MonkeyPatch, attribute: str, value: object
+) -> None:
+    """Kills a fingerprint over `_WEIGHTS` alone.
+
+    All three constants decide what a stored score *means*, and the two that
+    are not weights are the ones a reader is most likely to think are
+    incidental. `_NEIGHBORS_PER_TITLE` changes no score at all -- it changes
+    which pairs are **stored**, so a table rebuilt at 10 and read as though it
+    were 25 is missing rows nobody can see are missing. `_CANDIDATE_POOL`
+    decides which pairs were ever **considered**, so shrinking it can silently
+    drop a title's true nearest neighbour while every stored row stays
+    perfectly valid.
+
+    A fingerprint blind to either reports a table as current across exactly
+    the changes that make it wrong without making it look wrong.
+    """
+    before = blend_fingerprint()
+    monkeypatch.setattr(f"usher.services.similar.{attribute}", value)
+    assert blend_fingerprint() != before
+
+
+def test_reordering_the_weights_without_changing_one_leaves_the_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kills a fingerprint over `repr(_WEIGHTS)` or an unsorted `json.dumps`.
+
+    `_WEIGHTS` is a `dict` and Python preserves insertion order, so the
+    obvious spellings mint a new digest for a purely cosmetic edit -- which
+    declares every row in the table stale, and instructs an operator to spend
+    a full rebuild on a no-op. The failure is not that it is wrong; it is that
+    it cries wolf, and the next genuine change is the one nobody rebuilds for.
+    """
+    before = blend_fingerprint()
+    monkeypatch.setattr(
+        "usher.services.similar._WEIGHTS",
+        {"genres": 0.10, "cosine": 0.45, "keywords": 0.20, "tags": 0.25},
+    )
+    assert blend_fingerprint() == before
+
+
+async def test_a_rebuild_stamps_the_running_fingerprint_so_nothing_reads_stale() -> None:
+    """The zero case, and it is what makes a non-zero count mean something."""
+    service, embeddings, _ = _service()
+    for index, title_id in enumerate((_SEED, _OTHER)):
+        _, vector = planted_pair((math.pi / 2) / (index + 3))
+        await embeddings.given(title_id, vector)
+    await service.rebuild()
+
+    assert await service.stale_neighbors() == 0
+
+
+async def test_rows_written_under_a_previous_blend_read_as_stale() -> None:
+    """The state M7 created and M6 could not have detected.
+
+    Every row stored before this milestone came from a three-signal blend at
+    different weights. Both halves of such a table are in `[0, 1]`, both carry
+    a plausible `rank`, and **nothing distinguished them** -- so an operator
+    reading `computed_at()` sees one recent timestamp and concludes the
+    artefact is current, which it is, for the wrong definition of current.
+
+    Scoped to one seed as well as whole-table, because that is what
+    `usher similar <title id>` reports and the two must not be able to
+    disagree about what "different blend" means.
+    """
+    service, embeddings, neighbors = _service()
+    for index, title_id in enumerate((_SEED, _OTHER)):
+        _, vector = planted_pair((math.pi / 2) / (index + 3))
+        await embeddings.given(title_id, vector)
+    await service.rebuild()
+    neighbors.given_fingerprint(_SEED, "a-fingerprint-from-m6")
+
+    assert await service.stale_neighbors(title_id=_SEED) == 1
+    assert await service.stale_neighbors(title_id=_OTHER) == 0
+    assert await service.stale_neighbors() == 1

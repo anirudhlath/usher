@@ -377,9 +377,11 @@ first in-process consumer.
   genome movies is **1.82%** of a full catalog's 899,828 movies, **1.29%** of
   all 1,271,138 titles, and **8.7%** of [04](04-catalog-bootstrap.md)'s "~189k
   titles with ≥100 IMDb votes" priority tier — which is the denominator that
-  makes the "~7%" this line used to carry roughly right. ⏳ The number that
-  matters is coverage of the *enriched tier*, which the phase reports and
-  which has not yet been measured against a real enriched catalog. Two
+  makes the "~7%" this line used to carry roughly right. **M7 blends it in at
+  weight 0.25** — see the four-way blend below. The number that matters is
+  coverage of the *enriched tier* and of the **candidate pairs** a rebuild
+  actually scores; both are reported by `usher similar --rebuild` itself, and
+  the measured figures are in [09](09-roadmap.md)'s M7 section. Two
   vectors are comparable only when they came from the same release, which is
   what `genome_scores.genome_revision` records and what
   `GenomeRepository.get_pair` refuses to blend across,
@@ -396,14 +398,59 @@ the MovieLens tag-genome importer had never been built at that point (it
 shipped in M7: `movielens` is a bootstrap phase and
 `adapters/bulk/movielens.py` exists, so this signal now has data — blending it
 in is M7's own similarity work, not M6's); and `titles.collection_id`
-is a bare nullable UUID with no table that nothing in `src/` writes. So M6 ships
+is a bare nullable UUID with no table that nothing in `src/` writes. So M6 shipped
 **embedding cosine (0.60) plus keyword Jaccard (0.25) and genre Jaccard
-(0.15)**, written as a sum of weighted terms over an explicit signal list, so
-that landing a third signal is one entry and one accessor rather than a
-rewritten scorer. The weights are **chosen with an argument, not measured** —
-nothing in M6 measures similarity relevance — and they are constants rather than
-settings, because changing one changes what "similar" means and every stored row
-was written under the old meaning.
+(0.15)**, written as a sum of weighted terms over an explicit signal list.
+
+**M7 lands the third signal, and the blend is now four terms:**
+
+| Term | M6 | M7 | Renormalised when `tags` is absent |
+|---|---|---|---|
+| `cosine` | 0.60 | 0.45 | 0.45 / 0.75 = **0.600** |
+| `tags` | — | **0.25** | absent |
+| `keywords` | 0.25 | 0.20 | 0.20 / 0.75 = **0.267** |
+| `genres` | 0.15 | 0.10 | 0.10 / 0.75 = **0.133** |
+
+**The three carried-over weights sum to 0.75, and that is the whole argument
+for these numbers rather than round ones.** `_blend` renormalises over the
+signals that are *present*, so on a pair with no genome — the overwhelming
+majority of them — the cosine share is **exactly 0.600, unchanged to three
+decimal places**, while keywords and genres move by +0.0167 and −0.0167. Such
+a pair's score therefore moves by `0.0167 × (keywords − genres)`, **bounded by
+±0.0167**, and two of them can only swap if they were already within 0.033 of
+each other. That is an arithmetic bound with a real residual, not a claim that
+the existing ordering is preserved.
+
+**A pair where only one side has a genome vector scores `None`, never 0.0**
+([ADR-0014](decisions/0014-absence-is-not-zero.md)). This is the first site
+where `0.0` is not merely uninformative but *unreachable by real data*: every
+genome component is positive, so the true cosine of any real pair is well above
+zero — measured floor **0.2556** over all 268,157,000 ordered off-diagonal
+pairs, mean 0.6101, sd 0.0913.
+
+**The genome term's spread was measured before its weight was chosen, and its
+relevance was not.** The saturation bar was written down first — saturated if
+mean ≥ 0.70, or p1 ≥ 0.50, or sd < 0.05, or the top-10 neighbour gap < 0.15 —
+and no clause fired, so the vectors ship raw rather than mean-centred. That
+says the term is not inert. It says nothing about whether 0.25 beats 0.20: the
+weights remain **chosen with an argument, not measured**, because nothing in
+this project measures similarity relevance and M7 does not change that. The two
+claims are kept apart deliberately.
+
+They stay constants rather than settings, because changing one changes what
+"similar" means and every stored row was written under the old meaning — which
+is now a *detectable* condition rather than a warning, since
+`title_neighbors.blend_fingerprint` records which blend produced each row.
+
+**What the third signal actually cost, because M6 published an estimate and it
+was optimistic.** M6 wrote that landing a third signal is "one entry and one
+accessor rather than a rewritten scorer". True of the scorer exactly — `_blend`
+is untouched and no consumer of `title_neighbors` changed — but the value has to
+*come from* somewhere, and the neighbour DTOs live on a **port**. The measured
+bill: one `_WEIGHTS` entry, one accessor, **two port DTO fields, two widened
+statements, both fakes, and the port's abstract-method pin**. The signal list
+really is the extension point; the sentence understated the blast radius of a
+port change, and is corrected here rather than quoted.
 
 Genres and keywords are **two terms rather than one Jaccard over their union**,
 and the reason is vocabulary size: genres are a closed set of about nineteen

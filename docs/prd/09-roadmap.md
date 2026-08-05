@@ -368,10 +368,31 @@ and is therefore the first whose output is measurably worse without it
 ([06](06-rows-and-recommendations.md) names it as a row input). What it costs:
 one `BulkDataset` implementation, one entry in `PHASES`, one table, one
 licence row in [04](04-catalog-bootstrap.md), and one weighted term in
-`SimilarityService`'s existing signal list. **And if M7 also declines it**:
-[05](05-search-and-similarity.md)'s ~7% coverage figure stays a plan rather
-than a measurement, and its four-way blend stays a two-way one. Said out loud,
-rather than left for a table of four bullets to imply four shipped signals.
+`SimilarityService`'s existing signal list.
+
+**Shipped in M7, and the cost line above was wrong in two places — corrected
+here rather than quoted.**
+
+- **"One weighted term" is one entry and one accessor *in the scorer*, plus two
+  port DTO fields, two widened statements, both fakes, and the port's
+  abstract-method pin.** `NeighborSeed`/`NeighborCandidate` live in
+  `ports/repository.py`, so a fourth signal is a **port** change — which is a
+  fake change and a surface-pin change by construction. `_blend` itself is
+  untouched, so the *spirit* of the estimate held; its blast radius did not.
+- **The list omitted invalidation entirely, which turned out to be the larger
+  item.** Adding the term re-weights the other three, so every row already in
+  `title_neighbors` was computed under a different meaning — and nothing
+  distinguished the halves. M7 therefore also ships
+  `title_neighbors.blend_fingerprint` (migration `ffb`, the milestone's fifth
+  against a plan budgeting four, named in advance rather than discovered),
+  `usher.similarity.neighbors.stale`, and a `usher similar` that says so per
+  title. **A full `usher similar --rebuild` is required after upgrading, and
+  nothing schedules it.**
+
+That fingerprint closes the *meaning-changed* half of staleness and explicitly
+**not** the *some-other-title-was-embedded* half, which remains undecidable per
+row exactly as M6 argued. M6's age-not-fingerprint reasoning stands and is not
+reversed.
 
 **M9 owes ADR-0012 a successor.** In v1, `POST /titles/{id}/play` returns a
 target URL carrying the source's session token, because M3 has no HTTP surface

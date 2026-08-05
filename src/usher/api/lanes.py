@@ -403,7 +403,11 @@ class LaneSupervisor:
                         requeued = True
                     ran = await worker.run_once()
                     await self._gauges.refresh(pipeline.queue)
-                    await self._backlog.refresh(pipeline.embeddings, self._settings.embedding_model)
+                    await self._backlog.refresh(
+                        pipeline.embeddings,
+                        pipeline.neighbors,
+                        self._settings.embedding_model,
+                    )
             except asyncio.CancelledError:
                 if registry is not None:
                     await registry.aclose()

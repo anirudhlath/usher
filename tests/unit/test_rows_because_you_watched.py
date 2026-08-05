@@ -23,6 +23,13 @@ from usher.services.rows.because_you_watched import (
     BecauseYouWatchedProvider,
 )
 
+# The blend these arranged rows claim to have been computed under. A literal,
+# never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
+# express "this row came from a different blend", which is the whole state the
+# column exists to describe.
+_FP = "arranged-by-a-test"
+
+
 pytestmark = pytest.mark.anyio
 
 
@@ -46,6 +53,7 @@ async def _neighbours(
             )
             for rank, neighbour_id in enumerate(neighbour_ids)
         ],
+        blend_fingerprint=_FP,
     )
 
 

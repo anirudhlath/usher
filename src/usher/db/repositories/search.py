@@ -189,8 +189,15 @@ _POPULATION = "t.enrichment_state <> 'skeleton'"
 # refused title -- one whose composed document was degenerate -- is written as a
 # row with a NULL vector precisely so it stops matching the stale predicate;
 # there is nothing to search *from*, so it is not a seed.
+#
+# `has_genome` is an `EXISTS` rather than a `LEFT JOIN`, because the question
+# is membership and the vector is a TOASTed `halfvec(1128)`: a join would fetch
+# 2,256 bytes per seed to answer a boolean. It is read by the *rebuild*, which
+# counts it, and never by the blend -- the genome cosine is a property of a
+# pair and rides on `NeighborCandidate` instead.
 _LIST_EMBEDDED = """
-SELECT e.title_id, t.genres, t.keywords
+SELECT e.title_id, t.genres, t.keywords,
+       EXISTS (SELECT 1 FROM genome_scores AS g WHERE g.title_id = e.title_id) AS has_genome
 FROM title_embeddings AS e
 JOIN titles AS t ON t.id = e.title_id
 WHERE e.embedding IS NOT NULL
@@ -241,6 +248,40 @@ WHERE seed.title_id = ANY(:seed_ids) AND seed.embedding IS NOT NULL
 
 _TAGS_FOR = "SELECT id, genres, keywords FROM titles WHERE id = ANY(:title_ids)"
 
+# The genome cosine, per **pair**, and it is a separate statement for exactly
+# the reason `titles` is not joined into `_NEAREST`: that statement runs inside
+# `_EXACT_SCAN_OFF`, and with `enable_indexscan = off` a join to
+# `genome_scores` degrades to a **sequential scan of the whole genome table
+# once per seed**.
+#
+# **The M7 plan says to put this inside `_NEAREST` and to avoid "a third round
+# trip per page". Measured on the real 15,565-row table, that is the more
+# expensive spelling, and the margin grows with the page:**
+#
+# | page | `_NEAREST` alone | joined inside (the plan) | separate statement |
+# |---|---|---|---|
+# | 50 seeds | 165.7-166.2 ms | **246.6-255.4 ms (+49%)** | 165.9 + 20.3 = 186.2 ms (+12%) |
+# | 200 seeds | 619.9 ms | **958.1 ms (+55%)** | (one hash build, unchanged) |
+#
+# The plan shape is what makes it decisive rather than the timings:
+# `Seq Scan on genome_scores gc ... loops=200` -- once per seed, 15,565 rows
+# each time. Outside the bracket the same work is one hash build over
+# `genome_scores` shared by every pair in the page.
+#
+# **An `INNER JOIN`, and that is the ADR-0014 rule expressed structurally.** A
+# pair where either side has no `genome_scores` row simply produces no row
+# here, and the adapter maps an absent pair to `tags=None`. A `LEFT JOIN` would
+# hand back an explicit NULL that means the identical thing, one nullable
+# column later; an implementation tempted to `COALESCE` it has to reach past
+# the absence to do so.
+_GENOME_PAIRS = """
+SELECT p.seed_id, p.neighbor_id, 1 - (gs.relevance <=> gc.relevance) AS tags
+FROM unnest(CAST(:seed_ids AS uuid[]), CAST(:neighbor_ids AS uuid[]))
+     AS p(seed_id, neighbor_id)
+JOIN genome_scores AS gs ON gs.title_id = p.seed_id
+JOIN genome_scores AS gc ON gc.title_id = p.neighbor_id
+"""
+
 # **Exact, not approximate, and bracketed around one statement rather than left
 # on for the transaction.** PRD 05 puts brute-force exact cosine at this scale
 # (10k x 384 halfvec is 7.7 MB, inside this host's 96 MB L3), and the argument
@@ -279,11 +320,21 @@ _DELETE_NEIGHBORS = "DELETE FROM title_neighbors WHERE title_id = ANY(:seed_ids)
 # a page writes shares one instant and `min(computed_at)` is genuinely the
 # oldest *page* rather than the oldest row.
 _INSERT_NEIGHBORS = """
-INSERT INTO title_neighbors (title_id, neighbor_id, score, rank)
-SELECT * FROM unnest(
+INSERT INTO title_neighbors (title_id, neighbor_id, score, rank, blend_fingerprint)
+SELECT *, :blend_fingerprint FROM unnest(
     CAST(:title_ids AS uuid[]), CAST(:neighbor_ids AS uuid[]),
     CAST(:scores AS double precision[]), CAST(:ranks AS integer[])
 )
+"""
+
+# The staleness predicate, and there is exactly one of it. `usher similar
+# <title id>` scopes it to a seed, `usher.similarity.neighbors.stale` does not,
+# and both read the same clause -- which is what stops two consumers of one
+# fact drifting apart.
+_COUNT_STALE_NEIGHBORS = """
+SELECT count(*) FROM title_neighbors
+WHERE blend_fingerprint <> :blend_fingerprint
+  AND (CAST(:title_id AS uuid) IS NULL OR title_id = CAST(:title_id AS uuid))
 """
 
 # `ORDER BY rank`, not `ORDER BY score DESC`. The batch's own ordering is
@@ -518,7 +569,10 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
             )
         return [
             NeighborSeed(
-                title_id=row.title_id, genres=tuple(row.genres), keywords=tuple(row.keywords)
+                title_id=row.title_id,
+                genres=tuple(row.genres),
+                keywords=tuple(row.keywords),
+                has_genome=bool(row.has_genome),
             )
             for row in result.all()
         ]
@@ -542,10 +596,14 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                 # which is the kind of degradation nothing reports.
                 for statement in _EXACT_SCAN_ON:
                     await self._session.execute(text(statement))
-            # The tag read runs *after* the bracket, with indexes back: it is a
-            # primary-key lookup into `titles`, and the whole reason it is a
-            # second statement rather than a join inside the LATERAL.
+            # Both tag reads run *after* the bracket, with indexes back. For
+            # `titles` it is a primary-key lookup; for `genome_scores` it is
+            # one hash build shared by the whole page instead of one sequential
+            # scan per seed. That is the whole reason each is a second
+            # statement rather than a join inside the LATERAL -- measured, and
+            # written out above `_GENOME_PAIRS`.
             tags = await self._tags_for({row.neighbor_id for row in rows})
+            genome = await self._genome_pairs([(row.seed_id, row.neighbor_id) for row in rows])
         answer: dict[uuid.UUID, list[NeighborCandidate]] = {}
         for row in rows:
             genres, keywords = tags.get(row.neighbor_id, ((), ()))
@@ -558,9 +616,31 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
                     cosine=float(row.cosine),
                     genres=genres,
                     keywords=keywords,
+                    # Absent means "one of these two has no genome vector",
+                    # which is `None` and never 0.0 (ADR-0014).
+                    tags=genome.get((row.seed_id, row.neighbor_id)),
                 )
             )
         return answer
+
+    async def _genome_pairs(
+        self, pairs: Sequence[tuple[uuid.UUID, uuid.UUID]]
+    ) -> dict[tuple[uuid.UUID, uuid.UUID], float]:
+        """The genome cosine for each pair that has one, keyed by the pair.
+
+        Pairs the statement does not answer for are simply absent, which is
+        what the caller turns into `tags=None`.
+        """
+        if not pairs:
+            return {}
+        result = await self._session.execute(
+            text(_GENOME_PAIRS),
+            {
+                "seed_ids": [seed_id for seed_id, _ in pairs],
+                "neighbor_ids": [neighbor_id for _, neighbor_id in pairs],
+            },
+        )
+        return {(row.seed_id, row.neighbor_id): float(row.tags) for row in result.all()}
 
     async def _tags_for(
         self, title_ids: set[uuid.UUID]
@@ -589,7 +669,11 @@ class PostgresTitleNeighborRepository(TitleNeighborRepository):
         self._session = session
 
     async def replace(
-        self, seed_ids: Sequence[uuid.UUID], neighbors: Sequence[ScoredNeighbor]
+        self,
+        seed_ids: Sequence[uuid.UUID],
+        neighbors: Sequence[ScoredNeighbor],
+        *,
+        blend_fingerprint: str,
     ) -> int:
         if not seed_ids:
             return 0
@@ -607,6 +691,12 @@ class PostgresTitleNeighborRepository(TitleNeighborRepository):
                                 "neighbor_ids": [row.neighbor_title_id for row in neighbors],
                                 "scores": [row.score for row in neighbors],
                                 "ranks": [row.rank for row in neighbors],
+                                # Stamped by the same statement that writes the
+                                # rows, never by a second one afterwards: a page
+                                # that committed and then failed before the
+                                # stamp would mint exactly the mislabelled row
+                                # this column exists to catch.
+                                "blend_fingerprint": blend_fingerprint,
                             },
                         )
         except IntegrityError as exc:
@@ -641,6 +731,16 @@ class PostgresTitleNeighborRepository(TitleNeighborRepository):
         with self._session.no_autoflush:
             result = await self._session.execute(text(_OLDEST_NEIGHBOR))
         return result.scalar_one_or_none()
+
+    async def count_stale(
+        self, *, blend_fingerprint: str, title_id: uuid.UUID | None = None
+    ) -> int:
+        with self._session.no_autoflush:
+            result = await self._session.execute(
+                text(_COUNT_STALE_NEIGHBORS),
+                {"blend_fingerprint": blend_fingerprint, "title_id": title_id},
+            )
+        return int(result.scalar_one())
 
 
 def _as_vector_literal(embedding: tuple[float, ...] | None) -> str | None:

@@ -158,6 +158,14 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
             CollectionRepository,
             {"upsert_many", "resolve_tmdb_ids", "attach_titles", "list_owned", "count"},
         ),
+        # Not one of Task 6's three, and added here by M7's Task 35 because
+        # this is exactly the list that catches what that task did: it grew
+        # `count_stale` on a port six milestones old, and nothing else in the
+        # suite would have noticed the surface move.
+        (
+            TitleNeighborRepository,
+            {"replace", "list_for", "computed_at", "count_stale"},
+        ),
     ],
 )
 def test_the_new_repository_ports_declare_exactly_these_abstract_methods(

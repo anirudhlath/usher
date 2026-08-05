@@ -132,3 +132,42 @@ statements per batch regardless of size. Fifteen mutations were run against
 it, including the one-statement form itself; every one was caught, and a
 plausible-but-wrong per-row implementation carrying that spelling fails 11
 of the 25 shared contract cases.
+
+### The site where `0.0` is not merely uninformative but unreachable
+
+Added by M7's similarity work, and it is worth its own section because it is
+the first application where the wrong answer is a value **the true
+distribution cannot produce**.
+
+`NeighborCandidate.tags` is the MovieLens tag-genome cosine for a *pair* of
+titles, and it is `None` when **either** side has no `genome_scores` row. Every
+other site in this ADR is a case where `0.0` is a plausible-but-unevidenced
+reading of the same fact — "played zero times" against "we did not ask". Here
+`0.0` is not even plausible:
+
+- every component of a genome vector is a relevance in `[0.00025, 1.0]`, so a
+  cosine between two of them is bounded strictly above zero by construction;
+- measured over all **268,157,000** ordered off-diagonal pairs of the real
+  16,376-vector release: **minimum 0.2556**, p1 0.4075, mean 0.6101.
+
+So writing `0.0` for a half-covered pair asserts that two films share no tags,
+which **no real pair can truthfully say** — the single most confident wrong
+statement available in the blend.
+
+**And its consequence is structural rather than marginal.** `_blend`
+renormalises over the signals that are present, so `None` correctly drops the
+term and scores the pair on what is known. `0.0` instead applies a maximally
+negative genome term to every pair that straddles the coverage boundary — which
+reorders every genome-bearing title's neighbour list to put every *other*
+genome-bearing title above every un-genomed one. At the genome's real coverage
+that is a small clique pinned to the top of the overwhelming majority of
+lists, produced by a value no measurement supports, with no error and nothing
+in any gauge to see it.
+
+The clamp that keeps `tags` inside `[0, 1]` lives in the **service**, not in
+SQL, for the reason `cosine`'s clamp already does: `title_neighbors.score` is
+`CHECK (score >= 0 AND score <= 1)`, so the bound has to hold for every
+implementation of the port rather than for the one that remembered. And
+`_clamped` is a function rather than a `min`/`max` at the call site precisely
+because of this ADR: `max(0.0, value or 0.0)` is the obvious repair for the
+`None` arm and it silently reintroduces the collapse.

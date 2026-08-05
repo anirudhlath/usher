@@ -6,23 +6,59 @@ is exactly right: what "similar" *means* is a decision about meaning, and it
 must not be able to reach a `halfvec`, an operator class or an index. The
 database computes distances; this module decides what to do with them.
 
-**Two of PRD 05's four signals do not exist in `src/` and the blend says so by
-its shape.** No `Person`/`Credit` table (boundary call 2), and the MovieLens
-tag-genome importer has never been built -- `PHASES` has no `movielens` phase
-and `adapters/bulk/` has no `movielens.py`. `collection_id` is a bare nullable
-UUID with no table that nothing in `src/` writes. So the blend is a **sum of
-weighted terms over an explicit signal list**, and landing a third signal is one
-`_WEIGHTS` entry, one accessor and one case -- not a rewritten scorer.
+**Three of PRD 05's four signals exist as of M7.** The MovieLens tag genome is
+the third and landed in this milestone; `Person`/`Credit` now exist but feed
+the *search document*'s weight class B rather than this blend, so the fourth
+PRD 05 signal -- a credit-overlap term -- is still unbuilt.
 
-**And this module is the milestone's one acknowledged gap, stated rather than
-dressed up.** Everything else M6 derives is either fresh by construction (the
-generated column) or carries the fingerprint of its input (`title_embeddings`).
-A neighbour row is neither: it goes stale when *some other title* gets an
-embedding, which no per-row predicate can decide. `computed_at()` is a
-whole-artefact age, `None` means never computed, and nothing in M6 re-runs the
-rebuild -- `usher similar --rebuild` is an operator's or a cron entry's job.
+**M6 promised what a third signal would cost, and the promise was slightly
+optimistic. Corrected here rather than quoted.** It read: *"landing a third
+signal is one `_WEIGHTS` entry, one accessor and one case -- not a rewritten
+scorer."* Measured by doing it:
+
+- **True of the scorer, exactly.** `_blend(**signals)` iterates `_WEIGHTS`, so
+  `tags=...` at the call site in `_neighbors_for` was the whole of the change
+  here. `_blend` itself is untouched, and no consumer of `title_neighbors`
+  changed.
+- **Understated everywhere else.** The value has to *come from* somewhere, and
+  `NeighborSeed`/`NeighborCandidate` are in `ports/repository.py`, not in
+  `services/`. So the real bill is **one `_WEIGHTS` entry, one accessor, two
+  port DTO fields, two widened statements, both fakes, and the contract
+  suite** -- a port change, which is a fake change and a contract-suite change
+  by construction.
+
+The promise's *spirit* holds and that is why the sentence is corrected rather
+than deleted: the signal list really is the extension point, and nothing about
+the scorer was rewritten. PRD 05 and PRD 09 carry the same correction.
+
+**A pairwise signal cannot ride on a per-candidate statement.** `_TAGS_FOR`
+answers "what genres and keywords does this candidate have"; a genome cosine is
+a property of the *pair*, so it has no expression there at all. That is a
+structural fact about the signal rather than a preference about SQL, and it is
+what makes the second widened statement a genuinely different shape from the
+first.
+
+**This module was M6's one acknowledged freshness gap, and M7 closes half of
+it.** Two things make a neighbour row stale and they are not the same:
+
+1. **The row's own meaning changed** -- the weights, the stored count or the
+   candidate pool moved, so a score computed yesterday is not comparable with
+   one computed today. M7 makes this urgent by *doing* it: every row written
+   before this milestone came from a three-signal blend at different weights,
+   and nothing could tell the halves apart. `title_neighbors.blend_fingerprint`
+   closes it, and `blend_fingerprint()` below is the one definition.
+2. **Some other title was embedded** and now belongs in this row. That is
+   genuinely undecidable per row -- it is a fact about the whole other table --
+   and M7 leaves it exactly where M6 left it: `computed_at()` is a
+   whole-artefact age, `None` means never computed, and **nothing schedules
+   `usher similar --rebuild`.** It is an operator's command or a cron entry.
+
+Saying which half is closed is the difference between an improvement and a
+claim. [ADR-0020](../../../docs/prd/decisions/0020-derived-state-carries-its-fingerprint.md).
 """
 
+import hashlib
+import json
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -56,10 +92,52 @@ _tracer = trace.get_tracer("usher.similar")
 # rather than a coincidence. Its weakness is coverage, which is exactly why
 # absence excludes the term instead of scoring it zero.
 #
-# `genres` 0.15: a guard, not a driver -- it stops the vector pairing a war
+# `genres` 0.10: a guard, not a driver -- it stops the vector pairing a war
 # documentary with a war film's trailer. Smallest because it *saturates*: a
 # closed set of roughly nineteen values with two to four per title means any
 # two dramas score 0.33 or better against each other regardless of subject.
+#
+# `tags` 0.25: the MovieLens tag genome, landed in M7. The same weight
+# `keywords` used to carry, because it is the same *kind* of claim -- a topical
+# vocabulary over the work's content -- made better: 1,128 dimensions of
+# human-scored relevance against a sparse editorial keyword list, dense where
+# keywords are long-tail. Not higher than `cosine`, which is the only term
+# computed over the actual prose and the only one present on *every* embedded
+# pair. Not lower than `keywords`, because if a human-scored 1,128-dimension
+# relevance vector is worth less than a keyword set it is not worth landing.
+#
+# **The term is not saturated, and that was measured before the weight was
+# chosen.** The bar was written down first -- saturated if mean >= 0.70, or
+# p1 >= 0.50, or sd < 0.05, or the top-10 neighbour gap < 0.15 -- and over all
+# 16,376 vectors and all **268,157,000** ordered off-diagonal pairs the genome
+# measures **mean 0.6101, sd 0.0913, min 0.2556, p1 0.4075, p99 0.8165, top-10
+# gap 0.2456**. No clause fired, so the vectors ship raw rather than
+# mean-centred. For comparison, this repository already ships a signal that is
+# *more* crowded: real embeddings over name-only skeletons are mean 0.5867 /
+# sd 0.055, recorded as "crowded, but ordered".
+#
+# **Re-weighting is the decision; the addition is the easy half.** `_blend`
+# renormalises over *present* signals, so a pair with a genome vector and a
+# pair without are scored on different denominators -- by design, and it is
+# also what makes "did the weights change the ordering" hard to see, because
+# the two populations are not comparable by construction. The three
+# carried-over weights therefore sum to **0.75**, and that is the whole
+# argument for these numbers rather than round ones: on a pair with no genome
+# the renormalised cosine share is **0.45 / 0.75 = 0.600, unchanged to three
+# decimal places**, while keywords and genres move by +0.0167 and -0.0167. So
+# such a pair's score moves by `0.0167 x (keywords - genres)`, bounded by
+# **+/-0.0167**, and two of them can only swap if they were already within
+# 0.033 of each other. That is an arithmetic bound with a real residual, not a
+# claim that the ordering is preserved. Pinned by
+# `test_a_pair_with_no_genome_is_scored_within_the_reweighting_bound`.
+#
+# **And 0.25 is chosen with an argument, not measured.** Nothing in this
+# project measures similarity *relevance*, and M7 does not change that. The
+# measurement above is of the signal's **spread**, which is a property of the
+# data and decides whether the term is inert; it says nothing about whether
+# 0.25 beats 0.20. The two claims are kept apart deliberately -- a weight with
+# a measurement beside it that measures something else is worse than a weight
+# with no measurement at all.
 #
 # **Two terms rather than one Jaccard over the union**, for that same reason:
 # five genre elements vanish inside a forty-element keyword union and the term
@@ -72,7 +150,12 @@ _tracer = trace.get_tracer("usher.similar")
 # the old meaning. A setting invites a table half-computed under each
 # definition with nothing to tell them apart -- the state this milestone exists
 # to eliminate. Changing one here is a code change *plus a rebuild*.
-_WEIGHTS: dict[str, float] = {"cosine": 0.60, "keywords": 0.25, "genres": 0.15}
+_WEIGHTS: dict[str, float] = {
+    "cosine": 0.45,
+    "tags": 0.25,
+    "keywords": 0.20,
+    "genres": 0.10,
+}
 
 # 20 is where the halfvec ordering starts to diverge from float32, and there
 # the scores are already within 2e-4. 25 is deliberately just past it: PRD 06's
@@ -88,6 +171,50 @@ _NEIGHBORS_PER_TITLE = 25
 _CANDIDATE_POOL = 100
 
 
+def blend_fingerprint() -> str:
+    """What a stored `title_neighbors.score` *means*, as 32 hex characters.
+
+    **The one definition, with three consumers**: the rebuild stamps it,
+    `usher similar <title id>` compares against it, and
+    `usher.similarity.neighbors.stale` counts rows that disagree with it. That
+    is [ADR-0020](../../../docs/prd/decisions/0020-derived-state-carries-its-fingerprint.md)'s
+    argument in one function -- staleness is a *query*, not an inference.
+
+    **The three constants are exactly the ones that decide a score, and no
+    others.** `_WEIGHTS` is what each signal is worth; `_NEIGHBORS_PER_TITLE`
+    is how many rows survive, so moving it changes which pairs are *stored*
+    even though it changes no score; `_CANDIDATE_POOL` decides which pairs were
+    ever *considered*, so a smaller pool can silently exclude the true nearest
+    neighbour. A row written under any different combination is not comparable
+    with one written under this, and before this column existed nothing could
+    tell them apart -- both are in `[0, 1]`, both carry a plausible `rank`.
+
+    **`sort_keys` on both levels is load-bearing.** `_WEIGHTS` is a `dict`, and
+    Python preserves insertion order, so reordering the four entries without
+    changing a single number would otherwise mint a new fingerprint and declare
+    the whole table stale for a no-op edit.
+
+    **What this does *not* answer**, stated rather than implied: whether some
+    *other* title has been embedded since this row was computed. That half is
+    undecidable per row -- it is a fact about the whole other table -- and M7
+    leaves it exactly where M6 left it. The module docstring carries the two
+    halves side by side.
+    """
+    payload = json.dumps(
+        {
+            "weights": dict(sorted(_WEIGHTS.items())),
+            "neighbors_per_title": _NEIGHBORS_PER_TITLE,
+            "candidate_pool": _CANDIDATE_POOL,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    # `usedforsecurity=False` for the reason `services/search.py` already
+    # records: this is a change-detection digest, not a security primitive, and
+    # the column is sized for 32 hex characters.
+    return hashlib.md5(payload.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class NeighborRebuild:
     """What one `usher similar --rebuild` did, as an operator reads it."""
@@ -100,6 +227,21 @@ class NeighborRebuild:
     # operator finds out that a swathe of the catalog composes to an empty
     # document.
     without_embedding: int
+    # **The genome's coverage, reported by the path that consumes it.** PRD 05
+    # has promised "~7% coverage" since before an importer existed and has
+    # never said of what; these three are the denominators that answer it, and
+    # they arrive from the rebuild rather than from a second query somebody has
+    # to think to run.
+    #
+    # `seeds_with_genome` is the *title* rate over the embedded population.
+    # `pairs_with_tags / candidate_pairs` is the **pair** rate, which is the
+    # one that decides whether the term can promote anything -- and it is
+    # measured rather than squared. Genome membership and pool membership both
+    # correlate with popularity and with enrichment, so `coverage ** 2` is
+    # wrong in an unknown direction.
+    seeds_with_genome: int
+    candidate_pairs: int
+    pairs_with_tags: int
 
 
 class SimilarityService:
@@ -182,6 +324,13 @@ class SimilarityService:
             after: uuid.UUID | None = None
             seeds = 0
             rows = 0
+            seeds_with_genome = 0
+            candidate_pairs = 0
+            pairs_with_tags = 0
+            # Resolved once per rebuild, not per page: the constants cannot
+            # move mid-run, and a per-page call would let a table be stamped
+            # with two fingerprints if they somehow could.
+            fingerprint = blend_fingerprint()
             while True:
                 page = await self._embeddings.list_embedded(after=after, limit=page_size)
                 if not page:
@@ -194,20 +343,54 @@ class SimilarityService:
                     for seed in page
                     for row in _neighbors_for(seed, candidates.get(seed.title_id, []))
                 ]
+                seeds_with_genome += sum(1 for seed in page if seed.has_genome)
+                # Counted over the **pool**, not over the stored rows: the
+                # question the number answers is whether the term had anything
+                # to promote, and a candidate the blend demoted out of the top
+                # 25 still had its tag cosine read.
+                for seed in page:
+                    pool = candidates.get(seed.title_id, [])
+                    candidate_pairs += len(pool)
+                    pairs_with_tags += sum(1 for one in pool if one.tags is not None)
                 # The seed ids go in separately from the rows: a seed whose
                 # neighbours all disappeared contributes none, and a delete
                 # scoped to the rows would leave its stale ones forever.
-                rows += await self._neighbors.replace([seed.title_id for seed in page], written)
+                rows += await self._neighbors.replace(
+                    [seed.title_id for seed in page], written, blend_fingerprint=fingerprint
+                )
                 seeds += len(page)
                 after = page[-1].title_id
                 await self._commit()
             span.set_attribute("usher.similar.seeds", seeds)
             span.set_attribute("usher.similar.rows", rows)
+            span.set_attribute("usher.similar.seeds_with_genome", seeds_with_genome)
+            span.set_attribute("usher.similar.candidate_pairs", candidate_pairs)
+            span.set_attribute("usher.similar.pairs_with_tags", pairs_with_tags)
             return NeighborRebuild(
                 seeds=seeds,
                 rows=rows,
                 without_embedding=await self._embeddings.count_without_embedding(),
+                seeds_with_genome=seeds_with_genome,
+                candidate_pairs=candidate_pairs,
+                pairs_with_tags=pairs_with_tags,
             )
+
+    async def stale_neighbors(self, *, title_id: uuid.UUID | None = None) -> int:
+        """Stored rows whose blend fingerprint is not the running one.
+
+        Whole-table by default, which is `usher.similarity.neighbors.stale`;
+        scoped to one seed for `usher similar <title id>`, which is how that
+        command can say "these neighbours were computed under a different
+        blend" without a second definition of what "different" means.
+
+        **A non-zero answer is not a broken table**, and the message an
+        operator sees says so: the rows are readable and internally consistent,
+        they were simply computed under a different meaning. PRD 08's
+        degradation rule -- narrowed, not broken.
+        """
+        return await self._neighbors.count_stale(
+            blend_fingerprint=blend_fingerprint(), title_id=title_id
+        )
 
 
 def _neighbors_for(
@@ -234,6 +417,14 @@ def _neighbors_for(
                 cosine=max(0.0, candidate.cosine),
                 genres=_jaccard(seed.genres, candidate.genres),
                 keywords=_jaccard(seed.keywords, candidate.keywords),
+                # **`None` stays `None`** -- a pair where either side has no
+                # genome vector drops the term rather than scoring it zero
+                # (ADR-0014). Clamped for the same reason `cosine` is, and to
+                # both ends: real data cannot leave `[0, 1]` because every
+                # genome component is positive, but a port implementation can,
+                # and the clamp has to hold for every implementation rather
+                # than for the one that remembered.
+                tags=_clamped(candidate.tags),
             ),
             candidate.title_id,
         )
@@ -258,6 +449,18 @@ def _neighbors_for(
         ScoredNeighbor(title_id=seed.title_id, neighbor_title_id=neighbor, score=score, rank=rank)
         for rank, (score, neighbor) in enumerate(scored[:_NEIGHBORS_PER_TITLE])
     ]
+
+
+def _clamped(value: float | None) -> float | None:
+    """A signal held inside `[0, 1]`, with `None` passing straight through.
+
+    The `None` arm is the whole reason this is a function rather than a
+    `max`/`min` at the call site: `min(1.0, max(0.0, None))` raises, and the
+    obvious repair -- `max(0.0, value or 0.0)` -- silently turns "no genome
+    vector" into "these two films share no tags", which is precisely the
+    ADR-0014 collapse `NeighborCandidate.tags` exists to refuse.
+    """
+    return None if value is None else min(1.0, max(0.0, value))
 
 
 def _jaccard(left: Sequence[str], right: Sequence[str]) -> float | None:
@@ -302,4 +505,4 @@ def _blend(**signals: float | None) -> float:
     return total / applied if applied else 0.0
 
 
-__all__ = ["NeighborRebuild", "SimilarityService"]
+__all__ = ["NeighborRebuild", "SimilarityService", "blend_fingerprint"]
