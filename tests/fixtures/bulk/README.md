@@ -79,3 +79,43 @@ uv run pytest tests/unit/test_adapters_bulk_imdb.py \
 ```
 
 Several assertions depend on line offsets and on the order of the kept rows.
+
+## MovieLens — the fixtures that are code, and why
+
+**There is no MovieLens file in this directory, deliberately.** The tag
+genome's fixtures live as Python literals in
+`tests/unit/test_adapters_bulk_movielens.py` and
+`tests/unit/test_adapters_bulk_download.py`, and that is a licensing
+decision rather than a convenience.
+
+**None of the four checks in `tests/unit/test_no_third_party_data.py` can
+recognise a MovieLens row by shape.** `_IMDB_DATASET_ROW` wants a tconst
+followed by a tab; `_TMDB_EXPORT_RECORD` wants a JSON object carrying
+`original_title`/`original_name`. A `genome-scores.csv` row is three
+integers and a float, and a `links.csv` row is three integers — neither is
+distinguishable from any CSV ever written. A committed `.zip` is worse
+still: `_every_text_file` drops it on `UnicodeDecodeError` before any check
+looks at it, so it is invisible to all four.
+
+`.csv` was added to `_SCANNED_SUFFIXES` in M7 so that a future committed
+slice would at least fall inside the IMDb-band and once-committed-identifier
+checks. That narrows the hole; it does not close it. Literals in a scanned
+`.py` file are the only form of these fixtures two of the four guards can
+see at all — and they are diffable besides.
+
+**The reserved band cannot express a zero-padded IMDb id, so the padding
+contract is asserted on digits.** `_SYNTHETIC_IMDB_ID` is
+`^(tt|nm)99\d{6}$` — exactly eight digits, always beginning `99`. Padding,
+by definition, produces *leading zeros*, so any padded result begins `tt00`,
+which `_ANY_IMDB_ID` matches and `_SYNTHETIC_IMDB_ID` does not: writing the
+expected padded value as a single literal anywhere in this repository —
+fixture, assertion, or plan document, since the fourth check scans the whole
+tree — fails `test_every_imdb_id_is_in_the_reserved_synthetic_band`.
+`test_a_short_imdb_id_is_left_padded_to_seven_digits` therefore asserts on
+the digits with the `tt` prefix applied separately (`"tt" + "0099000"`), and
+the two literals never touch. Same family as the `:name`-in-a-SQL-comment
+trap: the guard reads text, not meaning.
+
+The MovieLens `imdbId` values used in those fixtures are 8 digits beginning
+`99`, so the *joined* form lands squarely in the reserved band — which is
+also a realistic shape, since 6,559 of the archive's 86,537 rows are 8 wide.
