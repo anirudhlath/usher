@@ -79,7 +79,19 @@ So rows are pure functions of context and trivially testable with fakes.
 
 `BuiltRow` and `RowCard` are Pydantic DTOs (`usher.domain.rows`). `RowCard`
 carries `title_id`, `kind`, `name`, `year`, `enrichment_state`, `owned`, and
-the progress triple `position_seconds` / `runtime_seconds` / `played`.
+the progress triple `position_seconds` / `runtime_seconds` / `played`, plus ⏳
+`episode_id` / `episode_label` for the two rows that are about a chapter.
+
+⏳ **`title_id` is always the *series*, never the episode**, and the chapter
+rides alongside it. Every other field on the card — `kind`, `name`, `year`,
+`owned`, `enrichment_state` — describes the series, so a `title_id` that
+sometimes meant an episode would be a second vocabulary in the one field every
+provider's cards agree on. `episode_id` is what makes a Next Up card
+*playable*: without it the card can only navigate to the series page, which is
+one more click than the row exists to remove. `episode_label` (`"S02E05"`) is
+composed on the server so the zero-padding is decided once rather than by each
+client — ADR-0006's "the server composes", applied to a string. Both are `None`
+on every card of the other seven rows.
 
 Three fields an earlier draft of this sentence listed are **deliberately
 absent**, each for a stated reason:

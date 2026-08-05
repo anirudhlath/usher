@@ -51,6 +51,7 @@ from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import TitleRepository
 from usher.services.handlers import SourceBinding
+from usher.services.rows import ROW_PROVIDERS
 
 
 def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipeline:
@@ -97,6 +98,7 @@ def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipelin
         search=unused,
         similar=unused,
         taste=unused,
+        row_providers=ROW_PROVIDERS,
         events=NullEventPublisher(),
         commit=commit,
     )

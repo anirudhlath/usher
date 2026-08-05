@@ -242,6 +242,16 @@ SELECT DISTINCT title_id FROM media_items
 WHERE title_id = ANY(:title_ids) AND episode_id IS NULL
 """
 
+# The episode-keyed twin, and it is not a copy of the statement above with one
+# column swapped: `_OWNED_TITLE_IDS` carries `episode_id IS NULL` so a series
+# reads as one row, which means asking *it* about an episode answers about the
+# series' own row -- reporting a missing episode file as owned, on the 89% of a
+# real library that is episodes.
+_OWNED_EPISODE_IDS = """
+SELECT DISTINCT episode_id FROM media_items
+WHERE episode_id = ANY(:episode_ids)
+"""
+
 
 # Recently Added. The bound is a **time window**, not a row count, which is
 # what PRD 06 already says ("New items in the window") and what makes the
@@ -554,6 +564,17 @@ class PostgresMediaItemRepository(MediaItemRepository):
         with self._session.no_autoflush:
             result = await self._session.execute(text(_OWNED_TITLE_IDS), {"title_ids": title_ids})
         return {row[0] for row in result.all()}
+
+    async def owned_episode_ids(self, episode_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        if not episode_ids:
+            return set()
+        with self._session.no_autoflush:
+            rows = (
+                await self._session.execute(
+                    text(_OWNED_EPISODE_IDS), {"episode_ids": list(episode_ids)}
+                )
+            ).all()
+        return {row.episode_id for row in rows}
 
     async def list_recently_added(
         self, *, since: AwareDatetime, limit: int = 24

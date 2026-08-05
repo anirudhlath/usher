@@ -157,6 +157,28 @@ class RowCard(DomainModel):
     # exactly the titles whose runtime is `None`, which are the ones that
     # most need the badge.
     played: bool = False
+    # **Two nullable fields for the two rows that are about a chapter rather
+    # than about a title**, added by Group G/H because `NextUpProvider`'s own
+    # headline case asserts on the label and `ContinueWatchingProvider` has to
+    # be able to resume an episode file.
+    #
+    # `title_id` stays the **series**, and that is the decision. Every other
+    # field on this card -- `kind`, `name`, `year`, `owned`,
+    # `enrichment_state` -- describes the series, and a `title_id` that
+    # sometimes meant an episode would be a second vocabulary in the field
+    # every other provider's cards agree on. So the chapter rides alongside
+    # rather than replacing it.
+    #
+    # `episode_id` is what makes the card *playable*: without it a Next Up
+    # card can only navigate to the series page, which is one more click than
+    # the row exists to remove. `episode_label` is composed here rather than
+    # left as two integers, so the zero-padding is decided once on the server
+    # instead of by each client -- ADR-0006's argument ("the server composes")
+    # applied to a string. `None` on every card of the other seven rows, which
+    # is why both default and why neither is a branch a client has to take
+    # twice.
+    episode_id: uuid.UUID | None = None
+    episode_label: str | None = None
 
 
 class BuiltRow(DomainModel):

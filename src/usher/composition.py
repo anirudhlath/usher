@@ -101,6 +101,7 @@ from usher.ports.repository import (
     TitleRepository,
     WatchStateRepository,
 )
+from usher.ports.rows import RowProvider
 from usher.ports.source import SourceAdapter, SourceAdapterFactory
 from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
@@ -118,6 +119,7 @@ from usher.services.jobs import JobWorker
 from usher.services.matching import MatchService
 from usher.services.push import PushApplyService
 from usher.services.reconcile import ReconcileService
+from usher.services.rows import ROW_PROVIDERS
 from usher.services.search import SearchService
 from usher.services.similar import SimilarityService
 from usher.services.taste import TasteService
@@ -196,6 +198,12 @@ class Pipeline:
     search: SearchService
     similar: SimilarityService
     taste: TasteService
+    # The registry itself, not a list assembled here. A provider enabled by
+    # *registration in code* is boundary call 9, and a list a composition
+    # root builds by hand is a list the tenth provider is forgotten from --
+    # which is dead code that looks exactly like a provider with nothing to
+    # say. `services/rows/__init__.py` owns it; this field is the wiring.
+    row_providers: tuple[RowProvider, ...]
     events: EventPublisher
     commit: Callable[[], Awaitable[None]]
 
@@ -357,6 +365,7 @@ def build_pipeline(
         # `genre_affinity` is unaffected because it reads counts rather than
         # vectors -- which is the whole reason Task 23 declines PRD 06's
         # "taste centroid concentrated in a genre".
+        row_providers=ROW_PROVIDERS,
         taste=TasteService(
             watch_states=watch_states,
             embeddings=embeddings,

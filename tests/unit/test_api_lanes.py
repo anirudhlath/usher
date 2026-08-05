@@ -71,6 +71,7 @@ from usher.ports.source import (
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
+from usher.services.rows import ROW_PROVIDERS
 from usher.services.search import SearchService
 from usher.services.similar import SimilarityService
 from usher.services.taste import TasteService
@@ -272,6 +273,7 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
             result_limit=settings.search_result_limit,
         ),
         similar=SimilarityService(embeddings, neighbors, titles, commit),
+        row_providers=ROW_PROVIDERS,
         taste=TasteService(
             watch_states=watch_states,
             embeddings=embeddings,

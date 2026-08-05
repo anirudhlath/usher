@@ -156,6 +156,14 @@ class FakeEpisodeRepository(EpisodeRepository):
                 found[key] = stored.id
         return found
 
+    async def list_by_ids(self, episode_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, Episode]:
+        # One increment whatever the batch, matching the real one statement --
+        # which is what lets a provider case hold the call count fixed across
+        # three in-progress series and thirty.
+        self.calls += 1
+        wanted = set(episode_ids)
+        return {one.id: one for one in self._episodes.values() if one.id in wanted}
+
     async def next_up(
         self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
     ) -> dict[uuid.UUID, Episode]:

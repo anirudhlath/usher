@@ -37,6 +37,15 @@ def test_media_item_repository_surface() -> None:
             "list_for_title",
             "list_unmatched",
             "attach_title",
+            # M7's episode-keyed ownership read, and it is named here rather
+            # than folded in beside `owned_title_ids` because the two look
+            # interchangeable and are not: that one bounds itself to
+            # `episode_id IS NULL` so a series reads as one row, so asking it
+            # about an episode answers about the *series'* own row and reports
+            # a missing episode file as owned. Dropped from the ABC,
+            # `NextUpProvider` would silently show cards nothing can play, on
+            # the 89% of a real library that is episodes.
+            "owned_episode_ids",
             # M6's ranking surface. Named here for the same reason
             # `list_for_title` is: dropped from the ABC, every implementation
             # could stop providing it and still type-check, and the owned

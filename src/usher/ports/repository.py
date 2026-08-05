@@ -873,6 +873,26 @@ class MediaItemRepository(ABC):
         """
 
     @abstractmethod
+    async def owned_episode_ids(self, episode_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        """Which of these **episodes** the household has a copy of.
+
+        `owned_title_ids`' twin, and it is a genuinely different question
+        rather than a convenience: that one bounds itself to `episode_id IS
+        NULL` precisely so a series is one row, so asking it about an episode
+        answers about the *series'* own row and would report a missing episode
+        file as owned. 999,827 of the one measured source's 1,126,674 items are
+        episodes, so this is the majority read of the two.
+
+        `NextUpProvider` is what needs it: *"next up" that cannot be played is
+        worse than absent*, and that filter is the provider's rather than
+        `next_up`'s, which answers what comes next and not what is available.
+
+        No availability filter, matching `owned_title_ids` exactly — a copy the
+        nightly sweep retracted is still a copy you have. One statement however
+        many ids are asked about.
+        """
+
+    @abstractmethod
     async def list_recently_added(
         self, *, since: AwareDatetime, limit: int = 24
     ) -> list[AddedTitle]:
@@ -1346,6 +1366,29 @@ class EpisodeRepository(ABC):
 
         Absent keys mean "no such episode under this series", never "not
         asked", so a caller iterates its own probes.
+        """
+
+    @abstractmethod
+    async def list_by_ids(self, episode_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, Episode]:
+        """Episodes by their own ids, in one round trip.
+
+        **The read `list_in_progress` leaves its caller needing.** That method
+        returns episode watch states *as themselves* -- deliberately, because
+        the card resumes a file -- and its docstring hands the roll-up to the
+        provider: *"Collapsing to one card per series is the provider's, and is
+        decided once, there."* An episode state carries no `title_id`, so
+        without this there is no way to reach the series a resume belongs to,
+        and `ContinueWatchingProvider` silently drops every episode resume on a
+        library where 999,827 of 1,126,674 items are episodes. Trap 7, arriving
+        through the one M7 read that does not `COALESCE` its way to a title.
+
+        **One statement for the whole page, never one per state.** The
+        alternative in the existing surface is `list_for_title`, which returns
+        the entire tree -- 20,000 rows for the measured pathological series, to
+        find one episode.
+
+        An id with no episode is simply absent, never a key mapped to `None`:
+        a caller drops the card rather than rendering one it cannot open.
         """
 
     @abstractmethod

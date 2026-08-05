@@ -297,6 +297,17 @@ class FakeMediaItemRepository(MediaItemRepository):
             if entry.title_id in wanted and entry.episode_id is None and entry.title_id is not None
         }
 
+    async def owned_episode_ids(self, episode_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        # No `episode_id is None` bound here, which is the *opposite* of
+        # `owned_title_ids` above and is the whole reason the two are separate
+        # methods rather than one with a flag.
+        wanted = set(episode_ids)
+        return {
+            entry.episode_id
+            for entry in self._items.values()
+            if entry.episode_id in wanted and entry.episode_id is not None
+        }
+
     async def list_recently_added(
         self, *, since: AwareDatetime, limit: int = 24
     ) -> list[AddedTitle]:
