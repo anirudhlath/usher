@@ -50,6 +50,8 @@ from usher.ports.source import (
     SourceWatchState,
 )
 from usher.services.ingest import IngestService
+from usher.services.rows import WATCH_STATE_ROWS
+from usher.services.rows.cache import RowCache
 from usher.services.watch_sync import MergedState, WatchStateSyncService
 
 _tracer = trace.get_tracer("usher.push")
@@ -83,12 +85,20 @@ class PushApplyService:
         events: EventPublisher,
         commit: Callable[[], Awaitable[None]],
         *,
+        cache: RowCache | None = None,
         max_items_per_event: int = 50,
     ) -> None:
         self._ingest = ingest
         self._watch = watch
         self._events = events
         self._commit = commit
+        # **The push lane invalidates; the nightly walk expires.** A push event
+        # *is* a change -- the same sentence PRD 07 uses to explain why this
+        # lane publishes `watchstate.updated` and the walk does not -- so the
+        # fan-out is per *event*, over a small fixed slug set, rather than per
+        # merged row. `None` for a deployment composing no screens (the CLI's
+        # own roots), where an invalidation would have no cache to reach.
+        self._cache = cache
         self._max_items = max_items_per_event
 
     async def apply(
@@ -159,8 +169,28 @@ class PushApplyService:
         )
         await self._commit()
         if outcome.rows_written:
+            self._invalidate_rows(user_id)
             await self._publish_watch_states(states, outcome.merged, observed_at)
         return PushOutcome(states_merged=outcome.rows_written)
+
+    def _invalidate_rows(self, user_id: uuid.UUID) -> None:
+        """Drop this household's watch-state rows and its composed screen.
+
+        **Trap 5, on the right side of it.** The nightly walk merges up to
+        1,126,789 states and invalidates *nothing*: one invalidation per merged
+        row is the fan-out per row per night that PRD 07 already refuses for
+        `watchstate.updated`, and the walk's changes reach the screen through
+        the 30 s screen TTL and a demand read -- a walk that finishes at 04:00
+        is on the screen by 04:00:30. Here the unit is one pushed event, whose
+        slug set is `WATCH_STATE_ROWS` and is fixed.
+
+        Guarded on `rows_written` for the reason the publish beside it is: a
+        merge refused by "latest `updated_at` wins" is the source echoing back a
+        position a client just set, and dropping a warm screen for it is a full
+        recompose per second of playback.
+        """
+        if self._cache is not None:
+            self._cache.invalidate(user_id, WATCH_STATE_ROWS)
 
     async def _publish_watch_states(
         self,

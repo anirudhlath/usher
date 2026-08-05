@@ -329,6 +329,23 @@ class WatchStateSyncService:
         cursor: AwareDatetime | None,
         user_id: uuid.UUID,
     ) -> None:
+        """The nightly walk. **It invalidates no rows and publishes no
+        `row.invalidated`, and this is the place somebody would add both.**
+
+        A walk merges up to 1,126,789 states. One `RowCache.invalidate` per
+        merged row is the fan-out per row per night that PRD 07 already refuses
+        for `watchstate.updated` -- and with `row.invalidated` attached it is
+        that fan-out reaching every connected client *and* instructing each one
+        to refetch, which is a thundering herd at 04:00 on top of it. Nothing
+        else would notice: the cache would be correct, the screens would be
+        fresh, and the only symptom is a million-message night.
+
+        The walk's changes reach the screen through the composed screen's own
+        30 s TTL and a demand read. A walk that finished at 04:00 is on the
+        screen by 04:00:30, which is the honest and entirely adequate answer.
+        The push lane is where invalidation belongs, because a push event *is*
+        a change -- `services/push.py::_invalidate_rows`.
+        """
         batch: list[SourceWatchState] = []
         async for state in adapter.watch_state(since=cursor):
             batch.append(state)

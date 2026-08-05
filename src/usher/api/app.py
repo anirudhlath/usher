@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -20,6 +21,7 @@ from usher.composition import (
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.services.events import InMemoryEventBus
+from usher.services.rows.cache import RowCache
 from usher.telemetry import configure_telemetry, register_push_gauges, register_sse_gauge
 
 
@@ -54,6 +56,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             user_id=DefaultUserId(session_factory),
             provider=provider,
             embedder=model,
+            rows=row_cache,
         )
         app.state.lanes = lanes
         # PRD 10's `usher.source.push.connected` / `.reconnects`. Registered
@@ -120,6 +123,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # `create_app()` in one process is deliberate and is why the reader is a
     # module global rather than a captured closure.
     register_sse_gauge(lambda: bus.subscribers)
+    # The process's row and screen caches (PRD 06). Here rather than in the
+    # lifespan for the reason `bus` is: it is not a resource with a lifetime --
+    # a dict, no connection, nothing to dispose. **One per app, never per
+    # request**: a request-scoped cache caches nothing, exactly as a
+    # request-scoped bus fans out to nobody. The push lane invalidates through
+    # this same object, which is why it is built before `lanes` reads it.
+    row_cache = RowCache(clock=lambda: datetime.now(UTC))
+    app.state.row_cache = row_cache
     # Replaces FastAPI's default 422 body, which echoes the submitted
     # request -- and `POST /admin/sources` submits a source credential. See
     # usher.api.errors; this is a security control, not a response-shape

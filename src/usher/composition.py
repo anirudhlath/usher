@@ -120,6 +120,7 @@ from usher.services.matching import MatchService
 from usher.services.push import PushApplyService
 from usher.services.reconcile import ReconcileService
 from usher.services.rows import row_providers
+from usher.services.rows.cache import RowCache
 from usher.services.search import SearchService
 from usher.services.similar import SimilarityService
 from usher.services.taste import TasteService
@@ -418,7 +419,10 @@ async def open_adapter(pipeline: Pipeline, source: Source) -> SourceAdapter | No
 
 
 def build_push_applier(
-    pipeline: Pipeline, settings: Settings, events: EventPublisher
+    pipeline: Pipeline,
+    settings: Settings,
+    events: EventPublisher,
+    cache: RowCache | None = None,
 ) -> PushApplyService:
     """One push event into catalog state, through M4's own chain.
 
@@ -426,12 +430,19 @@ def build_push_applier(
     because the applier is the one collaborator whose publisher *must* be
     the live bus -- a push merge nobody is told about is the read-through
     loop not closing, which is the milestone.
+
+    `cache` is passed on identical terms and for the identical reason: it is
+    process-scoped where the pipeline is session-scoped, and an applier holding
+    a cache nobody serves from would invalidate a dict with no reader. `None`
+    is a composition root that composes no screens -- `usher sync`, `usher
+    work` -- where there is nothing to invalidate.
     """
     return PushApplyService(
         pipeline.ingest,
         pipeline.watch,
         events,
         pipeline.commit,
+        cache=cache,
         max_items_per_event=settings.push_max_items_per_event,
     )
 

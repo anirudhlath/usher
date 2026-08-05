@@ -62,6 +62,22 @@ BASE_SCORES: Mapping[str, float] = {
     PeopleProvider.__name__: PEOPLE_SCORE_CEILING,
 }
 
+# **The rows a watch state can move**, named by the providers that own them
+# rather than by two string literals in `services/push.py`. A watch state
+# changes where you are in something (`continue-watching`) and which episode is
+# next (`next-up`); everything else it touches -- a seed's neighbours, a genre
+# lift -- reaches the screen through the composed screen's own 30 s expiry,
+# which `RowCache.invalidate` drops alongside these.
+#
+# Read off the constructed providers rather than restated, for the reason
+# `BASE_SCORES` imports each provider's own constant: a table that repeats a
+# value is a table that can drift from it, and a slug this list spelled wrongly
+# would invalidate nothing, silently, forever.
+WATCH_STATE_ROWS: tuple[str, ...] = (
+    ContinueWatchingProvider().slug_prefix,
+    NextUpProvider().slug_prefix,
+)
+
 __all__ = [
     "BASE_SCORES",
     "BECAUSE_YOU_WATCHED_SCORE_CEILING",
@@ -74,6 +90,7 @@ __all__ = [
     "REDISCOVER_SCORE",
     "ROW_PROVIDERS",
     "SEASONAL_SCORE",
+    "WATCH_STATE_ROWS",
     "BaseRow",
     "BecauseYouWatchedProvider",
     "Chapter",

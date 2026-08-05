@@ -592,6 +592,45 @@ the model sees 200 titles it might plausibly recommend, not a catalog.
 Rows are recomputed lazily and served stale while refreshing, so the home screen
 never blocks on a slow row.
 
+> **Built in M7 as `services/rows/cache.py`, with one sentence above
+> corrected.** Both caches are **in-process** — a dict in the server, per
+> worker, emptied by a restart. The deployment this project ships runs one
+> (`compose.yml`, one uvicorn worker), so today there is exactly one cache;
+> with two replicas the screens stay within their TTL of each other but
+> **invalidation does not cross processes**, which is the same change as the
+> cross-process `EventPublisher` and is named with it rather than built.
+>
+> **"Served stale while refreshing" is not implemented in M7 and is M9's.** A
+> background refresh needs a session it did not get from a request: the
+> request's own is committed and closed by `get_session`, and sharing it with a
+> task is the `AsyncSession` concurrency hazard [09](09-roadmap.md)'s boundary
+> call 8 refuses one layer up — with the same "usually works" signature. Its
+> own session is a connection outside the request pool's accounting, per stale
+> key, on demand; and `api/lanes.py`'s supervisor is one lane per *source*,
+> enumerable and bounded, where this would be one task per stale key. The
+> payoff is one request per TTL per user, because every other request in the
+> window is already a hit. It lands with `usher.cache.hits`/`.misses`, because
+> a refresh path with no hit/miss metric is a mechanism nobody can see working.
+> **M7 caches and expires.**
+>
+> **Invalidation is driven by the push lane and by demand reads, never by the
+> nightly walk** — the same scale argument [07](07-client-api.md) makes for
+> `watchstate.updated`. A walk merges up to 1,126,789 states; one invalidation
+> per merged row is a fan-out per row per night. A walk that finishes at 04:00
+> is on the screen by 04:00:30, through the 30 s screen TTL.
+> `WatchStateSyncService` is handed no cache at all, so adding that call means
+> adding a constructor argument.
+>
+> **Cache keys carry the user**, taken from the request's own `current_user`,
+> so replacing that one dependency remains the whole of adding authentication —
+> and a key that omitted it would work today and serve one household's screen
+> to another the day auth lands, with no error, no log line and no metric.
+>
+> **The row half is bounded and evicts soonest-to-expire first**, because
+> `because-you-watched-<seed>` is one slug per seed and expired entries are read
+> past rather than removed: without a ceiling the TTL reclaims nothing and the
+> dict grows with the household's watch history.
+
 ⏳ **"Invalidated on watch-state change" was an event this project has already
 refused to publish.** The nightly walk merges up to **1,126,789** watch states,
 so one invalidation per merged row is a million messages a night for at most

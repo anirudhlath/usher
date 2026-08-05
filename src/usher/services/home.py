@@ -49,12 +49,14 @@ in-flight depth rather than on a comment.
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 
 from opentelemetry import metrics, trace
 
 from usher.domain.rows import BuiltRow, RowFamily
 from usher.ports.rows import Row, RowContext, RowProvider, ScoredRow
 from usher.services.rows import ROW_PROVIDERS
+from usher.services.rows.cache import RowCache
 
 _meter = metrics.get_meter("usher.home")
 _tracer = trace.get_tracer("usher.home")
@@ -94,6 +96,12 @@ _row_build_duration = _meter.create_histogram(
 # so every field there owes a reader *and* a reason.
 _MAX_ROWS = 10
 _MAX_PER_FAMILY = 4
+
+# PRD 06's caching table: "Composed home screen | ~30 s per user". The built
+# rows underneath carry their own TTLs on `BuiltRow.ttl`, which is why this is
+# the only lifetime stated here -- a row's is the row's to state, and the two
+# layers are what keeps a six-hour similarity row off a 30 s rebuild cycle.
+_SCREEN_TTL = timedelta(seconds=30)
 
 # No *window* of this many adjacent rows is all `SIMILARITY`. Spelled as the
 # window length PRD 06 states rather than as "at most two in a row", so the
@@ -138,15 +146,33 @@ class HomeService:
         self,
         providers: Sequence[RowProvider] = ROW_PROVIDERS,
         *,
+        cache: RowCache | None = None,
         max_rows: int = _MAX_ROWS,
         max_per_family: int = _MAX_PER_FAMILY,
     ) -> None:
         self._providers = tuple(providers)
+        # `None` is a composer with no cache at all, which is what every
+        # ordering case here uses and what makes "compose it cold" expressible
+        # for `usher home`. A cache that could not be absent would make the
+        # milestone's one cache measurement untakeable.
+        self._cache = cache
         self._max_rows = max_rows
         self._max_per_family = max_per_family
 
     async def compose(self, ctx: RowContext) -> tuple[BuiltRow, ...]:
-        """Propose, select, build sequentially, drop empties, order."""
+        """Propose, select, build sequentially, drop empties, order.
+
+        The whole screen is cached under the request's own `user_id` for
+        `_SCREEN_TTL`, and each built row under `(user_id, slug)` for its own
+        `BuiltRow.ttl`. Both are in-process; `services/rows/cache.py` says what
+        that costs and what M9 owns.
+        """
+        cached = None if self._cache is None else self._cache.get_screen(ctx.user.id)
+        if cached is not None:
+            # A screen hit does not re-propose. `propose` is the cheap phase,
+            # not the free one -- nine bounded reads is still nine round trips
+            # for an answer already on hand.
+            return cached
         started = time.perf_counter()
         with _tracer.start_as_current_span("home.compose") as span:
             candidates: list[_Candidate] = []
@@ -173,6 +199,8 @@ class HomeService:
             span.set_attribute("usher.home.built", len(built))
             span.set_attribute("usher.home.rows", len(screen))
         _compose_duration.record(time.perf_counter() - started)
+        if self._cache is not None:
+            self._cache.put_screen(ctx.user.id, screen, ttl=_SCREEN_TTL)
         return screen
 
     async def _build(self, ctx: RowContext, candidate: _Candidate) -> BuiltRow:
@@ -182,16 +210,29 @@ class HomeService:
         a *child* of the composition rather than a second root -- PRD 10's
         nesting rule is what makes a trace answer "what did this request do"
         instead of "what happened around then".
+
+        **A cache hit records no `usher.row.build.duration` point**,
+        deliberately: the histogram measures *building*, and a hit built
+        nothing. A hit recorded as a ~0 s build would drag the p95 towards zero
+        exactly as the cache warms, which is the shape that hides the slow
+        provider dashboard 4 exists to find.
         """
+        slug = candidate.row.slug
+        if self._cache is not None:
+            hit = self._cache.get_row(ctx.user.id, slug)
+            if hit is not None:
+                return hit
         started = time.perf_counter()
         with _tracer.start_as_current_span("row.build") as span:
             span.set_attribute("usher.row.provider", candidate.provider.slug_prefix)
-            span.set_attribute("usher.row.slug", candidate.row.slug)
+            span.set_attribute("usher.row.slug", slug)
             row = await candidate.row.build(ctx)
             span.set_attribute("usher.row.cards", len(row.cards))
         _row_build_duration.record(
             time.perf_counter() - started, {"provider": candidate.provider.slug_prefix}
         )
+        if self._cache is not None:
+            self._cache.put_row(ctx.user.id, slug, row, ttl=row.ttl)
         return row
 
     def _select(self, candidates: Sequence[_Candidate]) -> list[_Candidate]:
