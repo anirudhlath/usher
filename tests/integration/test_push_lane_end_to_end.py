@@ -244,14 +244,31 @@ async def test_a_pushed_watch_state_lands_and_is_published(
                     SourceWatchState(external_id="movie-1", position_seconds=612, played=False)
                 )
             )
-            published = await asyncio.wait_for(anext(subscribed), timeout=BOUND)
+            # **Three frames, not one, since M7.** The lane publishes one
+            # `row.invalidated` per row a watch state can move and then the
+            # `watchstate.updated`, and the whole sequence is read rather than
+            # searched for: a loop that read *until* it found a watch-state
+            # event would pass against a lane that published forty row
+            # invalidations first, which is precisely the fan-out trap 5 is
+            # about. Bounded by `BOUND`, so a lane that publishes fewer fails
+            # here rather than hanging.
+            published = [await asyncio.wait_for(anext(subscribed), timeout=BOUND) for _ in range(3)]
         finally:
             lane.cancel()
             await asyncio.gather(lane, return_exceptions=True)
 
-    assert published.event.kind is ClientEventKind.WATCHSTATE_UPDATED
-    assert published.event.title_id == title_id
-    assert published.event.data["position_seconds"] == 612
+    assert [sent.event.kind for sent in published] == [
+        ClientEventKind.ROW_INVALIDATED,
+        ClientEventKind.ROW_INVALIDATED,
+        ClientEventKind.WATCHSTATE_UPDATED,
+    ]
+    # The row invalidations reach the bus even though this lane holds **no
+    # `RowCache`**: the event is a client contract and the cache is a
+    # server-side optimisation, so a deployment that cached nothing would still
+    # tell its clients what to refetch.
+    assert [sent.event.data["slug"] for sent in published[:2]] == ["continue-watching", "next-up"]
+    assert published[2].event.title_id == title_id
+    assert published[2].event.data["position_seconds"] == 612
     stored = await PostgresWatchStateRepository(session).get_for_title(user_id, title_id)
     assert stored is not None
     assert stored.position_seconds == 612

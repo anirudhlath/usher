@@ -169,12 +169,13 @@ class PushApplyService:
         )
         await self._commit()
         if outcome.rows_written:
-            self._invalidate_rows(user_id)
+            await self._invalidate_rows(user_id)
             await self._publish_watch_states(states, outcome.merged, observed_at)
         return PushOutcome(states_merged=outcome.rows_written)
 
-    def _invalidate_rows(self, user_id: uuid.UUID) -> None:
-        """Drop this household's watch-state rows and its composed screen.
+    async def _invalidate_rows(self, user_id: uuid.UUID) -> None:
+        """Drop this household's watch-state rows and its composed screen, and
+        tell every connected client which rows to refetch.
 
         **Trap 5, on the right side of it.** The nightly walk merges up to
         1,126,789 states and invalidates *nothing*: one invalidation per merged
@@ -191,6 +192,23 @@ class PushApplyService:
         """
         if self._cache is not None:
             self._cache.invalidate(user_id, WATCH_STATE_ROWS)
+        # **One event per invalidated slug, and no `title_id`.** PRD 07's
+        # payload for this event is a row slug and its client action is
+        # "refetch that row", so the slug is the whole payload -- a frame
+        # without it is an instruction with no object. The absent `title_id` is
+        # what makes this the one event the `?titles=` filter cannot express:
+        # it reaches unfiltered subscribers and no others, which is correct,
+        # because a client that sent `?titles=` is on a detail screen and a row
+        # invalidation is exactly the unrelated churn that filter exists to
+        # keep off it.
+        #
+        # Published here rather than beside the cache write inside `RowCache`,
+        # because the cache is a dict and a dict that published events would be
+        # a second publisher nobody could see from the lane that owns the bus.
+        for slug in WATCH_STATE_ROWS:
+            await self._events.publish(
+                ClientEvent(kind=ClientEventKind.ROW_INVALIDATED, data={"slug": slug})
+            )
 
     async def _publish_watch_states(
         self,

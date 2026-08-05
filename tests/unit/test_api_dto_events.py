@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 
-from usher.api.dto.events import SseEventKind, encode_sse, parse_titles
+from usher.api.dto.events import _WIRE, SseEventKind, encode_sse, parse_titles
 from usher.ports.events import ClientEvent, ClientEventKind
 from usher.services.events import SentEvent
 
@@ -77,6 +77,7 @@ def test_the_wire_vocabulary_is_its_own_enum() -> None:
     assert {kind.value for kind in SseEventKind} == {
         "title.updated",
         "watchstate.updated",
+        "row.invalidated",
         "sync.progress",
         "resync_required",
     }
@@ -112,3 +113,48 @@ def test_a_malformed_title_id_raises_rather_than_being_dropped() -> None:
     detail screen quietly never updates. The route turns this into a 422."""
     with pytest.raises(ValueError, match=r"badly formed|invalid"):
         parse_titles(f"{uuid.uuid4()},not-a-uuid")
+
+
+def test_the_wire_map_is_total_over_the_internal_enum_directly() -> None:
+    """**The direct spelling of the guard above it**, and it is a *second* case
+    rather than a replacement.
+
+    The plan for this milestone claimed `_WIRE` had no exhaustiveness guard at
+    all -- that adding a member to both enums and forgetting the mapping "passes
+    mypy and the whole suite, then raises `KeyError` inside a response that has
+    already answered `200 text/event-stream`". **That is refuted**: M5's
+    `test_every_internal_kind_has_a_wire_name` encodes every kind through
+    `encode_sse`, so a missing entry raises `KeyError` there and the case fails.
+    Measured, not reasoned about, by making exactly that mutation.
+
+    This one is kept anyway because it fails *differently*: on a set comparison
+    naming the missing member, rather than on a `KeyError` from inside a
+    formatter, which is the difference between a diagnosis and a symptom.
+    """
+    assert set(_WIRE) == set(ClientEventKind)
+
+
+def test_a_row_invalidation_carries_its_slug_on_the_data_line() -> None:
+    """PRD 07's payload is "Row slug" and its client action is "Refetch that
+    row" -- so the slug is the whole payload, and a frame without it is an
+    instruction with no object. Kills an event published with an empty `data`,
+    which is a well-shaped frame that tells a client nothing."""
+    frame = encode_sse(
+        _sent(ClientEvent(kind=ClientEventKind.ROW_INVALIDATED, data={"slug": "continue-watching"}))
+    )
+
+    lines = frame.split("\n")
+    assert lines[1] == "event: row.invalidated"
+    assert json.loads(lines[2].removeprefix("data: ")) == {"slug": "continue-watching"}
+
+
+def test_a_row_invalidation_carries_no_title_id() -> None:
+    """A row is not a title. `title_id` on this event would be a filter key that
+    half-works -- it would wake exactly the detail screens subscribed to
+    whichever title happened to be attached, which is neither "every subscriber"
+    nor "the right ones"."""
+    frame = encode_sse(
+        _sent(ClientEvent(kind=ClientEventKind.ROW_INVALIDATED, data={"slug": "next-up"}))
+    )
+
+    assert "title_id" not in json.loads(frame.split("\n")[2].removeprefix("data: "))

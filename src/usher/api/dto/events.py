@@ -35,16 +35,29 @@ class SseEventKind(StrEnum):
 
     TITLE_UPDATED = "title.updated"
     WATCHSTATE_UPDATED = "watchstate.updated"
+    ROW_INVALIDATED = "row.invalidated"
     SYNC_PROGRESS = "sync.progress"
     RESYNC_REQUIRED = "resync_required"
 
 
-# Exhaustive by construction rather than by convention: an internal kind with
-# no wire name is a `KeyError` raised in the middle of a response that already
-# answered 200, where there is no status code left to report it with.
+# Exhaustive by convention *and* by two cases, which is the honest wording: an
+# internal kind with no wire name is a `KeyError` raised in the middle of a
+# response that already answered 200, where there is no status code left to
+# report it with -- and **mypy does not check a dict literal for exhaustiveness
+# over its key enum**, so nothing here makes it true by construction.
+#
+# What does make it true is
+# `test_api_dto_events.py::test_every_internal_kind_has_a_wire_name`, which
+# encodes every member through `encode_sse` and therefore raises that exact
+# `KeyError` in the suite instead of in production, plus
+# `test_the_wire_map_is_total_over_the_internal_enum_directly`, which fails on
+# a set comparison naming the missing member rather than on a `KeyError` from
+# inside a formatter. Both were run against the missing-entry mutation; the
+# first kills it, which corrects an M7 plan claim that nothing did.
 _WIRE: dict[ClientEventKind, SseEventKind] = {
     ClientEventKind.TITLE_UPDATED: SseEventKind.TITLE_UPDATED,
     ClientEventKind.WATCHSTATE_UPDATED: SseEventKind.WATCHSTATE_UPDATED,
+    ClientEventKind.ROW_INVALIDATED: SseEventKind.ROW_INVALIDATED,
     ClientEventKind.SYNC_PROGRESS: SseEventKind.SYNC_PROGRESS,
     ClientEventKind.RESYNC_REQUIRED: SseEventKind.RESYNC_REQUIRED,
 }

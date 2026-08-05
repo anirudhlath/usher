@@ -291,11 +291,23 @@ async def test_a_watch_event_that_changed_something_publishes_it(fixture: _Fixtu
             watch_states=(SourceWatchState(external_id="i1", position_seconds=61, played=False),),
         )
     )
+    # **Three events, and the sequence is asserted rather than filtered.** M7
+    # added one `row.invalidated` per slug a watch state can move, published
+    # *before* the watch-state event so a client that refetches on the first
+    # one gets a screen composed after the cache was cleared. A case that
+    # filtered for `WATCHSTATE_UPDATED` here would pass against a lane that
+    # published forty row invalidations.
     assert [event.kind for event in fixture.events.published] == [
-        ClientEventKind.WATCHSTATE_UPDATED
+        ClientEventKind.ROW_INVALIDATED,
+        ClientEventKind.ROW_INVALIDATED,
+        ClientEventKind.WATCHSTATE_UPDATED,
     ]
-    assert fixture.events.published[0].title_id == title_id
-    assert fixture.events.published[0].data["position_seconds"] == 61
+    assert [event.data["slug"] for event in fixture.events.published[:2]] == [
+        "continue-watching",
+        "next-up",
+    ]
+    assert fixture.events.published[2].title_id == title_id
+    assert fixture.events.published[2].data["position_seconds"] == 61
 
 
 async def test_an_unmatched_item_does_not_shift_what_the_others_publish(
@@ -324,8 +336,13 @@ async def test_an_unmatched_item_does_not_shift_what_the_others_publish(
             ),
         )
     )
+    # The row invalidations carry no `title_id` and no position, so this pairing
+    # is over the watch-state events alone -- named by kind rather than by an
+    # index, because an index would silently re-point if the slug set grew.
     assert [
-        (event.title_id, event.data["position_seconds"]) for event in fixture.events.published
+        (event.title_id, event.data["position_seconds"])
+        for event in fixture.events.published
+        if event.kind is ClientEventKind.WATCHSTATE_UPDATED
     ] == [(first, 22), (second, 33)]
 
 
@@ -1126,3 +1143,62 @@ def _built_row() -> BuiltRow:
         display_hint=DisplayHint.LANDSCAPE,
         ttl=timedelta(seconds=60),
     )
+
+
+async def test_a_pushed_watch_state_publishes_row_invalidated_for_the_rows_it_moved(
+    fixture: _Fixture,
+) -> None:
+    """The push lane publishes because a push event *is* a change -- the same
+    sentence PRD 07 uses for `watchstate.updated`. One event per invalidated
+    slug, and the slug set is small and fixed, so the fan-out is per *event*
+    rather than per merged row.
+
+    The payload is the slug and nothing else: PRD 07's client action is "refetch
+    that row", and a frame with an empty `data` is a well-shaped instruction
+    with no object.
+    """
+    await fixture.given_matched("i1")
+
+    await fixture.apply(
+        SourceEvent(
+            kind=SourceEventKind.WATCH_STATE_CHANGED,
+            external_ids=("i1",),
+            watch_states=(SourceWatchState(external_id="i1", position_seconds=61, played=False),),
+        )
+    )
+
+    invalidations = [
+        event for event in fixture.events.published if event.kind is ClientEventKind.ROW_INVALIDATED
+    ]
+    assert [event.data for event in invalidations] == [
+        {"slug": "continue-watching"},
+        {"slug": "next-up"},
+    ]
+    assert all(event.title_id is None for event in invalidations), (
+        "a row is not a title, and a title_id here is a filter key that half-works"
+    )
+
+
+async def test_the_nightly_walk_publishes_no_row_invalidated(fixture: _Fixture) -> None:
+    """**Trap 5.** A walk merges up to 1,126,789 states. One `row.invalidated`
+    per merged row is a fan-out per row per night to every connected client
+    *and* a thundering herd of refetches at 04:00 -- strictly worse than the
+    `watchstate.updated` fan-out M5 already refused, because this one instructs
+    the client to come back.
+
+    Kills a publish added to `WatchStateSyncService`'s merge loop, which is the
+    most natural place to write it and the place nothing else would notice: the
+    screens are fresh and the cache is correct. `WatchStateSyncService` is
+    handed no `EventPublisher` at all, so the mutation has to add a constructor
+    argument to be written.
+    """
+    await fixture.given_matched("i1")
+    fixture.adapter.seed_state(
+        SourceWatchState(external_id="i1", position_seconds=61, played=False)
+    )
+
+    run = await fixture.watch.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert run.items_matched == 1, "the walk merged nothing, so the case proves nothing"
+    assert fixture.events.published == []
+    assert "events" not in inspect.signature(WatchStateSyncService.__init__).parameters

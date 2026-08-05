@@ -308,9 +308,41 @@ subsystem narrows functionality, it never fails a request local state can answer
 |---|---|---|---|
 | `title.updated` | Title id + changed fields | Patch in place | ✅ M5 |
 | `watchstate.updated` | Title/episode id, position, played | Update progress | ✅ M5 |
-| `row.invalidated` | Row slug | Refetch that row | M7 |
+| `row.invalidated` | Row slug | Refetch that row | ✅ M7 |
 | `sync.progress` | Source, counts, phase | Admin UI only | ✅ M5 |
 | `bootstrap.progress` | Phase, percent | Admin UI only | — |
+
+> **Settled in M7.** Published by the **push lane only**, at the same point it
+> publishes `watchstate.updated`, because a push event *is* a change — one
+> event per invalidated slug over a small fixed set, so the fan-out is per
+> *event* rather than per merged row. The **nightly walk publishes none**, for
+> the reason already recorded below for `watchstate.updated` and more strongly:
+> one per merged row is a fan-out per row per night *and* an instruction to
+> every client to refetch, which is a thundering herd at 04:00 on top of a
+> million messages. `WatchStateSyncService` is handed no `EventPublisher` at
+> all, so writing that call means changing its constructor. A walk's changes
+> reach the screen through the 30 s screen TTL and a demand read
+> ([06](06-rows-and-recommendations.md)).
+>
+> **The `?titles=` filter cannot express this event, and does not need to.**
+> The payload is a row slug and carries no title id, so it reaches unfiltered
+> subscribers and no others — never "some". A client that sent `?titles=` is on
+> a detail screen, and the bullet below's own justification for the filter is
+> that a detail screen is not woken by unrelated churn. **A client that wants
+> row invalidations subscribes without `?titles=`.** A `?rows=` filter scoping
+> by slug is the additive change that would relax this; nothing asks for one,
+> and a filter no client sends is a shape fixed before anything has used it.
+>
+> **`EnrichService` publishes no `row.invalidated`.** An enrichment changes a
+> card's *contents*, and `title.updated` already tells a client to patch that
+> card in place; a second event for the same change is a duplicate with no
+> consumer, at the enriched tier's scale.
+>
+> **The member and its publisher shipped in one commit**, because this
+> document's own rule binds both ways: an event nothing emits is a client
+> handler that waits forever, and a publisher with no wire name is a `KeyError`
+> inside a response that has already answered `200 text/event-stream`, where
+> there is no status code left to report it with.
 
 - Subscriptions are scoped by query (`?titles=id1,id2`) so a detail screen isn't
   woken by unrelated churn.
