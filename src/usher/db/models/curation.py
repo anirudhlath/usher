@@ -142,14 +142,39 @@ and both default to `0`.
 
 **Precision 12, so four integer digits, so a single call above
 `$9,999.99999999` raises `numeric field overflow` rather than storing
-something.** Verified. That ceiling is chosen to catch the one misconfiguration
-that is otherwise invisible — a price entered per *token* instead of per
-million, a factor of 1e6 — which at 12,000 tokens and `$3` is `$36,000` and
-fails loudly. Honest limitation: the same mistake on a 1,200-token call is
-`$3,600`, which fits, so the ceiling catches the large version and not the
-small one. A month of three-figure spend is unaffected either way: it is a
-`SUM()`, which Postgres computes at unconstrained precision, so this bound is
-per call and not per ledger.
+something.** Verified.
+
+**This paragraph is the one copy of what that ceiling catches**, and the
+consolidation is a correction rather than tidying: the mechanism shipped in
+five places and every copy had the direction backwards, saying "a price
+entered per *token* instead of per million". That mistake produces the
+opposite of `$36,000`. Four other places — `m08a`'s docstring,
+`LLMCallRepository.record`, `PostgresLLMCallRepository` and
+`tests/fakes/llm_call_repository.py` — now name the ceiling and point here.
+
+The misconfiguration is a price **scaled up** by a million on the way in.
+`OpenAICompatibleClient._cost` already divides by `1_000_000`, so an operator
+who performs the per-million conversion themselves — entering `3_000_000`
+where `3` was meant — is charged 1e6 times the real number, and at 12,000
+tokens that is `$36,000` and fails loudly. `Settings` bounds both price fields
+below and not above, so such a value is accepted (verified), which is what
+makes this reachable rather than theoretical.
+
+**Two honest limitations, and the second is the larger one.** The same
+over-statement on a 1,200-token call is `$3,600`, which fits and stores, so
+the ceiling catches the large version and not the small one. And the
+**inverse** mistake has no ceiling at all: entering the *per-token* price
+(`$0.000003` for a `$3`/Mtok model) into a per-Mtok field under-states every
+call by that same factor of 1e6, stores perfectly, and reads back as a hosted
+model that is nearly free. That is the `0.0000` failure of the table above
+arriving through the *input* rather than through the scale, and nothing in
+this schema can see it — which is also why `cost_usd` recording the token
+counts alongside it matters: spend is recomputable from this ledger after the
+fact, and that is the only repair either direction has.
+
+A month of three-figure spend is unaffected by the ceiling either way: the
+report is a `SUM()`, which Postgres computes at unconstrained precision, so
+this bound is per call and not per ledger.
 
 ## Neither table has an `updated_at`, and neither has a trigger
 

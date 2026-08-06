@@ -6,7 +6,7 @@ all of it is load-bearing** rather than structural. The fake stores the very
 builds eleven parameters against eleven columns, which is where a dropped
 `generation_id`, a `tokens_out` filled from `tokens_in` or a constant
 `purpose` becomes expressible at all. `tests/fakes/llm_call_repository.py`
-enumerates the seven divergences and the one place the fake is stricter.
+enumerates the six divergences and the one place the fake is stricter.
 
 Plus the three things a list cannot express, each with a case of its own here:
 a `NUMERIC(12, 8)` that refuses a number too large for it, the CHECK that
@@ -38,7 +38,7 @@ from usher.db.models.curation import LLMCallRow
 from usher.db.repositories.llm_call import PostgresLLMCallRepository
 from usher.domain.curation import LLMCall
 from usher.domain.ids import new_id
-from usher.ports.errors import RepositoryConflict
+from usher.ports.errors import RepositoryConflict, UsherPortError
 
 _READ_ONE = "SELECT * FROM llm_calls WHERE id = CAST(:id AS uuid)"
 
@@ -78,10 +78,11 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
         because a Python `Decimal` has no ceiling to hit.
 
         `cost_usd` is `NUMERIC(12, 8)`, so four integer digits: a single call
-        above `$9,999.99999999` raises `numeric field overflow`. `m08a` chose
-        that precision to catch exactly one misconfiguration -- a price
-        entered per *token* instead of per million, a factor of 1e6, which at
-        12,000 tokens and `$3` is `$36,000`.
+        above `$9,999.99999999` raises `numeric field overflow`. The
+        misconfiguration that precision exists to catch is a price scaled *up*
+        by a million on the way in -- `$36,000` on one 12,000-token call --
+        and `usher.db.models.curation`'s module docstring holds the one copy
+        of that argument.
 
         **It is reachable from a validly constructed `LLMCall`**, which is
         what separates it from every other refusal on this table: the model
@@ -96,22 +97,25 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
         DBAPIError`, **not** an `IntegrityError` and **not** even a
         `DataError` -- SQLAlchemy's asyncpg dialect does not classify
         `asyncpg.exceptions.NumericValueOutOfRangeError` (SQLSTATE `22003`)
-        into either. An implementation catching `IntegrityError` alone, which
-        is what every sibling repository in this package catches, lets a raw
-        SQLAlchemy exception cross the port boundary -- the one thing ADR-0009
-        says must never happen, since the only way a caller could handle it is
-        to import sqlalchemy itself.
+        into either. An implementation catching `IntegrityError` alone -- which
+        is what most sibling repositories in this package catch, and what this
+        one caught before the measurement -- lets a raw SQLAlchemy exception
+        cross the port boundary, the one thing ADR-0009 says must never happen,
+        since the only way a caller could handle it is to import sqlalchemy
+        itself. `PostgresCuratedRowRepository` has since been measured to need
+        the same widening for `curated_rows."position"`, so the shared filter
+        lives in `usher.db.repositories._errors`.
 
         There is no constraint to name, so `constraint` is `None`: this is the
         column's declared precision refusing a value, not a named constraint
         firing.
         """
-        priced_per_token_by_mistake = llm_call(
+        priced_a_million_times_over = llm_call(
             generation_id=new_id(), cost_usd=Decimal("36000.00000000")
         )
 
         with pytest.raises(RepositoryConflict) as raised:
-            await repository.record(priced_per_token_by_mistake)
+            await repository.record(priced_a_million_times_over)
 
         assert raised.value.constraint is None
         assert await ledger.count() == 0
@@ -227,16 +231,40 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
         not a plausible operational story, and it is reverted before the
         assertions so the ledger can be read back. The whole transaction is
         rolled back afterwards regardless.
+
+        **The failure is captured by hand rather than with
+        `pytest.raises(DBAPIError)`, and that is the whole difference between
+        this case discriminating and merely failing.** Under the mutation this
+        names, `record()` raises `RepositoryConflict` — which is a
+        `UsherPortError` and therefore *not* a `DBAPIError` — so
+        `pytest.raises` would decline it, let it propagate, and fail the case
+        before reaching a single assertion. The case would still be red, but
+        the line claiming to tell the two apart would never run, which is the
+        defect `35176e0` and `4608f3b` are both about. Captured into a
+        variable, the discriminating assertion is the one that fails and it
+        names what happened. `pytest.raises(Exception)` would have the same
+        property and is refused for two reasons: ruff's `B017` forbids it
+        without a `match=`, and a `match=` on a driver's message text is
+        exactly the dialect- and locale-dependent parsing that
+        `constraint_name` exists to avoid.
         """
+        raised: Exception | None = None
         await session.execute(text("ALTER TABLE llm_calls RENAME TO llm_calls_moved_away"))
         try:
-            with pytest.raises(DBAPIError) as raised:
-                await repository.record(llm_call(generation_id=new_id()))
+            await repository.record(llm_call(generation_id=new_id()))
+        # Deliberately wide: which exception this is *is* the assertion below.
+        except Exception as exc:
+            raised = exc
         finally:
             await session.execute(text("ALTER TABLE llm_calls_moved_away RENAME TO llm_calls"))
 
-        assert not isinstance(raised.value, RepositoryConflict)
-        cause = getattr(raised.value.orig, "__cause__", None)
+        assert raised is not None, "a write against a table that is not there did not raise"
+        assert not isinstance(raised, UsherPortError), (
+            f"an undefined table reached the caller as {type(raised).__name__}, which tells a "
+            "service the row was wrong when the schema is what is missing"
+        )
+        assert isinstance(raised, DBAPIError)
+        cause = getattr(raised.orig, "__cause__", None)
         assert getattr(cause, "sqlstate", None) == "42P01"
         assert await ledger.count() == 0
 

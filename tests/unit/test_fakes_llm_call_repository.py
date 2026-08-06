@@ -1,6 +1,6 @@
 """`FakeLLMCallRepository` against the shared `LLMCallRepository` contract.
 
-No Docker, no database. See `tests/fakes/llm_call_repository.py` for the seven
+No Docker, no database. See `tests/fakes/llm_call_repository.py` for the six
 places this half is more forgiving than
 `tests/integration/test_llm_call_repository.py`'s -- the first of which is
 that the fake stores the very `LLMCall` it was handed, so there is no column

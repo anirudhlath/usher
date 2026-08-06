@@ -114,12 +114,20 @@ claims a resolution the *input* does not have: both prices are an operator's
 guess at a provider's sheet and both default to `0`.
 
 **Precision 12 → four integer digits, so a call above `$9,999.99999999`
-raises `numeric field overflow` rather than storing something.** Verified. The
-ceiling is set to catch the one misconfiguration that is otherwise invisible —
-a price entered per *token* instead of per million, a factor of 1e6, which at
-12,000 tokens and `$3` is `$36,000` and fails loudly. Honest limitation: the
-same mistake on a 1,200-token call is `$3,600`, fits, and is stored. A month
-of three-figure spend is unaffected either way; that is a `SUM()`, computed at
+raises `numeric field overflow` rather than storing something.** Verified. It
+is a ceiling on the misconfiguration that scales a price **up** by a million:
+`_cost` already divides by `1_000_000`, so an operator entering `3_000_000`
+where `3` was meant is charged 1e6 times the real number, and at 12,000 tokens
+that is `$36,000`.
+
+**`db/models/curation.py`'s module docstring holds the one copy of that
+argument**, including the two limitations it does not cover — the same error
+on a smaller call fits and stores, and the *inverse* error (a per-token price
+in a per-Mtok field) under-states by the same factor with no ceiling at all.
+This paragraph shipped with the direction reversed, said "a price entered per
+*token* instead of per million", and that mistake produces the opposite of
+`$36,000`; it was wrong in all five copies, so there is now one. A month of
+three-figure spend is unaffected either way; that is a `SUM()`, computed at
 unconstrained precision, so this bound is per call and not per ledger.
 
 ## Indexes, each with the query it serves and the alternative refused

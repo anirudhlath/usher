@@ -1,8 +1,12 @@
 """In-memory `LLMCallRepository`.
 
-**Where this is more forgiving than Postgres, on purpose.** Seven places, each
+**Where this is more forgiving than Postgres, on purpose.** Six places, each
 of which the paired `tests/integration/test_llm_call_repository.py` run is
-what actually closes:
+what actually closes. It shipped with a seventh and the seventh was padding --
+"a linear scan rather than a btree" is a cost, not a forgiveness, and said in
+its own words that it gives the same answer `pk_llm_calls` gives. A list of
+six that are each individually checkable is worth more than a list of seven
+where one cannot be checked because it does not claim anything:
 
 - **The stored object *is* the object it was handed, so there is no column
   mapping here to get wrong.** `PostgresLLMCallRepository` builds eleven
@@ -13,10 +17,11 @@ what actually closes:
   structural here and load-bearing there. Named first, because a divergence
   that makes a case vacuous is worse than one that makes it strict, and this
   one makes most of the suite vacuous.
-- **No `NUMERIC(12, 8)`, so no `numeric field overflow`.** A price entered per
-  token instead of per million -- `$36,000` on one 12,000-token call, the
-  misconfiguration `m08a` chose precision 12 to catch -- stores happily here
-  and is a `RepositoryConflict` there. That is the port's only conflict path
+- **No `NUMERIC(12, 8)`, so no `numeric field overflow`.** The `$36,000`
+  one-call misconfiguration that precision 12 exists to catch -- a price scaled
+  *up* by a million on the way in; `usher.db.models.curation`'s module
+  docstring holds the one copy of that argument -- stores happily here and is a
+  `RepositoryConflict` there. That is the port's only conflict path
   reachable from a *validly constructed* `LLMCall` (the model bounds
   `cost_usd` with `ge=0` and no ceiling), so
   `test_a_cost_the_column_cannot_hold_is_a_port_error` is Postgres-only and is
@@ -44,13 +49,11 @@ what actually closes:
   aware datetimes compare by instant -- so only a case asserting on `tzinfo`
   or `utcoffset()` could tell them apart, and there is deliberately no such
   case in the contract.
-- **The duplicate check is a linear scan of a list, not a btree.** Exact and
-  O(n), which is the same answer `pk_llm_calls` gives and a different cost; a
-  ledger is append-only and this one holds a handful of rows per test, so the
-  scan is the honest shape rather than a dict pretending to be an index.
 
 **The duplicate-id refusal is modelled exactly rather than diverged**, name
-and all: `FakeTitleRepository` mirrors its three partial unique indexes name
+and all (as a linear scan rather than a btree, which is a cost and not a
+divergence -- it is the same answer `pk_llm_calls` gives):
+`FakeTitleRepository` mirrors its three partial unique indexes name
 for name for the same reason, so that `RepositoryConflict.constraint` agrees
 between the two arms instead of one arm merely also raising. It is the one
 place this fake reproduces the database rather than standing in for it,
@@ -59,7 +62,7 @@ violate through every unit test in the milestone and only discover against a
 real primary key.
 
 **And one divergence in the other direction, which is worth as much as the
-seven above: this fake never rounds.** `NUMERIC(12, 8)` rounds a ninth decimal
+six above: this fake never rounds.** `NUMERIC(12, 8)` rounds a ninth decimal
 place -- `$0.0375/Mtok x 101 tokens` is exactly `0.0000037875` and stores as
 `0.00000379`, a residual bounded by 5e-9 USD per call -- and a Python
 `Decimal` keeps every digit it was given. So a contract case asserting exact

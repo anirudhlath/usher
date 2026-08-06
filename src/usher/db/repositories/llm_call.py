@@ -81,8 +81,10 @@ _INSERT_CALL = text(
 # constraints. This table has one more: `cost_usd` is `NUMERIC(12, 8)`, so a
 # call above `$9,999.99999999` raises `numeric field overflow` -- reachable
 # from a *validly constructed* `LLMCall`, since the model bounds that field
-# with `ge=0` and no ceiling, and the exact misconfiguration `m08a` chose
-# precision 12 to catch (a price entered per token rather than per million).
+# with `ge=0` and no ceiling, and the exact misconfiguration precision 12 was
+# chosen to catch (a price scaled *up* by a million on the way in;
+# `db/models/curation.py`'s module docstring holds the one copy of that
+# argument and of the two limitations it does not cover).
 #
 # Measured on `pgvector/pgvector:pg17`: that arrives as a bare
 # `sqlalchemy.exc.DBAPIError` -- **not** an `IntegrityError` and **not** a

@@ -3110,13 +3110,24 @@ class LLMCallRepository(ABC):
         `$9,999.99999999` raises `numeric field overflow` -- and `LLMCall`
         bounds that field with `ge=0` and no ceiling, so this is reachable
         from a **validly constructed** domain model. It is the one
-        misconfiguration `m08a` chose that precision to catch: a price entered
-        per token instead of per million, a factor of 1e6, which at 12,000
-        tokens and `$3` is `$36,000`. Without translation that arrives at a
-        service as `sqlalchemy.exc.DataError`, which is exactly the
-        storage-specific type ADR-0009 exists to keep away from callers -- and
-        note it is not an `IntegrityError`, so an implementation catching only
-        that one lets it straight through.
+        misconfiguration that precision was chosen to catch -- a price scaled
+        *up* by a million on the way in, `$36,000` on one 12,000-token call.
+        `usher.db.models.curation`'s module docstring is the one copy of that
+        mechanism and of the two limitations it does not cover; this names it
+        and points there.
+
+        **Without translation it arrives at a service as a bare
+        `sqlalchemy.exc.DBAPIError`.** Measured, and stated in the negative
+        because both obvious guesses are wrong: it is **not** an
+        `IntegrityError` and **not** a `DataError` either, so an
+        implementation reaching for either catches nothing and the exception
+        goes straight through -- a raw SQLAlchemy type at a service, which is
+        the one thing ADR-0009 says must never happen.
+        `usher.db.repositories._errors.refuses_the_row` is the shared filter
+        and it discriminates on SQLSTATE *class* rather than on exception
+        class. `CuratedRowRepository.replace_for_user` needs the same one:
+        `curated_rows."position"` is `integer` against a `ge=0` field with no
+        ceiling, which is the identical shape on a different type.
 
         A conflict leaves the session usable for the caller's other pending
         work, which matters more here than on any sibling port: the caller is

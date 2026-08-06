@@ -190,15 +190,22 @@ the timeout belongs to the two cases that need it rather than to the runner.
 **`numeric field overflow` is a bare `sqlalchemy.exc.DBAPIError` — not an
 `IntegrityError`, and not a `DataError` either.** Measured 2026-08-06 on
 `pgvector/pgvector:pg17` against `llm_calls.cost_usd` (`NUMERIC(12, 8)`, so
-four integer digits): inserting `36000` raises, `exc.orig` is
+four integer digits; `36000` is reachable because `Settings` bounds both
+price fields below and not above, so an operator who performs the per-million
+conversion themselves enters `3_000_000` where `3` was meant —
+`db/models/curation.py` holds that argument, and note the direction: the
+*inverse* slip under-states by the same factor and has no ceiling at all):
+inserting `36000` raises, `exc.orig` is
 `AsyncAdapt_asyncpg_dbapi.Error` (SQLAlchemy's generic wrapper, not a
 classified subclass), `exc.orig.__cause__` is
 `asyncpg.exceptions.NumericValueOutOfRangeError` and its `sqlstate` is
 `22003`. SQLAlchemy's asyncpg dialect simply does not map SQLSTATE class 22
-onto `DataError`. **Every repository in this package catches `IntegrityError`
+onto `DataError`. **Most repositories in this package catch `IntegrityError`
 and only that**, which is correct for a table whose refusals are all
 constraints and wrong for any table with a bounded `NUMERIC` — the exception
-crosses the port boundary raw, which is the one thing ADR-0009 forbids.
+crosses the port boundary raw, which is the one thing ADR-0009 forbids. (Two
+now do not: `llm_call.py` from this finding, and `curation.py` from the
+`position` finding at the end of this file.)
 `PostgresLLMCallRepository` catches `DBAPIError` and filters on the SQLSTATE
 *class* instead: `22` (data exception) and `23` (integrity constraint
 violation) are "this row is not storable as given"; everything else — a
