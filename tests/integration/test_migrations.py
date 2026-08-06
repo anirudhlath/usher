@@ -89,6 +89,13 @@ async def test_migration_creates_the_updated_at_triggers(postgres_url: str) -> N
         # `updated_at` it should not have.
         "trg_people_set_updated_at",
         "trg_collections_set_updated_at",
+        # M8 adds `curated_rows` and `llm_calls` and this set does not move.
+        # Both are write-once artefacts -- a curated row is replaced
+        # wholesale, an `llm_calls` row records something that already
+        # happened -- so neither has an `updated_at` for a trigger to own.
+        # `db/models/curation.py` says so on both tables, because the
+        # tempting edit is to add one "for consistency" and it would fail
+        # here rather than there.
     }
 
 
@@ -327,6 +334,17 @@ async def test_the_row_read_indexes_carry_the_clauses_that_make_them_work(
     over every row including the review queue and every retracted file.
     Correct answers, wrong size, and no test would notice.
 
+    `ix_curated_rows_user_newest` is M8's, and its `DESC` is the one entry
+    here that is **not** plan-observable -- measured on
+    `pgvector/pgvector:pg17` at 30,000 rows, an ascending index answers
+    `ORDER BY generated_at DESC` with an `Index Scan Backward` at the same
+    cost, because a btree is bidirectional and the leading column is fixed by
+    equality. It is declared, and pinned here, for what a *wrong* direction
+    costs later: `ffc` dropped `ix_titles_popularity` for exactly that, and
+    the day this read grows a second ordering key the direction stops being
+    free. So this assertion pins a declaration rather than a plan, and says
+    so -- the alternative is a comment nothing checks.
+
     Asserted off `pg_indexes.indexdef` -- what Postgres will actually do --
     rather than off `Base.metadata`, the same discipline
     `test_search_schema.py` applies to `confdeltype`.
@@ -339,6 +357,10 @@ async def test_the_row_read_indexes_carry_the_clauses_that_make_them_work(
         (
             "ix_media_items_recently_added",
             "(added_at DESC NULLS LAST) WHERE (available AND (title_id IS NOT NULL))",
+        ),
+        (
+            "ix_curated_rows_user_newest",
+            "(user_id, generated_at DESC)",
         ),
     ):
         result = await session.execute(
@@ -395,6 +417,16 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     exercises `ff` specifically, which `-1` stopped reaching the moment `ffa`
     landed on top -- the failure this case had on the first run after that,
     and a good illustration of why a step count is the wrong pin.
+
+    **Head is `m8a` and the `-1` half is re-pointed at its artefacts.** The
+    previous spelling asserted `ix_titles_popularity` was present, which is
+    `ffc`'s own artefact -- and `ffc.downgrade()` recreating it is no longer
+    what `-1` reverses, so that assertion became *vacuously true*: still
+    passing, exercising nothing. That is this repository's "a run that did not
+    run is not a pass" arriving as an assertion that did not assert, and it is
+    the third migration in a row to hit it (`ffa`, then `ffc`, now `m8a`). The
+    displaced assertion has moved into the revision-pinned block below, where
+    revision ids do not drift.
     """
     admin = postgres_url.rsplit("/", 1)[0]
     scratch = f"cycle_{uuid.uuid4().hex[:12]}"
@@ -419,17 +451,27 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # downgrade that forgets one is invisible from there.
         await asyncio.to_thread(run_alembic, url, "-1")
         # **Asserted against whatever the current head actually reverses**, and
-        # that target moves with every migration -- `ffc` *drops* an index on
-        # upgrade where `ffb` added a *column* and `ffa` added a table, so the
-        # previous spelling (`"blend_fingerprint" not in ...`) silently stopped
-        # exercising the head's own `downgrade()` the moment `ffc` landed on
-        # top and started failing instead. Group F recorded exactly this for
-        # `ffa`, M7 Task 36 for `ffb`; it is the cost of a self-maintaining
-        # half, and it is cheaper than a step count that keeps passing for the
-        # wrong reason. `ffc.downgrade()` recreates `ix_titles_popularity`, so
-        # after one step back it is present again -- the mutation this catches
-        # is a `ffc.downgrade` that forgets to.
-        assert "ix_titles_popularity" in await _index_set(url)
+        # that target moves with every migration -- `m8a` *creates two tables*
+        # where `ffc` dropped an index, `ffb` added a column and `ffa` added a
+        # table, so each of the last three landings has silently re-pointed
+        # this half at something the new head does not touch. Group F recorded
+        # it for `ffa`, M7 Task 36 for `ffb`, M8 Task 8 for `ffc`. It is the
+        # cost of a self-maintaining half, and it is cheaper than a step count
+        # that keeps passing for the wrong reason.
+        #
+        # `m8a.downgrade()` drops both of its tables, so after one step back
+        # neither table's indexes exist. **Both are asserted, not one**: a
+        # downgrade that drops `curated_rows` and forgets `llm_calls` would
+        # pass a single-index check, and `llm_calls` ships no index beyond its
+        # primary key, so `pk_llm_calls` is what stands for that table here.
+        # The mutation this catches is a `downgrade()` body replaced by
+        # `pass`, which no other case in this suite can see -- the shared
+        # schema is built by one `upgrade head` and never goes down, and the
+        # whole-chain `base` round trip below drops every table anyway.
+        stepped_back = await _index_set(url)
+        assert "ix_curated_rows_user_newest" not in stepped_back
+        assert "pk_curated_rows" not in stepped_back
+        assert "pk_llm_calls" not in stepped_back
 
         # Then down to the revision *below* `ff`, which is where M7 group E's
         # two index changes become observable -- `ffa` sits between head and
@@ -444,11 +486,17 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
             functools.partial(run_alembic, url, "fe1d40c8b7a3", direction="down")
         )
         stepped = await _index_set(url)
-        # `ffa`'s and `ffb`'s own artefacts, checked here rather than after
-        # `-1`. These targets are **revision ids**, so unlike the step-back
-        # above they do not drift when a migration lands on top -- which is
-        # precisely why `ffb`'s column assertion moved here the moment `ffc`
-        # became head and the `-1` step-back stopped reaching `ffb`.
+        # `ffa`'s, `ffb`'s and `ffc`'s own artefacts, checked here rather than
+        # after `-1`. These targets are **revision ids**, so unlike the
+        # step-back above they do not drift when a migration lands on top --
+        # which is precisely why `ffb`'s column assertion moved here the
+        # moment `ffc` became head, and why `ffc`'s index assertion moved here
+        # the moment `m8a` did. `ffc.downgrade()` recreates
+        # `ix_titles_popularity` (wrong declaration and all -- a downgrade
+        # restores the schema it reversed, not a better one), and reaching
+        # `fe1d40c8b7a3` runs it, so this is the same assertion the `-1` half
+        # used to make and it is still exercising `ffc`.
+        assert "ix_titles_popularity" in stepped
         assert "pk_genome_scores" not in stepped
         assert "blend_fingerprint" not in await _column_set(url, "title_neighbors")
         assert "ix_watch_states_user_recent" not in stepped

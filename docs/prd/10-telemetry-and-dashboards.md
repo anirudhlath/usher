@@ -334,10 +334,11 @@ They are domain records, not telemetry exhaust — durable, queryable, exact.
 
 ```sql
 llm_calls(
-  id, at, model, purpose,           -- purpose: curation | query_expansion | …
+  id, at, model, purpose,           -- purpose: curation | query_expansion
   tokens_in, tokens_out, cost_usd,
-  latency_ms, ok, error
-)
+  latency_ms, ok, error,
+  generation_id                     -- ✅ M8. NULL for a purpose that produces
+)                                   --    no rows. See below
 
 search_queries(                       -- M9, whole. Not built in M6; see below
   id, at, user_id, query, mode,
@@ -354,6 +355,26 @@ false — independently of M8's decision not to take that dependency.** Measured
 all**. litellm does not *report* cost, it *computes* it, from a price table it
 bundles. So "exact SQL rather than estimated counters" was describing a lookup
 either way; the only question was whose table it is and how it ages.
+
+✅ **`generation_id` is new to this sketch and it is what makes dashboard 5 a
+join.** This column list had ten entries and no way to connect a completion to
+what it produced, so "cost per curated row" would have been a correlation on
+timestamps — two tables written milliseconds apart, matched by proximity, with
+no way to tell two users' concurrent generations apart. `curated_rows` carries
+the same `generation_id` on every row of one generation, so the panel is
+`llm_calls JOIN curated_rows USING (generation_id)` and nothing else.
+
+**It is also *why* this table has no `user_id`.** Spend is attributed to an
+outcome through that join rather than by denormalising a household onto a cost
+row, which is what keeps this a spend ledger rather than a second copy of the
+curation record. `NULL` for a purpose that produces no rows at all — query
+expansion is one, and once it ships those are the majority of the table, which
+is why the index that eventually serves this join is partial on
+`generation_id IS NOT NULL`. **No foreign key**, in either direction: a
+generation is three to five `curated_rows` rows, so that column is not unique
+and must not become so; and any foreign key would make a ledger row deletable
+by a cascade from the thing whose cost it records, when a curated row is
+replaced nightly and the money was still spent. Migration `m8a`.
 
 `cost_usd` is therefore computed from two configured per-million-token prices
 and **written onto the row**, so a later price change cannot rewrite history.

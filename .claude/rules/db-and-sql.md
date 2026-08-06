@@ -45,17 +45,34 @@ fourth, fifth and sixth are spelled `ffa`, `ffb`, `ffc`. In order:
 `fe1d40c8b7a3` (`titles.credit_names`, weight class B), `ff` (the row-read
 indexes), `ffa` (`genome_scores` + `user_taste`), `ffb`
 (`title_neighbors.blend_fingerprint` — named in advance as the fifth), and
-`ffc` (dropping `ix_titles_popularity`, found by Task 36). **The next milestone
-needs a new id convention**, recorded here so it is not rediscovered.
+`ffc` (dropping `ix_titles_popularity`, found by Task 36).
+**M8 opens the replacement, and it is `m8a`, `m8b`, … — milestone-prefixed,
+obviously ordered, unbounded.** Extending the hex ids again (`ffca`, `ffcb`, …)
+would still sort and would stop saying anything: the ids no longer group, and
+nothing in one says which milestone shipped it. `m` sorts after `f`, so every
+M8 revision sorts after every M7 one (verified by listing the directory) —
+which is the only thing the hex convention ever bought (Alembic orders by
+`down_revision` and never cared). `m8a` (`curated_rows` + `llm_calls`) is the
+first and `m8b`
+(the genome tag vocabulary) is planned; the rule for the next milestone is now
+mechanical rather than a decision.
 **`tests/integration/test_migrations.py`'s down/up cycle needs attention from
 every group that adds a migration, and its two halves fail differently.** The
 `-1`-from-head half self-maintains — it asserts on whatever the *current* head
-reverses — so adding a migration silently re-points it at a different artefact
-and it fails on the *previous* head's column. The named-revision half does not
-drift. Both hit this in M7: `ffa` broke it once (Group F) and `ffc` broke it
-again, because the prior session added the migration without running the
-integration suite. The repair is to re-point the `-1` half at the new head's
-own artefact and move the displaced assertion into the revision-pinned block.
+reverses — so adding a migration silently re-points it at a different artefact.
+**It fails loudly in one direction and passes vacuously in the other, and the
+second is the dangerous one.** If the new head touches something the old
+assertion named, the half fails on the previous head's artefact — noisy, and
+that is how `ffa` (Group F) and `ffc` (M7 Task 36) were caught. If it does
+*not*, the old assertion stays true for a reason that has nothing to do with
+the new migration, and the half keeps passing while exercising nothing: `m8a`
+creates two tables and does not touch `ix_titles_popularity`, so `ffc`'s
+assertion would have survived head-on-head as a run that did not run. The
+named-revision half does not drift at all. The repair, both times, is to
+re-point the `-1` half at the new head's own artefact and move the displaced
+assertion into the revision-pinned block. **A table-creating head needs two
+assertions, not one** — `m8a` drops `curated_rows` and `llm_calls`, and a
+`downgrade()` that forgets the second would pass a single-index check.
 Related: `run_alembic` used to infer its direction from the target string, so a
 bare revision id ran `upgrade` — a silent no-op — and it now takes an explicit
 `direction`.

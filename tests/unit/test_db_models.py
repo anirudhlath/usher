@@ -16,13 +16,14 @@ from sqlalchemy import Enum as SAEnum
 from sqlalchemy import Table
 
 from usher.db.base import Base
-from usher.db.models import MediaItemRow, SourceRow, TitleRow, UserRow, WatchStateRow
+from usher.db.models import LLMCallRow, MediaItemRow, SourceRow, TitleRow, UserRow, WatchStateRow
 from usher.db.models.search import (
     EMBEDDING_DIMENSIONS,
     TitleEmbeddingRow,
     TitleNeighborRow,
 )
 from usher.db.models.title import DERIVED_COLUMNS
+from usher.domain.curation import LLMPurpose
 from usher.domain.enums import (
     EnrichmentState,
     HdrFormat,
@@ -163,6 +164,11 @@ def test_enum_columns_are_real_enums_not_bare_strings() -> None:
         (SourceRow.__table__.c.kind, SourceKind),
         (MediaItemRow.__table__.c.hdr_format, HdrFormat),
         (WatchStateRow.__table__.c.origin, WatchStateOrigin),
+        # M8. `LLMPurpose` lives in `usher.domain.curation` rather than in
+        # `usher.ports.llm` where M1 declared it, because `LLMCall` is a
+        # domain model and `usher.domain` may not import `usher.ports` --
+        # `ports.llm` re-exports it, so this is the same enum either way.
+        (LLMCallRow.__table__.c.purpose, LLMPurpose),
     ]
     for column, enum_cls in cases:
         column_type = column.type

@@ -499,7 +499,8 @@ a failure that is silent under either one alone.
 
 | Table | Purpose |
 |---|---|
-| `curated_rows` | ⏳ Persisted LLM row output ([06](06-rows-and-recommendations.md)). **Does not exist yet** — M8 owns it, along with the `LLMClient` implementation that fills it |
+| `curated_rows` | ✅ Persisted LLM row output ([06](06-rows-and-recommendations.md)): `(id, user_id, slug, title, reason, card_title_ids uuid[], position, model_name, generation_id, generated_at)`. **`card_title_ids` is an ordered array on the row, not a child table** — see below. `reason` is nullable, because a model that returns an empty reason should give a row with no subtitle rather than one with an empty one. **No `created_at`**: `generated_at` is one instant per *generation*, written identically onto every row of it, which is what makes `ORDER BY generated_at DESC` select a whole generation rather than a mixture — so it also carries no `server_default`. `generation_id` is what makes a replacement atomic and a partial write legible. One index, `(user_id, generated_at DESC)`, serving the read, the delete and the `users` cascade. Migration `m8a` |
+| `llm_calls` | ✅ The cost ledger ([10](10-telemetry-and-dashboards.md)): `(id, at, model, purpose, tokens_in, tokens_out, cost_usd, latency_ms, ok, error, generation_id)`. **No `user_id`, deliberately** — spend is attributed to an outcome by joining `curated_rows` on `generation_id`, which is what dashboard 5's "cost per curated row" *is*. `record()` is called on the failure path too, so `ok` is the discriminator and a ledger of successes alone understates spend by exactly the failures. `cost_usd` is **`NUMERIC(12, 8)`**, never a float: `$3/Mtok × 1,200 tokens` is exactly `0.0036` and at scale 4 a `$0.02/Mtok` call stores as `0.0000` — measured. `generation_id` is nullable (query expansion produces no rows) and carries no foreign key. **No index beyond the primary key**, because every reader is an M10 dashboard; the two that will be right are written into `m8a`'s docstring. Migration `m8a` |
 | `people` | ✅ Canonical people: `(id, tmdb_id, name, sort_name, known_for_department, created_at, updated_at)`. Identity is a **partial-unique `tmdb_id`** (`WHERE tmdb_id IS NOT NULL`), never `name` — see below |
 | `credits` | ✅ The `people`↔`titles` join, one row per credit: `(id, person_id, title_id, kind, tmdb_credit_id, character, job, department, billing_order, created_at)`. `kind` is the `cast`/`crew` discriminator and `billing_order` is the cast's billing rank. **No `updated_at` and no trigger** — every write is an insert, because a credit is a fact about a payload rather than a mutable row |
 | `collections` | ✅ TMDb franchise grouping: `(id, tmdb_id, name, created_at, updated_at)`, `tmdb_id` partial-unique. `titles.collection_id`'s foreign-key target, at last |
@@ -586,6 +587,65 @@ one migration. What makes that safe rather than a deferral-by-omission is
 `genome_revision`: the vocabulary M8 loads must carry the same revision as the
 vectors it explains, and there is already something to check it against.
 
+### `curated_rows.card_title_ids` is an ordered array, and the missing foreign key is the price
+
+Both shapes are already precedented in this schema: `titles.genres` is a
+`text[]` on the row, and `title_neighbors` is a child table with an explicit
+`rank` integer. A curated row's cards took the array, for three reasons.
+
+**The ordering is the product.** A curated row *is* an ordering — it is the
+only judgement the completion was bought for, and
+[ADR-0028](decisions/0028-the-pool-is-the-contract.md) says nothing downstream
+may re-sort it. A Postgres array is an ordered container, so the order is the
+storage and there is no `ORDER BY` for a reader to forget. A child table makes
+the order a `rank` column that every read has to sort by — and a UUIDv7
+primary key makes a forgotten `ORDER BY rank` agree with `ORDER BY id` and
+pass every test whose fixture inserted the cards in order. This project has
+paid for that five times over, in M7's five untested provider orderings.
+`title_neighbors` takes the other shape because its order is a *ranking* a
+client may legitimately re-derive; this one is not.
+
+**A shelf is one row, so a replacement is one statement per shelf.**
+`replace_for_user` is delete-then-insert in one transaction. In the child
+shape the same write also moves thirty to fifty card rows and makes a
+partially inserted shelf representable — which is exactly the state
+`CuratedRow`'s `min_length=1` exists to make unconstructible.
+
+**The 1:1 row/model rule stays spellable.** `CuratedRow` has ten fields and
+this table has ten columns, so `PostgresCuratedRowRepository` reads through
+this project's usual shape (a `SELECT *` into an `extra="forbid"` model). A
+child table leaves nine here and puts the tenth where `SELECT *` cannot see
+it. `titles` is the only table in this schema carrying an exception list, and
+it exists for generated columns.
+
+⚠️ **The price is that this column cannot have referential integrity, and it
+is a real consequence rather than a footnote.** PostgreSQL has no foreign key
+over array elements, so deleting a title leaves a dangling id in every curated
+row that mentioned it. Three things follow, in the order they arrive: the
+stored row still validates, because the ids are all still there and the model
+never claims they resolve; `LLMRow`'s hydration loses a card, which is
+[ADR-0014](decisions/0014-absence-is-not-zero.md)'s shape and the same
+degradation the validator already produces, with a shelf that empties entirely
+dropped rather than rendered as a heading with nothing under it; and it
+self-heals at the next generation, because this table holds one generation per
+user and the nightly run replaces it wholesale, so the window is one day.
+
+**The child table would not have bought integrity — it would have bought a
+choice between two worse outcomes.** `ON DELETE CASCADE` on a card's
+`title_id` can empty a curated row *inside the database*, producing the
+heading-with-no-shelf that `min_length=1` refuses, silently and where nothing
+is looking. `ON DELETE RESTRICT` makes a title undeletable because a model
+mentioned it last night, for an artefact that is fully re-derivable — the
+delete that can essentially never succeed, which `title_neighbors` refuses
+RESTRICT for by name.
+
+**One liability the array really does introduce is closed with a CHECK.** A
+`uuid[]` admits a NULL *element*, which a child table's `NOT NULL` column
+could not, and a NULL element reads back as a card that denotes nothing while
+still satisfying "the array is non-empty". `array_position` is `IMMUTABLE` on
+PostgreSQL 17 and does find a NULL element (both verified directly), so
+`ck_curated_rows_cards_have_no_nulls` is what that `NOT NULL` would have been.
+
 ## Relationships
 
 ```
@@ -598,8 +658,16 @@ Title      1─* WatchState *─1 User
 Title      1─1 TitleEmbedding
 Title      1─1 GenomeVector  (sparse — 15,565 of 1,271,570; genome_scores)
 User       1─1 UserTaste     (nullable centroid; user_taste)
+User       1─* CuratedRow    (curated_rows; replaced per generation, CASCADE)
 Title      *─* Title        (through title_neighbors, directed, precomputed)
 ```
+
+⚠️ **`CuratedRow *─* Title` is deliberately absent from that list**, and its
+absence is the shape decision above rather than an omission. The relationship
+exists — a curated row names three to eight titles, in order — but it is a
+`uuid[]` column rather than a join table, so Postgres does not know about it
+and will neither check nor cascade it. `llm_calls` appears on no line at all:
+it references nothing, by the same argument.
 
 ⏳ **One of those lines still describes a table that does not exist.** `Image`
 has no table, no model and no port anywhere in `src/`, and it lands with M9,

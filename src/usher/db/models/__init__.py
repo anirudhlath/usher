@@ -2,6 +2,7 @@
 
 from usher.db.models.bootstrap import IdCrosswalkRow, ImportRunRow, TmdbIdRow
 from usher.db.models.collection import CollectionRow
+from usher.db.models.curation import CuratedRowRow, LLMCallRow
 from usher.db.models.episode import EpisodeRow, SeasonRow
 from usher.db.models.jobs import JobRow
 from usher.db.models.people import CreditRow, PersonRow
@@ -15,11 +16,13 @@ from usher.db.models.watch import UserRow, WatchStateRow
 __all__ = [
     "CollectionRow",
     "CreditRow",
+    "CuratedRowRow",
     "EpisodeRow",
     "GenomeScoreRow",
     "IdCrosswalkRow",
     "ImportRunRow",
     "JobRow",
+    "LLMCallRow",
     "MediaItemRow",
     "PersonRow",
     "RawPayloadRow",
