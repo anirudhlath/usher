@@ -228,14 +228,47 @@ is one function with one caller, and
 twin. The honest answer for the day it *is* reachable is a manual sweep, and
 it is written here rather than implied to be covered.
 
-**`title_neighbors` is an acknowledged exception to this ADR's own rule**,
-and it is written down as weaker rather than dressed up. It is a batch
-artefact over a population: a title's neighbours go stale when *some other*
-title gets an embedding, and there is no per-row predicate that can decide
-that without recomputing the row. It carries an oldest-row `computed_at()`
-instead, where `None` means never computed, and it is rebuilt rather than
-repaired. A freshness predicate that looked like the others and did not mean
-the same thing would be worse than an honest gap.
+**`title_neighbors` was an acknowledged exception to this ADR's own rule.
+M7 closes half of it, and the half it does not close is stated rather than
+implied.**
+
+M6 recorded the exception like this, and this part is still correct: a
+title's neighbours go stale when *some other* title gets an embedding, and
+there is no per-row predicate that can decide that without recomputing the
+row. It carried an oldest-row `computed_at()` instead, where `None` means
+never computed, and it was rebuilt rather than repaired.
+
+**What that argument missed is that there are two causes of staleness, not
+one — and M7 made the second one urgent by doing it.** M7's similarity work
+added the tag-genome term and re-weighted the other three, so every row
+written before it is a three-signal blend and every row after is a four-signal
+blend. Both are in `[0, 1]`, both carry a plausible `rank`, both sit in one
+table, and **nothing distinguished them.** That is exactly the state this ADR
+exists to eliminate, arriving in the one artefact it had exempted.
+
+So `title_neighbors` now carries **`blend_fingerprint`** — the md5 of
+`_WEIGHTS`, `_NEIGHBORS_PER_TITLE` and `_CANDIDATE_POOL`, i.e. of the three
+constants that between them decide what a stored score *means*. One definition
+(`services/similar.blend_fingerprint()`), three consumers: `usher similar
+<title id>` says so per title, `usher.similarity.neighbors.stale` counts the
+table, and `usher similar --rebuild` drives it to zero. Migration `ffb` stamps
+every pre-existing row with M6's own fingerprint
+(`6697a3e1eaca411cbae890e54a4c665a`) rather than a sentinel, so those rows
+*name* the blend that computed them instead of merely failing to match.
+
+**It does not answer "has some other title been embedded since?"** That half
+is genuinely undecidable per row, `computed_at()` still exists beside the
+fingerprint for it, and **nothing schedules `usher similar --rebuild`.** Two
+causes, one closed, and saying which is the difference between an improvement
+and a claim. A freshness predicate that looked like the others and did not mean
+the same thing would still be worse than an honest gap.
+
+**This is also the milestone that made this ADR's own Uncertainty section
+live.** The paragraph above warns that a fingerprint proves the *text* is
+current and not the *assembly rule*. M7's weight class B moved every
+`search_document` fingerprint at once, deliberately, and the blend fingerprint
+is the same idea applied to an assembly rule that has no text to hash: when the
+rule itself is the input, hash the rule.
 
 **Nothing measures the freshness of the *whole* system end to end.** Each
 half is checkable, and no gauge says "the index as a whole describes the

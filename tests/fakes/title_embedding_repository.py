@@ -42,6 +42,7 @@ sharing are exactly the three above, and a case both implementations could
 satisfy would be the vacuous pass the plan's trap section warns about.
 """
 
+import math
 import uuid
 from collections.abc import Sequence
 
@@ -92,6 +93,10 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
         self.titles: list[Title] = list(titles)
         self.fingerprints: dict[uuid.UUID, str] = dict(fingerprints or {})
         self.rows: dict[uuid.UUID, StoredEmbedding] = {}
+        # `genome_scores`, keyed the same way that table is. Absent means no
+        # row, which is the ~98% case and the one the `tags=None` rule is
+        # about.
+        self.genomes: dict[uuid.UUID, tuple[float, ...]] = {}
         self.upsert_calls: list[Sequence[TitleEmbeddingUpsert]] = []
         self._catalog = catalog
         self.nearest_calls: list[tuple[uuid.UUID, ...]] = []
@@ -124,6 +129,20 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
 
     async def get(self, title_id: uuid.UUID) -> StoredEmbedding | None:
         return self.rows.get(title_id)
+
+    async def list_for_titles(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[float, ...]]:
+        # A title with no row and a title whose row carries a NULL vector are
+        # both simply absent -- never a key mapped to `None` and never one
+        # mapped to a zero vector. ADR-0014, and the caller drops the title
+        # from its mean rather than averaging in an origin.
+        found: dict[uuid.UUID, tuple[float, ...]] = {}
+        for title_id in title_ids:
+            row = self.rows.get(title_id)
+            if row is not None and row.embedding is not None:
+                found[title_id] = row.embedding
+        return found
 
     def _population(self) -> list[Title]:
         return sorted(
@@ -173,6 +192,7 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
         genres: Sequence[str] = (),
         keywords: Sequence[str] = (),
         model_name: str = "fake:test-384",
+        genome: Sequence[float] | None = None,
     ) -> Title:
         """Seed one embedded title, its tag sets, and its vector.
 
@@ -186,6 +206,15 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
         is what makes "neither a seed nor a candidate" arrangeable at all, and
         calling `given` twice for one id replaces the row, which is how a case
         turns a real title into a refused one.
+
+        `genome` is this title's `genome_scores` row, or `None` for the great
+        majority of the catalog that has none. **`has_genome` is derived from
+        it rather than passed separately**, mirroring the statement's own
+        `EXISTS (SELECT 1 FROM genome_scores ...)`. A fake that let a case
+        claim coverage it had not seeded could report a seed flag of `True`
+        alongside a pairwise `tags` of `None` for every pair -- which is the
+        half-covered state the port's `None` rule exists to *describe*, arrived
+        at by an arrangement error rather than by the data.
         """
         title = Title(
             id=title_id,
@@ -204,6 +233,10 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
             source_fingerprint=f"fingerprint-{title_id}",
         )
         self.fingerprints[title_id] = f"fingerprint-{title_id}"
+        if genome is None:
+            self.genomes.pop(title_id, None)
+        else:
+            self.genomes[title_id] = tuple(genome)
         if self._catalog is not None:
             existing = await self._catalog.get(title_id)
             if existing is None:
@@ -243,7 +276,12 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
             "it is not advancing its keyset cursor"
         )
         return [
-            NeighborSeed(title_id=title.id, genres=title.genres, keywords=title.keywords)
+            NeighborSeed(
+                title_id=title.id,
+                genres=title.genres,
+                keywords=title.keywords,
+                has_genome=title.id in self.genomes,
+            )
             for title in self._embedded()
             if after is None or title.id > after
         ][: max(limit, 0)]
@@ -269,6 +307,7 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
                         cosine=_cosine(row.embedding, candidate_row.embedding),
                         genres=title.genres,
                         keywords=title.keywords,
+                        tags=self._genome_cosine(seed_id, title.id),
                     ),
                 )
                 for title in embedded
@@ -282,6 +321,30 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
             scored.sort(key=lambda pair: (pair[0], pair[1].title_id))
             answer[seed_id] = [candidate for _, candidate in scored[: max(limit, 0)]]
         return answer
+
+    def _genome_cosine(self, seed_id: uuid.UUID, candidate_id: uuid.UUID) -> float | None:
+        """The pair's genome cosine, or `None` when **either** side has no row.
+
+        **Mirrors the `None` rule and is not strengthened past it.** The real
+        statement gets this from a join that simply misses, and the standing
+        rule from M3's live run -- 40 contract assertions green against a
+        write-back that had never once worked -- is that a double which models
+        more of the predicate than the port promises stops being a stand-in.
+        So this is a join miss expressed in Python, and nothing more.
+
+        Unlike the embedding vectors, genome vectors are **not** unit, so this
+        normalises rather than taking a bare dot product: `<=>` is cosine
+        distance, which is normalisation-invariant, and a fake that returned a
+        raw dot would hand the blend a number outside `[0, 1]` and make the
+        service's clamp look load-bearing where it is not.
+        """
+        left, right = self.genomes.get(seed_id), self.genomes.get(candidate_id)
+        if left is None or right is None:
+            return None
+        norms = math.sqrt(sum(one * one for one in left)) * math.sqrt(
+            sum(one * one for one in right)
+        )
+        return None if norms == 0 else _cosine(left, right) / norms
 
     async def count_without_embedding(self) -> int:
         return sum(1 for row in self.rows.values() if row.embedding is None)

@@ -96,7 +96,25 @@ class IndexService:
                 logger.debug("index job names a title that no longer exists: {id}", id=title_id)
                 return
 
-            document = compose_document(title)
+            # **Site three of the document's three spellings, and the one
+            # that gets missed.** `credit_names` is in `DERIVED_COLUMNS`, so
+            # `_to_domain` filters it out and the `Title` above cannot supply
+            # it -- `compose_document(title)` silently composes the M6
+            # document. Sites one and two can both move correctly and the
+            # pair still disagrees on every credited title, forever.
+            #
+            # One indexed single-row read, on a path that then runs a 65 MB
+            # ONNX model at ~83 texts/s. The alternative -- `Title` modelling
+            # `credit_names` -- makes this free and buys a domain type on
+            # which `title.evolve(credit_names=...)` spells an array that
+            # disagrees with the `credits` table. Take the read.
+            #
+            # `.get(title.id, ())`, and the empty tuple is the *same* answer
+            # the port gives for a title with no credits: the assembly is
+            # positional, so an absent key would be a missing segment rather
+            # than an empty one.
+            names = await self._titles.credit_names_for([title_id])
+            document = compose_document(title, credits=names.get(title.id, ()))
             stored = await self._embeddings.get(title_id)
             if (
                 stored is not None

@@ -36,18 +36,33 @@ from typing import Any
 
 
 class ClientEventKind(StrEnum):
-    """PRD 07's SSE table, restricted to what M5 emits.
+    """PRD 07's SSE table, restricted to what this process emits.
 
-    `row.invalidated` is absent because nothing composes a row until M7, and
-    `bootstrap.progress` because bootstrap runs in the CLI process while
-    M5's bus is in-process. PRD 10's argument for keeping its metric
-    catalogue honest applies harder here: an empty dashboard panel is a
-    puzzle, and an SSE event type nothing emits is a client handler that
-    waits forever.
+    `bootstrap.progress` is absent because bootstrap runs in the CLI process
+    while the bus is in-process, so there is no channel from one to the other.
+    PRD 10's argument for keeping its metric catalogue honest applies harder
+    here: an empty dashboard panel is a puzzle, and an SSE event type nothing
+    emits is a client handler that waits forever.
+
+    **`row.invalidated` landed with M7**, which is the milestone that composes
+    a row -- and it landed in the same commit as its publisher, for the reason
+    above pointed the other way. This docstring used to say it was absent
+    "because nothing composes a row until M7"; that sentence is replaced rather
+    than left to read falsely.
     """
 
     TITLE_UPDATED = "title.updated"
     WATCHSTATE_UPDATED = "watchstate.updated"
+    # Payload is a **row slug**, and deliberately no `title_id`: a row is not a
+    # title. This is therefore the one event the `?titles=` filter cannot
+    # express -- it reaches unfiltered subscribers and no others, which is
+    # correct rather than a limitation. A client that sent `?titles=` is on a
+    # detail screen, and PRD 07's own reason for the filter is "so a detail
+    # screen isn't woken by unrelated churn". A `title_id` here would be a
+    # filter key that half-works: it would wake exactly the detail screens
+    # subscribed to whichever title happened to be attached, which is neither
+    # "every subscriber" nor "the right ones".
+    ROW_INVALIDATED = "row.invalidated"
     SYNC_PROGRESS = "sync.progress"
     # Not a domain event: the channel telling a client its own stream has a
     # hole in it. PRD 07: "On buffer overflow the server emits

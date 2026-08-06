@@ -8,21 +8,29 @@ wiring nothing checks.
 import argparse
 import asyncio
 import dataclasses
+from pathlib import Path
 
+import httpx
 import pytest
 
+from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
+from tests.fakes.import_run_repository import FakeImportRunRepository
 from usher.cli import (
     PHASES,
     SYNC_KINDS,
     _as_uuid,
     _filters_from,
+    _movielens,
+    _report_coverage,
     _run_lanes,
     build_parser,
     parse_args,
 )
 from usher.config import Settings
 from usher.domain.enums import EnrichmentState, TitleKind
+from usher.ports.repository import GenomeCoverage
 from usher.ports.search import SearchFilters, SearchMode
+from usher.services.bootstrap import BootstrapService
 
 
 def test_no_arguments_still_means_serve() -> None:
@@ -369,3 +377,153 @@ def test_similar_rejects_a_title_id_that_is_not_a_uuid() -> None:
     assert parse_args(["similar", "not-a-uuid"]).title_id == "not-a-uuid"
     with pytest.raises(SystemExit, match="title id is not a uuid"):
         _as_uuid("not-a-uuid", "title id")
+
+
+def test_movielens_is_the_last_phase_before_all_and_the_order_is_execution_order() -> None:
+    """`--phase all` runs the tuple in order, so this tuple *is* the
+    execution order an operator reads it as.
+
+    `movielens` must come after `imdb`: the genome joins to `titles` on
+    `imdb_id`, and against an empty catalog the join matches nothing. Kills a
+    tidy-up that alphabetises `PHASES`, which would put `crosswalk` and
+    `movielens` before `imdb` and produce a phase that downloads 335 MiB,
+    writes zero rows, and reports success.
+    """
+    assert PHASES == ("imdb", "tmdb-ids", "crosswalk", "movielens", "all")
+
+
+async def test_the_genome_phase_refuses_an_empty_catalog_before_downloading(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The worst outcome available in this milestone, refused.
+
+    Against an empty catalog the phase would otherwise download 350,896,731 B,
+    stream 18,472,128 rows, write 0, checkpoint COMPLETED, and show green in
+    `bootstrap-status` -- and every later `--phase all` would find a completed
+    checkpoint at the file's end and do nothing, so the failure would be
+    permanent and invisible.
+
+    Three assertions, one per property. **No request of any kind** -- the
+    transport fails the test if reached, so this also pins "before the
+    download" rather than merely "before the write". **No `ImportRun`** -- a
+    FAILED row would be a lie and a COMPLETED one would be worse, and the
+    absence of a row is what `bootstrap-status` already renders as "this
+    phase has not run". **A message that names the reason and the fix**,
+    because PRD 08's rule is that every operator command works against an
+    empty database, and "work" means saying why.
+    """
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"the genome phase reached the network: {request.url}")
+
+    catalog = FakeBulkCatalogRepository()
+    runs = FakeImportRunRepository()
+    service = BootstrapService(runs, catalog, _no_commit)
+    settings = Settings(
+        database_url="postgresql+asyncpg://u:p@localhost/db",
+        secret_key="0" * 32,
+        bulk_data_dir=tmp_path,
+    )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+        await _movielens(settings, client, catalog, service)
+
+    assert await catalog.count_titles() == 0
+    assert await runs.list_runs() == []
+    printed = capsys.readouterr().out
+    assert "titles is empty" in printed
+    assert "--phase imdb" in printed
+
+
+async def _no_commit() -> None:
+    return None
+
+
+def test_the_coverage_report_survives_an_enriched_tier_of_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A bootstrap-only catalog is all skeletons, which is exactly the state
+    PRD 08 says every operator command must survive. The enriched-tier
+    fraction is the one that matters and it is the one whose denominator is
+    zero on a fresh database. Kills a report that divides."""
+    _report_coverage(
+        GenomeCoverage(
+            with_vector=16376,
+            titles=1271138,
+            movies=899828,
+            enriched=0,
+            enriched_with_vector=0,
+            revisions=(("an-invented-etag", 16376),),
+        ),
+        unmatched=0,
+    )
+    printed = capsys.readouterr().out
+    assert "1.29% of 1271138 titles" in printed
+    assert "1.82% of 899828 movies" in printed
+    assert "n/a (0 titles) of the enriched tier" in printed
+    # One release is the normal case; a line reading "revisions: 1" is noise.
+    assert "MIXED RELEASES" not in printed
+
+
+def test_the_coverage_report_names_every_release_when_there_is_more_than_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Two releases in one table is a correctness problem
+    `GenomeRepository.get_pair` is already refusing to blend across, and a
+    killed re-import against a new upload is how it happens. Kills a report
+    that prints the breakdown unconditionally (noise on every normal run,
+    which trains an operator to skip the line) and one that never prints it
+    (the condition becomes invisible)."""
+    _report_coverage(
+        GenomeCoverage(
+            with_vector=3,
+            titles=10,
+            movies=8,
+            enriched=2,
+            enriched_with_vector=1,
+            revisions=(("an-invented-etag-a", 1), ("an-invented-etag-b", 2)),
+        ),
+        unmatched=4,
+    )
+    printed = capsys.readouterr().out
+    assert "3 vectors stored (4 unmatched)" in printed
+    assert "MIXED RELEASES" in printed
+    assert "an-invented-etag-a: 1" in printed
+    assert "an-invented-etag-b: 2" in printed
+
+
+def test_the_parser_knows_the_home_command() -> None:
+    args = parse_args(["home"])
+    assert args.command == "home"
+    assert args.limit == 10
+    assert args.repeat == 1
+
+
+def test_home_refuses_a_limit_below_one() -> None:
+    """Beside the identical checks `search` and `suggest` already carry. A zero
+    limit composes a screen and prints nothing, which reads as a broken
+    catalog rather than as an argument the operator got wrong."""
+    with pytest.raises(SystemExit):
+        parse_args(["home", "--limit", "0"])
+
+
+def test_home_refuses_a_repeat_below_one() -> None:
+    """A zero repeat times nothing and then reports a p95 over an empty list,
+    which is either a crash or a fabricated number depending on how the
+    percentile is spelled."""
+    with pytest.raises(SystemExit):
+        parse_args(["home", "--repeat", "0"])
+
+
+def test_home_has_no_cross_argument_rule_and_that_is_deliberate() -> None:
+    """`usher similar` needs one (`bool(title_id) == bool(rebuild)`) because
+    its two arguments select between two *different operations*, one of which
+    rewrites the whole neighbour table. `usher home` has one operation and two
+    scalars, so every combination of them is meaningful.
+
+    Written down as a case rather than as an absence, because a reader
+    comparing this command to its template will look for the rule and should
+    find the reason it is not there.
+    """
+    both = parse_args(["home", "--limit", "3", "--repeat", "5"])
+    assert (both.limit, both.repeat) == (3, 5)

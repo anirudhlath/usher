@@ -44,13 +44,16 @@ from typing import Any
 
 from pydantic import AwareDatetime
 
+from usher.domain.collection import Collection
 from usher.domain.enums import TitleKind
 from usher.domain.episode import Episode, Season
+from usher.domain.people import Credit, CreditKind, Person, person_sort_name
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, UsherPortError
 from usher.ports.ingest import ProviderRef
 from usher.ports.metadata import (
     ChangedPage,
+    DerivationResult,
     EnrichmentResult,
     MetadataCandidate,
     MetadataProvider,
@@ -263,6 +266,73 @@ class FakeMetadataProvider(MetadataProvider):
             seasons=tuple(seasons),
             episodes=tuple(episodes),
             payload=payload,
+        )
+
+    def to_derivation(self, payload: dict[str, Any], title_id: uuid.UUID) -> DerivationResult:
+        """People, credits and a collection out of a seeded payload.
+
+        **Deliberately a second, simpler reader than
+        `usher.adapters.tmdb.mapping`, and the module docstring's warning
+        applies with full force here**: agreeing with a payload this same
+        file wrote is not evidence about TMDb. What this exists for is the
+        service above it -- `DeriveService`'s resolution, scoping and
+        ordering -- and for that a reader that is honest about `cast`, `crew`
+        and `created_by` is enough.
+
+        Three things it does model, because a service case turns on each:
+        the per-kind divergence (`created_by` is top-level, not
+        `credits.crew`), one `Person` per distinct provider id however many
+        arrays name them, and `billing_order` read from `order` rather than
+        from the array index.
+
+        What it does **not** model: the crew job filter and the cast cutoff.
+        Both are `mapping.py`'s and both have their own cases there; a fake
+        that reimplemented them would be a second copy of the rule, which is
+        the thing a fake exists not to be.
+        """
+        people: dict[int, Person] = {}
+        credits: list[Credit] = []
+        block = payload.get("credits") or {}
+        sources: list[tuple[list[dict[str, Any]], CreditKind, str | None]] = [
+            (block.get("cast") or [], CreditKind.CAST, None),
+            (block.get("crew") or [], CreditKind.CREW, None),
+            (payload.get("created_by") or [], CreditKind.CREW, "Creator"),
+        ]
+        for entries, kind, forced_job in sources:
+            for entry in entries:
+                tmdb_id = entry.get("id")
+                name = entry.get("name")
+                if tmdb_id is None or not name:
+                    continue
+                if tmdb_id not in people:
+                    people[tmdb_id] = Person(
+                        tmdb_id=tmdb_id,
+                        name=name,
+                        sort_name=person_sort_name(name),
+                        known_for_department=entry.get("known_for_department"),
+                    )
+                credits.append(
+                    Credit(
+                        person_id=people[tmdb_id].id,
+                        title_id=title_id,
+                        kind=kind,
+                        tmdb_credit_id=entry.get("credit_id"),
+                        character=entry.get("character"),
+                        job=forced_job or entry.get("job"),
+                        department=entry.get("department"),
+                        billing_order=entry.get("order"),
+                    )
+                )
+        raw_collection = payload.get("belongs_to_collection")
+        collection = (
+            Collection(tmdb_id=raw_collection["id"], name=raw_collection["name"])
+            if isinstance(raw_collection, dict)
+            and raw_collection.get("id") is not None
+            and raw_collection.get("name")
+            else None
+        )
+        return DerivationResult(
+            people=tuple(people.values()), credits=tuple(credits), collection=collection
         )
 
     async def changed_since(self, since: AwareDatetime, cursor: str | None = None) -> ChangedPage:

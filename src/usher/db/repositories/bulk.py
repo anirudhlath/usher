@@ -49,6 +49,16 @@ generated column in an `INSERT` column list is an *error*, not an ignored
 value. The generated column is also the one index artefact on `titles` that
 `bulk_load_window` cannot suspend -- it is computed on every write, measured
 at 4.06x on this module's own `INSERT ... SELECT` shape, and accepted.
+
+`titles.credit_names` joins that list for a different reason: it is an
+ordinary column, so naming it in an `INSERT` here would be accepted rather
+than rejected -- and would write an array disagreeing with `credits`. The
+only correct writer is the statement that also writes that table
+(`DeriveService`). Its `server_default` of `'{}'` is what lets every
+statement here go on omitting it, and the omission is load-bearing rather
+than tidy: `usher_array_text` is STRICT, so a NULL in that column nulls the
+whole `search_document` and the title leaves every full-text index in
+silence.
 """
 
 from collections.abc import AsyncIterator, Sequence
@@ -60,11 +70,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.staging import stage_records
 from usher.domain.ids import new_id
-from usher.ports.bulk import IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
+from usher.ports.bulk import (
+    GENOME_TAG_COUNT,
+    GenomeVector,
+    IdCrosswalkPair,
+    ImdbRating,
+    ImdbTitle,
+    TmdbId,
+)
 from usher.ports.repository import (
     BulkCatalogRepository,
     BulkWriteResult,
     CrosswalkLinkResult,
+    GenomeCoverage,
+    GenomeWriteResult,
 )
 
 # Dropped for the duration of a bulk-load window and rebuilt after, but only
@@ -125,6 +144,57 @@ _CROSSWALK_PAIRS = """
     UNION ALL
     SELECT imdb_id, tmdb_series_id, 'series'
     FROM id_crosswalk WHERE tmdb_series_id IS NOT NULL
+"""
+
+
+# `CREATE TEMP TABLE ... ON COMMIT DROP` is a correctness precondition and not
+# a style rule -- `usher.db.staging` records all three measured failure modes
+# of a shared `public` name, and `tests/unit/test_staging_ddl.py` scans `src/`
+# for both halves of this spelling.
+#
+# **`relevance real[]`, and which of three spellings this is was measured
+# rather than chosen.** `halfvec` had never crossed asyncpg's binary `COPY` in
+# this repository, and that path needs a codec for every column type. Tried in
+# the stated order of preference against a scratch `pgvector/pgvector:pg17`
+# (pgvector 0.8.6):
+#
+# 1. **Stage as `real[]` and cast -- this, and it works.** `pg_cast` carries
+#    `real[] -> halfvec` (alongside `double precision[]`, `integer[]`,
+#    `numeric[]`, `vector` and `sparsevec`), and asyncpg has a native
+#    `float4[]` codec, so nothing is registered and nothing new touches the
+#    shared staging path. Round-trip verified lane for lane.
+# 2. Stage as `text` and cast from the literal form. Also works, and is
+#    **1.7x faster to stage** -- median 25.5 ms against 43.2 ms over 7 runs of
+#    250 rows -- which is the opposite of what the wire size suggests, because
+#    asyncpg's binary array encoder walks 250 x 1,128 Python floats while a
+#    pre-built string is one memcpy. Not taken: preference order aside, the
+#    difference is ~1.2 s across a whole 16,376-row import, against a 350 MB
+#    download and an 18.4M-row parse. Recorded because the smaller payload
+#    being the slower one is genuinely surprising.
+# 3. Registering pgvector's asyncpg codec on the connection. Not needed, and
+#    it would have been the first place in this repository to touch the raw
+#    connection's type system -- `usher.db.staging` is shared by every bulk
+#    writer in the deployment, so a codec registered for one caller's benefit
+#    is a global change made from a local place.
+_GENOME_STAGING_DDL = """
+CREATE TEMP TABLE stg_genome (
+    imdb_id text, tmdb_id integer, relevance real[]
+) ON COMMIT DROP
+"""
+
+# `enrichment_state <> 'skeleton'` twice, deliberately: `enriched_with_vector`
+# is counted by joining `genome_scores` back to `titles` rather than by
+# counting vectors, because those two agree only while every genome-bearing
+# title happens to be enriched -- which is true of a fresh bootstrap and false
+# of every real deployment.
+_GENOME_COVERAGE = """
+SELECT
+  (SELECT count(*) FROM genome_scores)                                AS with_vector,
+  (SELECT count(*) FROM titles)                                       AS titles,
+  (SELECT count(*) FROM titles WHERE kind = 'movie')                  AS movies,
+  (SELECT count(*) FROM titles WHERE enrichment_state <> 'skeleton')  AS enriched,
+  (SELECT count(*) FROM genome_scores g JOIN titles t ON t.id = g.title_id
+    WHERE t.enrichment_state <> 'skeleton')                           AS enriched_with_vector
 """
 
 
@@ -265,6 +335,77 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         result = await self._session.execute(text(sql))
         inserted, updated = result.one()
         return BulkWriteResult(inserted=int(inserted), updated=int(updated))
+
+    async def upsert_genome_vectors(
+        self, rows: Sequence[GenomeVector], *, revision: str
+    ) -> GenomeWriteResult:
+        if not rows:
+            # No `COPY`, no temp table, no `INSERT ... SELECT` over nothing.
+            # A row-less batch is routine here rather than exceptional: every
+            # genome movie absent from `links.csv` produces one, and
+            # `BulkDataset.batches`' contract explicitly permits a batch that
+            # exists only to advance the cursor.
+            return GenomeWriteResult(inserted=0, updated=0, unmatched=0)
+        await self._stage(
+            _GENOME_STAGING_DDL,
+            "stg_genome",
+            ("imdb_id", "tmdb_id", "relevance"),
+            # `list(...)`, not the DTO's tuple: asyncpg's array encoder wants
+            # a sequence it recognises as a list, and the DTO is frozen with
+            # `slots=True` for a reason that stops at this boundary.
+            [(row.imdb_id, row.tmdb_id, list(row.relevance)) for row in rows],
+        )
+        result = await self._session.execute(
+            text(f"""
+                WITH staged AS (
+                    SELECT DISTINCT ON (t.id)
+                           t.id AS title_id,
+                           CAST(s.relevance AS halfvec({GENOME_TAG_COUNT})) AS relevance
+                    FROM stg_genome s
+                    JOIN titles t ON t.imdb_id = s.imdb_id AND t.kind = 'movie'
+                    ORDER BY t.id, s.imdb_id
+                ), missed AS (
+                    SELECT count(*) AS n FROM stg_genome s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM titles t
+                        WHERE t.imdb_id = s.imdb_id AND t.kind = 'movie'
+                    )
+                ), upserted AS (
+                    INSERT INTO genome_scores (title_id, relevance, genome_revision)
+                    SELECT title_id, relevance, :revision FROM staged
+                    ON CONFLICT (title_id) DO UPDATE SET
+                        relevance = excluded.relevance,
+                        genome_revision = excluded.genome_revision,
+                        computed_at = now()
+                    RETURNING (xmax = 0) AS inserted
+                )
+                SELECT count(*) FILTER (WHERE inserted) AS inserted,
+                       count(*) FILTER (WHERE NOT inserted) AS updated,
+                       (SELECT n FROM missed) AS unmatched
+                FROM upserted
+            """),  # noqa: S608 -- GENOME_TAG_COUNT is a module constant, not input
+            {"revision": revision},
+        )
+        inserted, updated, unmatched = result.one()
+        return GenomeWriteResult(
+            inserted=int(inserted), updated=int(updated), unmatched=int(unmatched)
+        )
+
+    async def genome_coverage(self) -> GenomeCoverage:
+        with self._session.no_autoflush:
+            counts = await self._session.execute(text(_GENOME_COVERAGE))
+            revisions = await self._session.execute(
+                text("SELECT genome_revision, count(*) FROM genome_scores GROUP BY 1 ORDER BY 1")
+            )
+        with_vector, titles, movies, enriched, enriched_with_vector = counts.one()
+        return GenomeCoverage(
+            with_vector=int(with_vector),
+            titles=int(titles),
+            movies=int(movies),
+            enriched=int(enriched),
+            enriched_with_vector=int(enriched_with_vector),
+            revisions=tuple((str(name), int(count)) for name, count in revisions),
+        )
 
     async def count_titles(self) -> int:
         with self._session.no_autoflush:

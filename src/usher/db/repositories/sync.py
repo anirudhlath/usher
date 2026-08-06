@@ -41,7 +41,7 @@ from usher.db.repositories._errors import constraint_name
 from usher.domain.ids import new_id
 from usher.domain.sync import SyncRun, SyncRunKind
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
-from usher.ports.repository import RawPayloadStore, SyncRunRepository
+from usher.ports.repository import CachedPayload, RawPayloadStore, SyncRunRepository
 
 _MUTABLE = tuple(
     column.name for column in SyncRunRow.__table__.columns if column.name not in {"id"}
@@ -77,6 +77,38 @@ VALUES (:id, :provider, :kind, :reference, CAST(:payload AS jsonb), clock_timest
 ON CONFLICT (provider, kind, reference) DO UPDATE SET
     payload = excluded.payload,
     fetched_at = excluded.fetched_at
+"""
+
+# **The outer parentheses around the OR-ed predicate are load-bearing and
+# their absence is silent.** Written without them the clause parses as
+# `(provider = <p> AND after IS NULL) OR (id > after)`, which is exactly
+# right on the first page -- `after` is NULL, the left arm is the real
+# predicate -- and collapses to `id > after` on every page after it, handing
+# back every remaining row in the table whatever provider wrote it.
+# `db/repositories/search.py`'s `list_stale` carries the same note for the
+# same reason; this is the second site, not a new discovery. Observed rather
+# than argued: written without them,
+# `test_iterate_stays_scoped_to_one_provider_on_every_page_not_only_the_first`
+# is the *only* case in this store's twenty that fails, because every other
+# case's rows share one provider.
+#
+# `CAST(:after AS uuid)`, never `:after::uuid`: SQLAlchemy's `text()`
+# bind-parameter regex treats a name immediately followed by `::` as a
+# Postgres cast and skips the bind entirely, so the latter reaches asyncpg as
+# a literal string. The cast is needed regardless -- an untyped NULL
+# parameter has no type for `IS NULL` to resolve against.
+#
+# `ORDER BY id`, which is the primary key and therefore total.
+# `ix_raw_payloads_fetched_at` is not a candidate and is not read by this
+# statement: `fetched_at` ties across every row a bootstrap transaction
+# writes, so a page boundary inside that group would drop the rest of it.
+_ITERATE = """
+SELECT id, kind, reference, payload, fetched_at
+FROM raw_payloads
+WHERE provider = :provider
+  AND (CAST(:after AS uuid) IS NULL OR id > CAST(:after AS uuid))
+ORDER BY id
+LIMIT :limit
 """
 
 
@@ -222,6 +254,52 @@ class PostgresRawPayloadStore(RawPayloadStore):
         # `min()` over an empty set is SQL NULL, which is exactly the port's
         # "no entries at all" answer -- no separate existence check needed.
         return cast(datetime | None, found)
+
+    async def count(self, provider: str) -> int:
+        with self._session.no_autoflush:
+            found = (
+                await self._session.execute(
+                    text("SELECT count(*) FROM raw_payloads WHERE provider = :provider"),
+                    {"provider": provider},
+                )
+            ).scalar_one()
+        return int(found)
+
+    async def iterate(
+        self, provider: str, *, limit: int = 500, after: uuid.UUID | None = None
+    ) -> list[CachedPayload]:
+        if limit <= 0:
+            return []
+        with self._session.no_autoflush:
+            rows = (
+                (
+                    await self._session.execute(
+                        text(_ITERATE),
+                        {"provider": provider, "after": after, "limit": limit},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [
+            CachedPayload(
+                id=row["id"],
+                kind=row["kind"],
+                reference=row["reference"],
+                # The same ambiguity `get` documents, at a second `text()`
+                # statement over the same column: a `text()` statement carries
+                # no SQLAlchemy type, so what asyncpg hands back for `jsonb`
+                # depends on whether a codec was installed on that connection.
+                # Not skipped on the grounds that `get` already has it -- a
+                # `str` masquerading as a payload would reach `DeriveService`
+                # as a mapping with no keys.
+                payload=json.loads(row["payload"])
+                if isinstance(row["payload"], str)
+                else dict(row["payload"]),
+                fetched_at=row["fetched_at"],
+            )
+            for row in rows
+        ]
 
 
 def _to_domain(row: SyncRunRow) -> SyncRun:

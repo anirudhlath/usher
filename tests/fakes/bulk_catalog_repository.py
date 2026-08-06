@@ -18,16 +18,26 @@ module's docstring for what a Postgres-vs-fake mutation check found.
 
 import contextlib
 import math
+import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
 
 from usher.domain.enums import TitleKind
-from usher.ports.bulk import IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
+from usher.domain.ids import new_id
+from usher.ports.bulk import (
+    GenomeVector,
+    IdCrosswalkPair,
+    ImdbRating,
+    ImdbTitle,
+    TmdbId,
+)
 from usher.ports.repository import (
     BulkCatalogRepository,
     BulkWriteResult,
     CrosswalkLinkResult,
+    GenomeCoverage,
+    GenomeWriteResult,
 )
 
 # Sorts after every real id, mirroring SQL's NULLS LAST (Python's default,
@@ -48,16 +58,36 @@ def _crosswalk_sort_key(pair: IdCrosswalkPair) -> tuple[float, float, float]:
 
 
 class _StoredTitle:
-    __slots__ = ("facts", "imdb_id", "kind", "popularity", "rating", "tmdb_id", "tvdb_id")
+    __slots__ = (
+        "enriched",
+        "facts",
+        "id",
+        "imdb_id",
+        "kind",
+        "popularity",
+        "rating",
+        "tmdb_id",
+        "tvdb_id",
+    )
 
     def __init__(self, row: ImdbTitle) -> None:
         self.imdb_id = row.imdb_id
         self.kind = row.kind
         self.facts = row
+        # A UUIDv7 minted here, exactly as the real `upsert_titles` mints one
+        # per staged row. It exists so the genome cases can assert that the
+        # stored key is *this* id and not MovieLens' own integer -- which is
+        # the whole of the wrong implementation they kill, and is unassertable
+        # against a fake that keys everything on `imdb_id`.
+        self.id = new_id()
         self.tmdb_id: int | None = None
         self.tvdb_id: int | None = None
         self.popularity: float | None = None
         self.rating: tuple[float, int] | None = None
+        # `enrichment_state <> 'skeleton'`, as a bool. Nothing on this port
+        # writes it; the contract's seeder does, because the enriched-tier
+        # coverage fraction is the one number that matters.
+        self.enriched = False
 
 
 class FakeBulkCatalogRepository(BulkCatalogRepository):
@@ -65,6 +95,7 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
         self._titles: dict[str, _StoredTitle] = {}
         self._tmdb_ids: dict[tuple[int, TitleKind], TmdbId] = {}
         self._crosswalk: dict[str, IdCrosswalkPair] = {}
+        self._genome: dict[uuid.UUID, tuple[tuple[float, ...], str]] = {}
         self.window_depth = 0
 
     def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
@@ -250,10 +281,72 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
 
         return CrosswalkLinkResult(linked=linked, unmatched=unmatched, conflicted=conflicted)
 
+    async def upsert_genome_vectors(
+        self, rows: Sequence[GenomeVector], *, revision: str
+    ) -> GenomeWriteResult:
+        # First occurrence wins among rows resolving to one title, mirroring
+        # `SELECT DISTINCT ON (t.id) ... ORDER BY t.id, s.imdb_id` -- the real
+        # statement *must* pick one, because a second hit on the same ON
+        # CONFLICT target is a CardinalityViolationError that aborts the whole
+        # batch. Here it is a dict; there it is a clause a mutation deletes.
+        #
+        # `kind is MOVIE` is the `AND t.kind = 'movie'` of the real statement.
+        # `imdb_id` is unique per title regardless of kind, so this changes
+        # nothing against today's data and is exactly why it needs a case.
+        by_title: dict[uuid.UUID, tuple[float, ...]] = {}
+        unmatched = 0
+        for row in rows:
+            stored = self._titles.get(row.imdb_id)
+            if stored is None or stored.kind is not TitleKind.MOVIE:
+                unmatched += 1
+                continue
+            by_title.setdefault(stored.id, row.relevance)
+        inserted = updated = 0
+        for title_id, relevance in by_title.items():
+            if title_id in self._genome:
+                updated += 1
+            else:
+                inserted += 1
+            self._genome[title_id] = (relevance, revision)
+        return GenomeWriteResult(inserted=inserted, updated=updated, unmatched=unmatched)
+
+    async def genome_coverage(self) -> GenomeCoverage:
+        revisions: dict[str, int] = {}
+        for _, revision in self._genome.values():
+            revisions[revision] = revisions.get(revision, 0) + 1
+        enriched = [stored for stored in self._titles.values() if stored.enriched]
+        return GenomeCoverage(
+            with_vector=len(self._genome),
+            titles=len(self._titles),
+            movies=sum(1 for s in self._titles.values() if s.kind is TitleKind.MOVIE),
+            enriched=len(enriched),
+            # Counted by walking *titles*, not by counting vectors: the two
+            # agree only while every genome-bearing title happens to be
+            # enriched, which is the mutation the contract case kills.
+            enriched_with_vector=sum(1 for s in enriched if s.id in self._genome),
+            revisions=tuple(sorted(revisions.items())),
+        )
+
     async def count_titles(self) -> int:
         return len(self._titles)
 
     # --- test-only accessors, mirroring the contract's readback hooks ----
+
+    def title_id(self, imdb_id: str) -> uuid.UUID | None:
+        stored = self._titles.get(imdb_id)
+        return stored.id if stored else None
+
+    def genome(self, title_id: uuid.UUID) -> tuple[float, ...] | None:
+        found = self._genome.get(title_id)
+        return None if found is None else found[0]
+
+    def genome_keys(self) -> set[object]:
+        return set(self._genome)
+
+    def mark_enriched(self, imdb_id: str) -> None:
+        stored = self._titles.get(imdb_id)
+        if stored is not None:
+            stored.enriched = True
 
     def popularity(self, imdb_id: str) -> float | None:
         stored = self._titles.get(imdb_id)

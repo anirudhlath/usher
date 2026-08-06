@@ -29,8 +29,9 @@ reset the first test in the session to start a pipeline span owns those
 tracers and this file's exporter receives nothing.
 """
 
+import uuid
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
 import pytest
@@ -43,6 +44,7 @@ from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from sqlalchemy import text
 
 from usher.api.app import create_app
 from usher.api.deps import ReconcileServiceDep
@@ -313,3 +315,83 @@ async def test_the_databases_own_spans_nest_under_the_pipeline(
         and span.name.split()[0] in {"SELECT", "INSERT", "UPDATE", "DELETE", "WITH"}
     ]
     assert statements, "no SQLAlchemy statement span landed under a pipeline span"
+
+
+@pytest_asyncio.fixture
+async def a_recent_arrival(postgres_url: str) -> AsyncIterator[uuid.UUID]:
+    """One title with one owned copy that arrived today, committed.
+
+    `RecentlyAddedProvider` is the one provider that fires on a household with
+    no watch state at all, so it is the cheapest way to make the composer
+    actually *build* a row -- and without a built row there is no `row.build`
+    span to walk a parent chain from, which would leave the case below asserting
+    nothing.
+
+    Committed on its own connection for the reason `seeded_source` is: the route
+    runs in the request's session and cannot see an uncommitted write made in a
+    different one. Cleaned up by hand, because `titles` does not cascade with
+    the source the way `media_items` does.
+    """
+    from usher.db.base import build_engine, build_session_factory
+    from usher.db.repositories.media_item import PostgresMediaItemRepository
+    from usher.db.repositories.title import PostgresTitleRepository
+    from usher.domain.enums import TitleKind
+    from usher.domain.title import Title
+    from usher.ports.ingest import MediaItemUpsert
+
+    name = "A Film That Just Arrived"
+    title = Title(id=new_id(), kind=TitleKind.MOVIE, name=name, sort_name=name.lower(), year=2024)
+    source = next(iter(_SOURCES.values()))
+    engine = build_engine(postgres_url)
+    factory = build_session_factory(engine)
+    async with factory() as session:
+        await PostgresTitleRepository(session).add(title)
+        await PostgresMediaItemRepository(session).upsert_many(
+            [
+                MediaItemUpsert(
+                    source_id=source.id,
+                    external_id=f"home-probe-{title.id}",
+                    title_id=title.id,
+                    episode_id=None,
+                    container="mkv",
+                    video_codec=None,
+                    audio_codec=None,
+                    width=None,
+                    height=None,
+                    hdr_format=None,
+                    audio_channels=None,
+                    file_size_bytes=None,
+                    runtime_seconds=None,
+                    added_at=datetime.now(UTC),
+                    last_seen_at=datetime.now(UTC),
+                )
+            ]
+        )
+        await session.commit()
+    try:
+        yield title.id
+    finally:
+        async with factory() as session:
+            await session.execute(text("DELETE FROM titles WHERE id = :id"), {"id": title.id})
+            await session.commit()
+        await engine.dispose()
+
+
+async def test_a_row_build_nests_under_the_composition_and_that_under_the_request(
+    probe: AsyncClient, span_exporter: InMemorySpanExporter, a_recent_arrival: uuid.UUID
+) -> None:
+    """PRD 10's nesting rule, closed end to end for the composed screen.
+
+    `tests/unit/test_services_home_sequential.py` asserts `row.build ->
+    home.compose`; there is no request to be a parent of in a unit test, and
+    this is the half that only exists once the route does. **Asserted as
+    parentage rather than as existence**: a composer that started its own root
+    spans has valid ids, exports traces, and carries every span name PRD 10 asks
+    for -- and fails only this.
+    """
+    response = await probe.get("/home")
+
+    assert response.status_code == 200
+    assert response.json()["rows"], "nothing was built, so there is no row.build span to walk"
+    spans = span_exporter.get_finished_spans()
+    assert _ancestry(spans, "row.build") == ["row.build", "home.compose", "GET /home"]

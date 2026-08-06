@@ -1,0 +1,391 @@
+"""`GET /home` -- ADR-0006's route.
+
+**The real composer, over the repository fakes**, following M5's correction:
+the router, the DTO and `HomeService`'s own ordering all stay on the path a
+request takes. A stubbed service would make every case below a test of
+`HomeResponse.of` alone -- which would pass against a composer that returned its
+rows in registry order.
+"""
+
+import ast
+import inspect
+import pathlib
+import uuid
+from collections.abc import AsyncIterator
+from datetime import timedelta
+
+import httpx
+import pytest
+from asgi_lifespan import LifespanManager
+from fastapi import FastAPI
+
+from tests.unit.rows import USER, Library, days_ago
+from usher.api.app import create_app
+from usher.api.deps import get_home_service, get_row_cache, get_row_context
+from usher.api.dto.home import RowResponse
+from usher.config import Settings
+from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
+from usher.ports.rows import RowContext
+from usher.services.home import HomeService
+from usher.services.rows import ROW_PROVIDERS
+from usher.services.rows.cache import RowCache
+
+EXTERNAL_ID = "emby-item-9f31a2"
+
+
+class _Seeded:
+    """One household, and the ids a case needs to name a position with."""
+
+    def __init__(self, library: Library) -> None:
+        self.library = library
+        self.resuming: uuid.UUID | None = None
+        self.arrived: uuid.UUID | None = None
+        self.collection: uuid.UUID | None = None
+
+
+async def _household() -> _Seeded:
+    """A household that fires three rows, chosen so **score order and
+    alphabetical order disagree**.
+
+    That is not decoration. Seeded with `continue-watching` and
+    `recently-added` alone, the screen is `["continue-watching",
+    "recently-added"]` -- which is *also* what a response sorted by slug
+    produces, so the ordering case below passes against a composer whose
+    ordering is a `sorted()` call. Measured: that mutation survived until this
+    household grew a franchise row.
+
+    `FranchiseProvider` scores 0.55 against `RecentlyAddedProvider`'s 0.75, and
+    `franchise-<id>` sorts *before* `recently-added`. The screen is therefore
+    `[continue-watching, recently-added, franchise-<id>]` by score and
+    `[continue-watching, franchise-<id>, recently-added]` by slug.
+    """
+    library = Library()
+    seeded = _Seeded(library)
+    seeded.resuming = await library.title("A Film Half Watched", added=days_ago(200))
+    seeded.arrived = await library.title("A Film That Just Arrived", added=days_ago(1))
+    await library.in_progress(seeded.resuming, at=days_ago(2))
+    saga = [await library.title(f"A Saga Film {index}", added=days_ago(200)) for index in range(3)]
+    seeded.collection = await library.collection("A Saga", saga)
+    return seeded
+
+
+def _app(context: RowContext, *, cache: RowCache | None = None) -> FastAPI:
+    built = create_app(
+        Settings(
+            # A deliberately dead port: nothing on this path may connect, and
+            # a route that grew a query would fail here rather than silently
+            # work against a database this file does not have.
+            database_url="postgresql+asyncpg://usher:usher@127.0.0.1:1/usher",
+            secret_key="0123456789abcdef0123456789abcdef",
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
+    built.dependency_overrides[get_row_context] = lambda: context
+    if cache is not None:
+        built.dependency_overrides[get_row_cache] = lambda: cache
+    return built
+
+
+@pytest.fixture
+async def seeded() -> _Seeded:
+    return await _household()
+
+
+@pytest.fixture
+async def client(seeded: _Seeded) -> AsyncIterator[httpx.AsyncClient]:
+    app = _app(seeded.library.context())
+    async with LifespanManager(app) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as connected:
+            yield connected
+
+
+@pytest.fixture
+async def empty_client() -> AsyncIterator[httpx.AsyncClient]:
+    app = _app(Library().context())
+    async with LifespanManager(app) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as connected:
+            yield connected
+
+
+@pytest.fixture
+async def library_only() -> AsyncIterator[httpx.AsyncClient]:
+    """A synced library with nobody having watched anything."""
+    library = Library()
+    await library.title("A Film That Just Arrived", added=days_ago(1))
+    app = _app(library.context())
+    async with LifespanManager(app) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as connected:
+            yield connected
+
+
+async def test_the_screen_is_rows_in_the_order_the_server_composed_them(
+    client: httpx.AsyncClient, seeded: _Seeded
+) -> None:
+    """ADR-0006: "clients render them in order". The order is the product, so a
+    response carrying the same rows in a different order is a different screen
+    -- and `set(...)` or `in` assertions cannot tell them apart.
+
+    `continue-watching` is **pinned**, and `recently-added` outscores it
+    (`RECENTLY_ADDED_SCORE_CEILING` is below `CONTINUE_WATCHING_SCORE`, but the
+    pin is what makes this positional rather than arithmetic).
+    """
+    body = (await client.get("/home")).json()
+
+    assert [row["slug"] for row in body["rows"]] == [
+        "continue-watching",
+        "recently-added",
+        f"franchise-{seeded.collection}",
+    ]
+
+
+async def test_a_row_carries_a_slug_a_title_a_reason_and_a_display_hint(
+    client: httpx.AsyncClient, seeded: _Seeded
+) -> None:
+    row = (await client.get("/home")).json()["rows"][0]
+
+    assert row["slug"] == "continue-watching"
+    assert row["title"] == "Continue Watching"
+    assert row["reason"] == "You're part-way through these."
+    assert row["display_hint"] == "landscape"
+    assert [card["title_id"] for card in row["cards"]] == [str(seeded.resuming)]
+
+
+def test_a_row_with_nothing_to_explain_carries_a_null_reason_and_not_an_empty_string() -> None:
+    """PRD 06: the `reason` "is already written to be spoken aloud, not just
+    displayed" -- so it is a sentence, and `null` rather than `""` when a row
+    has none. An empty string is a subtitle a client renders as a blank line,
+    and it cannot be told from a row that had something to say and said
+    nothing. Kills `reason: str = ""` on the DTO.
+
+    **Asserted at the DTO rather than through the route, and that is a finding
+    rather than a convenience.** All nine shipped providers return a sentence
+    -- `BuiltRow.reason` is `str | None` and *nothing in `src/` returns
+    `None`* -- so the null arm is a shape the wire promises and no provider
+    currently reaches. Written through the route it would be a case that could
+    only ever assert the positive arm, which is the vacuous-pass failure this
+    milestone is about; written here it holds the DTO to the contract
+    `/openapi.json` publishes. Recorded for M8, whose `CuratedProvider` is the
+    first plausible row with nothing to explain.
+    """
+    row = BuiltRow(
+        slug="a-row-with-nothing-to-say",
+        title="A Row",
+        reason=None,
+        family=RowFamily.SOURCE,
+        display_hint=DisplayHint.PORTRAIT,
+        ttl=timedelta(seconds=60),
+    )
+
+    assert RowResponse.of(row).model_dump()["reason"] is None
+
+
+async def test_a_card_carries_no_artwork_field_at_all_rather_than_a_null_one(
+    client: httpx.AsyncClient,
+) -> None:
+    """Boundary call 3, and M5 settled the identical question one route over:
+    "an empty list would be indistinguishable from a film with no cast". A card
+    with `"artwork": null` on every card of every row is a client-side branch
+    that never takes its other arm, and the day M9 fills it every client that
+    shipped against the null already renders without it."""
+    card = (await client.get("/home")).json()["rows"][0]["cards"][0]
+
+    assert "artwork" not in card
+    assert "images" not in card
+    assert "poster" not in card
+
+
+async def test_the_response_carries_no_cursor(client: httpx.AsyncClient) -> None:
+    """ADR-0006 composes a *screen*; PRD 07's endpoint table gives `/browse` a
+    cursor and gives `/home` none. A cursor here would be a client paging
+    through rows, which is a browse under a screen's name."""
+    body = (await client.get("/home")).json()
+
+    assert set(body) == {"rows"}
+
+
+async def test_every_display_hint_is_one_of_adr_0006s_four_names(
+    client: httpx.AsyncClient,
+) -> None:
+    """ADR-0006's only concrete vocabulary. A fifth value invented by a provider
+    reaches every client at once and renders as nothing."""
+    body = (await client.get("/home")).json()
+
+    assert {row["display_hint"] for row in body["rows"]} <= {
+        "portrait",
+        "landscape",
+        "wide",
+        "square",
+    }
+
+
+async def test_a_row_carries_a_hint_and_never_a_layout(client: httpx.AsyncClient) -> None:
+    """ADR-0006: "Rows carry a display *hint* ... but never a layout." A hint is
+    what a card is shaped like; a layout is how many fit and what happens at
+    320 px. Kills a well-meant `columns` or `card_width` added because one
+    client asked."""
+    row = (await client.get("/home")).json()["rows"][0]
+
+    assert {"columns", "card_width", "rows_visible", "layout"} & set(row) == set()
+
+
+async def test_an_empty_database_answers_two_hundred_with_no_rows(
+    empty_client: httpx.AsyncClient,
+) -> None:
+    """**Not a 500, not a 404, and deliberately not padded.**
+
+    Nothing raised -- there was nothing to compute. `/home` is a screen rather
+    than a resource, so a screen with nothing on it is a fact about the
+    household. And the tempting fix -- one "popular titles" row so the screen is
+    never empty -- is this milestone's rule 2 exactly: a screen that looks
+    personalised on a household that has watched nothing, which is the version
+    that survives review. An empty list is distinguishable; a generic row is
+    not.
+    """
+    response = await empty_client.get("/home")
+
+    assert response.status_code == 200
+    assert response.json() == {"rows": []}
+
+
+async def test_a_library_with_no_watch_state_still_answers_recently_added(
+    library_only: httpx.AsyncClient,
+) -> None:
+    """The case that separates "no signal" from "no data", and the one that
+    makes the empty response above readable as "nothing here yet" rather than as
+    "composition is broken". `media_items.added_at` exists, so a synced library
+    with nobody having watched anything is one row, not zero."""
+    body = (await library_only.get("/home")).json()
+
+    assert [row["slug"] for row in body["rows"]] == ["recently-added"]
+
+
+async def test_the_route_never_loads_an_embedding_model(client: httpx.AsyncClient) -> None:
+    """`create_app`'s lifespan builds the embedder **only when
+    `worker_enabled`**, so a route that reached for one would work in
+    development and 500 in exactly the push-only deployment PRD 08 describes.
+
+    This app is built with `worker_enabled=False`, so `app.state` holds no
+    model at all -- and the screen still composes. Every row here reads a
+    *precomputed* artefact (`title_neighbors`, `user_taste`); computing those
+    needs a model where reading them does not, which is the same property
+    `usher index` already has.
+    """
+    assert (await client.get("/home")).status_code == 200
+
+
+def test_the_home_service_and_every_provider_hold_no_source_adapter() -> None:
+    """PRD 08's "never fails a request local state can answer" as a
+    *structural* property: with no adapter reachable there is no call to fail,
+    so there is no 503 and nothing for an RFC 9457 `code` to name. "It did not
+    raise" is also what a service that swallowed everything would produce.
+
+    Two misses this repository has already measured, both handled here: a
+    signature check spelled `annotation in (SourceAdapter, ...)` does not see a
+    **string** annotation, which is the one form needing no import at all; and
+    an `ast.ImportFrom`-only scan does not see `import usher.ports.source`.
+
+    Scans **every** registered provider, not just the composer: nine providers
+    is nine chances, and a guard scoped to one of them reads as coverage. Same
+    lesson M6's sweep recorded when a docstring guard scoped to the class missed
+    the method.
+    """
+    modules: list[type] = [HomeService, *(type(provider) for provider in ROW_PROVIDERS)]
+    assert len(modules) == 10, "the sweep lost providers, so it proves nothing"
+
+    for target in modules:
+        source = pathlib.Path(inspect.getfile(target)).read_text()
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert "ports.source" not in alias.name, (
+                        f"{target.__name__} imports {alias.name}"
+                    )
+            if isinstance(node, ast.ImportFrom) and node.module is not None:
+                assert "ports.source" not in node.module, f"{target.__name__} imports {node.module}"
+        # Annotations read as **text**, so a string annotation -- the one form
+        # needing no import at all -- is not invisible here.
+        assert "SourceAdapter" not in source, f"{target.__name__} names a SourceAdapter"
+
+
+async def test_the_response_carries_no_source_specific_concept(
+    client: httpx.AsyncClient,
+) -> None:
+    """PRD 07's first line. **The assertion is against the source's own item id,
+    never against the word "emby"** -- M5 found that rule out the hard way,
+    because `availability[].source` is an operator-typed name and "Living Room
+    Emby" is a correct value for it. A rule that forbids the substring forbids
+    the feature."""
+    body = (await client.get("/home")).text
+
+    assert "external_id" not in body
+    assert EXTERNAL_ID not in body
+
+
+async def test_the_response_carries_no_credential(client: httpx.AsyncClient) -> None:
+    body = (await client.get("/home")).text
+
+    assert "api_key" not in body
+    assert "credentials_ref" not in body
+
+
+async def test_the_schema_describes_real_shapes_rather_than_a_bare_object(
+    client: httpx.AsyncClient,
+) -> None:
+    """The repository's established rule: typed DTOs so `/openapi.json`
+    describes real shapes and clients codegen typed models. `/events` is the one
+    route where that is not true, and its DTO says why -- a `StreamingResponse`
+    is bytes and FastAPI's serializer never sees it.
+
+    The `display_hint` enum is asserted here rather than only through the data,
+    because a `display_hint: str` passes every response case above until a
+    provider emits a fifth value. That makes the **type** the thing under test.
+    """
+    schema = (await client.get("/openapi.json")).json()
+
+    home = schema["paths"]["/home"]["get"]["responses"]["200"]["content"]["application/json"]
+    assert home["schema"] != {"type": "object"}
+    hint = schema["components"]["schemas"]["DisplayHint"]
+    assert set(hint["enum"]) == {"portrait", "landscape", "wide", "square"}
+
+
+async def test_a_second_request_inside_the_window_is_served_from_the_apps_own_cache(
+    seeded: _Seeded,
+) -> None:
+    """**The cache is the one `create_app` built, not a fresh one per
+    request.** Overriding `get_row_cache` here would hide exactly the mutation
+    this case exists for: a request-scoped cache caches nothing and every
+    screen is composed again, correctly, with no symptom at all -- and
+    `usher.cache.hits` is M9's, so there is no metric to notice it either.
+
+    So the assertion reads `app.state.row_cache` after a real request. Measured:
+    without it, `get_row_cache` returning `RowCache(...)` per call survived
+    every other case in this file.
+    """
+    app = _app(seeded.library.context())
+
+    async with LifespanManager(app) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = (await client.get("/home")).json()
+            assert app.state.row_cache.get_screen(USER.id) is not None, (
+                "the request did not populate the cache the app was built with"
+            )
+            second = (await client.get("/home")).json()
+
+    assert first == second
+
+
+def test_the_route_resolves_the_cache_the_app_actually_built() -> None:
+    """`get_row_cache` off `app.state`, not a fresh one per request -- a
+    request-scoped cache caches nothing, exactly as a request-scoped bus fans
+    out to nobody. Asserted through the real `create_app` because the override
+    in every other case here would hide it."""
+    app = _app(Library().context())
+
+    assert isinstance(app.state.row_cache, RowCache)
+    assert get_home_service(app.state.row_cache) is not None

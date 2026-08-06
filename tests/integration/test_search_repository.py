@@ -18,6 +18,7 @@ import pytest
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.fakes.embedding import FakeEmbedder
 from usher.db.repositories.search import _FINGERPRINT_SQL, PostgresTitleEmbeddingRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, TitleKind
@@ -25,7 +26,18 @@ from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import TitleEmbeddingUpsert
+from usher.services.index import IndexService
 from usher.services.search import compose_document
+
+
+async def _no_commit() -> None:
+    """`IndexService` commits after its upsert; this suite's session is a
+    transaction the fixture rolls back, so committing here would make one case
+    durable against a session-scoped container and take three unrelated files
+    down with it -- the failure `tests/integration/test_pipeline_spans.py`
+    already recorded."""
+    return None
+
 
 _MODEL = "fake:test-384"
 _VECTOR = tuple([0.05] * 384)
@@ -611,3 +623,111 @@ async def test_the_second_page_still_applies_the_predicate(session: AsyncSession
 
     assert [title.id for title in first] == [stale.id]
     assert second == [], f"page two returned unfiltered rows: {[t.name for t in second]}"
+
+
+async def test_the_composer_and_the_sql_fingerprint_agree_for_a_title_with_credits(
+    session: AsyncSession,
+) -> None:
+    """The cross-check above extended to the population that can disagree.
+
+    **The existing case cannot see any of weight class B**, and that is worth
+    being explicit about rather than trusting: it calls `compose_document`
+    with the default `credits=()` over a title whose `credit_names` is `{}`,
+    so both sides emit an empty segment and the strings match under *every*
+    wrong implementation this change can produce. Move only the SQL and it
+    passes; move only the Python and it passes; move both and forget
+    `IndexService` and it is not in the picture at all.
+
+    This one seeds a populated `credit_names` and passes the same names to the
+    composer, so sites one and two moving apart -- in either direction -- is a
+    mismatch of two hashes.
+    """
+    title = _cross_check_title()
+    await _insert(session, title)
+    names = ("Marlow Vance", "Iris Kemp")
+    await session.execute(
+        text("UPDATE titles SET credit_names = CAST(:names AS text[]) WHERE id = :id"),
+        {"names": list(names), "id": title.id},
+    )
+
+    assert compose_document(title, credits=names).fingerprint == await _sql_fingerprint(
+        session, title.id
+    )
+
+
+async def test_an_uncredited_title_still_agrees_after_class_b_lands(
+    session: AsyncSession,
+) -> None:
+    """The other half, and it is what makes the unconditional segment
+    observable.
+
+    The M6 shim appended the credits section only `if credits:`, which is the
+    conditional-append shape `services/search.py`'s own module docstring
+    refuses as unreproducible in SQL. Restored, it produces a *six*-segment
+    string in Python against `_FINGERPRINT_SQL`'s seven, for every uncredited
+    title -- which is most of the catalog. If every case seeding this
+    comparison had credits, that mutation would survive.
+
+    Measured on pg17.10: `usher_array_text(ARRAY[]::text[])` is `''` and
+    `md5(usher_array_text(ARRAY[]::text[])) = md5('')`, so the empty segment
+    really is empty on both sides.
+    """
+    title = _cross_check_title(name="Iron Harbour")
+    await _insert(session, title)
+
+    assert compose_document(title).fingerprint == await _sql_fingerprint(session, title.id)
+
+
+async def test_an_indexed_title_with_credits_stops_matching_the_stale_predicate(
+    session: AsyncSession,
+) -> None:
+    """**Trap 2, as a closure property rather than as an equality of two
+    strings, and the only case that sees site three.**
+
+    Move both spellings correctly and leave `IndexService` calling
+    `compose_document(title)`, and this is what happens: the handler runs, the
+    embed is real, `usher.embedding.duration` looks healthy, the row is
+    written -- and the title still matches the stale predicate, because the
+    fingerprint it stored was computed over the M6 document while
+    `_FINGERPRINT_SQL` reads `credit_names`. The backfill re-claims it on the
+    next pass, and the pass after that.
+
+    **An infinite backfill that never errors.** Nothing raises, `usher index`
+    reports a plausible stale count that never reaches zero, and the worker is
+    busy. So the observable is not "the two hashes match" -- it is *after
+    indexing, the title stops matching*. Reproduced before the fix: with site
+    three left at the M6 call, `count_stale` came back `1` after indexing, and
+    `1` again after indexing a second time, from a handler that returned
+    successfully both times.
+
+    The embedder is a stand-in rather than the real model: what is under test
+    is which text was fingerprinted, and loading 65 MB of ONNX to find that
+    out would make this case a model test.
+    """
+    embeddings = PostgresTitleEmbeddingRepository(session)
+    title = _cross_check_title(name="The Quiet Vacuum")
+    await _insert(session, title)
+    names = ("Marlow Vance", "Iris Kemp")
+    await session.execute(
+        text("UPDATE titles SET credit_names = CAST(:names AS text[]) WHERE id = :id"),
+        {"names": list(names), "id": title.id},
+    )
+
+    service = IndexService(
+        titles=PostgresTitleRepository(session),
+        embeddings=embeddings,
+        embedder=FakeEmbedder(),
+        commit=_no_commit,
+    )
+    await service.index(title.id)
+
+    assert await embeddings.count_stale(FakeEmbedder().model_name) == 0, (
+        "a credited title that has just been indexed must stop matching the stale "
+        "predicate -- otherwise the backfill re-claims it forever"
+    )
+
+    # Twice, because the failure this kills is a *loop*: one pass that leaves
+    # the count at 1 is indistinguishable from a slow queue until the second
+    # pass leaves it at 1 as well.
+    await service.index(title.id)
+    assert await embeddings.count_stale(FakeEmbedder().model_name) == 0

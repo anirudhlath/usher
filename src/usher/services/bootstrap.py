@@ -65,6 +65,8 @@ class BootstrapService:
         self,
         dataset: BulkDataset[RowT],
         write: Callable[[Sequence[RowT]], Awaitable[int]],
+        *,
+        revision: str | None = None,
     ) -> ImportRun:
         """Stream `dataset` through `write`, checkpointing every batch.
 
@@ -118,20 +120,38 @@ class BootstrapService:
         with _tracer.start_as_current_span("bootstrap.import") as span:
             span.set_attribute("usher.dataset", dataset.name)
             try:
-                revision = await dataset.revision()
-                span.set_attribute("usher.revision", revision)
+                # `revision`, when given, is the value the caller already
+                # resolved this run -- the same parameter `BulkDataset.batches`
+                # carries and for a stronger reason than saving a HEAD.
+                #
+                # The `movielens` phase has to stamp `genome_scores
+                # .genome_revision` with the release each row came from, so
+                # its writer needs the value *during* the drain, and `write`
+                # is handed rows and nothing else. Resolving it separately in
+                # the caller and letting this method resolve it again leaves
+                # two `HEAD`s that can disagree: upstream re-uploading between
+                # them would download and stream release B while stamping
+                # every row release A. That is a mislabelled row, which is the
+                # precise failure `genome_revision` exists to make visible --
+                # so the caller passes its value in and the two agree by
+                # construction rather than by luck.
+                #
+                # Defaulted to `None`, so the four M2 call sites are
+                # unaffected and still resolve it here.
+                resolved = revision if revision is not None else await dataset.revision()
+                span.set_attribute("usher.revision", resolved)
                 try:
-                    run = await self._runs.start(dataset.name, revision)
+                    run = await self._runs.start(dataset.name, resolved)
                 except RepositoryConflict as exc:
                     # Case 1 -- handled entirely inside this nested try, so
                     # it never reaches the outer `except UsherPortError`
                     # below and never triggers the re-fetch-and-overwrite
                     # that branch performs for case 2.
-                    run = await self._concede_to_other_owner(dataset.name, revision, exc, span)
+                    run = await self._concede_to_other_owner(dataset.name, resolved, exc, span)
                 else:
                     resume_from = (
                         BulkCursor(
-                            revision=revision, position=run.position, rows_seen=run.rows_seen
+                            revision=resolved, position=run.position, rows_seen=run.rows_seen
                         )
                         if run.position
                         else None
@@ -144,7 +164,7 @@ class BootstrapService:
                             position=resume_from.position,
                             rows=resume_from.rows_seen,
                         )
-                    run = await self._drain(dataset, write, run, resume_from, revision)
+                    run = await self._drain(dataset, write, run, resume_from, resolved)
             except UsherPortError as exc:
                 # Case 2. self._runs.get(), not this call's own `run`
                 # binding -- see the docstring above for why that binding

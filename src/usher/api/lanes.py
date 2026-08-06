@@ -76,6 +76,7 @@ from usher.ports.events import EventPublisher
 from usher.ports.metadata import MetadataProvider
 from usher.ports.source import SourceAdapter, SourceEvent
 from usher.services.push import PushOutcome, PushSupervisor
+from usher.services.rows.cache import RowCache
 from usher.telemetry import PushSnapshot, register_queue_gauges, register_search_gauges
 
 # How long the worker lane waits after a pass that claimed nothing. Not a
@@ -96,11 +97,17 @@ class LaneSupervisor:
         user_id: Callable[[], Awaitable[uuid.UUID]],
         provider: MetadataProvider | None = None,
         embedder: Embedder | None = None,
+        rows: RowCache | None = None,
         idle_seconds: float = IDLE_SLEEP_SECONDS,
     ) -> None:
         self._settings = settings
         self._work = unit_of_work
         self._events = events
+        # The process's one row cache, so the push lane can invalidate the
+        # screens a merge just made stale. `None` where no screens are served
+        # -- and it is optional for the same reason `provider` and `embedder`
+        # are: a lane supervisor in a test has no `app.state` to read one off.
+        self._rows = rows
         self._user_id = user_id
         self._provider = provider
         # Carried, never built here. Both of these are per-*process*
@@ -313,7 +320,7 @@ class LaneSupervisor:
         self, source: Source, adapter: SourceAdapter, event: SourceEvent
     ) -> PushOutcome:
         async with self._work() as pipeline:
-            applier = build_push_applier(pipeline, self._settings, self._events)
+            applier = build_push_applier(pipeline, self._settings, self._events, self._rows)
             return await applier.apply(source, adapter, event, user_id=await self._user_id())
 
     async def _close_gap(self, source: Source, adapter: SourceAdapter) -> None:
@@ -396,7 +403,11 @@ class LaneSupervisor:
                         requeued = True
                     ran = await worker.run_once()
                     await self._gauges.refresh(pipeline.queue)
-                    await self._backlog.refresh(pipeline.embeddings, self._settings.embedding_model)
+                    await self._backlog.refresh(
+                        pipeline.embeddings,
+                        pipeline.neighbors,
+                        self._settings.embedding_model,
+                    )
             except asyncio.CancelledError:
                 if registry is not None:
                     await registry.aclose()

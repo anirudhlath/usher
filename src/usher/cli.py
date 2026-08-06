@@ -13,15 +13,20 @@ the same property: nothing downloads unless an operator asks.
 import argparse
 import asyncio
 import sys
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import httpx
 from loguru import logger
+from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.adapters.bulk.imdb import IMDbRatingDataset, IMDbTitleDataset
+from usher.adapters.bulk.movielens import GENOME_BATCH_SIZE, MovieLensGenomeDataset
 from usher.adapters.bulk.tmdb_ids import TMDbIdDataset
 from usher.adapters.bulk.wikidata import WikidataCrosswalkDataset
 from usher.api.lanes import LaneSupervisor
@@ -32,6 +37,7 @@ from usher.composition import (
     QueueGauges,
     SearchGauges,
     SourceRegistry,
+    build_derive_service,
     build_pipeline,
     build_worker,
     embedder,
@@ -45,18 +51,21 @@ from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
-from usher.db.users import ensure_default_user
+from usher.db.users import default_user, ensure_default_user
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
-from usher.ports.bulk import ImdbTitle
+from usher.ports.bulk import GenomeVector, ImdbTitle
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
-from usher.ports.repository import BulkCatalogRepository
+from usher.ports.repository import BulkCatalogRepository, GenomeCoverage
+from usher.ports.rows import RowContext
 from usher.ports.search import SearchFilters, SearchMode
 from usher.ports.source import SourceAdapter
 from usher.services.bootstrap import BootstrapService
+from usher.services.home import ComposeReport, HomeService
+from usher.services.rows.cache import RowCache
 from usher.services.search import SemanticSearchUnavailable
 from usher.telemetry import (
     configure_telemetry,
@@ -64,7 +73,11 @@ from usher.telemetry import (
     register_search_gauges,
 )
 
-PHASES = ("imdb", "tmdb-ids", "crosswalk", "all")
+# `movielens` runs **last** in `--phase all`: the genome joins to `titles` on
+# `imdb_id`, and an empty catalog joins to nothing. After `crosswalk` too --
+# it costs nothing and keeps the tuple in execution order, which is what an
+# operator reads it as.
+PHASES = ("imdb", "tmdb-ids", "crosswalk", "movielens", "all")
 # The two lanes `ReconcileService` walks `list_items` for. `watch_state` is a
 # real `SyncRunKind` and is deliberately absent: `sync` always runs it after
 # the item walk, so offering it as an *alternative* would let an operator ask
@@ -76,6 +89,38 @@ SYNC_KINDS = ("full", "delta")
 # answer, and a knob would invite tuning a number that is about to stop
 # mattering.
 _IDLE_SLEEP_SECONDS = 5.0
+# The failures that are the *operator's* to fix, and so the ones `main`
+# answers with a message instead of a stack. Public because the boundary's
+# whole design lives in what is and is not in this tuple, and a test asserts
+# on it directly.
+#
+# **`Exception` is deliberately absent, and that is the decision rather than
+# an oversight.** Catching it would also collapse every `AttributeError` and
+# `TypeError` -- the bugs -- to one line, which trades a cosmetic wart for a
+# lost bug report. So a family is added here only when an operator can act on
+# it: start the database, fix the URL, reconnect the network.
+#
+# `OSError` rather than a SQLAlchemy type alone because asyncpg lets a refused
+# TCP connection out **unwrapped** -- the exact failure M7's smoke test hit
+# was a bare `ConnectionRefusedError`, and a handler keyed on
+# `SQLAlchemyError` would have missed the one case this boundary exists for.
+OPERATOR_ERRORS: tuple[type[Exception], ...] = (
+    # A refused connection, a name that does not resolve, a full disk, a
+    # bulk dataset that is not where it was left.
+    OSError,
+    # Everything the driver does wrap: a missing table (`alembic upgrade
+    # head` never ran), a dead pool, a permission the role does not have.
+    SQLAlchemyError,
+    # TMDb, Emby, and every bulk download. An unreachable source is the same
+    # class of operator problem as an unreachable database.
+    httpx.HTTPError,
+)
+# Shorter than this and a rejected value is not a credential, and scrubbing
+# it would mangle the message it appears in ("not 4" -> "not <redacted>").
+_SHORTEST_REDACTABLE = 4
+# 128 + SIGINT, the shell's convention, so a wrapping script can tell an
+# operator's Ctrl-C from a command that failed.
+_INTERRUPTED_EXIT_CODE = 130
 
 
 def _titles_writer(
@@ -145,10 +190,134 @@ async def _bootstrap(settings: Settings, phase: str) -> None:
                     catalog.upsert_crosswalk,
                 )
                 await service.link_crosswalk()
+            if phase in ("movielens", "all"):
+                await _movielens(settings, client, catalog, service)
             logger.info("catalog now holds {count} titles", count=await catalog.count_titles())
     finally:
         await client.aclose()
         await engine.dispose()
+
+
+async def _movielens(
+    settings: Settings,
+    client: httpx.AsyncClient,
+    catalog: BulkCatalogRepository,
+    service: BootstrapService,
+) -> None:
+    """The MovieLens tag genome, and the coverage report that is the actual
+    deliverable of this phase.
+
+    **The precondition is checked before the dataset is constructed, and the
+    outcome it prevents is the worst one available here.** Run against an
+    empty catalog, `import_dataset` would download 350,896,731 B, stream
+    18,472,128 rows, write 0, checkpoint `COMPLETED`, and `bootstrap-status`
+    would show a green phase. Every later `--phase all` would then find a
+    completed checkpoint at the file's end and do nothing, so the failure
+    would be **permanent and invisible**. PRD 08 says every operator command
+    has to work against an empty database -- and "work" means saying why, not
+    succeeding vacuously.
+
+    Three properties of the refusal, each deliberate:
+
+    - **It refuses before the download.** 335 MiB is the cost of finding out
+      late.
+    - **It creates no `ImportRun`.** A `FAILED` row would be a lie -- nothing
+      failed upstream -- and a `COMPLETED` one would be worse. The absence of
+      a row is the honest state, and it is what `bootstrap-status` already
+      renders as "this phase has not run".
+    - **It refuses only on an *empty* catalog.** A non-empty catalog whose
+      join still matches nothing is not an error, it is a *number*, and the
+      coverage report below is where it becomes visible. Refusing on a
+      coverage threshold would be inventing a policy; 1.82% of movies is the
+      expected shape rather than a fault.
+
+    In `--phase all` the precondition is unreachable in the normal case; it
+    exists for the operator who runs `--phase movielens` alone against a
+    fresh database.
+
+    **Measured end to end on 2026-08-04** against a real
+    `pgvector/pgvector:pg17` holding a real `--phase imdb` bootstrap
+    (1,271,570 titles): 16,376 movie runs consumed, **15,565 vectors stored,
+    811 unmatched**, in **23.8 s** wall clock with the archive already
+    cached. The 811 are genome movies whose IMDb id the catalog does not
+    hold -- 5.0% of the genome -- because M2 retains only four `titleType`s
+    and MovieLens carries some it drops. That is the join's miss count doing
+    exactly the job it exists for.
+
+    **A re-run does NOT report updates, and the plan predicted it would.**
+    The first run checkpoints at `position = 16376`, so the second resumes
+    from a *completed* cursor, skips every run, yields no batch, and writes
+    nothing -- 14.7 s of re-parsing to do nothing, and `0 unmatched` because
+    the writer is never called. That is correct and is the same shape
+    `--phase imdb` already has; the insert-vs-update distinction lives in the
+    repository and is covered there, not through a second CLI invocation.
+    """
+    if await catalog.count_titles() == 0:
+        print(
+            "movielens needs a catalog to join against: the genome is keyed "
+            "on imdb_id and titles is empty. Run --phase imdb first."
+        )
+        return
+
+    dataset = MovieLensGenomeDataset(
+        client,
+        settings.bulk_data_dir,
+        # NOT `settings.bulk_batch_size`. That default is 50,000, sized for
+        # ~100-byte rows; a GenomeVector carries 1,128 Python floats (~36 kB),
+        # and the whole dataset is 16,376 rows, so 50,000 would yield exactly
+        # one ~590 MB batch, committed once, checkpointing nothing -- and a
+        # killed run would restart from zero every time.
+        batch_size=GENOME_BATCH_SIZE,
+    )
+    revision = await dataset.revision()
+
+    async def write(rows: Sequence[GenomeVector]) -> int:
+        result = await catalog.upsert_genome_vectors(rows, revision=revision)
+        _GENOME_TALLY["unmatched"] += result.unmatched
+        return result.inserted + result.updated
+
+    _GENOME_TALLY["unmatched"] = 0
+    await service.import_dataset(dataset, write, revision=revision)
+    _report_coverage(await catalog.genome_coverage(), _GENOME_TALLY["unmatched"])
+
+
+# The `unmatched` count has nowhere else to go: `BootstrapService.import_dataset`
+# takes a writer returning `int` (rows written) and knows nothing about a
+# join's misses. A module-level tally rather than a wider port change, because
+# a join's miss count is this one phase's report and not a property of every
+# bulk import -- and the alternative, widening the writer's return type, would
+# touch all four existing call sites for one caller's benefit.
+_GENOME_TALLY = {"unmatched": 0}
+
+
+def _percent(part: int, whole: int) -> str:
+    return "n/a (0 titles)" if whole == 0 else f"{100.0 * part / whole:.2f}%"
+
+
+def _report_coverage(coverage: GenomeCoverage, unmatched: int) -> None:
+    """Four fractions, the enriched-tier one last because it is the one that
+    matters.
+
+    PRD 05 promised "~7% coverage" and PRD 04 repeated it as "~7% of the
+    priority tier", and that figure has never had a denominator. Three of
+    these are ceilings the *dataset* can reach; the fourth is what the join
+    actually did against this operator's catalog.
+    """
+    print(f"movielens: {coverage.with_vector} vectors stored ({unmatched} unmatched)")
+    print(f"  {_percent(coverage.with_vector, coverage.titles)} of {coverage.titles} titles")
+    print(f"  {_percent(coverage.with_vector, coverage.movies)} of {coverage.movies} movies")
+    print(
+        f"  {_percent(coverage.enriched_with_vector, coverage.enriched)} of the enriched "
+        f"tier ({coverage.enriched_with_vector} of {coverage.enriched} titles)"
+    )
+    # Only when there is more than one. A single-revision table is the normal
+    # case and a line reading "revisions: 1" is noise; a table carrying two is
+    # a correctness problem `GenomeRepository.get_pair` is already refusing to
+    # blend across, and the fix is a re-import.
+    if len(coverage.revisions) > 1:
+        print("  MIXED RELEASES -- get_pair refuses to compare across these; re-import:")
+        for name, count in coverage.revisions:
+            print(f"    {name}: {count}")
 
 
 async def _status(settings: Settings) -> None:
@@ -157,12 +326,17 @@ async def _status(settings: Settings) -> None:
     try:
         async with factory() as session:
             runs = await PostgresImportRunRepository(session).list_runs()
-            catalog_size = await PostgresBulkCatalogRepository(session).count_titles()
+            catalog = PostgresBulkCatalogRepository(session)
+            catalog_size = await catalog.count_titles()
+            # A phase whose deliverable is coverage has to be visible in the
+            # command an operator runs to see coverage.
+            genome = await catalog.genome_coverage()
     finally:
         await engine.dispose()
     # Printed, not logged: this is a report an operator asked for, and routing
     # it through the JSON log sink would make it unreadable at a terminal.
     print(f"titles in catalog: {catalog_size}")
+    print(f"genome vectors: {genome.with_vector}")
     if not runs:
         print("no import has been run yet")
         return
@@ -372,18 +546,81 @@ async def _work(settings: Settings, *, once: bool) -> None:
             await worker.startup()
             ran = await worker.run_once()
             await gauges.refresh(pipeline.queue)
-            await backlog.refresh(pipeline.embeddings, settings.embedding_model)
+            await backlog.refresh(pipeline.embeddings, pipeline.neighbors, settings.embedding_model)
             print(f"{ran} jobs")
             while not once:
                 if ran == 0:
                     await asyncio.sleep(_IDLE_SLEEP_SECONDS)
                 ran = await worker.run_once()
                 await gauges.refresh(pipeline.queue)
-                await backlog.refresh(pipeline.embeddings, settings.embedding_model)
+                await backlog.refresh(
+                    pipeline.embeddings, pipeline.neighbors, settings.embedding_model
+                )
         finally:
             await registry.aclose()
             await aclose()
             await aclose_model()
+
+
+async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
+    """Report derivation coverage, or re-derive people and credits inline.
+
+    **The bare form only reads** -- five counts, no writes -- so it is safe on
+    a production box while diagnosing something, which is the same bargain
+    `usher index`'s bare form takes.
+
+    **`--backfill` walks the cache inline rather than enqueueing, and that is
+    the one place this command deliberately does not follow `index`.**
+    `_index`'s backfill enqueues because the worker owns the model and a CLI
+    that embedded would load 65 MB of ONNX in a process whose job is to print
+    two numbers. Derivation needs none of that: no model, no network call, no
+    rate limit -- it is a JSONB read and three writes. So the queue would buy
+    ordering, retry and backoff for work that needs none of the three, and
+    enqueueing over the enriched tier instead would write 2k-10k `jobs` rows,
+    claim them one at a time, and issue one `get` per row to do what `iterate`
+    does in a page-walk reading the same payloads in one pass.
+
+    **The one-shot backfill exists because M7 arrives after a catalog is
+    already enriched.** Those titles were enriched by M4/M5/M6, their payloads
+    are in the cache, and *nothing will ever re-enrich them* -- so nothing
+    will ever enqueue a `derive` job for them. The steady state is the job
+    kind, enqueued alongside `index` after each enrichment commits.
+
+    **On an empty database every line reads 0 and the command exits 0.** PRD
+    08: *"every one of them has to work against an empty database"*. The
+    arithmetic hazard here is the coverage ratio, which is why the report
+    prints two counts and no percentage: `titles_with_credits /
+    cached_payloads` is `0/0` on exactly the deployment that rule exists for.
+    """
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        if not backfill:
+            print("provider: tmdb")
+            print(f"cached payloads: {await pipeline.payloads.count('tmdb'):,}")
+            print(f"titles with credits: {await pipeline.credits.count_titles_with_credits():,}")
+            print(f"people: {await pipeline.people.count():,}")
+            print(f"collections: {await pipeline.collections.count():,}")
+            return
+
+        # The provider is required for `to_derivation` -- a pure mapping, no
+        # client and no request -- and its absence is the same degradation
+        # `usher index` reports for a missing embedder: narrowed, not broken,
+        # and said once rather than guessed at.
+        provider, aclose = await metadata_provider(settings)
+        if provider is None:
+            print("no TMDb API key configured; nothing can be derived from the cache")
+            return
+        try:
+            report = await build_derive_service(pipeline, provider).derive_all(
+                page_size=page_size, limit=limit
+            )
+        finally:
+            await aclose()
+        print(f"payloads read: {report.payloads_read:,}")
+        print(f"titles derived: {report.titles_derived:,}")
+        print(f"people written: {report.people_written:,}")
+        print(f"credits written: {report.credits_written:,}")
+        print(f"collections linked: {report.collections_written:,}")
 
 
 async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
@@ -427,16 +664,27 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
         pipeline = build_pipeline(session, settings)
         model = settings.embedding_model
         if not backfill:
-            await gauges.refresh(pipeline.embeddings, model)
+            await gauges.refresh(pipeline.embeddings, pipeline.neighbors, model)
             snapshot = gauges.read()
             print(f"model: {model}")
             print(f"stale embeddings: {snapshot.stale}")
             print(f"refused (no content to embed): {snapshot.refused}")
-            # ~115 tokens a document at ~8,000-10,700 tokens/s on CPU. A range
+            # ~135 tokens a document at ~8,000-10,700 tokens/s on CPU. A range
             # derived from the invariant rather than from a texts/s rate.
+            #
+            # **135 and not the ~115 M6 measured**, because M7's weight class
+            # B added a seventh segment: `credit_names` holds up to ten names
+            # at ~2 tokens each, so a credited document is ~20 tokens longer.
+            # The 100-130 range in this function's docstring was measured for
+            # a `name + overview + genres + keywords` document and is left
+            # standing as what it is -- a measurement of a different document
+            # shape -- rather than quietly restated for this one. Uncredited
+            # titles, which are most of the catalog, still sit inside it; the
+            # estimate is deliberately the pessimistic end, because an
+            # operator reading it is deciding whether to start a backfill now.
             print(
-                f"estimated worker time: {snapshot.stale * 115 / 10700:.0f}-"
-                f"{snapshot.stale * 115 / 8000:.0f}s"
+                f"estimated worker time: {snapshot.stale * 135 / 10700:.0f}-"
+                f"{snapshot.stale * 135 / 8000:.0f}s"
             )
             return
 
@@ -474,7 +722,7 @@ async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: i
         # cheaper still not to count per page, and the number an operator wants
         # is the backlog *left over* -- the same reason `QueueGauges` refreshes
         # after a worker pass rather than before it.
-        await gauges.refresh(pipeline.embeddings, model)
+        await gauges.refresh(pipeline.embeddings, pipeline.neighbors, model)
         print(f"{seen} stale titles swept, {written} index jobs written")
 
 
@@ -644,6 +892,28 @@ async def _similar(
         if rebuild:
             report = await pipeline.similar.rebuild()
             print(f"rebuilt {report.seeds} seeds, wrote {report.rows} neighbour rows")
+            # **The genome's coverage, with its denominators, printed by the
+            # thing that consumed the vectors.** PRD 05 promised "~7%" since
+            # before an importer existed and never said of what; these are the
+            # two numbers that answer it, and the second is the one that
+            # decides whether the term can promote anything.
+            #
+            # The pair rate is *measured*, never squared: genome membership
+            # and candidate-pool membership both correlate with popularity and
+            # with enrichment, so `coverage ** 2` is wrong in an unknown
+            # direction.
+            if report.seeds:
+                share = 100.0 * report.seeds_with_genome / report.seeds
+                print(
+                    f"{report.seeds_with_genome} of {report.seeds} seeds carried a genome "
+                    f"vector ({share:.2f}%)"
+                )
+            if report.candidate_pairs:
+                pair_share = 100.0 * report.pairs_with_tags / report.candidate_pairs
+                print(
+                    f"{report.pairs_with_tags} of {report.candidate_pairs} candidate pairs "
+                    f"scored a genome cosine ({pair_share:.2f}%)"
+                )
             if report.without_embedding:
                 # Excluded *and* counted. A rebuild that silently skipped a
                 # growing swathe of the catalog reads exactly like one with
@@ -660,6 +930,16 @@ async def _similar(
         for row in rows:
             year = f" ({row.year})" if row.year else ""
             print(f"{row.score:.3f}  {row.name}{year}  {row.title_id}")
+        # **Narrowed, not broken** -- PRD 08's degradation rule, the same shape
+        # `--mode fused` takes when it cannot reach the semantic lane. The
+        # neighbours still print: they are internally consistent and perfectly
+        # readable, they were simply computed under a different blend, and
+        # refusing to show them would turn "out of date" into "regressed".
+        if rows and await pipeline.similar.stale_neighbors(title_id=title_id):
+            print(
+                "these neighbours were computed under a different blend; "
+                "run `usher similar --rebuild`"
+            )
         if not rows and await pipeline.similar.computed_at() is None:
             # Two causes for an empty answer and only one is a fact about the
             # title. One message for both sends an operator to look at the
@@ -667,6 +947,139 @@ async def _similar(
             print("no neighbours have ever been computed -- run `usher similar --rebuild`")
         elif not rows:
             print("no neighbours for this title")
+
+
+async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
+    """Compose the home screen, and time it.
+
+    **Ships alongside `GET /home` rather than instead of it**, which is the
+    reverse of `usher search` and `usher similar`. ADR-0006's claim -- one
+    request paints a screen -- is a property of a request boundary that no
+    command can exhibit, so there the route is the deliverable. What this
+    command is for is PRD 08's rule that every operator command works against
+    an empty database, and the arithmetic that rule is hunting: **the taste
+    centroid is a mean, and the mean of zero embeddings is 0/0.**
+
+    **And it is where boundary call 8's promise is kept.** The rows build
+    sequentially because `AsyncSession` is not safe for concurrent use; whether
+    that is *fast enough* is a measurement rather than an argument, and this is
+    the measurement. Revisit the sequential build when
+    `usher.home.compose.duration` p95 exceeds **400 ms** *and* no single
+    provider accounts for **50%** or more of the total build time -- over
+    budget with a dominant provider is a query to fix, not a build to
+    parallelise, and under budget is neither. If both hold, the redesign is a
+    session per row behind a bounded pool, i.e. a lane, and PRD 01's
+    concurrency table grows the row boundary call 8 says it does not have.
+    Both numbers are printed, so the rule is read off the output rather than
+    recomputed.
+
+    **Every registered provider gets a line, including the ones that proposed
+    nothing.** An absent provider and a silent one are the two states this
+    milestone exists to distinguish, so the report iterates the *registry* and
+    never the proposals -- `HomeService.compose_report` is what makes that
+    possible without a second loop describing a composition that never
+    happened.
+
+    **`--repeat` measures N *cold* compositions**, clearing the cache before
+    each. A repeat that measured cache hits would report a number near zero and
+    mean nothing. The warm read is timed once, separately, and labelled -- and
+    it is the only measurement of the cache this milestone has, because
+    `usher.cache.hits`/`.misses` is M9's.
+    """
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        user = await default_user(session)
+        # The same wiring `api/deps.py` builds per request, minus the request:
+        # `taste` and `affinities` are values the composer hands over, because
+        # a provider may import only `domain/` and `ports/`.
+        ctx = RowContext(
+            user=user,
+            now=lambda: datetime.now(UTC),
+            titles=pipeline.titles,
+            media_items=pipeline.media_items,
+            watch_states=pipeline.watch_states,
+            episodes=pipeline.episodes,
+            neighbors=pipeline.neighbors,
+            people=pipeline.people,
+            credits=pipeline.credits,
+            collections=pipeline.collections,
+            affinities=await pipeline.taste.genre_affinity(user.id),
+        )
+        cache = RowCache(clock=lambda: datetime.now(UTC))
+        service = HomeService(pipeline.row_providers, cache=cache, max_rows=limit)
+
+        # Collected rather than overwritten so the last one is reachable
+        # without an `Optional` no input can reach -- `parse_args` refuses
+        # `--repeat 0`, and `assert` is not available in shipped code.
+        reports: list[ComposeReport] = []
+        for _ in range(repeat):
+            # Cleared *before* each run, so every one of them is cold. Without
+            # this the second run is a cache hit and the measurement silently
+            # becomes a benchmark of a dict.
+            cache.clear()
+            reports.append(await service.compose_report(ctx))
+        report = reports[-1]
+        cold = [one.duration_seconds for one in reports]
+
+        warm_at = time.perf_counter()
+        await service.compose(ctx)
+        warm = time.perf_counter() - warm_at
+
+        _print_home_report(report, cold=cold, warm=warm)
+
+
+def _print_home_report(report: ComposeReport, *, cold: Sequence[float], warm: float) -> None:
+    """The operator's table. `print`, never `logger` -- the split every command
+    in this module makes: loguru output is operational and goes to a sink an
+    operator may not be reading, and a command's answer is stdout, which is
+    what gets piped."""
+    print(f"{'provider':<22}{'proposed':>9}{'built':>7}{'cards':>7}{'propose':>11}{'build':>11}")
+    for one in sorted(report.providers, key=lambda entry: entry.provider):
+        built = "-" if one.selected == 0 else str(one.built)
+        cards = "-" if one.selected == 0 else str(one.cards)
+        build = "-" if one.selected == 0 else f"{one.build_seconds * 1000:.1f} ms"
+        print(
+            f"{one.provider:<22}{one.proposed:>9}{built:>7}{cards:>7}"
+            f"{one.propose_seconds * 1000:>8.1f} ms{build:>11}"
+        )
+    print()
+    print(
+        f"{len(report.providers)} providers, {report.silent} proposed nothing, "
+        f"{report.dropped} built empty and was dropped"
+    )
+    print(f"screen: {len(report.rows)} rows, {report.cards} cards")
+    ordered = sorted(cold)
+    p50 = ordered[len(ordered) // 2]
+    # The p95 of one sample is that sample, which is honest rather than
+    # flattering -- and `--repeat` is how an operator buys a real one.
+    p95 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
+    print(
+        f"compose (cold)  p50 {p50 * 1000:.1f} ms  p95 {p95 * 1000:.1f} ms "
+        f"over {len(cold)} run(s)     compose (warm, from cache)  {warm * 1000:.1f} ms"
+    )
+    # **The second half of boundary call 8's rule, computed rather than left to
+    # the reader.** If one provider is most of the wall clock, parallelising
+    # nine of them converges on that provider's latency and buys nothing -- the
+    # finding is a query to fix.
+    total_build = sum(one.build_seconds for one in report.providers)
+    if total_build > 0:
+        slowest = max(report.providers, key=lambda entry: entry.build_seconds)
+        share = slowest.build_seconds / total_build
+        print(
+            f"slowest provider: {slowest.provider} at {slowest.build_seconds * 1000:.1f} ms "
+            f"({share:.0%} of build time)"
+        )
+    else:
+        print("nothing was built, so there is no build time to attribute")
+    # **Printed unconditionally**, and that is a correction the empty-database
+    # case caught: guarded on `total_build > 0` the rule an operator needs is
+    # missing from exactly the run where they most need to know what the
+    # numbers mean, which is the one against a household that has watched
+    # nothing.
+    print(
+        "revisit the sequential build only when p95 > 400 ms AND no single provider "
+        "is >= 50% of build time"
+    )
 
 
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
@@ -757,6 +1170,17 @@ def _as_uuid(value: str, what: str) -> uuid.UUID:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="usher")
+    # The error boundary's own escape hatch, and the reason the boundary is
+    # allowed to swallow a stack at all. Top-level rather than per-command
+    # (`usher --traceback bootstrap-status`) because the boundary is
+    # top-level; it is **not** a `Settings` field, since a knob that turns
+    # off a presentation choice for one invocation is not deployment
+    # configuration.
+    parser.add_argument(
+        "--traceback",
+        action="store_true",
+        help="show the full stack instead of a one-line message",
+    )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("serve", help="run the HTTP server (the default with no arguments)")
     bootstrap = sub.add_parser("bootstrap", help="import bulk catalog datasets")
@@ -796,6 +1220,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index.add_argument("--limit", type=int, default=0, help="stop after N titles; 0 drains")
     index.add_argument("--page-size", type=int, default=1000)
+
+    derive = sub.add_parser(
+        "derive", help="report derivation coverage, or re-derive from the cache"
+    )
+    derive.add_argument(
+        "--backfill",
+        action="store_true",
+        help="walk the cached payloads and re-derive inline (the bare form only reads)",
+    )
+    derive.add_argument("--limit", type=int, default=0, help="stop after N payloads; 0 drains")
+    # 500 rather than `index`'s 1000: a page here carries whole JSONB payloads
+    # rather than title ids, and 500 TMDb detail responses at ~8 kB is ~4 MB in
+    # flight. A number to keep in mind, not a measured optimum.
+    derive.add_argument("--page-size", type=int, default=500)
 
     search = sub.add_parser("search", help="search the catalog")
     search.add_argument("query", help="what to search for")
@@ -844,6 +1282,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="recompute title_neighbors for the whole embedded population",
     )
 
+    home = sub.add_parser("home", help="compose the home screen, and time it")
+    home.add_argument("--limit", type=int, default=10, help="rows to compose")
+    home.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="cold compositions to time; the cache is cleared before each",
+    )
+
     push = sub.add_parser("push", help="run the push lane, or probe a source's push channel")
     push.add_argument("--source", default=None, help="source name; omit for every enabled source")
     push.add_argument(
@@ -889,12 +1336,81 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             parser.error("--limit must be at least 1")
     if args.command == "suggest" and args.limit < 1:
         parser.error("--limit must be at least 1")
+    if args.command == "home":
+        # **No cross-argument rule, and that is stated rather than omitted.**
+        # `usher similar` needs one because its two arguments select between
+        # two *different operations*, one of which rewrites a whole table.
+        # `home` has one operation and two scalars, so only the bounds matter.
+        if args.limit < 1:
+            parser.error("--limit must be at least 1")
+        if args.repeat < 1:
+            parser.error("--repeat must be at least 1")
     if args.command == "similar" and bool(args.title_id) == bool(args.rebuild):
         # Both spellings refused: no arguments is a read of nothing, and both
         # together is a read and a write in one command. `parser.error` again
         # -- exit 2 with usage rather than exit 1 with a traceback.
         parser.error("give a title id, or --rebuild, but not both")
     return args
+
+
+def _command_name(args: argparse.Namespace) -> str:
+    """What to call the thing that failed, in a message an operator reads.
+
+    `None` rather than `"serve"` is what argparse leaves behind when no
+    subcommand was given, and `main` treats that as `serve` -- so the
+    message has to as well, or the one command the container actually runs
+    reports itself as `usher None`.
+    """
+    return args.command or "serve"
+
+
+def _operator_problem(command: str, exc: BaseException) -> str:
+    """One line for the failure, one for the way back to the stack.
+
+    The type name is kept because `str(OSError)` on its own is
+    `[Errno 111] Connect call failed ('db', 5432)` -- which says *where* and
+    never *what*, and reads as a puzzle rather than as "the database is not
+    up".
+    """
+    return (
+        f"usher {command}: {type(exc).__name__}: {exc}\n"
+        f"(the stack is one flag away: `usher --traceback {command}`)"
+    )
+
+
+def _settings_problem(command: str, exc: ValidationError) -> str:
+    """pydantic's diagnosis with every rejected value stripped out.
+
+    **This is a security control, not formatting.** A pydantic v2
+    `ValidationError` renders as
+
+        ... [type=value_error, input_value='mysql://admin:hunter2@db/usher', ...]
+
+    so `USHER_DATABASE_URL` with the wrong driver printed the whole DSN, and
+    a truncated `USHER_SECRET_KEY` printed the key. Both fields are
+    `SecretStr` in `Settings` for exactly that reason; this CLI was the one
+    reader that unwrapped them, and it did it on the surface an operator is
+    most likely to paste into an issue.
+
+    Same control, and same trade, as `usher.api.errors` makes for a 422:
+    `loc` and `msg` survive -- so the operator still learns which setting was
+    wrong and what it should have been -- and the value never does.
+
+    `msg` is scrubbed as well as `input` dropped. No validator in `Settings`
+    interpolates the value into its own message today, and none of pydantic's
+    built-in messages do either; the scrub is there so that writing one does
+    not quietly reopen this.
+    """
+    lines = [f"usher {command}: the settings were rejected"]
+    for error in exc.errors():
+        where = ".".join(str(part) for part in error["loc"]) or "(settings)"
+        message = error["msg"]
+        rejected = str(error.get("input", ""))
+        if len(rejected) >= _SHORTEST_REDACTABLE and rejected in message:
+            message = message.replace(rejected, "<redacted>")
+        lines.append(f"  {where}: {message}")
+    lines.append("(values are not shown -- any setting may be a credential)")
+    return "\n".join(lines)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -912,11 +1428,56 @@ def main(argv: Sequence[str] | None = None) -> None:
     the server, because that is exactly what the container's CMD runs
     (`alembic upgrade head && exec python -m usher`). Adding subcommands
     must not change it, and neither must adding an entry point.
+
+    **The `try` is the whole error boundary for the CLI, and it is one
+    `try` deliberately.** M7's smoke test found `bootstrap-status` and
+    `sync-status` answering an unreachable database with sixty lines of
+    asyncpg and greenlet frames; the operator's actual information was the
+    last line. Per-command handling is the shape that rots -- the next
+    command is written by copying an arm, not the handler -- so the
+    boundary wraps `_dispatch` rather than living inside it, and
+    `tests/unit/test_cli_errors.py` asserts that shape by AST as well as
+    asserting the behaviour.
+
+    Reading the settings is inside it too. A `.env` that fails validation is
+    the same kind of failure as a database that is down, it reaches the
+    operator through the same command, and it is the case that was leaking a
+    credential (see `_settings_problem`).
+
+    `SystemExit` is untouched by all of it: it is a `BaseException`, the
+    handlers below name only `Exception` subclasses, and three places in
+    this module already exit with a message chosen for the failure it
+    describes.
     """
     argv = sys.argv[1:] if argv is None else list(argv)
     args = parse_args(list(argv) if argv else ["serve"])
-    settings = get_settings()
-    configure_telemetry(settings)
+    try:
+        settings = get_settings()
+        configure_telemetry(settings)
+        _dispatch(args, settings)
+    except ValidationError as exc:
+        # Before `OPERATOR_ERRORS` and, unlike it, **not reopened by
+        # `--traceback`**: a settings failure's stack is always the same six
+        # pydantic frames and diagnoses nothing, so the only thing re-raising
+        # would add is the value `_settings_problem` exists to withhold.
+        raise SystemExit(_settings_problem(_command_name(args), exc)) from exc
+    except KeyboardInterrupt:
+        # `usher bootstrap` is a multi-hour download an operator is *expected*
+        # to interrupt. A `KeyboardInterrupt` traceback through `asyncio.run`
+        # reads as the run failing rather than as their own decision.
+        print("interrupted", file=sys.stderr)
+        raise SystemExit(_INTERRUPTED_EXIT_CODE) from None
+    except OPERATOR_ERRORS as exc:
+        if args.traceback:
+            # Bare `raise`, not `raise exc`: rebinding would replace the
+            # stack the flag was asked for with this frame.
+            raise
+        raise SystemExit(_operator_problem(_command_name(args), exc)) from exc
+
+
+def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
+    """The command table, lifted out of `main` so the boundary there is one
+    `try` around all of it rather than one per arm."""
     if args.command == "bootstrap":
         asyncio.run(_bootstrap(settings, args.phase))
     elif args.command == "bootstrap-status":
@@ -948,6 +1509,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         asyncio.run(
             _index(settings, backfill=args.backfill, limit=args.limit, page_size=args.page_size)
         )
+    elif args.command == "derive":
+        asyncio.run(
+            _derive(settings, backfill=args.backfill, limit=args.limit, page_size=args.page_size)
+        )
     elif args.command == "search":
         asyncio.run(
             _search(
@@ -969,6 +1534,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 rebuild=args.rebuild,
             )
         )
+    elif args.command == "home":
+        asyncio.run(_home(settings, limit=args.limit, repeat=args.repeat))
     elif args.command == "push":
         asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
     else:

@@ -66,11 +66,14 @@ autoflush fails.
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import Text, exists, func, nulls_last, select
+from sqlalchemy import cast as sql_cast
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
+from usher.db.models.source import MediaItemRow
 from usher.db.models.title import DERIVED_COLUMNS, TitleRow
 from usher.db.repositories._errors import constraint_name
 from usher.domain.enums import EnrichmentState, TitleKind
@@ -248,6 +251,51 @@ class PostgresTitleRepository(TitleRepository):
         row = result.scalar_one_or_none()
         return _to_domain(row) if row else None
 
+    async def resolve_tmdb_ids(
+        self, kind: TitleKind, tmdb_ids: Sequence[int]
+    ) -> dict[int, uuid.UUID]:
+        # No statement at all for an empty batch. A derivation page whose
+        # payloads are all one kind reaches the other branch with nothing to
+        # ask about, and `tmdb_id = ANY('{}')` is a round trip to learn
+        # nothing -- the same guard `list_by_ids` carries.
+        if not tmdb_ids:
+            return {}
+        with self._session.no_autoflush:  # see get()'s comment
+            rows = await self._session.execute(
+                # Two columns, never the whole row: the caller wants a
+                # `Credit.title_id` and a link target, not 31 columns per
+                # title. `ix_titles_tmdb_id_kind` serves this directly, and
+                # the `kind` predicate is half the key rather than a filter
+                # -- ADR-0011, and without it this collapses a movie and a
+                # series that share an integer into one arbitrary answer.
+                select(TitleRow.tmdb_id, TitleRow.id).where(
+                    TitleRow.tmdb_id.in_(set(tmdb_ids)), TitleRow.kind == kind
+                )
+            )
+        # `tmdb_id` is nullable on the row and the predicate above excludes
+        # NULL by construction, so the narrowing is a type-checker fact
+        # rather than a runtime branch.
+        return {tmdb_id: title_id for tmdb_id, title_id in rows.all() if tmdb_id is not None}
+
+    async def credit_names_for(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[str, ...]]:
+        if not title_ids:
+            return {}
+        with self._session.no_autoflush:  # see get()'s comment
+            rows = await self._session.execute(
+                # Two columns, not the row: this is read once per backfill
+                # page over the enriched tier, and pulling 31 columns per
+                # title to reach one array is the shape `list_by_ids` exists
+                # to avoid being used for.
+                select(TitleRow.id, TitleRow.credit_names).where(TitleRow.id.in_(set(title_ids)))
+            )
+        # The column is NOT NULL with a server_default, so `or ()` is a
+        # type-checker courtesy rather than a live branch -- and it stays,
+        # because a NULL here would be the STRICT-wrapper failure and an
+        # empty tuple is the right answer to give the composer either way.
+        return {title_id: tuple(names or ()) for title_id, names in rows.all()}
+
     async def get_by_imdb_id(self, imdb_id: str) -> Title | None:
         # See get_by_tmdb_id's comment -- same IS NULL hazard, same guard.
         if imdb_id is None:
@@ -287,6 +335,69 @@ class PostgresTitleRepository(TitleRepository):
                 .options(defer(TitleRow.search_document, raiseload=True))
                 .where(TitleRow.id.in_(list(title_ids)))
             )
+        return [_to_domain(row) for row in result.scalars().all()]
+
+    async def list_owned_by_tag(
+        self,
+        *,
+        genre: str | None = None,
+        keyword: str | None = None,
+        limit: int = 20,
+    ) -> list[Title]:
+        if genre is None and keyword is None:
+            # No statement at all. An unpredicated call is "the library
+            # ordered by popularity", which is the popular-titles fallback
+            # spelled as a query, and the port declines to express it.
+            return []
+        # **The ownership semi-join is inside the statement**, which is the
+        # whole reason this method exists rather than the caller filtering a
+        # catalog read: taking the twenty most popular horror films from
+        # 1.27M rows and *then* asking which are owned answers nothing on a
+        # normal household.
+        #
+        # `EXISTS` rather than a join, and deliberately **without**
+        # `episode_id IS NULL`. Without the bound a series owned through its
+        # episode files is owned, which is the answer this read wants and the
+        # opposite of the one `owned_title_ids` wants; and `EXISTS`
+        # short-circuits, so the 20,000-episode series costs one probe rather
+        # than the 20,001 rows a join would multiply out.
+        owned = exists().where(
+            MediaItemRow.title_id == TitleRow.id,
+            MediaItemRow.available.is_(True),
+        )
+        statement = (
+            select(TitleRow).options(defer(TitleRow.search_document, raiseload=True)).where(owned)
+        )
+        # `@>` written out, because `ARRAY.contains()` raises
+        # `NotImplementedError` on the *generic* `ARRAY` these columns are
+        # declared with -- only the dialect-specific type implements it, and
+        # the model declares the generic one deliberately (it is what makes
+        # M2's bulk path and the ORM agree). Measured, not guessed: the
+        # obvious spelling fails at statement-build time in the integration
+        # run and never at all against the fake.
+        #
+        # AND, never OR: a window carrying both a genre and a keyword wants
+        # the intersection, and the union is a strictly larger, less relevant
+        # row that still looks right.
+        if genre is not None:
+            statement = statement.where(
+                TitleRow.genres.bool_op("@>")(sql_cast([genre], PG_ARRAY(Text)))
+            )
+        if keyword is not None:
+            statement = statement.where(
+                TitleRow.keywords.bool_op("@>")(sql_cast([keyword], PG_ARRAY(Text)))
+            )
+        statement = statement.order_by(
+            # `nulls_last` spelled out: Postgres defaults a DESC sort to NULLS
+            # FIRST, and `titles.popularity` was measured NULL on all
+            # 1,271,138 rows of a bootstrap-only catalog -- so the default
+            # puts the entire unknown population above every known one.
+            nulls_last(TitleRow.popularity.desc()),
+            nulls_last(TitleRow.vote_count.desc()),
+            TitleRow.id,
+        ).limit(limit)
+        with self._session.no_autoflush:  # see get()'s comment
+            result = await self._session.execute(statement)
         return [_to_domain(row) for row in result.scalars().all()]
 
     async def count_by_state(self) -> dict[EnrichmentState, int]:

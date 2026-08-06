@@ -10,6 +10,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -34,8 +35,20 @@ from usher.domain.enums import EnrichmentState, ProductionStatus, TitleKind
 #:
 #: Three call sites consume this, and the second is the one that gets missed
 #: -- `_to_domain` (a read), `update()`'s mutation loop (a *write*), and
-#: `test_title_and_title_row_have_matching_field_sets`.
-DERIVED_COLUMNS: frozenset[str] = frozenset({"search_document"})
+#: `test_title_and_title_row_have_matching_field_sets`. All three consume the
+#: set *generically*, which is the whole reason it is a set rather than a
+#: hardcoded name, and `credit_names` is the first time that is paid off:
+#: adding it needed no edit at any of the three. Confirmed by reading them,
+#: not by assuming.
+#:
+#: **`credit_names` is here for a different reason from `search_document`, and
+#: the asymmetry matters.** Postgres refuses to let anyone write a generated
+#: column, so membership there is belt-and-braces. `credit_names` is an
+#: ordinary column that something *must* write, so membership is the **only**
+#: thing stopping `TitleRepository.update()` from writing it -- and the only
+#: correct writer is the statement that also writes `credits`, because any
+#: other writer produces an array that disagrees with that table.
+DERIVED_COLUMNS: frozenset[str] = frozenset({"search_document", "credit_names"})
 
 
 class TitleRow(Base):
@@ -100,9 +113,54 @@ class TitleRow(Base):
     vote_count: Mapped[int | None] = mapped_column(Integer)
     popularity: Mapped[float | None] = mapped_column(Float)
 
-    # No index yet -- deferred for M9 alongside media_items' added_at/
-    # last_seen_at/available; see the note in db/models/source.py.
-    collection_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    # The FK it has been waiting for since M1. PRD 02: "the one artefact that
+    # exists today is titles.collection_id, a bare nullable UUID with no
+    # foreign key that nothing in src/ ever writes; it is the column waiting
+    # for the table, not evidence of one." M7 lands the table.
+    #
+    # SET NULL, and the two refused alternatives are the argument. CASCADE
+    # would delete the *films* when a franchise grouping is deleted -- wrong
+    # in kind, against PRD 02's own "the catalog outlives the servers".
+    # RESTRICT would refuse every collection delete, because a collection with
+    # no members is never written, so the refusal fires unconditionally and is
+    # a table nothing can delete from. SET NULL is media_items.title_id's
+    # precedent verbatim: the row is worth keeping and it just loses the link,
+    # and DeriveService re-attaches it on the next pass, so a NULLed link is
+    # self-healing rather than lost.
+    collection_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("collections.id", ondelete="SET NULL")
+    )
+
+    # Weight class B's input, denormalised onto `titles` because a stored
+    # generated expression cannot reach another table -- measured, three
+    # spellings, in migration fe1d40c8b7a3's docstring. This is `credits`
+    # projected to names and truncated to the top billed; `credits` is the
+    # fact, this is the search input.
+    #
+    # NOT NULL with a server_default, and **all three of the reasons are
+    # independently sufficient** -- which is why it is spelled this way rather
+    # than as a nullable column somebody later "tidies":
+    #
+    # 1. `_to_row` builds `TitleRow(**title.model_dump(...))` and this column
+    #    is not a `Title` field (see DERIVED_COLUMNS), so every INSERT through
+    #    the repository omits it. The same reason `genres` carries one.
+    # 2. `bulk.py` enumerates its columns by hand and names none of them here.
+    # 3. **`usher_array_text` is STRICT.** `usher_array_text(NULL)` is NULL,
+    #    `tsvector || NULL` is NULL, so one NULL in this column makes the whole
+    #    `search_document` NULL and the title vanishes from every full-text
+    #    search with no error anywhere. Measured directly on pg17.10 against
+    #    this schema's own wrapper: a row with `credit_names IS NULL` stored
+    #    `search_document IS NULL` while its name was populated, and the same
+    #    row with `'{}'` stored `'harbour':2A 'iron':1A`.
+    #
+    # No index. Nothing queries this column directly -- it exists to be read
+    # by the generated expression in the same row, and
+    # `ix_titles_search_document` is what serves the query. A GIN index here
+    # would be a second write cost on every derivation for a query nobody
+    # makes.
+    credit_names: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list, server_default=text("'{}'")
+    )
 
     enrichment_state: Mapped[EnrichmentState] = mapped_column(
         enum_column(EnrichmentState, length=16),
@@ -147,6 +205,7 @@ class TitleRow(Base):
         Computed(
             "setweight(to_tsvector('english', coalesce(name, '')), 'A') "
             "|| setweight(to_tsvector('english', coalesce(original_name, '')), 'A') "
+            "|| setweight(to_tsvector('english', usher_array_text(credit_names)), 'B') "
             "|| setweight(to_tsvector('english', coalesce(overview, '')), 'C') "
             "|| setweight(to_tsvector('english', coalesce(tagline, '')), 'C') "
             "|| setweight(to_tsvector('english', usher_array_text(genres)), 'D') "
@@ -234,21 +293,34 @@ class TitleRow(Base):
             "enrichment_state",
             postgresql_where=text("enrichment_state <> 'skeleton'"),
         ),
-        # Descending and partial, not a plain ascending index: "most popular
-        # first" is ORDER BY popularity DESC NULLS LAST, which a plain
-        # ascending btree cannot serve in either scan direction (forward
-        # gives ASC NULLS LAST, backward gives DESC NULLS FIRST -- neither
-        # matches). Excluding NULLs means there is nothing to place "last"
-        # inside the index at all, so a backward scan is directly usable.
-        # Measured: the plain-ascending version fell back to a 24.8 ms seq
-        # scan at 300k rows for a query a matching index serves in 0.19 ms,
-        # and would cost ~340 MB at 12.7M rows indexing millions of
-        # NULL-popularity skeleton rows no such query ever wants first.
-        Index(
-            "ix_titles_popularity",
-            text("popularity DESC"),
-            postgresql_where=text("popularity IS NOT NULL"),
-        ),
+        # **`ix_titles_popularity` was here and is dropped in `ffc`, because
+        # the reasoning that shaped it does not survive contact with the
+        # planner.** It read, in part: *"Excluding NULLs means there is
+        # nothing to place 'last' inside the index at all, so a backward scan
+        # is directly usable."* That is the load-bearing claim and it is
+        # **refuted**, measured on pg17.10 against 1,271,570 real titles with
+        # 291,584 popularities:
+        #
+        #   ORDER BY popularity DESC            -> Index Scan, cost 0.42..20.97
+        #   ORDER BY popularity DESC NULLS LAST -> Parallel Seq Scan + Sort,
+        #                                          cost 86,142
+        #
+        # Postgres matches pathkeys rather than reasoning that a partial index
+        # excluding NULLs makes the two orderings equivalent. Every consumer in
+        # `src/` writes `DESC NULLS LAST` -- correctly, since without it the
+        # whole unknown population sorts above every known one -- so the index
+        # could never serve a single shipped statement.
+        #
+        # Rebuilding it as `(popularity DESC NULLS LAST)` was measured too and
+        # does not rescue it: `list_owned_by_tag`, the one statement that
+        # orders by this column, keeps a byte-identical `Merge Semi Join` plus
+        # 2,569-row `top-N heapsort` plan either way, because it filters by
+        # ownership and genre first. See `ffc`'s docstring for the full table
+        # and for what would bring an index back.
+        #
+        # The ~340 MB this comment used to quote was for a hypothetical 12.7M
+        # rows; the real figure was **9,536 kB**, and 8,192 bytes on a
+        # bootstrap-only catalog where the partial predicate matches nothing.
         # PRD 03 stage 3 matches bulk-imported titles on normalised name +
         # year and calls this "why matching is fast and mostly offline" --
         # but sort_name has an explicit no-normalisation contract (Title's
@@ -314,6 +386,24 @@ class TitleRow(Base):
             "name",
             postgresql_using="gin",
             postgresql_ops={"name": "gin_trgm_ops"},
+        ),
+        # FranchiseProvider's whole read (CollectionRepository.list_owned),
+        # and the referencing-side lookup collections' SET NULL performs on
+        # every delete -- Postgres implements SET NULL by finding referencing
+        # rows *by this column*, and nothing else here leads with it.
+        #
+        # PRD 02 deferred this index to M9 ("No index yet -- deferred for M9
+        # alongside media_items' added_at/last_seen_at/available"). M7 needs it
+        # now and the deferral is retracted with its reason in the same commit
+        # rather than silently overridden.
+        #
+        # Partial: NULL on all 371,310 series rows -- belongs_to_collection is
+        # movies-only -- and on the majority of the 899,828 movie rows. That
+        # is ix_titles_popularity's argument, one column over.
+        Index(
+            "ix_titles_collection_id",
+            "collection_id",
+            postgresql_where=text("collection_id IS NOT NULL"),
         ),
         # Mirrors the domain model's Field(ge=0) / Field(ge=0, le=10) /
         # Field(min_length=1) constraints -- see the Title commit.

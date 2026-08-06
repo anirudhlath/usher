@@ -44,12 +44,41 @@ class JobKind(StrEnum):
     **`index` was deliberately absent until M6**, and it stopped being so
     because the handler, the enqueue and the drain land in one milestone. A
     kind whose handler is a stub is a queue that grows forever.
+
+    `derive` turns one cached provider payload into that title's people,
+    credits and collection (ADR-0016). **Its unit of work is one title and
+    that is what makes it a kind at all** -- everything it reads is one row of
+    `raw_payloads`, found by `(provider, kind, reference)`, and no other
+    title's data is touched. `SimilarityService`'s rebuild is the
+    counter-example and is deliberately *not* a kind: a neighbour list is a
+    function of every other embedded vector, so a job keyed on one `Title.id`
+    would misdescribe what the work reads and 10,000 of them would each scan
+    the whole population.
+
+    Like `index` it is enqueued after enrichment's commit and at `BACKFILL`,
+    and like `index` its correctness does not depend on the queue: `usher
+    derive --backfill` walks the cache directly and re-derives idempotently,
+    because the credit write is a scoped replace rather than an append. The
+    two are deliberately **not ordered against each other** -- a title whose
+    `index` job is claimed first embeds without its cast, `derive` then moves
+    its fingerprint, and the backfill re-claims it. One wasted embed per
+    enriched title, which is the fingerprint scheme working rather than a leak
+    in it, and the only lever would be a `JobPriority` rung that does not
+    exist between `BACKFILL` and `NEW`.
+
+    **Adding a member here needs no migration**, verified rather than
+    assumed: `db/models/jobs.py` declares `kind` through `enum_column`, whose
+    `native_enum=False` compiles to a plain `VARCHAR(32)` and whose
+    `create_constraint` defaults to `False` in SQLAlchemy 2.0, so the database
+    holds no membership CHECK and no native enum type. Pydantic owns
+    membership.
     """
 
     MATCH = "match"
     ENRICH = "enrich"
     WATCH_HISTORY = "watch_history"
     INDEX = "index"
+    DERIVE = "derive"
 
 
 class JobStatus(StrEnum):

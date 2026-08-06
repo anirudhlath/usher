@@ -10,17 +10,27 @@ import uuid
 from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher, NullEventPublisher
 
 
-def test_every_event_kind_is_something_m5_emits() -> None:
-    """PRD 10's rule for metrics, applied to a client contract: "A
-    documented metric nothing emits is a dashboard panel that is
-    permanently empty, and nothing distinguishes that from a healthy zero."
-    An SSE event type nothing emits is worse -- a client writes a handler
-    for it and waits forever. PRD 07 lists five; M5 ships four, and PRD 09's
-    roadmap says which milestone owes the fifth.
+def test_every_event_kind_is_something_this_process_emits() -> None:
+    """PRD 10's rule for metrics, applied to a client contract: "A documented
+    metric nothing emits is a dashboard panel that is permanently empty, and
+    nothing distinguishes that from a healthy zero." An SSE event type nothing
+    emits is worse -- a client writes a handler for it and waits forever.
+
+    **M7 added the fifth, `row.invalidated`, in the same commit as its
+    publisher** (`PushApplyService`), which is this rule pointed the other way:
+    a member with no publisher is the handler that waits forever, and a
+    publisher with no member is a `KeyError` inside a response that has already
+    answered 200. `bootstrap.progress` is still absent, because bootstrap runs
+    in the CLI process while the bus is in-process.
+
+    Renamed from `..._is_something_m5_emits`: the rule is about *this process*,
+    not about one milestone, and a guard whose name pins a milestone is one the
+    next milestone edits without reading.
     """
     assert {kind.value for kind in ClientEventKind} == {
         "title.updated",
         "watchstate.updated",
+        "row.invalidated",
         "sync.progress",
         "resync_required",
     }

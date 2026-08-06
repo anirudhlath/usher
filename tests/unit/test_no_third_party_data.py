@@ -60,6 +60,18 @@ because a guard that globs nothing passes exactly like a guard that passes.
 Same family as `CLAUDE.md`'s "prove the guard is installed before believing
 a green run" for the network check.
 
+**A known, recorded hole: none of the four can recognise a MovieLens row.**
+A genome-scores row is three integers and a float; a `links.csv` row is
+three integers. Neither is distinguishable from any other CSV, so
+`_IMDB_DATASET_ROW` (a tconst followed by a tab) and `_TMDB_EXPORT_RECORD`
+(a JSON object carrying `original_title`/`original_name`) both miss them by
+construction, and a committed `.zip` is dropped by `_every_text_file` on
+`UnicodeDecodeError` before any of them looks. `.csv` was added to
+`_SCANNED_SUFFIXES` for M7 so a committed slice at least falls inside the
+band and denylist checks; that is a narrowing, not a fix. The actual control
+is that MovieLens fixtures are **Python literals in a scanned `.py` file**,
+which two of the four do read. See `tests/fixtures/bulk/README.md`.
+
 See `tests/fixtures/README.md` for the allocation table these bands come
 from and for how to regenerate a fixture.
 """
@@ -74,7 +86,13 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 _SCANNED_ROOTS = ("src", "tests")
-_SCANNED_SUFFIXES = frozenset({".py", ".json", ".jsonl", ".tsv", ".md", ".sql", ".txt"})
+# `.csv` joined for MovieLens (M7). It does **not** make a MovieLens row
+# detectable -- a genome row is three integers and a float, and `links.csv`
+# is three integers, both indistinguishable from any CSV ever written, which
+# is why those fixtures are Python literals rather than files. What the
+# suffix buys is that a future committed `.csv` falls inside the IMDb-band
+# and once-committed-identifier checks, which is strictly more than zero.
+_SCANNED_SUFFIXES = frozenset({".py", ".json", ".jsonl", ".tsv", ".md", ".sql", ".txt", ".csv"})
 _FIXTURES = _REPO / "tests" / "fixtures"
 
 # IMDb ids are `tt`/`nm` plus 7 or 8 digits. Synthetic ones additionally

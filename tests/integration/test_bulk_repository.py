@@ -23,6 +23,7 @@ from usher.db.base import build_engine, build_session_factory
 from usher.db.models.source import SourceRow
 from usher.db.models.title import TitleRow
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
+from usher.db.repositories.genome import PostgresGenomeRepository
 from usher.domain.enums import SourceKind
 from usher.ports.repository import BulkCatalogRepository
 
@@ -90,6 +91,33 @@ class TestPostgresBulkCatalogRepositoryContract(BulkCatalogRepositoryContract):
         )
         value = result.scalar_one_or_none()
         return str(value) if value is not None else None
+
+    async def title_id_of(self, repo: BulkCatalogRepository, imdb_id: str) -> uuid.UUID | None:
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        result = await repo._session.execute(
+            text("SELECT id FROM titles WHERE imdb_id = :imdb_id"), {"imdb_id": imdb_id}
+        )
+        value = result.scalar_one_or_none()
+        return cast(uuid.UUID, value) if value is not None else None
+
+    async def genome_of(
+        self, repo: BulkCatalogRepository, title_id: uuid.UUID
+    ) -> tuple[float, ...] | None:
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        row = await PostgresGenomeRepository(repo._session).get(title_id)
+        return None if row is None else row.relevance
+
+    async def genome_keys(self, repo: BulkCatalogRepository) -> set[object]:
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        result = await repo._session.execute(text("SELECT title_id FROM genome_scores"))
+        return {row[0] for row in result}
+
+    async def enrich(self, repo: BulkCatalogRepository, imdb_id: str) -> None:
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        await repo._session.execute(
+            text("UPDATE titles SET enrichment_state = 'enriched' WHERE imdb_id = :imdb_id"),
+            {"imdb_id": imdb_id},
+        )
 
     async def indexes_intact(self, repo: BulkCatalogRepository) -> bool:
         assert isinstance(repo, PostgresBulkCatalogRepository)

@@ -10,22 +10,34 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 ## Status
 
 Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
-adapter), M4 (ingest pipeline), M5 (push and read-through) and M6 (search)
-are complete — see [`docs/plans/`](docs/plans/) for the task breakdowns and
+adapter), M4 (ingest pipeline), M5 (push and read-through), M6 (search) and
+M7 (rows and recommendations) are complete — see
+[`docs/plans/`](docs/plans/) for the task breakdowns and
 [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's next.
 
 M3, M4 and M5 are each verified against a live Emby server, and M4's metadata
 half against the live TMDb API. M5's run is the first in this repository to
-have parsed a real `/embywebsocket` message. **M6's one outstanding item is
-its own typo-tolerance gate**, which is built but has not yet been run
-against a real 1.27M-title catalog
+have parsed a real `/embywebsocket` message. **M6's typo-tolerance gate ran on
+2026-08-03 against a real 1,271,138-title catalog and failed** — short names
+are the weak band and no configuration comes close to an as-you-type latency
+budget. The result is recorded with its numbers and the follow-up (a two-tier
+suggest) has an owner in M9
 ([ADR-0002](docs/prd/decisions/0002-postgres-first-search.md)).
 
-**The HTTP surface is deliberately small so far**: `/health`,
-`/health/ready`, `/titles/{id}`, `/events` (SSE) and the `/admin/sources`
-routes. **M6 adds none** — search, suggest, similarity and indexing are all
-command-line, and M9 owns the routers. Everything the ingest pipeline does is
-driven from the command line until then — see below.
+**M7 composes a home screen**: nine row providers, scored and diversified
+server-side, plus the taste centroid, the MovieLens tag genome as a third
+similarity signal, and `Person`/`Credit`/`Collection` re-derived from the
+payload cache with no second network call.
+
+**The HTTP surface is deliberately small, and M7 is the first milestone since
+M5 to grow it**: `/health`, `/health/ready`, `/titles/{id}`, **`/home`**,
+`/events` (SSE) and the `/admin/sources` routes. `GET /home` returns the whole
+screen in one response — **no cursor**, which is what
+[ADR-0006](docs/prd/decisions/0006-server-composed-home.md) specifies, and no
+error envelope, because every input is local state and there is no upstream
+failure it can be asked about. Still M9's: search, suggest, similarity,
+browse, the image proxy, and the RFC 9457 envelope. Everything else is driven
+from the command line — see below.
 
 ## Requirements
 
@@ -94,7 +106,20 @@ them with `docker compose exec usher python -m usher <command>`.
 ```bash
 uv run usher --help                  # every command and flag
 uv run usher serve                   # the HTTP server (also the no-argument default)
+uv run usher --traceback <command>   # the full stack, when one line is not enough
 ```
+
+When something an operator can fix goes wrong — the database is not up, a
+`.env` value is wrong, a source is unreachable — every command exits 1 with
+one line rather than a stack:
+
+```
+usher bootstrap-status: ConnectionRefusedError: [Errno 111] Connect call failed ('127.0.0.1', 5432)
+(the stack is one flag away: `usher --traceback bootstrap-status`)
+```
+
+A *bug* still gets its full traceback, deliberately. And a rejected setting is
+reported by name without its value, because a setting may be a credential.
 
 **Populate the catalog** — pulls IMDb's `title.basics`/`title.ratings` dumps,
 TMDb's *public daily id export* files (no API key needed for these) and
@@ -104,10 +129,17 @@ checkpoint. See
 [`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md).
 
 ```bash
-uv run usher bootstrap                     # all three phases
-uv run usher bootstrap --phase imdb        # one at a time: imdb | tmdb-ids | crosswalk | all
+uv run usher bootstrap                     # every phase
+uv run usher bootstrap --phase imdb        # one at a time: imdb | tmdb-ids | crosswalk | movielens | all
+uv run usher bootstrap --phase movielens   # the MovieLens tag genome (M7), ~335 MB, ~10 min
 uv run usher bootstrap-status              # progress per dataset, and catalog size
 ```
+
+`movielens` runs **last** under `--phase all`, and refuses outright against an
+empty catalog: the genome joins `titles` on `imdb_id`, so there is nothing to
+join to until the IMDb phase has run. It downloads `ml-latest.zip` and reads
+three of its seven members — the only archive that has a genome *and* a
+licence permitting redistribution, which is why the phase names it.
 
 **Sync a source** — walks a registered media server into the catalog
 (matching, ingest, availability sweep), then walks its watch state.
@@ -158,6 +190,26 @@ uv run usher index             # model, stale count, refused count, estimated wo
 uv run usher index --backfill  # enqueue the work; re-running writes zero rows
 ```
 
+`usher derive` re-derives people, credits and collections out of the provider
+payloads M4 already cached (ADR-0016) — **with no second network call**. Its
+bare form is five counts and no writes; `--backfill` walks the cache inline,
+which is where it deliberately differs from `usher index`: derivation needs no
+model, no request and no rate limit, so the queue would buy ordering, retry and
+backoff for work that needs none of the three. In steady state each enrichment
+enqueues a `derive` job alongside its `index` one, and the backfill exists
+because M7 arrives after a catalog is already enriched — nothing will ever
+re-enrich those titles, so nothing will ever enqueue a job for them.
+
+```bash
+uv run usher derive             # cached payloads, titles with credits, people, collections
+uv run usher derive --backfill  # walk the cache and re-derive inline; idempotent
+```
+
+**Order matters after a fresh upgrade**: `alembic upgrade head` → `usher derive
+--backfill` → `usher index --backfill` → `usher work`. Indexing before deriving
+embeds every title with an empty weight class B and then re-claims all of them
+once `credit_names` is populated, which is the wasted pass twice over.
+
 Embedding is optional and off by default. The model lives behind an extra
 (`uv sync --extra embedding`, 167 MiB, no torch) and `USHER_EMBEDDING_ENABLED`
 gates it; without it a worker simply never claims `index` jobs, and full-text
@@ -202,6 +254,37 @@ reason: a read and the write that refreshes what it reads.
 uv run usher similar <title id>    # the precomputed neighbours, best first
 uv run usher similar --rebuild     # recompute title_neighbors for the embedded tier
 ```
+
+`usher home` composes the screen `GET /home` returns, and times it.
+
+```bash
+uv run usher home                  # one composition, with a per-provider table
+uv run usher home --repeat 5       # five *cold* compositions; the cache is cleared before each
+```
+
+It ships **alongside** the route rather than instead of it, which is the
+reverse of `usher search`: ADR-0006's claim — one request paints a screen — is
+a property of a request boundary that no command can exhibit, so there the
+route is the deliverable. What the command is for is the rule that every
+operator command works against an empty database, and the arithmetic that rule
+is hunting: the taste centroid is a mean, and the mean of zero embeddings is
+0/0. Against an empty household it exits 0 and prints nine providers that
+proposed nothing.
+
+**Every registered provider gets a line, including the ones that proposed
+nothing** — an absent provider and a silent one are the two states a composed
+home screen cannot otherwise tell apart. `proposed 1, built 0` is a row that
+was chosen, hydrated and found nothing renderable; `proposed 2` with no build
+is the per-family cap. The cold/warm pair is the only measurement of the row
+cache this milestone has, because `usher.cache.hits`/`.misses` is M9's.
+
+Measured 2026-08-04 against a real 1,271,570-title catalog with a synthetic
+household on top of it: **p50 23.9 ms, p95 35.9 ms cold, 0.0 ms warm**, eight
+rows and 115 cards, slowest provider 34% of build time. The rows build
+**sequentially** — `AsyncSession` is not safe for concurrent use — and the
+command prints the rule for revisiting that (p95 > 400 ms *and* no provider
+≥ 50% of build time) beside the numbers, so it is read off the output rather
+than recomputed.
 
 **Nothing runs the rebuild for you**, and that is stated rather than implied.
 A title's neighbours go stale when *some other* title gets an embedding, which

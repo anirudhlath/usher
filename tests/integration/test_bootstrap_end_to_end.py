@@ -7,7 +7,8 @@ link.
 """
 
 import gzip
-from collections.abc import Sequence
+import zipfile
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 import httpx
@@ -16,11 +17,18 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.adapters.bulk.imdb import IMDbRatingDataset, IMDbTitleDataset
+from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.domain.bootstrap import ImportRunStatus
 from usher.domain.enums import TitleKind
-from usher.ports.bulk import IdCrosswalkPair, ImdbTitle, TmdbId
+from usher.ports.bulk import (
+    GENOME_TAG_COUNT,
+    GenomeVector,
+    IdCrosswalkPair,
+    ImdbTitle,
+    TmdbId,
+)
 from usher.services.bootstrap import BootstrapService
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures" / "bulk"
@@ -214,3 +222,144 @@ class _Stop(Exception):
 async def _written(catalog: PostgresBulkCatalogRepository, rows: Sequence[ImdbTitle]) -> int:
     result = await catalog.upsert_titles(rows)
     return result.inserted + result.updated
+
+
+# --- the movielens phase, end to end over a synthetic archive --------------
+#
+# `tt99000020` is `SHAWSHANK`'s id in the shared bulk contract; the IMDb
+# fixture slice this file already stages holds it. `links.csv` carries the
+# digits bare, so the archive's own column is `99000020` and the adapter's
+# `zfill(7)` produces the joined form.
+_ML_ROOT = "ml-latest/"
+_ML_LINKS = "\n".join(
+    [
+        "movieId,imdbId,tmdbId",
+        "90000501,99000020,90000601",  # joins to a real skeleton movie
+        "90000502,99000998,90000602",  # in links, in the genome, in no title
+    ]
+)
+# **The real 1,128, not a convenient two.** `genome_scores.relevance` is
+# declared `halfvec(1128)` and the cast in the staged upsert refuses anything
+# else -- measured, `asyncpg.exceptions.DataError: expected 1128 dimensions,
+# not 2` -- so a narrow fixture here would exercise everything except the one
+# width production runs at. Generated rather than written out: 1,128 tag names
+# and 2,256 score rows are a loop, and every value is invented.
+_ML_TAGS = "\n".join(
+    ["tagId,tag"] + [f"{tag},synthetic tag {tag}" for tag in range(1, GENOME_TAG_COUNT + 1)]
+)
+_ML_SCORES = "\n".join(
+    ["movieId,tagId,relevance"]
+    + [
+        f"{movie},{tag},{round(((movie + tag) % 97) / 97.0, 5)}"
+        for movie in (90000501, 90000502)
+        for tag in range(1, GENOME_TAG_COUNT + 1)
+    ]
+)
+
+
+def _genome_cache(cache: Path) -> Path:
+    with zipfile.ZipFile(cache / "ml-latest.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"{_ML_ROOT}links.csv", _ML_LINKS)
+        archive.writestr(f"{_ML_ROOT}genome-tags.csv", _ML_TAGS)
+        archive.writestr(f"{_ML_ROOT}genome-scores.csv", _ML_SCORES)
+    return cache
+
+
+async def _seed_catalog(session: AsyncSession, cache: Path) -> PostgresBulkCatalogRepository:
+    catalog = PostgresBulkCatalogRepository(session)
+    service = BootstrapService(PostgresImportRunRepository(session), catalog, session.flush)
+    async with httpx.AsyncClient(transport=_local(cache)) as client:
+        await service.import_dataset(
+            IMDbTitleDataset(client, cache, batch_size=10), _write_titles(catalog)
+        )
+    return catalog
+
+
+def _write_titles(
+    catalog: PostgresBulkCatalogRepository,
+) -> Callable[[Sequence[ImdbTitle]], Awaitable[int]]:
+    async def write(rows: Sequence[ImdbTitle]) -> int:
+        result = await catalog.upsert_titles(rows)
+        return result.inserted + result.updated
+
+    return write
+
+
+async def test_the_genome_phase_joins_on_imdb_id_and_checkpoints_by_movie_run(
+    session: AsyncSession, cache: Path
+) -> None:
+    """The whole `movielens` phase against real Postgres: archive -> adapter
+    -> staged `real[]` -> `halfvec(1128)` -> a row keyed on the resolved
+    `titles.id`.
+
+    **This is the only place the `halfvec`-over-`COPY` path runs end to end.**
+    A `halfvec` had never crossed asyncpg's binary `COPY` in this repository
+    before M7; the staging column is `real[]` and the cast is in the
+    `INSERT ... SELECT`, and if either half were wrong this case is what
+    says so rather than a production bootstrap.
+
+    `position` is a *movie run index*, not a line number: two movies, two
+    completed runs, one of which joins to nothing.
+    """
+    catalog = await _seed_catalog(session, _genome_cache(cache))
+    service = BootstrapService(PostgresImportRunRepository(session), catalog, session.flush)
+
+    async with httpx.AsyncClient(transport=_local(cache)) as client:
+        dataset = MovieLensGenomeDataset(client, cache, batch_size=10)
+        revision = await dataset.revision()
+        misses = 0
+
+        async def write(rows: Sequence[GenomeVector]) -> int:
+            nonlocal misses
+            result = await catalog.upsert_genome_vectors(rows, revision=revision)
+            misses += result.unmatched
+            return result.inserted + result.updated
+
+        run = await service.import_dataset(dataset, write, revision=revision)
+
+    assert run.status is ImportRunStatus.COMPLETED
+    # Two completed movie runs consumed; both yielded a vector, one of which
+    # the catalog could not place.
+    assert run.position == 2
+    assert misses == 1
+
+    stored = await session.execute(
+        text(
+            "SELECT g.genome_revision, t.imdb_id FROM genome_scores g "
+            "JOIN titles t ON t.id = g.title_id"
+        )
+    )
+    assert [tuple(row) for row in stored] == [('"fixture"', "tt99000020")]
+
+
+async def test_a_replayed_genome_phase_reports_updates_and_the_same_coverage(
+    session: AsyncSession, cache: Path
+) -> None:
+    """Trap 3 through the whole phase rather than through one statement, and
+    the coverage report alongside it. Rowcount reports the sum, so without
+    `xmax = 0` the second run of an operator's `--phase movielens` would be
+    indistinguishable from the first."""
+    catalog = await _seed_catalog(session, _genome_cache(cache))
+    rows = [
+        GenomeVector(
+            movie_id=90000501,
+            imdb_id="tt99000020",
+            tmdb_id=None,
+            relevance=(0.5, 0.25) + (0.0,) * (GENOME_TAG_COUNT - 2),
+        ),
+    ]
+    # Straight through the repository: the phase's own batching is covered
+    # above, and what this case is about is the second write of one row.
+    first = await catalog.upsert_genome_vectors(rows, revision='"fixture"')
+    again = await catalog.upsert_genome_vectors(rows, revision='"fixture"')
+
+    assert (first.inserted, first.updated) == (1, 0)
+    assert (again.inserted, again.updated) == (0, 1)
+
+    coverage = await catalog.genome_coverage()
+    assert coverage.with_vector == 1
+    assert coverage.revisions == (('"fixture"', 1),)
+    # A bootstrap-only catalog is all skeletons, so the enriched-tier
+    # denominator is zero -- which is the state PRD 08 says every operator
+    # command must survive, and the report must not divide by it.
+    assert coverage.enriched == 0

@@ -17,9 +17,9 @@ direct Emby access, for both movies and television.
 | **M4 — Ingest pipeline** ✅ | Ingest → match → enrich; priority queue; stub-on-sight; unmatched review; the availability sweep and its refusal. **The `index` stage is M6's** — see the boundary calls below |
 | **M5 — Push and read-through** ✅ | WebSocket events with health grounded in a message ledger ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)), supervised reconnect with a gap-closing delta, demand promotion, `GET /titles/{id}`, SSE to clients over an `EventPublisher` port ([ADR-0019](decisions/0019-the-client-event-channel-is-a-port.md)), and two supervised lanes in the server process |
 | **M6 — Search** ✅ | **The `index` stage of [03](03-sources-and-sync.md)'s pipeline**; a weighted full-text document as a generated column, a typo-tolerant autocomplete path on its own port, optional embeddings with a fingerprint that makes staleness a query, RRF fusion reporting its own coverage, similarity, and a precomputed neighbour table. **Adds no HTTP route and no new client event, both deliberately** — see the boundary calls below. **[ADR-0002](decisions/0002-postgres-first-search.md)'s Meilisearch gate ran against a real 1,271,138-title catalog on 2026-08-03 and failed for short names and for latency**; the follow-up is the two-tier suggest, owned by M9 |
-| **M7 — Rows** | Row and RowProvider hierarchy, system rows, similarity rows, taste centroid. **Plus the MovieLens tag-genome importer** — five documents specify it and nothing builds it; see below |
-| **M8 — Curation** | LLM row generation, validation, persistence, regeneration job |
-| **M9 — API surface** | Full HTTP surface, image proxy, playback resolution, **the playback ticket that succeeds [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)**, **outbound watch state (`PUT /watch/titles/{id}` and the source write-back retry job)**, **[07](07-client-api.md)'s RFC 9457 error envelope**, `GET /titles/{id}/similar` over M6's precomputed table, **the `search_queries` analytics table whole** ([10](10-telemetry-and-dashboards.md)), **the two-tier suggest [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges** (see below), attribution |
+| **M7 — Rows** ✅ | `Row`/`RowProvider` as ports and **nine registered providers**, `HomeService`'s propose→score→diversify→build, in-process row and screen caches, the taste centroid and genre affinity, `GET /home` and `usher home`, `row.invalidated`. **Plus the MovieLens tag-genome importer** — five documents specified it and nothing built it, and it is now the similarity blend's third live signal. Plus `Person`/`Credit`/`Collection` re-derived from `raw_payloads` with no second network call (`usher derive`), search weight class B filled, and two measurements the milestone owed: the sequential build's cost, and `titles.popularity`/genome coverage with their denominators |
+| **M8 — Curation** | LLM row generation, validation, persistence, regeneration job. **Inherits from M7:** `curated_rows`, `LLMRow`, `CuratedProvider`, `RowFamily.CURATED` and `POST /admin/rows/regenerate` as one family (call 2); M6's query expansion (its call 6); and the genome's **tag vocabulary**, which M7 deliberately does not store — a prompt that wants to say "atmospheric, thought-provoking" needs the words, and `genome_revision` is what makes loading them later safe |
+| **M9 — API surface** | Full HTTP surface, image proxy, playback resolution, **the playback ticket that succeeds [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)**, **outbound watch state (`PUT /watch/titles/{id}` and the source write-back retry job)**, **[07](07-client-api.md)'s RFC 9457 error envelope**, `GET /titles/{id}/similar` over M6's precomputed table, **the `search_queries` analytics table whole** ([10](10-telemetry-and-dashboards.md)), **the two-tier suggest [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges** (see below), attribution. **Inherits from M7:** artwork on `RowCard` with the `Image` table and `GET /images/{id}` (call 3); `title_search_names`' *people* half, with M6's condition **restated rather than renewed** (call 6); row provider enable/disable via the admin API (call 9); the RFC 9457 envelope `GET /home` deliberately ships without (call 1), plus `usher.http.server.duration`, `usher.cache.hits`/`.misses` and serve-stale-while-refreshing; `credits` as a key on `GET /titles/{id}`; and the three ranking terms M7 built data for and did not wire — taste-centroid proximity, watch state and recency ([05](05-search-and-similarity.md)) |
 | **M10 — Hardening** | Observability, failure modes, backup/restore, docs, public release |
 
 TV is in scope throughout, not deferred — series/season/episode modelling,
@@ -139,6 +139,16 @@ deliberately rather than drifted into.**
    *provider's* JSON shape would put a TMDb-shaped concept in `services/`.
    Because the document is a generated column, filling B when M7 lands
    `Credit` is a migration rather than a rewrite.
+
+   **M7 filled it, and annotated that last sentence rather than deleting
+   it.** It is true of the search *path* — no service was rewritten — and
+   understates the migration: filling B needed a denormalised
+   `titles.credit_names` column (a stored generated expression cannot reach
+   another table, and the `IMMUTABLE`-wrapper workaround is accepted by
+   Postgres and silently wrong), a forced full-column rewrite in the same
+   migration, and a re-embed of the whole enriched tier, because the
+   positional assembly moves every fingerprint including uncredited titles'.
+   See [05](05-search-and-similarity.md).
 3. **No `title_search_names` table is built.** [05](05-search-and-similarity.md)
    specifies a narrow `(title_id, name, kind, popularity)` table for
    autocomplete, justified by *aliases and people names* — one title
@@ -211,6 +221,252 @@ of it (a `vote_count` tiebreak in the suggest ordering, because
 follow-up has an owner below. A failed gate that is written down with its
 numbers is a closed item, not an open one.
 
+**M7's boundary was ambiguous in nine places, and each was decided
+deliberately rather than drifted into.** They were **recorded as they were
+executed** rather than in one pass at the end, so call 8 below landed with the
+commit that made it and the other eight arrived with the milestone's
+documentation task — which is why 8 reads longer than its neighbours and
+carries a measurement they do not.
+
+1. **`GET /home` IS built, and it is the first client-facing route since M5.**
+   M6 declined routes and delivered through the CLI, and three milestones
+   before it did the same, so the default here is CLI-only. What overrides it
+   is that [ADR-0006](decisions/0006-server-composed-home.md) is the ADR
+   governing this milestone and its entire content is about the route — and
+   its central claim, *"one request paints a screen"*, is a property of a
+   **request boundary** that no command can exhibit. M6's call 1 declined
+   routes for capabilities the CLI genuinely delivers (`search`, `suggest`,
+   `similar` each print exactly what the route would return); composition is
+   the first capability where the CLI is a *proxy* for the deliverable rather
+   than the deliverable in another skin. `row.invalidated` is assigned to M7
+   by name in [07](07-client-api.md)'s SSE table, and an invalidation event
+   with no row to invalidate is an event with no consumer. `usher home` ships
+   too, because [08](08-operations.md)'s operator rule is that every command
+   works against an empty database, and a route is a poor place to discover
+   that composition divides by zero on a household that has watched nothing.
+   **What stays M9's, so this is a route and not a land grab:** the RFC 9457
+   envelope, `usher.http.server.duration`, `usher.cache.hits`/`.misses`, HTTP
+   cache headers, and pagination. The screen comes back in one response with
+   **no cursor** — what ADR-0006 specifies, and what [07](07-client-api.md)'s
+   own endpoint table already showed.
+
+2. **`curated_rows`, `LLMRow` and `CuratedProvider` are not built. M8 owns the
+   family whole.** [02](02-data-model.md) already said so and
+   [06](06-rows-and-recommendations.md) says `LLMRow.build()` *"only hydrates
+   stored output"* — so hydrating a table whose generator does not exist would
+   fix that table's shape before anything had tried to fill it, which is the
+   `search_queries` failure [10](10-telemetry-and-dashboards.md) argues at
+   length, one milestone early. `POST /admin/rows/regenerate` goes with it, and
+   `RowFamily` ships with **two** members rather than a `CURATED` nobody can
+   emit: a cap over a family with no members is a branch no test can reach.
+   Nine of [06](06-rows-and-recommendations.md)'s ten providers ship, and its
+   table is annotated rather than silently shipped short.
+
+3. **`RowCard` carries no artwork field, exactly as `GET /titles/{id}` carries
+   no `images` key.** There is no `Image` table, no `images` column and not
+   even a `poster_path` on `titles`; M9 owns the proxy and the table. The
+   choice was between an always-null field and no field, and M5 settled the
+   identical question one route over in a sentence this call reuses verbatim:
+   *"an empty list would be indistinguishable from a film with no cast."* A
+   card with `"artwork": null` on every row is a client-side branch that never
+   takes its other arm, and the day M9 fills it every client that shipped
+   against the null already renders without it. `rating` is refused on the
+   same page for a different reason — see
+   [06](06-rows-and-recommendations.md): `watch_states` has no `rating` and no
+   `favorite`, and neither does `SourceWatchState`, so a *household's* rating
+   on a card is a field with no source. (`titles.community_rating` exists and
+   is a different thing: IMDb's aggregate, not this household's opinion.)
+
+4. **`Person` and `Credit` ARE built, and `Collection` with them, all three
+   re-derived from `raw_payloads` with no second network call.** M4's boundary
+   call 2 arriving at the milestone it named. Two providers depend on them
+   (`PeopleProvider`, `FranchiseProvider`), M6 reserved search weight class B
+   for exactly this, and `titles.collection_id` had been a bare nullable UUID
+   with no table since M1. The payload already holds all three, so nothing is
+   fetched — it ships as [03](03-sources-and-sync.md)'s fifth pipeline stage,
+   `usher derive`.
+
+   **But "the payload already holds all three" is true of the *entities* and
+   not of [02](02-data-model.md)'s field lists, and the difference cost four
+   fields.** `Person`'s sketch named `imdb_id`, `birth_year`, `death_year` and
+   `biography`; none is on a `credits.cast[]` or `credits.crew[]` entry and all
+   four live on `/person/{id}` — one request per person, which is the second
+   network call this call forbids. M7 dropped all four rather than shipping a
+   model whose emptiest fields imply a crawl nobody scheduled. **Unassigned**,
+   and named in [03](03-sources-and-sync.md) rather than left implied.
+
+5. **Weight class B is filled, and it needs a denormalised column on `titles`
+   because a generated column cannot reach another table.** M6 promised
+   *"filling B when M7 lands `Credit` is a migration rather than a rewrite"*,
+   and that is true only if class B is fed from a column of the row being
+   generated. A stored generated expression may reference **only the current
+   row**, so `setweight(to_tsvector('english', (SELECT … FROM credits …)),
+   'B')` is not expressible at all — measured on PostgreSQL 17.10, it is
+   refused *syntactically*, before immutability is even considered. So M7 adds
+   `titles.credit_names text[]`, maintained by the same call and the same
+   transaction that writes `credits`, so the two cannot disagree.
+   Still a migration rather than a rewrite of the search path, and a
+   **bigger** one than M6's sentence implies: a new column, a new writer, a
+   forced full rewrite of `search_document` (because
+   `CREATE OR REPLACE FUNCTION` does not recompute stored generated values),
+   and every fingerprint in the enriched tier moving at once. That last is
+   [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s scheme
+   working rather than failing, at 25 s to 2 min at the measured throughput.
+   Corrected in [05](05-search-and-similarity.md).
+
+6. **`title_search_names` is still not built, and M6's own condition for
+   building it is not met.** M6 deferred it to *"the day M7 lands aliases and
+   people"* — and **M7 lands people but not aliases**. `alternative_titles` is
+   in neither `append_to_response` list, so it is not in `raw_payloads` at all;
+   landing it means changing the crawl's request shape and re-fetching the
+   whole enriched tier, i.e. a metadata-provider change wearing a search
+   table's name. And the people half now belongs with M9's two-tier suggest,
+   which [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate
+   obliges and which *replaces* the shipped suggest path — so building the
+   narrow table now means M9 redesigns against a table built for the design it
+   is replacing. **The condition is restated in [05](05-search-and-similarity.md)
+   rather than the deferral being silently renewed**, which is the failure this
+   roadmap names for the tag genome below: *an obligation recorded only where
+   it was postponed is one nobody plans.*
+
+7. **The MovieLens tag genome IS built, and `genome_scores` is one dense
+   `halfvec(1128)` per title rather than [02](02-data-model.md)'s implied tall
+   table.** Measured on `pgvector/pgvector:pg17` (pgvector 0.8.6) at the real
+   dimensions: 16,376 rows of `halfvec(1128)` is **45 MB**, while the same data
+   as `(title_id, tag_id smallint, relevance real)` is 18,472,128 rows and
+   **2,106 MB** — **47×**, against a database [08](08-operations.md) budgets at
+   8–12 GB *total*. `real[]` sits between them at 88 MB and is worse than
+   both, having no operator class. The genome is a genuinely dense matrix —
+   every one of 16,376 movies carries a value for every one of 1,128 tags,
+   verified by counting — so the tall form stores 16,376 copies of a tag id to
+   express a matrix with no holes in it, and the dense form makes the
+   similarity term a single `<=>`, the operator `SimilarityService` already
+   blends. [ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md).
+
+8. **Rows build SEQUENTIALLY, and [06](06-rows-and-recommendations.md)'s
+   "builds the top N concurrently" is corrected rather than implemented.**
+   `AsyncSession` is explicitly not safe for concurrent use — two coroutines
+   awaiting on one session interleave on one connection — so `asyncio.gather`
+   over nine providers sharing the request's session is not a performance
+   choice, it is a corruption. **And it usually works**, which is how it
+   ships: two short reads frequently complete, and the failure is an
+   intermittent `InvalidRequestError` or a result set attributed to the wrong
+   query, under load, in production. The two ways out are both worse at this
+   scale: a session per row means nine connections for one home screen, i.e.
+   pool exhaustion at one concurrent user against a default pool; and a
+   semaphore has no lane to belong to ([01](01-architecture.md)'s concurrency
+   table has no lane for this, and [08](08-operations.md) already retracted
+   "concurrency per lane" as a setting because *"a setting cannot be added
+   ahead of the mechanism it would bound"*). Every provider's query is a
+   bounded local read.
+
+   **Pinned by a case rather than by a comment, and the case is about the
+   session rather than about the clock.** The repository's usual instrument —
+   measured intersection-over-union of wall-clock windows — is the *weaker*
+   one here, because `asyncio.gather` over coroutines that never suspend
+   produces N disjoint windows and would pass the assertion it exists to
+   kill. The assertion is instead on the shared handle's in-flight depth,
+   which is `AsyncSession`'s actual contract: one statement at a time. A
+   second case scans `services/home.py` for `gather`/`TaskGroup`/
+   `create_task`/`wait`, walking both `ast.Import` and `ast.ImportFrom` and
+   matching the bare name as well as the attribute — the first case is about
+   this implementation, the second about the next one.
+
+   `usher.home.compose.duration` and the per-provider
+   `usher.row.build.duration` are what turn revisiting this into a number
+   rather than an argument, and `usher home` is where the number is taken.
+
+   **The number, so the call can be acted on.** `usher home` records
+   `usher.home.compose.duration` and the per-provider `usher.row.build.duration`
+   breakdown, and prints both. **The sequential build is revisited when p95
+   exceeds 400 ms *and* no single provider accounts for ≥ 50% of the total
+   build time.** 400 ms is [ADR-0006](decisions/0006-server-composed-home.md)'s
+   "instant over a slow link" apportioned — ~1 s perceived, of which ~600 ms is
+   network and client render that Usher does not control; M6's 50 ms p95 is
+   deliberately **not** reused, being a keystroke budget for as-you-type
+   suggest, and applying it to a screen paint would condemn the sequential
+   build against a bar nothing in the design promised. The second condition is
+   what makes the first actionable: if one provider dominates, concurrency
+   converges on that provider's latency and buys nothing, so the finding is a
+   **query** to fix. Only when both hold is the redesign a session per row
+   behind a bounded pool — i.e. a lane, and
+   [01](01-architecture.md)'s concurrency table grows the row this call notes
+   it does not have. `usher home` prints the rule beside the numbers, so it is
+   read off the output rather than recomputed.
+
+   **Measured on 2026-08-04, and neither condition fires.** `usher home
+   --repeat 5` against a real `bootstrap --phase imdb` catalog of **1,271,570
+   titles**, with a synthetic household seeded on top of it — 5,200 owned
+   `media_items`, 360 watch states spread over two years (300 films plus 60
+   episodes, so the roll-up is exercised), 50 collections of four owned members,
+   200 people with 1,800 credits, and 6,000 `title_neighbors` rows over 300
+   seeds. **The catalog is real; the household is synthetic and is said so** —
+   a real household's watch history cannot be manufactured by a live run, and a
+   measurement without one would time four providers and report the sequential
+   build as free.
+
+   | | |
+   |---|---|
+   | compose, cold, p50 | **23.9 ms** |
+   | compose, cold, p95 | **35.9 ms** — against a 400 ms budget, **11×** under |
+   | compose, warm (screen cache hit) | **0.0 ms** |
+   | slowest provider | `because-you-watched`, 4.3 ms, **34%** of build time |
+   | screen | 8 rows, 115 cards |
+
+   Per provider, propose / build in ms: `because-you-watched` 3.3 / 4.3 (3
+   rows), `people` 2.3 / 3.7 (2), `franchise` 2.1 / — (proposed 2, **capped
+   out**), `next-up` 1.5 / 1.0, `recently-added` 0.7 / 1.7,
+   `continue-watching` 0.5 / 1.8, `rediscover` 0.3 / — (proposed nothing),
+   `genre-affinity` 0.0 / — (proposed 1, capped out), `seasonal` 0.0 / —
+   (outside every window). **The per-family cap is visible in that table**:
+   eight of ten proposals were selected, and the two that were not are the
+   lowest-scoring `SOURCE` rows rather than anything a provider got wrong.
+
+   So the sequential build stands. ⚠️ **But "not close" is a property of that
+   household and was re-measured on 2026-08-05 against the scale ceiling** — a
+   synthetic population owning all 1,277,878 items with 1,086,149 played —
+   where compose is **p50 710.3 ms, p95 783.4 ms**, i.e. 2× *over* the budget.
+   The call is unchanged and the reason is the second condition: `genre-affinity`
+   is **98%** of build time there, so the answer is to fix one provider rather
+   than to run nine concurrently on one session. Read the 11× as scoped to
+   5,200 owned copies.
+   [ADR-0025](decisions/0025-rows-build-sequentially.md) records it, because
+   the way this ships wrong is that concurrent *usually works*.
+
+9. **Row provider enable/disable does not become a table.**
+   [08](08-operations.md) puts it in the *database* layer — *"Sources, users,
+   row provider enable/disable | Runtime, via admin API"* — and the admin API
+   is M9's. A table whose only writer is a route in a later milestone is the
+   `search_queries` failure again, and this one would be worse: a
+   `row_providers` table with nine rows all reading `enabled = true` is
+   indistinguishable from no table, right up until an operator finds it and
+   expects toggling it to do something. **Providers are enabled by
+   registration in code in M7**, and [08](08-operations.md)'s row is annotated
+   with its owner rather than left implying a control that exists. It is also
+   what makes the injected clock belong on `RowContext` rather than on each
+   provider's constructor: a provider registered once cannot take a
+   per-request argument at construction.
+
+**M7 is complete, and it is the first milestone whose *subject document* was
+written entirely before any of it existed.** [06](06-rows-and-recommendations.md)
+carried no `⏳` and no `🔶` anywhere: every statement in it read as shipped, and
+five were not. It described a concurrency model that would corrupt a session
+(call 8), a `RowCard` field with no table behind it (call 3), a taste model
+built on a rating column this system has never had, a caching row — *"neighbour
+tables: rebuilt on embedding change"* — describing a trigger that has never
+existed, and a taste-centroid invalidation that would have been a million
+messages a night. **A document with no markers is not a document with no gaps;
+it is a document nobody has audited.** All five are corrected in place, and
+each says what happened to the sentence it replaces.
+
+**Two obligations that are M7's and belong to nobody.** `alternative_titles`
+stays **unassigned** — it needs an `append_to_response` change plus a re-crawl
+of the whole enriched tier, and it is the blocker on call 6's other half; and
+`Person`'s four `/person/{id}` fields (call 4) are unassigned for the same
+shape of reason. Both are named in [03](03-sources-and-sync.md) rather than
+left implied by the deferrals they block, because that is the failure this
+roadmap has now recorded twice.
+
 ### The follow-up the gate obliges: a two-tier suggest, owned by M9
 
 **Owner: M9**, alongside the HTTP surface and the `search_queries` table,
@@ -270,10 +526,62 @@ and is therefore the first whose output is measurably worse without it
 ([06](06-rows-and-recommendations.md) names it as a row input). What it costs:
 one `BulkDataset` implementation, one entry in `PHASES`, one table, one
 licence row in [04](04-catalog-bootstrap.md), and one weighted term in
-`SimilarityService`'s existing signal list. **And if M7 also declines it**:
-[05](05-search-and-similarity.md)'s ~7% coverage figure stays a plan rather
-than a measurement, and its four-way blend stays a two-way one. Said out loud,
-rather than left for a table of four bullets to imply four shipped signals.
+`SimilarityService`'s existing signal list.
+
+**Shipped in M7, and the cost line above was wrong in two places — corrected
+here rather than quoted.**
+
+- **"One weighted term" is one entry and one accessor *in the scorer*, plus two
+  port DTO fields, two widened statements, both fakes, and the port's
+  abstract-method pin.** `NeighborSeed`/`NeighborCandidate` live in
+  `ports/repository.py`, so a fourth signal is a **port** change — which is a
+  fake change and a surface-pin change by construction. `_blend` itself is
+  untouched, so the *spirit* of the estimate held; its blast radius did not.
+- **The list omitted invalidation entirely, which turned out to be the larger
+  item.** Adding the term re-weights the other three, so every row already in
+  `title_neighbors` was computed under a different meaning — and nothing
+  distinguished the halves. M7 therefore also ships
+  `title_neighbors.blend_fingerprint` (migration `ffb`, the milestone's fifth
+  against a plan budgeting four, named in advance rather than discovered),
+  `usher.similarity.neighbors.stale`, and a `usher similar` that says so per
+  title. **A full `usher similar --rebuild` is required after upgrading, and
+  nothing schedules it.**
+
+That fingerprint closes the *meaning-changed* half of staleness and explicitly
+**not** the *some-other-title-was-embedded* half, which remains undecidable per
+row exactly as M6 argued. M6's age-not-fingerprint reasoning stands and is not
+reversed.
+
+**Settled in M7 — what was built, from which archive, and what it covers.**
+Retired in place rather than deleted, because a reader who remembers the
+paragraph above needs to find out what happened to it.
+
+- **The archive is `ml-latest.zip`, and the choice is forced rather than
+  preferred.** `ml-32m` (05/2024) is the newest full release and **dropped the
+  genome entirely** — four members only. `ml-25m` still has one and is the only
+  genome-bearing archive whose licence says *"the user may not redistribute the
+  data without separate permission."* `ml-latest` has a genome **and** the
+  permissive clause. All three are recorded in
+  [04](04-catalog-bootstrap.md)'s licence section, because the reason the
+  licence row is right is only legible next to the two archives it is not.
+- **Three of that document's numbers were wrong and are corrected with their
+  measurement**: 18,472,128 relevance scores rather than "15.6M", 334.6 MiB
+  rather than "250 MiB" (which is `ml-25m`'s size — the right number for the
+  wrong archive, which is why it survived review), and 16,376 movies rather
+  than 13,816. The 1,128 tags was exactly right.
+- **The coverage promise finally has denominators, and the one that matters is
+  not the one anyone quoted.** [05](05-search-and-similarity.md)'s *"~7%"* was
+  roughly right about the ≥100-vote priority tier (**7.61%** measured) and
+  wrong about everything else: **1.22%** of all titles, **10.68%** of a real
+  household's owned library. The figure that decides whether the term does
+  anything is the **candidate-pair** rate — both sides of a pair need a vector
+  — measured at **1.81%**, never squared. That is **below the 10% floor the
+  weight assumes**, so the term ships at 0.25 with the pool-vs-revert choice
+  deferred to M9 and the reason recorded rather than the number quietly
+  absorbed.
+- **And "one weighted term in `SimilarityService`'s existing signal list" was
+  wrong in the two ways above**, which is why the cost line is corrected in
+  place rather than quoted approvingly.
 
 **M9 owes ADR-0012 a successor.** In v1, `POST /titles/{id}/play` returns a
 target URL carrying the source's session token, because M3 has no HTTP surface

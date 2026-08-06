@@ -457,6 +457,23 @@ class SearchSnapshot:
 
     stale: int = 0
     refused: int = 0
+    # **A third number, and it is about a different table.** `stale`/`refused`
+    # are `title_embeddings`; this is `title_neighbors` rows whose
+    # `blend_fingerprint` is not the running one -- M7's fourth similarity
+    # signal changed what every stored score *means*, and before that column
+    # existed nothing could tell a row computed under the old blend from one
+    # computed under the new.
+    #
+    # It rides on this snapshot rather than on a fourth module global because
+    # it is refreshed by exactly the same passes, from the same session, and a
+    # separate reader would be a second thing to remember to wire.
+    #
+    # **A zero here does not mean the artefact is current**, and PRD 10's panel
+    # must not be read that way: it means no row disagrees with the running
+    # blend. A row can carry the right fingerprint and still be stale because
+    # some *other* title was embedded into its neighbourhood since, which is
+    # undecidable per row and is why `computed_at()` still exists beside this.
+    neighbors_stale: int = 0
 
 
 SearchReader = Callable[[], SearchSnapshot]
@@ -511,6 +528,17 @@ def register_search_gauges(read: SearchReader) -> None:
         unit="1",
         description="Titles whose composed document was degenerate, so no vector was written",
     )
+    # A different meter name, because this is `title_neighbors` rather than the
+    # embedding backlog, and a dashboard grouping the two under one subsystem
+    # would suggest one `usher index --backfill` drains both. It does not:
+    # this one is drained by `usher similar --rebuild`, which nothing
+    # schedules.
+    metrics.get_meter("usher.similarity").create_observable_gauge(
+        "usher.similarity.neighbors.stale",
+        callbacks=[_observe_neighbors_stale],
+        unit="1",
+        description="Stored neighbour rows computed under a different similarity blend",
+    )
 
 
 def _observe_embeddings_stale(options: CallbackOptions) -> Iterable[Observation]:
@@ -519,6 +547,10 @@ def _observe_embeddings_stale(options: CallbackOptions) -> Iterable[Observation]
 
 def _observe_embeddings_refused(options: CallbackOptions) -> Iterable[Observation]:
     return _search_observations(lambda snapshot: snapshot.refused)
+
+
+def _observe_neighbors_stale(options: CallbackOptions) -> Iterable[Observation]:
+    return _search_observations(lambda snapshot: snapshot.neighbors_stale)
 
 
 def _search_observations(select: Callable[[SearchSnapshot], int]) -> Iterable[Observation]:

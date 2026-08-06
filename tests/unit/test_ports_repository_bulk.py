@@ -30,6 +30,8 @@ def test_bulk_catalog_repository_surface() -> None:
             "upsert_tmdb_ids",
             "upsert_crosswalk",
             "link_crosswalk",
+            "upsert_genome_vectors",
+            "genome_coverage",
             "count_titles",
         }
     )

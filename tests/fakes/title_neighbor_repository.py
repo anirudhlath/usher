@@ -41,12 +41,16 @@ def _now() -> datetime:
 
 class FakeTitleNeighborRepository(TitleNeighborRepository):
     def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
-        self._rows: dict[uuid.UUID, list[tuple[ScoredNeighbor, datetime]]] = {}
+        self._rows: dict[uuid.UUID, list[tuple[ScoredNeighbor, datetime, str]]] = {}
         self._clock = clock or _now
         self.replace_calls: list[tuple[tuple[uuid.UUID, ...], int]] = []
 
     async def replace(
-        self, seed_ids: Sequence[uuid.UUID], neighbors: Sequence[ScoredNeighbor]
+        self,
+        seed_ids: Sequence[uuid.UUID],
+        neighbors: Sequence[ScoredNeighbor],
+        *,
+        blend_fingerprint: str,
     ) -> int:
         self.replace_calls.append((tuple(seed_ids), len(neighbors)))
         # Scoped to `seed_ids`, never to the rows: a seed contributing no rows
@@ -58,14 +62,37 @@ class FakeTitleNeighborRepository(TitleNeighborRepository):
         # rather than a per-row `clock_timestamp()`.
         stamp = self._clock()
         for row in neighbors:
-            self._rows.setdefault(row.title_id, []).append((row, stamp))
+            self._rows.setdefault(row.title_id, []).append((row, stamp, blend_fingerprint))
         return len(neighbors)
 
     async def list_for(self, title_id: uuid.UUID, *, limit: int) -> list[ScoredNeighbor]:
         stored = sorted(
-            self._rows.get(title_id, []), key=lambda pair: (pair[0].rank, pair[0].neighbor_title_id)
+            self._rows.get(title_id, []), key=lambda row: (row[0].rank, row[0].neighbor_title_id)
         )
-        return [row for row, _ in stored[: max(limit, 0)]]
+        return [row for row, _, _ in stored[: max(limit, 0)]]
+
+    async def count_stale(
+        self, *, blend_fingerprint: str, title_id: uuid.UUID | None = None
+    ) -> int:
+        return sum(
+            1
+            for seed_id, rows in self._rows.items()
+            if title_id is None or seed_id == title_id
+            for _, _, stored in rows
+            if stored != blend_fingerprint
+        )
+
+    def given_fingerprint(self, seed_id: uuid.UUID, fingerprint: str) -> None:
+        """Re-stamp a seed's stored rows, so a case can arrange a table written
+        under a *previous* blend without owning a previous blend.
+
+        Not a port method. The alternative -- mutating `_WEIGHTS`, rebuilding,
+        restoring -- makes the arrangement depend on module state that other
+        cases in the same process also read.
+        """
+        self._rows[seed_id] = [
+            (row, stamp, fingerprint) for row, stamp, _ in self._rows.get(seed_id, [])
+        ]
 
     async def computed_at(self) -> AwareDatetime | None:
         stamps = self.stamps()
@@ -78,4 +105,4 @@ class FakeTitleNeighborRepository(TitleNeighborRepository):
         """Every stored row's timestamp. Not a port method -- it exists so a
         case can assert *which* of two instants `computed_at` chose rather than
         that it chose one."""
-        return [stamp for rows in self._rows.values() for _, stamp in rows]
+        return [stamp for rows in self._rows.values() for _, stamp, _ in rows]

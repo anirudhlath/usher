@@ -9,12 +9,13 @@ can reach. `tests/integration/test_services_push.py` is the paired run.
 """
 
 import asyncio
+import inspect
 import itertools
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from opentelemetry import trace
@@ -35,6 +36,7 @@ from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind
+from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
 from usher.domain.source import Source
 from usher.ports.errors import PortUnavailable
 from usher.ports.events import ClientEventKind
@@ -51,6 +53,7 @@ from usher.ports.source import (
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.push import PushApplyService, PushOutcome, PushSupervisor
+from usher.services.rows.cache import RowCache
 from usher.services.watch_sync import WatchStateSyncService
 
 T0 = datetime(2026, 7, 1, tzinfo=UTC)
@@ -125,11 +128,17 @@ class _Fixture:
             # invisible to `test_applying_an_event_commits_once`.
             commit=self._commit,
         )
+        # A real `RowCache` rather than a spy: the property under test is
+        # that a *cached screen goes away*, and a spy would assert that a
+        # method was called, which is satisfied by a call that invalidates the
+        # wrong household or the wrong slugs.
+        self.rows = RowCache(clock=lambda: T0)
         self.applier = PushApplyService(
             self.ingest,
             self.watch,
             self.events,
             self._commit,
+            cache=self.rows,
             max_items_per_event=max_items_per_event,
         )
         self.title_ids: dict[str, uuid.UUID] = {}
@@ -282,11 +291,23 @@ async def test_a_watch_event_that_changed_something_publishes_it(fixture: _Fixtu
             watch_states=(SourceWatchState(external_id="i1", position_seconds=61, played=False),),
         )
     )
+    # **Three events, and the sequence is asserted rather than filtered.** M7
+    # added one `row.invalidated` per slug a watch state can move, published
+    # *before* the watch-state event so a client that refetches on the first
+    # one gets a screen composed after the cache was cleared. A case that
+    # filtered for `WATCHSTATE_UPDATED` here would pass against a lane that
+    # published forty row invalidations.
     assert [event.kind for event in fixture.events.published] == [
-        ClientEventKind.WATCHSTATE_UPDATED
+        ClientEventKind.ROW_INVALIDATED,
+        ClientEventKind.ROW_INVALIDATED,
+        ClientEventKind.WATCHSTATE_UPDATED,
     ]
-    assert fixture.events.published[0].title_id == title_id
-    assert fixture.events.published[0].data["position_seconds"] == 61
+    assert [event.data["slug"] for event in fixture.events.published[:2]] == [
+        "continue-watching",
+        "next-up",
+    ]
+    assert fixture.events.published[2].title_id == title_id
+    assert fixture.events.published[2].data["position_seconds"] == 61
 
 
 async def test_an_unmatched_item_does_not_shift_what_the_others_publish(
@@ -315,8 +336,13 @@ async def test_an_unmatched_item_does_not_shift_what_the_others_publish(
             ),
         )
     )
+    # The row invalidations carry no `title_id` and no position, so this pairing
+    # is over the watch-state events alone -- named by kind rather than by an
+    # index, because an index would silently re-point if the slug set grew.
     assert [
-        (event.title_id, event.data["position_seconds"]) for event in fixture.events.published
+        (event.title_id, event.data["position_seconds"])
+        for event in fixture.events.published
+        if event.kind is ClientEventKind.WATCHSTATE_UPDATED
     ] == [(first, 22), (second, 33)]
 
 
@@ -1026,3 +1052,153 @@ async def test_a_bug_in_the_lane_is_not_swallowed_as_a_push_failure(lane: _Lane)
     with pytest.raises(ZeroDivisionError):
         await asyncio.wait_for(supervisor.run(SUPERVISED_SOURCE, adapter), timeout=5.0)
     assert lane.push_available == [True], "a bug marked the source unavailable"
+
+
+async def test_a_pushed_watch_state_invalidates_that_users_rows(fixture: _Fixture) -> None:
+    """The push lane invalidates, because a push event *is* a change -- the
+    same sentence PRD 07 uses to explain why the push lane publishes
+    `watchstate.updated` and the nightly walk does not.
+
+    Asserted on a *cached screen going away* rather than on a call being made:
+    the slug set and the household are both part of being right, and a spy
+    asserting `invalidate` was called is satisfied by a call that dropped
+    somebody else's screen.
+    """
+    await fixture.given_matched("i1")
+    other = new_id()
+    fixture.rows.put_screen(fixture.user_id, (), ttl=timedelta(seconds=30))
+    fixture.rows.put_row(
+        fixture.user_id, "continue-watching", _built_row(), ttl=timedelta(seconds=30)
+    )
+    fixture.rows.put_screen(other, (), ttl=timedelta(seconds=30))
+
+    await fixture.apply(
+        SourceEvent(
+            kind=SourceEventKind.WATCH_STATE_CHANGED,
+            external_ids=("i1",),
+            watch_states=(SourceWatchState(external_id="i1", position_seconds=61, played=False),),
+        )
+    )
+
+    assert fixture.rows.get_screen(fixture.user_id) is None
+    assert fixture.rows.get_row(fixture.user_id, "continue-watching") is None
+    assert fixture.rows.get_screen(other) is not None, "another household's screen was dropped"
+
+
+async def test_a_refused_merge_leaves_the_cached_screen_alone(fixture: _Fixture) -> None:
+    """Guarded on `rows_written`, exactly as the publish beside it is. An
+    unmatched item merges nothing, and dropping a warm screen for it is a full
+    recompose bought with no change to show for it -- once per second of
+    playback, on the item a client just set."""
+    fixture.rows.put_screen(fixture.user_id, (), ttl=timedelta(seconds=30))
+
+    await fixture.apply(
+        SourceEvent(
+            kind=SourceEventKind.WATCH_STATE_CHANGED,
+            external_ids=("never-matched",),
+            watch_states=(
+                SourceWatchState(external_id="never-matched", position_seconds=61, played=False),
+            ),
+        )
+    )
+
+    assert fixture.rows.get_screen(fixture.user_id) is not None
+
+
+async def test_the_nightly_walk_invalidates_nothing(fixture: _Fixture) -> None:
+    """**Trap 5.** A walk merges up to 1,126,789 states; one invalidation per
+    merged row is a fan-out per row per night, and with `row.invalidated`
+    attached it is that fan-out reaching every connected client *and* telling
+    each one to refetch -- the exact thing M5 refused for `watchstate.updated`,
+    and strictly worse because this one instructs the client to come back.
+
+    The walk's changes reach the screen through the 30 s screen TTL and a
+    demand read: a walk that finished at 04:00 is on the screen by 04:00:30.
+
+    Kills an `invalidate` call added to `WatchStateSyncService`'s merge loop,
+    which is where it is most natural to write it and where nothing else would
+    notice: the cache is correct, the screens are fresh, and the only symptom
+    is a million-message night. `WatchStateSyncService` is handed no cache at
+    all, so the mutation has to *add a constructor argument* to be written --
+    which is the strongest form this guarantee can take.
+    """
+    await fixture.given_matched("i1")
+    fixture.adapter.seed_state(
+        SourceWatchState(external_id="i1", position_seconds=61, played=False)
+    )
+    fixture.rows.put_screen(fixture.user_id, (), ttl=timedelta(seconds=30))
+
+    run = await fixture.watch.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert run.items_matched == 1, "the walk merged nothing, so the case proves nothing"
+    assert fixture.rows.get_screen(fixture.user_id) is not None
+    assert "cache" not in inspect.signature(WatchStateSyncService.__init__).parameters
+
+
+def _built_row() -> BuiltRow:
+    return BuiltRow(
+        slug="continue-watching",
+        title="Continue Watching",
+        family=RowFamily.SOURCE,
+        display_hint=DisplayHint.LANDSCAPE,
+        ttl=timedelta(seconds=60),
+    )
+
+
+async def test_a_pushed_watch_state_publishes_row_invalidated_for_the_rows_it_moved(
+    fixture: _Fixture,
+) -> None:
+    """The push lane publishes because a push event *is* a change -- the same
+    sentence PRD 07 uses for `watchstate.updated`. One event per invalidated
+    slug, and the slug set is small and fixed, so the fan-out is per *event*
+    rather than per merged row.
+
+    The payload is the slug and nothing else: PRD 07's client action is "refetch
+    that row", and a frame with an empty `data` is a well-shaped instruction
+    with no object.
+    """
+    await fixture.given_matched("i1")
+
+    await fixture.apply(
+        SourceEvent(
+            kind=SourceEventKind.WATCH_STATE_CHANGED,
+            external_ids=("i1",),
+            watch_states=(SourceWatchState(external_id="i1", position_seconds=61, played=False),),
+        )
+    )
+
+    invalidations = [
+        event for event in fixture.events.published if event.kind is ClientEventKind.ROW_INVALIDATED
+    ]
+    assert [event.data for event in invalidations] == [
+        {"slug": "continue-watching"},
+        {"slug": "next-up"},
+    ]
+    assert all(event.title_id is None for event in invalidations), (
+        "a row is not a title, and a title_id here is a filter key that half-works"
+    )
+
+
+async def test_the_nightly_walk_publishes_no_row_invalidated(fixture: _Fixture) -> None:
+    """**Trap 5.** A walk merges up to 1,126,789 states. One `row.invalidated`
+    per merged row is a fan-out per row per night to every connected client
+    *and* a thundering herd of refetches at 04:00 -- strictly worse than the
+    `watchstate.updated` fan-out M5 already refused, because this one instructs
+    the client to come back.
+
+    Kills a publish added to `WatchStateSyncService`'s merge loop, which is the
+    most natural place to write it and the place nothing else would notice: the
+    screens are fresh and the cache is correct. `WatchStateSyncService` is
+    handed no `EventPublisher` at all, so the mutation has to add a constructor
+    argument to be written.
+    """
+    await fixture.given_matched("i1")
+    fixture.adapter.seed_state(
+        SourceWatchState(external_id="i1", position_seconds=61, played=False)
+    )
+
+    run = await fixture.watch.sync(fixture.source, fixture.adapter, user_id=fixture.user_id)
+
+    assert run.items_matched == 1, "the walk merged nothing, so the case proves nothing"
+    assert fixture.events.published == []
+    assert "events" not in inspect.signature(WatchStateSyncService.__init__).parameters

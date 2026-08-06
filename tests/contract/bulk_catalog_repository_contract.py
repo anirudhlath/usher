@@ -25,10 +25,22 @@ existed before this docstring paragraph was added.
 """
 
 import dataclasses
+import uuid
 
 from usher.domain.enums import TitleKind
-from usher.ports.bulk import IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
-from usher.ports.repository import BulkCatalogRepository, BulkWriteResult
+from usher.ports.bulk import (
+    GENOME_TAG_COUNT,
+    GenomeVector,
+    IdCrosswalkPair,
+    ImdbRating,
+    ImdbTitle,
+    TmdbId,
+)
+from usher.ports.repository import (
+    BulkCatalogRepository,
+    BulkWriteResult,
+    GenomeWriteResult,
+)
 
 SHAWSHANK = ImdbTitle(
     imdb_id="tt99000020",
@@ -70,6 +82,25 @@ SLEEPER = ImdbTitle(
     runtime_minutes=89,
     genres=("Comedy",),
 )
+
+
+GENOME_RELEASE_A = "an-invented-etag-a"
+GENOME_RELEASE_B = "an-invented-etag-b"
+
+_EMPTY_GENOME_RESULT = GenomeWriteResult(inserted=0, updated=0, unmatched=0)
+
+
+def _genome(movie_id: int, imdb_id: str, lead: float) -> GenomeVector:
+    """One full-width vector whose first lane is `lead` and whose rest is
+    zero. Full width because `halfvec(1128)` rejects anything else, and only
+    the first lane is ever asserted on -- the cases here are about *which
+    key* the vector lands under, not about its contents."""
+    return GenomeVector(
+        movie_id=movie_id,
+        imdb_id=imdb_id,
+        tmdb_id=None,
+        relevance=(lead,) + (0.0,) * (GENOME_TAG_COUNT - 1),
+    )
 
 
 class BulkCatalogRepositoryContract:
@@ -391,8 +422,19 @@ class BulkCatalogRepositoryContract:
     async def test_link_crosswalk_copies_popularity_from_the_tmdb_universe(
         self, repo: BulkCatalogRepository
     ) -> None:
-        """What makes ix_titles_popularity useful and gives M4's enrichment
-        queue an ordering derived from real-world relevance."""
+        """The write that gives a `--phase all` catalog a popularity at all.
+
+        **This docstring used to say "what makes ix_titles_popularity useful
+        and gives M4's enrichment queue an ordering", and both halves were
+        false** -- no statement orders that queue by popularity, and the index
+        was declared with a pathkey no consumer asks for. Migration `ffc`
+        drops it; `ports/repository.py` carries the measurement.
+
+        What the write is genuinely for: `PostgresSuggestIndex` orders on this
+        column and `SearchService._popularity_term` reads it. Measured on a
+        real `--phase all` catalog, 2026-08-05: 291,584 of 1,271,570 titles
+        carry one, of which exactly **3** are `0.0`.
+        """
         await repo.upsert_titles([SHAWSHANK])
         await repo.upsert_tmdb_ids(
             [TmdbId(tmdb_id=90000020, kind=TitleKind.MOVIE, original_name="x", popularity=12.5)]
@@ -451,6 +493,227 @@ class BulkCatalogRepositoryContract:
         assert await self.indexes_intact(repo) is True
 
     # --- hooks a concrete subclass must answer ---------------------------
+
+    # ---- the MovieLens tag genome -------------------------------------
+    #
+    # `GENOME_RELEASE_A`/`_B` are opaque release tokens, exactly as the
+    # archive's ETag is. The point of the second is only that it differs.
+
+    async def test_the_vector_is_stored_under_the_resolved_title_id_not_the_movielens_id(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """The front matter's second named wrong implementation.
+
+        MovieLens' `movieId` is an integer in its own id space and
+        `titles.id` is a UUIDv7. An implementation that stores the first
+        produces a table that is correctly shaped, correctly sized, and joins
+        to nothing -- and the only symptom is that every genome term is
+        absent, which looks exactly like the 98.7% of the catalog that
+        legitimately has no vector. Nothing raises, no count is wrong, and
+        `genome_scores` has the right number of rows in it.
+
+        Killed by asserting the stored key equals the *seeded title's* id and
+        that reading by that id returns the seeded vector.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+        result = await repo.upsert_genome_vectors(
+            [_genome(90_000_301, SHAWSHANK.imdb_id, 0.75)], revision=GENOME_RELEASE_A
+        )
+
+        assert (result.inserted, result.updated, result.unmatched) == (1, 0, 0)
+        title_id = await self.title_id_of(repo, SHAWSHANK.imdb_id)
+        assert title_id is not None
+        stored = await self.genome_of(repo, title_id)
+        assert stored is not None
+        assert stored[0] == 0.75
+        assert 90_000_301 not in await self.genome_keys(repo)
+
+    async def test_a_genome_row_for_an_imdb_id_the_catalog_does_not_hold_is_counted_not_written(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """`links.csv` holds 86,537 movies and the catalog holds whatever
+        IMDb's dump retained; the difference is real and expected.
+
+        Kills an implementation that inserts an orphan row -- the foreign key
+        would reject it, loudly, aborting the batch -- and one that drops it
+        silently *without counting it*, which is how a join that matched
+        almost nothing looks identical to one that matched everything. The
+        count is the deliverable of the whole phase.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+        result = await repo.upsert_genome_vectors(
+            [
+                _genome(90_000_301, SHAWSHANK.imdb_id, 0.75),
+                _genome(90_000_302, "tt99000999", 0.5),
+            ],
+            revision=GENOME_RELEASE_A,
+        )
+
+        assert (result.inserted, result.updated, result.unmatched) == (1, 0, 1)
+
+    async def test_two_movielens_ids_resolving_to_one_title_do_not_raise(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """Trap 2, and it is required rather than defensive.
+
+        Without `DISTINCT ON`, one batch containing two rows that resolve to
+        the same `titles.id` aborts with `CardinalityViolationError: ON
+        CONFLICT DO UPDATE command cannot affect row a second time` and takes
+        the whole batch with it. The front matter measured `links.csv`'s
+        widths and emptiness but **not** `imdbId` uniqueness, so this is
+        required until somebody does -- and it should stay afterwards
+        regardless, because it is also what makes the winner deterministic
+        rather than whichever row the planner reached first.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+        result = await repo.upsert_genome_vectors(
+            [
+                _genome(90_000_301, SHAWSHANK.imdb_id, 0.75),
+                _genome(90_000_302, SHAWSHANK.imdb_id, 0.25),
+            ],
+            revision=GENOME_RELEASE_A,
+        )
+
+        assert result.inserted == 1
+        assert result.unmatched == 0
+
+    async def test_a_replayed_batch_reports_updates_rather_than_inserts(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """Trap 3. Rowcount reports the sum, so without `xmax = 0` a
+        re-import is indistinguishable from a first run -- and "did this
+        phase do anything" is the question this phase exists to answer.
+
+        The second call also carries a *different* value, so this doubles as
+        the case that a replay actually rewrites rather than being skipped:
+        an implementation that turned the replay into a no-op to make the
+        counts look tidy would leave the stale vector in place.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+        first = await repo.upsert_genome_vectors(
+            [_genome(90_000_301, SHAWSHANK.imdb_id, 0.75)], revision=GENOME_RELEASE_A
+        )
+        again = await repo.upsert_genome_vectors(
+            [_genome(90_000_301, SHAWSHANK.imdb_id, 0.25)], revision=GENOME_RELEASE_B
+        )
+
+        assert (first.inserted, first.updated) == (1, 0)
+        assert (again.inserted, again.updated) == (0, 1)
+        title_id = await self.title_id_of(repo, SHAWSHANK.imdb_id)
+        assert title_id is not None
+        stored = await self.genome_of(repo, title_id)
+        assert stored is not None
+        assert stored[0] == 0.25
+
+    async def test_a_genome_vector_never_lands_on_a_series(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """The genome is movies-only, so a vector on a series is a fact the
+        dataset never asserted.
+
+        `imdb_id` is unique per title regardless of kind, so `AND t.kind =
+        'movie'` changes nothing against today's data -- which is exactly why
+        it needs a case rather than a comment: its absence is otherwise
+        indistinguishable from having remembered it. One keystroke against
+        the class of defect ADR-0011 exists for.
+        """
+        await repo.upsert_titles([THRONES])
+        result = await repo.upsert_genome_vectors(
+            [_genome(90_000_303, THRONES.imdb_id, 0.75)], revision=GENOME_RELEASE_A
+        )
+
+        assert (result.inserted, result.updated, result.unmatched) == (0, 0, 1)
+
+    async def test_an_empty_genome_batch_writes_nothing_and_does_not_raise(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """A dataset yields a row-less batch to advance the cursor past a run
+        of movies its own filtering dropped -- `BulkDataset.batches`' contract
+        permits exactly that, and every genome movie absent from `links.csv`
+        produces one. Kills an implementation that stages an empty `COPY` and
+        then runs an `INSERT ... SELECT` over nothing, which is two
+        statements and a temp table for no rows."""
+        assert await repo.upsert_genome_vectors([], revision=GENOME_RELEASE_A) == (
+            _EMPTY_GENOME_RESULT
+        )
+
+    async def test_genome_coverage_counts_the_enriched_tier_separately(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """The number that has never had a denominator.
+
+        Three of the four fractions are ceilings the *dataset* can reach;
+        `enriched_with_vector / enriched` is what the join did against this
+        operator's catalog. Kills an implementation that reports one number
+        and lets the caller pick a denominator, and one that counts enriched
+        titles with a vector by counting *vectors* -- which is the same
+        number only while every genome-bearing title happens to be enriched.
+        """
+        await repo.upsert_titles([SHAWSHANK, SLEEPER, THRONES])
+        await repo.upsert_genome_vectors(
+            [
+                _genome(90_000_301, SHAWSHANK.imdb_id, 0.75),
+                _genome(90_000_304, SLEEPER.imdb_id, 0.5),
+            ],
+            revision=GENOME_RELEASE_A,
+        )
+        await self.enrich(repo, SHAWSHANK.imdb_id)
+
+        coverage = await repo.genome_coverage()
+
+        assert coverage.with_vector == 2
+        assert coverage.titles == 3
+        assert coverage.movies == 2
+        assert coverage.enriched == 1
+        assert coverage.enriched_with_vector == 1
+        assert coverage.revisions == ((GENOME_RELEASE_A, 2),)
+
+    async def test_genome_coverage_reports_every_release_present(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """A table carrying two releases is a correctness problem
+        `GenomeRepository.get_pair` is already refusing to blend across, and
+        an operator needs to be able to see it -- a killed re-import against
+        a new upload is exactly how it happens. Kills an implementation that
+        reports only the newest revision, or only a count of distinct ones.
+        """
+        await repo.upsert_titles([SHAWSHANK, SLEEPER])
+        await repo.upsert_genome_vectors(
+            [_genome(90_000_301, SHAWSHANK.imdb_id, 0.75)], revision=GENOME_RELEASE_A
+        )
+        await repo.upsert_genome_vectors(
+            [_genome(90_000_304, SLEEPER.imdb_id, 0.5)], revision=GENOME_RELEASE_B
+        )
+
+        coverage = await repo.genome_coverage()
+
+        assert dict(coverage.revisions) == {GENOME_RELEASE_A: 1, GENOME_RELEASE_B: 1}
+
+    async def title_id_of(self, repo: BulkCatalogRepository, imdb_id: str) -> uuid.UUID | None:
+        """The `titles.id` an IMDb id resolved to. A test affordance, not a
+        port method: `BulkCatalogRepository` deliberately exposes no per-row
+        read, and the whole point of the case above is that the *stored key*
+        is this id."""
+        raise NotImplementedError
+
+    async def genome_of(
+        self, repo: BulkCatalogRepository, title_id: uuid.UUID
+    ) -> tuple[float, ...] | None:
+        """The stored vector for a title id, or None."""
+        raise NotImplementedError
+
+    async def genome_keys(self, repo: BulkCatalogRepository) -> set[object]:
+        """Every key `genome_scores` is stored under. Read as a set of
+        opaque objects so the case that a `movieId` is *not* among them can
+        be written without either arm having to pretend an integer is a
+        UUID."""
+        raise NotImplementedError
+
+    async def enrich(self, repo: BulkCatalogRepository, imdb_id: str) -> None:
+        """Move a title off the skeleton tier. Nothing on this port writes
+        `enrichment_state`, and the enriched-tier coverage fraction is the
+        one number that matters, so the suite needs a way to create one."""
+        raise NotImplementedError
 
     async def popularity_of(self, repo: BulkCatalogRepository, imdb_id: str) -> float | None:
         """How this implementation reads back a title's popularity. Not on

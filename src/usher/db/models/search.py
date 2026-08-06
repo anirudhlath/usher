@@ -221,6 +221,28 @@ class TitleNeighborRow(Base):
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # **What this score *means*, as 32 hex characters** — the md5 of
+    # `_WEIGHTS`, `_NEIGHBORS_PER_TITLE` and `_CANDIDATE_POOL`, minted by
+    # `usher.services.similar.blend_fingerprint()`.
+    #
+    # M6 shipped this table with an age and no fingerprint, and argued the
+    # exemption honestly: a neighbour row goes stale when *some other* title is
+    # embedded, which no per-row predicate can decide. That argument is correct
+    # about one of the two staleness causes and silent about the other, and M7
+    # made the other one urgent by changing the blend — every row written
+    # before M7 came from three signals at different weights, every row after
+    # from four, both in `[0, 1]`, both with a plausible `rank`, and **nothing
+    # could tell them apart**.
+    #
+    # `Text` rather than `String(32)`, following `source_fingerprint` one table
+    # over: the length is a property of today's digest, and a CHECK on it would
+    # be a migration the day the digest changes.
+    #
+    # **Not nullable, and the backfill is a real value rather than a
+    # sentinel** — see migration `ffb`, which stamps every pre-existing row
+    # with the fingerprint of M6's own three-signal blend, because that is what
+    # computed them and it is verifiable rather than merely different.
+    blend_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
 
     __table_args__ = (
         # `(title_id, neighbor_id)`, which is the identity of the fact. Not

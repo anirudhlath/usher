@@ -1448,3 +1448,385 @@ lane of its own**; PRD 08's two TOML rows that will not become settings.
 
 **Merge readiness: no unfixed finding.** The one repository change this step made is the strengthened
 `Embedder` docstring guard, written because the sweep found the gap. Everything else is recorded.
+
+## ✅ M7 Task 36 — the `titles.popularity` re-measure and the genome's real coverage (2026-08-05)
+
+**A measurement task in the shape of M6's gate: the bar was written down before the numbers were
+known** (`/tmp/m7-gate/BAR.md`, committed to nothing), and the deliverable is the recorded result
+whichever way it fell. Driven from throwaway scripts outside the working tree against two controlled
+catalogs in a scratch `pgvector/pgvector:pg17`: **Arm NULL** (`m7home`, `--phase imdb` only,
+popularity NULL throughout) and **Arm ALL** (`m7gate`, `CREATE DATABASE … TEMPLATE m7home` then
+advanced through `tmdb-ids`/`crosswalk`/`movielens`), so the `titles` rows are identical in origin
+and the only difference is what `link_crosswalk` wrote. The typo test set is third-party data by
+construction and is **not committed**; the measurement is.
+
+**The popularity distribution, settled rather than inferred.** `--phase all` catalog, 1,271,570
+titles: **291,584 (22.9%) carry a popularity, of which exactly 3 are 0.0.** So the daily export ships
+real values, not the `NOT NULL DEFAULT 0` filler the "mostly-0.0 skeletons" fear assumed — the
+`vote_count`-populated column is 539,350 rows.
+
+**Suggest recall, same 2,993 cases at seed 20260803, both arms in one process (all `%` @0.3, cap
+200, driven through the shipped `PostgresSuggestIndex`):**
+
+| config | 2–4 | 5–7 | 8–11 | 12–19 | 20+ | all | p50 |
+|---|---|---|---|---|---|---|---|
+| NULL / shipped | 36.9 | 81.0 | 98.8 | 99.8 | 99.8 | **83.4** | 38.6 |
+| ALL / shipped | 34.1 | 78.5 | 97.8 | 99.8 | 99.8 | **82.1** | 43.0 |
+| ALL / R1 `NULLIF(pop,0)` | 34.1 | 78.5 | 97.8 | 99.8 | 99.8 | **82.1** | 43.0 |
+| ALL / R2 drop-popularity | 36.9 | 81.0 | 98.8 | 99.8 | 99.8 | **83.4** | 43.1 |
+
+Arm NULL reproduces M6's shipped-config recall within ~1 pt (82.5 → 83.4), the intended cross-check.
+The realistic catalog costs **1.3 pts overall (−2.8 worst band), entirely out-ranked misses** (the 38
+extra misses, 535 vs 497, are exactly the ones R2 recovers, and an `ORDER BY` change can only rescue a
+candidate already in the set) — **within Bar A's 2.0-pt tolerance**, so the shipped ordering is **kept
+unchanged**. R2 clears Bar B numerically but its enriched-tier behaviour is unmeasurable on a skeleton
+catalog → recorded as an M9 change, not shipped. p50 moved +11.4% (data, not ordering — identical
+across the three orderings within each arm; the host carried other load, tail 1773 ms vs M6's quiet
+734 ms), so absolute latency is the noisy half and recall the trustworthy one.
+
+**`ix_titles_popularity` — dropped, migration `ffc`.** Not merely unread (M7 Group H's
+`list_owned_by_tag` *does* order by `titles.popularity`) but **unusable as declared**: a
+`DESC`/NULLS-FIRST btree while every consumer asks `DESC NULLS LAST`, a pathkey the planner never
+takes (`ORDER BY popularity DESC` → Index Scan cost 0.42..20.97; `DESC NULLS LAST` → Parallel Seq
+Scan + Sort, cost 86,142). Rebuilding it `DESC NULLS LAST` leaves `list_owned_by_tag`'s plan
+byte-identical. 9,536 kB, not in `_SUSPENDABLE_INDEXES`. Bar E: `list_owned_by_tag('Drama', 60)` is a
+**Merge Semi Join over `pk_titles` + `ix_media_items_title_id`, no Seq Scan on titles**, 84.9 ms at
+2,569 owned titles — the provider's shape holds, no `titles.genres` GIN warranted.
+
+**Genome coverage (Bar C), read out of `usher similar --rebuild`'s own counters over a 5,020-title
+owned population:** 15,565 genome vectors = 1.22% of titles / 1.73% of movies; **7.61%** of the
+204,494-title ≥100-vote priority tier (makes PRD's "~7%" roughly right); **10.68%** of owned titles.
+The number that decides the weight is the **candidate-pair rate: 1.81%** (9,069 of 502,000 pairs),
+measured not squared (`coverage²` = 1.14%). **Below the 10% floor → Bar C FAILS**, but 1.81% is a
+*conservative* floor (no TMDb key ran, so documents are name-shaped and the pool name-selected).
+**The genome term is kept at weight 0.25** for now; the genome-aware-pool-vs-weight-revert choice is
+deferred to M9 (a real enriched tier), cheap and detectable via `blend_fingerprint`.
+
+**Guess by guess, refutations first** (a run that confirms everything looked too little):
+
+| # | guess | verdict | evidence |
+|---|---|---|---|
+| 2 | most popularity is 0.0 on skeletons | **refuted** | exactly 3 zeros in 291,584 |
+| 3 | partial catalog is worse than either extreme | **refuted** | −1.3 pts, within the 2.0 bar |
+| 5 | `NULLIF(popularity,0)` recovers the loss | **refuted** | recovers 0 (only 3 zeros to remap) |
+| 6 | `ix_titles_popularity` read by nothing | **sharpened** | read by `list_owned_by_tag`, but unusable as declared |
+| 1 | ~23% of `--phase all` carries a popularity | confirmed | 22.9% |
+| 4 | lost recall is out-ranked, not floor | confirmed | R2 recovers exactly the 38 marginal misses |
+| 7 | enriched-tier genome coverage ≫ 1.82% | confirmed | 10.68% of owned |
+| 8 | pair rate above `coverage²` | confirmed | 1.81% vs 1.14% |
+
+**Source corrections in the same task:** `adapters/search/postgres.py`'s stale `_SUGGEST` comment and
+`SearchService._popularity_term`'s "most of 1,271,138 rows" both fixed and scoped to the phase each
+number belongs to; `_blend` re-checked against the populated catalog and unchanged. `ix_titles_popularity`
+justification in `ports/repository.py` corrected (it named an enrichment-queue consumer that never
+existed — the queue is `jobs`, claimed by `ix_jobs_claim`). **Not verified in this run, named rather
+than implied:** popularity after real TMDb enrichment fills the enriched tier (boundary call 4's actual
+state); R2 and the genome term's behaviour on a genuinely enriched catalog at scale; non-Latin scripts.
+
+## ✅ M7 Tasks 37–38 — the PRD/ADR pass and the milestone verification (2026-08-05)
+
+**The headline: this milestone shipped an artefact with no oracle, and the sweep is what proved the
+claim rather than restating it.** Nine providers and a composer, where **a wrong row renders
+identically to a right one** — no exception, no empty result, no `count(*)` an operator can run.
+**Five of the nine provider orderings turned out not to be pinned by position**, and the whole-suite
+mutation sweep is the only mechanism in this repository that could have said so.
+
+### The mutation sweep — 21 mutations, 20 killed, 1 equivalent
+
+Run in place against the **whole** suite, M6's harness rules enforced by the harness rather than by
+attention: `compile()` rather than `ast.parse`, `ERROR collecting` scored `BROKEN-MUTATION`, zero
+collected scored `DID-NOT-RUN`, `cp` backups, a signal handler, target-must-appear-exactly-once, and
+a 420 s bound against an 83 s baseline. **Zero HUNG, zero DID-NOT-RUN, zero BROKEN**, and every run
+landed at 85–87 s, so nothing was near the bound.
+
+**Six survivors, and every one was a MISSING TEST rather than an equivalent mutant.** Each is now
+covered by a case that was verified twice — it passes unmutated on both drivers, and it fails against
+the exact mutation that produced it:
+
+| survivor | what it did unnoticed | the case that now kills it |
+|---|---|---|
+| `recently-added` `ORDER BY added_at DESC` deleted | shelf led by the oldest arrival, and `LIMIT` then picks the wrong titles | `..._orders_by_recency_when_id_order_agrees_with_nothing` |
+| `because-you-watched` `ORDER BY rank` deleted | "most similar" decided by the neighbour's UUID | `..._orders_by_rank_and_not_by_the_neighbours_own_id` |
+| `franchise` `ORDER BY owned_count DESC` deleted | which franchises reach the screen decided by derivation order | `..._ranked_by_how_much_of_them_is_owned` |
+| `people` count key deleted | evicts a long-term collaborator **and** renders "3 films" for someone watched 5 times | `test_the_count_key_outranks_recency_when_the_two_disagree` |
+| `credits` `billing_order` deleted on `list_for_person` | "More from X" led by walk-ons, leads truncated away | `..._are_ordered_by_billing_order` + `..._null_billing_order_last` |
+| **`blend_fingerprint` `<>` → `=`** | **the staleness gauge counts fresh rows** | `test_count_stale_counts_rows_from_another_blend_...` |
+
+**One structural cause behind five of the six, and it is worth more than any single case.**
+`new_id()` is UUIDv7 and therefore **monotonic**, and almost every fixture mints its ids in the same
+order it assigns the ranking value — so `ORDER BY <id>` and `ORDER BY <the real key>` return identical
+lists and the real key is unobservable. Two docstrings in this repository already name that exact trap
+(`credit_repository_contract.py`, `person_repository_contract.py`), one of them recording that an
+`ORDER BY c.person_id` mutant survived the whole suite until its fixture was rearranged. **The five
+survivors are the statements where that lesson was not carried across.** Every new case therefore
+asserts its own premise — `assert far_id < near_id`, `assert often_id < lately_id` — so a future
+fixture change that re-aligns the two orders fails loudly instead of going quiet.
+
+**The `blend_fingerprint` survivor is the most serious and is not an ordering bug.** Inverting the
+staleness predicate survived because **every** test of neighbour `count_stale` runs against
+`FakeTitleNeighborRepository`, whose comparison is Python, and the only `count_stale` calls in
+`tests/integration/` are the unrelated *embedding* one. `TitleNeighborRepository` is the one repository
+port with a Postgres implementation and **no shared contract suite**, which is why `_LIST_NEIGHBORS`
+and `_COUNT_STALE_NEIGHBORS` are the two least-covered statements in that file. On a table inherited
+from M6 — the deployment `blend_fingerprint` was *added for* — the inverted gauge reads **zero**, which
+is verbatim the failure PRD 10 says the column exists to prevent: *"a gauge that always reads zero is
+indistinguishable from a fresh table"*. The new case seeds a stale row **and** a fresh row in one
+table, because with only one kind present an inversion answers correctly by luck of direction.
+
+**The one true equivalent mutant, with its argument:** `_MAX_ROWS = 10 → 99` survives because with two
+families the longest reachable screen today is **nine** rows — one pinned plus four per family — so 10
+is unreachable by construction. PRD 06 already argues this. **It becomes a real bug the day M8
+registers `CuratedProvider`** and `RowFamily` grows its third member, which is exactly when a case
+should be written.
+
+**Named and killed as expected:** the `next_up` high-water → first-gap sibling (3 cases), the taste
+centroid's sign flip (2), the diversity run rule (5) and the per-family cap (2), `_WEIGHTS["tags"]`
+deleted (6), the genome cosine scored `0.0` rather than `None` (3), and **Trap 2 — weight class B's
+fingerprint moved on one side only — which killed 22 cases and did not hang**, so the bound written
+for it was not needed.
+
+### Task 37 — the PRD audit
+
+PRD 06 is the first *subject document* in this project written entirely before any of it existed, and
+it carried **no `⏳` and no `🔶` anywhere**: every statement read as shipped, and five were wrong.
+*"builds the top N concurrently"* (a corruption, ADR-0025); *"neighbour tables: rebuilt on embedding
+change"* (a trigger that **has never existed**, false in M6 too); *"curated rows: until regenerated"*
+(M8's whole family); the taste centroid's *"highly rated"* (**no household rating exists anywhere in
+this system**); and `RowCard`'s *"artwork refs"*. **A document with no markers is not a document with
+no gaps; it is a document nobody has audited.**
+
+**The audit's method produced its most useful finding.** Every claim written into the PRD was then
+fact-checked adversarially against `src/`, and **thirteen were wrong** — two invented figures in a
+measured household ("200 people", "over 300 seeds"), a date gap stated as six weeks that was two days,
+"four cross-provider invariants" where there are five and the one named first is not among them, and
+four repetitions of "the same *statement* writes both" where the repository issues three inside one
+transaction. **Writing a correction is not the same as writing a true correction.**
+
+Two findings that are properties of the milestone rather than of the prose:
+
+- **`TasteService.centroid` has no caller anywhere in `src/`.** `RowContext.taste` was specified, built,
+  found to be structurally `None` on the request path (it needs an embedder the route deliberately
+  holds none of), and deleted. So `user_taste` — table, fingerprint, written refusal, all built and
+  tested — **is written by nothing on a running deployment**. What `TasteService` is called for is
+  `genre_affinity`, which needs no embedder. **M8 inherits the wiring, not a working pre-filter.**
+- **`GET /home` reads no `user_taste`**, so PRD 07's list of its local inputs was wrong the same way.
+
+Two new ADRs — **0024** (the genome is one dense `halfvec(1128)` per title, 45 MB against 2,106 MB) and
+**0025** (rows build sequentially, because `AsyncSession` is not concurrency-safe). Three amended:
+**0006** finally has a shipped system to describe, **0014** gains the port-level site beside its
+blend-level one, **0020** was already amended by Task 35.
+
+### The gates
+
+**Suite 3,217 passed / 5 skipped** — 2,416 unit + 4, 801 integration + 1, reconciled by addition
+(M6 merged at 2,433/5; +784). Three assertions verified by **planting** rather than by reading: the
+1:1 row/model guard fails in **both** directions (`credit_names` removed from `DERIVED_COLUMNS`, and a
+name `Title` does model added to it); dropping a provider from `ROW_PROVIDERS` fails 2 cases;
+`JobKind` pins `{match, enrich, watch_history, index, derive}`.
+
+**7 import contracts kept, 0 broken — both new surfaces verified by planting**, because a contract
+that has never been seen to break is a contract nobody has checked. A `usher.db.models` import inside
+a row provider → **BROKEN** (*"db is driven, not driving"*); a `usher.adapters.bulk.movielens` import
+inside a service → **BROKEN** (*"adapters are driven, not driving"*). **No eighth contract is needed**
+for `adapters/bulk/`.
+
+⚠️ **The first attempt at that plant measured nothing, and the harness caught it rather than the
+operator.** The anchor string did not exist in the target file, so the substitution was a silent no-op
+and `lint-imports` reported *7 kept, 0 broken* — which reads exactly like a passing check. **A plant
+must be verified present before the check is believed**; this is the `sitecustomize.py` installation
+proof in a third guise.
+
+**Network guard, eighth consecutive milestone, both halves in one environment:** `[netguard] installed`
+printed by the module itself, 3,205 passed with zero blocks, and `getaddrinfo('files.grouplens.org')`
+raising `RuntimeError: NETWORK BLOCKED` in that same environment.
+
+**Migration chain** empty → head → `downgrade base` → head: 22 tables at head `ffc`, **only
+`alembic_version`** after base with the four extensions retained, 22 again on the second upgrade. The
+`collections`/`titles.collection_id` downgrade ordering is exercised by nothing else and is clean.
+Seven `set_updated_at` triggers — the two M7 adds, and correctly **not** `credits`, which has no
+`updated_at` because every write is an insert.
+
+**Container, measured with `docker images` and not `image inspect`** (which reports the compressed size
+under the containerd snapshotter and understated M6's image 4.2×): **357 MB** default (venv 133 MB),
+**608 MB** with `--extra embedding` (venv 314 MB) — **+1 MB each against M6**, which is the prediction
+stated before the build holding: the MovieLens importer needs nothing beyond `zipfile` and `csv`.
+Non-root, no `uv` on `PATH`.
+
+**Compose stack end to end.** **48** `USHER_*`/`OTEL_*` keys from `docker compose config` **and 48 from
+`printenv` inside the running container** — the two agreeing is why both are measured, and 48 = 47
+`Settings` fields + `USHER_COMPOSE_HOST_PORT`, **unchanged from M6 because M7 added no settings at
+all**. `/health` 200, `/health/ready` 200, and **`GET /home` answering `200 {"rows":[]}` from outside
+the container on an empty database** — PRD 07's documented behaviour, live, on the milestone's one new
+route.
+
+### The clean-checkout smoke test
+
+`git clone`, `cp .env.example .env`, one generated key, **nothing else** — the README's own first step,
+diffed to prove the `.env` is byte-identical to the example apart from the key. **3,205 passed / 5
+skipped, identical to the working tree**, and M5's `extra="forbid"` regression has **not** returned:
+`bootstrap-status` fails with `OSError: Connect call failed`, a *database* error, not a `Settings`
+one. `fastembed` absent, which is the shipped default.
+
+**The no-embedder claim, which has the most surface in M7 and the least coverage elsewhere.**
+`usher home` against a migrated, empty household with `USHER_EMBEDDING_ENABLED=false`: **exit 0**, nine
+providers each on their own line *including the ones that proposed nothing*, `0 rows, 0 cards`, cold
+p50 12.7 ms. Not a crash, not a 500, and — the one that matters — **not a generic row**. The three
+`WARNING`s name what to run and are said **once per process**, not once per `propose`.
+
+⚠️ **One finding, pre-existing and not a merge blocker:** `usher bootstrap-status` and `sync-status`
+print a **raw traceback** against an unreachable database. Exit 1 is right; the presentation is not.
+Recorded rather than fixed — it predates M7 and the fix is a CLI-wide error boundary.
+
+> ✅ **Fixed after the milestone, before the merge**, in `fix(cli): a failure the operator can fix is
+> a message, not a stack`. `main` now has one `try` around the whole dispatch naming four operator
+> families — `OSError`, `SQLAlchemyError`, `httpx.HTTPError`, `ValidationError` — with
+> `usher --traceback <command>` as the escape hatch, and 30 cases in
+> `tests/unit/test_cli_errors.py`. Two things the fix turned up that the finding did not predict:
+>
+> - **`OSError` is load-bearing and a SQLAlchemy-only handler would have missed the exact case.**
+>   asyncpg lets a refused TCP connection out **unwrapped** — the propagated exception from the
+>   smoke test's own repro is a bare `ConnectionRefusedError`, not an `InterfaceError`. Checked
+>   directly rather than assumed.
+> - 🔴 **The traceback was leaking a credential, which is why this stopped being cosmetic.**
+>   pydantic v2's `ValidationError` message carries `input_value=…`, so `USHER_DATABASE_URL` with a
+>   non-asyncpg driver printed the **whole DSN including the password**, and a truncated
+>   `USHER_SECRET_KEY` printed the key. Both fields are `SecretStr`; the CLI was the one reader that
+>   unwrapped them. Same defect `usher.api.errors` exists to prevent on the 422 path, one surface
+>   over, and reproduced live before and after. `--traceback` deliberately does **not** reopen it.
+>
+> Both mutations that matter were checked in place and killed: `except OPERATOR_ERRORS` →
+> `except Exception` is caught by `test_a_programming_error_keeps_its_traceback`, and returning
+> pydantic's own message instead of the redacted one is caught by three cases.
+
+⚠️ **And one process finding worth more than it cost.** A live end-to-end run was started **while the
+mutation sweep was still mutating the working tree in place**, and would have measured mutated code.
+Killed within seconds and its database recreated so nothing survived. **A sweep that mutates in place
+makes the tree unshareable for its whole duration** — an obvious consequence that is not obvious while
+looking for something to parallelise.
+
+### Two migration findings, as Step 3 recorded them
+
+**Six migrations against a plan budgeting four**, and the rule is not that a fifth is forbidden — it is
+that a fifth arrives with an argument. `fd7c3a5b9e12`, `fe1d40c8b7a3`, `ff`, `ffa` are the four;
+**`ffb`** (`title_neighbors.blend_fingerprint`) is the fifth and was **named in advance rather than
+discovered** — adding the genome term re-weights the other three, so every stored row means something
+different from every new one, and `ffa` lands earlier in the serial order so amending it in place is
+not available; **`ffc`** (dropping `ix_titles_popularity`) is the sixth and was **conditional in the
+plan**, taken because Task 36's measurement said so.
+
+**The revision-id convention ran out inside this milestone, exactly where the plan predicted.** M6 left
+three two-character prefixes (`fd`, `fe`, `ff`) against four planned migrations, so it is exhausted at
+the *fourth*. **Nothing breaks** — alembic orders by `down_revision`, not lexically — and saying so
+precisely is half the finding; what is lost is the only thing the convention bought. **The remedy is
+now in `CLAUDE.md`: extend by a character** (`ff` → `ffa`, `ffb`, `ffc`), which still sorts after `fc`
+and after `ff`, is unbounded, and keeps `ls` order forever.
+
+### What M8 inherits
+
+A **registry that is the composition point** (nine providers, asserted by name *and* count, with five
+cross-provider invariants parametrised over it), so `CuratedProvider` is a subclass and a registration
+that inherits five cases the day it is written. **`GET /home` and its wire DTOs**, so a curated row
+lands in an existing envelope. **`RowFamily` with two members and no `CURATED`** — the third arrives in
+the same diff as the provider that emits it. **`row.invalidated` on the push lane**, so regeneration
+has a channel and the fan-out rule travels with it. **`people`, `credits`, `collections`** via
+`usher derive`, so a prompt can name a director. **The genome and `genome_revision`**, which is what
+makes loading the tag vocabulary later safe rather than a deferral-by-omission.
+**`SearchService.search`'s query string** as the seam query expansion wraps.
+
+### What M8 does not get, named rather than implied
+
+No `LLMClient` implementation. No `curated_rows` table, deliberately. **A taste centroid nothing
+calls** — built, fingerprinted, tested, and unreachable on the request path, so M8 wires it or PRD 06's
+LLM pre-filter stays a design. No artwork and no `Image` (M9); no `title_search_names` (M9, with the
+two-tier suggest); no admin API and therefore no runtime provider toggle (M9). **No rating anywhere in
+the household's data**, so any prompt wanting "highly rated" inherits M7's engagement substitution.
+
+### The live end-to-end run (2026-08-05), and the number it refuted
+
+Driven from a throwaway script outside the working tree, against a throwaway container. No credential,
+token, user id or host written anywhere; no API key exists in this environment, which bounds what the
+run could cover and is stated rather than implied.
+
+**A real catalog, from the public dumps.** `--phase imdb` **1,271,516 titles in 86.1 s** (899,885
+movies / 371,631 series), `--phase tmdb-ids` 13.8 s, `--phase crosswalk` **333.2 s** (Wikidata SPARQL,
+the slowest phase by 4×), `--phase movielens` **25.7 s** → **15,565 genome rows** at revision
+`14ea425b-600f0e149d407`, **1.7297%** of the catalog's movies. **NIC delta for the whole run: 49.1 MB.**
+`title.basics.tsv.gz` (225 MB) was **not** re-downloaded — its ETag had not moved in the day since the
+cache was filled — and `ml-latest.zip` (335 MB) was not either, because it has not moved in three
+years. Both cache behaviours confirmed by the counter rather than by the log.
+
+**Task 36's popularity distribution reproduces on an independently bootstrapped catalog:**
+291,617 of 1,271,516 carry a popularity (**22.94%**, against 22.9% measured on 2026-08-05's catalog),
+and **exactly 1 is 0.0** where the earlier run found 3. The `0.0`-skeleton fear remains refuted, and
+the count moving 3 → 1 across two snapshots is the honest reading: it is a handful of rows either way,
+never a population. `genome_rows` **15,565** matches Task 36's figure exactly.
+
+**`usher derive` found nothing, and that is correct rather than a failure.** `raw_payloads` is 0 with
+no TMDb key configured, so `collections` and `credits` are 0 — which is why `franchise` and `people`
+proposed nothing below. The derivation stage is exercised by its own contract suites; what this run
+establishes is that its *absence* degrades rather than breaks.
+
+**The composed screen, printed because a human is the only oracle this milestone has:**
+
+```
+provider               proposed  built  cards    propose      build
+because-you-watched           0      -      -     0.3 ms          -
+continue-watching             1      1     20    48.8 ms     2.4 ms
+franchise                     0      -      -     1.1 ms          -
+genre-affinity                1      1     10     0.0 ms   251.4 ms
+next-up                       0      -      -   302.9 ms          -
+people                        0      -      -    14.0 ms          -
+recently-added                1      1     24    48.7 ms     2.1 ms
+rediscover                    1      1     20    43.2 ms     1.9 ms
+seasonal                      0      -      -     0.0 ms          -
+9 providers, 5 proposed nothing, 0 built empty and was dropped
+screen: 4 rows, 74 cards
+```
+
+**Four rows, 74 cards, five providers silent — and every silence has a reason**, which is the property
+that matters: `because-you-watched` has no `title_neighbors` (no embedder), `franchise` no
+`collections` and `people` no `credits` (no payload cache to derive from), `next-up` no started series,
+`seasonal` outside every window on 2026-08-05. **Nothing fell back to a generic row.**
+
+**⚠️ The headline refutation: p95 is 783.4 ms here, against the 35.9 ms Task 34 measured and the
+"11× under budget" this milestone wrote into PRD 06 and ADR-0025.** Both numbers are true and they are
+about different populations, and conflating them is the mistake to avoid:
+
+| | Task 34 (2026-08-04) | this run |
+|---|---|---|
+| owned, available media items | 5,200 | **1,277,878** |
+| watch states | 360 | **1,277,878** (1,086,149 played) |
+| compose cold p50 / p95 | 23.9 / **35.9 ms** | 710.3 / **783.4 ms** |
+| slowest provider | `because-you-watched` 4.3 ms = 34% | `genre-affinity` 251.4 ms = **98%** |
+
+**This is not a household — it is the scale ceiling.** `scripts/measure_rows.py` seeds the measured
+deployment's whole library and marks most of it played, so it describes a household that owns all
+1.27M titles and has watched 1.09M of them. No real household is this shape. **What it does establish
+is where the sequential build actually bends**, which is a question Task 34's 5,200-copy household
+could not answer, and which PRD 06's "11×" figure should never be read as answering.
+
+**And the revisit rule earned its second clause.** The rule, written before either run: revisit only
+when p95 > 400 ms **and** no single provider is ≥ 50% of build time. Here the first clause fires
+(783 ms) and the second does not (`genre-affinity` at 98%) — so the rule's answer is **fix the slow
+provider, do not parallelise**, which is the right answer and is not the one a p95 threshold alone
+would have given. A two-clause rule that has now been observed to disagree with its own first clause
+is a rule doing work. `next-up`'s 302.9 ms *propose* at 1.27M watch states is the second number worth
+carrying forward.
+
+**Guess by guess, refutations first:**
+
+| guess | verdict | evidence |
+|---|---|---|
+| the sequential build is comfortably inside budget | **REFUTED at scale** | p95 783 ms against a 400 ms budget — true only of a 5,200-copy household |
+| p95 and the per-provider share move together | **refuted** | one provider at 98% while p95 is 22× Task 34's |
+| all nine providers fire on a real catalog | **refuted, as predicted** | 5 of 9 proposed nothing, each for a stated reason |
+| exactly 3 titles carry `popularity = 0.0` | **refuted (snapshot-dependent)** | 1 on this catalog; a handful either way, never a population |
+| ~23% of a `--phase all` catalog carries a popularity | confirmed | 22.94% on an independent bootstrap |
+| the genome joins 15,565 rows | confirmed | exact match, and 1.73% of movies |
+| a frozen archive is not re-downloaded | confirmed | 49.1 MB NIC delta for the whole run |
+| no embedder degrades rather than breaks | confirmed | 4 rows built, no generic row, exit 0 |
+
+**Not in scope, named rather than implied:** no Emby walk (no source configured here); no TMDb
+enrichment and therefore no derived credits or collections, no `title_neighbors`, and no measurement of
+`usher derive` against a populated cache; `GET /home` under any concurrency; more than one household or
+source; and GPU embedding throughput, still unmeasured for the reason M6 declined it.

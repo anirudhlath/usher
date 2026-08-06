@@ -1081,7 +1081,15 @@ async def test_the_walk_publishes_nothing_and_the_push_lane_through_the_same_cha
         SourceEvent(kind=SourceEventKind.WATCH_STATE_CHANGED, external_ids=("i1",)),
         user_id=fixture.user_id,
     )
-    assert [event.kind for event in events.published] == [ClientEventKind.WATCHSTATE_UPDATED]
+    # M7's `row.invalidated` rides the same publish, and the whole sequence is
+    # asserted rather than filtered: this case's entire point is *which lane
+    # publishes what*, so a filtered assertion here would stop seeing the lane
+    # that grew a fan-out.
+    assert [event.kind for event in events.published] == [
+        ClientEventKind.ROW_INVALIDATED,
+        ClientEventKind.ROW_INVALIDATED,
+        ClientEventKind.WATCHSTATE_UPDATED,
+    ]
 
 
 def test_the_walk_has_no_event_publisher_to_publish_through() -> None:

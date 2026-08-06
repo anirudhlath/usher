@@ -250,8 +250,30 @@ class EnrichService:
         # renders depends on the search document or the embedding, so a
         # `title.indexed` would be an event with no consumer, which
         # `ports/events.py` names: "no member nothing emits". Do not add one.
+        #
+        # **One call, two requests, and that is not tidiness.** `enqueue` is a
+        # staged write -- a temp DDL, a COPY and one `INSERT ... SELECT ... ON
+        # CONFLICT` -- so a second `await self._queue.enqueue([...])` here is a
+        # second full staging cycle per enriched title, on the path M6 already
+        # had to fix once for exactly this shape of cost. Two requests in one
+        # list is one cycle and one statement. Everything above applies to both
+        # requests and is not restated.
+        #
+        # The two are deliberately not ordered against each other. `DERIVE`
+        # writes `credit_names`, which is an input to `compose_document`, so a
+        # title whose `INDEX` job is claimed first embeds without its cast and
+        # is re-claimed once `DERIVE` moves its fingerprint. One wasted embed
+        # per enriched title at ~115 tokens, and the only lever is a
+        # `JobPriority` rung that does not exist between `BACKFILL` and `NEW`
+        # -- promoting `DERIVE` to `NEW` would put it ahead of a `match` queue
+        # that is hundreds of thousands of jobs deep on a first bootstrap.
         await self._queue.enqueue(
-            [JobRequest(kind=JobKind.INDEX, key=str(enriched.id), priority=JobPriority.BACKFILL)]
+            [
+                JobRequest(kind=JobKind.INDEX, key=str(enriched.id), priority=JobPriority.BACKFILL),
+                JobRequest(
+                    kind=JobKind.DERIVE, key=str(enriched.id), priority=JobPriority.BACKFILL
+                ),
+            ]
         )
         # PRD 03's read-through loop, closed: "Completion publishes a
         # `title.updated` event on a Server-Sent Events channel; clients patch

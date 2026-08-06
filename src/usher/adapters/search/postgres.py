@@ -747,21 +747,33 @@ WHERE dist <= :max_distance
 -- box to whichever skeleton the scan reached first. The id makes the order
 -- total.
 --
--- **`vote_count` is here because `popularity` is empty, and that is
--- measured rather than suspected.** On a real bootstrapped catalog
--- `titles.popularity` is NULL on **all 1,271,138 rows** -- nothing in
--- `src/` writes it except TMDb enrichment, and boundary call 4's own
--- premise is that the enriched tier is 2k-10k titles against a 1.27M-row
--- catalog. So with popularity alone this clause degenerates to
--- `dist ASC, id ASC`: equal-distance candidates are ordered by a UUIDv7,
--- i.e. by insertion order, i.e. arbitrarily. `vote_count` is written by the
--- bootstrap itself (538,937 rows) and is the popularity signal the catalog
--- actually holds. Measured over 2,993 single-edit typo cases on 750 real
--- movie names, ADR-0002's gate run of 2026-08-03: recall@5 **78.3% ->
--- 82.5%** overall, **27.8% -> 36.1%** on 2-4-character names and
--- **68.3% -> 77.5%** on 5-7, at an unchanged p50 (33.3 -> 33.6 ms) and p95
--- (209 -> 211 ms). It is strictly a tiebreak *under* popularity, so an
--- enriched catalog is unaffected.
+-- **`vote_count` is here because `popularity` is sparse, and both the
+-- claim and M6's old wording of it are measured rather than suspected.** M6
+-- wrote here that `titles.popularity` is NULL on **all 1,271,138 rows --
+-- nothing in `src/` writes it except TMDb enrichment**; Task 36 re-measured
+-- that on a realistic catalog (2026-08-05) and both halves were wrong:
+--   * "NULL on all rows" is true of a **`--phase imdb`** catalog only, which
+--     is what M6's gate ran against. `link_crosswalk` writes `popularity`
+--     from `tmdb_ids` on `--phase crosswalk|all` (`ports/repository.py`), so
+--     a real operator's catalog is **partially** populated.
+--   * Measured on a `--phase all` catalog of 1,271,570 titles: **291,584
+--     (22.9%) carry a popularity, of which exactly 3 are 0.0** -- the daily
+--     export ships real values, not the `NOT NULL DEFAULT 0` filler the
+--     column permits. On the ~77% that stay NULL this clause degenerates to
+--     `dist ASC, id ASC` (a UUIDv7, i.e. insertion order), and `vote_count`
+--     -- written by the bootstrap on 539,350 rows -- is what orders them.
+-- **The shipped ordering was re-measured and deliberately kept.** Same 2,993
+-- typo cases, same seed, the populated arm against the all-NULL one: the
+-- populated catalog costs **1.3 pts overall (83.4 -> 82.1)**, entirely
+-- out-ranked misses where a real popularity promotes a wrong candidate --
+-- inside Task 36's 2.0-pt regression bar, so `CLAUDE.md`'s "partial catalog
+-- is worse than either extreme" is **refuted**. Making `vote_count` the
+-- primary key (dropping popularity) recovers all 1.3 pts and does not hurt
+-- the all-NULL arm, but its behaviour on a *genuinely enriched* tier --
+-- boundary call 4's population -- could not be measured on this skeleton
+-- catalog, so it is an M9 change to re-measure, not shipped here.
+-- `NULLIF(popularity, 0)` recovers nothing: only 3 zeros exist. `vote_count`
+-- remains a tiebreak *under* popularity, so an enriched catalog is unaffected.
 ORDER BY dist ASC, popularity DESC NULLS LAST, vote_count DESC NULLS LAST, id ASC
 LIMIT :limit
 """  # noqa: S608 - every interpolated fragment is a module constant

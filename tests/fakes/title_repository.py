@@ -84,6 +84,27 @@ class FakeTitleRepository(TitleRepository):
 
     def __init__(self) -> None:
         self._titles: dict[uuid.UUID, Title] = {}
+        # `titles.credit_names`. Public because `CreditRepository` is what
+        # writes it -- `credit_names` is not a `Title` field (DERIVED_COLUMNS)
+        # and `update()` cannot reach it, which is the guarantee rather than
+        # the cost -- so `FakeCreditRepository` is handed this dict the way
+        # `FakeCollectionRepository` is handed a catalog. A test that writes
+        # it directly is standing in for a derivation, not for the port.
+        self.credit_names: dict[uuid.UUID, tuple[str, ...]] = {}
+        # `media_items`, as much of it as `list_owned_by_tag` reads: a title
+        # maps to the episode ids of its available copies, with `None` for a
+        # title-level one. Public and seeded directly, the affordance
+        # `FakeCollectionRepository.catalog` and `FakePersonRepository.
+        # household` already are -- this fake models one table and the read
+        # semi-joins another, so the alternative is a fake that answers
+        # "unowned" for everything and a contract case that cannot be written.
+        #
+        # **Episode ids are modelled rather than collapsed to a bool**, and
+        # that is the point of the shape: the real statement deliberately does
+        # *not* carry `episode_id IS NULL`, so a series owned only through its
+        # episodes is owned, and a fake holding a bare set could not tell that
+        # implementation from the one that reports every series unowned.
+        self.available_copies: dict[uuid.UUID, list[uuid.UUID | None]] = {}
 
     async def add(self, title: Title) -> None:
         if title.id in self._titles:
@@ -145,6 +166,32 @@ class FakeTitleRepository(TitleRepository):
                 return title
         return None
 
+    async def resolve_tmdb_ids(
+        self, kind: TitleKind, tmdb_ids: Sequence[int]
+    ) -> dict[int, uuid.UUID]:
+        # The `kind` filter mirrors ix_titles_tmdb_id_kind and is half the
+        # key, not a narrowing: 26,968 measured TMDb ids are live in both
+        # spaces. An id this store does not hold is simply absent -- the
+        # port's contract, because `raw_payloads` outlives `titles`.
+        wanted = set(tmdb_ids)
+        return {
+            title.tmdb_id: title.id
+            for title in self._titles.values()
+            if title.tmdb_id in wanted and title.kind is kind and title.tmdb_id is not None
+        }
+
+    async def credit_names_for(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[str, ...]]:
+        # An empty tuple for a title that exists and has no credits, absent
+        # for one that does not exist at all. The two are different answers
+        # and the composer's positional assembly depends on the difference.
+        return {
+            title_id: self.credit_names.get(title_id, ())
+            for title_id in title_ids
+            if title_id in self._titles
+        }
+
     async def get_by_imdb_id(self, imdb_id: str) -> Title | None:
         if imdb_id is None:
             return None
@@ -178,6 +225,39 @@ class FakeTitleRepository(TitleRepository):
         fake's own docstring.
         """
         return list(self._titles.values())
+
+    async def list_owned_by_tag(
+        self,
+        *,
+        genre: str | None = None,
+        keyword: str | None = None,
+        limit: int = 20,
+    ) -> list[Title]:
+        if genre is None and keyword is None:
+            # The port's refusal, reproduced rather than inherited: an
+            # unpredicated call is the popular-titles fallback as a query.
+            return []
+        matching = [
+            title
+            for title in self._titles.values()
+            if self.available_copies.get(title.id)
+            and (genre is None or genre in title.genres)
+            and (keyword is None or keyword in title.keywords)
+        ]
+        # `NULLS LAST` under a descending sort, spelled as a two-part key --
+        # the tempting `key=lambda t: t.popularity` raises on a None and the
+        # tempting repair `or 0.0` sorts an unknown above a genuinely
+        # unpopular title, which is the wrong answer rather than a crash.
+        matching.sort(
+            key=lambda title: (
+                title.popularity is None,
+                -(title.popularity or 0.0),
+                title.vote_count is None,
+                -(title.vote_count or 0),
+                title.id,
+            )
+        )
+        return matching[: max(limit, 0)]
 
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         counts: dict[EnrichmentState, int] = dict.fromkeys(EnrichmentState, 0)

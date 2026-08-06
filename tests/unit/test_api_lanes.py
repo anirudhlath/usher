@@ -30,17 +30,21 @@ import pytest
 from loguru import logger
 from pydantic import SecretStr
 
+from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credential_store import FakeCredentialStore
+from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
+from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_match_repository import FakeTitleMatchRepository
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
@@ -67,8 +71,10 @@ from usher.ports.source import (
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
+from usher.services.rows import ROW_PROVIDERS
 from usher.services.search import SearchService
 from usher.services.similar import SimilarityService
+from usher.services.taste import TasteService
 from usher.services.watch_sync import WatchStateSyncService
 
 CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-horse-battery"))
@@ -217,6 +223,11 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
     async def commit() -> None:
         fakes.commits.append(time.perf_counter())
 
+    # Real fakes rather than `None`: `build_worker` constructs
+    # `DeriveService` eagerly whenever a provider is present, so an unused
+    # slot here would fail at construction instead of at the lane behaviour
+    # each of these cases is about.
+    people = FakePersonRepository()
     return Pipeline(
         sources=fakes.sources,
         credentials=fakes.credentials,
@@ -230,6 +241,10 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
         queue=queue,
         embeddings=embeddings,
         neighbors=neighbors,
+        taste_rows=FakeTasteRepository(watch_states),
+        people=people,
+        credits=FakeCreditRepository(people, titles),
+        collections=FakeCollectionRepository(),
         adapters=fakes.adapters,
         matcher=matcher,
         ingest=ingest,
@@ -258,6 +273,15 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
             result_limit=settings.search_result_limit,
         ),
         similar=SimilarityService(embeddings, neighbors, titles, commit),
+        row_providers=ROW_PROVIDERS,
+        taste=TasteService(
+            watch_states=watch_states,
+            embeddings=embeddings,
+            titles=titles,
+            taste=FakeTasteRepository(watch_states),
+            embedder=None,
+            now=lambda: datetime.now(UTC),
+        ),
         events=fakes.events,
         commit=commit,
     )

@@ -40,6 +40,53 @@ be added if a client turns out to need flexible field selection.
 | `GET /search/suggest?q=` | Type-ahead — the cheap narrow path from [05](05-search-and-similarity.md) |
 | `GET /browse?genre=&year=&sort=&owned=&cursor=` | Faceted paging with facet counts |
 
+> **Built in M7: `GET /home`.** ✅ Ordered, hydrated rows — `slug`, `title`,
+> `reason`, `display_hint` and cards — composed server-side and rendered in
+> order ([ADR-0006](decisions/0006-server-composed-home.md)). **This is the
+> first client-facing route since M5, and the default in this project is
+> CLI-only**: ADR-0006's central claim, *"one request paints a screen"*, is a
+> property of a request boundary that no command can exhibit, which is the
+> first time that has been true. `usher home` ships alongside it as the proxy,
+> not instead of it.
+>
+> **No cursor**, which is what that ADR specifies and what the table above
+> already shows: `/browse` carries one and `/home` does not. Nine of PRD
+> [06](06-rows-and-recommendations.md)'s ten providers are behind it;
+> `CuratedProvider` and `curated_rows` are M8's whole family
+> ([09](09-roadmap.md)'s M7 boundary call 2).
+>
+> **A card carries no artwork**, absent rather than null, for the reason
+> `GET /titles/{id}` carries no `images` key: there is no `Image` table and no
+> `poster_path`, M9 owns the proxy, and an always-null field is a client-side
+> branch that never takes its other arm.
+>
+> **`display_hint` is a hint and never a layout** —
+> `portrait | landscape | wide | square`, ADR-0006's only concrete vocabulary,
+> and it reaches `/openapi.json` as an enum rather than as a string. No column
+> count, no card width. If a client ever needs one, ADR-0006's own mitigation
+> is the route: an optional layout *profile* that constrains composition, which
+> is strictly additive.
+>
+> **An empty database answers `200 {"rows": []}`.** Not a 404 — a screen with
+> nothing on it is a fact about the household — and deliberately not padded
+> with a generic row, which would look personalised on a household that has
+> watched nothing. A synced library with no watch state is *not* empty:
+> `RecentlyAddedProvider` fires, so the difference between "no signal" and "no
+> data" is visible on the wire.
+>
+> **The route never calls a source, and never loads an embedding model.** Every
+> input is local — watch state, media items, `title_neighbors`, genre affinity
+> over `titles.genres`, credits, collections — so
+> [08](08-operations.md)'s "never fails a request
+> local state can answer" is structural here, and there is still no 503 for the
+> RFC 9457 envelope below to describe. The model matters because `create_app`
+> builds one only when a worker runs in the same process; every similarity
+> input this route reads is *precomputed*, which is the same property
+> `usher index` has.
+>
+> **Still M9's:** the RFC 9457 envelope, `usher.http.server.duration`,
+> `usher.cache.hits`/`.misses`, HTTP cache headers, and pagination.
+
 > ⏳ **`GET /search` and `GET /search/suggest` are M9's.** M6 built everything
 > behind them — `SearchService`, `PostgresSearchIndex`, `PostgresSuggestIndex`,
 > RRF fusion and the ranking blend — and **added no HTTP route**, delivering
@@ -70,7 +117,16 @@ be added if a client turns out to need flexible field selection.
 > `Person`/`Credit` land with M7 and `Image` with M9, each re-derived from
 > `raw_payloads` with no second network call ([09](09-roadmap.md)'s M4 boundary
 > call 2), and an empty list would be indistinguishable from a film with no
-> cast. **`GET /titles/{id}/similar` is M9's, not M6's** — this sentence said
+> cast.
+>
+> **M7 landed `Person`, `Credit` and `Collection` and this route still carries
+> none of them**, which is the distinction between a table and a wire field and
+> is stated rather than left for a reader to infer from a milestone number.
+> `people`, `credits` and `collections` are real ([02](02-data-model.md)) and
+> `usher derive` fills them; adding a `credits` key here is a DTO, a hydration
+> read and a shape decision (how many, in what order, cast and crew together or
+> apart) that no M7 task makes. **Owner: M9**, with the rest of this route's
+> unbuilt surface. `Image` is unchanged and still M9's from both ends. **`GET /titles/{id}/similar` is M9's, not M6's** — this sentence said
 > "M6's" until M6 ran and added no HTTP route at all
 > ([09](09-roadmap.md)'s M6 boundary call 1). M6 built the
 > `SimilarityService` and the precomputed `title_neighbors` table that route
@@ -187,9 +243,11 @@ does not carry a `failed` tier.
   "id": "01936f2a-...",
   "name": "Dune",
   "year": 2021,
-  "enrichment_state": "stub",     // overview/credits/artwork not yet fetched
+  "enrichment_state": "stub",     // overview not yet fetched
   "overview": null,
-  "images": { "poster": null },
+  // no "images" key and no "credits" key -- absent, never null.
+  // The earlier draft of this example carried "images": {"poster": null},
+  // which is the exact shape the paragraph above refuses.
   "availability": [ { "source": "Emby", "quality": "2160p HDR10" } ],
   "watch_state": { "position_seconds": 1840, "played": false }
 }
@@ -253,6 +311,19 @@ subsystem narrows functionality, it never fails a request local state can answer
 > playback ticket [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)
 > owes. M5's two ordinary failures are the shapes M3 already ships: a 404 for
 > an unknown title and a 422 for a malformed id or `?titles=`.
+>
+> **Still deferred after M7, and M7 is the milestone that tested the reason
+> rather than restating it.** M7 adds a client-facing route — `GET /home` —
+> and it does not force the envelope either, for the same structural reason
+> one layer along: every input is local state (watch state, media items,
+> `title_neighbors`, genre affinity, credits, collections), the route holds no
+> `SourceAdapter`, and [08](08-operations.md)'s own degradation table says
+> *"LLM call fails → Home composes without them"* — so the one upstream that
+> could be down is one this route already composes without. **There is no 503
+> here to give a `code` to.** Two client routes now, two milestones, and the
+> deferral has survived both on evidence rather than on inertia; the first
+> route whose honest answer is a domain-level failure is still M9's
+> `POST /titles/{id}/play`.
 
 ## Streaming updates (SSE)
 
@@ -262,9 +333,41 @@ subsystem narrows functionality, it never fails a request local state can answer
 |---|---|---|---|
 | `title.updated` | Title id + changed fields | Patch in place | ✅ M5 |
 | `watchstate.updated` | Title/episode id, position, played | Update progress | ✅ M5 |
-| `row.invalidated` | Row slug | Refetch that row | M7 |
+| `row.invalidated` | Row slug | Refetch that row | ✅ M7 |
 | `sync.progress` | Source, counts, phase | Admin UI only | ✅ M5 |
 | `bootstrap.progress` | Phase, percent | Admin UI only | — |
+
+> **Settled in M7.** Published by the **push lane only**, at the same point it
+> publishes `watchstate.updated`, because a push event *is* a change — one
+> event per invalidated slug over a small fixed set, so the fan-out is per
+> *event* rather than per merged row. The **nightly walk publishes none**, for
+> the reason already recorded below for `watchstate.updated` and more strongly:
+> one per merged row is a fan-out per row per night *and* an instruction to
+> every client to refetch, which is a thundering herd at 04:00 on top of a
+> million messages. `WatchStateSyncService` is handed no `EventPublisher` at
+> all, so writing that call means changing its constructor. A walk's changes
+> reach the screen through the 30 s screen TTL and a demand read
+> ([06](06-rows-and-recommendations.md)).
+>
+> **The `?titles=` filter cannot express this event, and does not need to.**
+> The payload is a row slug and carries no title id, so it reaches unfiltered
+> subscribers and no others — never "some". A client that sent `?titles=` is on
+> a detail screen, and the bullet below's own justification for the filter is
+> that a detail screen is not woken by unrelated churn. **A client that wants
+> row invalidations subscribes without `?titles=`.** A `?rows=` filter scoping
+> by slug is the additive change that would relax this; nothing asks for one,
+> and a filter no client sends is a shape fixed before anything has used it.
+>
+> **`EnrichService` publishes no `row.invalidated`.** An enrichment changes a
+> card's *contents*, and `title.updated` already tells a client to patch that
+> card in place; a second event for the same change is a duplicate with no
+> consumer, at the enriched tier's scale.
+>
+> **The member and its publisher shipped in one commit**, because this
+> document's own rule binds both ways: an event nothing emits is a client
+> handler that waits forever, and a publisher with no wire name is a `KeyError`
+> inside a response that has already answered `200 text/event-stream`, where
+> there is no status code left to report it with.
 
 - Subscriptions are scoped by query (`?titles=id1,id2`) so a detail screen isn't
   woken by unrelated churn.

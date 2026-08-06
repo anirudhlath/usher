@@ -26,17 +26,28 @@ from sqlalchemy import text
 
 from usher.api.app import create_app
 from usher.api.deps import (
+    get_collection_repository,
+    get_credit_repository,
+    get_default_user,
     get_default_user_id,
     get_episode_repository,
+    get_home_service,
     get_ingest_service,
     get_job_queue,
     get_match_service,
     get_media_item_repository,
+    get_person_repository,
     get_raw_payload_store,
     get_reconcile_service,
+    get_row_cache,
+    get_row_context,
     get_source_repository,
     get_sync_run_repository,
+    get_taste_repository,
+    get_taste_service,
+    get_title_embedding_repository,
     get_title_match_repository,
+    get_title_neighbor_repository,
     get_title_read_service,
     get_title_repository,
     get_watch_state_repository,
@@ -64,6 +75,23 @@ _PROVIDERS = {
     # one whose graph a 500 at request time would be a real outage.
     "sources_repository": get_source_repository,
     "title_read_service": get_title_read_service,
+    # M7's composed home screen. Every one of these is resolved through
+    # FastAPI's own machinery rather than by calling the function, because the
+    # failure this file exists to catch has no other detector: annotating one
+    # dependency without `Depends` raises `FastAPIError` at **route
+    # registration**, and a unit test that overrides `get_home_service` never
+    # sees it.
+    "neighbors": get_title_neighbor_repository,
+    "embeddings": get_title_embedding_repository,
+    "people": get_person_repository,
+    "credits": get_credit_repository,
+    "collections": get_collection_repository,
+    "taste_repository": get_taste_repository,
+    "default_user": get_default_user,
+    "taste_service": get_taste_service,
+    "row_context": get_row_context,
+    "row_cache": get_row_cache,
+    "home_service": get_home_service,
 }
 
 
@@ -103,7 +131,18 @@ async def test_every_pipeline_provider_resolves_in_a_request(probe: AsyncClient)
         response = await probe.get(f"/_probe/{name}")
         assert response.status_code == 200, f"{name}: {response.text}"
         assert response.json()["built"].startswith(
-            ("Postgres", "Match", "Ingest", "Reconcile", "Watch", "Title")
+            (
+                "Postgres",
+                "Match",
+                "Ingest",
+                "Reconcile",
+                "Watch",
+                "Title",
+                "Row",
+                "Home",
+                "Taste",
+                "User",
+            )
         )
 
 
@@ -115,6 +154,50 @@ async def test_the_providers_answer_with_a_live_session(probe: AsyncClient) -> N
     the real graph is what makes that observable at all."""
     response = await probe.get("/_probe/media_items")
     assert response.json()["built"] == "PostgresMediaItemRepository"
+
+
+async def test_the_row_context_carries_the_stored_user_and_not_a_fresh_one(
+    postgres_url: str,
+) -> None:
+    """**A constructor default is one keystroke from an empty home screen.**
+
+    `User.id` is `default_factory=new_id`, so `User(name="default",
+    is_default=True)` built in `get_row_context` would validate, type-check and
+    compose a screen for a household that has never existed -- every read
+    returns nothing, and the response renders as a household that has watched
+    nothing rather than as a bug. That is this milestone's headline failure
+    arriving through a default value, and nothing in the unit file can see it:
+    those cases construct the context themselves.
+
+    So the assertion is that the id on the context is the id in `users`.
+    """
+    app = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key="0" * 32,
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
+
+    @app.get("/_probe/row_context_user")
+    async def _context_user(
+        ctx: Annotated[object, Depends(get_row_context)],
+        user_id: Annotated[uuid.UUID, Depends(get_default_user_id)],
+    ) -> dict[str, str]:
+        return {"context": str(ctx.user.id), "stored": str(user_id)}  # type: ignore[attr-defined]
+
+    async with LifespanManager(app) as manager:
+        transport = ASGITransport(app=manager.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            body = (await client.get("/_probe/row_context_user")).json()
+
+    assert body["context"] == body["stored"]
+
+    factory = build_session_factory(build_engine(postgres_url))
+    async with factory() as session:
+        await session.execute(text("DELETE FROM users WHERE id = :id"), {"id": body["stored"]})
+        await session.commit()
 
 
 async def test_a_request_resolves_the_default_user_and_writes_the_row(

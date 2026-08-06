@@ -8,7 +8,7 @@ holds the Postgres implementations.
 
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any
@@ -16,13 +16,15 @@ from typing import Any
 from pydantic import AwareDatetime
 
 from usher.domain.bootstrap import ImportRun
+from usher.domain.collection import Collection
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.episode import Episode, Season
+from usher.domain.people import Credit, CreditKind, Person
 from usher.domain.source import MediaItem, Source
 from usher.domain.sync import SyncRun, SyncRunKind
 from usher.domain.title import Title
 from usher.domain.watch import WatchState
-from usher.ports.bulk import IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
+from usher.ports.bulk import GenomeVector, IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
 from usher.ports.ingest import (
     MediaItemTarget,
     MediaItemUpsert,
@@ -148,6 +150,127 @@ class TitleRepository(ABC):
         """
 
     @abstractmethod
+    async def resolve_tmdb_ids(
+        self, kind: TitleKind, tmdb_ids: Sequence[int]
+    ) -> dict[int, uuid.UUID]:
+        """`tmdb_id` -> title id **within one id space**, in one round trip.
+
+        The reverse of `get_by_tmdb_id`, batched, and it exists for the walk
+        that starts from a *payload*. `raw_payloads` has no `title_id` and no
+        foreign key to `titles` (ADR-0016), so a derivation's only way back to
+        a title is `(provider, kind, reference)` -- and `kind` is half of that
+        key, not a convenience filter. ADR-0011: TMDb keys movies and series
+        in separate spaces that overlap on 26,968 measured ids, so a
+        resolution keyed on the integer alone attaches a series' cast to a
+        film, silently, with the right counts.
+
+        **Named to match `PersonRepository.resolve_tmdb_ids` and
+        `CollectionRepository.resolve_tmdb_ids`**, which do the same job for
+        the same reason one table over. It takes a `kind` where those two do
+        not, because those two id spaces are not namespaced and this one is.
+
+        **Ids rather than `Title`s.** The caller needs a `Credit.title_id` and
+        a link target, not 31 columns per row; `list_by_ids` is the method for
+        hydration and keeping the two apart is what stops a derivation from
+        pulling the whole catalog through a page walk.
+
+        A batch rather than one: a derivation page is 500 payloads, and a
+        lookup per payload is the round-trip-per-item shape batching exists to
+        remove.
+
+        **Absent keys mean "no such title", never "not asked", and never an
+        error.** `raw_payloads` outlives `titles`, so a payload naming a title
+        deleted since the fetch is ordinary -- the same call `IndexService`
+        makes when a title vanishes between the sweep and the claim. An
+        implementation that raised would let one deleted title abort a whole
+        derivation page.
+        """
+
+    @abstractmethod
+    async def credit_names_for(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[str, ...]]:
+        """Weight class B's input for a page of titles.
+
+        **Not a field on `Title`, and this method is the consequence.**
+        `credit_names` is in `DERIVED_COLUMNS` -- it is `credits` projected to
+        names and truncated to a ranking constant, so a domain model carrying
+        it would be a cast list that is not the cast, on the object
+        `GET /titles/{id}` hydrates from, and `title.evolve(credit_names=...)`
+        would spell an array that disagrees with the `credits` table. The
+        composer needs it anyway, because the fingerprint it computes has to
+        reproduce `_FINGERPRINT_SQL` byte for byte and that predicate reads
+        the column.
+
+        It is also the only port-level read of the array, which is what lets a
+        *contract* case assert that `credit_names` and `credits` never
+        disagree. Without it that property is assertable only against raw SQL
+        on one side and a fake's private dict on the other -- two assertions
+        about two implementations rather than one about the contract.
+
+        Batch, so the backfill pays one read per page rather than one per
+        title. **A title with no credits is present in the answer with an
+        empty tuple, not absent**: the assembly is *positional* and an absent
+        key would be spelled as a missing segment, which is precisely failure
+        mode (a) in `services/search.py`'s module docstring. A `title_id`
+        naming no row at all is absent, which is `list_by_ids`' rule and is a
+        different thing.
+        """
+
+    @abstractmethod
+    async def list_owned_by_tag(
+        self,
+        *,
+        genre: str | None = None,
+        keyword: str | None = None,
+        limit: int = 20,
+    ) -> list[Title]:
+        """Owned titles carrying a genre and/or a keyword, best first.
+
+        **The retrieval half of `GenreAffinityProvider` and the whole of
+        `SeasonalProvider`, and it did not exist.** `ff_row_read_indexes`
+        reasons about it from the other side -- *"its retrieval half is
+        bounded to owned titles (single-digit thousands) before array
+        containment is consulted"* -- which is the shape this signature makes
+        mandatory rather than hoped for: the ownership semi-join is inside the
+        statement, not a filter the caller applies to the catalog's top N. The
+        difference is not style. Taking the twenty most popular horror films
+        in a 1.27M-row catalog and *then* asking which are owned returns
+        nothing at all on a normal household.
+
+        **Owned here means "has an available copy", with no `episode_id IS
+        NULL` bound, and that is a deliberate divergence from
+        `MediaItemRepository.owned_title_ids`.** That method answers about one
+        row per title and carries the bound so that asking it about an episode
+        cannot report a missing episode file as owned. This one asks "can the
+        household play something of this title", and for a series the answer
+        is yes when any episode file exists -- a series owned only through its
+        episodes is the normal case on a library that is 89% episodes, and
+        excluding it would make every television title unreachable by every
+        row built on this read. A semi-join, so a 20,000-episode series costs
+        one probe rather than 20,000 rows.
+
+        **Both predicates given means both must match**; neither given returns
+        `[]` and reads nothing. An unpredicated call is a request for the
+        library ordered by popularity, which is the popular-titles fallback
+        spelled as a query -- so the port declines to express it.
+
+        Ordered `popularity DESC NULLS LAST, vote_count DESC NULLS LAST, id`.
+        The second key is not decoration: `titles.popularity` was measured
+        NULL on all 1,271,138 rows of a bootstrap-only catalog and is
+        `NOT NULL DEFAULT 0` in `tmdb_ids`, so on a partially-linked catalog a
+        crosswalk-linked skeleton at 0.0 outranks an unlinked title with half
+        a million votes. That hazard is recorded rather than solved here --
+        it is the same one M6's suggest path took `vote_count` for -- and the
+        `id` tail is what makes two reads of one unchanged catalog agree.
+
+        Nothing about *watched* is expressed here. `played_title_ids` answers
+        that, over the ids this returns, because the two questions have
+        different bounds and folding them together would make the limit mean
+        something different on every household.
+        """
+
+    @abstractmethod
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         """Catalog size broken down by enrichment tier.
 
@@ -187,6 +310,63 @@ class CrosswalkLinkResult:
     linked: int
     unmatched: int
     conflicted: int
+
+
+@dataclass(frozen=True, slots=True)
+class GenomeWriteResult:
+    """What one batch of genome vectors actually changed.
+
+    `inserted`/`updated` split for the reason every write on this port
+    splits them: rowcount alone reports their sum, so a re-import would be
+    indistinguishable from a first run. That matters more here than
+    anywhere, because "did this phase actually do anything" is the question
+    the whole `movielens` phase exists to answer.
+
+    **`unmatched` is the third field and it is the deliverable.** It counts
+    staged rows whose `imdb_id` is in no title — mirroring
+    `CrosswalkLinkResult(linked, unmatched, conflicted)`, which is this
+    project's precedent for reporting a join's misses as a count rather than
+    as silence. `links.csv` holds 86,537 movies and the catalog holds
+    whatever IMDb's dump retained, so the difference is real and expected;
+    what is not acceptable is a join that matched almost nothing looking
+    identical to one that matched everything.
+    """
+
+    inserted: int
+    updated: int
+    unmatched: int
+
+
+@dataclass(frozen=True, slots=True)
+class GenomeCoverage:
+    """Genome coverage with its denominators, because "~7%" never had one.
+
+    PRD 05 promised *"~7% coverage"* and PRD 04 repeated it as *"~7% of the
+    priority tier"*, and neither named a denominator. Measured against the
+    dataset, 16,376 genome movies is **1.82%** of a full catalog's 899,828
+    movies, **1.29%** of all 1,271,138 titles, and **8.7%** of PRD 04's own
+    *"~189k titles with >=100 IMDb votes"* priority tier — which is the
+    denominator that makes the published figure roughly right.
+
+    **None of those is the number that matters**, which is `enriched` and
+    `enriched_with_vector`: an owned household library of 2k-10k titles,
+    skewed hard toward exactly the popular, English, pre-2019 movies the
+    genome covers. Those three percentages are ceilings the *dataset* can
+    reach; these fields are what the join actually did against *this*
+    operator's catalog.
+
+    `revisions` is `(genome_revision, count)` pairs. More than one entry is a
+    correctness problem rather than a curiosity — `GenomeRepository.get_pair`
+    already refuses to blend across it — and the fix is a re-import. One
+    entry is the normal case and is not worth printing.
+    """
+
+    with_vector: int
+    titles: int
+    movies: int
+    enriched: int
+    enriched_with_vector: int
+    revisions: tuple[tuple[str, int], ...] = ()
 
 
 class BulkCatalogRepository(ABC):
@@ -316,8 +496,28 @@ class BulkCatalogRepository(ABC):
         already stored: a title that already carries a *different* value
         does not get overwritten either, and is reported as `conflicted`,
         not `linked`. Copies `popularity` across from the TMDb id universe
-        at the same time, which is what makes `ix_titles_popularity` usable
-        and gives M4's enrichment queue a real ordering.
+        at the same time.
+
+        **That last clause used to continue "…which is what makes
+        `ix_titles_popularity` usable and gives M4's enrichment queue a real
+        ordering", and both halves were false.** The enrichment queue is
+        `jobs`, claimed through `ix_jobs_claim` (`priority DESC, created_at`);
+        no statement anywhere orders it by `titles.popularity`, so the named
+        consumer never existed. And the index could not have served one
+        anyway — it was declared `(popularity DESC)`, i.e. NULLS FIRST, while
+        every consumer in `src/` asks `DESC NULLS LAST`, which is a different
+        pathkey. Measured against 1,271,570 real titles: the favourable
+        spelling takes an `Index Scan` at cost 0.42..20.97 and the shipped one
+        a `Parallel Seq Scan` + `Sort` at 86,142. Migration `ffc` drops it and
+        records what would bring one back.
+
+        **What the write itself is for is still real, and is now stated
+        without the index:** it is what gives 22.93% of a `--phase all`
+        catalog a popularity at all, which is the signal
+        `PostgresSuggestIndex` orders on and `SearchService._popularity_term`
+        reads. Measured 2026-08-05: 291,584 of 1,271,570 rows, of which
+        exactly **3** are `0.0` — the daily export carries real values, not
+        the `NOT NULL DEFAULT 0` filler the column's declaration permits.
 
         Both `titles.tmdb_id` (scoped by `kind`, ADR-0011) and
         `titles.tvdb_id` are globally unique where not NULL
@@ -330,6 +530,51 @@ class BulkCatalogRepository(ABC):
 
         Idempotent: a second call over unchanged inputs reports
         `linked == 0`.
+        """
+
+    @abstractmethod
+    async def upsert_genome_vectors(
+        self, rows: Sequence[GenomeVector], *, revision: str
+    ) -> GenomeWriteResult:
+        """Store genome vectors against the titles their `imdb_id` resolves
+        to, returning what changed and how many resolved to nothing.
+
+        **The `imdb_id -> titles.id` join lives inside this statement, and
+        that is the whole point of the method.** The dataset cannot do it: it
+        never touches a database, which is what lets it be unit-tested with
+        no Docker. A service doing it would be an ad-hoc `SELECT` in
+        `services/`, which contract three forbids. So the join belongs on the
+        one port whose docstring already reserves the staged, set-based path.
+
+        `revision` is the run's own resolved dataset revision, bound as a
+        parameter and stored on every row it writes. It is not derived from
+        `now()` and not read back out of the file: it is what makes
+        `genome_scores.genome_revision` mean "the release this row came
+        from", which is what `GenomeRepository.get_pair` refuses to blend
+        across.
+
+        **A staged batch may contain two rows resolving to one title, and
+        that is not defensive.** Two MovieLens `movieId`s carrying the same
+        `imdbId` both resolve to one `titles.id`, and a second hit on one
+        conflict target is `CardinalityViolationError` — a runtime abort of
+        the whole batch, not a skipped row. An implementation must pick a
+        single deterministic winner rather than leaving it to whichever row
+        a scan reached first.
+
+        Idempotent in the sense that matters for resume safety: replaying a
+        batch is an upsert, never a duplicate. Unlike `upsert_titles`, a
+        replay is *not* invisible — it reports `updated`, which is the honest
+        answer and the one an operator re-running the phase is asking for.
+        """
+
+    @abstractmethod
+    async def genome_coverage(self) -> GenomeCoverage:
+        """Genome coverage against every denominator that has one.
+
+        Two set-based reads -- the counts, and the `genome_revision`
+        histogram -- run at the end of the `movielens` phase and printed. See
+        `GenomeCoverage` for why the enriched-tier fraction is the one that
+        matters and the other three are ceilings.
         """
 
     @abstractmethod
@@ -433,6 +678,21 @@ class SourceRepository(ABC):
         """Remove a source. Returns whether a row was actually removed, so
         `DELETE /admin/sources/{id}` can answer 404 rather than claiming to
         have deleted something that never existed. Idempotent."""
+
+
+@dataclass(frozen=True, slots=True)
+class AddedTitle:
+    """One title the household has a copy of, and when that copy arrived.
+
+    Not a `MediaItem`: a title with twenty thousand episode files is *one*
+    row here, so no single item's identity is the honest answer. `added_at`
+    is the newest contributing file's, because a season that landed last
+    night on a show whose pilot has been on disk for two years is a new
+    arrival.
+    """
+
+    title_id: uuid.UUID
+    added_at: AwareDatetime
 
 
 class MediaItemRepository(ABC):
@@ -686,9 +946,104 @@ class MediaItemRepository(ABC):
         """
 
     @abstractmethod
+    async def owned_episode_ids(self, episode_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        """Which of these **episodes** the household has a copy of.
+
+        `owned_title_ids`' twin, and it is a genuinely different question
+        rather than a convenience: that one bounds itself to `episode_id IS
+        NULL` precisely so a series is one row, so asking it about an episode
+        answers about the *series'* own row and would report a missing episode
+        file as owned. 999,827 of the one measured source's 1,126,674 items are
+        episodes, so this is the majority read of the two.
+
+        `NextUpProvider` is what needs it: *"next up" that cannot be played is
+        worse than absent*, and that filter is the provider's rather than
+        `next_up`'s, which answers what comes next and not what is available.
+
+        No availability filter, matching `owned_title_ids` exactly — a copy the
+        nightly sweep retracted is still a copy you have. One statement however
+        many ids are asked about.
+        """
+
+    @abstractmethod
+    async def list_recently_added(
+        self, *, since: AwareDatetime, limit: int = 24
+    ) -> list[AddedTitle]:
+        """Titles whose newest copy arrived on or after `since`, newest first.
+
+        **One row per title, and `episode_id IS NULL` is deliberately not how
+        that is done.** An episode's `MediaItem` carries its series'
+        `title_id`, so a series that just landed is one row per episode file
+        -- 20,000 for the measured pathological series, one card. Three other
+        statements on this port bound that with `episode_id IS NULL`; here
+        the same bound is the wrong one, and its cost is already named on
+        `owned_title_ids`: *"a library that reported episodes but never their
+        series row reads as not-owned for that series."* Recently Added is
+        precisely the surface where a newly added series must appear. So the
+        dedup is over *all* matched rows and the window is the bound instead.
+
+        `added_at` is the **newest** contributing copy's, because a season
+        that landed last night on a two-year-old show is a new arrival.
+
+        **`available` is filtered, and that is the opposite call from
+        `owned_title_ids`**, whose comment argues against an availability
+        predicate because "a copy the nightly sweep retracted is still a copy
+        you have". True of *ownership*, false of *what arrived this week*.
+        Two statements, two answers, and the divergence is deliberate.
+
+        **`since` is the caller's, not the statement's.** `now()` is frozen
+        per transaction, so a statement spelling its own
+        `now() - interval '30 days'` cannot be tested at its boundary -- every
+        row a case inserts shares one instant, and "inside the window" and "at
+        its edge" become the same fact. `clock_timestamp()` would trade that
+        for a nondeterministic test. It is also what lets
+        `RecentlyAddedProvider` own the window as a tunable rather than as a
+        migration. An item with no `added_at` at all is excluded, by
+        three-valued logic rather than by a predicate.
+
+        **No `user_id` and no `source_id`.** Availability is household-wide,
+        so this is the one provider whose output is identical for every member
+        of the household. Stated because every other statement on this port is
+        per-source and the natural instinct is to scope this one too.
+
+        **`added_at` is not immutable, and a reader of the upsert's
+        `COALESCE(excluded.added_at, media_items.added_at)` will assume it
+        is.** That clause refuses to overwrite with **NULL** only. A source
+        that reports a *different* `added_at` -- files genuinely re-copied, or
+        a source migration re-deriving its creation date -- wins, every walk,
+        and moves the whole library into this window at once. The window and
+        the `limit` cap how bad that looks; nothing prevents it. The clause is
+        deliberately unchanged, because it is also what lets a source that
+        initially could not report `added_at` fill it in later.
+        """
+
+    @abstractmethod
     async def count_for_source(self, source_id: uuid.UUID) -> int:
         """How many items this source has, available or not. The sweep's
         denominator, and the CLI's report."""
+
+
+@dataclass(frozen=True, slots=True)
+class RecentWatch:
+    """One title the household finished, with the engagement facts this
+    schema actually has.
+
+    **Not a `WatchState`, and that is structural rather than stylistic.** A
+    watched *episode* is rolled up to its series here, and a `WatchState`
+    carrying a series' `title_id` alongside an episode's `episode_id` is
+    forbidden both by the model validator and by
+    `ck_watch_states_exactly_one_target`. Returning one anyway would mean
+    lying about which row was read.
+
+    `play_count` is here rather than being left for a second call because it
+    is the only engagement signal `watch_states` carries -- there is no
+    rating column, and M7 does not invent one -- and every consumer of
+    `list_recent` wants to weight by it.
+    """
+
+    title_id: uuid.UUID
+    last_played_at: AwareDatetime | None
+    play_count: int
 
 
 class WatchStateRepository(ABC):
@@ -775,6 +1130,161 @@ class WatchStateRepository(ABC):
         unique constraint, and a different branch of `merge_from_source`'s
         SQL. Without it, an implementation whose `COALESCE` is right for
         titles and wrong for episodes has nothing that can tell.
+        """
+
+    @abstractmethod
+    async def list_in_progress(self, user_id: uuid.UUID, *, limit: int = 20) -> list[WatchState]:
+        """One user's in-progress states, most recently played first.
+
+        **"In progress" is `NOT played AND position_seconds > 0`**, and both
+        halves are load-bearing. Without `NOT played`, a title finished last
+        night is the single most recent thing the household did and heads the
+        row. Without `position_seconds > 0`, the answer is the entire
+        unwatched library in physical order -- which is a populated, plausible
+        row that satisfies every `len(cards) > 0` assertion ever written
+        about it.
+
+        **A minimum position is deliberately *not* here.** A title abandoned
+        at three seconds is in progress by this definition and stays there
+        forever, because nothing in PRD 06 or PRD 07 can dismiss a card. The
+        floor belongs to `ContinueWatchingProvider`: it is a product tunable,
+        the percentage spelling needs the nullable `runtime_seconds` (and so
+        evaluates to false for every state whose runtime a source did not
+        report), and Postgres uses a partial index whenever the query's
+        predicate implies the index's -- so a tighter provider predicate over
+        this looser one costs nothing, while a floor baked into an index
+        predicate makes every adjustment a migration.
+
+        **Ordered `last_played_at DESC NULLS LAST, id DESC`.** `NULLS LAST` is
+        the whole correctness content of that clause: `last_played_at` is
+        nullable because a walk's listing frequently cannot determine it
+        (ADR-0014), Postgres's default for `DESC` is NULLS FIRST, and the
+        obvious spelling therefore ranks every state the system knows least
+        about above every state it knows most about. `updated_at` is not a
+        tiebreak here: it is trigger-owned and is the *write* instant, which a
+        nightly walk makes identical across a million rows because `now()` is
+        frozen per transaction.
+
+        **Episode states are returned as themselves, not rolled up to their
+        series.** The card resumes a file. Collapsing to one card per series
+        is the provider's, and is decided once, there.
+        """
+
+    @abstractmethod
+    async def list_recent(self, user_id: uuid.UUID, *, limit: int = 20) -> list[RecentWatch]:
+        """One user's most recently *finished* titles, one row per title.
+
+        Feeds `BecauseYouWatchedProvider`'s seeds and `TasteService`'s
+        centroid. One method rather than two: same predicate, same ordering,
+        same dedup, and only `limit` differs (~3 seeds against ~50 to
+        average).
+
+        **`played`, not "has a `last_played_at`".** A seed naming a film the
+        household abandoned twenty minutes in is a recommendation built on a
+        rejection.
+
+        **Watched episodes are rolled up to their series' `title_id`, and this
+        is not a convenience.** `title_embeddings` and `title_neighbors` are
+        keyed on `titles.id` and an episode has neither, while 999,827 of the
+        one measured source's 1,126,674 items are episodes -- so a title-only
+        implementation returns an empty list for exactly the household PRD
+        06's taste model describes, and both consumers then produce confident
+        output from no input.
+
+        **One row per title.** Ten watched episodes of one series are one
+        seed, or `BecauseYouWatchedProvider` emits ten identical rows and the
+        centroid is one series counted ten times. `last_played_at` and
+        `play_count` come from the most recent contributing state.
+
+        Ordered `last_played_at DESC NULLS LAST`, with the same `NULLS`
+        argument as `list_in_progress`. `limit` is applied after the dedup: a
+        limit pushed inside it keeps whichever titles the dedup's own key
+        ordered first, which is not a recency answer at all.
+        """
+
+    @abstractmethod
+    async def list_rediscoverable(
+        self, user_id: uuid.UUID, *, before: AwareDatetime, limit: int = 24
+    ) -> list[RecentWatch]:
+        """Titles this user finished long ago, most-rewatched first.
+
+        **This is a substitution and it is named as one.** PRD 06 fires
+        `RediscoverProvider` on *"Watched > 2 years ago, **rated highly**"*.
+        There is no rating column on `watch_states`, no `favorite`, and
+        `SourceWatchState` carries neither -- M7 does not invent one, because
+        landing a real rating is a source-port change against a field no
+        client can set yet. What this schema can express instead is split in
+        two, and the split is the whole design:
+
+        - **The filter is `played AND last_played_at < before`.** Both halves
+          are needed: `played` excludes an abandonment, which is a rejection
+          rather than a fondness, and the cutoff is the entire "> 2 years
+          ago".
+        - **The engagement proxy is the *ordering*, never the filter**:
+          `play_count DESC`. A rewatch is a revealed preference and it is the
+          only thing in this table a household writes more than once.
+
+        **`play_count >= 2` as a filter is the tempting version and it is
+        wrong.** `list_needing_history`'s own docstring records that `played
+        AND play_count = 0` is how "history unknown" is spelled, and that
+        Emby's listing reports `PlayCount: 0` for an item played twice -- so
+        that filter returns **nothing** on a freshly-walked deployment and an
+        arbitrary subset on a half-backfilled one. As an *ordering* the same
+        unreliable column degrades gracefully: an un-backfilled household
+        gets a correct set ordered by recency within it, a backfilled one
+        gets rewatches first, and neither is empty for a reason nobody can
+        see.
+
+        **A state that cannot be dated is excluded for free**, because
+        `last_played_at < before` is NULL and therefore not true. That is the
+        exact mirror of `list_in_progress`, where the same nullability does
+        the *wrong* thing for free -- same column, same three-valued logic,
+        opposite outcomes.
+
+        **Title-keyed only, so Rediscover is film-only.** This is a scope
+        decision and not the call `list_recent` refused: a title-only
+        `list_recent` returns an *empty* set for a TV household and the
+        centroid is then computed from nothing, which is a correctness
+        failure that produces confident output. A title-only
+        `list_rediscoverable` returns a correct but film-only row -- and a
+        "rediscover" card for a series is an invitation to re-watch sixty
+        hours.
+        """
+
+    @abstractmethod
+    async def played_title_ids(
+        self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        """Which of these titles this user has already played.
+
+        **The mirror of `MediaItemRepository.owned_title_ids`, and shaped like
+        it for the same reason**: one statement for a whole shelf, bounded by
+        what the caller is holding rather than by the household's history. It
+        exists because three providers need to *subtract* -- a "you love
+        westerns" shelf made of the four westerns already finished, or a "more
+        from this director" shelf made of the films that established the
+        affinity, is circular and has nothing to offer.
+
+        **An episode's played state counts for its series**, through
+        `COALESCE(ws.title_id, e.title_id)`. Trap 7 again, and the direction
+        of the damage is the reverse of `list_recent`'s: this read *excludes*,
+        so a title-only implementation returns too few ids and every series
+        the household is halfway through is offered back as something new.
+        The row is populated, plausible and about things they have seen.
+
+        **`played`, never "has a watch state".** A sync writes a row per item
+        it observed, so "has a state" is the owned library and the shelf built
+        on it is permanently empty. Note this is the same predicate
+        `list_recent` uses and deliberately *not* `list_in_progress`': a
+        title abandoned twenty minutes in is not "already seen", and offering
+        it again is right.
+
+        No `limit`: the answer is bounded by `title_ids`, and a limit would
+        make a partial answer indistinguishable from a full one -- which for
+        a set used to subtract means silently showing a title back.
+
+        An empty `title_ids` answers with an empty set without reading
+        anything.
         """
 
 
@@ -968,6 +1478,83 @@ class EpisodeRepository(ABC):
         """
 
     @abstractmethod
+    async def list_by_ids(self, episode_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, Episode]:
+        """Episodes by their own ids, in one round trip.
+
+        **The read `list_in_progress` leaves its caller needing.** That method
+        returns episode watch states *as themselves* -- deliberately, because
+        the card resumes a file -- and its docstring hands the roll-up to the
+        provider: *"Collapsing to one card per series is the provider's, and is
+        decided once, there."* An episode state carries no `title_id`, so
+        without this there is no way to reach the series a resume belongs to,
+        and `ContinueWatchingProvider` silently drops every episode resume on a
+        library where 999,827 of 1,126,674 items are episodes. Trap 7, arriving
+        through the one M7 read that does not `COALESCE` its way to a title.
+
+        **One statement for the whole page, never one per state.** The
+        alternative in the existing surface is `list_for_title`, which returns
+        the entire tree -- 20,000 rows for the measured pathological series, to
+        find one episode.
+
+        An id with no episode is simply absent, never a key mapped to `None`:
+        a caller drops the card rather than rendering one it cannot open.
+        """
+
+    @abstractmethod
+    async def next_up(
+        self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, Episode]:
+        """The next episode to watch for each of many series, in one round
+        trip.
+
+        **"Next" is the episode immediately after the household's high-water
+        mark** -- the greatest `(season_number, episode_number)` among played
+        episodes of that series -- not the first gap. A skipped episode stays
+        skipped: nothing in PRD 06 or PRD 07 can dismiss a card, so a
+        gap-seeking implementation makes one skipped episode this household's
+        Next Up tonight and every night after.
+
+        **The mark is a position, not an instant.** Never
+        `ORDER BY last_played_at DESC LIMIT 1`: a household that finishes
+        season three and rewatches the pilot is not asking for S01E02, and
+        `last_played_at` is nullable on nearly every walk-sourced row
+        (ADR-0014), which makes a recency-keyed mark arbitrary rather than
+        merely wrong.
+
+        **Absent, not null, in three cases**: nothing played (a series never
+        started has a *first* episode, not a next one -- and "S01E01 of
+        everything unstarted" is the whole unwatched library wearing a
+        personalised row's title); the mark is the finale (the series is
+        finished; **never wrap to S01E01**); and no episodes at all. A key
+        missing from the mapping means "nothing to say", which is the answer
+        PRD 06 asks a provider to give.
+
+        **Season 0 is excluded on both sides.** Specials are out-of-band by
+        construction, and `(0, n) < (1, 1)` is an artefact of the numbering
+        rather than a claim about viewing order -- so one watched special
+        must not make this say "continue" about a show nobody has started,
+        and a special must never be offered as the next chapter.
+
+        **Reads watch state keyed on `episode_id` only.** A series' own
+        `title_id`-keyed row is the whole show, and a source can set it
+        (Emby's "mark series watched"); an implementation that reads it has
+        no `(season, episode)` to position from and answers from whatever the
+        join degenerates to.
+
+        **Only `played` states move the mark.** A walk writes a row for every
+        item it sees, so on a full library nearly every episode has a
+        `watch_states` row and almost none are played -- without the
+        predicate the mark is the finale for every series at once and this
+        method goes silent across the whole library.
+
+        **One statement for every series asked about.** A per-series loop
+        returns the identical mapping and is the N+1 this method exists to
+        prevent -- the same argument `resolve_episodes` makes, and the reason
+        `NextUpProvider` must never reach for `list_for_title`, which returns
+        the whole tree (20,000 rows for the measured pathological series).
+        """
+
+    @abstractmethod
     async def list_for_title(self, title_id: uuid.UUID) -> tuple[list[Season], list[Episode]]:
         """Everything under one series, seasons then episodes, each ordered by
         its own numbering. Used by enrichment to decide what changed, and by
@@ -1025,6 +1612,35 @@ class SyncRunRepository(ABC):
         `sync-status`."""
 
 
+@dataclass(frozen=True, slots=True)
+class CachedPayload:
+    """One `raw_payloads` row, as a walk sees it.
+
+    Carries `kind` and `reference` rather than a `title_id`, because the table
+    has neither a `title_id` column nor a foreign key to `titles` (ADR-0016:
+    the cache is keyed `(provider, kind, reference)` and nothing else). The
+    caller resolves back to a title through that pair, and **the pair is the
+    whole key** -- ADR-0011: `tmdb_id` is unique per kind, and 26,968 measured
+    TMDb ids are live in both the movie and the series id space.
+
+    `id` is here so the caller can pass it back as `after`. It is deliberately
+    not a `title_id` in disguise.
+
+    Declared immediately above the port that returns it rather than beside
+    `NeighborSeed`/`StoredEmbedding`, because this module has no
+    `from __future__ import annotations` -- an abstract method's return
+    annotation is evaluated when the class body runs, so the name has to
+    already exist. That is also where `TitleEmbeddingUpsert` sits relative to
+    `TitleEmbeddingRepository`.
+    """
+
+    id: uuid.UUID
+    kind: str
+    reference: str
+    payload: dict[str, Any]
+    fetched_at: AwareDatetime
+
+
 class RawPayloadStore(ABC):
     """The provider response cache (PRD 02's `raw_payloads`).
 
@@ -1073,6 +1689,45 @@ class RawPayloadStore(ABC):
         """The compliance query: the oldest cache entry for a provider, which
         is what PRD 10's dashboard-5 panel plots against TMDb's 6-month
         ceiling. `None` when the provider has no entries at all."""
+
+    @abstractmethod
+    async def count(self, provider: str) -> int:
+        """How many payloads this provider has cached.
+
+        The denominator of `usher derive`'s coverage report, and it is printed
+        as a **count beside another count** rather than as a percentage: PRD
+        08 requires every command to work against an empty database, and a
+        derived-coverage percentage is `0/0` on exactly that deployment.
+        """
+
+    @abstractmethod
+    async def iterate(
+        self, provider: str, *, limit: int = 500, after: uuid.UUID | None = None
+    ) -> list[CachedPayload]:
+        """One page of this provider's cached payloads, oldest id first.
+
+        **A keyset cursor, not an offset**, for the reason `list_stale`'s is
+        one: `OFFSET` pagination is measured in this repository at 43.7 ms at
+        offset 0 and 388.9 ms at offset 1,126,574 -- linear per page, quadratic
+        to drain -- and a derivation's entire job is to walk a population to
+        exhaustion. Pass the last `id` of a page as `after` to get the next
+        one; an empty list means drained.
+
+        Ordered by `id`, which is the primary key and therefore a **total**
+        order. `fetched_at` is not: the INSERT arm's `server_default` is
+        `now()` = `transaction_timestamp()`, so every row a bootstrap
+        transaction writes shares one instant, and a page boundary inside that
+        group drops the rest of it with nothing to say so.
+
+        **Scoped by `provider`, and deliberately not by `kind`.** The
+        derivation needs both TMDb id spaces in one walk, and
+        `CachedPayload.kind` is what keeps them apart -- a signature that took
+        `kind` would invite two walks and a caller that forgot the second. It
+        is not scoped by freshness either: a payload outside `EnrichService`'s
+        window is still a payload, and refusing to derive from it would mean a
+        re-derivation that silently covered less of the catalog than the last
+        one.
+        """
 
 
 @dataclass(frozen=True, slots=True)
@@ -1125,11 +1780,29 @@ class StoredEmbedding:
 class NeighborSeed:
     """One embedded title, carrying the tag sets the blend needs — so a page
     read answers the seed half in one statement rather than ids here plus a
-    second `list_by_ids` pulling 31 columns per row for two of them."""
+    second `list_by_ids` pulling 31 columns per row for two of them.
+
+    **`has_genome` is not read by the blend**, and that is deliberate rather
+    than an oversight: the genome cosine is a property of a *pair*, so it
+    rides on `NeighborCandidate`. This flag is read by the **rebuild**, which
+    counts it, so "what fraction of the seeds this rebuild processed carried a
+    genome vector" is a number the rebuild *reports* rather than a second
+    query somebody has to think to run.
+
+    That is the coverage figure PRD 05 has promised since before an importer
+    existed and has never had a denominator for — arriving from the code path
+    that consumes the vectors.
+
+    **Required rather than defaulted**, following `CreditRepository.
+    replace_for_titles`' `credit_names`: a default of `False` would let a port
+    implementation that never learned about the genome report 0% coverage on a
+    fully covered catalog, and report it silently.
+    """
 
     title_id: uuid.UUID
     genres: tuple[str, ...]
     keywords: tuple[str, ...]
+    has_genome: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1146,12 +1819,30 @@ class NeighborCandidate:
     rather than this port's: `title_neighbors.score` is `CHECK (score >= 0 AND
     score <= 1)`, so the clamp has to hold for every implementation of this
     port rather than for the one that remembered.
+
+    **`tags` is the MovieLens tag-genome cosine, and it is `None` when *either*
+    side has no `genome_scores` row.** A cosine here too, never a distance, for
+    the reason above.
+
+    **Not `0.0` — [ADR-0014](../../../docs/prd/decisions/0014-absence-is-not-zero.md),
+    and this is the site where `0.0` is not merely uninformative but
+    *unreachable by real data*.** Every component of a genome vector is
+    positive, so the true cosine of any real pair is well above zero: Group F
+    measured the floor at **0.2556** over all 268,157,000 ordered off-diagonal
+    pairs, against a mean of 0.6101. `0.0` would therefore be the single most
+    confident *wrong* statement in the blend — it claims two films share no
+    tags, which no pair can truthfully say — and its effect is structural
+    rather than marginal: a genome-bearing title's neighbours would be
+    reordered to put every other genome-bearing title above every un-genomed
+    one, which at the measured coverage is a small clique pinned to the top of
+    the overwhelming majority of lists.
     """
 
     title_id: uuid.UUID
     cosine: float
     genres: tuple[str, ...]
     keywords: tuple[str, ...]
+    tags: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1317,6 +2008,28 @@ class TitleEmbeddingRepository(ABC):
         """
 
     @abstractmethod
+    async def list_for_titles(
+        self, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, tuple[float, ...]]:
+        """The stored vectors for a named set of titles, in one round trip.
+
+        `TasteService` averages ~50 named titles, and `get()` in a loop is 50
+        round trips to build one centroid — the same N+1 `nearest_for` takes a
+        page of seeds to avoid, and the one `EpisodeRepository.next_up` exists
+        to prevent one port over.
+
+        **A title with no row, and a title whose row carries a NULL vector, are
+        both simply absent from the mapping** — never a key mapped to `None`,
+        and never a key mapped to a zero vector. ADR-0014: the caller drops the
+        title from its mean rather than averaging in an origin that drags the
+        result toward nothing and shortens every subsequent cosine by a factor
+        nobody chose. Collapsing the two absences is deliberate: a consumer
+        that drops the term either way does not need to know which, and one
+        that branches on it is reading the backfill's progress out of a data
+        row.
+        """
+
+    @abstractmethod
     async def count_without_embedding(self) -> int:
         """Rows carrying a `NULL` embedding — the written refusals.
 
@@ -1336,14 +2049,20 @@ class TitleEmbeddingRepository(ABC):
 class TitleNeighborRepository(ABC):
     """`title_neighbors` — the precomputed similarity artefact (PRD 05).
 
-    **The one derived artefact in M6 whose freshness is not a per-row
-    predicate**, and the port says so rather than implying otherwise. A row is
-    stale when either title's embedding moved — which is a predicate, and
-    which subsumes the metadata case for free because `compose_document`
-    includes genres and keywords. But a row is *also* stale when some third
-    title's embedding moved into its neighbourhood, and that is not decidable
-    without recomputing the row. So the artefact carries an age, not a
-    fingerprint, and it is rebuilt rather than repaired.
+    **Two causes of staleness, and as of M7 exactly one of them is a query.**
+    A row is stale when the *blend's own meaning* changed — different weights,
+    a different stored count, a different candidate pool — and that is now
+    `blend_fingerprint`, written by `replace` and counted by `count_stale`.
+    A row is *also* stale when some third title's embedding moved into its
+    neighbourhood, and that is not decidable without recomputing the row: it is
+    a fact about the whole other table rather than about this one.
+
+    So the artefact carries **both** an age and a fingerprint, and neither
+    subsumes the other. `computed_at()` is the weaker, whole-artefact signal
+    that covers the undecidable half; `count_stale` is the exact one that
+    covers the half M7 made urgent by changing what a score means. M6 shipped
+    only the first and wrote the gap down honestly; M7 closes what it can and
+    says which.
 
     Same session ownership as every other repository here: methods flush and
     return counts, and never commit.
@@ -1351,9 +2070,21 @@ class TitleNeighborRepository(ABC):
 
     @abstractmethod
     async def replace(
-        self, seed_ids: Sequence[uuid.UUID], neighbors: Sequence[ScoredNeighbor]
+        self,
+        seed_ids: Sequence[uuid.UUID],
+        neighbors: Sequence[ScoredNeighbor],
+        *,
+        blend_fingerprint: str,
     ) -> int:
         """Replace every stored row for `seed_ids` with `neighbors`.
+
+        **`blend_fingerprint` is required and keyword-only**, following
+        `CreditRepository.replace_for_titles`' `credit_names`: it is what makes
+        "write the rows now and stamp them in a second statement afterwards"
+        unspellable rather than merely discouraged. A page that committed its
+        rows and then failed before the stamp would leave rows claiming a blend
+        that did not produce them, which is the exact state the column exists
+        to detect, minted by the thing detecting it.
 
         **`seed_ids` is passed separately from the rows and that is not
         redundancy.** A seed whose neighbours all disappeared — the other
@@ -1389,4 +2120,709 @@ class TitleNeighborRepository(ABC):
         `None` means *never computed*, which is a different fact from "this
         title has no neighbours" and is what stops `usher similar` sending an
         operator to look at the wrong thing.
+        """
+
+    @abstractmethod
+    async def count_stale(
+        self, *, blend_fingerprint: str, title_id: uuid.UUID | None = None
+    ) -> int:
+        """Stored rows whose `blend_fingerprint` is not the one passed in.
+
+        **One predicate, three consumers**, which is ADR-0020's whole argument
+        expressed as a method rather than restated three times:
+        `usher.similarity.neighbors.stale` reads it whole-table, `usher similar
+        <title id>` reads it scoped to one seed, and `usher similar --rebuild`
+        is what drives it back to zero.
+
+        `title_id=None` is the whole table. A scoped call is not a convenience
+        twin — it is what lets a per-title command answer "these neighbours
+        were computed under a different blend" without minting a second
+        definition of *different*, which is how two consumers of one fact drift
+        apart.
+
+        **This answers the meaning-changed half of staleness and not the
+        other-title-was-embedded half**, and the port says so rather than
+        letting a zero here read as "the artefact is current". A row can carry
+        the running fingerprint and still be wrong, because some third title
+        was embedded into its neighbourhood since — that is undecidable per row
+        and is why `computed_at()` still exists beside this.
+        """
+
+
+@dataclass(frozen=True, slots=True)
+class StoredTaste:
+    """One user's cached centroid, and the evidence for its currency.
+
+    Not `Centroid` (`usher.domain.taste`), and the divergence is the whole
+    point of having both. `Centroid` refuses to exist over nothing —
+    `vector` is `min_length=1` and `title_count` is `ge=1` — because a vector
+    averaged over no titles is a point equidistant from everything, which is a
+    row that is noise wearing a reason. This is the *storage* shape, and it
+    must be able to hold exactly the state `Centroid` refuses: a **written
+    refusal**, `centroid=None` with a `title_count` below the minimum.
+
+    That distinction is load-bearing rather than tidy. `title_embeddings`
+    writes a NULL vector for a document its composer refused, so the row stops
+    matching the stale predicate and is re-claimed *once* when its input moves.
+    Without the equivalent here, a four-title household is recomputed on every
+    read of every home screen forever, and the fifth title does not re-claim
+    the centroid once — it re-claims it always.
+
+    **`source_watermark` is nullable, against the plan's `NOT NULL`, and the
+    reason is the household whose history is empty.** It holds
+    `max(watch_states.updated_at)` as of computation, and that aggregate is
+    `NULL` over an empty history. With a `NOT NULL` column there is no value to
+    write, so the refusal for a household that has watched nothing cannot be
+    stored at all — and `stored IS DISTINCT FROM NULL` is then true forever, so
+    that household is the *one* recomputed on every read. Nullable makes
+    `NULL IS DISTINCT FROM NULL` false, the refusal readable, and the first
+    watch state that lands the thing that re-claims it.
+    """
+
+    user_id: uuid.UUID
+    centroid: tuple[float, ...] | None
+    model_name: str
+    source_watermark: AwareDatetime | None
+    title_count: int
+    computed_at: AwareDatetime
+
+
+@dataclass(frozen=True, slots=True)
+class LibraryGenres:
+    """The genre baseline: how the household's **owned** shelf is composed.
+
+    Task 23's denominator, and it is a taste question rather than a catalog
+    one, which is why it lives on this port rather than on `TitleRepository`.
+
+    **`tagged_titles` is carried alongside `counts` rather than being derivable
+    from it, and it must come from the same read.** `sum(counts.values())`
+    over-counts: a title carries two to four genres, so the shares deliberately
+    do not partition. And two separate statements could disagree -- a title
+    landing between them makes `share_library` exceed 1 for a genre nobody
+    added, which reads as a plausible number rather than as a fault.
+
+    **An untagged title is in neither the counts nor the total.** `titles.
+    genres` is `ARRAY(Text) NOT NULL DEFAULT '{}'` and the skeleton tier is
+    largely empty, so leaving untagged titles in the denominator would dilute
+    every `share_library` by the tagged fraction and inflate every lift
+    uniformly -- which on a mostly-skeleton catalog makes the minimum-lift
+    floor fire for everything at once. Excluded from both sides, an untagged
+    title changes no answer at all.
+    """
+
+    counts: Mapping[str, int]
+    tagged_titles: int
+
+
+class TasteRepository(ABC):
+    """`user_taste` — the per-user centroid, invalidated by fingerprint.
+
+    **PRD 06 says the centroid is *"invalidated on watch-state change"* and
+    that is trap 5.** The nightly walk merges up to 1,126,789 watch states, so
+    one invalidation per merged row is a million invalidations a night for at
+    most one useful recomputation per user — the exact fan-out PRD 07 refuses
+    for `watchstate.updated`. Nothing publishes anything here. The merge path
+    writes nothing to `user_taste` and does not know it exists.
+
+    Instead this is ADR-0020's scheme applied per user
+    (`docs/prd/decisions/0020-derived-state-carries-its-fingerprint.md`):
+    the stored row carries the `max(updated_at)` of
+    the watch states it was computed from, and a demand read recomputes when
+    the household's current max differs. Same shape as `title_embeddings`'
+    `source_fingerprint`, on a different key.
+
+    Same session ownership as every other repository here: methods flush and
+    return, and never commit.
+    """
+
+    @abstractmethod
+    async def library_genre_counts(self) -> LibraryGenres:
+        """How the **owned** library is composed by genre.
+
+        Task 23's baseline, and the choice of population is the decision.
+        *Not* the household's own watched distribution -- normalising by the
+        quantity being measured makes every lift exactly 1.0 by construction,
+        so the provider would propose nothing on every household forever.
+        *Not* the whole 1.27M-row catalog either: a household cannot watch what
+        it does not own, so a household that owns nothing but horror and
+        watches nothing but horror has emitted **zero** bits of taste
+        information -- the library made that choice. Against a global baseline
+        it reads as an overwhelming horror affinity and the row says *"you
+        watch a lot more Horror than your library would suggest"* to somebody
+        whose library suggested exactly that. Word for word false.
+
+        The owned library is the household's actual **choice set**, which makes
+        affinity *lift over opportunity*.
+
+        "Owned" is `owned_title_ids`' definition and not
+        `list_recently_added`'s: a title's own row (`episode_id IS NULL`),
+        with **no** availability filter, because a copy the nightly sweep
+        retracted is still a copy you have. The two statements diverge
+        deliberately and each says so.
+
+        Household-wide, so no `user_id`: availability is not per-user. It is
+        also not per-source -- a title owned twice is owned once.
+        """
+
+    @abstractmethod
+    async def get(self, user_id: uuid.UUID, *, model_name: str) -> StoredTaste | None:
+        """The cached row **only if it is not stale**, else `None`.
+
+        The staleness check lives here rather than in the service, which is the
+        opposite of where meaning usually goes in this codebase, and it is
+        deliberate: the predicate is three clauses over two tables including a
+        `max()` subquery, so a service-side check would be `get()` plus
+        `watermark()` plus a comparison — two round trips and a race between
+        them. `None` means "recompute", and it means it for all three reasons
+        at once: no row, a different embedder, or a moved watermark.
+
+        **A returned row may carry `centroid=None`.** That is a current,
+        readable *refusal* and not an absence; a caller that treats it as
+        `None` has reintroduced the recompute-forever bug the column exists to
+        prevent.
+        """
+
+    @abstractmethod
+    async def put(self, taste: StoredTaste) -> None:
+        """Upsert one user's row, refusals included.
+
+        Sets `computed_at` from the value rather than from a server default, so
+        the artefact's age is the service's injected clock and a test does not
+        have to wait for one.
+        """
+
+    @abstractmethod
+    async def watermark(self, user_id: uuid.UUID) -> AwareDatetime | None:
+        """`max(watch_states.updated_at)` for this user; `None` on an empty
+        history.
+
+        **Read *before* the window, never after.** A merge landing between the
+        window read and the write would otherwise be stamped as included when
+        it was not, and the stored centroid would then be stale while carrying
+        a watermark claiming freshness — self-certifying staleness, which no
+        later read can detect. Reading it first makes the failure the harmless
+        direction: one redundant recomputation.
+
+        **`updated_at`, not `last_played_at`.** `updated_at` is what the merge
+        touches and it carries both an `onupdate` and the table's trigger, so
+        it is monotone and always moves. A re-merge that raises `play_count`
+        without moving `last_played_at` is exactly the `completed` ->
+        `rewatched` promotion the centroid's weights care about, and a
+        `last_played_at` watermark would miss every rewatch.
+        """
+
+
+@dataclass(frozen=True, slots=True)
+class CreditedPerson:
+    """One credit and the person it names, in one row rather than two reads.
+
+    A bare `Credit` carries a `person_id` and nothing renderable, so a port
+    returning them hands every caller the same second query. That is the N+1
+    this milestone's front matter names, relocated into the port rather than
+    removed -- and a port that *offers* an N+1 is worse than one a caller
+    invents, because it looks sanctioned.
+    """
+
+    person_id: uuid.UUID
+    name: str
+    kind: CreditKind
+    character: str | None
+    job: str | None
+    department: str | None
+    billing_order: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class PersonCredit:
+    """One of a person's credits, with the title it is on.
+
+    The mirror of `CreditedPerson`: the person is the thing already known, so
+    what travels is the title id. Hydration into a `RowCard` is
+    `TitleRepository`'s, which is what keeps this port from growing a second
+    opinion about what a title is.
+    """
+
+    title_id: uuid.UUID
+    kind: CreditKind
+    character: str | None
+    job: str | None
+    billing_order: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecurringPerson:
+    """A person who recurs across the titles one user has actually played.
+
+    `watched_title_count` is a count of **distinct titles**, never of credits.
+    A person credited twice on one film -- two jobs, or two characters, both
+    of which TMDb genuinely emits -- would otherwise read as two titles, and a
+    one-film person would out-rank a four-film one. The row this feeds says
+    "you keep watching this person"; counting credits makes it say something
+    else with total confidence, which is exactly the failure this milestone
+    opens by describing.
+
+    `kind` and `job` travel because the row's own text needs them: "More from
+    <name>" is a worse row than "Directed by <name>", and a provider holding
+    only a name cannot tell the two apart.
+    """
+
+    person_id: uuid.UUID
+    name: str
+    kind: CreditKind
+    job: str | None
+    watched_title_count: int
+    # **The most recent watch that credits them, and it is a tiebreak the row
+    # cannot compute for itself.** Two directors at four titles each, one from
+    # last month and one from 2019, is the front matter's opening failure with
+    # a person's name on it -- a beautifully constructed row about a film
+    # watched three years ago -- and `watched_title_count` alone cannot
+    # separate them, so "whatever the aggregate returned" would decide.
+    #
+    # Nullable, because `watch_states.last_played_at` is (ADR-0014: a walk's
+    # listing cannot determine it), and a person known only through undatable
+    # states is a real state rather than a bug. Readers sort it last.
+    last_watched_at: AwareDatetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedCollection:
+    """A franchise and the household's coverage of it.
+
+    **Lists, not counts, and the two counts are `len()`.** PRD 06's franchise
+    signal is "you own 2 of 4", which is two numbers *and* the cards to
+    render. Storing `owned_count` beside `owned_title_ids` would permit the
+    two to disagree, which is a state no consumer could interpret -- the same
+    argument `title_neighbors`' primary key makes about `(title_id, rank)`.
+
+    `title_ids` is every member in release order, `owned_title_ids` the subset
+    with an available media item. The difference is the completeness signal,
+    and it is what makes a franchise row say something a genre row cannot.
+    """
+
+    collection_id: uuid.UUID
+    name: str
+    title_ids: tuple[uuid.UUID, ...]
+    owned_title_ids: frozenset[uuid.UUID]
+
+
+class PersonRepository(ABC):
+    """Persistence for canonical people (PRD 02's `Person`).
+
+    PRD 02: *"People are canonical entities, so 'more from this director' is a
+    join rather than a string match."* Identity is Usher's own UUIDv7;
+    `tmdb_id` is a nullable indexed attribute and never identity (ADR-0003),
+    which is what makes **two directors who share a name two rows**. An
+    implementation that dedupes on `name` is the first wrong implementation
+    this port's contract suite exists to kill.
+
+    Same session ownership as every other repository here: methods flush so
+    conflicts surface immediately, none commits.
+
+    **No `get(person_id)`.** Nothing in M7 reads one person by id --
+    `GET /people/{id}` is M9's (PRD 07's endpoint table, boundary call 6) --
+    and the only thing a row needs is a name, which `RecurringPerson`
+    carries. `SearchIndex`' settled argument applies unchanged: *"A port
+    method whose only test is its own test is a liability, and the failure
+    mode of a rare path is that it has rotted by the time somebody needs
+    it."*
+    """
+
+    @abstractmethod
+    async def upsert_many(self, people: Sequence[Person]) -> BulkWriteResult:
+        """Insert or update, keyed on `tmdb_id`.
+
+        **Keyed on `tmdb_id`, not on `Person.id`.** The derivation mints a
+        fresh UUIDv7 per sighting exactly as ingest does for seasons, so an
+        upsert keyed on the id inserts a duplicate row per pass and the
+        catalog grows a copy of every actor every time `usher derive` runs.
+
+        **Never overwrites a non-null field with a null one.** This is not
+        the defensive version of the `COALESCE` rule -- it is required, and
+        the payload says why: a `created_by[]` entry carries no
+        `known_for_department` while a `credits.cast[]` entry does, so the
+        same person arrives with it and without it *inside one derivation
+        pass*. An unconditional assignment blanks an actor's department the
+        moment they also created a series, silently, on a field
+        `PeopleProvider` reads.
+
+        A batch may contain the same `tmdb_id` many times -- one derivation
+        pass spans many titles and a working actor is on several of them -- so
+        an implementation deduplicates rather than assuming. The last such row
+        wins.
+
+        A person with a `None` `tmdb_id` is inserted, never merged: the
+        uniqueness index is partial and NULL never collides with NULL. Two
+        such people are two rows, which is the only answer available when
+        there is no identity to compare.
+        """
+
+    @abstractmethod
+    async def resolve_tmdb_ids(self, tmdb_ids: Sequence[int]) -> dict[int, uuid.UUID]:
+        """`tmdb_id` -> person id, in one round trip.
+
+        Exists for `EpisodeRepository.resolve_seasons`' reason, restated
+        because it is the same defect: `upsert_many` reports counts rather
+        than ids, and it cannot report the caller's -- the derivation mints a
+        fresh UUIDv7 per sighting and a person the catalog already holds keeps
+        the id it was inserted with. So the id a `Credit.person_id` must carry
+        is knowable only by reading it back.
+
+        **A batch rather than one, and the number is the argument.** A single
+        enriched movie names tens of people; the enriched tier is 2k-10k
+        titles. A lookup per person is the round-trip-per-item shape batching
+        exists to remove.
+
+        Absent keys mean "no such person", never "not asked", so a caller
+        iterates its own probes rather than reading a short answer as a full
+        one.
+        """
+
+    @abstractmethod
+    async def count(self) -> int:
+        """How many people the catalog holds. `usher derive`'s report, and the
+        one number that tells an operator a derivation ran at all."""
+
+    @abstractmethod
+    async def list_recurring_for_user(
+        self, user_id: uuid.UUID, *, min_titles: int = 2, limit: int = 10
+    ) -> list[RecurringPerson]:
+        """People who recur across the titles this user has played, most
+        first.
+
+        **This is the method the N+1 hazard is about.** The obvious shape is
+        "list the user's watch states, then `list_for_title` each one" -- one
+        statement per watched title, against a history the one measured
+        deployment sizes at up to 1,126,789 states. This answers it in one
+        statement instead, and the port exists in this shape so a provider
+        cannot express the other one.
+
+        **`watched_title_count` counts distinct titles, never credits.** A
+        person credited twice on one film reads as two titles otherwise, and a
+        one-film person out-ranks a four-film one -- a row that is populated,
+        ordered, plausible and wrong, which is the failure mode this milestone
+        exists to refuse.
+
+        **Episode watch state counts toward its series**, and an
+        implementation reading only `watch_states.title_id` misses it. 999,827
+        of the one measured source's 1,126,674 items are episodes, so a
+        People row built from `title_id` alone is a row about films on a
+        library that is mostly television. Twelve watched episodes of one
+        series are **one** title in this count, which is the other half of why
+        the count is distinct.
+
+        `min_titles` defaults to 2 because "recurring" is PRD 06's word and
+        one appearance is not a recurrence. `played` is the predicate, not
+        "has a watch state": a row with `played = false, position_seconds = 0`
+        is a state a sync created, not something the user watched.
+
+        Ordered by count descending, then by `last_watched_at` descending
+        with nulls last, then by `person_id` so two reads of one catalog
+        agree -- the `list_for`/`nearest_for` rule with the recency key the
+        row above it needs.
+
+        **`billing_order` is deliberately not here and not filterable.** The
+        grouping is `(person_id, name, kind, job)`, which is what makes a
+        person credited twice on one film one row rather than two, and a
+        billing bound would have to be applied *before* that grouping to mean
+        anything. So "top billed" is not expressible through this port; what
+        is expressible is `kind` and `job`, which is what `PeopleProvider`
+        filters on. `mapping._CAST_LIMIT` already bounds a title's stored cast
+        at 50, so the population is bounded even though the billing rank is
+        not readable. Recorded rather than worked around.
+        """
+
+
+class CreditRepository(ABC):
+    """Persistence for `credits` -- the join that makes "more from this
+    director" a lookup.
+
+    **The write is a replace, not an upsert, and that is the port's central
+    decision.** A title's credit set changes upstream: a name is corrected, a
+    role is removed, a mis-attributed actor is deleted. An upsert can express
+    every one of those except the last, and the last is the one that leaves a
+    permanently wrong row -- so the unit of work is "this title's credits are
+    now exactly these", which only a scoped replace can say.
+
+    Same session ownership as every other repository here: flushes, never
+    commits.
+    """
+
+    @abstractmethod
+    async def replace_for_titles(
+        self,
+        title_ids: Sequence[uuid.UUID],
+        credits: Sequence[Credit],
+        *,
+        credit_names: Mapping[uuid.UUID, Sequence[str]],
+    ) -> int:
+        """Replace every stored credit for `title_ids` with `credits`, and
+        write `titles.credit_names` for the same scope in the same call.
+
+        **`credit_names` is not a second write and may not become one.** It is
+        weight class B's input -- `credits` projected to names and truncated
+        to a ranking constant -- and a stored generated column cannot reach
+        another table, which is the whole reason it exists as a column at all
+        (boundary call 5, measured in migration `fe1d40c8b7a3`). The array and
+        the table are two spellings of one fact: split them across two calls
+        or two transactions and they diverge, and the symptom is a full-text
+        hit on a name `credits` no longer holds. Keyword-only and **without a
+        default**, so a caller cannot forget it.
+
+        **Scoped by `title_ids`, exactly as the delete is.** A title in scope
+        but absent from the mapping has its array emptied rather than left
+        alone -- same argument, same sentence: a title whose credits all
+        disappeared upstream contributes no rows, so a scope derived from the
+        rows leaves its stale names in place forever.
+
+        Order within each sequence is the ranking and is preserved. It is
+        top-billed first, which is what makes the class-B lexemes the ones a
+        viewer would search for.
+
+        **`title_ids` is passed separately from the rows and that is not
+        redundancy** -- `TitleNeighborRepository.replace`'s argument, arriving
+        at a second table for the same reason. A title whose credits all
+        disappeared upstream contributes no rows at all, so an implementation
+        deriving the delete's scope from `credits` deletes nothing for it and
+        leaves its stale credits in place through every future derivation. It
+        is the one row shape a re-derivation cannot repair.
+
+        Returns the number of credit rows written, which is what makes
+        `usher derive`'s report a number rather than a reassurance.
+
+        A `title_id` or `person_id` naming a row that does not exist raises
+        `RepositoryConflict` rather than a raw storage error, and leaves the
+        session usable for the caller's other pending work -- the derivation
+        commits a batch of credits together with its job checkpoint.
+
+        Idempotent by construction: PRD 08's redelivery rule, and the job
+        queue *will* redeliver. Running it twice with the same arguments
+        produces the same rows and the same count.
+
+        A batch carrying the same `tmdb_credit_id` twice keeps one of them;
+        the partial unique index is what makes a *scoping* bug raise instead
+        of doubling a title's cast, and tolerating an in-batch duplicate is
+        what stops a payload that lists a credit twice from failing the whole
+        derivation.
+        """
+
+    @abstractmethod
+    async def list_for_title(
+        self, title_id: uuid.UUID, *, kind: CreditKind | None = None, limit: int = 20
+    ) -> list[CreditedPerson]:
+        """One title's credits, top-billed first, with the person joined in.
+
+        **Ordered by `billing_order`, nulls last, ties broken by
+        `person_id`.** "Top billed" is what PRD 06's People row means and what
+        a client's cast list renders; an implementation that drops
+        `billing_order` returns provider-JSON order, which is *usually* right
+        and is therefore invisible until it is not. That is the front matter's
+        second named wrong implementation for this suite.
+
+        **`kind` filters and may not be ignored.** Asking for cast and
+        receiving crew is the third named wrong implementation, and it has the
+        property that makes this milestone dangerous: the answer is populated,
+        correctly shaped, and about the wrong people. `None` means both, in
+        one ordering.
+
+        Called by `usher derive`'s report, and it is the surface every
+        `replace_for_titles` case asserts through -- a write port with no read
+        can only assert on counts, which cannot tell a correct row from a
+        wrong one. M9's `GET /titles/{id}` cast block is its first
+        client-facing caller.
+        """
+
+    @abstractmethod
+    async def count_titles_with_credits(self) -> int:
+        """How many **distinct titles** hold at least one credit.
+
+        Titles, never credit rows: a report counting rows says "412,000
+        credits" where an operator asked "did my library get derived", and one
+        heavily-credited film moves it by fifty. This is the numerator beside
+        `RawPayloadStore.count`'s denominator, and the two are printed
+        unreduced.
+        """
+
+    @abstractmethod
+    async def list_for_person(self, person_id: uuid.UUID, *, limit: int = 50) -> list[PersonCredit]:
+        """Everything one person is credited on -- `PeopleProvider`'s cards.
+
+        Scoped to the person, and an implementation that forgets the filter
+        returns the whole table in physical order, which satisfies every
+        membership assertion and no positional one. The contract case seeds a
+        second person's credits for exactly that reason.
+
+        One call per person and **not** an N+1: `PeopleProvider` emits 0-2
+        rows (PRD 06's own table), so this is at most two statements. The
+        unbounded question -- *which* people -- is
+        `PersonRepository.list_recurring_for_user`, in one statement, which is
+        where the fan-out actually lived.
+
+        Ordered by `billing_order` nulls last then `title_id`, so a person's
+        headline roles lead and two reads agree.
+        """
+
+
+class CollectionRepository(ABC):
+    """Persistence for TMDb's movie franchise grouping, and the writer
+    `titles.collection_id` has never had.
+
+    **Movies only, and the port says so rather than a provider discovering
+    it.** `belongs_to_collection` is a field of `/movie/{id}` with no
+    `/tv/{id}` counterpart -- verified against the recorded payloads. So on a
+    television-only household PRD 06's ">= 2 owned titles in a collection" is
+    unsatisfiable **by construction** rather than by absence of data, which is
+    the fact an operator debugging a missing row needs, and it is why
+    `attach_titles` filters on kind rather than trusting its caller.
+
+    Flushes, never commits.
+    """
+
+    @abstractmethod
+    async def upsert_many(self, collections: Sequence[Collection]) -> BulkWriteResult:
+        """Insert or update, keyed on `tmdb_id`.
+
+        Keyed on `tmdb_id` rather than `Collection.id` for
+        `PersonRepository.upsert_many`'s reason: the derivation mints a fresh
+        UUIDv7 per sighting, so an id-keyed upsert grows a duplicate franchise
+        per pass. A batch names the same collection once per member film, so
+        deduplication is the common case rather than the odd one.
+        """
+
+    @abstractmethod
+    async def resolve_tmdb_ids(self, tmdb_ids: Sequence[int]) -> dict[int, uuid.UUID]:
+        """`tmdb_id` -> collection id, in one round trip. Absent keys mean "no
+        such collection", never "not asked". Same argument as
+        `PersonRepository.resolve_tmdb_ids`, and it is what
+        `attach_titles`' pairs are built from."""
+
+    @abstractmethod
+    async def attach_titles(self, links: Sequence[tuple[uuid.UUID, uuid.UUID]]) -> int:
+        """Set `titles.collection_id` for each `(title_id, collection_id)`
+        pair. Returns the number of rows actually **changed**.
+
+        **Changed, not touched.** A re-derivation over an unchanged catalog
+        must write zero rows: an implementation that assigns unconditionally
+        produces a dead row version per movie per pass, on a table with a GIN
+        index and a stored generated column. This repository has already
+        recorded that shape once, in a `DO UPDATE` with no `WHERE`, and the
+        returned count is what makes it observable rather than merely avoided.
+
+        **Filters `kind = 'movie'` itself, and does not trust its caller.** A
+        series carrying a movie's `belongs_to_collection` is the fourth wrong
+        implementation this port's contract must kill, and the filter lives
+        here because it is a property of the data source rather than of any
+        one call site. `titles` deliberately carries no
+        `CHECK (collection_id IS NULL OR kind = 'movie')` -- see
+        `db/models/collection.py` for why -- so this is what enforces it.
+
+        A `collection_id` naming no collection raises `RepositoryConflict`. A
+        `title_id` naming no title is simply not updated: an `UPDATE` that
+        matches nothing is not an error, and treating it as one would make a
+        concurrent title merge fail a derivation.
+
+        **Does not clear links outside `links`.** The scope is the pairs
+        given, not "the world". An implementation that NULLs every unnamed
+        title unlinks the whole catalog the first time the derivation runs
+        over one page.
+        """
+
+    @abstractmethod
+    async def count(self) -> int:
+        """How many franchises the catalog holds -- `usher derive`'s report.
+
+        Deliberately **not** scoped to franchises with owned members, which is
+        `list_owned`'s question: this one answers "did the derivation write
+        collections", and narrowing it would make an empty answer ambiguous
+        between "nothing derived" and "nothing owned".
+        """
+
+    @abstractmethod
+    async def list_owned(self, *, min_owned: int = 2, limit: int = 5) -> list[OwnedCollection]:
+        """Franchises the household owns at least `min_owned` of, most-owned
+        first.
+
+        **No `user_id`, deliberately, and PRD 06's wording is what settles
+        it.** ">= 2 owned titles in a collection" is a statement about
+        *ownership*, and ownership is a property of the household's sources --
+        `MediaItem` has no user and never has. A `user_id` parameter here
+        would be a fiction every implementation would have to ignore. The
+        row's personalisation comes from `HomeService`'s scoring, not from
+        this read.
+
+        `min_owned` defaults to 2 because a franchise you own one of is not a
+        franchise row -- it is a single film with a subtitle, and it is the
+        distractor this suite's case seeds.
+
+        **Owned means an available, title-level media item.** `episode_id IS
+        NULL` is part of the predicate rather than implied: `media_items`
+        holds 999,827 episode rows on the one measured deployment, and a join
+        on `title_id` alone reads the wrong population. Collections hold only
+        movies so no episode can match today, which is exactly why the clause
+        has to be written down -- its absence is otherwise indistinguishable
+        from having forgotten it.
+
+        One statement, not one per collection. Ordered by owned count
+        descending, ties broken by `collection_id`.
+        """
+
+
+@dataclass(frozen=True, slots=True)
+class GenomeVectorRow:
+    """One stored genome vector and the release it was computed from."""
+
+    title_id: uuid.UUID
+    relevance: tuple[float, ...]
+    genome_revision: str
+
+
+class GenomeRepository(ABC):
+    """Read access to the stored MovieLens tag-genome vectors.
+
+    **Read-only in M7, and that is a boundary rather than an omission.** The
+    writer is `BulkCatalogRepository.upsert_genome_vectors`: writing this
+    table is a staged, `COPY`-scale, set-based join from `imdb_id` to
+    `titles.id`, which is exactly the path `BulkCatalogRepository`'s docstring
+    reserves. A `put()` here to make test seeding convenient would be a port
+    method nothing in `src/` calls, which this project has already shipped
+    once; the contract suite seeds through an abstract seeder instead.
+
+    **Coverage is 1.82% of movies and 1.29% of all titles**, so "this title
+    has no vector" is the common case rather than the edge, and every method
+    below is written for that.
+    """
+
+    @abstractmethod
+    async def get(self, title_id: uuid.UUID) -> GenomeVectorRow | None:
+        """The stored vector, or `None` when this title has none.
+
+        **`None`, never a zero vector.** ADR-0014 applied to a 1,128-lane
+        vector -- the 20th site in `src/`, counted rather than asserted. A
+        zero vector is not "no information": it is a specific vector that
+        sits at cosine 0.0 from every other vector, so a title with no genome
+        row would score as *maximally dissimilar* from everything, which is
+        an assertion the data never made, and every gauge would read healthy
+        while it happened. At 1.29% coverage that would be 98.7% of the
+        catalog.
+        """
+
+    @abstractmethod
+    async def get_pair(
+        self, left: uuid.UUID, right: uuid.UUID
+    ) -> tuple[GenomeVectorRow, GenomeVectorRow] | None:
+        """Both vectors, or `None` if either is missing **or if the two were
+        computed from different releases**.
+
+        The second half is what `genome_revision` exists for: a vector is
+        only comparable to another built from the same 1,128 tags in the same
+        order, and two vectors from different releases have the same type,
+        the same width and nothing else to tell them apart. A mixed table
+        then yields cosines that are wrong and plausible, which is the
+        failure this milestone opens by naming. A mixed table is also a
+        countable condition an operator can see -- `SELECT genome_revision,
+        count(*) FROM genome_scores GROUP BY 1` -- with a re-import as the
+        fix.
+
+        One call rather than two `get`s because this is the access pattern:
+        a similarity blend scores a candidate *pair* it already holds. It is
+        also why there is no HNSW index -- see `GenomeScoreRow`.
         """

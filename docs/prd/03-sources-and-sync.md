@@ -429,8 +429,11 @@ Target: under 5 seconds from open to enriched for a single title.
 
 ## The ingest pipeline
 
-Four idempotent, resumable stages. Any stage can be re-run without duplicating
-work.
+Five idempotent, resumable stages. Any stage can be re-run without duplicating
+work. **It was four until M7 added the fifth** — derivation — and the fifth is
+unlike the other four in one way worth stating at the top: it makes **no
+network request at all**, because everything it needs is already in
+`raw_payloads`.
 
 ### 1. Ingest
 
@@ -643,8 +646,9 @@ rows; nothing above the adapter reads a TMDb key.
 
 **M4 populates `Title`, `Season` and `Episode`, and caches the response
 verbatim.** `Person`, `Credit`, `Collection` and `Image` are populated by the
-milestone that first *reads* them — `Person`/`Credit` and `Collection` by M7,
-`Image` by M9 — each re-derived from the cached payload in `raw_payloads`
+milestone that first *reads* them — **`Person`/`Credit` and `Collection`
+shipped in M7 as stage 5 below**, `Image` is M9's — each re-derived from the
+cached payload in `raw_payloads`
 with **no second network call**, which is what
 [02](02-data-model.md)'s cache is for
 ([ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)). So
@@ -743,12 +747,17 @@ wording.
 **What this stage deliberately does *not* do**, each with its reason, because
 a stage described only by what it does reads as one that does everything:
 
-- **It does not fill weight class B.** No `Person`/`Credit` table exists
-  anywhere in `src/`, and the only place credits physically exist is
-  `raw_payloads.payload` — a *provider's* JSON shape, which has no business in
-  `services/`. The class is reserved and empty, and because the document is a
-  generated column, filling it when M7 lands `Credit` is a migration rather
-  than a rewrite. Boundary call 2.
+- **It did not fill weight class B, and M7 did.** In M6 no `Person`/`Credit`
+  table existed anywhere in `src/`, the only place credits physically existed
+  was `raw_payloads.payload` — a *provider's* JSON shape, which has no business
+  in `services/` — so the class shipped reserved and empty. Boundary call 2.
+  **M7 filled it from stage 5's output**, and the sentence M6 wrote about the
+  cost ("a migration rather than a rewrite") was true of the search *path* and
+  optimistic about everything else: a generated column cannot reach another
+  table at all, so class B is a `setweight` over a denormalised
+  `titles.credit_names`, and changing the expression forces a full column
+  rewrite and re-embeds the whole enriched tier
+  ([05](05-search-and-similarity.md)).
 - **It does not rebuild the search document.** That would be the obvious
   symmetry and it is wrong: it makes the cheap, always-correct half depend on
   the expensive, fallible half, so a parked embedding job would *also* mean a
@@ -766,6 +775,57 @@ a stage described only by what it does reads as one that does everything:
   and then matched `played AND play_count = 0` permanently — which is why it
   is worth a paragraph in the PRD: it is a *class* of bug this pipeline keeps
   producing.
+
+### 5. Derive — people, credits and collections, with no second network call
+
+✅ **Shipped in M7**, and it is the stage this section previously described
+only as a promise: *"`Person`, `Credit` and `Collection` are populated by the
+milestone that first reads them"* named no mechanism, no job kind and no
+command. All three now come out of `raw_payloads` — `DeriveService`,
+`JobKind.DERIVE` and its handler, and `usher derive` on the command line.
+
+**No second network call**, which is [ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)'s
+whole point arriving three milestones after the cache was built, and M4's
+boundary call 2 paying off: the payloads the enrichment crawl already fetched
+carry `credits`, `created_by` and `belongs_to_collection`, so re-deriving is a
+read of a local table. A household that enriched its library last year can
+derive today, offline.
+
+**The join back is the trap, and it is a data-integrity one rather than a
+performance one.** `raw_payloads` has no `title_id` — it is keyed by the
+provider reference that fetched it — so the join is
+`(provider='tmdb', kind=title.kind.value, reference=str(title.tmdb_id))`, and
+**`tmdb_id` is unique per kind rather than globally**
+([ADR-0011](decisions/0011-tmdb-id-is-namespaced-by-kind.md)): 26,968 ids are
+live in both spaces, so a derivation keyed on the integer alone attaches a
+series' cast to a film, silently, on ids that are all real. The `kind` in that
+tuple is the whole of the guard.
+
+**It walks the cache with a keyset cursor on the port, not with a `SELECT` in
+a service.** `RawPayloadStore.iterate` is a port method with a fake and a
+contract case, because the alternative — a service reaching past the port for
+one paged read — is the layering violation contract three forbids, and because
+the cache is the one table here whose size is the enriched tier rather than a
+batch.
+
+**Two forms, and the bare one is read-only.** `usher derive` reports cached
+payloads, titles carrying credits, people and collections; `usher derive
+--backfill` re-derives inline rather than enqueueing, because a derivation is
+a local read and a queue in front of it buys latency and a second failure
+mode. It also maintains `titles.credit_names`, weight class B's denormalised
+input, in the same call and the same transaction that writes `credits` — one
+writer, so the two
+cannot disagree ([05](05-search-and-similarity.md)).
+
+⏳ **`alternative_titles` is not derived, because it is not in the cache**, and
+this is named here rather than left implied by the deferral it blocks.
+It appears in neither `append_to_response` list above, so aliases are not in
+`raw_payloads` at all — landing them changes the crawl's *request shape* and
+re-fetches the whole enriched tier, i.e. it is a metadata-provider change
+wearing a search table's name. It is the blocker on
+[05](05-search-and-similarity.md)'s `title_search_names`, and it is
+**unassigned**: M9 owns the people half of that table and nothing owns this
+one.
 
 ## Watch state
 

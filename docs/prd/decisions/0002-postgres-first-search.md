@@ -289,6 +289,21 @@ Three things follow, and two of them contradict what this project assumed.
   this run**, pinned by
   `tests/integration/test_adapters_search_postgres.py::test_vote_count_orders_the_box_when_every_popularity_is_null`.
 
+  **Re-measured 2026-08-05 (M7 Task 36), and both the finding and its scope
+  are now sharper.** "NULL on all 1,271,138 rows" was true of the gate's
+  **`--phase imdb`** catalog; `link_crosswalk` writes `popularity` from
+  `tmdb_ids`, so a `--phase all` catalog carries it on **291,584 of 1,271,570
+  titles (22.9%), of which exactly 3 are 0.0** — real values, not filler. The
+  +4.2/+8.3 win above was therefore measured where popularity was inert. On
+  the populated catalog popularity re-contests the ordering and costs **1.3
+  points overall (83.4 → 82.1)**, all out-ranked misses — within Task 36's
+  2.0-point regression bar, so the ordering was **kept unchanged** and the
+  "partially populated catalog is worse than either extreme" worry is refuted.
+  Dropping popularity (vote_count as the primary key) recovers all 1.3 points
+  and does not hurt the all-NULL arm, but its enriched-tier behaviour was
+  unmeasurable on a skeleton catalog and is deferred to M9; `NULLIF(popularity,
+  0)` recovers nothing, since only 3 zeros exist.
+
 ### GIN against GiST, which this ADR left ⏳ and which is now decided
 
 **Neither wins outright, they trade, and the two must not both exist.**

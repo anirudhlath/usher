@@ -7,8 +7,8 @@ Three layers, split by what changes and when:
 | Layer | Holds | Changes |
 |---|---|---|
 | **Environment** | `DATABASE_URL`, port, log level, embedding model, `USHER_SECRET_KEY`, TMDb key | Deploy time |
-| **Config file** (TOML) | Rate limits, TTLs, row weights, enrichment tier, concurrency per lane, image cache ladder | Restart |
-| **Database** | Sources, users, row provider enable/disable | Runtime, via admin API |
+| **Config file** (TOML) | Rate limits, TTLs, enrichment tier, image cache ladder | Restart |
+| **Database** | Sources, users, ⏳ row provider enable/disable (**M9** — see below) | Runtime, via admin API |
 
 Sources live in the database because they are added through the admin API. A
 deployment that needs a compose edit and a restart to connect a media server is
@@ -19,10 +19,19 @@ environment setting on `usher.config.Settings` and is documented in
 `.env.example` — completeness in both directions, so a setting an operator
 cannot discover and a documented key that is not a setting are both test
 failures (`tests/unit/test_deployment_config.py`). M6 added nine of them,
-four `USHER_EMBEDDING_*` and five `USHER_SEARCH_*`.
+four `USHER_EMBEDDING_*` and five `USHER_SEARCH_*`. **M7 added none**, and
+that is recorded so the count reads as a current statement rather than as a
+tally somebody stopped keeping: every M7 constant that could have been a
+setting is deliberately code — the similarity weights and pool sizes
+([05](05-search-and-similarity.md)), the row scores and the composition caps
+([06](06-rows-and-recommendations.md)), and the row build's concurrency, which
+has no setting because it has no mechanism to bound (below).
 
-**Two entries in that middle row will not become settings, and M6 is where
-that was decided rather than drifted into.**
+**Two entries that were in that middle row will not become settings, and M6 is
+where that was decided rather than drifted into. They are struck from the table
+above in M7, which is the milestone that made leaving them there concretely
+wrong** — a table listing a knob after its own prose retracted it is the same
+failure as a table listing a control nothing implements.
 
 - ⏳ **"Concurrency per lane" has no knob because it has no lane** — there is
   no semaphore anywhere in `src/`, and [01](01-architecture.md)'s concurrency
@@ -36,6 +45,40 @@ that was decided rather than drifted into.**
   half computed one way and half the other, which is this milestone's own
   headline failure mode in a config file. A weight change is a code change
   and a rebuild.
+
+  **M7's row provider scores are the same answer for different reasons**, and
+  they are worth stating because the M6 argument does not transfer: a row
+  score is computed per request and cached for ~30 s, so there is no
+  half-written artefact to be inconsistent. Two other reasons hold instead.
+  A configurable score set can *reorder* Continue Watching, which
+  [06](06-rows-and-recommendations.md) fixes as *"1 row, always ranked
+  first"* — a TOML file that can break a specification. And a score only
+  decides ordering *among proposals*, after which diversity constraints and
+  the top-N cap reshape the result, so an operator turning the dial would
+  watch a screen change for reasons the dial does not explain.
+
+⏳ **"Row provider enable/disable" is annotated rather than struck, because
+unlike the two above it is a control that should exist — it just cannot yet.**
+The bottom row claims it is available *"runtime, via admin API"*, and the admin
+API is M9's; M6 added no route and M7 added exactly one, `GET /home`. So the
+mechanism is missing on the same principle the concurrency bullet states:
+
+> A `row_providers` table with nine rows all reading `enabled = true` is
+> indistinguishable from no table, right up until an operator finds it and
+> expects toggling it to do something. **Providers are enabled by registration
+> in code in M7** — `services/rows/__init__.py`'s `ROW_PROVIDERS` is the
+> composition point — and the runtime control lands with the admin API that can
+> write it. **M9**, and [09](09-roadmap.md)'s M7 boundary call 9.
+
+This is the same argument [10](10-telemetry-and-dashboards.md) makes about
+`search_queries`: a table whose writer does not exist gets its shape fixed
+before anything has tried to fill it.
+
+**And there is no concurrency setting for the row build**, for the reason the
+first bullet gives: a setting cannot be added ahead of the mechanism it would
+bound, and boundary call 8's mechanism is a `for` loop whose correct value is
+1 ([01](01-architecture.md)'s concurrency table now carries the row). Stated so
+the absence reads as a decision.
 
 ### `.env` has two readers, and that is what the `USHER_COMPOSE_` namespace is for
 
@@ -101,6 +144,20 @@ Rules:
   field from an otherwise valid `POST /admin/sources` therefore made the
   server reply with the plaintext password. `usher.api.errors` strips
   `input` from every validation error, app-wide.
+- **And neither does a rejected *setting*.** The same defect, one surface
+  over, found while building the CLI's error boundary and fixed with it:
+  `Settings` rejecting `USHER_DATABASE_URL` printed
+  `input_value='mysql://admin:<the password>@db:5432/usher'` in the
+  traceback, and a truncated `USHER_SECRET_KEY` printed the key. Both fields
+  are `SecretStr` precisely so that cannot happen; the CLI was the one reader
+  that unwrapped them, on the surface an operator is most likely to paste
+  into an issue. `usher.cli._settings_problem` renders `loc` and `msg` and
+  drops `input`, the same trade `usher.api.errors` makes — the operator still
+  learns which setting was wrong and what it should have been, and never sees
+  the value. **`--traceback` does not reopen it**: a settings failure's stack
+  is six pydantic frames that diagnose nothing, so the only thing re-raising
+  would add is the credential
+  ([ADR-0026](decisions/0026-the-cli-boundary-names-families.md)).
 - Rotating `USHER_SECRET_KEY` re-encrypts on next write; a documented rotation
   command handles the bulk case. **Until that write happens the old rows are
   unreadable, and that state is rendered rather than raised**: Fernet's
@@ -329,6 +386,18 @@ unreachable.
 - **`--allow-full-retraction` is the only way past ADR-0015's ceiling**, and
   it is a flag rather than a configuration default because it is the one
   input that can mark a whole library unavailable.
+- **A failure the operator can fix is a message; a failure they cannot is a
+  stack.** M7's smoke test found `bootstrap-status` and `sync-status`
+  answering an unreachable database with sixty lines of asyncpg and greenlet
+  frames whose only operator-facing content was the last one. `main` has a
+  single `try` around the whole dispatch which names the families an operator
+  can act on — `OSError`, `SQLAlchemyError`, `httpx.HTTPError`,
+  `ValidationError` — and answers each with one line and exit 1;
+  `usher --traceback <command>` re-raises. **`Exception` is deliberately not
+  among them**, so a bug still gets its full traceback, and Ctrl-C exits 130
+  rather than printing one. Why those families and not `Exception`, and why
+  the settings case is redacted, are
+  [ADR-0026](decisions/0026-the-cli-boundary-names-families.md).
 
 ### Backup — the asymmetry is the point
 
@@ -340,6 +409,42 @@ The precious set is a handful of small tables. A documented `pg_dump` of those
 turns disaster recovery into a short restore plus a background rebuild, instead
 of a crisis. State this loudly in the README — it is the difference between
 "lost everything" and "lost an afternoon of indexing".
+
+**M7 added five tables and four of them are rebuildable, which is worth the
+detail because "everything is rebuildable" is the kind of claim that is true
+right up to the table it is not true of.**
+
+| Table | Rebuildable? | From what, at what cost |
+|---|---|---|
+| `people`, `credits`, `collections` | **yes, with no network call at all** | `raw_payloads`, via `usher derive --backfill` ([03](03-sources-and-sync.md)'s stage 5). This is M4's boundary call 2 paying off: **the payload cache is the backup** |
+| `user_taste` | **yes** | a mean over embeddings of the household's watch states. It carries its own fingerprint (`model_name` + `source_watermark`), so a missing row is *indistinguishable from a stale one* and is recomputed by the same predicate rather than restored. ⚠️ **And as of M7 nothing in `src/` calls `TasteService.centroid`**, so the table is unwritten on a running deployment — see below |
+| `title_neighbors` | **yes** | `usher similar --rebuild`, and `blend_fingerprint` is what tells a restored table from a current one |
+| **`genome_scores`** | **yes, but only from upstream** | re-download `ml-latest.zip` and re-run `bootstrap --phase movielens`. Frozen for three years, so reproducible in practice — **and not guaranteed**: GroupLens can withdraw or replace the archive, and then it is not rebuildable at all |
+
+So the honest backup statement is that **`raw_payloads` and `watch_states` are
+the load-bearing rows**, and `genome_scores` is the one M7 table whose
+recreation depends on a third party still serving a file. It is not in the
+precious column either, because a dump of it is a redistribution of MovieLens
+data — permitted by `ml-latest`'s licence ([04](04-catalog-bootstrap.md)) and
+still not something this project's own rule 1 does.
+
+⚠️ **`user_taste` is the one M7 table with no writer on the request path, and
+that is a property of M7 rather than of backup.** `RowContext.taste` was
+specified and deleted — every provider turned out to be a predicate over a
+repository rather than a retrieval, and on the request path the centroid is
+`None` unconditionally anyway, because it needs an embedder the route
+deliberately holds none of. So `TasteService.centroid` has no caller in `src/`
+and the table stays empty on a default deployment; what `TasteService` *is*
+called for is `genre_affinity`, which needs no embedder and no centroid. The
+table, its fingerprint and its written refusal are all built and tested;
+the consumer is M9's, with the ranking terms
+[05](05-search-and-similarity.md) names. Recorded here rather than left for an
+operator to discover from an empty table.
+
+⚠️ **Row provider enable/disable belongs in the *precious* column the day it
+exists.** It is operator-authored state in the database, like source config —
+no importer restores a human's choice — and the row above is annotated M9 for
+exactly the reason it is not listed here yet.
 
 ### Resource envelope
 

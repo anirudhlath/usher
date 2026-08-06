@@ -1,0 +1,310 @@
+"""The in-process row and screen caches (PRD 06).
+
+**In-process, per worker, and it dies with the process.** Said here because a
+reader assumes otherwise: this is a dict in the server, not Redis. On the
+deployment this project ships that is exactly one cache -- `compose.yml` runs
+one `usher` service and its `CMD` runs one uvicorn worker.
+
+**The two silent bugs this file exists to make loud.** A key collision serves
+one household's screen to another, which is unreachable at one user and
+*unreachable is not impossible*; and a TTL that never expires serves last
+week's screen with no error anywhere. Neither raises, neither logs, and neither
+is visible on a screen that looks right.
+"""
+
+import datetime as dt
+import uuid
+
+import pytest
+
+from tests.fakes.row_provider import FakeRow, FakeRowProvider
+from tests.unit.rows import Library
+from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.rows import BuiltRow, DisplayHint, RowCard, RowFamily
+from usher.ports.rows import RowContext, ScoredRow
+from usher.services.home import HomeService
+from usher.services.rows.cache import RowCache
+
+_TTL = dt.timedelta(seconds=30)
+_START = dt.datetime(2026, 8, 4, 12, 0, tzinfo=dt.UTC)
+
+
+class _Clock:
+    """A clock that only moves when a case moves it.
+
+    The alternative -- `datetime.now(UTC)` inside the cache -- makes both TTL
+    cases unassertable: there is no way to reach an expiry without sleeping,
+    and a case that sleeps 30 s is a case nobody runs.
+    """
+
+    def __init__(self) -> None:
+        self.now = _START
+
+    def advance(self, delta: dt.timedelta) -> None:
+        self.now += delta
+
+    def __call__(self) -> dt.datetime:
+        return self.now
+
+
+@pytest.fixture
+def clock() -> _Clock:
+    return _Clock()
+
+
+# A card built twice from the same name must be the *same* card: these cases
+# compare a cached value against a freshly built one, and a `new_id()` per call
+# makes every such comparison fail for a reason that has nothing to do with the
+# cache.
+_NAMESPACE = uuid.UUID("00000000-0000-7000-8000-00000000ca11")
+
+
+def _card(name: str) -> RowCard:
+    return RowCard(
+        title_id=uuid.uuid5(_NAMESPACE, name),
+        kind=TitleKind.MOVIE,
+        name=name,
+        enrichment_state=EnrichmentState.SKELETON,
+    )
+
+
+def _row(name: str, *, slug: str = "continue-watching") -> BuiltRow:
+    return BuiltRow(
+        slug=slug,
+        title="Continue Watching",
+        family=RowFamily.SOURCE,
+        display_hint=DisplayHint.LANDSCAPE,
+        ttl=_TTL,
+        cards=(_card(name),),
+    )
+
+
+def _screen(name: str) -> tuple[BuiltRow, ...]:
+    return (_row(name),)
+
+
+def test_two_users_never_share_a_composed_screen(clock: _Clock) -> None:
+    """**Unreachable at one user, and unreachable is not impossible.**
+
+    v1 mints one user, so a key that omitted `user_id` would work today and
+    serve one household's screen to another the day PRD 07's authentication
+    seam is replaced -- with no error, no log line and no metric. What makes
+    the key correct is that it is built from the `user_id` the request
+    resolved, never from a module constant or an implicit current user.
+
+    Kills a key spelled `slug` alone, and a key spelled `("screen",)`.
+    """
+    cache, alice, bob = RowCache(clock=clock), uuid.uuid4(), uuid.uuid4()
+
+    cache.put_screen(alice, _screen("alice"), ttl=_TTL)
+
+    assert cache.get_screen(bob) is None
+    assert cache.get_screen(alice) == _screen("alice")
+
+
+def test_a_row_cache_key_carries_both_the_user_and_the_slug(clock: _Clock) -> None:
+    cache, alice, bob = RowCache(clock=clock), uuid.uuid4(), uuid.uuid4()
+
+    cache.put_row(alice, "continue-watching", _row("alice"), ttl=_TTL)
+
+    assert cache.get_row(bob, "continue-watching") is None
+    assert cache.get_row(alice, "next-up") is None
+    assert cache.get_row(alice, "continue-watching") == _row("alice")
+
+
+def test_an_expired_entry_is_recomputed_rather_than_served(clock: _Clock) -> None:
+    """A TTL that never expires serves a screen from last week and nothing
+    anywhere reports it. The mutation is one deleted branch."""
+    cache, user = RowCache(clock=clock), uuid.uuid4()
+    cache.put_screen(user, _screen("old"), ttl=_TTL)
+
+    clock.advance(dt.timedelta(seconds=31))
+
+    assert cache.get_screen(user) is None
+
+
+def test_an_entry_exactly_at_its_expiry_is_expired(clock: _Clock) -> None:
+    """**Steps the clock *onto* the boundary, not past it.**
+
+    M5's mutation sweep recorded the `stale_after` `<=` -> `<` mutation
+    surviving for precisely this reason: every case in that file stepped past
+    the boundary rather than onto it, so both spellings agreed on every input
+    the suite offered. One second of drift in a 30 s TTL is invisible; the
+    habit that hides it is not.
+    """
+    cache, user = RowCache(clock=clock), uuid.uuid4()
+    cache.put_screen(user, _screen("old"), ttl=_TTL)
+    cache.put_row(user, "continue-watching", _row("old"), ttl=_TTL)
+
+    clock.advance(_TTL)
+
+    assert cache.get_screen(user) is None
+    assert cache.get_row(user, "continue-watching") is None
+
+
+def test_a_live_entry_is_served_without_recomputing(clock: _Clock) -> None:
+    cache, user = RowCache(clock=clock), uuid.uuid4()
+    cache.put_screen(user, _screen("fresh"), ttl=_TTL)
+
+    clock.advance(dt.timedelta(seconds=29))
+
+    assert cache.get_screen(user) == _screen("fresh")
+
+
+def test_the_row_cache_is_bounded_because_its_key_space_is_the_catalog(
+    clock: _Clock,
+) -> None:
+    """`because-you-watched-<seed>` is one slug per seed, so an unevicted dict
+    keyed by `(user_id, slug)` grows with the household's watch history -- and
+    expired entries are only *read* past, never removed, so the TTL reclaims
+    nothing. Same cardinality hazard as the `provider` metric label, one layer
+    over, and here it is a leak."""
+    cache, user = RowCache(clock=clock, max_entries=64), uuid.uuid4()
+
+    for index in range(500):
+        cache.put_row(user, f"because-you-watched-{index}", _row(str(index)), ttl=_TTL)
+
+    assert cache.size <= 64
+
+
+def test_eviction_takes_the_soonest_to_expire_first(clock: _Clock) -> None:
+    """A ceiling that evicted the *newest* entry would leave a cache that
+    never serves anything it was just asked to store -- bounded, and useless,
+    with no symptom but a miss rate nothing in M7 measures
+    (`usher.cache.hits` is M9's)."""
+    cache, user = RowCache(clock=clock, max_entries=2), uuid.uuid4()
+
+    cache.put_row(user, "expires-first", _row("a"), ttl=dt.timedelta(seconds=1))
+    cache.put_row(user, "expires-later", _row("b"), ttl=dt.timedelta(seconds=300))
+    cache.put_row(user, "expires-last", _row("c"), ttl=dt.timedelta(seconds=600))
+
+    assert cache.get_row(user, "expires-first") is None
+    assert cache.get_row(user, "expires-later") is not None
+    assert cache.get_row(user, "expires-last") is not None
+
+
+def test_invalidating_a_user_leaves_another_users_entries_alone(clock: _Clock) -> None:
+    cache, alice, bob = RowCache(clock=clock), uuid.uuid4(), uuid.uuid4()
+    cache.put_screen(alice, _screen("alice"), ttl=_TTL)
+    cache.put_row(bob, "continue-watching", _row("bob"), ttl=_TTL)
+    cache.put_screen(bob, _screen("bob"), ttl=_TTL)
+
+    cache.invalidate(alice, ("continue-watching",))
+
+    assert cache.get_screen(bob) == _screen("bob")
+    assert cache.get_row(bob, "continue-watching") == _row("bob")
+
+
+def test_invalidating_a_row_also_drops_the_screen_that_contained_it(clock: _Clock) -> None:
+    """The composed screen is a *composition of rows*, so a row whose inputs
+    moved leaves the screen carrying a stale copy of it. Dropping the row and
+    keeping the screen is the subtle half of this bug: the next request is a
+    screen cache hit and the invalidation had no visible effect at all."""
+    cache, user = RowCache(clock=clock), uuid.uuid4()
+    cache.put_row(user, "continue-watching", _row("old"), ttl=_TTL)
+    cache.put_screen(user, _screen("old"), ttl=_TTL)
+
+    cache.invalidate(user, ("continue-watching",))
+
+    assert cache.get_row(user, "continue-watching") is None
+    assert cache.get_screen(user) is None
+
+
+def test_clearing_empties_both_halves(clock: _Clock) -> None:
+    """`usher home --repeat` clears between runs, because a repeat that
+    measured cache hits would report a number near zero and mean nothing."""
+    cache, user = RowCache(clock=clock), uuid.uuid4()
+    cache.put_row(user, "continue-watching", _row("x"), ttl=_TTL)
+    cache.put_screen(user, _screen("x"), ttl=_TTL)
+
+    cache.clear()
+
+    assert cache.size == 0
+    assert cache.get_screen(user) is None
+
+
+# --- the composer's own use of it ----------------------------------------
+
+
+@pytest.fixture
+def ctx() -> RowContext:
+    return Library().context()
+
+
+def _provider(slug: str, *, score: float) -> FakeRowProvider:
+    return FakeRowProvider(
+        proposals=(ScoredRow(row=FakeRow(slug, cards=(_card(slug),)), score=score),),
+        slug_prefix=slug,
+    )
+
+
+def _builds(provider: FakeRowProvider) -> int:
+    row = provider.rows[0]
+    assert isinstance(row, FakeRow)
+    return row.builds
+
+
+async def test_a_second_compose_inside_the_window_rebuilds_nothing(
+    ctx: RowContext, clock: _Clock
+) -> None:
+    """The screen cache doing its job, asserted through the composer rather
+    than through the dict -- a cache nothing reads is a dict."""
+    cache = RowCache(clock=clock)
+    provider = _provider("recently-added", score=0.9)
+    service = HomeService(providers=[provider], cache=cache)
+
+    first = await service.compose(ctx)
+    second = await service.compose(ctx)
+
+    assert first == second
+    assert _builds(provider) == 1
+    assert len(provider.contexts) == 1, "a screen hit must not re-propose either"
+
+
+async def test_a_compose_after_the_screen_expires_builds_again(
+    ctx: RowContext, clock: _Clock
+) -> None:
+    """The other half, and the one that fails against a TTL that never
+    expires: without it the case above is satisfied by a cache that never
+    lets go."""
+    cache = RowCache(clock=clock)
+    provider = _provider("recently-added", score=0.9)
+    service = HomeService(providers=[provider], cache=cache)
+
+    await service.compose(ctx)
+    clock.advance(dt.timedelta(seconds=31))
+    await service.compose(ctx)
+
+    assert len(provider.contexts) == 2
+
+
+async def test_a_row_survives_the_screen_expiring_because_its_own_ttl_is_longer(
+    ctx: RowContext, clock: _Clock
+) -> None:
+    """PRD 06 caches at two layers, and this is why: the screen is ~30 s and a
+    similarity row is hours. A composer that only cached the screen would
+    rebuild every row on every screen miss, which is the expensive half of the
+    work done on a 30 s cycle for rows whose inputs move in days."""
+    cache = RowCache(clock=clock)
+    provider = FakeRowProvider(
+        proposals=(
+            ScoredRow(
+                row=FakeRow(
+                    "because-you-watched-dune",
+                    family=RowFamily.SIMILARITY,
+                    ttl=dt.timedelta(hours=6),
+                    cards=(_card("Dune"),),
+                ),
+                score=0.8,
+            ),
+        ),
+        slug_prefix="because-you-watched",
+    )
+    service = HomeService(providers=[provider], cache=cache)
+
+    await service.compose(ctx)
+    clock.advance(dt.timedelta(seconds=31))
+    await service.compose(ctx)
+
+    assert len(provider.contexts) == 2, "the screen must have expired"
+    assert _builds(provider) == 1, "the row's own six-hour TTL had not expired"

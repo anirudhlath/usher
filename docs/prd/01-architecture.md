@@ -59,9 +59,14 @@ section below exists because those are not the same kind of thing.
 **There is no `meilisearch` service** — the sentence here used to say one
 existed behind a feature gate, and none has ever been in `compose.yml`. What
 exists is the gate itself, which is a measurement with a decision attached
-([ADR-0002](decisions/0002-postgres-first-search.md)) and has **⏳ not yet been
-run**. If it is ever taken, the service is added behind the `SuggestIndex`
-port alone — that being the whole of
+([ADR-0002](decisions/0002-postgres-first-search.md)). **It ran on 2026-08-03
+against a real 1,271,138-title catalog and it failed** — 27.8% recall@5 on
+2–4-character names against a bar of 0.75, and a p95 of 211 ms against a 50 ms
+as-you-type budget that no configuration clearing the recall half comes closer
+to — **and no `meilisearch` service was added anyway**,
+because the answer the gate produced is a two-tier suggest owned by M9 rather
+than a second engine ([09](09-roadmap.md)). If one is ever taken, it is added
+behind the `SuggestIndex` port alone — that being the whole of
 [ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md).
 
 ## Layering rules
@@ -148,13 +153,14 @@ Other ports follow the same pattern:
 |---|---|
 | `SourceAdapter` | `EmbyAdapter` |
 | `MetadataProvider` | `TmdbMetadataProvider` |
-| `BulkDataset` | `IMDbDumps`, `TMDbIdExport`, `WikidataCrosswalk` — ⏳ `MovieLensGenome` **does not exist**; owned by M7, see [09](09-roadmap.md) |
+| `BulkDataset` | `IMDbDumps`, `TMDbIdExport`, `WikidataCrosswalk`, `MovieLensGenomeDataset` — **the last shipped in M7** (`adapters/bulk/movielens.py`, `bootstrap --phase movielens`), and it is back in this table having been removed from it in M6 for not existing. Removing it was right then; restoring it with an implementation behind it is the same discipline in the other direction |
 | `SearchIndex` | `PostgresSearchIndex` (`MeilisearchIndex` gated) |
 | `SuggestIndex` | `PostgresSuggestIndex` (`MeilisearchSuggestIndex` gated) — **the gate moved to this port**, which is [ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md) |
 | `Embedder` | `FastEmbedEmbedder` — **optional**, behind an extra and off by default; a deployment without it still has full-text and trigram, the tier serving 1.27M titles ([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)) |
 | `LLMClient` | `LiteLLMClient` |
 | `TitleRepository` | `PostgresTitleRepository` ([ADR-0009](decisions/0009-repositories-are-ports.md)) |
-| `Row` / `RowProvider` | see [06](06-rows-and-recommendations.md) |
+| `Row` | `BaseRow` in `services/rows/base.py` and its nine concrete rows — **the base class is in `services/` and the ABC is in `ports/`**, because `hydrate()` reads two repositories off the context and a port with a dependency is not a port ([06](06-rows-and-recommendations.md)) |
+| `RowProvider` | `ContinueWatchingProvider`, `NextUpProvider`, `RecentlyAddedProvider`, `RediscoverProvider`, `BecauseYouWatchedProvider`, `FranchiseProvider`, `GenreAffinityProvider`, `SeasonalProvider`, `PeopleProvider` — nine, registered as `services/rows/__init__.py`'s `ROW_PROVIDERS`. ⏳ `CuratedProvider` is the tenth and **M8 owns it whole**, with `curated_rows` and `LLMRow` ([09](09-roadmap.md)'s M7 boundary call 2) |
 
 **`adapters/search/` vs `db/repositories/`.** Both ultimately talk to the
 same PostgreSQL instance, which invites conflating them — they are not the
@@ -180,13 +186,18 @@ usher/
 │   ├── prd/                    ← this
 │   └── specs/                  ← reviewed design specs
 ├── src/usher/
-│   ├── api/         routers/, deps.py, dto/
+│   ├── api/         routers/ (health, titles, events, home, sources),
+│   │                deps.py, dto/ (… home.py), lanes.py
 │   ├── domain/      title.py, person.py, source.py, watch.py, rows.py
 │   ├── ports/       *.py  (ABCs only)
-│   ├── adapters/    emby/, tmdb/, bulk/, search/, embedding/, llm/
-│   ├── services/
+│   ├── adapters/    emby/, tmdb/, bulk/ (… movielens.py), search/,
+│   │                embedding/, llm/
+│   ├── services/    rows/ (base.py, cache.py, one module per provider),
+│   │                home.py, taste.py, derive.py, similar.py, search.py,
+│   │                matching.py, ingest.py, enrich.py, push.py, jobs.py
 │   ├── jobs/        queue.py, scheduler.py, tasks/
-│   ├── db/          models/, repositories/ (implement ports/), migrations/
+│   ├── db/          models/ (… people.py, collection.py, taste.py),
+│   │                repositories/ (implement ports/), migrations/
 │   └── config.py
 ├── tests/           unit/, integration/, fixtures/, fakes/ (port doubles
 │                    services are unit-tested against, e.g. FakeTitleRepository)
@@ -241,10 +252,13 @@ own semaphore, so a slow upstream can't starve the API:
 | Enrichment workers | 8 | TMDb rate limit (~40 rps ceiling) |
 | Source sync workers | 4 | Emby is slow (~1–5 s/request observed) |
 | Embedding | 1 batch worker | CPU/GPU |
+| **Row build** (M7) | **1, sequential — and not a setting** | `AsyncSession` |
 
-⏳ **This table is the design, and the last three rows are not what shipped.**
-There is **no semaphore anywhere in `src/`** and none of these three numbers
-exists as a limit. What actually bounds the work: one `JobWorker` claiming a
+⏳ **This table is the design, and three of its rows are not what shipped** —
+enrichment workers, source sync workers and embedding. (The row-build row below
+them is the exception and is described rather than corrected; see the paragraph
+after this one.) There is **no semaphore anywhere in `src/`** and none of those
+three numbers exists as a limit. What actually bounds the work: one `JobWorker` claiming a
 batch and running it **sequentially**, so enrichment concurrency is 1, not 8;
 TMDb is bounded by a **token bucket** at `USHER_TMDB_REQUESTS_PER_SECOND`
 rather than by a worker count, which is the more direct control over the thing
@@ -254,8 +268,25 @@ the same `JobWorker` as `match` and `enrich`, so its "1 batch worker" is
 really "whatever the one worker is doing next".
 `USHER_EMBEDDING_BATCH_SIZE` is the embedder's internal batch, not a lane.
 
-The row that is worth revisiting rather than merely correcting is the last
-one: embedding is CPU-bound work sharing a worker with two I/O-bound job
+**The row-build row is the one line in this table that is a decision rather
+than a design**, and it is here because a concurrency table that silently omits
+the one loop a reader would expect to find in it is how somebody adds
+`asyncio.gather` in good faith. `HomeService` builds the selected rows in a
+`for`, on the request's own session, and 1 is the *correct* number rather than
+an unraised limit: `AsyncSession` is explicitly not safe for concurrent use, so
+nine coroutines awaiting on one session interleave on one connection — a
+corruption that usually works, failing as an intermittent `InvalidRequestError`
+under load. The two escapes are worse at this scale (a session per row is nine
+connections for one home screen; a semaphore has no lane to belong to, which is
+this very table's gap). There is **no setting**, because
+[08](08-operations.md) already retracted "concurrency per lane" on the
+principle that a setting cannot be added ahead of the mechanism it would bound,
+and the mechanism here is a `for`. Measured rather than assumed: p50 23.9 ms,
+p95 35.9 ms cold over nine providers on a real 1,271,570-title catalog.
+[ADR-0025](decisions/0025-rows-build-sequentially.md).
+
+The row that is worth revisiting rather than merely correcting is the
+embedding one: embedding is CPU-bound work sharing a worker with two I/O-bound job
 kinds, so a long backfill delays every `match` behind it. M6 bounds the damage
 by enqueueing `index` at `BACKFILL` priority, which is a priority answer to a
 scheduling question and is enough at 2k–10k titles.

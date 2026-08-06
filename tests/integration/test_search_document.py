@@ -198,3 +198,60 @@ async def test_the_stored_document_equals_a_freshly_computed_one(
         )
     )
     assert drifted.scalar_one() == 0
+
+
+async def test_a_title_with_no_credits_stores_the_same_document_it_did_before(
+    session: AsyncSession,
+) -> None:
+    """The migration's blast radius, bounded by measurement rather than by
+    hope.
+
+    An empty `credit_names` produces an empty tsvector, and `tsvector ||
+    <empty>` shifts no positions -- verified on pg17.10 against the M6
+    expression side by side: a row named `Iron` with overview `A harbour at
+    dusk.` and genres `{autumn,winter}` stores
+    `'autumn':6 'dusk':5C 'harbour':3C 'iron':1A 'winter':7` under **both**
+    expressions, byte for byte.
+
+    So `test_the_document_is_weighted_by_field` is unaffected for the
+    overwhelming majority of the catalog -- 1.27M skeletons have no credits and
+    never will -- and any change it *does* report is a real one.
+    """
+    repository = PostgresTitleRepository(session)
+    title = _title(name="Iron", overview="A harbour at dusk.", genres=("autumn", "winter"))
+    await repository.add(title)
+
+    document = await _document(session, title.id)
+
+    assert "'iron':1A" in document
+    assert "'autumn':6" in document
+    assert "'winter':7" in document
+
+
+async def test_a_null_credit_names_would_null_the_whole_document_so_the_column_is_not_null(
+    session: AsyncSession,
+) -> None:
+    """The silent failure the NOT NULL exists to make unreachable.
+
+    `usher_array_text` is declared STRICT, so `usher_array_text(NULL)` is NULL
+    and `tsvector || NULL` is NULL -- the *entire* search document, including
+    the title's own name at weight A. Measured on pg17.10 against this
+    schema's own wrapper: a row with a populated `name` and `credit_names IS
+    NULL` stored `search_document IS NULL`, while the same row with `'{}'`
+    stored `'harbour':2A 'iron':1A`. The title disappears from every full-text
+    query and from `ix_titles_search_document`, and nothing raises.
+
+    Asserted against the schema rather than by inserting a NULL, because the
+    NOT NULL is what makes inserting one impossible -- which is the point. The
+    wrong implementation this kills is a nullable `credit_names`, whose first
+    symptom is a subset of the catalog quietly unsearchable.
+    """
+    nullable = await session.execute(
+        text(
+            "SELECT is_nullable, column_default FROM information_schema.columns "
+            "WHERE table_name = 'titles' AND column_name = 'credit_names'"
+        )
+    )
+    is_nullable, default = nullable.one()
+    assert is_nullable == "NO"
+    assert default is not None, "a raw INSERT or COPY that omits the column must still get '{}'"

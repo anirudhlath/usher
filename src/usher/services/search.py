@@ -35,7 +35,7 @@ its own case in `tests/unit/test_services_search_document.py`:
 
 1. *Appending a section only when the field is populated.* `_FINGERPRINT_SQL`
    is `coalesce(..., '')` on every nullable column with no conditionals, so it
-   emits six segments for every title. The assembly below is positional for
+   emits seven segments for every title. The assembly below is positional for
    that reason: a missing overview is an empty line, never an absent one.
 2. *Joining array elements on `", "`.* The predicate uses `usher_array_text`,
    which is `array_to_string($1, ' ')` -- the same `IMMUTABLE` wrapper the
@@ -140,35 +140,43 @@ def compose_document(title: Title, *, credits: Sequence[str] = ()) -> EmbeddingD
     meaningless and the backfill non-terminating. Everything below iterates a
     tuple in the order a provider supplied it; nothing iterates a `set`.
 
-    **The six segments, their order and their separators are
+    **The seven segments, their order and their separators are
     `_FINGERPRINT_SQL`'s**, not a choice made here, for the reason the module
     docstring gives. Read that before editing this function.
 
-    `credits` is always `()` in M6 and is a parameter anyway (boundary call
-    2): no `Person`/`Credit`/`Collection`/`Image` table, model or port exists
-    in `src/` -- `ports/metadata.py` defers all four by name -- and the only
-    place credits physically exist is `raw_payloads.payload`, so assembling
-    them here would put a *provider's* JSON shape in `services/`.
+    **`credits` is weight class B's text and it is `titles.credit_names`, not
+    a `Title` field.** `credit_names` is in `DERIVED_COLUMNS` -- it is
+    `credits` projected to names and truncated to a ranking constant -- so a
+    `Title` cannot supply it and the caller reads it through
+    `TitleRepository.credit_names_for`. That read is **site three** of the
+    three this document has, and it is the one that gets missed: sites one and
+    two can both move correctly and the pair still disagrees on every credited
+    title, forever, because `IndexService` was still calling this with the
+    default.
 
-    **A non-empty `credits` breaks the agreement with `_FINGERPRINT_SQL`**,
-    which has no credits column, and the failure is the silent one: every
-    title with a credit matches the stale predicate forever. M7 moves both
-    sides in one commit or neither. Pinned by
-    `test_credits_are_accepted_and_are_empty_in_m6`, whose second assertion
-    exists to make that visible rather than to check a string.
+    **The seventh segment is unconditional and sits at position three.** The
+    M6 shim appended it only `if credits:`, which is the first of the three
+    shapes this module's docstring refuses as unreproducible in SQL --
+    harmlessly then, because `credits` was always `()` so the branch was never
+    taken. Position three matches the generated column's concatenation order,
+    so all three spellings read in the same sequence.
+
+    A caller that passes nothing gets an **empty segment**, never an absent
+    one: `usher_array_text(ARRAY[]::text[])` is `''` and
+    `md5(usher_array_text(ARRAY[]::text[])) = md5('')`, verified on pg17.10,
+    so an uncredited title produces the identical string on both sides.
     """
     text = _SECTION.join(
         (
             title.name,
             title.original_name or "",
+            _ITEM.join(credits),
             title.overview or "",
             title.tagline or "",
             _ITEM.join(title.genres),
             _ITEM.join(title.keywords),
         )
     )
-    if credits:
-        text = text + _SECTION + _ITEM.join(credits)
     return EmbeddingDocument(
         text=text,
         # `usedforsecurity=False` is required, not decorative: ruff's `S`
@@ -474,11 +482,16 @@ def _popularity_term(popularity: float | None) -> float | None:
     """`p / (p + midpoint)`, or `None` when nobody has measured it.
 
     **`None` is not 0.0** -- ADR-0014, in a fourth place. `titles.popularity`
-    is null for every title TMDb has never described, which on the measured
-    catalog is most of 1,271,138 rows, and `popularity or 0.0` ranks a title
-    nobody measured identically to one measured as unpopular. That buries the
-    whole un-enriched catalog beneath the enriched tier while looking like
-    arithmetic and raising nothing.
+    is null for every title TMDb's daily export has never described: **all**
+    of a `--phase imdb` catalog and **~77%** of a `--phase all` one (Task 36
+    measured 291,584 of 1,271,570 titles carrying a popularity, 2026-08-05).
+    `popularity or 0.0` would rank a title nobody measured identically to one
+    measured as unpopular, burying the whole un-enriched catalog beneath the
+    enriched tier while looking like arithmetic and raising nothing. `_blend`
+    below was re-checked against the populated catalog and is unchanged: it
+    drops an absent signal from numerator and denominator, so a partially
+    populated catalog scores each title on what is known about it, not on a
+    zero it never measured.
     """
     if popularity is None:
         return None

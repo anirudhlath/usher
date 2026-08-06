@@ -143,13 +143,74 @@ class IdCrosswalkPair:
     tvdb_series_id: int | None = None
 
 
+# The MovieLens tag vocabulary's width, and the one place it is written.
+#
+# It has to agree in two places that cannot check each other -- the importer
+# verifies it against `genome-tags.csv` before reading a score, and
+# `GenomeScoreRow.relevance` declares `halfvec(GENOME_TAG_COUNT)` -- so it
+# lives here, on the port both sides already import, rather than being
+# spelled twice. `EMBEDDING_DIMENSIONS` gets away with living on the storage
+# side alone because nothing outside `db/` needs it.
+GENOME_TAG_COUNT = 1128
+
+
+@dataclass(frozen=True, slots=True)
+class GenomeVector:
+    """One movie's dense MovieLens tag-genome vector.
+
+    **One vector per movie, not one score per row** — boundary call 7. The
+    genome is a genuinely dense matrix: every one of the 16,376 movies
+    carries a value for every one of the 1,128 tags, verified by counting.
+    The tall shape `(title_id, tag_id, relevance)` stores 18,472,128 rows to
+    express a matrix with no holes in it, and measures at 2,106 MB against
+    45 MB for this shape, against a database PRD 08 budgets at 8-12 GB
+    *total*.
+
+    `relevance` is exactly `len(tag vocabulary)` floats — 1,128 against the
+    real archive — **in ascending `tagId` order**, which is the only thing
+    that makes two vectors comparable. Nothing downstream re-derives that
+    order, so a vector assembled under a different one is silently wrong at
+    every position; `MovieLensGenomeDataset` therefore builds it by index
+    rather than by append, and the vocabulary's contiguity is checked before
+    a single score is read.
+
+    **The values are the archive's own relevances, untransformed, and that
+    was measured rather than assumed.** Every relevance is non-negative with
+    mean 0.111, so two *unrelated* films share a background profile and the
+    obvious worry is that cosine saturates — which is the saturation
+    `SimilarityService._WEIGHTS` already documents for genres. Measured over
+    all 16,376 vectors and all 268,157,000 off-diagonal pairs, against a bar
+    written before the run: mean 0.6101, sd 0.0913, p1 0.4075, and a
+    top-10-neighbour gap of 0.2456. It does not saturate, so the vectors are
+    stored as supplied. `usher.adapters.bulk.movielens` carries the bar, the
+    two mean-centred variants that were measured alongside, and why neither
+    ships. Do not "fix" this by centring without re-reading that.
+
+    `imdb_id` is already `'tt' || lpad(imdbId, 7, '0')` — the adapter does
+    the padding, because `links.csv` carries the digits bare and 6,559 of
+    its 86,537 rows are 8 wide rather than 7. `tmdb_id` is carried but is
+    not the join key: TMDb ids are unique only *per kind* (ADR-0011) and
+    MovieLens is movies-only, so joining on it requires supplying that kind
+    from outside the row. `movie_id` is MovieLens' own id, kept for
+    diagnostics — it is what an operator has when reconciling a row against
+    the archive, and it is the id a wrong implementation stores in place of
+    the resolved `Title.id`.
+    """
+
+    movie_id: int
+    imdb_id: str
+    tmdb_id: int | None
+    relevance: tuple[float, ...]
+
+
 class BulkDataset[RowT](ABC):
     """A third-party bulk dataset, streamed as resumable batches.
 
     Implementations: `IMDbTitleDataset`, `IMDbRatingDataset`,
-    `TMDbIdDataset`, `WikidataCrosswalkDataset` (`usher.adapters.bulk`).
-    Port named for the role, implementations for the service — the same
-    split as `SourceAdapter`/`EmbyAdapter` (ADR-0009).
+    `TMDbIdDataset`, `WikidataCrosswalkDataset`, `MovieLensGenomeDataset`
+    (`usher.adapters.bulk`). Port named for the role, implementations for
+    the service — the same split as `SourceAdapter`/`EmbyAdapter`
+    (ADR-0009).
     """
 
     @property

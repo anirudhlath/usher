@@ -63,6 +63,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any, cast
 
+from pydantic import AwareDatetime
 from sqlalchemy import CursorResult, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,7 +74,7 @@ from usher.domain.ids import new_id
 from usher.domain.watch import WatchState
 from usher.ports.errors import PortDataMalformed, RepositoryConflict
 from usher.ports.ingest import WatchStateMerge
-from usher.ports.repository import WatchStateRepository
+from usher.ports.repository import RecentWatch, WatchStateRepository
 
 # `ordinal` breaks a tie in `observed_at`, which is the *common* case rather
 # than the rare one: one walk carries one `observed_at` across every batch,
@@ -187,6 +188,138 @@ ORDER BY updated_at, id
 LIMIT :limit
 """
 
+# Continue Watching. `NOT played AND position_seconds > 0` is the port's
+# definition of "in progress"; the *floor* (a minimum position, or a
+# percentage of runtime) is deliberately the provider's, because Postgres can
+# use a partial index whenever the query predicate implies the index
+# predicate, so a tighter caller costs nothing and a tighter index costs a
+# migration per adjustment.
+#
+# ORDER BY: `NULLS LAST` is the correctness content, not the formatting.
+# `last_played_at` is nullable (ADR-0014 -- a walk's listing cannot determine
+# it), Postgres defaults a DESC sort to NULLS FIRST, and the natural spelling
+# therefore puts every walk-sourced state above every push-sourced one. The
+# index this reads, `ix_watch_states_user_recent`, is declared
+# `last_played_at DESC NULLS LAST` for the same reason: a DESC-NULLS-FIRST
+# btree serves the filter and cannot supply this order, so the planner adds a
+# Sort and the recency key buys nothing.
+#
+# No `updated_at` tiebreak: it is owned by trg_watch_states_set_updated_at
+# and is the write instant, which a full walk makes identical across a
+# million rows because `now()` is frozen per transaction. `id DESC` is
+# UUIDv7 creation order, which is at least a fact about the household.
+#
+# `CAST(:user_id AS uuid)`, never a colon-name followed by a double colon --
+# SQLAlchemy's `text()` bind regex skips a name spelled that way and the
+# literal reaches asyncpg. And no colon-prefixed word anywhere in these
+# comments: the same regex scans comment lines, so one there declares a real
+# bind parameter the caller must then supply.
+_IN_PROGRESS = """
+SELECT * FROM watch_states
+WHERE user_id = CAST(:user_id AS uuid)
+  AND NOT played
+  AND position_seconds > 0
+ORDER BY last_played_at DESC NULLS LAST, id DESC
+LIMIT :limit
+"""
+
+# `BecauseYouWatched` seeds and the taste centroid.
+#
+# The LEFT JOIN is what makes this work on a real library: 999,827 of the one
+# measured source's 1,126,674 items are episodes, `title_embeddings` and
+# `title_neighbors` are keyed on titles.id, and an episode has neither -- so
+# without the rollup this returns nothing for a TV household and both
+# consumers compute confidently from an empty set.
+#
+# The inner DISTINCT ON is mandatory rather than defensive, exactly as it is
+# in media_item.py: ten watched episodes of one series are one seed. The
+# outer level re-sorts because DISTINCT ON forces its own ORDER BY to lead
+# with the distinct key, so the recency order has to be applied again above
+# it -- which also means this statement's ordering is a Sort node by
+# construction and the index bounds the *scan*, not the sort. That is bounded
+# by the household's watch history, not by the catalog.
+#
+# `WHERE title_id IS NOT NULL` on the outer level, not the inner: an episode
+# whose series row was deleted rolls up to NULL, and filtering it inside the
+# DISTINCT ON would let a *second* state for the same series win the slot.
+_RECENT = """
+SELECT title_id, last_played_at, play_count FROM (
+    SELECT DISTINCT ON (COALESCE(ws.title_id, e.title_id))
+           COALESCE(ws.title_id, e.title_id) AS title_id,
+           ws.last_played_at AS last_played_at,
+           ws.play_count AS play_count
+    FROM watch_states ws
+    LEFT JOIN episodes e ON e.id = ws.episode_id
+    WHERE ws.user_id = CAST(:user_id AS uuid) AND ws.played
+    ORDER BY COALESCE(ws.title_id, e.title_id),
+             ws.last_played_at DESC NULLS LAST, ws.id DESC
+) newest
+WHERE title_id IS NOT NULL
+ORDER BY last_played_at DESC NULLS LAST, title_id DESC
+LIMIT :limit
+"""
+
+
+# Rediscover, and the substitution for the rating column that does not exist.
+#
+# PRD 06 fires this row on "watched > 2 years ago, rated highly".
+# `watch_states` has no rating column, no favorite, and `SourceWatchState`
+# carries neither -- so the signal splits in two, and the split is the design:
+# the FILTER is `played AND last_played_at < cutoff`, and the engagement proxy
+# is the ORDERING, `play_count DESC`.
+#
+# `play_count >= 2` in the WHERE is the tempting version and it is wrong.
+# `_NEEDING_HISTORY` above spells "history unknown" as `played AND play_count
+# = 0`, because Emby's listing reports `PlayCount: 0` for an item played
+# twice -- so as a filter it returns NOTHING on a freshly-walked deployment
+# and an arbitrary subset on a half-backfilled one. As an ordering the same
+# unreliable column degrades gracefully.
+#
+# `last_played_at < cutoff` is NULL, and therefore not true, for a state the
+# walk could not date -- so an undatable state is excluded for free. That is
+# the exact mirror of `_IN_PROGRESS`, where the same nullability does the
+# WRONG thing for free and `NULLS LAST` is what corrects it. Same column,
+# same three-valued logic, opposite outcomes.
+#
+# `title_id IS NOT NULL`, so Rediscover is film-only. A scope decision rather
+# than the call `_RECENT` refused: title-only there returns an EMPTY set for
+# a TV household and the centroid is computed from nothing, where title-only
+# here returns a correct but film-only row.
+_REDISCOVERABLE = """
+SELECT title_id, last_played_at, play_count
+FROM watch_states
+WHERE user_id = CAST(:user_id AS uuid)
+  AND played
+  AND title_id IS NOT NULL
+  AND last_played_at < CAST(:before AS timestamptz)
+ORDER BY play_count DESC, last_played_at DESC, title_id DESC
+LIMIT :limit
+"""
+
+
+# "Which of these has the household seen", and the third statement in this
+# module to carry `COALESCE(ws.title_id, e.title_id)`.
+#
+# The rollup is in the WHERE as well as the SELECT, and that is the whole
+# statement: `WHERE ws.title_id = ANY(:title_ids)` is the natural spelling,
+# is green on every movie fixture, and answers **films only** on a library
+# that is 89% episodes.
+#
+# Bounded by `:title_ids` rather than by a LIMIT. This set is used to
+# *subtract*, so a truncated answer silently puts a watched title back on a
+# shelf -- where a truncated `list_recent` merely shortens one.
+#
+# `DISTINCT` rather than a GROUP BY: a series with twelve watched episodes is
+# one id, and the caller wants membership rather than a count.
+_PLAYED_TITLE_IDS = """
+SELECT DISTINCT COALESCE(ws.title_id, e.title_id) AS title_id
+FROM watch_states ws
+LEFT JOIN episodes e ON e.id = ws.episode_id
+WHERE ws.user_id = CAST(:user_id AS uuid)
+  AND ws.played
+  AND COALESCE(ws.title_id, e.title_id) = ANY(:title_ids)
+"""
+
 
 class PostgresWatchStateRepository(WatchStateRepository):
     def __init__(self, session: AsyncSession) -> None:
@@ -255,6 +388,54 @@ class PostgresWatchStateRepository(WatchStateRepository):
         with self._session.no_autoflush:
             rows = (await self._session.execute(text(_NEEDING_HISTORY), {"limit": limit})).all()
         return [(row.user_id, row.title_id, row.episode_id) for row in rows]
+
+    async def list_in_progress(self, user_id: uuid.UUID, *, limit: int = 20) -> list[WatchState]:
+        with self._session.no_autoflush:
+            rows = (
+                (
+                    await self._session.execute(
+                        text(_IN_PROGRESS), {"user_id": user_id, "limit": limit}
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [WatchState.model_validate(dict(row)) for row in rows]
+
+    async def list_recent(self, user_id: uuid.UUID, *, limit: int = 20) -> list[RecentWatch]:
+        with self._session.no_autoflush:
+            rows = (
+                await self._session.execute(text(_RECENT), {"user_id": user_id, "limit": limit})
+            ).all()
+        return [RecentWatch(row.title_id, row.last_played_at, row.play_count) for row in rows]
+
+    async def list_rediscoverable(
+        self, user_id: uuid.UUID, *, before: AwareDatetime, limit: int = 24
+    ) -> list[RecentWatch]:
+        with self._session.no_autoflush:
+            rows = (
+                await self._session.execute(
+                    text(_REDISCOVERABLE),
+                    {"user_id": user_id, "before": before, "limit": limit},
+                )
+            ).all()
+        return [RecentWatch(row.title_id, row.last_played_at, row.play_count) for row in rows]
+
+    async def played_title_ids(
+        self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        wanted = list(dict.fromkeys(title_ids))
+        if not wanted:
+            # No statement at all, matching `owned_title_ids`' own guard: an
+            # `= ANY('{}')` is a table scan that answers nothing.
+            return set()
+        with self._session.no_autoflush:
+            rows = (
+                await self._session.execute(
+                    text(_PLAYED_TITLE_IDS), {"user_id": user_id, "title_ids": wanted}
+                )
+            ).all()
+        return {row.title_id for row in rows}
 
     async def get_for_title(self, user_id: uuid.UUID, title_id: uuid.UUID) -> WatchState | None:
         return await self._get("title_id", user_id, title_id)

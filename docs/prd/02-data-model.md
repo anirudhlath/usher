@@ -117,9 +117,14 @@ full 12.7M. Not added in M1 because `CREATE INDEX CONCURRENTLY` can add it
 online with no table rewrite whenever M9 lands — there is no cost to
 waiting and a real cost (write overhead through M2's bulk load, and every
 write after) to adding it before anything queries by facet. The same
-applies to indexes on `media_items.added_at`/`last_seen_at`/`available`
-and `titles.collection_id`: none exist yet, and none are needed while
-`media_items` stays in the tens of thousands of rows.
+applied to indexes on `media_items.added_at`/`last_seen_at`/`available` and
+`titles.collection_id`. Three of those five have since landed:
+`ix_media_items_sweep` covers `last_seen_at`/`available` for the availability
+sweep (M4), `titles.collection_id` got its index with the foreign key that
+needs it (M7), and `ix_media_items_recently_added` covers `added_at` for the
+row M7 built on it. The `genres` GIN index is still deferred, and M7 records
+why the query it was measured for is not the query M7 runs — see
+[06](06-rows-and-recommendations.md).
 
 ### Season / Episode
 
@@ -169,27 +174,117 @@ than a string match.
 ```python
 class Person(BaseModel):
     id: UUID
-    tmdb_id: int | None; imdb_id: str | None
-    name: str; sort_name: str
-    birth_year: int | None; death_year: int | None
+    tmdb_id: int | None
+    name: str; sort_name: str            # sort_name NOT NULL, name verbatim
     known_for_department: str | None
-    biography: str | None
+    created_at: datetime; updated_at: datetime
 
 class Credit(BaseModel):
     id: UUID
     person_id: UUID
-    title_id: UUID | None
-    episode_id: UUID | None              # episode-level guest credits
+    title_id: UUID                       # required — no episode_id, see below
     kind: CreditKind                     # cast | crew
+    tmdb_credit_id: str | None           # TMDb's 24-char credit ObjectId
     character: str | None                # cast
     job: str | None; department: str | None   # crew
     billing_order: int | None
+    created_at: datetime
 ```
+
+✅ **Shipped in M7** (migration `fd7c3a5b9e12`), and three shapes in that
+sketch are load-bearing rather than incidental.
+
+**Identity is `(tmdb_id)`, partial-unique, and deliberately not `(tmdb_id,
+kind)`.** `titles` needs the kind because TMDb's movie and series id spaces
+overlap on 26,968 ids ([ADR-0011](decisions/0011-tmdb-id-is-namespaced-by-kind.md));
+`/person/{id}` is one space, so a person carries one id. It is an index
+`WHERE tmdb_id IS NOT NULL` rather than a column constraint, because a person
+derived from a payload that carried no id must still be storable. **And it is
+not `name`:** two people share a name often enough that a unique index on it
+would refuse a real derivation, and Group B's contract suite proves the
+identity is the id by writing two rows with the same name and different ids.
+
+**`credits.kind` is a `cast`/`crew` discriminator and `billing_order` is a
+rank, and neither is indexed.** `kind` has two values over a table that is
+always read `WHERE title_id = …` or `WHERE person_id = …` first, so an index on
+it would be a scan of half the table wearing an index's name. `billing_order`
+is `CHECK (>= 0)` and nullable, because a crew credit has no billing.
+
+**`credits` has no `updated_at` and no trigger**, unlike `people` and
+`collections`. A credit row is derived from a cached payload and replaced
+wholesale when that payload is re-derived; there is no update path for a
+trigger to fire on.
+
+⏳ **`imdb_id`, `birth_year`, `death_year` and `biography` are not built, and
+they are not deferred pending a decision — they are a different milestone's
+network budget.** None of them is on a `credits.cast[]`, `credits.crew[]` or
+`created_by[]` entry; all four live on **`/person/{id}`**, which is one request
+per person against an enriched tier of 2k–10k titles whose distinct-person
+count is several times that. M7's boundary call 4 re-derives `Person` from
+`raw_payloads` with **no second network call**, so shipping them would be four
+columns no derivation can ever fill. Owner: **unassigned** — filling them is an
+`append_to_response` namespace that does not exist plus a per-person crawl,
+i.e. a metadata-provider change, named here rather than left implied.
+
+⏳ **`episode_id` is not built, and `title_id` is `NOT NULL` in consequence.**
+Measured against the recorded payload: `season.json`'s `episodes[].crew` and
+`episodes[].guest_stars` are both `[]`, and no live run has ever seen either
+populated. Building the nullable `title_id`/`episode_id` pair now would fix
+this table's natural key, its CHECK and three consumers' semantics ("does an
+episode credit count toward its series" — `list_for_title`, `PeopleProvider`'s
+recurrence count, weight class B's `credit_names`) against a field that has
+never carried a value, and a natural key over a nullable column does not
+constrain at all, because NULL never collides with NULL. **Reversing it is four
+DDL statements** — `ADD COLUMN episode_id uuid`, `ALTER COLUMN title_id DROP
+NOT NULL`, add `CHECK (num_nonnulls(title_id, episode_id) = 1)` following
+`ck_watch_states_exactly_one_target`'s precedent, and swap one partial unique
+index for two — with no table rewrite and no re-crawl. Reversing the other
+direction is a data migration with no `ON CONFLICT` target to lean on. The cost
+until then: a guest star appearing in one episode of a series is invisible to
+`PeopleProvider` and to weight class B, over a population that is currently
+**zero**.
 
 ### Collection
 
 TMDb franchise grouping ("The Matrix Collection"). Powers franchise rows and
 "you own 2 of 4" completeness signals.
+
+```python
+class Collection(BaseModel):
+    id: UUID
+    tmdb_id: int | None
+    name: str
+    created_at: datetime; updated_at: datetime
+```
+
+✅ **Shipped in M7** (migration `fd7c3a5b9e12`), with `tmdb_id` partial-unique
+for the same reason `people` has it and **not** composite with `kind`, because
+`belongs_to_collection` is a field of `/movie/{id}` and there is no series
+counterpart to collide with. The migration also gave `titles.collection_id` the
+foreign key it had waited for since M1 (`ON DELETE SET NULL`) and the partial
+index that serves both `FranchiseProvider`'s read and the referencing-side
+lookup that `SET NULL` performs on every collection delete.
+
+**`belongs_to_collection` is movies-only and has no `/tv/{id}` counterpart** —
+verified against the recorded payloads, where `series.json` carries no such key
+and nothing plays its role. Three consequences:
+
+- `FranchiseProvider` fires on **movies only**. On a television-only household
+  PRD 06's firing condition ("≥ 2 owned titles in a collection") is
+  unsatisfiable *by construction* rather than by absence of data — a different
+  fact, and the one an operator debugging a missing row needs.
+- **No series grouping is invented.** Grouping by name prefix, grouping by
+  `networks`, and reading Emby's `TmdbCollection` provider-id key (real,
+  observed in M4's key-space sweep, and a *movie* collection id attached to
+  whatever Emby chose) each produce a populated, plausible, wrong row.
+- `titles.collection_id` is NULL on every series row, permanently. A series row
+  carrying a non-NULL one is a defect, and `CollectionRepository`'s contract
+  suite kills it.
+
+**No `overview` and no `parts[]`** — both are on `/collection/{id}`, the second
+network call boundary call 4 refuses — and **no artwork**, which is M9's whole
+table. `belongs_to_collection` itself is `{id, name, poster_path,
+backdrop_path}`.
 
 ### Image
 
@@ -252,6 +347,30 @@ section opens with, and that `CLAUDE.md` states project-wide.
 
 **Unmatched items are never dropped.** A `MediaItem` with `title_id IS NULL`
 sits in a review queue exposed over the admin API for manual resolution.
+
+**`added_at` is COALESCEd forward, which is not the same as immutable — and
+the difference is what M7's Recently Added row is exposed to.** The shipped
+upsert is `added_at = COALESCE(excluded.added_at, media_items.added_at)`. That
+refuses to overwrite with **NULL**, so a delta payload that omits the field
+cannot erase it. It does **not** refuse to overwrite with a *value*: if a
+source reports a different `added_at`, the new one wins, every walk. Two
+opposite consequences follow and both are real:
+
+- A library re-imported into the same source keeps its dates, as long as the
+  source keeps reporting the same ones. This is the behaviour the `COALESCE`
+  is usually credited with.
+- A library whose source reports *fresh* dates — files genuinely re-copied, so
+  their creation time is new, or a source migration re-deriving them from the
+  import — has **every row's `added_at` reprogrammed to the import instant**,
+  and `RecentlyAddedProvider` then shows the entire library. The window and the
+  row's limit cap how bad that looks; nothing prevents it.
+
+M7 deliberately does not make the column insert-only, because the same clause
+is what lets a source that initially could not report `added_at` fill it in on
+a later walk. Making it immutable would fix the flood and make that
+permanently unfixable, which is the worse trade against a nullable column on a
+review-queue table. Recorded here so the next reader of "COALESCEd forward"
+does not read it as "write-once".
 
 ### User / WatchState
 
@@ -352,16 +471,120 @@ the one that gets missed:
 | **`update()`'s mutation loop** | it `setattr`s every column, so Postgres answers `ERROR: column "search_document" can only be updated to DEFAULT`. **This fires on writes**, so a change that only tested reading a seeded row will not see it. |
 | the 1:1 assertion in the model tests | fails — and, spelled as `columns - DERIVED_COLUMNS == model_fields`, it *also* fails if someone adds a name to `DERIVED_COLUMNS` that `Title` does model. |
 
+**M7 put a second name in `DERIVED_COLUMNS`, and it is a different kind of
+thing from the first.** `DERIVED_COLUMNS` is now
+`{"search_document", "credit_names"}`. `search_document` is
+`GENERATED ALWAYS AS (…) STORED`, so **Postgres maintains it** and no code
+could write it if it tried. `titles.credit_names text[]` is **maintained by
+code** — by the same call in `db/repositories/people.py` that writes `credits`, inside
+one transaction, holding the top ten billed plus every stored crew name — so nothing
+in the database stops a caller writing it, and its membership here is what
+does: `_to_domain` filters it out (so `Title` does not carry a cast list that
+is not the cast) and `_NOT_UPDATABLE` — which is
+`{"id", "created_at", "updated_at"} | DERIVED_COLUMNS` — keeps `update()`'s
+mutation loop off it, so a `Title` round-trip cannot blank it.
+
+Both belong here and the shared reason is the 1:1 rule, not the mechanism:
+**a column is in `DERIVED_COLUMNS` when it is derived from domain state rather
+than being domain state**, whoever derives it. The distinction matters the day
+someone adds a third: a generated column that is not listed fails loudly on
+every read, while a code-maintained one that is not listed fails on the *write*
+path only — `update()`'s mutation loop would happily set it to `None`, and
+`usher_array_text` is `STRICT`, so one NULL nulls the whole search document for
+that row and nothing raises. That is why `credit_names` is `NOT NULL` with a
+`'{}'` server default as well as being listed here: two independent guards for
+a failure that is silent under either one alone.
+
 ### Supporting tables
 
 | Table | Purpose |
 |---|---|
 | `curated_rows` | ⏳ Persisted LLM row output ([06](06-rows-and-recommendations.md)). **Does not exist yet** — M8 owns it, along with the `LLMClient` implementation that fills it |
-| `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, computed_at)`. A **batch artefact**, rebuilt rather than repaired, blending the two signals M6 has data for — embedding cosine plus genre and keyword Jaccard — and not the four [05](05-search-and-similarity.md) specifies. It is the one derived artefact in this schema with no per-row freshness predicate, and it carries a whole-artefact `computed_at` instead, on purpose ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)) |
-| `genome_scores` | ⏳ MovieLens tag-genome relevance vectors, where available. **Does not exist**: no importer, no phase, no table. Owned by M7 — see [09](09-roadmap.md) |
+| `people` | ✅ Canonical people: `(id, tmdb_id, name, sort_name, known_for_department, created_at, updated_at)`. Identity is a **partial-unique `tmdb_id`** (`WHERE tmdb_id IS NOT NULL`), never `name` — see below |
+| `credits` | ✅ The `people`↔`titles` join, one row per credit: `(id, person_id, title_id, kind, tmdb_credit_id, character, job, department, billing_order, created_at)`. `kind` is the `cast`/`crew` discriminator and `billing_order` is the cast's billing rank. **No `updated_at` and no trigger** — every write is an insert, because a credit is a fact about a payload rather than a mutable row |
+| `collections` | ✅ TMDb franchise grouping: `(id, tmdb_id, name, created_at, updated_at)`, `tmdb_id` partial-unique. `titles.collection_id`'s foreign-key target, at last |
+| `user_taste` | ✅ One centroid per user: `(user_id PK, centroid halfvec(384), model_name, source_watermark, title_count, computed_at)`. `centroid` and `source_watermark` are both **nullable on purpose** — a household below five engaged titles gets a written refusal rather than a skipped row, and a household with no watch state at all has no watermark to record. `(model_name, source_watermark)` together are [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s fingerprint here |
+| `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, blend_fingerprint, computed_at)`. A **batch artefact**, rebuilt rather than repaired. M6 blended the two signals it had data for; M7 makes it three of the four [05](05-search-and-similarity.md) specifies and adds **`blend_fingerprint`** (migration `ffb`), so "was this row computed under the current blend?" stopped being undecidable. `computed_at` stays beside it for the half that is still undecidable per row — *some other title was embedded since* ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)) |
+| `genome_scores` | ✅ One title's MovieLens tag-genome vector: `(title_id, relevance halfvec(1128), genome_revision, computed_at)`. **One dense vector per title, not a tall `(title_id, tag_id, relevance)`** — see below |
 | `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats. One row per *attempt*, so the availability sweep can say which run last finished cleanly |
 | `jobs` | Priority work queue ([03](03-sources-and-sync.md)). A completed job's row is deleted, so there is no `done` status and the table's size is the outstanding work, not the work ever done |
 | `raw_payloads` | JSONB cache of **provider** responses, so reprocessing never refetches. Its `fetched_at` column is also what enforces TMDb's ≤6-month cache term — see [ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md), which is why there is no separate `provider_cache_meta` table and why source payloads are not stored here |
+
+### `genome_scores` is one dense vector per title, and the tall shape is refused with a measurement
+
+An earlier draft of the row above implied a tall
+`(title_id, tag_id, relevance)` table. Priced on a scratch
+`pgvector/pgvector:pg17` (pgvector **0.8.6**) at the real dimensions,
+16,376 rows:
+
+| Form | Rows | Total size |
+|---|---|---|
+| `halfvec(1128)`, one row per title | 16,376 | **45 MB** (1,096 kB heap + 43 MB TOAST + 624 kB index) |
+| `real[]`, one row per title | 16,376 | 88 MB |
+| `(title_id, tag_id smallint, relevance real)`, PK on the pair | **18,472,128** | **2,106 MB** |
+
+**47×**, against a database [08](08-operations.md) budgets at 8–12 GB
+*total*. `real[]` sits between and is worse than both — no operator class, so
+the similarity term stops being a single `<=>` and becomes arithmetic in
+Python. The genome is a genuinely dense matrix (every one of 16,376 movies
+carries a value for every one of 1,128 tags, verified by counting), so the
+tall form stores 16,376 copies of the tag id and the title id to express a
+matrix with no holes in it.
+
+**No HNSW index, and that is a decision rather than an omission.** The access
+pattern is a *pair* lookup by `title_id` rather than a KNN, and an HNSW index
+cannot help a lookup by primary key at all. Measured against a real
+15,565-row load: `get_pair` is **0.062 ms** (two primary-key probes under a
+`BitmapOr`); an unindexed KNN over the same table — one seed against all
+15,565 — is **59.4–66.2 ms** at 93,617 buffers, dominated by one TOAST fetch
+per row. Nothing asks for that today; if something ever does, this reopens on
+evidence. M6 separately measured a planner-*preferred* index costing 4.3× for
+byte-identical recall. The 624 kB of index inside the 45 MB is the primary
+key, and `tests/integration/test_genome_repository.py` asserts the index set
+so a later migration cannot quietly add one.
+
+⚠️ **An earlier draft of this section, taken from the M7 plan, said "a full
+pairwise cosine over all 16,376 vectors is 1.190 ms".** That is not
+achievable and is corrected here: a full pairwise scan is 121M unordered
+pairs of 1,128 lanes and measures **384 s** as a self-join. 1.190 ms is about
+the cost of a single pair. The decision is unchanged — it always rested on
+the access pattern, not on the scan.
+
+**The vector is TOASTed.** 1,128 halfvec lanes is 2,256 bytes plus a header,
+past Postgres's ~2 kB inline threshold, so the heap holds pointers and the
+TOAST relation holds 43 MB. Every read pays a TOAST fetch — invisible at
+16,376 rows, and one more reason the population here is the genome's own
+16,376 rather than the catalog's 1.27M.
+
+**`genome_revision` is [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s
+shape.** The tag vocabulary can change between releases, so a vector is only
+comparable to another built from the same 1,128 tags in the same order — and
+two vectors from different releases are type-identical, same-width, and
+otherwise indistinguishable, so a half-migrated table yields cosines that are
+wrong and plausible. Each row carries the archive revision that produced it,
+and `GenomeRepository.get_pair` returns `None` across a mismatch. An operator
+counts a mixed table with
+`SELECT genome_revision, count(*) FROM genome_scores GROUP BY 1`; the fix is a
+re-import. `computed_at` and no `updated_at` and no trigger, following
+`title_neighbors`: this is a batch artefact.
+
+**Absence is the absence of the row, never a zero vector**
+([ADR-0014](decisions/0014-absence-is-not-zero.md)). A zero vector
+is not "no information" — it is a specific vector at cosine 0.0 from every
+other vector, so a title with no genome row would score as *maximally
+dissimilar* from everything. At the measured coverage that is the common case,
+not the edge.
+
+**The tag vocabulary itself is deliberately not stored, and the cost is
+recorded rather than discovered.** Nothing in M7 reads a tag *name*: cosine
+needs the two vectors and the guarantee that their positions mean the same
+thing. `genome-tags.csv` is read by the importer to verify contiguity and
+width, and thrown away. The cost lands on M8 — **an LLM prompt that wants to
+say "atmospheric, thought-provoking" needs the words** — and paying it is a
+1,128-row table plus a loader step in a phase that already reads the file, and
+one migration. What makes that safe rather than a deferral-by-omission is
+`genome_revision`: the vocabulary M8 loads must carry the same revision as the
+vectors it explains, and there is already something to check it against.
 
 ## Relationships
 
@@ -373,18 +596,30 @@ Title      1─* Image
 Title      1─* MediaItem *─1 Source
 Title      1─* WatchState *─1 User
 Title      1─1 TitleEmbedding
+Title      1─1 GenomeVector  (sparse — 15,565 of 1,271,570; genome_scores)
+User       1─1 UserTaste     (nullable centroid; user_taste)
 Title      *─* Title        (through title_neighbors, directed, precomputed)
 ```
 
-⏳ **Three of those lines describe tables that do not exist**, and they are
-marked here because this block is the fastest place to read the schema and the
-easiest place to be misled by it. `Collection`, `Person`, `Credit` and `Image`
-have no table, no model and no port anywhere in `src/` — `Person`/`Credit`
-land with M7 and `Image` with M9, each re-derived from `raw_payloads` with no
-second network call ([09](09-roadmap.md)'s M4 boundary call 2). The one
-artefact that exists today is **`titles.collection_id`, a bare nullable UUID
-with no foreign key that nothing in `src/` ever writes**; it is the column
-waiting for the table, not evidence of one.
+⏳ **One of those lines still describes a table that does not exist.** `Image`
+has no table, no model and no port anywhere in `src/`, and it lands with M9,
+re-derived from `raw_payloads` with no second network call
+([09](09-roadmap.md)'s M4 boundary call 2).
+
+`Collection`, `Person` and `Credit` **landed in M7** (`fd7c3a5b9e12`), which
+also gave `titles.collection_id` — a bare nullable UUID with no foreign key
+since M1, which nothing in `src/` ever wrote — its foreign key to
+`collections` (`ON DELETE SET NULL`) and the partial index PRD 02 had deferred
+to M9 alongside `media_items`' three columns. That deferral is retracted here
+with its reason: the index is the whole of `FranchiseProvider`'s read *and*
+the referencing-side lookup `SET NULL` performs on every collection delete.
+
+**The `Collection 1─* Title` line is movies-only**, and by construction rather
+than by absence of data — see the `Collection` section above.
+
+**`Title *─* Person` runs through `Credit.title_id`, which is `NOT NULL`**, so
+that edge names a title and never an episode. The ⏳ under `Credit` above
+carries the measurement and the four DDL statements that would reverse it.
 
 ## Rules
 

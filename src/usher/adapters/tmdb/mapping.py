@@ -20,8 +20,19 @@ error:
 | certification | `release_dates.…[].certification` | `content_ratings.…[].rating` |
 | IMDb id | top-level `imdb_id` | `external_ids.imdb_id` |
 | append namespace | `release_dates` | `content_ratings` |
+| collection | `belongs_to_collection` (object or `null`) | **key absent entirely** |
+| creator | *(none — no such concept)* | **top-level `created_by[]`, not `credits.crew`** |
 
-All eight rows were read from TMDb's published reference on 2026-07-31 (see
+The last two rows were added by M7's derivation and were **read out of the
+recorded fixtures rather than assumed**: `movie.json` has
+`belongs_to_collection` and no `created_by`; `series.json` has `created_by`
+and **no `belongs_to_collection` key at all**, and its `credits.crew` is `[]`
+while its `created_by` holds the creator. So a mapper that read creators out
+of `credits.crew` — the obvious place, because that is where a *movie's*
+director lives — returns nothing for every series in the catalog, silently,
+which is exactly what this table exists to prevent.
+
+The first eight rows were read from TMDb's published reference on 2026-07-31 (see
 `tests/fixtures/tmdb/README.md` for the endpoint list), and **every one was
 then confirmed against the live API on 2026-08-01** over 29 movie and 30
 series detail responses: each movie carried `title`/`release_date`/`runtime`/
@@ -50,11 +61,14 @@ from either.
 import re
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from usher.domain.collection import Collection
 from usher.domain.enums import ProductionStatus, TitleKind
 from usher.domain.episode import Episode, Season
+from usher.domain.people import Credit, CreditKind, Person, person_sort_name
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed
 from usher.ports.metadata import MetadataCandidate
@@ -88,6 +102,41 @@ _STATUS: dict[str, ProductionStatus] = {
 # recent episode so far". A returning series has a `last_air_date` too, and
 # rendering it as an end year shows "2011-2026" for a show still on the air.
 _FINISHED = (ProductionStatus.ENDED, ProductionStatus.CANCELED)
+
+# Which crew jobs become `credits` rows. **The filter is the load-bearing
+# half of the derivation's bound.** Unfiltered crew is every gaffer, best boy
+# and assistant art director, and both consumers of that table --
+# `PeopleProvider`'s "more from this director" and the search document's
+# weight class B -- want the people a viewer could name. Below the line,
+# crews repeat because studios repeat, so an unfiltered set makes
+# "recurring" mean "worked at the same studio".
+#
+# A job absent from this set maps to nothing rather than raising, exactly as
+# `_STATUS` treats a status TMDb invents. `Creator` is here because
+# `created_by[]` entries carry no `job` at all and this module supplies one;
+# it is not a value TMDb ever sends in `credits.crew`.
+CREDITED_JOBS: frozenset[str] = frozenset(
+    {"Director", "Writer", "Screenplay", "Story", "Novel", "Creator"}
+)
+
+# The `job` written for a `created_by[]` entry, which carries none.
+_CREATOR_JOB = "Creator"
+# `created_by[]` carries no `department` either; "Writing" is TMDb's own
+# department for the Creator job where it does appear in `credits.crew`.
+_CREATOR_DEPARTMENT = "Writing"
+
+# The cast bound, on `order` rather than on array position -- see
+# `_cast_credits`. A large film's `credits.cast` runs into the low hundreds;
+# at the enriched tier boundary call 4 targets (2k-10k titles) an unbounded
+# cast is roughly 10k x 150 ~ 1.5M credit rows against a database PRD 08
+# budgets at 8-12 GB *total*, and at 50 it is ~500k.
+#
+# **50 is chosen, not measured**, and it is labelled that way for the reason
+# `services/search.py` labels `_POPULARITY_MIDPOINT`: the consequence of a
+# wrong cutoff is bounded, because it drops the 51st-billed actor from a
+# filmography and changes nothing else. A live run over a real enriched tier
+# is what would turn it into a number.
+_CAST_LIMIT = 50
 
 
 def kind_of_payload(payload: Mapping[str, Any]) -> TitleKind:
@@ -215,6 +264,114 @@ def seasons_and_episodes(
     return tuple(seasons), tuple(episodes)
 
 
+def people_and_credits(
+    payload: Mapping[str, Any], title_id: uuid.UUID
+) -> tuple[list[Person], list[Credit]]:
+    """One TMDb detail response -> that title's people and their credits.
+
+    Pure, and a pure function of a payload that may have come out of
+    `raw_payloads` months after the fetch that produced it -- `to_result`'s
+    property, restated because this one is reached the same way.
+
+    **Three sources, and the third is the per-kind divergence.**
+    `credits.cast[]` is billed cast, `credits.crew[]` is crew filtered to
+    `CREDITED_JOBS`, and `created_by[]` is a series' creators -- a top-level
+    array, **not** part of `credits.crew`, which is `[]` on the recorded
+    series payload. A mapper that read creators out of the crew returns
+    nothing for every series in the catalog.
+
+    **Ids are minted here and are placeholders.** `Person.id` is a fresh
+    UUIDv7 per sighting, exactly as ingest mints one per season, and every
+    `Credit.person_id` names the `Person` minted beside it in this same call.
+    A person the catalog already holds keeps the id it was inserted with, so
+    the caller upserts on `tmdb_id`, reads the real ids back through
+    `PersonRepository.resolve_tmdb_ids`, and re-points the credits. Nothing
+    here can know that id.
+
+    **An entry with no usable `id` is dropped rather than raised on.** The
+    standing rule this module opens with -- nothing TMDb can put in a payload
+    may raise, because a `pydantic.ValidationError` is not a `UsherPortError`
+    and would kill the worker instead of parking one job -- and here there is
+    a second, independent reason: a person with a NULL `tmdb_id` is inserted
+    rather than merged (the unique index is partial), so its stored id can
+    never be read back and any credit naming it would be permanently
+    orphaned.
+
+    One person may hold several credits on one title -- a director who also
+    wrote it, an actor who also created the series -- and they are separate
+    rows. `(title_id, person_id, kind, job)` is the natural key precisely so
+    they do not collapse; a mapper deduplicating on `(title_id, person_id)`
+    keeps whichever it saw second.
+    """
+    entries = _credit_entries(payload)
+
+    people: dict[int, Person] = {}
+    for one in entries:
+        existing = people.get(one.tmdb_id)
+        if existing is None:
+            people[one.tmdb_id] = Person(
+                tmdb_id=one.tmdb_id,
+                name=one.name,
+                # In `domain/`, never spelled here: an adapter-side spelling
+                # is what makes a sort order irreproducible between callers.
+                sort_name=person_sort_name(one.name),
+                known_for_department=one.known_for_department,
+            )
+        elif existing.known_for_department is None and one.known_for_department is not None:
+            # `PersonRepository.upsert_many`'s COALESCE rule arriving one
+            # layer early, and it is reachable *inside a single payload*: a
+            # `created_by[]` entry carries no `known_for_department` and a
+            # `credits.cast[]` entry does, so the same person arrives with it
+            # and without it in one pass. Frozen models, so this is a new
+            # instance -- which is why the credits are built in a second pass,
+            # against the finished map.
+            people[one.tmdb_id] = existing.evolve(known_for_department=one.known_for_department)
+
+    credits = [
+        Credit(
+            person_id=people[one.tmdb_id].id,
+            title_id=title_id,
+            kind=one.kind,
+            tmdb_credit_id=one.tmdb_credit_id,
+            character=one.character,
+            job=one.job,
+            department=one.department,
+            billing_order=one.billing_order,
+        )
+        for one in entries
+    ]
+    return list(people.values()), credits
+
+
+def collection_from_payload(payload: Mapping[str, Any]) -> Collection | None:
+    """A movie's `belongs_to_collection` -> a `Collection`, or `None`.
+
+    **Three shapes reach `None` and all three are ordinary.** `null` is the
+    common case for a standalone film; the key is **absent entirely** on every
+    series, verified against the recorded `series.json`'s top-level key set;
+    and an object missing an `id` or a usable `name` is dropped rather than
+    raised on, because `Collection.name` is `min_length=1` and a
+    `pydantic.ValidationError` is not a `UsherPortError`.
+
+    `tmdb_id` is what makes a re-derivation an update rather than a duplicate.
+    No `overview` and no artwork: those live on `/collection/{id}`, a second
+    network call boundary call 4 refuses.
+
+    This does **not** check the payload's kind, and does not need to: a series
+    has no such key. `CollectionRepository.attach_titles` filters
+    `kind = 'movie'` itself rather than trusting its caller, so the property
+    holds in two independent places.
+    """
+    block = payload.get("belongs_to_collection")
+    if not isinstance(block, Mapping):
+        return None
+    tmdb_id = _as_int(block.get("id"))
+    name = _text(block.get("name"))
+    if tmdb_id is None or name is None:
+        return None
+    return Collection(tmdb_id=tmdb_id, name=name)
+
+
 def search_candidates(body: Mapping[str, Any], kind: TitleKind) -> list[MetadataCandidate]:
     """One `/search/movie` or `/search/tv` page -> candidates.
 
@@ -263,6 +420,130 @@ def changed_ids(body: Mapping[str, Any]) -> tuple[list[int], bool]:
 
 
 # -- filters ---------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _CreditEntry:
+    """One payload entry, already filtered and already read.
+
+    The array an entry came from is what fixes `kind`, `job`, `department`
+    and `billing_order` -- none of the four is inferable from the entry
+    alone, because a crew entry with no `job` and a cast entry with no
+    `character` are the same row shape.
+
+    **Every field here is the parsed value, not the raw one**, so the two
+    passes in `people_and_credits` cannot disagree about which entries are
+    usable. An entry with no id or no name never becomes one of these at all:
+    a person minted without a credit, or a credit naming a person that was
+    never minted, are the two shapes that split would produce.
+    """
+
+    tmdb_id: int
+    name: str
+    kind: CreditKind
+    known_for_department: str | None
+    tmdb_credit_id: str | None
+    character: str | None
+    job: str | None
+    department: str | None
+    billing_order: int | None
+
+
+def _credit_entries(payload: Mapping[str, Any]) -> list[_CreditEntry]:
+    """Cast, then filtered crew, then creators -- in that order.
+
+    Order matters and is not cosmetic: `people_and_credits` keeps the first
+    populated `known_for_department` it sees, and cast entries carry one
+    while `created_by[]` entries never do. Reading the creators first would
+    make the COALESCE branch the common path instead of the rare one.
+    """
+    block = payload.get("credits")
+    credits: Mapping[str, Any] = block if isinstance(block, Mapping) else {}
+    entries: list[_CreditEntry] = []
+
+    for entry in _mappings(credits.get("cast")):
+        billing = _non_negative_int(entry.get("order"))
+        # **The cutoff is on `order`, never on the array index.** The two
+        # agree on every array TMDb happens to have sorted, which is most of
+        # them -- and where they disagree, slicing the array keeps the wrong
+        # fifty and renumbers the lead actor. An entry with no `order` at all
+        # is kept: TMDb always sends one for cast, and dropping a cast member
+        # over a missing sort key would be losing data to tidiness.
+        if billing is not None and billing >= _CAST_LIMIT:
+            continue
+        _append(entries, entry, CreditKind.CAST, job=None, department=None, billing_order=billing)
+
+    for entry in _mappings(credits.get("crew")):
+        job = _text(entry.get("job"))
+        if job is None or job not in CREDITED_JOBS:
+            continue
+        _append(
+            entries,
+            entry,
+            CreditKind.CREW,
+            job=job,
+            department=_text(entry.get("department")),
+            # **`crew[]` has no `order` field** -- read out of the fixtures,
+            # not assumed. So `billing_order` is `None` here, and a schema
+            # that made it `NOT NULL DEFAULT 0` would put every crew member
+            # above the star of the film in every "top billed" read, because
+            # `list_for_title` orders nulls last.
+            billing_order=None,
+        )
+
+    # The ninth divergence row. A series' creators are a *top-level* array,
+    # not part of `credits.crew` -- which is `[]` on the recorded series
+    # payload -- so a mapper that read the crew returns nothing for every
+    # series in the catalog, silently. `created_by[]` entries carry no `job`,
+    # no `department` and no `order`, so all three are supplied here.
+    for entry in _mappings(payload.get("created_by")):
+        _append(
+            entries,
+            entry,
+            CreditKind.CREW,
+            job=_CREATOR_JOB,
+            department=_CREATOR_DEPARTMENT,
+            billing_order=None,
+        )
+    return entries
+
+
+def _append(
+    entries: list[_CreditEntry],
+    entry: Mapping[str, Any],
+    kind: CreditKind,
+    *,
+    job: str | None,
+    department: str | None,
+    billing_order: int | None,
+) -> None:
+    """One filtered entry, or nothing at all.
+
+    The id and the name are read here, once, so the two passes over the
+    result cannot disagree about which entries are usable. An entry missing
+    either is dropped rather than raised on -- `mapping.py`'s standing rule,
+    plus a second reason specific to people: one with no provider id is
+    *inserted* rather than merged (the unique index is partial), so its
+    stored id can never be read back and any credit naming it would be
+    permanently orphaned.
+    """
+    tmdb_id = _as_int(entry.get("id"))
+    name = _text(entry.get("name"))
+    if tmdb_id is None or name is None:
+        return
+    entries.append(
+        _CreditEntry(
+            tmdb_id=tmdb_id,
+            name=name,
+            kind=kind,
+            known_for_department=_text(entry.get("known_for_department")),
+            tmdb_credit_id=_text(entry.get("credit_id")),
+            character=_text(entry.get("character")),
+            job=job,
+            department=department,
+            billing_order=billing_order,
+        )
+    )
 
 
 def _episodes_of(entry: Mapping[str, Any], season: Season, title_id: uuid.UUID) -> list[Episode]:

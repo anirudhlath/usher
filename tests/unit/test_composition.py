@@ -24,11 +24,15 @@ import pytest
 from loguru import logger
 from pydantic import SecretStr
 
+from tests.fakes.collection_repository import FakeCollectionRepository
+from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.metadata_provider import FakeMetadataProvider
+from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
+from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.composition import (
@@ -47,6 +51,7 @@ from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import TitleRepository
 from usher.services.handlers import SourceBinding
+from usher.services.rows import ROW_PROVIDERS
 
 
 def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipeline:
@@ -61,6 +66,13 @@ def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipelin
         return None
 
     unused = cast(Any, None)
+    # `build_derive_service` reads three more slots than
+    # `build_enrich_service` does, so they are real fakes rather than
+    # `unused`: `build_worker` constructs the service eagerly, and a `None`
+    # there fails at construction rather than at the one wiring decision
+    # under test.
+    people = FakePersonRepository()
+    titles_store = titles if isinstance(titles, FakeTitleRepository) else FakeTitleRepository()
     return Pipeline(
         sources=unused,
         credentials=unused,
@@ -74,6 +86,10 @@ def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipelin
         queue=queue,
         embeddings=FakeTitleEmbeddingRepository(),
         neighbors=unused,
+        taste_rows=FakeTasteRepository(),
+        people=people,
+        credits=FakeCreditRepository(people, titles_store),
+        collections=FakeCollectionRepository(),
         adapters=unused,
         matcher=unused,
         ingest=unused,
@@ -81,6 +97,8 @@ def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipelin
         watch=unused,
         search=unused,
         similar=unused,
+        taste=unused,
+        row_providers=ROW_PROVIDERS,
         events=NullEventPublisher(),
         commit=commit,
     )
@@ -229,6 +247,50 @@ def test_a_worker_with_an_embedder_registers_the_index_handler() -> None:
     )
 
     assert JobKind.INDEX in worker.registered_kinds
+
+
+def test_a_worker_without_a_provider_registers_no_derive_handler() -> None:
+    """`DERIVE` is guarded on the **provider**, the `ENRICH` arm rather than
+    the `INDEX` one, and the guard is correct rather than merely consistent:
+    `DeriveService` holds a `MetadataProvider` for `to_derivation`, and a
+    deployment with no key has no TMDb payloads in `raw_payloads` to derive
+    from at all -- they exist only because a key once did.
+
+    Fails: the unguarded registration. Its symptom is a parked job on a
+    keyless deployment, and a parked job needs a human to release work whose
+    only problem was the process it was offered to. Leaving it pending for a
+    worker that has a key is `INDEX`'s bargain, one lane over.
+    """
+    worker = build_worker(
+        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _settings(),
+        provider=None,
+        embedder=FakeEmbedder(),
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+
+    assert JobKind.DERIVE not in worker.registered_kinds
+    # The embedder is present, so this is a guard on the provider rather than
+    # on "anything optional" -- without this line the case passes against a
+    # `DERIVE` registered under `embedder is not None`.
+    assert JobKind.INDEX in worker.registered_kinds
+
+
+def test_a_worker_with_a_provider_registers_the_derive_handler() -> None:
+    """The control that makes the case above evidence rather than a
+    tautology: without it, an implementation registering *nothing* passes."""
+    worker = build_worker(
+        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _settings(),
+        provider=FakeMetadataProvider(),
+        embedder=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+
+    assert JobKind.DERIVE in worker.registered_kinds
+    assert JobKind.INDEX not in worker.registered_kinds
 
 
 async def test_the_model_is_loaded_once_across_three_worker_passes() -> None:

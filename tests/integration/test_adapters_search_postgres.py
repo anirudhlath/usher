@@ -117,6 +117,13 @@ async def _insert_title(
     land, because `search_document` is computed from exactly those and
     nothing in this suite ever writes it.
 
+    `credit_names` is written here and by no other statement in this file,
+    because it is weight class B's input and `search_document` is generated
+    from it. Without it the shared contract's class-B case is red here and
+    green against `FakeSearchIndex`, which is the correct order to find them
+    in: the fake models the weight, the real one reads a column somebody has
+    to fill.
+
     `enrichment_state` defaults to `enriched` because a `SearchDocument`
     exists for a title worth indexing -- and because it is the denominator of
     `semantic_coverage` (Task 18): a skeleton is not "missing an embedding",
@@ -124,11 +131,12 @@ async def _insert_title(
     """
     columns = (
         "id, kind, name, sort_name, original_name, overview, tagline, "
-        "genres, keywords, year, popularity, vote_count, enrichment_state"
+        "genres, keywords, credit_names, year, popularity, vote_count, enrichment_state"
     )
     values = (
         "CAST(:id AS uuid), :kind, :name, :sort_name, :original_name, :overview, "
-        ":tagline, CAST(:genres AS text[]), CAST(:keywords AS text[]), :year, "
+        ":tagline, CAST(:genres AS text[]), CAST(:keywords AS text[]), "
+        "CAST(:credit_names AS text[]), :year, "
         ":popularity, :vote_count, :enrichment_state"
     )
     await session.execute(
@@ -138,6 +146,7 @@ async def _insert_title(
             "kind": document.kind.value,
             "genres": list(document.genres),
             "keywords": list(document.keywords),
+            "credit_names": list(document.credits),
             "vote_count": vote_count,
             "enrichment_state": enrichment_state.value,
             **{

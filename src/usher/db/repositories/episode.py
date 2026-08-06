@@ -178,6 +178,85 @@ JOIN episodes e ON e.title_id = p.pt AND e.season_number = p.ps AND e.episode_nu
 """
 
 
+# The first join from `watch_states` to `episodes` anywhere in `src/`. Not a
+# new caller of an old statement: `list_for_title` returns the entire tree --
+# 20,000 rows for the one measured pathological series -- and `NextUpProvider`
+# asks about every series the household has started, so a loop over it reads
+# four million rows to produce two hundred cards.
+#
+# Five things here are load-bearing, each with its own contract case:
+#
+#   The mark is a POSITION, not an instant: `ORDER BY e.season_number DESC,
+#   e.episode_number DESC`, never `ws.last_played_at DESC`. A household that
+#   finishes season three and rewatches the pilot is not asking for S01E02,
+#   and `last_played_at` is NULL on nearly every walk-sourced row (ADR-0014),
+#   which makes a recency-keyed mark arbitrary rather than merely wrong.
+#
+#   `DISTINCT ON` rather than `GROUP BY`, because `max()` over a composite
+#   does not exist in Postgres. Two of them: one picks each series' mark, the
+#   other picks the first candidate after it.
+#
+#   The ROW COMPARISON `(a, b) > (c, d)` is lexicographic by definition, and
+#   the hand-expanded `season_number > ... OR (season_number = ... AND
+#   episode_number > ...)` is the same thing written three ways to get wrong.
+#   It is also what keeps this indexable: a btree row comparison against
+#   `(title_id, season_number, episode_number)` is pushed down as an index
+#   condition, and that index already exists as
+#   `uq_episodes_title_season_episode`. Both spellings return identical rows,
+#   so only the EXPLAIN case can tell them apart.
+#
+#   `e.season_number > 0` on BOTH sides. Season 0 is TMDb's specials
+#   namespace and the CHECK allows it, so one watched Christmas special would
+#   otherwise set a mark of (0, 1) and Next Up would present starting a show
+#   as continuing it. Named because its absence is otherwise indistinguishable
+#   from having forgotten it.
+#
+#   The CANDIDATE-side copy of that predicate is an EQUIVALENT MUTANT and is
+#   kept anyway, which is the same treatment `_ENQUEUE`'s `GREATEST` gets.
+#   Deleting it survives the whole suite, and not for want of a case: with the
+#   mark side filtered, every mark has `season_number >= 1`, and `(0, n) >
+#   (>= 1, m)` is false for every n and m -- so no season-0 row can ever
+#   satisfy the row comparison and the predicate is unreachable. The plan's
+#   suggested cover (a mark of (0, 1) with a special at (0, 2)) cannot be
+#   written for exactly that reason: the mark side is what makes a season-0
+#   mark impossible. Kept because it stops being unreachable the day anyone
+#   loosens the mark side, and a reader who finds only one copy will assume
+#   the other was forgotten.
+#
+#   `ws.episode_id = e.id`, never `ws.title_id`. A series' own title-keyed
+#   row is the whole show and a source can write one (Emby's "mark series
+#   watched"); it carries no season or episode number at all. The equality
+#   join excludes such rows structurally rather than by predicate, since
+#   `uq_watch_states_user_episode` treats NULLs as distinct and an equality
+#   comparison never matches one.
+#
+# `CAST(:x AS uuid)`, never a colon-name followed by a double colon, and no
+# colon-prefixed word in any comment in this module -- SQLAlchemy's bind
+# regex skips the first spelling and silently creates a parameter for the
+# second.
+_NEXT_UP = """
+WITH mark AS (
+    SELECT DISTINCT ON (e.title_id)
+           e.title_id AS title_id, e.season_number AS season_number,
+           e.episode_number AS episode_number
+    FROM watch_states ws
+    JOIN episodes e ON e.id = ws.episode_id
+    WHERE ws.user_id = CAST(:user_id AS uuid)
+      AND ws.played
+      AND e.title_id = ANY(CAST(:title_ids AS uuid[]))
+      AND e.season_number > 0
+    ORDER BY e.title_id, e.season_number DESC, e.episode_number DESC
+)
+SELECT DISTINCT ON (e.title_id) e.*
+FROM mark m
+JOIN episodes e
+  ON e.title_id = m.title_id
+ AND (e.season_number, e.episode_number) > (m.season_number, m.episode_number)
+WHERE e.season_number > 0
+ORDER BY e.title_id, e.season_number, e.episode_number
+"""
+
+
 class PostgresEpisodeRepository(EpisodeRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -309,6 +388,52 @@ class PostgresEpisodeRepository(EpisodeRepository):
                 )
             ).all()
         return {(row.title_id, row.season_number, row.episode_number): row.id for row in rows}
+
+    async def list_by_ids(self, episode_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, Episode]:
+        # One statement for the whole page. The alternative already on this
+        # port is `list_for_title`, which returns the entire tree -- measured
+        # at 20,001 rows / 22.901 ms / 402 buffers for one pathological series,
+        # to find one episode.
+        if not episode_ids:
+            # `= ANY('{}')` is a valid empty answer rather than a syntax error,
+            # so this guard is a round trip saved rather than a correctness
+            # fix -- unlike the `IN ()` form, which would be the latter.
+            return {}
+        with self._session.no_autoflush:
+            rows = (
+                (
+                    await self._session.execute(
+                        text("SELECT * FROM episodes WHERE id = ANY(:episode_ids)"),
+                        {"episode_ids": list(dict.fromkeys(episode_ids))},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        # An id with no episode is simply absent -- never a key mapped to
+        # `None`, which a caller would have to distinguish from "not asked".
+        return {row["id"]: Episode.model_validate(dict(row)) for row in rows}
+
+    async def next_up(
+        self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, Episode]:
+        if not title_ids:
+            return {}
+        with self._session.no_autoflush:
+            rows = (
+                (
+                    await self._session.execute(
+                        text(_NEXT_UP),
+                        {
+                            "user_id": user_id,
+                            "title_ids": list(dict.fromkeys(title_ids)),
+                        },
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return {row["title_id"]: Episode.model_validate(dict(row)) for row in rows}
 
     async def list_for_title(self, title_id: uuid.UUID) -> tuple[list[Season], list[Episode]]:
         with self._session.no_autoflush:

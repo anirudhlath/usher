@@ -287,3 +287,49 @@ async def _wait_for_subscriber(bus: InMemoryEventBus, *, expected: int = 1) -> N
             return
         await asyncio.sleep(0.005)
     raise AssertionError("no subscriber appeared on the bus; this case would measure nothing")
+
+
+async def test_a_row_invalidation_reaches_an_unfiltered_subscriber(
+    client: httpx.AsyncClient, bus: InMemoryEventBus
+) -> None:
+    """The home client's subscription. It renders the whole screen and has no
+    title ids to scope to before it fetches one, so it subscribes unfiltered."""
+    async with client.stream("GET", "/events") as response:
+        lines = aiter(response.aiter_lines())
+        await _wait_for_subscriber(bus)
+        await bus.publish(
+            ClientEvent(kind=ClientEventKind.ROW_INVALIDATED, data={"slug": "continue-watching"})
+        )
+        frame = await asyncio.wait_for(_read_frame(lines), timeout=2.0)
+    assert "event: row.invalidated" in frame
+    assert "continue-watching" in frame
+
+
+async def test_a_row_invalidation_does_not_wake_a_detail_screen(
+    client: httpx.AsyncClient, bus: InMemoryEventBus
+) -> None:
+    """**The settlement, asserted rather than assumed.** A row-slug event
+    carries no title id, so it reaches every subscriber or none -- there is no
+    "some". It reaches none of the filtered ones, and that is correct rather
+    than a limitation: PRD 07's own reason for `?titles=` is "so a detail screen
+    isn't woken by unrelated churn", and a row invalidation is unrelated churn
+    for a screen that renders no rows.
+
+    Kills a well-meant `wants()` special case that lets `ROW_INVALIDATED` bypass
+    the filter -- which wakes every open detail screen for a row it does not
+    render, in exchange for a refetch the client would ignore.
+
+    The second publish is what makes this a *filter* assertion rather than a
+    timeout: the frame that does arrive proves the stream was live and reading.
+    """
+    watched = uuid.uuid4()
+    async with client.stream("GET", f"/events?titles={watched}") as response:
+        lines = aiter(response.aiter_lines())
+        await _wait_for_subscriber(bus)
+        await bus.publish(
+            ClientEvent(kind=ClientEventKind.ROW_INVALIDATED, data={"slug": "next-up"})
+        )
+        await bus.publish(ClientEvent(kind=ClientEventKind.TITLE_UPDATED, title_id=watched))
+        frame = await asyncio.wait_for(_read_frame(lines), timeout=2.0)
+    assert "row.invalidated" not in frame
+    assert str(watched) in frame

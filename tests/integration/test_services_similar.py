@@ -40,6 +40,13 @@ from usher.domain.title import Title
 from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
 from usher.services.similar import SimilarityService
 
+# The blend these arranged rows claim to have been computed under. A literal,
+# never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
+# express "this row came from a different blend", which is the whole state the
+# column exists to describe.
+_FP = "arranged-by-a-test"
+
+
 _MODEL = "fake:test-384"
 
 
@@ -352,10 +359,11 @@ async def test_a_seed_that_lost_every_neighbour_has_its_rows_deleted(
     await neighbors.replace(
         [seed_id],
         [ScoredNeighbor(title_id=seed_id, neighbor_title_id=other_id, score=0.5, rank=0)],
+        blend_fingerprint=_FP,
     )
     assert len(await neighbors.list_for(seed_id, limit=100)) == 1
 
-    assert await neighbors.replace([seed_id], []) == 0
+    assert await neighbors.replace([seed_id], [], blend_fingerprint=_FP) == 0
     assert await neighbors.list_for(seed_id, limit=100) == []
 
 
@@ -388,11 +396,112 @@ async def test_the_stored_rank_is_what_a_read_orders_by(session: AsyncSession) -
             ScoredNeighbor(title_id=seed_id, neighbor_title_id=near_id, score=0.1, rank=0),
             ScoredNeighbor(title_id=seed_id, neighbor_title_id=far_id, score=0.9, rank=1),
         ],
+        blend_fingerprint=_FP,
     )
 
     stored = await neighbors.list_for(seed_id, limit=10)
     assert [row.neighbor_title_id for row in stored] == [near_id, far_id]
     assert [row.rank for row in stored] == [0, 1]
+    # `near_id` is minted before `far_id`, so `ORDER BY neighbor_id` alone
+    # answers this case correctly. The next case is the one with teeth.
+    assert near_id < far_id
+
+
+@pytest.mark.integration
+async def test_a_read_orders_by_rank_and_not_by_the_neighbours_own_id(
+    session: AsyncSession,
+) -> None:
+    """`ORDER BY rank, neighbor_id` -- and deleting `rank` from it **survived
+    the whole suite** until this case existed.
+
+    The case above separates `rank` from `score` and not `rank` from `id`: it
+    mints the rank-0 neighbour first, so the monotonic UUIDv7 puts it first
+    under either ordering. Here the arrangement is inverted -- the rank-1
+    neighbour carries the *lower* id -- so an implementation that dropped the
+    `rank` key returns the catalog's oldest row as "most similar".
+
+    The distractor is `far_id`: a genuinely less similar title whose only
+    claim on the top of the shelf is that it was inserted first. Nothing
+    downstream recovers this -- `BaseRow.hydrate` turns ids into cards *in the
+    order given*, and `BecauseYouWatchedProvider` truncates to `_MAX_CARDS`
+    off the top, so a wrong order is also a wrong *selection*.
+    """
+    neighbors = PostgresTitleNeighborRepository(session)
+    first, second = planted_pair(math.pi / 4)
+    seed_id = await _seed(session, vector=first)
+    far_id = await _seed(session, vector=second)  # minted FIRST -> lower id
+    near_id = await _seed(session, vector=second)  # minted SECOND -> higher id
+    await session.flush()
+    assert far_id < near_id, "the fixture must make id order and rank order disagree"
+
+    await neighbors.replace(
+        [seed_id],
+        [
+            ScoredNeighbor(title_id=seed_id, neighbor_title_id=near_id, score=0.9, rank=0),
+            ScoredNeighbor(title_id=seed_id, neighbor_title_id=far_id, score=0.1, rank=1),
+        ],
+        blend_fingerprint=_FP,
+    )
+
+    stored = await neighbors.list_for(seed_id, limit=10)
+    assert [row.neighbor_title_id for row in stored] == [near_id, far_id]
+    assert [row.rank for row in stored] == [0, 1]
+
+
+@pytest.mark.integration
+async def test_count_stale_counts_rows_from_another_blend_and_not_rows_from_this_one(
+    session: AsyncSession,
+) -> None:
+    """The staleness predicate, against Postgres rather than against the fake.
+
+    Inverting `<>` to `=` in `_COUNT_STALE_NEIGHBORS` **survived the whole
+    suite**: every test of neighbour `count_stale` runs against
+    `FakeTitleNeighborRepository`, whose comparison is Python, and the only
+    integration reads of `count_stale` are the unrelated *embedding* one. So
+    the one clause that decides whether `usher.similarity.neighbors.stale`
+    means anything had no Postgres coverage at all.
+
+    **Both kinds of row have to be in the table at once.** With only stale rows
+    seeded, `<>` answers 1 and `=` answers 0 -- which an `== 1` assertion does
+    catch, but only by luck of direction; with only fresh rows the two swap and
+    a `== 0` assertion is satisfied by the inversion. Seeding one of each makes
+    the two predicates count *different rows*, and the per-title assertions pin
+    which is which.
+
+    The failure this guards is the one PRD 10 names: on a table inherited from
+    M6 -- the deployment the column was added for -- an inverted predicate
+    reads **zero**, and a gauge reading zero is indistinguishable from a fresh
+    table.
+
+    Both fingerprints are literals, for the reason `_FP` is one: the predicate
+    compares two strings and does not care whether either is today's real
+    blend, while a case that inherited `blend_fingerprint()` would stop
+    expressing "a different blend" the moment the weights moved.
+    """
+    neighbors = PostgresTitleNeighborRepository(session)
+    first, second = planted_pair(math.pi / 4)
+    stale_seed = await _seed(session, vector=first)
+    fresh_seed = await _seed(session, vector=first)
+    other = await _seed(session, vector=second)
+    await session.flush()
+
+    running = "the-running-blend"
+    assert running != _FP
+
+    await neighbors.replace(
+        [stale_seed],
+        [ScoredNeighbor(title_id=stale_seed, neighbor_title_id=other, score=0.5, rank=0)],
+        blend_fingerprint=_FP,
+    )
+    await neighbors.replace(
+        [fresh_seed],
+        [ScoredNeighbor(title_id=fresh_seed, neighbor_title_id=other, score=0.5, rank=0)],
+        blend_fingerprint=running,
+    )
+
+    assert await neighbors.count_stale(blend_fingerprint=running) == 1
+    assert await neighbors.count_stale(blend_fingerprint=running, title_id=stale_seed) == 1
+    assert await neighbors.count_stale(blend_fingerprint=running, title_id=fresh_seed) == 0
 
 
 @pytest.mark.integration
@@ -450,6 +559,7 @@ async def test_computed_at_is_the_oldest_page_and_none_before_any_rebuild(
     await neighbors.replace(
         [seed_id],
         [ScoredNeighbor(title_id=seed_id, neighbor_title_id=other_id, score=0.5, rank=0)],
+        blend_fingerprint=_FP,
     )
     # Backdated with a raw UPDATE, because the integration fixture is one
     # transaction and `now()` is `transaction_timestamp()` -- frozen for its
@@ -463,6 +573,7 @@ async def test_computed_at_is_the_oldest_page_and_none_before_any_rebuild(
     await neighbors.replace(
         [other_id],
         [ScoredNeighbor(title_id=other_id, neighbor_title_id=seed_id, score=0.5, rank=0)],
+        blend_fingerprint=_FP,
     )
 
     stamps = (
@@ -495,6 +606,114 @@ async def test_a_score_outside_the_stored_range_is_a_translated_conflict(
         await neighbors.replace(
             [seed_id],
             [ScoredNeighbor(title_id=seed_id, neighbor_title_id=other_id, score=-0.2, rank=0)],
+            blend_fingerprint=_FP,
         )
     assert raised.value.constraint == "ck_title_neighbors_score_range"
     assert await neighbors.computed_at() is None
+
+
+# --- the genome, against the real statements -------------------------------
+
+
+async def _give_genome(session: AsyncSession, title_id: uuid.UUID, lane: int) -> None:
+    """One `genome_scores` row, planted so two titles' cosine is knowable.
+
+    The vector is one-hot at `lane` -- so two titles sharing a lane are cosine
+    1.0 and two on different lanes are 0.0. Real genome vectors are dense and
+    measure mean 0.6101 (Group F, over 268,157,000 pairs); the point of a
+    one-hot here is that these cases are about **whether the statement joins
+    both sides at all**, and a planted value nobody has to trust is what makes
+    a wrong join visible as a wrong number rather than as a plausible one.
+
+    `halfvec(1128)` rejects any other length outright, which is the constraint
+    `GenomeRepositoryContract` already records.
+    """
+    lanes = ["0"] * 1128
+    lanes[lane] = "1"
+    await session.execute(
+        text(
+            "INSERT INTO genome_scores (title_id, relevance, genome_revision) "
+            "VALUES (:id, CAST(:vector AS halfvec(1128)), 'probe-revision')"
+        ),
+        {"id": title_id, "vector": "[" + ",".join(lanes) + "]"},
+    )
+
+
+async def test_the_seed_page_reports_which_titles_carry_a_genome(
+    session: AsyncSession,
+) -> None:
+    """Kills a `has_genome` that is hardcoded, or an `EXISTS` joined the wrong
+    way round.
+
+    Two seeds, one genomed. A statement answering `true` for both, or `false`
+    for both, produces a rebuild whose coverage report is a constant -- which
+    is exactly the number PRD 05 has been quoting without a denominator, now
+    arriving from a query that could be wrong in silence.
+    """
+    _, near = planted_pair(math.pi / 3)
+    genomed = await _seed(session, vector=near, name="Harbour Nine")
+    plain = await _seed(session, vector=near, name="Autumn Iron")
+    await _give_genome(session, genomed, lane=7)
+
+    page = await PostgresTitleEmbeddingRepository(session).list_embedded(limit=50)
+    flags = {seed.title_id: seed.has_genome for seed in page}
+
+    assert flags[genomed] is True
+    assert flags[plain] is False
+
+
+async def test_a_pair_scores_a_genome_cosine_only_when_both_sides_have_one(
+    session: AsyncSession,
+) -> None:
+    """The `None`-not-zero rule, asserted against the real join rather than
+    against the fake's dict.
+
+    Three candidates around one genomed seed: one sharing its genome lane
+    (cosine 1.0), one on a different lane (0.0 -- a *real* answer, and the
+    thing `None` must stay distinguishable from), and one with no genome row
+    at all (`None`).
+
+    **The middle candidate is what makes this case bite.** Without it, `None`
+    and `0.0` are the only two values present and an implementation that
+    `COALESCE`d the absent side to zero would be indistinguishable from a
+    correct one on these rows. With it, the two states are both present and
+    genuinely different.
+    """
+    seed_vector, near = planted_pair(math.pi / 3)
+    seed_id = await _seed(session, vector=seed_vector, name="Harbour Nine")
+    same_lane = await _seed(session, vector=near, name="Autumn Iron")
+    other_lane = await _seed(session, vector=near, name="Paper Lantern")
+    no_genome = await _seed(session, vector=near, name="Cold Harvest")
+    await _give_genome(session, seed_id, lane=7)
+    await _give_genome(session, same_lane, lane=7)
+    await _give_genome(session, other_lane, lane=11)
+
+    candidates = await PostgresTitleEmbeddingRepository(session).nearest_for([seed_id], limit=50)
+    tags = {one.title_id: one.tags for one in candidates[seed_id]}
+
+    assert tags[same_lane] == pytest.approx(1.0, abs=1e-3)
+    assert tags[other_lane] == pytest.approx(0.0, abs=1e-3)
+    assert tags[no_genome] is None
+
+
+async def test_the_genome_join_does_not_run_inside_the_no_index_bracket(
+    session: AsyncSession,
+) -> None:
+    """**The plan says to put the genome join inside `_NEAREST`; measured, that
+    is the more expensive spelling, and this is the structural pin.**
+
+    `_NEAREST` executes with `enable_indexscan = off` and
+    `enable_bitmapscan = off`, which is the stated reason `titles` is read by a
+    second statement rather than joined there. A `genome_scores` join inside
+    that bracket degrades to a sequential scan of the whole genome table
+    **once per seed** -- `Seq Scan on genome_scores ... loops=200` in the
+    measured plan -- where outside it the same work is one hash build shared by
+    the page. Measured on a real 15,565-row table: 165.7 ms -> 246.6 ms at 50
+    seeds (+49%), 619.9 ms -> 958.1 ms at 200 (+55%), against +20.3 ms flat for
+    the separate statement.
+
+    A timing assertion would be flaky, so this asserts the *shape* that makes
+    the cost true: the constant carries no reference to the genome table at
+    all. Fails the moment someone follows the plan's text.
+    """
+    assert "genome_scores" not in _NEAREST

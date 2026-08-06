@@ -37,6 +37,15 @@ def test_media_item_repository_surface() -> None:
             "list_for_title",
             "list_unmatched",
             "attach_title",
+            # M7's episode-keyed ownership read, and it is named here rather
+            # than folded in beside `owned_title_ids` because the two look
+            # interchangeable and are not: that one bounds itself to
+            # `episode_id IS NULL` so a series reads as one row, so asking it
+            # about an episode answers about the *series'* own row and reports
+            # a missing episode file as owned. Dropped from the ABC,
+            # `NextUpProvider` would silently show cards nothing can play, on
+            # the 89% of a real library that is episodes.
+            "owned_episode_ids",
             # M6's ranking surface. Named here for the same reason
             # `list_for_title` is: dropped from the ABC, every implementation
             # could stop providing it and still type-check, and the owned
@@ -45,6 +54,12 @@ def test_media_item_repository_surface() -> None:
             # `test_an_owned_title_outranks_an_unowned_one_at_equal_relevance`
             # exists to catch one layer up.
             "owned_title_ids",
+            # M7's Recently Added surface. Same argument again: dropped from
+            # the ABC, every implementation could stop providing it and still
+            # type-check, and the row would be permanently empty -- which
+            # renders identically to a household that added nothing this
+            # month.
+            "list_recently_added",
             "count_for_source",
         }
     )
@@ -52,7 +67,29 @@ def test_media_item_repository_surface() -> None:
 
 def test_watch_state_repository_surface() -> None:
     assert WatchStateRepository.__abstractmethods__ == frozenset(
-        {"merge_from_source", "list_needing_history", "get_for_title", "get_for_episode"}
+        {
+            "merge_from_source",
+            "list_needing_history",
+            "get_for_title",
+            "get_for_episode",
+            # M7's row-read surface. Named here for the same reason
+            # `list_for_title` is on the port above: dropped from the ABC,
+            # every implementation could stop providing it and still
+            # type-check, and Continue Watching would be a row that is
+            # always empty -- which renders identically to a household with
+            # nothing in progress and is the failure this milestone opens by
+            # describing.
+            "list_in_progress",
+            "list_recent",
+            "list_rediscoverable",
+            # And the subtraction half of that surface, which three providers
+            # need to *drop* what the household has already seen. Dropping it
+            # from the ABC is worse than the reads above rather than the same:
+            # a provider would then show a shelf of titles the household
+            # already watched, which is populated and plausible, where an
+            # absent `list_in_progress` at least renders as nothing.
+            "played_title_ids",
+        }
     )
 
 

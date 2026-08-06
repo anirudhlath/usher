@@ -274,6 +274,30 @@ def test_title_and_title_row_have_matching_field_sets() -> None:
     assert columns - DERIVED_COLUMNS == set(Title.model_fields)
 
 
+def test_credit_names_is_a_derived_column_and_not_a_domain_field() -> None:
+    """Boundary call 5's denormalised column, on the side of the 1:1 rule the
+    task argued it onto.
+
+    `columns - DERIVED_COLUMNS == fields` fails *both* ways round, so it forces
+    this decision to be made and does not make it. Recorded as its own case so
+    the reasoning has somewhere to live: `credit_names` is `credits` projected
+    to names and truncated to a ranking constant, which is an index artefact
+    and not a fact about the film.
+
+    The second assertion is the load-bearing one. `_NOT_UPDATABLE` is
+    `{"id", "created_at", "updated_at"} | DERIVED_COLUMNS`, so membership is
+    what stops `TitleRepository.update()` from writing this column -- and
+    unlike `search_document`, which Postgres refuses to let anyone write,
+    this is an ordinary column and nothing else would stop it. The wrong
+    implementation it kills is `Title` gaining a `credit_names` field, which
+    makes `title.evolve(credit_names=...)` spell an array that disagrees with
+    the `credits` table.
+    """
+    assert "credit_names" in DERIVED_COLUMNS
+    assert "credit_names" not in Title.model_fields
+    assert "credit_names" in {c.name for c in TitleRow.__table__.columns}
+
+
 def test_the_embedding_column_is_nullable_and_the_neighbour_columns_are_not() -> None:
     """A schema fact that reads like an oversight and is the design.
 

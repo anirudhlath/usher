@@ -16,6 +16,7 @@ from tests.contract.media_item_repository_contract import (
     EARLIER,
     RUN_AT,
     MediaItemRepositoryContract,
+    MediaItemRepositoryRecentlyAddedContract,
     item,
 )
 from usher.db.repositories.media_item import PostgresMediaItemRepository
@@ -81,12 +82,69 @@ async def episode_id(session: AsyncSession) -> uuid.UUID:
     return episode
 
 
+@pytest_asyncio.fixture
+async def other_title_id(session: AsyncSession) -> uuid.UUID:
+    title = Title(kind=TitleKind.MOVIE, name="Other Title", sort_name="Other Title")
+    await PostgresTitleRepository(session).add(title)
+    return title.id
+
+
+@pytest_asyncio.fixture
+async def series_title_id(session: AsyncSession) -> uuid.UUID:
+    """A real series, so `episode_ids` has somewhere to hang.
+
+    Recently Added's dedup is about a *series* collapsing to one card, and
+    the rows that collapse carry this id in `title_id` and their own id in
+    `episode_id` -- which is exactly what `IngestService` writes and exactly
+    why `episode_id IS NULL` is the wrong bound for this one statement.
+    """
+    series = Title(kind=TitleKind.SERIES, name="Landed Series", sort_name="Landed Series")
+    await PostgresTitleRepository(session).add(series)
+    await session.execute(
+        text("INSERT INTO seasons (id, title_id, season_number) VALUES (:id, :title_id, 1)"),
+        {"id": new_id(), "title_id": series.id},
+    )
+    return series.id
+
+
+@pytest_asyncio.fixture
+async def episode_ids(session: AsyncSession, series_title_id: uuid.UUID) -> list[uuid.UUID]:
+    """Ten real episodes of one series. `media_items.episode_id` is a foreign
+    key, so these cannot be invented here the way they can in the unit
+    half."""
+    season = (
+        await session.execute(
+            text("SELECT id FROM seasons WHERE title_id = :title_id"),
+            {"title_id": series_title_id},
+        )
+    ).scalar_one()
+    made = []
+    for number in range(1, 11):
+        identifier = new_id()
+        await session.execute(
+            text(
+                "INSERT INTO episodes (id, title_id, season_id, season_number, episode_number) "
+                "VALUES (:id, :title_id, :season_id, 1, :number)"
+            ),
+            {
+                "id": identifier,
+                "title_id": series_title_id,
+                "season_id": season,
+                "number": number,
+            },
+        )
+        made.append(identifier)
+    return made
+
+
 @pytest.fixture
 def repository(session: AsyncSession) -> PostgresMediaItemRepository:
     return PostgresMediaItemRepository(session)
 
 
-class TestPostgresMediaItemRepository(MediaItemRepositoryContract):
+class TestPostgresMediaItemRepository(
+    MediaItemRepositoryContract, MediaItemRepositoryRecentlyAddedContract
+):
     """Every case in `MediaItemRepositoryContract`, against real Postgres.
 
     The fixtures come from module scope rather than being redefined here, so

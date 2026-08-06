@@ -4,6 +4,7 @@ must fail at instantiation, not at the call site."""
 from abc import ABC
 from collections.abc import Sequence
 from decimal import Decimal
+from typing import Protocol
 
 import pytest
 
@@ -26,18 +27,24 @@ from usher.ports.llm import LLMClient, LLMPurpose, LLMUsage
 from usher.ports.metadata import MetadataCandidate, MetadataProvider
 from usher.ports.repository import (
     BulkCatalogRepository,
+    CollectionRepository,
+    CreditRepository,
     EpisodeRepository,
+    GenomeRepository,
     ImportRunRepository,
     MediaItemRepository,
+    PersonRepository,
     RawPayloadStore,
     SourceRepository,
     SyncRunRepository,
+    TasteRepository,
     TitleEmbeddingRepository,
     TitleMatchRepository,
     TitleNeighborRepository,
     TitleRepository,
     WatchStateRepository,
 )
+from usher.ports.rows import Row, RowProvider
 from usher.ports.search import (
     FilterNotSupported,
     SearchIndex,
@@ -65,17 +72,24 @@ ALL_PORTS: list[type[ABC]] = [
     EventPublisher,
     JobQueue,
     BulkCatalogRepository,
+    CollectionRepository,
+    CreditRepository,
     EpisodeRepository,
+    GenomeRepository,
     ImportRunRepository,
     MediaItemRepository,
+    PersonRepository,
     RawPayloadStore,
     SourceRepository,
     SyncRunRepository,
+    TasteRepository,
     TitleEmbeddingRepository,
     TitleMatchRepository,
     TitleNeighborRepository,
     TitleRepository,
     WatchStateRepository,
+    Row,
+    RowProvider,
 ]
 
 
@@ -88,6 +102,100 @@ def test_port_cannot_be_instantiated_directly(port: type[ABC]) -> None:
 @pytest.mark.parametrize("port", ALL_PORTS)
 def test_port_declares_abstract_methods(port: type[ABC]) -> None:
     assert port.__abstractmethods__
+
+
+@pytest.mark.parametrize("port", ALL_PORTS)
+def test_no_port_is_a_protocol(port: type[ABC]) -> None:
+    """ADR-0001: ports are `abc.ABC`, never `typing.Protocol`. A Protocol is
+    satisfied structurally, so a fake that drifts from the port keeps passing
+    and the contract suite silently stops being a contract.
+
+    **Nothing in this file checked that, and the M7 group B sweep is what
+    found it.** The obvious assertions all pass against the rewrite ADR-0001
+    forbids: a `Protocol` subclass that keeps its `@abstractmethod`
+    decorators has a populated `__abstractmethods__`, so
+    `test_port_declares_abstract_methods` is green, and instantiating it
+    raises `TypeError` with the message *"Can't instantiate abstract class P
+    without an implementation for abstract methods ..."* -- **byte-identical
+    to the ABC's**, verified directly, so `test_port_cannot_be_instantiated_
+    directly` is green too and even `pytest.raises(TypeError,
+    match="abstract")` cannot tell them apart. The three mutations
+    `class <Port>(Protocol)` survived the whole file before this case
+    existed.
+
+    `ABC in __mro__` is what discriminates: `typing.Protocol` derives from
+    `Generic` and only its *metaclass* is an `ABCMeta`, so the class object
+    itself never has `ABC` in its MRO. Both halves are asserted, because
+    `ABC in __mro__` alone would pass for a class inheriting from both.
+    """
+    assert ABC in port.__mro__, f"{port.__name__} is not an ABC (ADR-0001)"
+    # Widened to `object` deliberately: `typing.Protocol` is a typing special
+    # form rather than a `type`, so the direct `Protocol not in port.__mro__`
+    # is a mypy `comparison-overlap` error against a `tuple[type, ...]` --
+    # and silencing that with an ignore would leave the check itself
+    # unverified by the type checker.
+    protocol: object = Protocol
+    assert protocol not in port.__mro__, f"{port.__name__} is a Protocol (ADR-0001)"
+
+
+@pytest.mark.parametrize(
+    "port,methods",
+    [
+        (
+            PersonRepository,
+            {"upsert_many", "resolve_tmdb_ids", "list_recurring_for_user", "count"},
+        ),
+        (
+            CreditRepository,
+            {
+                "replace_for_titles",
+                "list_for_title",
+                "list_for_person",
+                "count_titles_with_credits",
+            },
+        ),
+        (
+            CollectionRepository,
+            {"upsert_many", "resolve_tmdb_ids", "attach_titles", "list_owned", "count"},
+        ),
+        # Not one of Task 6's three, and added here by M7's Task 35 because
+        # this is exactly the list that catches what that task did: it grew
+        # `count_stale` on a port six milestones old, and nothing else in the
+        # suite would have noticed the surface move.
+        (
+            TitleNeighborRepository,
+            {"replace", "list_for", "computed_at", "count_stale"},
+        ),
+    ],
+)
+def test_the_new_repository_ports_declare_exactly_these_abstract_methods(
+    port: type[ABC], methods: set[str]
+) -> None:
+    """The exact set, not merely a non-empty one, and the sweep is why.
+
+    `test_port_declares_abstract_methods` asserts `port.__abstractmethods__`
+    is truthy, which is satisfied by a port that lost the decorator on one
+    method of three -- the other two keep the class abstract, so
+    instantiation still raises and nothing notices. That mutation survived
+    the whole file. A method that silently became concrete returns `None`,
+    and a fake that never implements it passes its own contract suite while
+    the real repository is the only thing that works.
+
+    Also a spelled-out inventory of the methods Task 6 settled, so the four
+    deliberately-absent ones -- `PersonRepository.get`,
+    `CollectionRepository.get`, `list_members`, and any `rebuild` -- cannot
+    be added without this list moving and someone reading the reason.
+
+    It moved once, and this is the record of it: M7's `usher derive` report
+    added `PersonRepository.count`, `CollectionRepository.count` and
+    `CreditRepository.count_titles_with_credits`. Each is read by that
+    command's bare form, which is the same bargain `usher index`'s bare form
+    takes with `count_stale`/`count_refused` -- a count with a caller, not a
+    port method whose only test is its own. `count_titles_with_credits`
+    counts **titles**, never rows, and its name says so because a report
+    reading "412,000 credits" answers a question nobody asked.
+    """
+    assert set(port.__abstractmethods__) == methods
 
 
 def test_every_port_abc_is_registered_in_all_ports() -> None:

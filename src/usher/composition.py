@@ -51,6 +51,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import httpx
 from loguru import logger
@@ -60,17 +61,20 @@ from usher.adapters.factory import ConfiguredSourceAdapterFactory
 from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestIndex
 from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
 from usher.config import Settings
+from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
+from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
 from usher.db.repositories.search import (
     PostgresTitleEmbeddingRepository,
     PostgresTitleNeighborRepository,
 )
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
+from usher.db.repositories.taste import PostgresTasteRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
@@ -82,21 +86,28 @@ from usher.ports.events import EventPublisher, NullEventPublisher
 from usher.ports.jobs import JobQueue
 from usher.ports.metadata import MetadataProvider
 from usher.ports.repository import (
+    CollectionRepository,
+    CreditRepository,
     EpisodeRepository,
     MediaItemRepository,
+    PersonRepository,
     RawPayloadStore,
     SourceRepository,
     SyncRunRepository,
+    TasteRepository,
     TitleEmbeddingRepository,
     TitleMatchRepository,
     TitleNeighborRepository,
     TitleRepository,
     WatchStateRepository,
 )
+from usher.ports.rows import RowProvider
 from usher.ports.source import SourceAdapter, SourceAdapterFactory
+from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
 from usher.services.handlers import (
     SourceBinding,
+    derive_handler,
     enrich_handler,
     index_handler,
     match_handler,
@@ -108,8 +119,11 @@ from usher.services.jobs import JobWorker
 from usher.services.matching import MatchService
 from usher.services.push import PushApplyService
 from usher.services.reconcile import ReconcileService
+from usher.services.rows import row_providers
+from usher.services.rows.cache import RowCache
 from usher.services.search import SearchService
-from usher.services.similar import SimilarityService
+from usher.services.similar import SimilarityService, blend_fingerprint
+from usher.services.taste import TasteService
 from usher.services.watch_sync import WatchStateSyncService
 from usher.telemetry import QueueSnapshot, SearchSnapshot
 
@@ -173,6 +187,10 @@ class Pipeline:
     queue: JobQueue
     embeddings: TitleEmbeddingRepository
     neighbors: TitleNeighborRepository
+    taste_rows: TasteRepository
+    people: PersonRepository
+    credits: CreditRepository
+    collections: CollectionRepository
     adapters: SourceAdapterFactory
     matcher: MatchService
     ingest: IngestService
@@ -180,6 +198,13 @@ class Pipeline:
     watch: WatchStateSyncService
     search: SearchService
     similar: SimilarityService
+    taste: TasteService
+    # The registry itself, not a list assembled here. A provider enabled by
+    # *registration in code* is boundary call 9, and a list a composition
+    # root builds by hand is a list the tenth provider is forgotten from --
+    # which is dead code that looks exactly like a provider with nothing to
+    # say. `services/rows/__init__.py` owns it; this field is the wiring.
+    row_providers: tuple[RowProvider, ...]
     events: EventPublisher
     commit: Callable[[], Awaitable[None]]
 
@@ -250,11 +275,15 @@ def build_pipeline(
     runs = PostgresSyncRunRepository(session)
     embeddings = PostgresTitleEmbeddingRepository(session)
     neighbors = PostgresTitleNeighborRepository(session)
+    taste_rows = PostgresTasteRepository(session)
     queue = PostgresJobQueue(
         session,
         max_attempts=settings.job_max_attempts,
         backoff_seconds=settings.job_backoff_seconds,
     )
+    people = PostgresPersonRepository(session)
+    credits = PostgresCreditRepository(session)
+    collections = PostgresCollectionRepository(session)
     matcher = MatchService(titles=titles, matching=matching, queue=queue, provider=provider)
     ingest = IngestService(
         matcher=matcher,
@@ -276,6 +305,10 @@ def build_pipeline(
         queue=queue,
         embeddings=embeddings,
         neighbors=neighbors,
+        taste_rows=taste_rows,
+        people=people,
+        credits=credits,
+        collections=collections,
         adapters=adapter_factory(settings),
         matcher=matcher,
         ingest=ingest,
@@ -327,6 +360,27 @@ def build_pipeline(
         # and why a deployment with no embedding extra can still read and
         # rebuild neighbours for whatever the worker did index.
         similar=SimilarityService(embeddings, neighbors, titles, session.commit),
+        # **The embedder is passed and may be `None`, which is the shipped
+        # default.** `TasteService.centroid` then returns `None` rather than a
+        # zero vector, every consumer drops the signal (ADR-0014), and
+        # `genre_affinity` is unaffected because it reads counts rather than
+        # vectors -- which is the whole reason Task 23 declines PRD 06's
+        # "taste centroid concentrated in a genre".
+        # **The one deployment fact a provider is told about.** Same
+        # `embedder is None` test `SearchService` uses, and the same one
+        # `TasteService` acts on: with no embedder `title_neighbors` holds
+        # genre and keyword overlap alone (M6's blend drops the absent cosine
+        # term rather than zeroing it), so "Because you watched Dune" is a
+        # causal claim nothing computed and the sentence softens.
+        row_providers=row_providers(semantic=embedder is not None),
+        taste=TasteService(
+            watch_states=watch_states,
+            embeddings=embeddings,
+            titles=titles,
+            taste=taste_rows,
+            embedder=embedder,
+            now=lambda: datetime.now(UTC),
+        ),
         events=publisher,
         commit=session.commit,
     )
@@ -365,7 +419,10 @@ async def open_adapter(pipeline: Pipeline, source: Source) -> SourceAdapter | No
 
 
 def build_push_applier(
-    pipeline: Pipeline, settings: Settings, events: EventPublisher
+    pipeline: Pipeline,
+    settings: Settings,
+    events: EventPublisher,
+    cache: RowCache | None = None,
 ) -> PushApplyService:
     """One push event into catalog state, through M4's own chain.
 
@@ -373,12 +430,19 @@ def build_push_applier(
     because the applier is the one collaborator whose publisher *must* be
     the live bus -- a push merge nobody is told about is the read-through
     loop not closing, which is the milestone.
+
+    `cache` is passed on identical terms and for the identical reason: it is
+    process-scoped where the pipeline is session-scoped, and an applier holding
+    a cache nobody serves from would invalidate a dict with no reader. `None`
+    is a composition root that composes no screens -- `usher sync`, `usher
+    work` -- where there is nothing to invalidate.
     """
     return PushApplyService(
         pipeline.ingest,
         pipeline.watch,
         events,
         pipeline.commit,
+        cache=cache,
         max_items_per_event=settings.push_max_items_per_event,
     )
 
@@ -437,6 +501,14 @@ def build_worker(
         worker.register(
             JobKind.ENRICH, enrich_handler(build_enrich_service(pipeline, settings, provider))
         )
+        # Guarded on the provider rather than on the embedder, and that is the
+        # honest dependency rather than the convenient one: `DeriveService`
+        # holds a `MetadataProvider` for `to_derivation`, which is a pure
+        # mapping and makes no network call. A deployment with no key has no
+        # TMDb payloads to derive from at all -- they exist only because a key
+        # once did -- so leaving derive jobs pending for a worker that has one
+        # is exactly INDEX's bargain, one lane over.
+        worker.register(JobKind.DERIVE, derive_handler(build_derive_service(pipeline, provider)))
     # Guarded exactly as ENRICH is, and the symmetry is the point: `run_once`
     # claims `list(self._handlers)`, so a worker with no model leaves index
     # jobs pending for a worker that has one rather than parking them. A job
@@ -447,6 +519,26 @@ def build_worker(
     if embedder is not None:
         worker.register(JobKind.INDEX, index_handler(build_index_service(pipeline, embedder)))
     return worker
+
+
+def build_derive_service(pipeline: Pipeline, provider: MetadataProvider) -> DeriveService:
+    """One session's repositories plus the provider's pure mapper.
+
+    The `provider` argument looks like `build_index_service`'s `embedder` and
+    is a different kind of thing: an embedder is a once-per-*process*
+    resource this factory must not build, while a provider is held here only
+    for `to_derivation`, which is synchronous and makes no request. Nothing
+    on this path opens a socket.
+    """
+    return DeriveService(
+        payloads=pipeline.payloads,
+        provider=provider,
+        titles=pipeline.titles,
+        people=pipeline.people,
+        credits=pipeline.credits,
+        collections=pipeline.collections,
+        commit=pipeline.commit,
+    )
 
 
 def build_index_service(pipeline: Pipeline, embedder: Embedder) -> IndexService:
@@ -777,10 +869,23 @@ class SearchGauges:
     def read(self) -> SearchSnapshot:
         return self._snapshot
 
-    async def refresh(self, embeddings: TitleEmbeddingRepository, model_name: str) -> None:
+    async def refresh(
+        self,
+        embeddings: TitleEmbeddingRepository,
+        neighbors: TitleNeighborRepository,
+        model_name: str,
+    ) -> None:
         self._snapshot = SearchSnapshot(
             stale=await embeddings.count_stale(model_name),
             refused=await embeddings.count_refused(model_name),
+            # The third count is over `title_neighbors` and is the one thing
+            # here that is *not* about the embedding backlog. It is refreshed
+            # in the same pass because it is read from the same session and
+            # answers the same operator question -- "is my derived state
+            # current" -- and `blend_fingerprint()` is resolved here rather
+            # than passed in so there is exactly one definition of the running
+            # blend, which is the whole of ADR-0020's argument.
+            neighbors_stale=await neighbors.count_stale(blend_fingerprint=blend_fingerprint()),
         )
 
 
