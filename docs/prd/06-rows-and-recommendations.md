@@ -619,14 +619,56 @@ plus borrowed aggregate signals (TMDb similar/recommended) where useful.
 
 Generation runs nightly and on demand:
 
-1. **Assemble context** — recent watch history with ratings, plus a candidate
-   pool of ~200 unwatched titles pre-filtered by taste-centroid proximity and
-   popularity. The pool spans the whole catalog, not just the library, so
-   suggestions can include things to seek out.
-2. **One structured call** via litellm →
-   `[{title, reason, item_ids ⊆ pool}]`, 3–5 rows.
+1. **Assemble context** — recent watch history with ⏳ ~~ratings~~
+   **engagement**, plus a candidate pool of ~200 unwatched titles pre-filtered
+   by ⏳ popularity and genre affinity, **re-ranked** by taste-centroid
+   proximity where a centroid exists. The pool spans the whole catalog, not
+   just the library, so suggestions can include things to seek out.
+
+   ⏳ **"with ratings" is the fourth site in this document where a rating this
+   schema does not have was assumed**, after `RowCard`, `RediscoverProvider`
+   and the centroid — and the substitution the Taste section already writes
+   down applies here unchanged: rewatched (`play_count >= 2`) weighs 1.00,
+   merely finished weighs 0.60.
+
+   ⏳ **And the centroid cannot be the pre-filter's spine, because on the
+   shipped configuration there is no centroid.** `USHER_EMBEDDING_ENABLED`
+   defaults to `False`, so implementing that clause literally makes curation
+   the feature that never fires on a default deployment — **which is exactly
+   the failure this document already corrected once**, for
+   `GenreAffinityProvider`, and in the same direction: *"it fails in the
+   direction hardest to notice."* The pool is therefore built from signals
+   that need no model, and the centroid **re-orders** it when one is
+   available — which is also what finally gives `TasteService.centroid` a
+   caller in `src/`, a gap M7 shipped and named.
+2. **One structured call** to any OpenAI-compatible endpoint →
+   `[{title, reason, item_ids ⊆ pool}]`, 3–5 rows. (This read *"via litellm"*
+   until M8 priced that dependency at +146 MB and 29 distributions against a
+   `POST` —
+   [ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md).) **`item_ids`
+   are indices into the pool, never UUIDs** — measured, a UUID handle costs
+   3.1× the prompt tokens and is the *least* accurate of three spellings, and
+   an index is the only one that is bounds-checked
+   ([ADR-0028](decisions/0028-the-pool-is-the-contract.md)).
 3. **Validate** — IDs not in the pool are dropped; rows below a minimum length
-   are discarded. Hallucinated identifiers never reach a client.
+   are discarded **whole rather than padded**, because a padded row is a
+   fabricated recommendation wearing a model's reason string. Hallucinated
+   identifiers never reach a client.
+
+   ⚠️ **This step is where the milestone's one live defect was found, and the
+   sentence above does not describe it.** The obvious spelling —
+   `id in set_of_pool_ids` — dropped **108 of 108** identifiers against a
+   provider that returned them as JSON *integers* where the schema asked for
+   strings; coerced, the same run dropped **0**. Not one id was invented. What
+   that ships as is a generation that called the model, wrote an `llm_calls`
+   row reading `ok = true` with real tokens and a real cost, and left the
+   household with no curated rows — indistinguishable from a model that had
+   nothing to say, because the degradation table below reads *"previous
+   curated rows persist"*. So: the validator **coerces before it compares**,
+   `usher.curation.dropped` carries a `reason` label distinguishing
+   `not_in_pool` from `unparseable`, and **a generation that validates to zero
+   rows is a failure rather than an empty success**.
+   [ADR-0028](decisions/0028-the-pool-is-the-contract.md).
 4. **Persist** as `curated_rows`.
 
 Failure is non-fatal: previous rows stay until successfully replaced. Cost is

@@ -346,8 +346,22 @@ search_queries(                       -- M9, whole. Not built in M6; see below
 )
 ```
 
-`litellm` reports per-call cost natively, so cost analysis is exact SQL rather
-than estimated counters.
+🔴 **This paragraph read *"`litellm` reports per-call cost natively, so cost
+analysis is exact SQL rather than estimated counters"* and its premise is
+false — independently of M8's decision not to take that dependency.** Measured
+2026-08-06 against a live OpenAI-compatible endpoint: `usage` carries
+`prompt_tokens`, `completion_tokens` and `total_tokens` and **no cost field at
+all**. litellm does not *report* cost, it *computes* it, from a price table it
+bundles. So "exact SQL rather than estimated counters" was describing a lookup
+either way; the only question was whose table it is and how it ages.
+
+`cost_usd` is therefore computed from two configured per-million-token prices
+and **written onto the row**, so a later price change cannot rewrite history.
+Both default to `0`, which is the honest value for a local model and the wrong
+one for a hosted model an operator forgot to price — and the mitigation is that
+`tokens_in`/`tokens_out` are recorded exactly, so spend is recomputable from
+the ledger after the fact.
+[ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md).
 
 `search_queries` does something more useful than reporting: **it turns the
 Meilisearch gate in [ADR-0002](decisions/0002-postgres-first-search.md) into a

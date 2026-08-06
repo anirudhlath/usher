@@ -43,8 +43,13 @@ too, despite one implementation each, because neither implementation is
 itself a single external service to name: **`fastembed` runs in-process
 against a local ONNX conversion of a BAAI checkpoint** — a Qdrant library
 serving a third-party conversion of somebody else's weights, which is three
-names and no upstream service at all — and `litellm` is itself a
-multi-provider abstraction, not one upstream. (This example read
+names and no upstream service at all — and the LLM client's upstream is
+whatever `USHER_LLM_BASE_URL` points at, which is a setting rather than a
+name. (That second half read *"`litellm` is itself a multi-provider
+abstraction, not one upstream"* until M8 declined the dependency
+([ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md)); the
+conclusion is unchanged and the reason is now a property of the shipped code
+rather than of a library.) (This example read
 `sentence-transformers` until M6 replaced the runtime; the argument is
 unchanged and the substitution makes it stronger. See
 [ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md).)
@@ -157,7 +162,7 @@ Other ports follow the same pattern:
 | `SearchIndex` | `PostgresSearchIndex` (`MeilisearchIndex` gated) |
 | `SuggestIndex` | `PostgresSuggestIndex` (`MeilisearchSuggestIndex` gated) — **the gate moved to this port**, which is [ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md) |
 | `Embedder` | `FastEmbedEmbedder` — **optional**, behind an extra and off by default; a deployment without it still has full-text and trigram, the tier serving 1.27M titles ([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)) |
-| `LLMClient` | `LiteLLMClient` |
+| `LLMClient` | `OpenAICompatibleClient` — **one `POST /v1/chat/completions` over the httpx stack already here, and `litellm` is not taken.** Priced rather than assumed: +146 MB and 29 distributions against +0 and 0, and the 29 are a second async HTTP stack plus two tokenizer runtimes. The provider abstraction is `USHER_LLM_BASE_URL` [ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md) |
 | `TitleRepository` | `PostgresTitleRepository` ([ADR-0009](decisions/0009-repositories-are-ports.md)) |
 | `Row` | `BaseRow` in `services/rows/base.py` and its nine concrete rows — **the base class is in `services/` and the ABC is in `ports/`**, because `hydrate()` reads two repositories off the context and a port with a dependency is not a port ([06](06-rows-and-recommendations.md)) |
 | `RowProvider` | `ContinueWatchingProvider`, `NextUpProvider`, `RecentlyAddedProvider`, `RediscoverProvider`, `BecauseYouWatchedProvider`, `FranchiseProvider`, `GenreAffinityProvider`, `SeasonalProvider`, `PeopleProvider` — nine, registered as `services/rows/__init__.py`'s `ROW_PROVIDERS`. ⏳ `CuratedProvider` is the tenth and **M8 owns it whole**, with `curated_rows` and `LLMRow` ([09](09-roadmap.md)'s M7 boundary call 2) |
@@ -218,10 +223,14 @@ tree is what a new reader navigates by.
   under `db/`), the worker as `services/jobs.py`, and the "scheduler" as
   `api/lanes.py`'s supervised lanes. Nothing was skipped; the concepts landed
   under the layers that own them.
-- **There is no `adapters/llm/`.** `ports/llm.py` exists and has no
-  implementation until M8 — so `LLMClient → LiteLLMClient` in the table above
-  is a plan, not an inventory. `adapters/search/` and `adapters/embedding/`
-  are real as of M6.
+- ~~**There is no `adapters/llm/`.**~~ **Built in M8**, and the entry it said
+  was "a plan, not an inventory" was also wrong about *what* was planned:
+  `LLMClient → LiteLLMClient` became `OpenAICompatibleClient`
+  ([ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md)). The
+  directory keeps its capability name and the *reason* changes — an
+  OpenAI-compatible client has no single upstream either, because its upstream
+  is whatever `base_url` points at. `adapters/search/` and
+  `adapters/embedding/` are real as of M6.
 
 ## Stack
 
@@ -233,7 +242,7 @@ tree is what a new reader navigates by.
 | ORM | SQLAlchemy 2.0 (async) + Alembic |
 | DB | PostgreSQL 17 + pgvector ≥ 0.8.5 |
 | Jobs | In-process asyncio workers over a Postgres-backed queue |
-| LLM | litellm (provider-agnostic) |
+| LLM | Any OpenAI-compatible endpoint, over httpx — `USHER_LLM_BASE_URL` ([ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md)) |
 | Embeddings | fastembed, local, **optional** (167 MiB, no torch) |
 | Packaging | uv |
 | License | MIT |
