@@ -421,3 +421,36 @@ just by running it:**
   the first migration). These aren't SQLAlchemy `Table` metadata at all, so
   autogenerate never sees them, in either direction — adding, dropping, or
   changing one is always a hand-written `op.execute(...)` migration.
+
+**And the trap is not "a bounded `NUMERIC`" — it is any column narrower than
+the field feeding it, which includes every `Integer` in this schema.** Found
+2026-08-06, one task after the `numeric field overflow` entry further up this
+file, and it generalises it. On `curated_rows."position"`:
+`integer` in the table, `Field(ge=0)` with no ceiling on `CuratedRow`, so
+`position = 2**31` is a **validly constructed** domain model the column cannot
+hold. Measured on `pgvector/pgvector:pg17` through
+`PostgresCuratedRowRepository.replace_for_user`: `sqlalchemy.exc.DBAPIError`,
+`exc.orig.__cause__` is `asyncpg.exceptions.DataError`, sqlstate `22000` —
+**refused client-side by asyncpg's own binary encoder, before a byte reaches
+Postgres**, which is a different mechanism from the `NUMERIC` overflow and
+arrives as the same unclassified `DBAPIError`. `except IntegrityError` does not
+catch either, so the raw SQLAlchemy exception crossed that port boundary too
+until the `except` widened; the mutation back to `IntegrityError` fails exactly
+the one case that constructs such a row.
+
+So `refuses_the_row()` and `ROW_IS_REFUSED` now live in
+`db/repositories/_errors.py` beside `constraint_name()`, which is the module
+whose whole reason is that two copies of a measured accessor are two chances to
+lose one. **The rule to apply when writing the next repository: compare each
+column's declared width against the bounds of the domain field that feeds it,
+and if the field is bounded on fewer sides than the column, that repository
+needs the SQLSTATE-class `except` rather than `IntegrityError`.** `ge=0` with
+no ceiling against `integer` is the common shape here — it is also
+`CuratedRow.position`'s sibling in every `Field(ge=0)` in `usher.domain`.
+
+**One thing the primary key adds to the same enumeration:** a batch naming one
+row id twice is neither a CHECK nor a foreign key, and it is a reachable
+caller-assembly mistake. It answers `RepositoryConflict(constraint=
+"pk_curated_rows")` with the session still usable, because the SAVEPOINT does
+not care which kind of refusal it rolled back. Enumerations of "what raises
+here" written by constraint *kind* keep missing a kind; write them by outcome.
