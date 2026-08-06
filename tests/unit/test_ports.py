@@ -29,6 +29,7 @@ from usher.ports.repository import (
     BulkCatalogRepository,
     CollectionRepository,
     CreditRepository,
+    CuratedRowRepository,
     EpisodeRepository,
     GenomeRepository,
     ImportRunRepository,
@@ -74,6 +75,7 @@ ALL_PORTS: list[type[ABC]] = [
     BulkCatalogRepository,
     CollectionRepository,
     CreditRepository,
+    CuratedRowRepository,
     EpisodeRepository,
     GenomeRepository,
     ImportRunRepository,
@@ -165,6 +167,18 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
         (
             TitleNeighborRepository,
             {"replace", "list_for", "computed_at", "count_stale"},
+        ),
+        # M8 Task 9, and it is on this list for the reason `count_stale` is:
+        # the surface is where the decisions live. **`replace_for_user` takes
+        # no `generation_id` parameter** -- every `CuratedRow` carries one, so
+        # a third argument would be a second spelling of a fact the rows
+        # already hold, and the delete's scope is `user_id` rather than the
+        # generation (M8's plan names a three-argument signature; the port
+        # docstring carries the argument for departing from it). A parameter
+        # re-added here without that argument being answered moves this set.
+        (
+            CuratedRowRepository,
+            {"replace_for_user", "list_for_user"},
         ),
     ],
 )
