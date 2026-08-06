@@ -1,0 +1,436 @@
+---
+paths:
+  - "tests/**"
+  - "conftest.py"
+  - "**/conftest.py"
+---
+
+# Testing discipline and mutation sweeps
+
+Verified facts, loaded when working in this subsystem. Measured or observed,
+never assumed — each entry carries its date, its sample and what it refuted.
+The always-on conventions live in `CLAUDE.md`; this file is the evidence.
+
+**A UUIDv7 primary key makes an `ORDER BY` key unobservable, and it cost this
+milestone five untested orderings.** `new_id()` is monotonic, and almost every
+fixture mints its ids in the same order it assigns the ranking value — so
+`ORDER BY <id>` and `ORDER BY <the real key>` return identical lists and the
+real key is never exercised. M7's whole-suite sweep found **five provider
+orderings whose key could be deleted with the suite still green**:
+`recently-added`'s `added_at DESC`, `because-you-watched`'s `rank`,
+`franchise`'s `owned_count DESC`, `people`'s `count(DISTINCT title_id) DESC`,
+and `credits`' `billing_order` on `list_for_person`. Two docstrings in this
+repository already named the trap (an `ORDER BY c.person_id` mutant survived
+the whole suite in M7 Group B until its fixture was rearranged) and the lesson
+had not been carried across. **Every ordering case must assert its own
+premise** — `assert far_id < near_id` — so a later fixture change that
+re-aligns id order with key order fails loudly instead of going quiet, and
+**a case asserting membership (`x in result`, `len(result) > 0`) is not an
+ordering test at all**: it is satisfied by returning the whole table in
+physical order.
+**`TitleNeighborRepository` is the one repository port with a Postgres
+implementation and no shared contract suite, and that gap hid a live defect.**
+Inverting `_COUNT_STALE_NEIGHBORS`' `WHERE blend_fingerprint <> :fp` to `=`
+**survived the whole suite**: every test of neighbour `count_stale` runs
+against `FakeTitleNeighborRepository`, whose comparison is Python, and every
+`count_stale` call under `tests/integration/` is the unrelated *embedding*
+one. On a table inherited from M6 — the deployment `blend_fingerprint` was
+added for — the inverted gauge reads **zero**, which is exactly what PRD 10
+says the column exists to prevent. **A staleness case must seed a stale row
+*and* a fresh row in one table**, because with only one kind present an
+inversion answers correctly by luck of direction.
+**A mutation sweep mutates the working tree in place, so nothing else may use
+that tree while it runs.** Obvious in retrospect and not obvious while looking
+for something to parallelise: a live end-to-end run was started against a
+mid-sweep tree and would have measured mutated code. Two corollaries: reading
+a source file to check a fact gives you whatever mutation is currently applied
+(use `git show HEAD:<path>`), and any second process wanting the repo has to
+wait.
+**A plant that did not land looks exactly like a check that passed.** Verifying
+an import contract by planting the import it forbids reported *7 kept, 0
+broken* — because the anchor string being substituted did not exist in the
+target file and the edit was a silent no-op. **Assert the plant is present
+before believing the check**, the same family as the `sitecustomize.py`
+installation proof and the `-q`/`-qq` trap.
+**A concurrency test must assert on *observed overlap*, not on a count.**
+"Exactly one of two claimers got the job" is also what a serialised pair of
+claims produces — the M3 failure verbatim, where a deleted single-flight lock
+let a concurrency test pass five runs in a row. `JobQueueContract`'s harness
+releases N claimers through an `asyncio.Barrier` and records the wall-clock
+interval each claim occupied; `overlapping()` fails unless those intervals
+genuinely intersect. Measured on this host: the two windows share **76.2%** of
+their union.
+**A concurrency claim whose failure mode is a *deadlock* needs a second kind
+of case, and every burst around it needs a bound.** M5's `InMemoryEventBus`
+exists to make "a slow subscriber never blocks a publisher" true, and the
+one-line mutation that breaks it — `await queue.put(...)` for `put_nowait` —
+does not answer wrongly, it hangs. Three consequences, all measured:
+
+- **A timing case can only ever report a timeout against it**, so the M5
+  plan's instruction to "confirm it fails on the interval assertion and not
+  on a timeout" is unachievable. What has teeth is driving the coroutine
+  **one step by hand**: `coro.send(None)` raises `StopIteration` for a
+  coroutine that never awaited and hands back a future for one that parked.
+  No scheduler, no clock, no timeout; it fails on its own assertion in
+  microseconds, and it cannot be satisfied by a serialised run because it
+  never involves two tasks. Fill the queue first — `asyncio.Queue.put` on a
+  queue with room does not await either.
+- **An unbounded burst turns that mutation from KILLED into HUNG**, which in
+  a sweep log reads like a mutation nothing observed rather than one
+  everything caught. It happened twice on this milestone, in two files, which
+  is why `tests/contract/event_publisher_contract.publish_all` exists and
+  every burst goes through it. Whole-suite, the mutation now fails 5 cases in
+  46.7 s against a 42.8 s baseline, and the 4 s difference *is* the bounds
+  firing.
+- **The operational case is still worth keeping, and its harness has to
+  subscribe before it publishes.** `asyncio.create_task` only schedules, so
+  the first publish in the plan's draft reached an empty subscriber set and
+  the reader parked forever — the case timed out on its own harness rather
+  than on the bus. With the reader signalling first: the publisher's window
+  sits inside the window a subscriber spent parked and unread for **99.3–99.6%
+  of their union over five runs** (publish 4.3 ms, parked 4.4 ms), against
+  `JobQueueContract`'s 76.2% and group D's 62.6%.
+**A mutation can survive because CPython collected it, not because the code
+is right.** "Subscribe outside the generator so the `finally` never runs"
+survived the whole SSE suite when spelled as
+`await bus.subscribe(...).__aenter__()` with the context manager left
+unreferenced: refcounting destroys the `_AsyncGeneratorContextManager`
+immediately, the async generator's finalizer closes it, and the `finally`
+runs anyway. Spelled with a strong reference retained, the same mutation
+fails `test_a_disconnect_unsubscribes` at once. A leak test only tests a leak
+if the mutation actually leaks.
+**`status.HTTP_422_UNPROCESSABLE_ENTITY` is deprecated behind a Starlette 1.3
+module `__getattr__`, so it warns once per *request*, not once per import.**
+Use `HTTP_422_UNPROCESSABLE_CONTENT`; both are 422. This suite deliberately
+runs with no expected warnings, for the reason the `testcontainers` shim was
+replaced: a suite with one permanent warning is a suite where the next real
+one is invisible.
+**`FakeTitleRepository` and `FakeTitleMatchRepository` are one table and are
+now wired together.** `TitleRepository.add` flushes, so a stub the match
+stage just wrote is visible to the very next `TitleMatchRepository` read.
+Keeping two independent dicts made a *correct* service fail rather than a
+wrong one pass: `IngestService`'s second walk of a series it had itself
+stubbed missed the ladder, re-created the stub, conflicted on
+`ix_titles_tvdb_id`, and had nothing left to look the winner up with. Pass a
+`FakeTitleRepository` to the constructor; leaving it out is still meaningful
+and models a read that missed another worker's committed write, which is the
+only deterministic way to produce the race `MatchService`'s conflict handler
+exists for.
+**No test in this repository makes a network request, and that is measured
+rather than asserted.** Verified 2026-07-31, **re-verified 2026-08-01 after
+the live TMDb run**, **again after the fixture scrub and the CLI/deps
+changes**, **again after M5 group E added an SSE route and a streaming
+ASGI transport**, and **again after group F added `GET /titles/{id}`**, by
+running the whole suite under a
+`sitecustomize.py` that patches `socket.socket.connect`, `connect_ex` and
+`socket.getaddrinfo` to raise on anything that is not loopback (`AF_UNIX` is
+left alone, so Docker's socket still works and `testcontainers` still reaches
+`127.0.0.1`). **1,549 unit + 429 integration passed (2 unit cases skipped), zero blocks**, with
+`[netguard] installed` printed by the module itself in the same run and
+`socket.getaddrinfo("api.themoviedb.org", 443)` raising
+`RuntimeError: NETWORK BLOCKED` in the same environment. Group F's re-run:
+**1,586 unit + 442 integration passed (2 unit cases skipped), zero blocks**,
+and group G's, after `create_app` grew its two supervised lanes:
+**1,623 unit + 450 integration passed (2 unit cases skipped), zero blocks**,
+`[netguard] installed` on stderr, and the same `getaddrinfo` probe raising in
+the same `uv run` environment. **Re-verified a sixth time on 2026-08-02, at
+the end of M5 and after a live run that really did open sockets to a real
+Emby server from a throwaway script outside the tree: 1,624 unit + 474
+integration passed (2 unit cases skipped), zero blocks**, with
+`[netguard] installed` printed by the module itself in the same run, both
+`getaddrinfo("api.themoviedb.org", 443)` and `connect(("1.1.1.1", 443))`
+raising `RuntimeError: NETWORK BLOCKED` in that same environment, and the
+in-process case (`/tmp/netguard/test_guard_is_live_in_pytest.py`) passing
+under the same `PYTHONPATH`. The
+guard lives outside the tree — it is a check to re-run, not a dependency to
+add, because `PYTHONPATH`-injecting a socket monkeypatch into every developer's
+suite costs more than it catches.
+**Prove the guard is installed before believing a green run.** A
+`sitecustomize.py` that is not on `PYTHONPATH` produces exactly the same
+output as one that is and blocks nothing — the same family as the
+venv-shebang trap. The 2026-08-01 re-run printed `[netguard] installed` from
+the module itself and then, in the same environment,
+`socket.getaddrinfo("api.themoviedb.org", 443)` raised
+`RuntimeError: NETWORK BLOCKED`. Both checks, or the run proves nothing.
+**M5's final mutation sweep: 56 mutations, 50 killed, and every one of the
+six survivors was predicted.** Run 2026-08-02 in place, each mutation
+against the **whole** 2,098-test suite rather than its own task's selection.
+Baseline green before (`2098 passed, 2 skipped in 47.20s`), restored green
+after, the group-G harness's rules enforced throughout — target must appear
+exactly once, `cp` backups never `git checkout --`, a run that did not run is
+`DID-NOT-RUN`, a syntax error is `BROKEN-MUTATION`, a hang is `HUNG`.
+**Zero HUNG, zero DID-NOT-RUN, zero BROKEN**, and every mutation was
+dry-run through `ast.parse` before the sweep started so an `IndentationError`
+could not be scored as a kill.
+
+The six survivors, and the one prediction that was wrong in the *other*
+direction:
+
+- **Five are the plan's own named equivalent mutants, each surviving for
+  the stated reason**: the `stale_after` boundary (`<=` → `<`; the clocks in
+  those cases step past the boundary rather than onto it), the
+  `except asyncio.CancelledError: raise` arm (a `BaseException` in 3.13, so
+  the `UsherPortError` arm would not catch it anyway), `list(self._subscribers)`
+  (`publish` does not await, so nothing can be removed mid-iteration),
+  `rpartition` → `partition` (the epoch is hex and holds no `-`), and
+  `is ENRICHED` in place of the rank comparison (both agree on all three
+  rungs today).
+- **The sixth is `_write_push_available`'s "nothing changed" guard**, which
+  is not on the plan's list but *is* already recorded above as an equivalent
+  mutant against today's repository: SQLAlchemy emits no `UPDATE` when no
+  attribute actually changed, so the `set_updated_at` trigger never fires
+  either way.
+- **The plan's sixth named survivor was killed, and for a different reason
+  than the plan reasoned about.** `socket_logger`'s `propagate = False` was
+  predicted to survive because "the level alone is sufficient", which is
+  true *as a security property* — and it dies anyway, on
+  `test_the_socket_logger_is_re_silenced_on_every_call`, which pins all
+  three fields directly rather than asserting the leak. Worth knowing before
+  anyone reads that kill as evidence the propagate flag is load-bearing for
+  the token.
+
+Three results worth carrying forward. The milestone's headline mutation —
+moving `failures = 0` from delivery to connection — **fails 4 cases**, so
+PRD 08's "after N failures mark `supports_push = false`" cannot silently
+stop firing against a buffering proxy. Deleting the watchdog call fails 4,
+and `is_delivering` returning `self.connected` fails **11**, the largest
+blast radius in the sweep. And the ADR-0014 mutation on the *third* payload
+shape (`play_count=as_int(entry.get("PlayCount"))` in `user_data_states`)
+fails 2 — which matters more now that the live run has shown that field
+would be *telling the truth*: the test suite forbids reading it on the
+strength of a rule about evidence, not on the strength of the value being
+wrong.
+**M4's final mutation sweep: 39 mutations, one survivor, and the survivor is
+an equivalent mutant the code comment predicted.** Run 2026-07-31 in place,
+each mutation against the **whole** 1,713-test suite rather than its own
+task's selection — which is the point of a final sweep, since a per-task
+sweep cannot see collateral in another file. Baseline green before,
+restored green after, `/tmp/mutate.py`'s rules enforced throughout (a run
+that did not run is `DID-NOT-RUN`, never `KILLED`; the target must appear
+exactly once; `cp` backups, never `git checkout --`). **38/39 killed.**
+
+The survivor is `priority = GREATEST(jobs.priority, excluded.priority)` →
+`priority = excluded.priority` in `_ENQUEUE`, and it survives because the
+same statement's `WHERE jobs.status <> 'parked' AND jobs.priority <
+excluded.priority` already guarantees `excluded.priority` is the larger.
+`jobs.py`'s own comment says exactly this and keeps both anyway ("one is
+*when* to write, the other *what* to write"). Verified rather than assumed:
+removing **both** together fails 2 cases, so PRD 03's no-demotion property is
+covered — by the `WHERE` clause. So
+`test_re_enqueueing_at_a_lower_priority_does_not_demote` passes against a
+`SET` clause that would demote, and is really a test of the predicate. Worth
+knowing before anyone "simplifies" the `WHERE` on the strength of that case's
+name.
+
+Two other results worth carrying forward. `claim-without-skip-locked` is the
+only mutation whose run is measurably slower (57.2 s against a ~41.6 s
+baseline) — that is `asyncio.wait_for` bounding the blocked claim rather than
+the suite hanging, which is why `pytest-timeout` is deliberately not a
+dependency. And `usable-ids-filters-nothing` **is** caught (2 cases), by
+`test_a_malformed_imdb_id_does_not_abort_the_batch`'s *second* item, whose
+only id is unusable — the first item survives the mutation intact, so a
+version of that case carrying one item would have ratified it.
+**Mutation sweeps on this host: the shell is zsh, and it does not
+word-split an unquoted `$VAR`.** A selection passed as `$C="path1 path2"`
+reaches pytest as one bogus path, nothing runs, the exit code is non-zero,
+and a naive harness records the mutation as caught having measured nothing.
+Three were, before the harness started requiring that a run actually ran.
+Same family as the venv-shebang trap: the sweep proves nothing and looks
+like it proved something.
+**M6's sweep: 61 mutations, 50 killed, 11 survived, 0 HUNG, 0 DID-NOT-RUN —
+and three harness findings, one of which defeats the plan's own trap rule.**
+
+- **`ast.parse` is NOT sufficient to dry-run a mutation, and `compile()` is.**
+  `ast.parse` **accepts** `continue` outside a loop — that error is raised by
+  the *compile* stage — so a mutation spelled with a stray `continue` passed
+  the dry run, the suite died at collection in 1 s, and the harness scored it
+  `KILLED` against an unrelated file. Caught by reading the log, not by the
+  rule. Validate with `compile(source, path, "exec")`, and additionally score
+  `ERROR collecting` + `SyntaxError` as `BROKEN-MUTATION`. This is trap rule 3
+  ("a run that collected zero tests is DID-NOT-RUN") failing in a way the rule
+  as written does not cover: the run *did* collect, it collected an error.
+- **SIGTERM skips the `finally`, so a killed sweep leaves the tree mutated.**
+  `pkill` on the harness mid-mutation left `ports/search.py` modified. The `cp`
+  backup is what recovered it — `git checkout --` would have been M5 group F's
+  disaster again. A sweep harness needs a signal handler, or the operator needs
+  to check `git status` after every interruption.
+- **A mutation must be the change the plan names, not a change that happens to
+  break the statement.** "`updated_at = now()` dropped from the `DO UPDATE`
+  clause" spelled as a *replacement* with an assignment already in that clause
+  is a duplicate `SET`, i.e. a SQL error, and scored a false kill against a
+  mutation the plan correctly calls equivalent. Deleted properly, it survives.
+**And one real coverage gap the sweep found, now closed.**
+`test_the_port_does_not_ask_callers_to_apply_a_query_prefix` read
+`inspect.getdoc(Embedder)` only. The deleted clause happened to live on the
+*class* docstring, so the guard was written against where it was rather than
+where it could go: restoring "callers are responsible for any query-side
+instruction prefix" on **`Embedder.embed`** — the more natural place, since
+`embed` is the method the instruction is about — survived all 2,433 cases. The
+guard now scans every docstring on the port. Same shape as the `sitecustomize`
+installation proof: a guard scoped to one surface of two reads as coverage.
+**Two plan predictions about survivors were wrong, in opposite directions.**
+Task 12's `stored.model_name == …` was predicted to survive "because
+`FakeEmbedder` has one model name", with an instruction not to strengthen the
+fake — it is **killed** by
+`test_a_model_swap_re_embeds_a_title_whose_text_did_not_change`, which seeds
+two model names without touching the fake. And the milestone's **headline**
+refusal mutation is killed by exactly **one** case in 2,433, and it is not the
+one the plan named: `test_a_refused_title_leaves_the_backfill_after_one_pass`
+writes the refused row *directly* (its own docstring says the case is about the
+predicate), so it cannot see a service-side skip at all; the cover is the unit
+case `test_a_degenerate_title_is_written_with_a_null_embedding_rather_than_skipped`.
+**A statement-count assertion needs the right thing held fixed.** "20
+episodes and 200 cost the same statements" is hollow when they share one
+series: `IngestService._series_titles` only queries for series the page does
+*not* carry, so with the whole library in one batch that list is empty and a
+per-item spelling of it issues zero statements. Measured — the mutation
+survived. Hold the **batch count** fixed and vary the page instead (nine
+batches of 5 against nine batches of 50), across many series and many
+titles, which is also the production shape: at 32,409 series among
+1,126,674 items an episode's series nearly always arrived in an earlier
+page.
+**A route-driven test commits for real.** `get_session` is the request's
+commit boundary, so an integration test that drives a walk through a
+*route* writes durably against the session-scoped container — unlike every
+rolled-back test in the suite. Leaving `tests/integration/
+test_pipeline_spans.py`'s stubbed `titles` and enqueued `jobs` behind took
+down four tests in three other files (a duplicate `ix_titles_tmdb_id_kind`,
+a queue depth of 2 where 0 was expected, a claim that found 3 jobs instead
+of 1, and a global `count_by_state`), each of which passed in isolation.
+`media_items` and `sync_runs` go with the source's `ON DELETE CASCADE`;
+`titles` and `jobs` do not.
+**`FakeJobQueue.enqueue` counts a no-op re-enqueue as a row written, and
+Postgres answers 0.** The fake takes its update branch and increments
+whatever it changed; `_ENQUEUE`'s `AND jobs.priority < excluded.priority`
+matches nothing for work already at that priority. So anything whose
+behaviour turns on the *count* rather than on the stored row is untestable
+against the fake: `TitleReadService._promote` returns whether an enqueue was
+*attempted*, and the version that returned "a row changed" passes all 18
+cases in `tests/unit/test_services_titles.py` and then reports
+`promoted = False` for every second open of the same stub — telling a client
+that an already-promoted title declined to be promoted. Killed only by
+`tests/integration/test_services_titles.py`. Recorded as the fake's seventh
+divergence rather than fixed, because a fake that modelled the whole
+promotion predicate would be a second implementation rather than a stand-in.
+
+**Import `testcontainers.community.postgres`, not `testcontainers.postgres`.**
+The latter is a shim that raises a `DeprecationWarning` at import time and
+was the only warning this suite emitted; the community module is the same
+class with the same behaviour (confirmed by running the whole integration
+suite against it). Changed 2026-08-01 — a shim that announces its own
+removal eventually takes it, and a suite with one permanently-expected
+warning is a suite where the next real warning is invisible. Still imported
+*inside* the `postgres_url` fixture rather than at module scope: `pytest -m
+"not integration"` imports that conftest even though it filters every test
+in it back out, and `testcontainers` drags in `docker`.
+
+Verified working as of Group E (title repository, first integration tests) —
+`tests/integration/` runs against a real PostgreSQL, started and torn down
+per test run by `testcontainers` (`pgvector/pgvector:pg17`; first run pulls
+the image, ~625 MB). Docker must be running; nothing else to set up. Its
+schema comes from running the real Alembic migration once per test session
+(`postgres_url`, `tests/integration/conftest.py`), not `Base.metadata.
+create_all` — CHECK constraint bodies and the three `set_updated_at`
+triggers are invisible to `create_all` the same way they're invisible to
+`--autogenerate` (above), so a suite that never runs the migration can't
+catch either drifting from the models. Each test still gets a fully
+isolated database via a connection-bound transaction rolled back
+afterward, not a schema recreate — cheaper than the 23-tests-worth of
+`create_all`/`drop_all` cycles that used to cost, and `tests/integration/
+test_migrations.py` is the ongoing regression check (trigger existence,
+plus an autogenerate diff against the migrated database asserting no
+drift):
+
+```bash
+uv run pytest                        # full suite — 235 tests, needs Docker for the 44 under tests/integration/
+uv run pytest tests/unit             # 191 tests, no Docker
+uv run pytest tests/integration      # 44 tests, needs Docker
+uv run pytest -m "not integration"   # marker equivalent of tests/unit
+uv run pytest -m integration         # marker equivalent of tests/integration
+```
+
+Two ways to select the same split — pick whichever fits: directory (what
+Task 10 itself was written and verified against) or the `integration`
+marker (registered in `pyproject.toml`, auto-applied to everything under
+`tests/integration/` by that directory's `conftest.py`). Both are kept in
+sync deliberately, so Group G's CI can use either without the two
+diverging. Not wired into `addopts` as a default `-m "not integration"` —
+that would make `pytest tests/integration/...` silently collect zero tests
+instead of running them.
+
+`tests/contract/title_repository_contract.py` holds the behavioural
+assertions every `TitleRepository` implementation must satisfy — the same
+suite runs against `FakeTitleRepository` (`tests/unit/`, no Docker) and
+`PostgresTitleRepository` (`tests/integration/`, real Postgres), so the two
+are verified to actually agree instead of merely looking alike. This is the
+pattern PRD 08 calls the "contract suite" for `SourceAdapter`; M3 is
+expected to reuse it.
+
+**Every fixture is shape-recorded and value-synthetic, and that is a
+licensing constraint, not a style.** A real Emby response embeds
+TMDb-sourced metadata, which TMDb's terms forbid redistributing and which
+"ship importers, never data" above already forbids committing; it also
+identifies a real library and carries real server and user ids. Regenerate
+a scrubbed *shape* with the script above and diff that; never paste a
+capture in.
+
+**That rule was broken from M1 to M4 and nothing noticed, which is the more
+useful half of the finding.** `tests/fixtures/bulk/` held verbatim IMDb
+rows — real ids, titles, years, runtimes, genres, and two `title.ratings`
+rows *with their vote counts*, the most licence-restricted part of that
+dataset — under a `README.md` asserting the rows were "typed by hand" and
+therefore only "recognisable identifiers". Hand-typing a real value does
+not make it synthetic, and **the false assurance was worse than the data**:
+it is what stopped three milestones of readers from checking. The TMDb and
+Emby fixtures had invented prose but kept real ids, air dates, runtimes,
+season/episode counts and `credit_id` ObjectIds — including, on
+`movie.json`, a real IMDb id belonging to a *different film* than the rest
+of the record was shaped after. Root cause is benign and worth knowing:
+**TMDb's reference pages illustrate their endpoints with real responses**,
+so "transcribed from published documentation" was transcribing a real
+payload. `scripts/capture_tmdb_fixture.py` was never the problem — it
+replaces every leaf with its type name — though its `--id 550` *default*
+was, and is now required.
+
+All of it was replaced on 2026-08-01, preserving every shape and format
+edge case (`\N`, tab separation, the header row, the movie/series `kind`
+split, the no-quoting-mechanism row, Emby's `VideoRange` vocabulary, every
+TMDb key and type). The one that needed care: the quoted-title row only
+pins the `csv.reader` trap if the invented title **opens and closes** with
+`"` — `csv` treats `"` as a quote character only at the start of a field,
+so a title with *interior* quotes survives both parsers and tests nothing.
+Verified both ways before committing.
+
+**`tests/unit/test_no_third_party_data.py` is the control, because a
+convention nothing checks is not one.** Three checks over `src/` and
+`tests/` — every IMDb id in a reserved `tt99`/`nm99` band; every id inside
+a committed fixture at or above a 90,000,000 floor (two orders of magnitude
+above TMDb's own daily-export id space); and a **hashed** regression list of
+the identifiers this repository once committed, hashed so the guard is not
+itself the last file holding them. `docs/` and `CLAUDE.md` are deliberately
+outside those three: neither ships, and naming a real row as the *specimen*
+for a measurement is a claim about a dataset rather than a copy of one —
+which is why this file still names one and
+`src/usher/adapters/bulk/imdb.py` no longer does.
+
+**A fourth check scans the whole repository, `docs/` included, for a
+dataset *row* rather than an identifier — and that location-independent one
+is what caught the two the other three missed.** `docs/plans/2026-07-30-m2-
+bootstrap.md` prescribed the original fixture verbatim, ratings rows and
+vote counts included: data, *and* the instruction that recreates it, which
+is the worse half and is why "docs are just notes" does not hold for a row.
+And `usher.adapters.bulk.tmdb_ids`' module docstring carried two real TMDb
+id-export records — in the wheel. Both are corrected. Matching on shape (a
+tconst followed by a tab; a JSON object carrying `original_title`/
+`original_name`) is what makes scanning prose free of noise: no sentence
+looks like that.
+
+Plus two cases that fail if the scans stop scanning — a guard that globs
+nothing passes exactly like a guard that passes, the same family as the
+`sitecustomize.py` installation proof. **Mutation-verified 11/11:** a real
+tconst back in a TSV fixture, a real TMDb id back in a JSON fixture, a real
+TVDb id back in an Emby fixture, a real TMDb id back in a `.py` test, a
+real dataset row back in a plan document, a real export record back in a
+shipped docstring, `_SCANNED_ROOTS` narrowed to `("src",)`, the repo-wide
+walk emptied, and each of the three matchers made to match nothing.
+`tests/fixtures/README.md` holds the bands and the allocation table.

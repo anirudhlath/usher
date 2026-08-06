@@ -1,0 +1,303 @@
+---
+paths:
+  - "src/usher/api/**"
+  - "src/usher/telemetry.py"
+  - "src/usher/composition.py"
+---
+
+# The HTTP surface, OpenTelemetry and the supervised lanes
+
+Verified facts, loaded when working in this subsystem. Measured or observed,
+never assumed — each entry carries its date, its sample and what it refuted.
+The always-on conventions live in `CLAUDE.md`; this file is the evidence.
+
+**`httpx.ASGITransport` buffers the whole response and therefore cannot test
+SSE at all.** Its `handle_async_request` runs `await self.app(scope, receive,
+send)` to *completion*, collects every `http.response.body` into a list, and
+only then builds a `Response` over the joined bytes — so
+`client.stream("GET", "/events")` against a route whose whole purpose is not
+to complete blocks inside the transport forever, and every case written
+against it would hang rather than fail. `tests/fakes/
+streaming_asgi_transport.py` is the replacement: the app runs in a task,
+`http.response.start` resolves a future, chunks go on a queue, and
+`aclose()` sends `http.disconnect`. Its scope carries
+`spec_version: "2.3"`, matching uvicorn 0.51's own, and that is load-bearing
+— `StreamingResponse.__call__` only runs `listen_for_disconnect` below spec
+2.4, so at 2.4+ a client going away would not cancel the body iterator and
+the route's `finally` would never run.
+**A replay ring and a per-subscriber queue are fed by the same `publish`
+calls, so a lazily-resolved replay duplicates.** `InMemoryEventBus.subscribe`
+snapshots the ring *before* it adds the subscriber, with no `await` in
+between. Resolved lazily at the first `__anext__` instead — which is what the
+M5 plan's draft did — everything published in the window between is in both
+halves and the client sees it twice. The window is real: `api/routers/
+events.py` reaches its first `anext` through an `asyncio.wait_for`, which
+yields to the loop, and the push lane publishes from another task.
+**`SQLAlchemyInstrumentor` was wired and produced no spans at all, for
+three milestones.** `instrument()` patches the *module attribute*
+`sqlalchemy.ext.asyncio.create_async_engine` with `wrapt`; `usher.db.base`
+did `from sqlalchemy.ext.asyncio import create_async_engine` at module
+scope, which is evaluated long before `configure_tracing` ever runs and
+binds the **original, unwrapped** function into that namespace forever.
+Verified directly: after `instrument()`, `usher.db.base.create_async_engine`
+and `sqlalchemy.ext.asyncio.create_async_engine` are different objects. The
+failure is silent in the worst way — the package is installed, the wiring
+reports success, `connect` spans still appear (`_wrap_connect` patches
+`Engine.connect` on the *class*, so it fires however the engine was built),
+and not one `SELECT`/`INSERT`/`UPDATE` span is ever produced. `build_engine`
+now calls `sa_asyncio.create_async_engine` through the module. A test that
+accepts a `connect` span is not enough; assert on a *statement* span.
+**Pipeline spans nest under the request's server span, asserted as
+parentage.** `tests/integration/test_pipeline_spans.py` walks the parent
+chain `match.title → ingest.item → sync.reconcile → GET …` on a real
+`create_app()` through a real request, with SQLAlchemy statement spans
+under the pipeline span that issued them. A pipeline that started its own
+*root* spans passes every other assertion in this repository — valid ids,
+exporting traces, PRD 10's span names all present — and fails only this.
+A worker's `job.*` span is the deliberate exception: a root with a `Link`.
+**`set_meter_provider` is set-once and `_ProxyMeter` caches, exactly like
+the tracer.** Every `usher` module calls `metrics.get_meter(...)` at import
+time, so each holds a `_ProxyMeter` whose instruments are `_Proxy*` shells
+that cache the first real instrument they are handed. Without
+`tests/conftest.py::reset_otel_meter_provider`, three rounds of "install a
+`MeterProvider` with an `InMemoryMetricReader`, record through
+`usher.services.jobs._job_duration`, read the reader" print the metric once
+and then raise `AttributeError: 'NoneType' object has no attribute
+'resource_metrics'` — the second `set_meter_provider` is refused and the
+second reader is never registered with any provider.
+
+`SQLAlchemyInstrumentor` needs the same treatment and the shared reset
+cannot give it: it resolves its tracer *once*, eagerly, into a `wrapt`
+closure, so it is a real `Tracer` rather than a `ProxyTracer` and nothing
+in `usher.*` holds it. `tests/integration/test_pipeline_spans.py`'s own
+fixture calls `SQLAlchemyInstrumentor().uninstrument()` before installing
+its provider; without that line its database-span case passes alone and
+finds an empty exporter when it runs third in its own file.
+**An observable OTel callback cannot query this database.** OTel invokes it
+from the metric reader's *background thread* and every database call here is
+a coroutine on asyncpg, so a callback that queried would have to bounce a
+coroutine onto the event loop (`run_coroutine_threadsafe`) and block the
+exporter thread on it — a deadlock whenever the loop is itself blocked.
+`usher.telemetry.register_queue_gauges` therefore takes a **synchronous**
+reader returning the caller's most recent *complete* re-read of the `jobs`
+table (`usher work` refreshes it after every pass), which is stale but never
+wrong — unlike the counter-incremented-on-enqueue the plan was guarding
+against. The SDK also keeps only the **first** observable gauge registered
+under a name and silently discards the rest (verified directly), so the
+reader is a module global that is replaced rather than a closure captured at
+instrument-creation time.
+**`TitleReadService` holds no `SourceAdapter`, and that is asserted on its
+imports rather than on its behaviour.** PRD 08's "a degraded subsystem
+narrows functionality; it never fails a request local state can answer" is
+only a property of the code if the failing call is *absent* rather than
+caught — "it did not raise" is also what a service that swallowed everything
+would produce. Two things the obvious check misses, both measured: a
+signature check spelled `parameter.annotation in (SourceAdapter, ...)` (or
+via `annotation.__name__`) does not see a **string** annotation, which is the
+one form needing no import at all; and an `ast.ImportFrom`-only scan does not
+see `import usher.ports.source`. Read the annotation as text and walk both
+node types. This is what makes M5's deferral of PRD 07's RFC 9457 envelope a
+structural claim: with no adapter reachable there is no 503 to give a `code`
+to, and the first route whose honest answer is "the source is down and I
+cannot serve this from local state" is M9's `POST /titles/{id}/play`.
+**A `GET /titles/{id}` leak check may not forbid the word "emby".** The
+availability badge carries the name an *operator* typed, and "Living Room
+Emby" is a correct value for it — PRD 07's own example spells it that way. A
+rule that forbids the substring forbids the feature. What must not escape is
+the source's own **item id**, so the assertion is against a distinctive
+`external_id` and against the key `external_id`, not against a vendor name.
+**The server process runs the lanes, and that is proved by a job
+disappearing rather than by an assertion about wiring.** `create_app`'s
+lifespan builds a `LaneSupervisor` and starts a push lane per enabled source
+plus one job worker (both settings-gated, PRD 01's `--worker` flag as
+configuration). A unit test of the supervisor proves it does what it is
+told; it says nothing about whether the lifespan tells it anything.
+`tests/integration/test_lanes_in_the_server_process.py` commits a real
+`match` job, starts nothing but `LifespanManager(create_app(settings))`, and
+asserts the row is gone before the app stops — with the mirror case
+(`worker_enabled=False`, the row survives) as the control that makes it
+evidence. The mutation `await lanes.start()` → `pass` fails exactly that one
+case out of 2,072.
+**Both lane switches default on, so every test that builds an app has to say
+it does not want them.** Nine fixtures now pass
+`push_enabled=False, worker_enabled=False`. Without it a worker lane polls
+the real `jobs` table under `tests/integration/test_pipeline_spans.py`, which
+enqueues jobs through its own probe route and asserts on them; and a push
+lane in `tests/integration/test_admin_sources.py` builds the **real**
+`EmbyAdapter` against `https://emby.invalid` and opens a socket, because
+`dependency_overrides` do not reach the lifespan. Stated per fixture rather
+than defaulted in `conftest.py`, so it is greppable.
+**`start()` creates tasks and awaits nothing, and the case with teeth drives
+the coroutine by hand.** `coro.send(None)` must raise `StopIteration`; a
+`start()` that read the source list inline hands back a future instead. That
+is what keeps `/health` answering 200 with Postgres down while
+`/health/ready` reports 503 — the M5 plan's own draft did
+`await self.refresh()` there, which opens a connection, and its own Step 4
+then asserted the opposite. The first refresh happens *inside* the refresher
+task, which refreshes and then sleeps, so nothing waits `USHER_PUSH_SOURCE_REFRESH_SECONDS`
+for its first lane either.
+**Per-lane crash isolation comes from one task per lane, not from the
+`except`.** Measured: deleting `_guard`'s `except` survives the whole suite,
+while removing `return_exceptions=True` from `stop()`'s gather fails **11**
+cases on its own — so the two are not the belt-and-braces pair a comment
+claimed. What `_guard` buys is that a crashed lane is not silent (without it
+CPython reports an unretrieved task exception at GC time, to stderr, with no
+source name in it), which needs a log assertion to see. And
+`running_sources() == ["B"]` is not a test of isolation: a supervisor whose
+second lane was created and never scheduled reports the same thing. The case
+asserts B ingests an item pushed *after* A's task is already `done()`.
+Two lanes genuinely overlapping is its own measurement — **99.3–99.4% of
+their union over five runs**, against a serialised supervisor's 0.0.
+**A guard can be right and unobservable, and `_write_push_available`'s is.**
+Deleting its "nothing changed" check does not move `sources.updated_at`,
+because `PostgresSourceRepository.update` sets attributes on a *loaded ORM
+row* and SQLAlchemy's unit of work emits no `UPDATE` when none actually
+changed — so the `set_updated_at` trigger never fires either way. Recorded
+as an equivalent mutant against today's repository and kept, because the day
+that repository issues a bare `UPDATE … SET` a flapping lane moves a column
+an operator reads, once per reconnect. Same treatment M4 gave `_ENQUEUE`'s
+`GREATEST`.
+**`JobWorker.startup()` requeues everything left `running`, so there is one
+worker per deployment, not per process.** `requeue_running`'s default
+`older_than_seconds=0.0` is correct at exactly one worker and at two steals
+the other's live claims. The server now runs one, so a deployment that also
+runs `usher work` must set `USHER_WORKER_ENABLED=false` on the server.
+`LaneSupervisor` calls `startup()` once rather than per pass, which was
+untestable until `idle_seconds` became a constructor argument nothing in
+`src/` passes: the case asserts one requeue over three passes.
+**Readiness reports the lanes and never gates on them, and the case that
+proves it cannot live in the unit file.** `tests/unit/test_api_health.py`'s
+app points at an unreachable database, so readiness is *already* 503 there
+and both mutations — `all(checks) and lanes.running_sources()`, and moving
+`push` inside `ReadinessChecks` where `all(...)` picks it up automatically —
+survive every case in it. Against a **reachable** database with no lanes
+running, both turn a 200 into a 503 and both die, so that case lives in
+`tests/integration/test_health.py`. `LaneReport` is a separate model from
+`ReadinessChecks` for exactly this reason: every field of the latter is part
+of the status code by construction.
+**`SourceStatus` refuses "push available without being authenticated", and
+`dataclasses.replace` re-runs `__post_init__`.** So the obvious one-liner
+for reporting a running lane's push health —
+`replace(status, push_available=self._push_health(source_id))` — raises
+`ValueError` out of `GET /admin/sources/{id}/status` for a state a rotated
+password produces, on the screen an operator opens to diagnose it. The
+lane's answer is taken only when the status is authenticated.
+**`usher.composition` is the wiring both roots share, and it needs no
+seventh import-linter contract.** `usher.cli` carries one saying nothing may
+import it, so shared code cannot live there. The new module sits outside
+every contract's source list — and that hole is closed by what it imports
+rather than by a rule: it imports `usher.db` and `usher.adapters`, so a core
+module reaching it breaks contracts two and three, which report indirect
+chains by default (unlike contract six's `allow_indirect_imports = true`).
+Verified by planting `from usher.composition import Pipeline` in
+`usher/services/push.py`: **4 kept, 2 broken.**
+
+Verified working as of Group F (telemetry bootstrap, FastAPI app with health
+endpoints, then hardened in a follow-up review pass) — the app is now a
+runnable service:
+
+```bash
+export USHER_DATABASE_URL="postgresql+asyncpg://usher:usher@localhost:5432/usher"
+export USHER_SECRET_KEY="<32+ char secret>"
+uv run alembic upgrade head
+uv run uvicorn usher.api.app:create_app --factory --host 0.0.0.0 --port 8000
+curl http://localhost:8000/health          # liveness  -- {"status":"ok"}, HTTP 200 always
+curl http://localhost:8000/health/ready    # readiness -- {"status":"ready","checks":{"database":true,"migrations":true}}, HTTP 200 or 503
+```
+
+`/health` and `/health/ready` are deliberately different: liveness must never
+depend on Postgres (a database outage is not a reason to kill and restart
+the process — restarting doesn't fix Postgres), so only readiness executes
+`SELECT 1` (and, only if that succeeds, compares the live `alembic_version`
+table against `usher.db.migrations.status.code_head_revision()` — PRD 08:
+"the app refuses to serve on a schema mismatch rather than guessing").
+Readiness returns HTTP 503 (not 200) when any check fails: no PRD text pins
+a status code, but a readiness probe's real consumers — Kubernetes, Docker
+`healthcheck`, load balancers — gate on the code and never parse the body.
+Verified directly against a real container: stopping Postgres mid-session
+leaves `/health` returning `{"status":"ok"}`/200 unchanged while
+`/health/ready` switches to `{"status":"degraded","checks":{"database":
+false,"migrations":false}}`/503 — same running process, no restart.
+Readiness self-heals once Postgres comes back, still without restarting
+Usher. Corrupting `alembic_version` on an otherwise-healthy database
+produces the same degraded/503 shape with `database: true, migrations:
+false` — a live demonstration is in the "readiness reports migration
+state" commit.
+
+Every request gets a real server span (`FastAPIInstrumentor`, wired in
+`create_app`) with SQLAlchemy queries and outbound httpx calls nested under
+it (`SQLAlchemyInstrumentor`/`HTTPXClientInstrumentor`, wired in
+`configure_tracing`) — without this, nothing ever called
+`tracer.start_as_current_span()` during request handling, so
+`inject_trace_context` never fired in the running service, only in tests
+that built their own span. `configure_tracing`/`configure_metrics` install a
+real `TracerProvider`/`MeterProvider` *unconditionally* (a bare provider
+with zero processors still assigns valid ids/records instruments, verified
+directly) — only the actual OTLP *export* is conditional on
+`settings.telemetry_enabled`. Both are `isinstance`-guarded against being
+reconfigured on a second `create_app()` call in the same process (verified
+directly: without the guard, 5 calls with telemetry enabled leaked 5
+background export threads; with it, flat at the 2 the first call installs).
+With no `OTEL_EXPORTER_OTLP_ENDPOINT` set, the default (unset) config still
+carries zero *export*-related risk — nothing gRPC-related is ever
+constructed. If an endpoint *is* set but nothing is listening there, the
+OTel SDK's own retry loop logs a warning rather than raising or hanging the
+app — graceful, but not literally silent in that specific case.
+
+Stdlib `logging` (uvicorn's access/error logs, SQLAlchemy warnings, the OTel
+exporter's own retry messages) is bridged into loguru via `_InterceptHandler`
+(loguru's own documented recipe) — without it, confirmed on a live run, only
+`usher`'s own logger calls were structured JSON; everything else printed as
+plain text, ignored `log_level`/`log_json`, and never got
+`trace_id`/`span_id` patched in.
+
+`get_session` (`api/deps.py`) is the request's commit/rollback boundary:
+commits once the handler completes without raising, rolls back and
+re-raises otherwise. Previously nothing in `src/` ever called `commit()` —
+`ports/repository.py`'s "the caller owns the session and the transaction"
+had no concrete caller yet, so a future write endpoint that forgot to
+commit would have lost data silently.
+
+`/health` and `/health/ready` responses are typed (`api/dto/health.py`,
+`LivenessResponse`/`ReadinessResponse`/`ReadinessChecks`), so
+`/openapi.json` describes real shapes instead of `{"type": "object"}`.
+
+`tests/integration/test_health.py`'s async `client` fixture needs
+`asgi_lifespan.LifespanManager` (new dev dependency) wrapping the app:
+`httpx.ASGITransport` only implements the ASGI "http" protocol, not
+"lifespan" (confirmed against its source and FastAPI's own docs), so a bare
+`AsyncClient(transport=ASGITransport(app=app))` never runs `create_app`'s
+lifespan and `app.state.session_factory` is never set. Reproduced directly:
+without the fix, `/health/ready` raises `AttributeError` while the other two
+tests in the file still pass. `deps.py`'s `get_session_factory` now raises a
+diagnosable `RuntimeError` for this exact case instead of Starlette's
+generic `AttributeError`.
+
+**It was reachable only from `usher.cli`, so a server-only deployment had an
+empty `users` table** — `docker compose up` against a healthy Postgres left
+`watch_states.user_id` with nothing to reference, and the row appeared only
+once `work --once` ran. Not a live bug in M4 (no route writes a watch state;
+the three admin routes are M9's) and a live bug the moment M5 adds one.
+Fixed as `usher.api.deps.get_default_user_id`/`DefaultUserIdDep`, a
+**request-scoped dependency and deliberately not a lifespan call**:
+`create_app`'s lifespan builds an engine and opens no connection, which is
+what makes `/health` answer 200 with Postgres down while `/health/ready`
+reports 503 — verified live against a real container. A write at startup
+turns a database outage into a crash loop and an unmigrated schema into a
+failure to boot, trading a documented, tested degradation for a worse one,
+for a row only a request ever needs. It also would have broken
+`tests/unit/test_api_health.py` and `test_telemetry.py`, which build a real
+app against no Postgres at all. Nothing routes over it yet, for the same
+reason nothing routes over the pipeline services beside it;
+`tests/integration/test_pipeline_deps.py` drives it through a real request
+and asserts the row is *committed*, read back on a second session.
+
+`api/deps.py` carries all eight new repositories plus `MatchService`/
+`IngestService`/`ReconcileService`/`WatchStateSyncService`, so M9 adds
+routers over finished wiring. **`EnrichService` is deliberately absent**:
+its provider owns the token bucket that keeps this deployment under TMDb's
+~40 rps ceiling, and a request-scoped `TmdbClient` gives every concurrent
+request a *fresh* bucket — N in-flight requests get N × 30 rps, a rate
+limiter that limits nothing. It belongs on `app.state` at lifespan, and
+nothing in PRD 07's surface calls enrichment directly (M5's demand
+promotion enqueues a job; `usher work` runs it).
