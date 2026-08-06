@@ -7,7 +7,7 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M7 complete.** The project scaffold, environment
+**Status: M7 complete, verified and swept.** The project scaffold, environment
 config, domain models, port ABCs, persistence (SQLAlchemy schema + Alembic
 migrations + title repository), the telemetry bootstrap, a FastAPI app
 with liveness/readiness endpoints, the container image + compose stack + CI
@@ -161,6 +161,51 @@ load automatically when working in `docs/`.
 
 ## Verified facts worth not re-deriving
 
+**A UUIDv7 primary key makes an `ORDER BY` key unobservable, and it cost this
+milestone five untested orderings.** `new_id()` is monotonic, and almost every
+fixture mints its ids in the same order it assigns the ranking value — so
+`ORDER BY <id>` and `ORDER BY <the real key>` return identical lists and the
+real key is never exercised. M7's whole-suite sweep found **five provider
+orderings whose key could be deleted with the suite still green**:
+`recently-added`'s `added_at DESC`, `because-you-watched`'s `rank`,
+`franchise`'s `owned_count DESC`, `people`'s `count(DISTINCT title_id) DESC`,
+and `credits`' `billing_order` on `list_for_person`. Two docstrings in this
+repository already named the trap (an `ORDER BY c.person_id` mutant survived
+the whole suite in M7 Group B until its fixture was rearranged) and the lesson
+had not been carried across. **Every ordering case must assert its own
+premise** — `assert far_id < near_id` — so a later fixture change that
+re-aligns id order with key order fails loudly instead of going quiet, and
+**a case asserting membership (`x in result`, `len(result) > 0`) is not an
+ordering test at all**: it is satisfied by returning the whole table in
+physical order.
+
+**`TitleNeighborRepository` is the one repository port with a Postgres
+implementation and no shared contract suite, and that gap hid a live defect.**
+Inverting `_COUNT_STALE_NEIGHBORS`' `WHERE blend_fingerprint <> :fp` to `=`
+**survived the whole suite**: every test of neighbour `count_stale` runs
+against `FakeTitleNeighborRepository`, whose comparison is Python, and every
+`count_stale` call under `tests/integration/` is the unrelated *embedding*
+one. On a table inherited from M6 — the deployment `blend_fingerprint` was
+added for — the inverted gauge reads **zero**, which is exactly what PRD 10
+says the column exists to prevent. **A staleness case must seed a stale row
+*and* a fresh row in one table**, because with only one kind present an
+inversion answers correctly by luck of direction.
+
+**A mutation sweep mutates the working tree in place, so nothing else may use
+that tree while it runs.** Obvious in retrospect and not obvious while looking
+for something to parallelise: a live end-to-end run was started against a
+mid-sweep tree and would have measured mutated code. Two corollaries: reading
+a source file to check a fact gives you whatever mutation is currently applied
+(use `git show HEAD:<path>`), and any second process wanting the repo has to
+wait.
+
+**A plant that did not land looks exactly like a check that passed.** Verifying
+an import contract by planting the import it forbids reported *7 kept, 0
+broken* — because the anchor string being substituted did not exist in the
+target file and the edit was a silent no-op. **Assert the plant is present
+before believing the check**, the same family as the `sitecustomize.py`
+installation proof and the `-q`/`-qq` trap.
+
 **M7's measurements, taken 2026-08-04/05 on this host against
 `pgvector/pgvector:pg17` (pgvector 0.8.6) unless stated otherwise. The
 `titles.popularity` re-measure has its own entry inside M6's gate section
@@ -289,6 +334,16 @@ credits and 6,000 `title_neighbors` rows): **cold p50
 written before the run and needs **both** clauses: p95 > 400 ms *and* no single
 provider at ≥ 50%. p95 is **11× under** the budget, so the second never
 applies.
+
+⚠️ **And that p95 is a property of the household, not of the composer.**
+Re-measured 2026-08-05 against the scale ceiling — `scripts/measure_rows.py`'s
+full seeding, **1,277,878 owned items and 1,277,878 watch states, 1,086,149
+played** — compose is **p50 710.3 ms, p95 783.4 ms**, 2× *over* the budget,
+with `genre-affinity` at **98%** of build time and `next-up` costing **302.9 ms
+to propose**. The decision does not move, because the revisit rule needs *both*
+clauses and the second does not fire: the answer is to fix one provider, not to
+run nine on one session. **Never quote the 11× without the 5,200-copy
+household it belongs to.**
 [ADR-0025](docs/prd/decisions/0025-rows-build-sequentially.md).
 
 **A non-overlap assertion passes against the exact `gather` it exists to

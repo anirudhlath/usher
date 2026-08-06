@@ -497,6 +497,66 @@ class PersonRepositoryContract:
         assert rows[1].last_watched_at is not None
         assert rows[0].last_watched_at > rows[1].last_watched_at
 
+    async def test_the_count_key_outranks_recency_when_the_two_disagree(
+        self,
+        repository: PersonRepository,
+        seeder: PersonHistorySeeder,
+        user_id: uuid.UUID,
+    ) -> None:
+        """The mirror of the case above, and the one that was missing.
+
+        `_RECURRING_PEOPLE` sorts on three keys and the suite covered the
+        second and third. Deleting the **first** --
+        `count(DISTINCT c.title_id) DESC` -- **survived the whole suite**,
+        because every multi-row case here equalises the counts by construction
+        in order to isolate the recency tiebreak, and every other case returns
+        one row.
+
+        Here the two keys disagree: five films over the years against three
+        last month, both above the floor. The five-film person is seeded
+        **first**, so id order favours the wrong answer too.
+
+        **Two things downstream make this worse than a reordering.**
+        `PeopleProvider` emits the first `_MAX_ROWS` qualifying people, and its
+        score saturates -- so the mutant does not merely reorder the screen, it
+        evicts a genuine long-term collaborator from it. And the provider
+        dedupes by first sighting *because the list is strongest-first*, so the
+        `reason` string renders "You've watched 3 films with X" for someone the
+        household has watched five with: a wrong number in prose written to be
+        spoken aloud.
+        """
+        await repository.upsert_many(
+            [person(93_000_045, "Watched Often"), person(93_000_046, "Watched Lately")]
+        )
+        ids = await repository.resolve_tmdb_ids([93_000_045, 93_000_046])
+        often_id, lately_id = ids[93_000_045], ids[93_000_046]
+        assert often_id < lately_id, (
+            "the fixture must make id order favour the wrong answer as well"
+        )
+
+        for index in range(5):
+            film = await seeder.movie()
+            await seeder.credit(person_id=often_id, title_id=film)
+            await seeder.watched(
+                user_id=user_id, title_id=film, last_played_at=LONG_AGO + timedelta(days=index)
+            )
+        for index in range(3):
+            film = await seeder.movie()
+            await seeder.credit(person_id=lately_id, title_id=film)
+            await seeder.watched(
+                user_id=user_id, title_id=film, last_played_at=RECENTLY + timedelta(days=index)
+            )
+
+        rows = await repository.list_recurring_for_user(user_id, min_titles=3)
+
+        assert [row.person_id for row in rows] == [often_id, lately_id]
+        assert [row.watched_title_count for row in rows] == [5, 3]
+        # and the recency key really does point the other way, so this case
+        # cannot be satisfied by an implementation that dropped *it* instead.
+        assert rows[0].last_watched_at is not None
+        assert rows[1].last_watched_at is not None
+        assert rows[0].last_watched_at < rows[1].last_watched_at
+
     async def test_a_person_known_only_through_undatable_states_sorts_last(
         self,
         repository: PersonRepository,

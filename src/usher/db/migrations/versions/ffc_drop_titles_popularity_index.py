@@ -34,9 +34,15 @@ session:
 
 | query | plan |
 |---|---|
-| `ORDER BY popularity DESC` (the index's own declaration) | `Index Scan using ix_titles_popularity`, cost 0.42..20.97 |
-| `ORDER BY popularity DESC NULLS LAST` (what `src/` asks) | `Parallel Seq Scan` + `Sort`, cost 86,142 |
-| the same, `enable_seqscan = off` | `Bitmap Index Scan` + **`Sort`** — the bitmap discards ordering, so the sort remains |
+| `DESC` -- as declared | `Index Scan using ix_titles_popularity`, cost 0.42..20.97 |
+| `DESC NULLS LAST` -- what `src/` asks | `Parallel Seq Scan` + `Sort`, cost 86,142 |
+| the same, `enable_seqscan = off` | `Bitmap Index Scan` + **`Sort`** |
+
+(All three over `ORDER BY popularity`; the `NULLS` clause is the whole
+difference.)
+
+The third row is the informative one: forcing the index still leaves the sort,
+because a bitmap scan discards ordering entirely.
 
 So it is not merely unread; **it is unusable as declared**, and has been since
 `a8a0e10ff464` created it.

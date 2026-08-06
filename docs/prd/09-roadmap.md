@@ -422,9 +422,14 @@ carries a measurement they do not.
    eight of ten proposals were selected, and the two that were not are the
    lowest-scoring `SOURCE` rows rather than anything a provider got wrong.
 
-   So the sequential build stands, and it is not close: p95 would have to grow
-   **11×** before the first condition even applies, at which point the second —
-   no single provider at ≥ 50% — would still have to hold.
+   So the sequential build stands. ⚠️ **But "not close" is a property of that
+   household and was re-measured on 2026-08-05 against the scale ceiling** — a
+   synthetic population owning all 1,277,878 items with 1,086,149 played —
+   where compose is **p50 710.3 ms, p95 783.4 ms**, i.e. 2× *over* the budget.
+   The call is unchanged and the reason is the second condition: `genre-affinity`
+   is **98%** of build time there, so the answer is to fix one provider rather
+   than to run nine concurrently on one session. Read the 11× as scoped to
+   5,200 owned copies.
    [ADR-0025](decisions/0025-rows-build-sequentially.md) records it, because
    the way this ships wrong is that concurrent *usually works*.
 

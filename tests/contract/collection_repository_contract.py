@@ -192,6 +192,52 @@ class CollectionRepositoryContract:
         listed = await repository.list_owned()
         assert [one.collection_id for one in listed] == [ids[98_000_018]]
 
+    async def test_owned_collections_are_ranked_by_how_much_of_them_is_owned(
+        self, repository: CollectionRepository, seeder: CollectionSeeder
+    ) -> None:
+        """`ORDER BY e.owned_count DESC` -- and deleting it **survived the
+        whole suite** until this case existed.
+
+        Every other case in this class returns at most one eligible
+        collection, so the sort had nothing to order and `ORDER BY c.id` was
+        indistinguishable from it. `Collection.id` is a UUIDv7 minted at
+        validation time, so id order is derivation order: under the mutation
+        the screen's franchise rows are decided by whichever franchise TMDb
+        happened to describe first.
+
+        **The provider cannot recover this.** `FranchiseProvider` reads with
+        `limit=_CANDIDATES` and emits the first `_MAX_ROWS` that still have
+        something unplayed, and its score *saturates* at four owned members --
+        so two franchises above the ceiling tie on score and the SQL order is
+        the only thing that decided which reached the screen.
+
+        The distractor is "Owns Two", seeded first so it carries the lower id:
+        a two-member franchise leading a shelf whose whole premise is "you own
+        2 of 4" completeness.
+        """
+        await repository.upsert_many(
+            [collection(98_000_034, "Owns Two"), collection(98_000_035, "Owns Four")]
+        )
+        ids = await repository.resolve_tmdb_ids([98_000_034, 98_000_035])
+        assert ids[98_000_034] < ids[98_000_035], (
+            "the fixture must make id order and owned-count order disagree"
+        )
+
+        for _ in range(2):
+            owned = await seeder.movie()
+            await repository.attach_titles([(owned, ids[98_000_034])])
+            await seeder.own(owned)
+        for _ in range(4):
+            owned = await seeder.movie()
+            await repository.attach_titles([(owned, ids[98_000_035])])
+            await seeder.own(owned)
+
+        listed = await repository.list_owned()
+        assert [one.collection_id for one in listed] == [ids[98_000_035], ids[98_000_034]]
+
+        capped = await repository.list_owned(limit=1)
+        assert [one.collection_id for one in capped] == [ids[98_000_035]]
+
     async def test_owned_counts_only_available_title_level_items(
         self, repository: CollectionRepository, seeder: CollectionSeeder
     ) -> None:

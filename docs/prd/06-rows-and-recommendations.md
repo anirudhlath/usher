@@ -224,6 +224,16 @@ consecutive similarity rows; cap per family), builds the top N
 > what would make this the wrong answer (thirty providers, or one that calls
 > out of process).
 >
+> ⚠️ **That figure is scoped to a 5,200-copy household and must not be read as
+> a property of the composer.** Re-measured 2026-08-05 against the scale
+> ceiling — a synthetic population owning all 1,277,878 items with 1,086,149
+> played — compose is **p50 710.3 ms, p95 783.4 ms**, i.e. **2× over** the
+> budget rather than 11× under it. The decision does not change, and the reason
+> is the rule's second clause: `genre-affinity` is **98%** of build time there,
+> so the answer is to fix one provider rather than to run nine concurrently on
+> one session. `next-up` costs 302.9 ms to *propose* at that scale, which is
+> the other number worth carrying.
+>
 > **Built in M7 as `services/home.py`.** The diversity constraints are two
 > rules at two stages, and the split is deliberate: the **per-family cap** is
 > applied at *selection*, because it bounds how many rows get built; the **no

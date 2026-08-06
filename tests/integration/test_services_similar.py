@@ -402,6 +402,106 @@ async def test_the_stored_rank_is_what_a_read_orders_by(session: AsyncSession) -
     stored = await neighbors.list_for(seed_id, limit=10)
     assert [row.neighbor_title_id for row in stored] == [near_id, far_id]
     assert [row.rank for row in stored] == [0, 1]
+    # `near_id` is minted before `far_id`, so `ORDER BY neighbor_id` alone
+    # answers this case correctly. The next case is the one with teeth.
+    assert near_id < far_id
+
+
+@pytest.mark.integration
+async def test_a_read_orders_by_rank_and_not_by_the_neighbours_own_id(
+    session: AsyncSession,
+) -> None:
+    """`ORDER BY rank, neighbor_id` -- and deleting `rank` from it **survived
+    the whole suite** until this case existed.
+
+    The case above separates `rank` from `score` and not `rank` from `id`: it
+    mints the rank-0 neighbour first, so the monotonic UUIDv7 puts it first
+    under either ordering. Here the arrangement is inverted -- the rank-1
+    neighbour carries the *lower* id -- so an implementation that dropped the
+    `rank` key returns the catalog's oldest row as "most similar".
+
+    The distractor is `far_id`: a genuinely less similar title whose only
+    claim on the top of the shelf is that it was inserted first. Nothing
+    downstream recovers this -- `BaseRow.hydrate` turns ids into cards *in the
+    order given*, and `BecauseYouWatchedProvider` truncates to `_MAX_CARDS`
+    off the top, so a wrong order is also a wrong *selection*.
+    """
+    neighbors = PostgresTitleNeighborRepository(session)
+    first, second = planted_pair(math.pi / 4)
+    seed_id = await _seed(session, vector=first)
+    far_id = await _seed(session, vector=second)  # minted FIRST -> lower id
+    near_id = await _seed(session, vector=second)  # minted SECOND -> higher id
+    await session.flush()
+    assert far_id < near_id, "the fixture must make id order and rank order disagree"
+
+    await neighbors.replace(
+        [seed_id],
+        [
+            ScoredNeighbor(title_id=seed_id, neighbor_title_id=near_id, score=0.9, rank=0),
+            ScoredNeighbor(title_id=seed_id, neighbor_title_id=far_id, score=0.1, rank=1),
+        ],
+        blend_fingerprint=_FP,
+    )
+
+    stored = await neighbors.list_for(seed_id, limit=10)
+    assert [row.neighbor_title_id for row in stored] == [near_id, far_id]
+    assert [row.rank for row in stored] == [0, 1]
+
+
+@pytest.mark.integration
+async def test_count_stale_counts_rows_from_another_blend_and_not_rows_from_this_one(
+    session: AsyncSession,
+) -> None:
+    """The staleness predicate, against Postgres rather than against the fake.
+
+    Inverting `<>` to `=` in `_COUNT_STALE_NEIGHBORS` **survived the whole
+    suite**: every test of neighbour `count_stale` runs against
+    `FakeTitleNeighborRepository`, whose comparison is Python, and the only
+    integration reads of `count_stale` are the unrelated *embedding* one. So
+    the one clause that decides whether `usher.similarity.neighbors.stale`
+    means anything had no Postgres coverage at all.
+
+    **Both kinds of row have to be in the table at once.** With only stale rows
+    seeded, `<>` answers 1 and `=` answers 0 -- which an `== 1` assertion does
+    catch, but only by luck of direction; with only fresh rows the two swap and
+    a `== 0` assertion is satisfied by the inversion. Seeding one of each makes
+    the two predicates count *different rows*, and the per-title assertions pin
+    which is which.
+
+    The failure this guards is the one PRD 10 names: on a table inherited from
+    M6 -- the deployment the column was added for -- an inverted predicate
+    reads **zero**, and a gauge reading zero is indistinguishable from a fresh
+    table.
+
+    Both fingerprints are literals, for the reason `_FP` is one: the predicate
+    compares two strings and does not care whether either is today's real
+    blend, while a case that inherited `blend_fingerprint()` would stop
+    expressing "a different blend" the moment the weights moved.
+    """
+    neighbors = PostgresTitleNeighborRepository(session)
+    first, second = planted_pair(math.pi / 4)
+    stale_seed = await _seed(session, vector=first)
+    fresh_seed = await _seed(session, vector=first)
+    other = await _seed(session, vector=second)
+    await session.flush()
+
+    running = "the-running-blend"
+    assert running != _FP
+
+    await neighbors.replace(
+        [stale_seed],
+        [ScoredNeighbor(title_id=stale_seed, neighbor_title_id=other, score=0.5, rank=0)],
+        blend_fingerprint=_FP,
+    )
+    await neighbors.replace(
+        [fresh_seed],
+        [ScoredNeighbor(title_id=fresh_seed, neighbor_title_id=other, score=0.5, rank=0)],
+        blend_fingerprint=running,
+    )
+
+    assert await neighbors.count_stale(blend_fingerprint=running) == 1
+    assert await neighbors.count_stale(blend_fingerprint=running, title_id=stale_seed) == 1
+    assert await neighbors.count_stale(blend_fingerprint=running, title_id=fresh_seed) == 0
 
 
 @pytest.mark.integration

@@ -316,6 +316,79 @@ class CreditRepositoryContract:
         listed = await repository.list_for_person(lead_person)
         assert [one.title_id for one in listed] == [title_id]
 
+    async def test_a_persons_credits_are_ordered_by_billing_order(
+        self,
+        repository: CreditRepository,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        lead_person: uuid.UUID,
+    ) -> None:
+        """`list_for_person`'s twin of `test_credits_are_ordered_by_billing_order`,
+        and the lesson recorded there was never carried across to this
+        statement.
+
+        Deleting `c.billing_order ASC NULLS LAST` from `_LIST_FOR_PERSON`
+        **survived the whole suite**: the only other case touching this read
+        asserts a one-element list, so the ordering had nothing to order.
+
+        The same trap applies, one column over. The read's tiebreak is
+        `c.title_id`, the fixture's titles are created in one order, and their
+        UUIDv7s ascend with it -- so a naive seeding makes title-id order equal
+        billing order and `ORDER BY c.title_id` alone passes. The billing
+        orders here are therefore assigned **against** creation order: the lead
+        role goes to the title created second.
+
+        What it costs when it is wrong: `PeopleRow` takes this list in the
+        order given and truncates to `_MAX_CARDS`, and its own comment says
+        this is *"the only ranking this row has"*. Under the mutation a "More
+        from X" shelf leads with walk-ons and can cut the leads entirely.
+        """
+        await repository.replace_for_titles(
+            [title_id, other_title_id],
+            [
+                credit(title_id, lead_person, billing_order=7),
+                credit(other_title_id, lead_person, billing_order=0),
+            ],
+            credit_names={},
+        )
+        assert title_id < other_title_id, (
+            "the fixture must make title-id order and billing order disagree"
+        )
+
+        listed = await repository.list_for_person(lead_person)
+
+        assert [one.title_id for one in listed] == [other_title_id, title_id]
+        assert [one.billing_order for one in listed] == [0, 7]
+
+    async def test_a_persons_credits_sort_a_null_billing_order_last(
+        self,
+        repository: CreditRepository,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        lead_person: uuid.UUID,
+    ) -> None:
+        """`NULLS LAST` on this statement too, and for the reason the sibling
+        case gives: a crew credit carries no billing, and `NULLS FIRST` -- the
+        Postgres default for `ASC` is FIRST only for `DESC`, so this is easy to
+        get backwards -- would lead the shelf with the uncredited.
+
+        The unbilled credit is on the **lower** title id, so an implementation
+        that dropped the key entirely also fails.
+        """
+        await repository.replace_for_titles(
+            [title_id, other_title_id],
+            [
+                credit(title_id, lead_person, billing_order=None),
+                credit(other_title_id, lead_person, billing_order=3),
+            ],
+            credit_names={},
+        )
+
+        listed = await repository.list_for_person(lead_person)
+
+        assert [one.billing_order for one in listed] == [3, None]
+        assert [one.title_id for one in listed] == [other_title_id, title_id]
+
     async def test_a_duplicate_credit_id_inside_one_batch_is_tolerated(
         self, repository: CreditRepository, title_id: uuid.UUID, lead_person: uuid.UUID
     ) -> None:

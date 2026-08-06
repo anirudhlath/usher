@@ -122,6 +122,24 @@ with `home.compose → row.build` spans for the drill-down.
 
 ## Uncertainty
 
+⚠️ **The p95 above is a property of that household, not of the composer, and a
+second run measured where it bends.** On 2026-08-05, against the same code and
+a deliberately pathological population — `scripts/measure_rows.py`'s full
+seeding, i.e. **1,277,878 owned items and 1,277,878 watch states, 1,086,149 of
+them played**, a "household" owning the entire catalog — compose is **cold p50
+710.3 ms, p95 783.4 ms**, with `genre-affinity` at 251.4 ms = **98%** of build
+time and `next-up` costing **302.9 ms to *propose***. So p95 crosses the 400 ms
+budget by 2× at the scale ceiling.
+
+**The decision is unchanged, and the reason is the second clause.** The revisit
+rule needs p95 > 400 ms **and** no single provider at ≥ 50%; here the first
+fires and the second does not, so the rule's answer is *fix `genre-affinity`*,
+not *parallelise* — and it is the right answer, because nine coroutines
+contending on one session would not have made a 251 ms provider faster. A
+two-clause rule that has now been observed to disagree with its own first
+clause is a rule doing work rather than decorating a decision. **Read the 11×
+figure as scoped to 5,200 owned copies and nothing more.**
+
 **This is right at nine bounded local reads and is not a general claim.** It is
 *not* an argument that sequential is right at thirty providers, and it is not
 an argument at all about a provider that calls out of process — an LLM row

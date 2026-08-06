@@ -1075,6 +1075,57 @@ class MediaItemRepositoryRecentlyAddedContract:
 
         assert [row.title_id for row in rows] == [series_title_id, other_title_id]
 
+    async def test_recently_added_orders_by_recency_when_id_order_agrees_with_nothing(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+    ) -> None:
+        """The outer sort is `added_at DESC`, and every other case in this
+        class is satisfied by `title_id DESC` alone.
+
+        Found by mutation: deleting `added_at DESC` from `_RECENTLY_ADDED`'s
+        outer `ORDER BY` **survived the whole suite**. Every multi-row case
+        here mints its ids in ascending order and its arrivals in ascending
+        recency, so id-descending order and recency order are exact reverses
+        and the two keys are indistinguishable. `new_id()` is a UUIDv7 and is
+        monotonic, so that coincidence is the default rather than bad luck.
+
+        This case arranges them to **agree**: the newest arrival is minted
+        first and therefore carries the *lower* id. The distractor is
+        `other_title_id` -- a two-year-old file whose only claim on the top of
+        the shelf is a larger UUID. An implementation ordering by id returns
+        it first, which is a Recently Added row led by the oldest thing in it.
+        """
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    "newest",
+                    title_id=title_id,
+                    added_at=WINDOW_START + timedelta(days=9),
+                )
+            ]
+        )
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    "oldest",
+                    title_id=other_title_id,
+                    added_at=WINDOW_START + timedelta(days=1),
+                )
+            ]
+        )
+
+        rows = await repository.list_recently_added(since=WINDOW_START)
+
+        assert [row.title_id for row in rows] == [title_id, other_title_id]
+        assert [row.title_id for row in rows] != sorted((title_id, other_title_id), reverse=True), (
+            "id order and recency order must disagree, or this case proves nothing"
+        )
+
     async def test_recently_added_spans_every_source(
         self,
         repository: MediaItemRepository,
