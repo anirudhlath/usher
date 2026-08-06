@@ -2929,10 +2929,23 @@ class CuratedRowRepository(ABC):
         Returns the number of rows stored, which is what makes `usher
         curate`'s report a number rather than a reassurance.
 
-        A `user_id` naming no user, or a row the table's own CHECKs refuse,
-        raises `RepositoryConflict` and leaves the session usable for the
-        caller's other pending work -- the service commits the rows together
-        with the ledger entry that paid for them.
+        **Anything the backing store refuses about a row raises
+        `RepositoryConflict`**, and the enumeration is deliberately by
+        outcome rather than by constraint kind, because the first version of
+        it said "a CHECK or a foreign key" and was wrong twice over. It
+        covers a `user_id` naming no household, a row the table's own CHECKs
+        refuse, **a batch naming one row id twice** -- a primary key, which is
+        neither of those, and a reachable caller-assembly mistake this port
+        does not otherwise refuse -- and **a value a column cannot hold at
+        all**, which is not a constraint: `position` is `ge=0` here and
+        `integer` there, so a large enough one is refused by the driver before
+        a statement is sent. An implementation that translates only integrity
+        violations lets that last one cross the boundary raw.
+
+        The session stays usable for the caller's other pending work either
+        way -- the service commits the rows together with the ledger entry
+        that paid for them, and a refused generation must not take the ledger
+        entry with it.
         """
 
     @abstractmethod

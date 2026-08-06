@@ -1,22 +1,32 @@
 """In-memory `CuratedRowRepository`.
 
-**Where this is more forgiving than Postgres, on purpose.** Seven places, each
+**Where this is more forgiving than Postgres, on purpose.** Eight places, each
 of which the paired `tests/integration/test_curated_row_repository.py` run is
 what actually closes:
 
 - **`replace_for_user` is a list filter, so the delete's scope is structurally
   correct here.** Deriving it from `rows` rather than from `user_id` takes a
   deliberate second collection in Python and is one `WHERE` clause away in
-  SQL, so the two cases that can see that scope --
-  `test_a_generation_that_produced_nothing_clears_the_screen` and
-  `test_a_replacement_drops_the_generation_it_replaced`, measured, the second
-  through its `seeder.count` assertion rather than its read -- are
-  load-bearing in the integration run and merely available here. (Written that
-  way rather than "only the integration run can see it", because that is not
-  true: the mutation spelled out by hand fails the same two cases on this arm.
-  What differs is how likely the mistake is, not whether the suite would catch
-  it.) Named first, because a divergence that makes a case vacuous is worse
-  than one that makes it strict.
+  SQL, so the two cases that can see that scope -- named in the contract's
+  module docstring, which is where that fact lives -- are load-bearing in the
+  integration run and merely available here. (Written that way rather than
+  "only the integration run can see it", because that is not true: the
+  mutation spelled out by hand fails the same two cases on this arm. What
+  differs is how likely the mistake is, not whether the suite would catch it.)
+  Named first, because a divergence that makes a case vacuous is worse than
+  one that makes it strict.
+- **`list_for_user`'s household filter cannot be made redundant here, and in
+  SQL it was.** This method narrows to `mine` *first* and computes everything
+  else from that, so the household predicate structurally precedes the
+  newest-generation one. In the statement they sit side by side in one
+  `WHERE`, where the generation predicate is exactly as selective as the
+  household predicate on any fixture that mints a fresh `generation_id` per
+  household -- which is why deleting the household half passed all fourteen
+  integration cases until `test_two_households_curated_in_one_run_do_not_
+  share_a_screen` existed. **This is the one predicate in this task whose
+  Postgres counterpart actually did go wrong**, so the asymmetry is not
+  hypothetical. Measured: `mine = list(self.rows)` here fails **three** cases;
+  dropping the outer `user_id` clause against Postgres fails **one**.
 - **Ordering is a Python `sorted`, so "no ordering at all" is not
   expressible.** The real read's `ORDER BY "position", id` can be deleted and
   Postgres will answer in whatever order the heap holds; the equivalent

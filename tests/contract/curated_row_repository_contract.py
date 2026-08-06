@@ -5,16 +5,23 @@ merged, and that the scope of the replacement is the *user* rather than the
 rows being written -- `TitleNeighborRepository.replace`'s argument arriving at
 a third table. Five of the cases below are about that, from five directions.
 
-**Exactly two of them can see a wrongly-scoped `DELETE`, and neither sees it
-through `list_for_user` alone.** Measured, not reasoned: re-scoping the delete
-to the ids of the rows being inserted fails
-`test_a_generation_that_produced_nothing_clears_the_screen`, where there is no
-new generation for the survivors to hide behind, and
-`test_a_replacement_drops_the_generation_it_replaced`, on its
-`seeder.count(user_id)` assertion and not on its read. Every other case in
-this suite is satisfied by that delete, because the read returns the newest
-generation and the stale rows are simply stepped over. That is why the seeder
-answers a count at all.
+**Exactly two of them can see a wrongly-scoped `DELETE`, and only one sees it
+through `list_for_user`.** Measured by planting a delete keyed on the ids of
+the rows being inserted and reading *which assertion* fails, on both arms:
+`test_a_generation_that_produced_nothing_clears_the_screen` fails on its
+**read**, because there is no new generation for the survivors to hide behind;
+`test_a_replacement_drops_the_generation_it_replaced` fails on
+`seeder.count(user_id)` and never on its read, because the newest-generation
+filter steps over exactly the rows that delete left. Every other case in this
+suite is satisfied by it. **That is what the seeder answers a count for.**
+
+*This paragraph is the one copy.* `tests/fakes/curated_row_repository.py` and
+`tests/integration/test_curated_row_repository.py` point here rather than
+restate it, because the same fact was written in three places and two of them
+drifted -- first by under-claiming ("only one case can see it"), then, when
+that was corrected, by over-claiming ("neither sees it through the read"). A
+sentence carrying two case names and a mechanism is not a sentence to keep
+three copies of.
 
 **Every case names the wrong implementation it rules out.** A test whose
 docstring cannot name what it kills is a test that kills nothing.
@@ -300,10 +307,9 @@ class CuratedRowRepositoryContract:
     async def test_a_generation_that_produced_nothing_clears_the_screen(
         self, repository: CuratedRowRepository, user_id: uuid.UUID, seeder: CuratedRowSeeder
     ) -> None:
-        """**The case the scope rule exists for**, and one of the two in this
-        suite that can see it -- the other is
-        `test_a_replacement_drops_the_generation_it_replaced`, and it sees it
-        only through the seeder's count.
+        """**The case the scope rule exists for**, and the only one whose
+        *read* can see it -- the module docstring above says which two cases
+        see it at all and through which assertion each one does.
 
         The wrong implementation this kills: a `DELETE` derived from the rows
         being written -- by their ids, or by their `generation_id` -- rather
@@ -316,10 +322,9 @@ class CuratedRowRepositoryContract:
         `CreditRepository.replace_for_titles` each carry this same case for
         the same reason.
 
-        It is invisible to the *read* of every case that replaces a non-empty
-        generation with another non-empty one, because the newest-generation
-        filter steps over the survivors -- which is what makes the count the
-        sibling case asserts the only other way to see it.
+        What makes *this* case the one whose read sees it: replacing with an
+        empty generation leaves no newer generation for the survivors to hide
+        behind, so they are the newest and the read returns them.
 
         ADR-0028 is why the empty call is legitimate rather than a caller
         error: a validator that ate the whole completion and a model with
@@ -485,8 +490,15 @@ class CuratedRowRepositoryContract:
 
         listed = await repository.list_for_user(user_id)
 
+        # One assertion, deliberately. The obvious companion --
+        # `{row.generation_id for row in listed} == {fresh_generation}` -- was
+        # here and is deleted: every row of `fresh` is built with
+        # `generation_id=fresh_generation` and `CuratedRow.__eq__` compares
+        # every field, so it can only fail where the line above has already
+        # failed, and no fixture-defect path reaches it either because that
+        # id is a required keyword passed straight through. An assertion that
+        # cannot fail reads as coverage.
         assert listed == fresh
-        assert {row.generation_id for row in listed} == {fresh_generation}
 
     async def test_a_household_with_no_generation_reads_as_an_empty_list(
         self, repository: CuratedRowRepository, user_id: uuid.UUID

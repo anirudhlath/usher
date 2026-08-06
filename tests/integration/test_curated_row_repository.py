@@ -4,11 +4,10 @@ The shared contract runs here unchanged, and this is the arm where several of
 its cases are load-bearing rather than structural — see
 `tests/fakes/curated_row_repository.py` for the enumerated list. Chiefly the
 delete's *scope*, which against a Python list cannot be got wrong by accident.
-Two cases see it and neither sees it through the read alone: re-scoping
-`_DELETE_ROWS` to the ids of the rows being inserted fails
-`test_a_generation_that_produced_nothing_clears_the_screen`, which has no new
-generation for the survivors to hide behind, and
-`test_a_replacement_drops_the_generation_it_replaced`, on its seeder count.
+**Which two cases see a wrongly-scoped delete, and through which assertion
+each one sees it, is stated once in the contract's module docstring**; it is
+not restated here, because two of the three copies that fact used to have
+drifted in opposite directions.
 
 Plus the four things a list cannot express: a foreign key, a CHECK constraint,
 the SAVEPOINT that makes a failed generation leave the previous screen whole,
@@ -140,6 +139,76 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
         with pytest.raises(RepositoryConflict) as raised:
             await repository.replace_for_user(user_id, [empty])
         assert raised.value.constraint == "ck_curated_rows_cards_not_empty"
+
+    async def test_one_row_id_twice_in_a_batch_is_a_port_error(
+        self, repository: PostgresCuratedRowRepository, user_id: uuid.UUID
+    ) -> None:
+        """`pk_curated_rows`, and it is here because the enumeration beside the
+        `except` clause said "a CHECK or a foreign key" and was wrong by a
+        whole class of constraint.
+
+        Postgres-only: the fake is a list and has no primary key, so a batch
+        naming one id twice is stored twice there. Reachable as a
+        caller-assembly mistake -- an id reused across two shelves of one
+        generation, which nothing else in this port refuses, since
+        `replace_for_user`'s two `ValueError`s are about the household and the
+        generation rather than about the ids.
+
+        Also pins that it is *translated*: a raw `IntegrityError` out of here
+        is the one thing ADR-0009 says must never happen, and the constraint
+        name is what tells a caller this was its own duplicate rather than a
+        conflict with somebody else's row.
+        """
+        generation, reused = new_id(), new_id()
+        with pytest.raises(RepositoryConflict) as raised:
+            await repository.replace_for_user(
+                user_id,
+                [
+                    curated_row(user_id, position=0, generation_id=generation, row_id=reused),
+                    curated_row(user_id, position=1, generation_id=generation, row_id=reused),
+                ],
+            )
+        assert raised.value.constraint == "pk_curated_rows"
+
+    async def test_a_position_wider_than_the_column_is_a_port_error(
+        self, repository: PostgresCuratedRowRepository, user_id: uuid.UUID
+    ) -> None:
+        """**The refusal that is not a constraint**, and the one that crossed
+        this port boundary raw until the `except` clause widened.
+
+        `curated_rows."position"` is `integer` and `CuratedRow.position` is
+        `Field(ge=0)` with **no ceiling**, so this row is a *validly
+        constructed* domain model -- no `model_construct`, nothing bypassed --
+        that the column cannot hold. `LLMCall.cost_usd` against `NUMERIC(12,
+        8)` is the sibling shape, found one task earlier and server-side;
+        this one is refused **client-side** by asyncpg's own binary encoder
+        before a byte is sent, and arrives as a bare
+        `sqlalchemy.exc.DBAPIError` with cause `asyncpg.exceptions.DataError`
+        and SQLSTATE `22000`. Measured, and it is why `except IntegrityError`
+        -- which every other repository in this package still uses, correctly,
+        for tables whose refusals are all constraints -- is not what this one
+        catches.
+
+        The wrong implementation this kills is therefore the *obvious* one,
+        and it was shipped: `except IntegrityError` lets this through
+        untranslated, so a caller would have to import sqlalchemy to handle
+        it.
+
+        `constraint` is `None` here rather than a name, which is the honest
+        answer: a column's declared width refusing a value is not a named
+        constraint firing.
+        """
+        wide = curated_row(user_id, position=2**31, generation_id=new_id())
+
+        with pytest.raises(RepositoryConflict) as raised:
+            await repository.replace_for_user(user_id, [wide])
+
+        assert raised.value.constraint is None
+        # The session survives it, exactly as it survives a constraint --
+        # the SAVEPOINT does not care which kind of refusal it rolled back.
+        again = [curated_row(user_id, position=0, generation_id=new_id())]
+        assert await repository.replace_for_user(user_id, again) == 1
+        assert await repository.list_for_user(user_id) == again
 
     async def test_a_generation_that_fails_part_way_leaves_the_previous_screen_whole(
         self,

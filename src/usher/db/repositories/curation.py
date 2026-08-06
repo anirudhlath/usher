@@ -24,11 +24,10 @@ from collections.abc import Sequence
 from sqlalchemy import DateTime, bindparam, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.db.models.curation import CuratedRowRow
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import constraint_name, refuses_the_row
 from usher.domain.curation import CuratedRow
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import CuratedRowRepository
@@ -97,10 +96,21 @@ _INSERT_ROW = text(
 # route). See the port for the other two reasons it is kept.
 #
 # `SELECT *` into an `extra="forbid"` model, which is this schema's house
-# shape and one of the three arguments for `card_title_ids` being a column
-# rather than a child table: the read is mechanically 1:1 with the table, so a
-# column added without a field on `CuratedRow` raises here rather than being
-# silently dropped.
+# shape -- `watch_state.py`, `sync.py`, `media_item.py`, `jobs.py` and
+# `episode.py` all read `.mappings()` into `Model.model_validate(dict(row))`
+# -- and one of the three arguments for `card_title_ids` being a column rather
+# than a child table.
+#
+# **The projection is the statement's, and that is what makes the 1:1 rule
+# enforce itself**: every column the *table* has reaches the model, so one
+# `CuratedRow` does not declare raises here rather than being silently
+# dropped. Spelled instead as `row._mapping[name]` over
+# `CuratedRowRow.__table__.columns` -- which is how this shipped -- the read
+# is 1:1 with the *ORM class* and filters, so a column on the table that the
+# class does not carry reads back clean. Measured both ways against a column
+# added to `curated_rows` inside a transaction: the house spelling raises
+# `ValidationError`, the filtered one returns rows. `compare_metadata` closes
+# that drift at a distance; this closes it at the read.
 #
 # `ORDER BY "position"` is the product (`CuratedRow`: the model's ordering is
 # the only judgement the completion was bought for). `id` after it makes the
@@ -174,29 +184,52 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
                     await self._session.execute(text(_DELETE_ROWS), {"user_id": user_id})
                     if records:
                         await self._session.execute(_INSERT_ROW, records)
-        except IntegrityError as exc:
-            # A `user_id` naming no household (`fk_curated_rows_user_id_users`),
-            # an empty or NULL-carrying card array, a negative position, an
-            # empty slug/title/model name -- every one is a CHECK or a foreign
-            # key on `curated_rows`, and every one is a bug in the generation
-            # rather than a conflict a retry could clear. Translated so
-            # nothing above imports sqlalchemy.exc, and raised out of a
-            # SAVEPOINT so the caller keeps a usable session for the ledger
-            # entry it still has to write.
+        except DBAPIError as exc:
+            if not refuses_the_row(exc):
+                # A dropped connection or a statement timeout is not this
+                # generation being wrong, and a caller that cannot tell those
+                # apart retries the one thing a retry cannot fix.
+                raise
+            # **Any constraint on `curated_rows`, and one refusal that is not a
+            # constraint at all.** A `user_id` naming no household
+            # (`fk_curated_rows_user_id_users`); an empty or NULL-carrying card
+            # array, a negative position, an empty slug/title/model name (the
+            # six CHECKs); and a batch carrying one row id twice
+            # (`pk_curated_rows`), which is neither a CHECK nor a foreign key
+            # and is a reachable caller-assembly mistake -- the enumeration
+            # said "a CHECK or a foreign key" and was wrong by one whole class
+            # of constraint.
+            #
+            # The one that is not a constraint is `"position"`: it is
+            # `integer`, `CuratedRow.position` is `Field(ge=0)` with no
+            # ceiling, and `2**31` is refused by asyncpg's own binary encoder
+            # **before a byte is sent** -- a bare `sqlalchemy.exc.DBAPIError`,
+            # cause `asyncpg.exceptions.DataError`, SQLSTATE `22000`, measured.
+            # `except IntegrityError` does not catch it, so a raw SQLAlchemy
+            # exception crossed this port boundary until the `except` widened.
+            # `refuses_the_row` is the shared predicate and `_errors.py` holds
+            # both measurements; `llm_calls.cost_usd` is the sibling, found
+            # first and server-side rather than client-side.
+            #
+            # Translated so nothing above imports sqlalchemy.exc, and raised
+            # out of a SAVEPOINT so the caller keeps a usable session for the
+            # ledger entry it still has to write.
             raise RepositoryConflict(
                 "a curated generation violates the screen's own bounds",
+                # `None` for the encoder's refusal, which is a column's width
+                # rejecting a value rather than a named constraint firing.
                 constraint=constraint_name(exc),
             ) from exc
         return len(records)
 
     async def list_for_user(self, user_id: uuid.UUID) -> list[CuratedRow]:
         with self._session.no_autoflush:
-            result = await self._session.execute(text(_LIST_FOR_USER), {"user_id": user_id})
-        columns = [column.name for column in CuratedRowRow.__table__.columns]
-        return [
-            CuratedRow.model_validate({name: row._mapping[name] for name in columns})
-            for row in result.all()
-        ]
+            rows = (
+                (await self._session.execute(text(_LIST_FOR_USER), {"user_id": user_id}))
+                .mappings()
+                .all()
+            )
+        return [CuratedRow.model_validate(dict(row)) for row in rows]
 
 
 def _refuse_disagreement(user_id: uuid.UUID, rows: Sequence[CuratedRow]) -> None:

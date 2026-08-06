@@ -18,12 +18,12 @@ timestamps.
 
 from sqlalchemy import DateTime, Numeric, bindparam, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
-from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.base import enum_column
 from usher.db.models.curation import COST_PRECISION, COST_SCALE
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import constraint_name, refuses_the_row
 from usher.domain.curation import LLMCall, LLMPurpose
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import LLMCallRepository
@@ -76,8 +76,8 @@ _INSERT_CALL = text(
 )
 
 # **SQLSTATE class, not exception class, and that is a measured decision
-# rather than a defensive one.** Every sibling repository in this package
-# catches `IntegrityError`, which is right for a table whose only refusals are
+# rather than a defensive one.** Most sibling repositories in this package
+# catch `IntegrityError`, which is right for a table whose only refusals are
 # constraints. This table has one more: `cost_usd` is `NUMERIC(12, 8)`, so a
 # call above `$9,999.99999999` raises `numeric field overflow` -- reachable
 # from a *validly constructed* `LLMCall`, since the model bounds that field
@@ -92,13 +92,12 @@ _INSERT_CALL = text(
 # exception crosses the port boundary, which is the one thing ADR-0009 says
 # must never happen.
 #
-# Catching `DBAPIError` whole would be too much: it is also a dropped
-# connection, a statement timeout and an undefined table, none of which is the
-# caller's row being wrong and all of which a caller must be able to tell
-# apart from one. `22` (data exception) and `23` (integrity constraint
-# violation) are the two SQLSTATE classes that mean "this row is not storable
-# as given"; everything else propagates untranslated.
-_ROW_IS_REFUSED = frozenset({"22", "23"})
+# **The predicate itself moved to `_errors.py` when Task 9 found the same
+# shape on `curated_rows."position"`** -- an `integer` column fed by a field
+# bounded below and not above, refused *client-side* by asyncpg's encoder,
+# same bare `DBAPIError`. Two tables reaching for one measurement is what that
+# module exists for; the argument above is why *this* table needs it, and
+# `ROW_IS_REFUSED` carries the argument for the two classes.
 
 
 class PostgresLLMCallRepository(LLMCallRepository):
@@ -119,7 +118,7 @@ class PostgresLLMCallRepository(LLMCallRepository):
                 async with self._session.begin_nested():
                     await self._session.execute(_INSERT_CALL, _parameters(call))
         except DBAPIError as exc:
-            if not _refuses_the_row(exc):
+            if not refuses_the_row(exc):
                 # A dropped connection or a statement timeout is not this
                 # row being wrong, and a caller that cannot tell those apart
                 # would retry the one thing a retry cannot fix.
@@ -177,21 +176,3 @@ def _parameters(call: LLMCall) -> dict[str, object]:
         # populated.
         "generation_id": call.generation_id,
     }
-
-
-def _refuses_the_row(exc: DBAPIError) -> bool:
-    """Whether Postgres refused *this row* rather than the connection or the
-    statement -- see `_ROW_IS_REFUSED` for the measurement behind the two
-    SQLSTATE classes.
-
-    `IntegrityError` is honoured directly as well as by its SQLSTATE, and that
-    is not redundancy for its own sake: the sqlstate is read off the same
-    best-effort `exc.orig.__cause__` chain `constraint_name` documents, so a
-    layer of it not being what is expected must degrade to the answer every
-    sibling repository already gives rather than to letting an integrity
-    violation through untranslated.
-    """
-    if isinstance(exc, IntegrityError):
-        return True
-    sqlstate = getattr(getattr(exc.orig, "__cause__", None), "sqlstate", None)
-    return isinstance(sqlstate, str) and sqlstate[:2] in _ROW_IS_REFUSED
