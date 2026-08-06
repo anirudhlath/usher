@@ -475,3 +475,35 @@ apart. Under all three, the same 37 mutations gave 36 killed and exactly the
 one intended survivor. **The faster the selection, the worse this gets** — a
 per-task sweep over one file is precisely where runs are short enough to
 collide, and a whole-suite sweep at 40 s a run never would have shown it.
+
+**Two predicates, one selectivity: a `WHERE` clause is unobservable when
+another clause in the same statement happens to be exactly as selective, and
+every fixture in the suite makes it so.** Found 2026-08-06 by M8 Task 9's
+sweep. `PostgresCuratedRowRepository.list_for_user` reads
+`WHERE user_id = :u AND generation_id = (<the newest generation for :u>)`, and
+**deleting the `user_id` half passed all 14 cases** — because a
+`generation_id` is minted per generation, every fixture gave each household a
+fresh one, and a `generation_id` predicate was then exactly as selective as a
+`user_id` one. Nothing in the schema makes that column unique (`m08a` ships no
+index on it), so the redundancy is real only until two households share a
+generation, at which point the missing clause puts one household's shelves,
+headings and reasons on another's screen. The state is reachable through the
+port with no seeder and no concurrency: one nightly job minting one id per
+*run* and calling `replace_for_user` per household is the obvious shape of the
+job that drives it. The case that closes it seeds exactly that, and it kills
+the mutation on both arms. **The general form: a redundant-looking predicate
+is a coverage question, not a style question — ask what makes it redundant,
+then check whether the suite has ever made that thing false.** Same family as
+the `ORDER BY` key a UUIDv7 makes unobservable, one clause over.
+
+**And a mutation whose damage a rollback undoes is unobservable against a
+transactional arm, which is a thing to check before writing "before" into a
+docstring.** Same sweep: moving `replace_for_user`'s argument validation from
+*before* the `DELETE` to *after* it survives the whole integration file,
+because the SAVEPOINT rolls the delete back with the raise — while the same
+move fails two cases against the fake, which has no transaction. So "refused
+before anything is written" is a property the *fake* holds and Postgres cannot
+demonstrate. Worth knowing in both directions: it is a legitimate
+equivalent-mutant control for a transactional repository, and it is a reason a
+fake's divergence list needs an entry for where the fake is **stricter**, not
+only for where it is more forgiving.
