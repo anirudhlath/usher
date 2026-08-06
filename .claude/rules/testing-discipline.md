@@ -434,3 +434,41 @@ real dataset row back in a plan document, a real export record back in a
 shipped docstring, `_SCANNED_ROOTS` narrowed to `("src",)`, the repo-wide
 walk emptied, and each of the three matchers made to match nothing.
 `tests/fixtures/README.md` holds the bands and the allocation table.
+
+**A mutation sweep can execute the *previous* mutant's bytecode against the
+current mutant's source, and the log reads as a clean kill.** Found 2026-08-05
+on M8 Task 7's two curation domain models. One run of
+`tests/unit/test_domain_curation.py` is **0.284 s**, and CPython validates a
+cached `.pyc` on `(int(source_mtime), source_size)` — **mtime at one-second
+resolution**. Deleting either of `LLMCall.model_post_init`'s two clauses
+removes **exactly 114 bytes**, so the two mutants are byte-identical in length;
+a whole mutate → run → restore → mutate cycle fits inside one second, so the
+second mutant collides with the first on *both* halves of that validation pair
+and the interpreter reuses the first one's bytecode. Restoring the original in
+between does not save you — it has a different size, so it recompiles, and only
+the two mutants match each other. Both scored `KILLED` naming the same failing
+case. Hand-reproduced in isolation, deleting clause 2 kills two *different*
+cases (`..._must_say_what_went_wrong_and_an_empty_string_does_not` and
+`evolve_re_runs_the_ok_error_agreement`), so the sweep had scored one mutation
+against another's result and would have ratified a clause nothing tested.
+
+**It is a new spelling of "a run that did not run is not a pass", and the rule
+as written does not cover it: the run *did* run.** It collected 25 tests,
+executed them, and failed — on the wrong code. Every prior member of that
+family produced *no* result (a suite that collected zero tests, a contract
+suite skipped because nothing was configured, a guard that globbed nothing);
+this one produces a complete, plausible, wrong one. Nearest relative is the
+`ast.parse`-versus-`compile()` finding above, where the run also got as far as
+collecting — it collected an error.
+
+Three defences, and the third is what makes the other two checkable: delete
+every `__pycache__` under `src/` before each run, set
+`PYTHONDONTWRITEBYTECODE=1` in the subprocess environment so none is written
+back, and carry an **equivalent-mutant control** — one mutation that must
+SURVIVE (reordering `__all__`'s members will do). A sweep reporting every
+mutation killed cannot distinguish a suite with teeth from a harness that
+scores every run as a kill, and the control is the only thing that tells them
+apart. Under all three, the same 37 mutations gave 36 killed and exactly the
+one intended survivor. **The faster the selection, the worse this gets** — a
+per-task sweep over one file is precisely where runs are short enough to
+collide, and a whole-suite sweep at 40 s a run never would have shown it.

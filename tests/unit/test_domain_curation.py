@@ -88,10 +88,15 @@ def test_a_curated_row_carries_every_field_it_was_given() -> None:
     what catch the other half -- a field that exists, accepts a value, and
     answers with something else.
     """
-    generation = uuid.uuid4()
-    row = _row(generation_id=generation, position=3, slug="curated-4")
-    assert isinstance(row.id, uuid.UUID)
-    assert isinstance(row.user_id, uuid.UUID)
+    row_id, user_id, generation = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    row = _row(id=row_id, user_id=user_id, generation_id=generation, position=3, slug="curated-4")
+    # Three distinct UUIDs, asserted by identity rather than by `isinstance`.
+    # All three fields are `uuid.UUID`, so a type check passes just as happily
+    # against a model that aliased one onto another -- and `user_id` is the
+    # partition key every read and the whole of `replace_for_user` is scoped
+    # by, so a row carrying its own id there is a row served to nobody.
+    assert row.id == row_id
+    assert row.user_id == user_id
     assert row.slug == "curated-4"
     assert row.title == "Quiet films for a loud week"
     assert row.reason == "Because you finished Perfect Days"
@@ -129,15 +134,27 @@ def test_the_order_the_model_returned_is_the_product_and_survives_construction()
     the shape a "tidy-up" takes on a tuple of ids, and kills
     `card_title_ids: frozenset[uuid.UUID]`.
 
-    The premise assertion is not decoration and is the whole reason this case
-    can fail: `new_id()` is a monotonic UUIDv7, so ids minted in a row arrive
-    already sorted and a sorting validator would return them unchanged. That
-    trap cost M7 five untested orderings. These three ids are fixed and
-    deliberately out of order, and the first assertion is what fails loudly if
-    someone later swaps them for freshly minted ones.
+    **Two premises, because the fixture has to be hostile to both tidy-ups and
+    an earlier version was only hostile to one.** `new_id()` is a monotonic
+    UUIDv7, so ids minted in a row arrive already sorted and a sorting
+    validator would hand them straight back -- the trap that cost M7 five
+    untested orderings. And three *distinct* ids cannot see an order-preserving
+    dedupe (`tuple(dict.fromkeys(v))`) at all: it is the identity function on
+    them, so the case ratified a mutation it claimed to kill. The fourth id
+    repeats the first, which is a real thing the validator will meet -- a model
+    asked for five titles does name one twice.
+
+    Deduping *here* is the wrong layer even though the row is wrong: ADR-0028
+    counts what it drops, under `not_in_pool` and `unparseable`, and a model
+    that silently collapsed a repeat would remove a card from the screen with
+    no counter moving. The row keeps what it was handed; the validator decides.
+
+    Both premise assertions fail loudly if someone later swaps these for
+    freshly minted ids, which is exactly how the fixture would go quiet.
     """
-    ids = (_CARD_A, _CARD_B, _CARD_C)
+    ids = (_CARD_A, _CARD_B, _CARD_C, _CARD_A)
     assert list(ids) != sorted(ids), "the fixture is pre-sorted, so it cannot see a sort"
+    assert len(set(ids)) != len(ids), "the fixture is already unique, so it cannot see a dedupe"
     assert _row(card_title_ids=ids).card_title_ids == ids
 
 
@@ -154,10 +171,26 @@ def test_card_ids_are_a_tuple_even_when_a_list_is_handed_in() -> None:
 
     The list input is deliberate: pydantic coerces it, so the annotation is the
     only thing standing between a caller's list and a shared mutable.
+
+    **Two assertions, two different wrong implementations, because the first
+    shadows the second.** `isinstance` fires before the round trip ever runs,
+    so the list mutation cannot be what gives the second assertion teeth -- a
+    case resting on it would ratify the hashability claim without once testing
+    it. What kills the round trip on its own is a `dict` field arriving on this
+    model: `field_provenance: dict[str, str]`, exactly the shape
+    `DomainModel`'s docstring records as making `Title` the one model in this
+    set that is *not* hashable, and exactly the field an adapter grows when it
+    wants to record where each value came from. Measured -- that mutation fails
+    this case and no other, with `TypeError: unhashable type: 'dict'`.
+
+    A round trip rather than `hash(row) is not None`, which no object can fail
+    and which therefore asserted nothing. Looking the row up again by an
+    *equal* row pins what a cache actually needs: `__hash__` and `__eq__`
+    agreeing, not merely hashability.
     """
     row = _row(card_title_ids=[_CARD_A, _CARD_B])
     assert isinstance(row.card_title_ids, tuple)
-    assert hash(row) is not None
+    assert {row: "cached"}[row.evolve()] == "cached"
 
 
 def test_a_positional_slug_survives_two_rows_that_chose_the_same_title() -> None:
@@ -361,12 +394,16 @@ def test_a_call_that_answered_perfectly_and_kept_nothing_is_a_failure() -> None:
     able to say the call succeeded and the generation did not -- which means a
     failed row with 316 output tokens and a non-zero cost on it is legal and is
     the interesting case, not a contradiction.
+
+    **The assertion is that the construction below does not raise.** Everything
+    after it names what "a real bill on a failed row" means, in exact values
+    rather than as `> 0` -- which is the shape standing rule 4 warns about, and
+    which here would also be satisfied by any failed call at all.
     """
     call = _call(ok=False, error="validated to zero rows", tokens_out=316)
-    assert call.ok is False
-    assert call.tokens_out == 316
-    assert call.cost_usd > 0
-    assert call.latency_ms > 0
+    assert (call.ok, call.error) == (False, "validated to zero rows")
+    assert (call.tokens_in, call.tokens_out) == (2924, 316)
+    assert call.cost_usd == Decimal("0.0036")
 
 
 def test_evolve_re_runs_the_ok_error_agreement() -> None:
@@ -535,9 +572,18 @@ def test_the_purpose_a_port_caller_imports_is_the_one_a_domain_model_types() -> 
     layering` contract already refuses `usher.domain -> usher.ports`, verified
     by planting that import in `domain/curation.py` and watching it report
     6 kept, 1 broken.
+
+    Both `__all__`s are asserted, and the declaring module's is the one that
+    was wrong: `usher.domain.curation` shipped `["CuratedRow", "LLMCall"]`,
+    excluding the single name another module re-exports from it, against
+    `domain/rows.py`'s `["BuiltRow", "DisplayHint", "RowCard", "RowFamily"]` --
+    which lists its enums. A re-export of a name its own module does not
+    declare public reads as an accident to whoever tidies next.
     """
+    import usher.domain.curation as domain_module
     from usher.ports.llm import LLMPurpose as PortLLMPurpose
 
     assert PortLLMPurpose is LLMPurpose
     assert PortLLMPurpose.CURATION is LLMPurpose.CURATION
+    assert "LLMPurpose" in domain_module.__all__
     assert "LLMPurpose" in __import__("usher.ports.llm", fromlist=["__all__"]).__all__

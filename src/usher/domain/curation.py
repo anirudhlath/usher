@@ -167,4 +167,4 @@ class LLMCall(DomainModel):
             raise ValueError("a failed call must say what went wrong")
 
 
-__all__ = ["CuratedRow", "LLMCall"]
+__all__ = ["CuratedRow", "LLMCall", "LLMPurpose"]
