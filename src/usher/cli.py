@@ -21,6 +21,8 @@ from datetime import UTC, datetime
 
 import httpx
 from loguru import logger
+from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.adapters.bulk.imdb import IMDbRatingDataset, IMDbTitleDataset
@@ -87,6 +89,38 @@ SYNC_KINDS = ("full", "delta")
 # answer, and a knob would invite tuning a number that is about to stop
 # mattering.
 _IDLE_SLEEP_SECONDS = 5.0
+# The failures that are the *operator's* to fix, and so the ones `main`
+# answers with a message instead of a stack. Public because the boundary's
+# whole design lives in what is and is not in this tuple, and a test asserts
+# on it directly.
+#
+# **`Exception` is deliberately absent, and that is the decision rather than
+# an oversight.** Catching it would also collapse every `AttributeError` and
+# `TypeError` -- the bugs -- to one line, which trades a cosmetic wart for a
+# lost bug report. So a family is added here only when an operator can act on
+# it: start the database, fix the URL, reconnect the network.
+#
+# `OSError` rather than a SQLAlchemy type alone because asyncpg lets a refused
+# TCP connection out **unwrapped** -- the exact failure M7's smoke test hit
+# was a bare `ConnectionRefusedError`, and a handler keyed on
+# `SQLAlchemyError` would have missed the one case this boundary exists for.
+OPERATOR_ERRORS: tuple[type[Exception], ...] = (
+    # A refused connection, a name that does not resolve, a full disk, a
+    # bulk dataset that is not where it was left.
+    OSError,
+    # Everything the driver does wrap: a missing table (`alembic upgrade
+    # head` never ran), a dead pool, a permission the role does not have.
+    SQLAlchemyError,
+    # TMDb, Emby, and every bulk download. An unreachable source is the same
+    # class of operator problem as an unreachable database.
+    httpx.HTTPError,
+)
+# Shorter than this and a rejected value is not a credential, and scrubbing
+# it would mangle the message it appears in ("not 4" -> "not <redacted>").
+_SHORTEST_REDACTABLE = 4
+# 128 + SIGINT, the shell's convention, so a wrapping script can tell an
+# operator's Ctrl-C from a command that failed.
+_INTERRUPTED_EXIT_CODE = 130
 
 
 def _titles_writer(
@@ -1136,6 +1170,17 @@ def _as_uuid(value: str, what: str) -> uuid.UUID:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="usher")
+    # The error boundary's own escape hatch, and the reason the boundary is
+    # allowed to swallow a stack at all. Top-level rather than per-command
+    # (`usher --traceback bootstrap-status`) because the boundary is
+    # top-level; it is **not** a `Settings` field, since a knob that turns
+    # off a presentation choice for one invocation is not deployment
+    # configuration.
+    parser.add_argument(
+        "--traceback",
+        action="store_true",
+        help="show the full stack instead of a one-line message",
+    )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("serve", help="run the HTTP server (the default with no arguments)")
     bootstrap = sub.add_parser("bootstrap", help="import bulk catalog datasets")
@@ -1308,6 +1353,66 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return args
 
 
+def _command_name(args: argparse.Namespace) -> str:
+    """What to call the thing that failed, in a message an operator reads.
+
+    `None` rather than `"serve"` is what argparse leaves behind when no
+    subcommand was given, and `main` treats that as `serve` -- so the
+    message has to as well, or the one command the container actually runs
+    reports itself as `usher None`.
+    """
+    return args.command or "serve"
+
+
+def _operator_problem(command: str, exc: BaseException) -> str:
+    """One line for the failure, one for the way back to the stack.
+
+    The type name is kept because `str(OSError)` on its own is
+    `[Errno 111] Connect call failed ('db', 5432)` -- which says *where* and
+    never *what*, and reads as a puzzle rather than as "the database is not
+    up".
+    """
+    return (
+        f"usher {command}: {type(exc).__name__}: {exc}\n"
+        f"(the stack is one flag away: `usher --traceback {command}`)"
+    )
+
+
+def _settings_problem(command: str, exc: ValidationError) -> str:
+    """pydantic's diagnosis with every rejected value stripped out.
+
+    **This is a security control, not formatting.** A pydantic v2
+    `ValidationError` renders as
+
+        ... [type=value_error, input_value='mysql://admin:hunter2@db/usher', ...]
+
+    so `USHER_DATABASE_URL` with the wrong driver printed the whole DSN, and
+    a truncated `USHER_SECRET_KEY` printed the key. Both fields are
+    `SecretStr` in `Settings` for exactly that reason; this CLI was the one
+    reader that unwrapped them, and it did it on the surface an operator is
+    most likely to paste into an issue.
+
+    Same control, and same trade, as `usher.api.errors` makes for a 422:
+    `loc` and `msg` survive -- so the operator still learns which setting was
+    wrong and what it should have been -- and the value never does.
+
+    `msg` is scrubbed as well as `input` dropped. No validator in `Settings`
+    interpolates the value into its own message today, and none of pydantic's
+    built-in messages do either; the scrub is there so that writing one does
+    not quietly reopen this.
+    """
+    lines = [f"usher {command}: the settings were rejected"]
+    for error in exc.errors():
+        where = ".".join(str(part) for part in error["loc"]) or "(settings)"
+        message = error["msg"]
+        rejected = str(error.get("input", ""))
+        if len(rejected) >= _SHORTEST_REDACTABLE and rejected in message:
+            message = message.replace(rejected, "<redacted>")
+        lines.append(f"  {where}: {message}")
+    lines.append("(values are not shown -- any setting may be a credential)")
+    return "\n".join(lines)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Every entry point's single door: `python -m usher`, the `usher`
     console script (`[project.scripts]`), and the container's `CMD`.
@@ -1323,11 +1428,56 @@ def main(argv: Sequence[str] | None = None) -> None:
     the server, because that is exactly what the container's CMD runs
     (`alembic upgrade head && exec python -m usher`). Adding subcommands
     must not change it, and neither must adding an entry point.
+
+    **The `try` is the whole error boundary for the CLI, and it is one
+    `try` deliberately.** M7's smoke test found `bootstrap-status` and
+    `sync-status` answering an unreachable database with sixty lines of
+    asyncpg and greenlet frames; the operator's actual information was the
+    last line. Per-command handling is the shape that rots -- the next
+    command is written by copying an arm, not the handler -- so the
+    boundary wraps `_dispatch` rather than living inside it, and
+    `tests/unit/test_cli_errors.py` asserts that shape by AST as well as
+    asserting the behaviour.
+
+    Reading the settings is inside it too. A `.env` that fails validation is
+    the same kind of failure as a database that is down, it reaches the
+    operator through the same command, and it is the case that was leaking a
+    credential (see `_settings_problem`).
+
+    `SystemExit` is untouched by all of it: it is a `BaseException`, the
+    handlers below name only `Exception` subclasses, and three places in
+    this module already exit with a message chosen for the failure it
+    describes.
     """
     argv = sys.argv[1:] if argv is None else list(argv)
     args = parse_args(list(argv) if argv else ["serve"])
-    settings = get_settings()
-    configure_telemetry(settings)
+    try:
+        settings = get_settings()
+        configure_telemetry(settings)
+        _dispatch(args, settings)
+    except ValidationError as exc:
+        # Before `OPERATOR_ERRORS` and, unlike it, **not reopened by
+        # `--traceback`**: a settings failure's stack is always the same six
+        # pydantic frames and diagnoses nothing, so the only thing re-raising
+        # would add is the value `_settings_problem` exists to withhold.
+        raise SystemExit(_settings_problem(_command_name(args), exc)) from exc
+    except KeyboardInterrupt:
+        # `usher bootstrap` is a multi-hour download an operator is *expected*
+        # to interrupt. A `KeyboardInterrupt` traceback through `asyncio.run`
+        # reads as the run failing rather than as their own decision.
+        print("interrupted", file=sys.stderr)
+        raise SystemExit(_INTERRUPTED_EXIT_CODE) from None
+    except OPERATOR_ERRORS as exc:
+        if args.traceback:
+            # Bare `raise`, not `raise exc`: rebinding would replace the
+            # stack the flag was asked for with this frame.
+            raise
+        raise SystemExit(_operator_problem(_command_name(args), exc)) from exc
+
+
+def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
+    """The command table, lifted out of `main` so the boundary there is one
+    `try` around all of it rather than one per arm."""
     if args.command == "bootstrap":
         asyncio.run(_bootstrap(settings, args.phase))
     elif args.command == "bootstrap-status":

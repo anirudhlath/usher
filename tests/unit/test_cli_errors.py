@@ -1,0 +1,432 @@
+"""The CLI's error boundary: what an operator sees when the thing that
+failed is theirs to fix.
+
+M7's smoke test recorded the finding this module closes: `usher
+bootstrap-status` and `usher sync-status` against an unreachable database
+printed **60 lines of asyncpg and greenlet internals** and exited 1. The
+exit code was right and the presentation was not -- the operator's actual
+information, `Connect call failed`, was the last line of a stack whose
+first fifty frames are library code they cannot act on.
+
+Two properties are under test here, and they pull in opposite directions,
+which is why both are pinned:
+
+1. **A failure the operator can fix is a message.** No stack, one line,
+   still exit 1.
+2. **A failure the operator cannot fix keeps its stack.** A `TypeError` in
+   row composition is a bug, and the traceback is the bug report. A
+   boundary that swallows it has traded a wart for a blindfold.
+
+And one that is a security control rather than a presentation choice:
+**a settings failure may not echo the value it rejected.** pydantic's
+`ValidationError` message carries `input_value=...`, so `USHER_DATABASE_URL`
+with the wrong driver printed the whole DSN -- password included -- and a
+short `USHER_SECRET_KEY` printed the key. Both fields are `SecretStr`
+precisely so that cannot happen. This is the same defect `usher.api.errors`
+exists to prevent on the HTTP side, on the surface an operator is *more*
+likely to run while pasting output into an issue.
+"""
+
+import argparse
+import ast
+import inspect
+from collections.abc import Callable, Coroutine
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+import uvicorn
+from sqlalchemy.exc import OperationalError
+
+from usher import cli as usher_cli
+
+# A value that must never appear in anything this module asserts on. Spelled
+# once so a leak fails loudly rather than being read past.
+_PASSWORD = "sup3rs3cret"
+
+# The minimal argv for every subcommand the parser advertises. A table
+# rather than a loop over `choices` alone because three commands need a
+# positional; `test_the_argv_table_covers_every_subcommand` is what keeps
+# the two in step, so a command added without a row here fails rather than
+# silently sitting outside the boundary.
+_MINIMAL_ARGV: dict[str, list[str]] = {
+    "serve": ["serve"],
+    "bootstrap": ["bootstrap"],
+    "bootstrap-status": ["bootstrap-status"],
+    "sync": ["sync"],
+    "sync-status": ["sync-status"],
+    "unmatched": ["unmatched"],
+    "work": ["work", "--once"],
+    "index": ["index"],
+    "derive": ["derive"],
+    "search": ["search", "dune"],
+    "suggest": ["suggest", "du"],
+    "similar": ["similar", "--rebuild"],
+    "home": ["home"],
+    "push": ["push"],
+}
+
+
+def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `Settings` that validates, so a case about the *command* failing is
+    not accidentally a case about the settings failing."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
+    monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
+
+
+def _raising(exc: BaseException) -> Callable[..., Coroutine[Any, Any, None]]:
+    async def run(*args: object, **kwargs: object) -> None:
+        raise exc
+
+    return run
+
+
+def _every_command_raises(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
+    """Make every dispatch target fail identically.
+
+    Reached by walking the module rather than by listing the fourteen
+    coroutines, for the same reason the argv table is checked against the
+    parser: a hand-written list agrees with itself and with nothing else.
+    """
+    for name, value in vars(usher_cli).items():
+        if name.startswith("_") and inspect.iscoroutinefunction(value):
+            monkeypatch.setattr(usher_cli, name, _raising(exc))
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise exc
+
+    # `serve` is not a coroutine, and it is the one arm the container's CMD
+    # actually runs, so it is inside the boundary or the boundary is not
+    # CLI-wide. Patched on the module object because `main` imports uvicorn
+    # lazily -- same module, so the attribute swap is visible either way.
+    monkeypatch.setattr(uvicorn, "run", boom)
+
+
+def _refused() -> ConnectionRefusedError:
+    """The exact exception the M7 smoke test hit, shape and all: asyncpg lets
+    the raw `OSError` out rather than wrapping it, which is why the boundary
+    cannot key on a SQLAlchemy type alone."""
+    return ConnectionRefusedError(111, "Connect call failed ('127.0.0.1', 5432)")
+
+
+def test_an_unreachable_database_is_a_message_rather_than_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configured(monkeypatch)
+    monkeypatch.setattr(usher_cli, "_status", _raising(_refused()))
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["bootstrap-status"])
+
+    message = str(exit_info.value)
+    # A `SystemExit` carrying a string exits 1 and prints the string on
+    # stderr -- the same shape `_as_uuid` and the semantic-search guard
+    # already use, so the boundary is not a second exit convention.
+    assert isinstance(exit_info.value.code, str)
+    assert "Connect call failed" in message
+    # The type name survives because `str(OSError)` alone is
+    # `[Errno 111] Connect call failed (...)`, which never says what went
+    # wrong -- only where.
+    assert "ConnectionRefusedError" in message
+    assert "Traceback" not in message
+    assert "asyncpg" not in message
+
+
+def test_the_message_names_the_command_that_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator runs `usher bootstrap` overnight and finds the output in
+    a log the next morning; a bare `[Errno 111]` with no subject is the same
+    problem as the traceback, shorter."""
+    _configured(monkeypatch)
+    monkeypatch.setattr(usher_cli, "_sync_status", _raising(_refused()))
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["sync-status"])
+
+    assert "sync-status" in str(exit_info.value)
+
+
+def test_the_message_names_the_escape_hatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stack still exists and the message has to say so, or the boundary
+    has removed the only tool for the failure it is most likely to hide."""
+    _configured(monkeypatch)
+    monkeypatch.setattr(usher_cli, "_status", _raising(_refused()))
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["bootstrap-status"])
+
+    assert "--traceback" in str(exit_info.value)
+
+
+def test_the_traceback_flag_lets_the_original_exception_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configured(monkeypatch)
+    refused = _refused()
+    monkeypatch.setattr(usher_cli, "_status", _raising(refused))
+
+    with pytest.raises(ConnectionRefusedError) as raised:
+        usher_cli.main(["--traceback", "bootstrap-status"])
+
+    # The *same* exception object, not a re-raise of a copy: the point of
+    # the flag is the original stack, and `raise exc` would rebind the
+    # traceback to the boundary.
+    assert raised.value is refused
+
+
+def test_a_programming_error_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The boundary's hardest requirement, and the reason it enumerates
+    families instead of catching `Exception`.
+
+    `AttributeError` here stands for every bug: nothing the operator sets or
+    starts makes it go away, so collapsing it to one line moves the cost
+    from a wart to a lost bug report. This case is what a later
+    `except Exception:` would break.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        usher_cli, "_status", _raising(AttributeError("'NoneType' object has no attribute 'id'"))
+    )
+
+    with pytest.raises(AttributeError):
+        usher_cli.main(["bootstrap-status"])
+
+
+def test_an_http_source_that_is_down_is_operator_facing_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TMDb, Emby and every bulk download fail through httpx, not through
+    the driver -- an unreachable Emby is the same class of operator problem
+    as an unreachable database and reads the same way."""
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        usher_cli, "_sync", _raising(httpx.ConnectError("[Errno -2] Name or service not known"))
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["sync"])
+
+    assert "ConnectError" in str(exit_info.value)
+    assert "Traceback" not in str(exit_info.value)
+
+
+def test_a_database_error_the_driver_does_wrap_is_operator_facing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the database story: a connect failure arrives as a
+    bare `OSError`, but `relation "titles" does not exist` -- an operator who
+    skipped `alembic upgrade head` -- arrives wrapped as a
+    `SQLAlchemyError`."""
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        usher_cli,
+        "_status",
+        _raising(OperationalError("SELECT 1", {}, Exception('relation "titles" does not exist'))),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["bootstrap-status"])
+
+    assert 'relation "titles" does not exist' in str(exit_info.value)
+
+
+def test_a_rejected_setting_is_reported_without_the_value_it_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The security case, and it is a live regression rather than a
+    hypothetical: `USHER_DATABASE_URL` with the wrong driver made
+    `usher bootstrap-status` print
+
+        ... [type=value_error, input_value='mysql://admin:<the password>@db:5432/usher', ...]
+
+    because pydantic's `ValidationError` message carries the input. The
+    field is `SecretStr` in `Settings` for exactly this reason, and the CLI
+    was the one reader that unwrapped it.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", f"mysql://admin:{_PASSWORD}@db:5432/usher")
+    monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["bootstrap-status"])
+
+    message = str(exit_info.value)
+    assert _PASSWORD not in message
+    assert "mysql://" not in message
+    # Redaction that also removes the diagnosis is not a fix: the operator
+    # still has to learn which setting, and what it should have been.
+    assert "database_url" in message
+    assert "postgresql+asyncpg" in message
+
+
+def test_a_rejected_secret_key_is_reported_without_the_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`USHER_SECRET_KEY` too short printed `input_value='0000'` -- the key
+    itself. A weak key is still a key, and it is usually a real one that was
+    truncated by a copy-paste rather than a placeholder."""
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/usher")
+    monkeypatch.setenv("USHER_SECRET_KEY", _PASSWORD)
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["bootstrap-status"])
+
+    message = str(exit_info.value)
+    assert _PASSWORD not in message
+    assert "secret_key" in message
+
+
+def test_the_traceback_flag_does_not_reopen_the_settings_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--traceback` re-raises everything else, and deliberately not this.
+
+    A settings failure's stack is always the same six pydantic frames and
+    tells nobody anything; the *only* thing re-raising would add is the
+    rejected value. So the one exception the flag does not reopen is the one
+    whose stack is worthless and whose message is a credential.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", f"mysql://admin:{_PASSWORD}@db:5432/usher")
+    monkeypatch.setenv("USHER_SECRET_KEY", "s" * 32)
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["--traceback", "bootstrap-status"])
+
+    assert _PASSWORD not in str(exit_info.value)
+
+
+def test_ctrl_c_during_a_long_import_is_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`usher bootstrap` is a multi-hour download that an operator is
+    expected to interrupt. Interrupting it printed a `KeyboardInterrupt`
+    traceback through `asyncio.run`, which reads as a failure of the run
+    rather than as the operator's own decision.
+
+    130 rather than 1: the shell's convention for "killed by SIGINT"
+    (128 + 2), so a wrapping script can tell an interrupt from a failure.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr(usher_cli, "_bootstrap", _raising(KeyboardInterrupt()))
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["bootstrap"])
+
+    assert exit_info.value.code == 130
+    assert "interrupted" in capsys.readouterr().err
+    # An interrupt is not a `KeyboardInterrupt` escaping to the terminal.
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_a_deliberate_exit_message_is_not_re_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI already raised `SystemExit` with a written message in three
+    places before this boundary existed -- `_as_uuid`, the semantic-search
+    guard, `similar`'s cross-argument rule. Those messages were chosen for
+    the failure they describe, and the boundary must pass them through
+    untouched rather than prefix them with a second explanation.
+
+    Free structurally, because `SystemExit` is a `BaseException` and the
+    boundary names only `Exception` subclasses -- pinned anyway, because
+    "free structurally" stops being true the moment somebody widens the
+    tuple.
+    """
+    _configured(monkeypatch)
+    written = "semantic search is unavailable -- try --mode fused, or run `usher index`"
+    monkeypatch.setattr(usher_cli, "_search", _raising(SystemExit(written)))
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["search", "dune"])
+
+    assert str(exit_info.value) == written
+
+
+def test_the_parsers_own_exits_are_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--help` exits 0 and a bad argument exits 2 with usage. Both happen
+    before the boundary, and both are what every other CLI does."""
+    _configured(monkeypatch)
+
+    with pytest.raises(SystemExit) as helped:
+        usher_cli.main(["--help"])
+    assert helped.value.code == 0
+
+    with pytest.raises(SystemExit) as refused:
+        usher_cli.main(["bootstrap", "--phase", "nonsense"])
+    assert refused.value.code == 2
+
+
+def test_the_argv_table_covers_every_subcommand() -> None:
+    """The parametrised case below is only "CLI-wide" if this passes: a new
+    subcommand with no row is a command nobody has checked is inside the
+    boundary."""
+    subparsers = next(
+        action
+        for action in usher_cli.build_parser()._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    assert sorted(_MINIMAL_ARGV) == sorted(subparsers.choices)
+
+
+@pytest.mark.parametrize("command", sorted(_MINIMAL_ARGV))
+def test_every_command_reports_a_dead_database_the_same_way(
+    command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The finding named two commands; the fix is one boundary, so the case
+    is every command rather than those two."""
+    _configured(monkeypatch)
+    _every_command_raises(monkeypatch, _refused())
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(_MINIMAL_ARGV[command])
+
+    message = str(exit_info.value)
+    assert "ConnectionRefusedError" in message
+    assert "Traceback" not in message
+
+
+def _function_def(name: str) -> ast.FunctionDef:
+    source = Path(usher_cli.__file__).read_text(encoding="utf-8")
+    return next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+
+def test_the_boundary_is_one_try_around_the_whole_dispatch() -> None:
+    """One case about this implementation, one about the next.
+
+    The behavioural cases above pass just as well against fourteen
+    `try`/`except` pairs, one per arm -- which is the shape that rots,
+    because the fifteenth command is written by copying an arm and not the
+    handler. This asserts the shape instead: `main` has exactly one `try`,
+    and everything that can fail -- reading the settings, configuring
+    telemetry, dispatching -- is inside it.
+    """
+    main_def = _function_def("main")
+
+    tries = [node for node in main_def.body if isinstance(node, ast.Try)]
+    assert len(tries) == 1, "main must have exactly one error boundary"
+
+    guarded = {id(node) for node in ast.walk(tries[0])}
+    fallible = [
+        node
+        for node in ast.walk(main_def)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"get_settings", "configure_telemetry", "_dispatch"}
+    ]
+    assert {call.func.id for call in fallible if isinstance(call.func, ast.Name)} == {
+        "get_settings",
+        "configure_telemetry",
+        "_dispatch",
+    }
+    assert all(id(call) in guarded for call in fallible)
+
+
+def test_the_boundary_catches_families_and_not_exception() -> None:
+    """`except Exception` is the change that passes every behavioural case
+    in this module except `test_a_programming_error_keeps_its_traceback`,
+    and it is what somebody reaches for when a new failure escapes. The
+    tuple is named so the intent is legible at the handler."""
+    assert Exception not in usher_cli.OPERATOR_ERRORS
+    assert BaseException not in usher_cli.OPERATOR_ERRORS
+    assert OSError in usher_cli.OPERATOR_ERRORS

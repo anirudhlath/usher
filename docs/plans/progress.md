@@ -1677,6 +1677,27 @@ p50 12.7 ms. Not a crash, not a 500, and — the one that matters — **not a ge
 print a **raw traceback** against an unreachable database. Exit 1 is right; the presentation is not.
 Recorded rather than fixed — it predates M7 and the fix is a CLI-wide error boundary.
 
+> ✅ **Fixed after the milestone, before the merge**, in `fix(cli): a failure the operator can fix is
+> a message, not a stack`. `main` now has one `try` around the whole dispatch naming four operator
+> families — `OSError`, `SQLAlchemyError`, `httpx.HTTPError`, `ValidationError` — with
+> `usher --traceback <command>` as the escape hatch, and 30 cases in
+> `tests/unit/test_cli_errors.py`. Two things the fix turned up that the finding did not predict:
+>
+> - **`OSError` is load-bearing and a SQLAlchemy-only handler would have missed the exact case.**
+>   asyncpg lets a refused TCP connection out **unwrapped** — the propagated exception from the
+>   smoke test's own repro is a bare `ConnectionRefusedError`, not an `InterfaceError`. Checked
+>   directly rather than assumed.
+> - 🔴 **The traceback was leaking a credential, which is why this stopped being cosmetic.**
+>   pydantic v2's `ValidationError` message carries `input_value=…`, so `USHER_DATABASE_URL` with a
+>   non-asyncpg driver printed the **whole DSN including the password**, and a truncated
+>   `USHER_SECRET_KEY` printed the key. Both fields are `SecretStr`; the CLI was the one reader that
+>   unwrapped them. Same defect `usher.api.errors` exists to prevent on the 422 path, one surface
+>   over, and reproduced live before and after. `--traceback` deliberately does **not** reopen it.
+>
+> Both mutations that matter were checked in place and killed: `except OPERATOR_ERRORS` →
+> `except Exception` is caught by `test_a_programming_error_keeps_its_traceback`, and returning
+> pydantic's own message instead of the redacted one is caught by three cases.
+
 ⚠️ **And one process finding worth more than it cost.** A live end-to-end run was started **while the
 mutation sweep was still mutating the working tree in place**, and would have measured mutated code.
 Killed within seconds and its database recreated so nothing survived. **A sweep that mutates in place

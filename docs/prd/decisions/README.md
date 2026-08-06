@@ -33,6 +33,7 @@ otherwise be lost and re-litigated in six months.
 | [0023](0023-a-provider-proposes-it-does-not-decide.md) | A provider proposes; the composer decides | Accepted — settles PRD 06's composition sketch |
 | [0024](0024-the-genome-is-one-dense-vector-per-title.md) | The tag genome is one dense `halfvec(1128)` per title, not a tall relevance table | Accepted — corrects PRD 02 |
 | [0025](0025-rows-build-sequentially.md) | Rows build sequentially, because `AsyncSession` is not concurrency-safe | Accepted — corrects PRD 06 |
+| [0026](0026-the-cli-boundary-names-families.md) | The CLI's error boundary names families, and `Exception` is not one of them | Accepted — extends PRD 08 |
 
 Format: context → decision → consequences → evidence. Short is fine.
 

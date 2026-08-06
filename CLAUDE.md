@@ -161,6 +161,36 @@ load automatically when working in `docs/`.
 
 ## Verified facts worth not re-deriving
 
+**A settings failure was printing the credential it rejected, and the CLI was
+the only reader that unwrapped it.** pydantic v2's `ValidationError` message
+carries `input_value=…`, so `USHER_DATABASE_URL` with a non-asyncpg driver made
+`usher bootstrap-status` print the **whole DSN including the password**, and a
+truncated `USHER_SECRET_KEY` printed the key — both fields are `SecretStr` in
+`Settings` for exactly that reason. This is the same defect `usher.api.errors`
+exists to prevent on the 422 path, and it survived four milestones because a
+traceback is where nobody looks for a leak. `cli._settings_problem` renders
+`loc` + `msg` and drops `input`, scrubbing the value out of `msg` too so a
+future validator that interpolates it cannot quietly reopen this.
+**`--traceback` deliberately does not reopen it**: a settings failure's stack is
+six pydantic frames that diagnose nothing, so re-raising would add only the
+credential.
+
+**A refused Postgres connection reaches the CLI as a bare `ConnectionRefusedError`,
+not as a SQLAlchemy error.** asyncpg lets the `OSError` out unwrapped during
+connect, so `except SQLAlchemyError` — the obvious spelling for a database error
+boundary — misses the single most common operator failure there is. Checked by
+running it, not by reading the class hierarchy. `SQLAlchemyError` is still in
+`cli.OPERATOR_ERRORS` because it *does* catch the other half (a missing table
+from an `alembic upgrade head` that never ran).
+
+**`except Exception` at a CLI boundary trades a wart for a blindfold.** It
+passes every behavioural case about presentation and breaks the one that
+matters — a bug's traceback is the bug report, and an operator can do nothing
+with `AttributeError: 'NoneType' object has no attribute 'id'` collapsed to one
+line either way. `cli.OPERATOR_ERRORS` is an enumerated tuple for that reason,
+and `test_a_programming_error_keeps_its_traceback` is what fails when somebody
+widens it.
+
 **A UUIDv7 primary key makes an `ORDER BY` key unobservable, and it cost this
 milestone five untested orderings.** `new_id()` is monotonic, and almost every
 fixture mints its ids in the same order it assigns the ranking value — so

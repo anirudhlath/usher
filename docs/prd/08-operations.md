@@ -144,6 +144,20 @@ Rules:
   field from an otherwise valid `POST /admin/sources` therefore made the
   server reply with the plaintext password. `usher.api.errors` strips
   `input` from every validation error, app-wide.
+- **And neither does a rejected *setting*.** The same defect, one surface
+  over, found while building the CLI's error boundary and fixed with it:
+  `Settings` rejecting `USHER_DATABASE_URL` printed
+  `input_value='mysql://admin:<the password>@db:5432/usher'` in the
+  traceback, and a truncated `USHER_SECRET_KEY` printed the key. Both fields
+  are `SecretStr` precisely so that cannot happen; the CLI was the one reader
+  that unwrapped them, on the surface an operator is most likely to paste
+  into an issue. `usher.cli._settings_problem` renders `loc` and `msg` and
+  drops `input`, the same trade `usher.api.errors` makes — the operator still
+  learns which setting was wrong and what it should have been, and never sees
+  the value. **`--traceback` does not reopen it**: a settings failure's stack
+  is six pydantic frames that diagnose nothing, so the only thing re-raising
+  would add is the credential
+  ([ADR-0026](decisions/0026-the-cli-boundary-names-families.md)).
 - Rotating `USHER_SECRET_KEY` re-encrypts on next write; a documented rotation
   command handles the bulk case. **Until that write happens the old rows are
   unreadable, and that state is rendered rather than raised**: Fernet's
@@ -372,6 +386,18 @@ unreachable.
 - **`--allow-full-retraction` is the only way past ADR-0015's ceiling**, and
   it is a flag rather than a configuration default because it is the one
   input that can mark a whole library unavailable.
+- **A failure the operator can fix is a message; a failure they cannot is a
+  stack.** M7's smoke test found `bootstrap-status` and `sync-status`
+  answering an unreachable database with sixty lines of asyncpg and greenlet
+  frames whose only operator-facing content was the last one. `main` has a
+  single `try` around the whole dispatch which names the families an operator
+  can act on — `OSError`, `SQLAlchemyError`, `httpx.HTTPError`,
+  `ValidationError` — and answers each with one line and exit 1;
+  `usher --traceback <command>` re-raises. **`Exception` is deliberately not
+  among them**, so a bug still gets its full traceback, and Ctrl-C exits 130
+  rather than printing one. Why those families and not `Exception`, and why
+  the settings case is redacted, are
+  [ADR-0026](decisions/0026-the-cli-boundary-names-families.md).
 
 ### Backup — the asymmetry is the point
 

@@ -106,7 +106,20 @@ them with `docker compose exec usher python -m usher <command>`.
 ```bash
 uv run usher --help                  # every command and flag
 uv run usher serve                   # the HTTP server (also the no-argument default)
+uv run usher --traceback <command>   # the full stack, when one line is not enough
 ```
+
+When something an operator can fix goes wrong — the database is not up, a
+`.env` value is wrong, a source is unreachable — every command exits 1 with
+one line rather than a stack:
+
+```
+usher bootstrap-status: ConnectionRefusedError: [Errno 111] Connect call failed ('127.0.0.1', 5432)
+(the stack is one flag away: `usher --traceback bootstrap-status`)
+```
+
+A *bug* still gets its full traceback, deliberately. And a rejected setting is
+reported by name without its value, because a setting may be a credential.
 
 **Populate the catalog** — pulls IMDb's `title.basics`/`title.ratings` dumps,
 TMDb's *public daily id export* files (no API key needed for these) and
