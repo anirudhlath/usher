@@ -419,14 +419,30 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     and a good illustration of why a step count is the wrong pin.
 
     **Head is `m8a` and the `-1` half is re-pointed at its artefacts.** The
-    previous spelling asserted `ix_titles_popularity` was present, which is
-    `ffc`'s own artefact -- and `ffc.downgrade()` recreating it is no longer
-    what `-1` reverses, so that assertion became *vacuously true*: still
-    passing, exercising nothing. That is this repository's "a run that did not
-    run is not a pass" arriving as an assertion that did not assert, and it is
-    the third migration in a row to hit it (`ffa`, then `ffc`, now `m8a`). The
-    displaced assertion has moved into the revision-pinned block below, where
-    revision ids do not drift.
+    previous spelling asserted `ix_titles_popularity` was *present*, which held
+    because `ffc.downgrade()` recreates it and `-1`-from-`ffc` ran that
+    downgrade. `-1`-from-`m8a` runs `m8a.downgrade()` instead and stops at the
+    `ffc` state, where `ffc.upgrade()` has dropped the index -- so the
+    inherited assertion **fails, loudly and immediately**. Measured on
+    `pgvector/pgvector:pg17`: `alembic downgrade -1` from head leaves
+    `alembic_version = ffc` and zero rows in `pg_indexes` for that name.
+
+    That is the general case rather than this migration's luck, and it is
+    worth stating because the opposite was written here first and was wrong:
+    **an inherited `-1` assertion that had teeth cannot survive a new head.**
+    Having teeth *means* being true at the state `-1` lands on and false at
+    the head's own state -- that is what "observes the head's `downgrade()`"
+    is -- and a new head makes `-1` land on exactly the state where it is
+    false. The direction of the assertion has nothing to do with it: `ffc`'s
+    was positive (`in`) and broke; `ffb`'s was negative (`not in`) and broke
+    too, because `-1`-from-`ffc` lands at the `ffb` state where
+    `blend_fingerprint` is present. Three landings, three loud breaks (`ffa`,
+    `ffc`, `m8a`). **So the alarm to watch for is a `-1` half that stays
+    green after a new migration**, which means the assertion it inherited
+    never had teeth. `.claude/rules/db-and-sql.md` carries the measurement.
+
+    The displaced assertion has moved into the revision-pinned block below,
+    where revision ids do not drift.
     """
     admin = postgres_url.rsplit("/", 1)[0]
     scratch = f"cycle_{uuid.uuid4().hex[:12]}"
@@ -450,14 +466,21 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # drops the tables, and a table takes its indexes with it, so a
         # downgrade that forgets one is invisible from there.
         await asyncio.to_thread(run_alembic, url, "-1")
-        # **Asserted against whatever the current head actually reverses**, and
-        # that target moves with every migration -- `m8a` *creates two tables*
-        # where `ffc` dropped an index, `ffb` added a column and `ffa` added a
-        # table, so each of the last three landings has silently re-pointed
-        # this half at something the new head does not touch. Group F recorded
-        # it for `ffa`, M7 Task 36 for `ffb`, M8 Task 8 for `ffc`. It is the
-        # cost of a self-maintaining half, and it is cheaper than a step count
-        # that keeps passing for the wrong reason.
+        # **Asserted against whatever the current head actually reverses**, so
+        # every new migration breaks this block and has to re-point it. That
+        # is the design rather than a defect: the assertion is only doing its
+        # job while it is false at the head's own state, which is precisely
+        # what makes it fail the moment `-1` starts landing there. Group F
+        # re-pointed it for `ffa`, M7 Task 36 for `ffc`, M8 Task 8 for `m8a`.
+        # It is cheaper than a step count, which keeps passing for the wrong
+        # reason instead of failing for the right one.
+        #
+        # **The direction of the assertion does not decide this.** `m8a`
+        # creates tables so its artefacts are asserted *absent*; `ffc` dropped
+        # an index so its artefact was asserted *present*. Both spellings
+        # break for the same reason when a head lands on them -- verified
+        # against the real chain, see this test's docstring. You do not get to
+        # pick the direction; the head's own `downgrade()` does.
         #
         # `m8a.downgrade()` drops both of its tables, so after one step back
         # neither table's indexes exist. **Both are asserted, not one**: a

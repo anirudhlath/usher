@@ -441,6 +441,9 @@ on M8 Task 7's two curation domain models. One run of
 `tests/unit/test_domain_curation.py` is **0.284 s**, and CPython validates a
 cached `.pyc` on `(int(source_mtime), source_size)` — **mtime at one-second
 resolution**. Deleting either of `LLMCall.model_post_init`'s two clauses
+(the hook was renamed to `_ok_and_error_must_agree` and moved to a
+`model_validator(mode="after")` shortly afterwards, so grep for that; the old
+name is kept here because it is what the sweep actually ran against)
 removes **exactly 114 bytes**, so the two mutants are byte-identical in length;
 a whole mutate → run → restore → mutate cycle fits inside one second, so the
 second mutant collides with the first on *both* halves of that validation pair

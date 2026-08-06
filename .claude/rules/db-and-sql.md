@@ -57,22 +57,46 @@ first and `m8b`
 (the genome tag vocabulary) is planned; the rule for the next milestone is now
 mechanical rather than a decision.
 **`tests/integration/test_migrations.py`'s down/up cycle needs attention from
-every group that adds a migration, and its two halves fail differently.** The
-`-1`-from-head half self-maintains — it asserts on whatever the *current* head
-reverses — so adding a migration silently re-points it at a different artefact.
-**It fails loudly in one direction and passes vacuously in the other, and the
-second is the dangerous one.** If the new head touches something the old
-assertion named, the half fails on the previous head's artefact — noisy, and
-that is how `ffa` (Group F) and `ffc` (M7 Task 36) were caught. If it does
-*not*, the old assertion stays true for a reason that has nothing to do with
-the new migration, and the half keeps passing while exercising nothing: `m8a`
-creates two tables and does not touch `ix_titles_popularity`, so `ffc`'s
-assertion would have survived head-on-head as a run that did not run. The
-named-revision half does not drift at all. The repair, both times, is to
-re-point the `-1` half at the new head's own artefact and move the displaced
-assertion into the revision-pinned block. **A table-creating head needs two
-assertions, not one** — `m8a` drops `curated_rows` and `llm_calls`, and a
-`downgrade()` that forgets the second would pass a single-index check.
+every group that adds a migration, and the `-1` half breaking is the design,
+not the defect.** The `-1`-from-head half asserts on whatever the *current*
+head reverses, so it has to be re-pointed every time — Group F did it for
+`ffa`, M7 Task 36 for `ffc`, M8 Task 8 for `m8a`.
+
+**An inherited `-1` assertion that had teeth cannot survive a new head, and
+the failure is always loud.** Having teeth *means* being true at the state
+`-1` lands on and false at the head's own state — that is what "observes the
+head's `downgrade()`" is — and a new head makes `-1` land on exactly the state
+where it is false. **The direction of the assertion is irrelevant**, which is
+the part that is easy to get backwards. Measured against the real chain on
+`pgvector/pgvector:pg17`, walking `-1` one step at a time and probing
+`pg_indexes` / `information_schema.columns` at each stop:
+
+| `-1` lands at | inherited assertion | value there | verdict |
+|---|---|---|---|
+| `ffb` (`-1` from `ffc`) | `ffb`'s **negative** `"blend_fingerprint" not in …` | present | **fails** |
+| `ffc` (`-1` from `m8a`) | `ffc`'s **positive** `"ix_titles_popularity" in …` | absent | **fails** |
+
+Both spellings, both loud. The trap is the off-by-one: `-1` from the *new*
+head lands on the **old head's applied state**, not on the old head's parent,
+so an artefact the old head created is present there and one it dropped is
+absent there — in each case the opposite of what the inherited assertion says.
+`ffc.upgrade()` is what drops `ix_titles_popularity`; only `ffc.downgrade()`
+restores it, and `-1` from `m8a` never runs that.
+
+**So the alarm is a `-1` half that stays green after a new migration lands.**
+That means the assertion it inherited was true at both states, i.e. it never
+observed the old head's `downgrade()` at all — it had no teeth when it was
+written, and the new head merely made that visible. A quiet pass here is a
+defect in the *previous* author's assertion, never in the new migration.
+
+The repair, every time: assert on the new head's own artefact, **in whichever
+direction that head's `downgrade()` establishes** — you do not choose it, a
+creating head gives you `not in` (`m8a`) and a dropping head gives you `in`
+(`ffc`) — and move the displaced assertion into the revision-pinned block,
+which does not drift. **A table-creating head needs an assertion per table,
+not one** — `m8a` drops `curated_rows` and `llm_calls`, and a `downgrade()`
+that forgets the second passes a single-index check; `llm_calls` carries no
+index beyond its primary key, so `pk_llm_calls` is what stands for it.
 Related: `run_alembic` used to infer its direction from the target string, so a
 bare revision id ran `upgrade` — a silent no-op — and it now takes an explicit
 `direction`.

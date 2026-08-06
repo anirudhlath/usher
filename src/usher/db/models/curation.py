@@ -222,6 +222,14 @@ class CuratedRowRow(Base):
     # row's position rather than slugified from the model's title -- see
     # `CuratedRow.slug`'s comment for the three reasons.
     slug: Mapped[str] = mapped_column(Text, nullable=False)
+    # The model's own prose, rendered as the shelf heading -- the one string
+    # in this schema that a language model wrote and a user reads verbatim,
+    # which is why ADR-0028's validator is the only thing between the two.
+    # `Text` rather than `String(N)`, following `source_fingerprint`: in
+    # Postgres a `varchar(N)` overflow is an *error*, so a length cap here
+    # would fail a whole generation over one long heading, and how much of a
+    # heading fits is a client layout concern rather than a fact about the
+    # shelf.
     title: Mapped[str] = mapped_column(Text, nullable=False)
     # Nullable, and reachable: none of M7's nine providers can produce a row
     # with nothing to explain, and a model that returns an empty reason
@@ -377,6 +385,15 @@ class LLMCallRow(Base):
     # `NUMERIC(12, 8)`, never `Float`. The module docstring carries the
     # measured table behind both numbers.
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(COST_PRECISION, COST_SCALE), nullable=False)
+    # `time.monotonic()` across the whole request -- transport and decode
+    # included, not the provider's own reported generation time. Written on
+    # the failure path too, where it is the number that tells a timeout
+    # (`USHER_LLM_TIMEOUT_SECONDS`, 120 s) apart from a fast refusal; those
+    # are otherwise the same `ok = false` row. It is also what makes a
+    # zero-token row legible rather than merely odd, which
+    # `OpenAICompatibleClient._usage` names as the honest half of its
+    # compromise: a real latency with no tokens is a provider that answered
+    # and omitted `usage`.
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     # Not "the HTTP call returned 200". It is "this generation produced
     # something", and the two disagree in exactly one direction: a call that
