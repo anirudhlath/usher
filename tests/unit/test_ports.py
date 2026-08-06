@@ -4,11 +4,12 @@ must fail at instantiation, not at the call site."""
 from abc import ABC
 from collections.abc import Sequence
 from decimal import Decimal
-from typing import Protocol
+from typing import Protocol, get_type_hints
 
 import pytest
 
 from tests.fakes.title_repository import FakeTitleRepository
+from usher.domain.curation import LLMCall
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import BulkDataset
 from usher.ports.credentials import CredentialStore
@@ -33,6 +34,7 @@ from usher.ports.repository import (
     EpisodeRepository,
     GenomeRepository,
     ImportRunRepository,
+    LLMCallRepository,
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
@@ -79,6 +81,7 @@ ALL_PORTS: list[type[ABC]] = [
     EpisodeRepository,
     GenomeRepository,
     ImportRunRepository,
+    LLMCallRepository,
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
@@ -180,6 +183,19 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
             CuratedRowRepository,
             {"replace_for_user", "list_for_user"},
         ),
+        # M8 Task 10, and the whole content of this entry is the **absence** of
+        # a read. `m08a` ships `llm_calls` with its primary key and no other
+        # index precisely because this port has none, so a `list_since` added
+        # here without that argument being re-opened leaves an index nothing
+        # reads maintained on every write -- `ix_titles_popularity` twice.
+        # `test_the_cost_ledger_has_no_read_method` below is the same claim
+        # spelled as its own case, for the reason `test_suggest_index_has_no_
+        # write_method` is: a surface's deliberate gap is a decision, and a
+        # decision needs something that fails when it is reversed by accident.
+        (
+            LLMCallRepository,
+            {"record"},
+        ),
     ],
 )
 def test_the_new_repository_ports_declare_exactly_these_abstract_methods(
@@ -273,6 +289,48 @@ def test_suggest_index_has_no_write_method() -> None:
     it without deleting this is a failing test.
     """
     assert SuggestIndex.__abstractmethods__ == frozenset({"suggest"})
+
+
+def test_the_cost_ledger_has_no_read_method() -> None:
+    """**The structural half of Task 10's central decision**, and
+    `test_suggest_index_has_no_write_method`'s argument arriving at a
+    repository port.
+
+    `llm_calls` has no reader in `src/` and every reader PRD 10 names is a
+    Grafana panel M10 builds. `m08a` shipped the table with its primary key
+    and **no other index** on the strength of that, writing the two future
+    indexes out as copy-pasteable `CREATE INDEX` statements beside the query
+    each serves. A read method added here would be a surface with no caller,
+    and this repository has shipped that twice: `ix_titles_popularity` was an
+    index nothing read, and `PushHealth.record_reconnect` was a method nothing
+    called, which made PRD 10's reconnect metric a permanent flat zero.
+
+    So this is not a style assertion. Adding `list_since` *and* the index it
+    needs, in the milestone that adds the panel reading them, is a decision;
+    adding it without deleting this case is a failing test.
+    """
+    assert LLMCallRepository.__abstractmethods__ == frozenset({"record"})
+
+
+def test_the_cost_ledger_takes_the_domain_model_rather_than_its_parts() -> None:
+    """The signature is the answer to "what happens when the constructor
+    raises inside an exception handler", and it is load-bearing enough to pin.
+
+    `record()` is called on the failure path, from inside an `except` block,
+    and the row it writes there is the one the ledger exists for. A
+    parts-shaped signature would rebuild the same `LLMCall` one frame deeper
+    and raise the same `ValidationError` inside a repository, where the caller
+    cannot see it -- unless it coerced, and inventing the operator-facing
+    string that says what went wrong is a decision only the layer that knows
+    can make. Eleven adjacent parameters, three of them integers and two of
+    them UUIDs, is also eleven chances to fill the wrong slot and still store
+    a well-formed row.
+
+    Asserted on the annotation rather than on the parameter count, because a
+    parts-shaped `record(**fields: Any)` has one parameter too.
+    """
+    hints = get_type_hints(LLMCallRepository.record)
+    assert hints == {"call": LLMCall, "return": type(None)}
 
 
 def test_incomplete_implementation_fails_at_instantiation() -> None:

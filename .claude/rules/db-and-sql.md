@@ -187,6 +187,41 @@ answer; both wait forever. So the concurrency cases in
 `tests/integration/test_job_queue.py` bound every claim with
 `asyncio.wait_for` — `pytest-timeout` is deliberately not a dependency, since
 the timeout belongs to the two cases that need it rather than to the runner.
+**`numeric field overflow` is a bare `sqlalchemy.exc.DBAPIError` — not an
+`IntegrityError`, and not a `DataError` either.** Measured 2026-08-06 on
+`pgvector/pgvector:pg17` against `llm_calls.cost_usd` (`NUMERIC(12, 8)`, so
+four integer digits): inserting `36000` raises, `exc.orig` is
+`AsyncAdapt_asyncpg_dbapi.Error` (SQLAlchemy's generic wrapper, not a
+classified subclass), `exc.orig.__cause__` is
+`asyncpg.exceptions.NumericValueOutOfRangeError` and its `sqlstate` is
+`22003`. SQLAlchemy's asyncpg dialect simply does not map SQLSTATE class 22
+onto `DataError`. **Every repository in this package catches `IntegrityError`
+and only that**, which is correct for a table whose refusals are all
+constraints and wrong for any table with a bounded `NUMERIC` — the exception
+crosses the port boundary raw, which is the one thing ADR-0009 forbids.
+`PostgresLLMCallRepository` catches `DBAPIError` and filters on the SQLSTATE
+*class* instead: `22` (data exception) and `23` (integrity constraint
+violation) are "this row is not storable as given"; everything else — a
+dropped connection, a statement timeout, an undefined table — propagates,
+because a caller that cannot tell those apart retries the one thing a retry
+cannot fix. `constraint_name()` is widened to `DBAPIError` for this and
+correctly answers `None` there: a declared precision refusing a value is not a
+named constraint firing.
+
+**A Python `float` bound to a `numeric` parameter is accepted and, at this
+schema's scales, value-preserving — so "cost written as a float" is an
+equivalent mutant for *storage*.** Measured in the same run, through
+SQLAlchemy's `Numeric(12, 8)` bindparam: `0.0087` stores `0.00870000`, `2e-08`
+stores `0.00000002`, and even `1/3` stores `0.33333333`. A double carries
+15–17 significant decimal digits and `NUMERIC(12, 8)` holds at most 12, so
+nothing in that column can round-trip through a float and land differently.
+What *does* lose money is re-scaling on the way in:
+`round(Decimal("0.00000002"), 4)` stores `0.00000000`, a real call reported as
+free. So a case asserting a cost round-trips cannot see a `float()` and can
+see a `quantize()`; write the assertion for the second and do not claim the
+first. (`Decimal` is still the right type end to end — the reason is the
+`SUM()` over a month and the domain model, not this write.)
+
 **Bulk loading bypasses the repository, and the SQL has three traps.**
 Verified against `pgvector/pgvector:pg17` on 2026-07-30, all three of which
 `usher.db.repositories.bulk` is built around:

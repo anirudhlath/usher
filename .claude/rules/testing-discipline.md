@@ -526,3 +526,31 @@ own assertions.** Note the failure mode is quiet rather than loud: the case
 still killed `ORDER BY slug` through its final assertions, so a dead guard does
 not break anything today, it just stops being the thing that notices when a
 later fixture change re-aligns the two orders.
+
+**Two columns held equal by an invariant are one column, and the cases that
+*suspend* the invariant are the only thing that tells them apart.** Found
+2026-08-06 by M8 Task 10's sweep, as a wrong prediction corrected by
+measurement. `llm_calls.ok` and `llm_calls.error` agree by construction —
+`LLMCall._ok_and_error_must_agree` refuses a disagreement and
+`ck_llm_calls_ok_error_agree` refuses it again — so writing
+`"ok": call.error is None` instead of `"ok": call.ok` was predicted to be an
+equivalent mutant, the "two predicates, one selectivity" entry above arriving
+at two *columns*. **It is killed**, and only by the `model_construct` cases
+that exist to prove the CHECK is real: with the model's validator skipped,
+`ok = false, error = NULL` derives to a stored *success* and
+`ok = true, error = '…'` to a stored *failure*, so the constraint those cases
+assert on never fires. The third shape in that parametrisation, `error = ''`,
+does **not** kill it — `'' is None` is false, so the derivation happens to
+agree and the row is refused either way — which is the part worth carrying:
+one of three shapes of "the invariant is suspended" was blind to it, so a
+parametrisation carrying only that shape would have ratified the mutant.
+**The general form: when a redundant-looking write is defended by an
+invariant, the mutation is observable exactly where the suite breaks that
+invariant on purpose — which is usually a `model_construct` case written for
+something else entirely. Check it there before calling it equivalent.**
+
+**And the mutation the same sweep was told to expect, which really is
+equivalent:** `cost_usd` written as a `float`. Measured rather than argued —
+see `.claude/rules/db-and-sql.md` for the numbers. Reported as a survivor with
+its evidence rather than replaced by a kill that would have been about
+something else.

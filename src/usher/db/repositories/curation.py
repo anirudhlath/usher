@@ -5,7 +5,8 @@ and one transaction: this is `PostgresTitleNeighborRepository.replace`'s shape
 arriving at a third table, and the scope argument it turns on is written out
 beside the `DELETE` below rather than left to be rediscovered.
 
-**`llm_calls` is deliberately not here.** The two tables share a migration
+**`llm_calls` is deliberately not here** — it is `repositories/llm_call.py`,
+and M8's plan named this module for both. The two tables share a migration
 because one service writes both in one transaction, and they share nothing
 else — no column, no foreign key, no lifetime. `LLMCallRepository` is
 append-only with no read at all, so a module holding both would be one class
