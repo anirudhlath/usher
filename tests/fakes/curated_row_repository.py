@@ -7,14 +7,16 @@ what actually closes:
 - **`replace_for_user` is a list filter, so the delete's scope is structurally
   correct here.** Deriving it from `rows` rather than from `user_id` takes a
   deliberate second collection in Python and is one `WHERE` clause away in
-  SQL, so `test_a_generation_that_produced_nothing_clears_the_screen` -- the
-  one case in the suite that can see that scope at all -- is load-bearing in
-  the integration run and merely available here. (Written that way rather than
-  "only the integration run can see it", because it is not true: the mutation
-  spelled out by hand does fail this arm too. What differs is how likely the
-  mistake is, not whether the case would catch it.) Named first, because a
-  divergence that makes a case vacuous is worse than one that makes it
-  strict.
+  SQL, so the two cases that can see that scope --
+  `test_a_generation_that_produced_nothing_clears_the_screen` and
+  `test_a_replacement_drops_the_generation_it_replaced`, measured, the second
+  through its `seeder.count` assertion rather than its read -- are
+  load-bearing in the integration run and merely available here. (Written that
+  way rather than "only the integration run can see it", because that is not
+  true: the mutation spelled out by hand fails the same two cases on this arm.
+  What differs is how likely the mistake is, not whether the suite would catch
+  it.) Named first, because a divergence that makes a case vacuous is worse
+  than one that makes it strict.
 - **Ordering is a Python `sorted`, so "no ordering at all" is not
   expressible.** The real read's `ORDER BY "position", id` can be deleted and
   Postgres will answer in whatever order the heap holds; the equivalent

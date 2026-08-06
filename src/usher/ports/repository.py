@@ -2899,7 +2899,19 @@ class CuratedRowRepository(ABC):
         `ValueError` rather than `RepositoryConflict`, following
         `SearchRequest`'s refusal of a fused request with no vector: neither
         is the backing store rejecting a write, both are a caller assembling a
-        call that cannot mean anything.
+        call that cannot mean anything. **The trade-off is that a `ValueError`
+        is not a `UsherPortError`**, so a service catching this project's port
+        taxonomy broadly does not catch these two -- and this is the first
+        repository method here to raise a builtin across the port boundary
+        (`SearchRequest` is a DTO, and `postgres.py`'s three are configuration
+        bounds). That is deliberate rather than an oversight: `usher.ports.
+        errors` exists to keep *storage-specific* exception types away from
+        callers, which a builtin does not violate, and every member of it
+        describes something that happened to a request -- an upstream refused,
+        a row conflicted, a payload was malformed. Neither of these is a
+        failure a caller could degrade around or retry; both are the call
+        itself being wrong, and a service that catches them is a service
+        papering over its own bug.
 
         **An empty `rows` is a legitimate and meaningful call, not a no-op.**
         It says "this generation produced nothing", and it must clear the

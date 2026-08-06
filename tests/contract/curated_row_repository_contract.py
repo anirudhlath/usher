@@ -3,12 +3,18 @@
 The port's central decision is that a household's screen is **replaced**, not
 merged, and that the scope of the replacement is the *user* rather than the
 rows being written -- `TitleNeighborRepository.replace`'s argument arriving at
-a third table. Five of the cases below are about that, from five directions,
-and the one that actually kills the wrong scope is the one replacing a
-generation with an **empty** one: every case that replaces a non-empty
-generation with another non-empty generation is satisfied by a delete keyed on
-the rows, because `list_for_user` then hides the survivors behind the
-newest-generation filter rather than reporting them.
+a third table. Five of the cases below are about that, from five directions.
+
+**Exactly two of them can see a wrongly-scoped `DELETE`, and neither sees it
+through `list_for_user` alone.** Measured, not reasoned: re-scoping the delete
+to the ids of the rows being inserted fails
+`test_a_generation_that_produced_nothing_clears_the_screen`, where there is no
+new generation for the survivors to hide behind, and
+`test_a_replacement_drops_the_generation_it_replaced`, on its
+`seeder.count(user_id)` assertion and not on its read. Every other case in
+this suite is satisfied by that delete, because the read returns the newest
+generation and the stale rows are simply stepped over. That is why the seeder
+answers a count at all.
 
 **Every case names the wrong implementation it rules out.** A test whose
 docstring cannot name what it kills is a test that kills nothing.
@@ -241,8 +247,17 @@ class CuratedRowRepositoryContract:
         assert by_position[0].id > by_position[9].id, (
             "the fixture must make id order and position order disagree"
         )
-        assert sorted(by_position.values(), key=lambda row: row.slug) != list(
-            by_position.values()
+        # **Both sides sorted, and the second `sorted` is not redundant.** This
+        # guard was first written as `... != list(by_position.values())`, and
+        # that comparison cannot fail for the defect it names: the dict is
+        # built from `reversed(range(10))`, so its value order is *descending*
+        # position, and "slug order differs from descending position order" is
+        # trivially true. Proved rather than reasoned -- planting the
+        # zero-padded scheme `curated-01`…`curated-10`, which makes slug order
+        # exactly equal ascending position order and is precisely what this
+        # guard exists to catch, left the old spelling green.
+        assert sorted(by_position.values(), key=lambda row: row.slug) != sorted(
+            by_position.values(), key=lambda row: row.position
         ), "the fixture must make slug order and position order disagree"
         shuffled = [by_position[position] for position in (4, 0, 9, 2, 7, 1, 8, 3, 6, 5)]
 
@@ -285,8 +300,10 @@ class CuratedRowRepositoryContract:
     async def test_a_generation_that_produced_nothing_clears_the_screen(
         self, repository: CuratedRowRepository, user_id: uuid.UUID, seeder: CuratedRowSeeder
     ) -> None:
-        """**The case the scope rule exists for**, and the only one in this
-        suite that can see it.
+        """**The case the scope rule exists for**, and one of the two in this
+        suite that can see it -- the other is
+        `test_a_replacement_drops_the_generation_it_replaced`, and it sees it
+        only through the seeder's count.
 
         The wrong implementation this kills: a `DELETE` derived from the rows
         being written -- by their ids, or by their `generation_id` -- rather
@@ -299,9 +316,10 @@ class CuratedRowRepositoryContract:
         `CreditRepository.replace_for_titles` each carry this same case for
         the same reason.
 
-        It is invisible to every case that replaces a non-empty generation
-        with another non-empty one, because the newest-generation read hides
-        the survivors.
+        It is invisible to the *read* of every case that replaces a non-empty
+        generation with another non-empty one, because the newest-generation
+        filter steps over the survivors -- which is what makes the count the
+        sibling case asserts the only other way to see it.
 
         ADR-0028 is why the empty call is legitimate rather than a caller
         error: a validator that ate the whole completion and a model with

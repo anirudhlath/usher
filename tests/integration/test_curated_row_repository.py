@@ -1,11 +1,14 @@
 """`PostgresCuratedRowRepository` against the real database.
 
-The shared contract runs here unchanged, and this is the arm where three of
-its cases are real rather than structural — see
-`tests/fakes/curated_row_repository.py` for the enumerated list. Chiefly:
-`test_a_generation_that_produced_nothing_clears_the_screen` is the only case
-in the suite that can see the delete's *scope*, and against a Python list that
-scope cannot be got wrong.
+The shared contract runs here unchanged, and this is the arm where several of
+its cases are load-bearing rather than structural — see
+`tests/fakes/curated_row_repository.py` for the enumerated list. Chiefly the
+delete's *scope*, which against a Python list cannot be got wrong by accident.
+Two cases see it and neither sees it through the read alone: re-scoping
+`_DELETE_ROWS` to the ids of the rows being inserted fails
+`test_a_generation_that_produced_nothing_clears_the_screen`, which has no new
+generation for the survivors to hide behind, and
+`test_a_replacement_drops_the_generation_it_replaced`, on its seeder count.
 
 Plus the four things a list cannot express: a foreign key, a CHECK constraint,
 the SAVEPOINT that makes a failed generation leave the previous screen whole,
