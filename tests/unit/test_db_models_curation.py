@@ -22,7 +22,6 @@ predicate, or a btree's key direction, so a "tidying" edit to any of them is
 a code change with no migration and nothing else in the suite to see it.
 """
 
-from decimal import Decimal
 from typing import cast
 
 from sqlalchemy import ARRAY, Numeric, Table
@@ -30,7 +29,7 @@ from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 
 from usher.db.models.curation import CuratedRowRow, LLMCallRow
-from usher.domain.curation import CuratedRow, LLMCall, LLMPurpose
+from usher.domain.curation import CuratedRow, LLMCall
 
 
 def test_curated_row_and_curated_row_row_have_matching_field_sets() -> None:
@@ -119,26 +118,43 @@ def test_cost_usd_is_numeric_with_a_scale_that_cannot_round_a_cheap_call_away() 
     (`$3/Mtok x 1,200 in` + `$15/Mtok x 340 out`) round-trips as exactly
     `0.0087`. The full argument, including what the eighth place still costs,
     is in `db/models/curation.py`.
+
+    **Why the eighth place specifically**, since `0.0036` and `0.0087` both
+    stop at the fourth and exhibit nothing about it: a price quoted in cents
+    per million tokens, times an integer token count, divided by 1e6, reaches
+    `decimals(price) + 6`. The extreme this column must hold is
+    `Decimal("0.02") * 1 / 1_000_000`, which is exactly `0.00000002` — eight
+    places, and `0.000000` at scale 6. That is stated here rather than
+    asserted because it is a property of stdlib `decimal` and touches no
+    usher code; where it is genuinely exercised is the round trip through
+    Postgres in `tests/integration/test_curation_schema.py::
+    test_a_sub_cent_cost_round_trips_exactly_as_a_decimal`.
     """
     column_type = LLMCallRow.__table__.c.cost_usd.type
     assert isinstance(column_type, Numeric)
     assert column_type.asdecimal is True
     assert (column_type.precision, column_type.scale) == (12, 8)
-    # The property the numbers are chosen for, restated where a reader who
-    # changes them will see it: a price quoted in cents per million tokens,
-    # times an integer token count, has at most eight decimal places.
-    assert Decimal("3.00") * 1200 / 1_000_000 == Decimal("0.0036")
 
 
 def test_purpose_is_an_enum_column_wide_enough_for_its_longest_member() -> None:
     """`enum_column` compiles to `VARCHAR(length)`, so the length is a real
-    bound rather than documentation: `query_expansion` is 15 characters and a
-    column narrower than that raises `value too long` on the first
-    query-expansion call — a failure that lands in M8's Task 20 rather than
-    in this task, against a table written by Task 10.
+    bound rather than documentation.
 
-    The enum-ness itself is pinned alongside every other enum column in
-    `test_db_models.py`; this case owns the width.
+    **The lower bound is not this case's to defend, and asserting it here was
+    a check that could not fail.** SQLAlchemy's `Enum.__init__` refuses a
+    length below its longest member at import time — verified on 2.0.51,
+    `enum_column(LLMPurpose, length=8)` raises `ValueError: When provided,
+    length must be larger or equal than the length of the longest enum value.
+    8 < 15` before any test runs. So `length >= max(len(member.value) …)` is
+    guaranteed by the constructor, and next to a line pinning the length at 32
+    it was doubly unfalsifiable. The constructor owns the floor; this case
+    owns the specific width.
+
+    32 rather than 16, which is the only wrong length that is *reachable*: it
+    fits both current members, so nothing raises, and it merely disagrees with
+    the migration — caught by `test_migration_matches_the_orm_metadata` as a
+    type diff. The enum-ness itself is pinned alongside every other enum
+    column in `test_db_models.py`.
     """
     column_type = LLMCallRow.__table__.c.purpose.type
     # `.type` is stubbed as the generic `TypeEngine`, which declares no
@@ -146,7 +162,6 @@ def test_purpose_is_an_enum_column_wide_enough_for_its_longest_member() -> None:
     # `enum_column`-not-`String` half of the claim.
     assert isinstance(column_type, SAEnum)
     assert column_type.length == 32
-    assert column_type.length >= max(len(member.value) for member in LLMPurpose)
 
 
 def test_curated_rows_check_constraint_names() -> None:
@@ -236,7 +251,7 @@ def test_llm_calls_ships_no_index_beyond_its_primary_key() -> None:
     `ix_titles_popularity`, dropped one migration ago, is this repository's
     standing example of an index added on the strength of a sentence in a
     document. The two indexes that would be right, and the query each would
-    serve, are written into `m8a`'s docstring so M10 adds them with a
+    serve, are written into `m08a`'s docstring so M10 adds them with a
     measurement rather than rediscovering the argument.
     """
     assert cast(Table, LLMCallRow.__table__).indexes == set()

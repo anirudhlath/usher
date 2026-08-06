@@ -374,7 +374,7 @@ is why the index that eventually serves this join is partial on
 generation is three to five `curated_rows` rows, so that column is not unique
 and must not become so; and any foreign key would make a ledger row deletable
 by a cascade from the thing whose cost it records, when a curated row is
-replaced nightly and the money was still spent. Migration `m8a`.
+replaced nightly and the money was still spent. Migration `m08a`.
 
 `cost_usd` is therefore computed from two configured per-million-token prices
 and **written onto the row**, so a later price change cannot rewrite history.

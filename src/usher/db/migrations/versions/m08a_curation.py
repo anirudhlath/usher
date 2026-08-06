@@ -1,6 +1,6 @@
 """`curated_rows` and `llm_calls` — what a generation produced, and its cost.
 
-Revision ID: m8a
+Revision ID: m08a
 Revises: ffc
 Create Date: 2026-08-05
 
@@ -10,14 +10,32 @@ fixed one hex character per migration; M6's cycle ended at `fc`, M7 spent
 `fd`/`fe`/`ff` and then extended by a character for `ffa`/`ffb`/`ffc`, and no
 hex character sorts after `f`. Extending again (`ffca`, `ffcb`, …) keeps
 sorting correctly and stops saying anything — the ids no longer group, and
-nothing in them says which milestone shipped what. So **M8 opens `m8a`,
-`m8b`, …**: milestone-prefixed, obviously ordered, unbounded, and still `ls`-
+nothing in them says which milestone shipped what. So **M8 opens `m08a`,
+`m08b`, …**: milestone-prefixed, obviously ordered, unbounded, and still `ls`-
 sortable within a milestone, which is the only thing the hex convention ever
 bought. `m` sorts after `f`, so **every M8 revision sorts after every M7 one**
 — verified by listing the versions directory, which is also where you can see
 that a third hex cycle starting with a digit would have sorted *before* `fa`
-and lost that property outright. Recorded in `.claude/rules/db-and-sql.md` in
-this same commit, beside the entry saying the old convention ran out.
+and lost that property outright.
+
+**The milestone number is zero-padded to two digits, and that is the whole of
+why this is `m08a` and not `m8a`.** Unpadded, `sorted(["m8a", "m9a", "m10a"])`
+is `["m10a", "m11a", "m8a", "m9a"]` — `m10a` sorts *first*, because `"1" <
+"8"` and string comparison never reaches the `0`. That is precisely the
+failure this docstring cites one paragraph up as the reason not to start a
+third hex cycle, and it would have arrived one milestone after the convention
+that was sold on avoiding it. M10 is not hypothetical here: it is named five
+times below as the milestone that reads `llm_calls`. Two digits carries to
+M99.
+
+**The general shape, because this is the second instance of it in this
+milestone:** an identifier minted by *counting* and then compared as a
+*string* sorts wrong at the first two-digit value. Task 7 hit the identical
+bug in `curated_rows.slug` — `curated-1 < curated-10 < curated-2` under
+`HomeService`'s `(-score, slug)` tie-break — and it is filed for Task 15. Same
+root cause, two subsystems, one milestone, and both were sold on the ordering
+being obvious. Recorded in `.claude/rules/db-and-sql.md` in this same commit,
+beside the entry saying the old convention ran out.
 
 **Two tables that share no column, no foreign key and no lifetime**, in one
 migration because they are written by one service in one transaction and
@@ -226,7 +244,7 @@ from alembic import op
 
 from usher.db.models.curation import COST_PRECISION, COST_SCALE
 
-revision = "m8a"
+revision = "m08a"
 down_revision = "ffc"
 branch_labels = None
 depends_on = None
@@ -327,9 +345,11 @@ def upgrade() -> None:
         # `VARCHAR(32)` via `native_enum=False`, this schema's only enum
         # spelling -- no `CREATE TYPE`, no membership CHECK, Pydantic owns
         # membership. `query_expansion` is the longest member at 15
-        # characters. PRD 10 writes this column's vocabulary open-ended
-        # ("curation | query_expansion | …"); it is closed here, and a new
-        # call site adds a member to `LLMPurpose` and to PRD 10 in one change.
+        # characters. PRD 10 *wrote* this column's vocabulary open-ended
+        # ("curation | query_expansion | …"); this commit closes it in both
+        # places -- the column here, and the trailing "| …" struck from PRD 10
+        # -- and a new call site now adds a member to `LLMPurpose` and to
+        # PRD 10 in one change.
         sa.Column(
             "purpose",
             sa.Enum("curation", "query_expansion", name="llmpurpose", native_enum=False, length=32),
@@ -380,12 +400,13 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("llm_calls")
-    # The index goes with the table, but it is dropped explicitly first for
-    # the reason `ff`'s downgrade recreates one explicitly: a downgrade that
-    # is only ever exercised through `base` -- where every table is dropped
-    # anyway -- is a downgrade nothing observes. `test_a_full_down_and_up_
-    # cycle_restores_every_index`'s `-1` half asserts this index is gone
-    # after one step back, which is the only state in which the difference
-    # between this body and `pass` is visible at all.
+    # **Not load-bearing, and kept anyway so `downgrade()` mirrors `upgrade()`
+    # statement for statement and a reader can diff the two by eye.**
+    # `op.drop_table` on the next line takes the index with it regardless, so
+    # deleting this line is an equivalent mutation -- unlike `ff`'s downgrade,
+    # where the `create_index` is the only thing that restores the index and
+    # removing it really does leave the schema short. Said explicitly because
+    # the two lines look alike and a future author would otherwise read this
+    # one as necessary.
     op.drop_index("ix_curated_rows_user_newest", table_name="curated_rows")
     op.drop_table("curated_rows")

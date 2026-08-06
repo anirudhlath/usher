@@ -440,7 +440,7 @@ class LLMCallRow(Base):
         # and has no read method, so after M8 this table has **zero** readers
         # in `src/`, and an index nothing reads is `ix_titles_popularity`
         # again -- maintained on every write for a consumer that does not
-        # exist. Both are one `CREATE INDEX` away and `m8a`'s docstring says
+        # exist. Both are one `CREATE INDEX` away and `m08a`'s docstring says
         # so, which is what makes this a deferral rather than a deletion.
         #
         # Not indexed even then: `purpose` and `model`. A deployment holds

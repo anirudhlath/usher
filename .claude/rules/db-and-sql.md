@@ -46,21 +46,39 @@ fourth, fifth and sixth are spelled `ffa`, `ffb`, `ffc`. In order:
 indexes), `ffa` (`genome_scores` + `user_taste`), `ffb`
 (`title_neighbors.blend_fingerprint` — named in advance as the fifth), and
 `ffc` (dropping `ix_titles_popularity`, found by Task 36).
-**M8 opens the replacement, and it is `m8a`, `m8b`, … — milestone-prefixed,
-obviously ordered, unbounded.** Extending the hex ids again (`ffca`, `ffcb`, …)
-would still sort and would stop saying anything: the ids no longer group, and
-nothing in one says which milestone shipped it. `m` sorts after `f`, so every
-M8 revision sorts after every M7 one (verified by listing the directory) —
-which is the only thing the hex convention ever bought (Alembic orders by
-`down_revision` and never cared). `m8a` (`curated_rows` + `llm_calls`) is the
-first and `m8b`
-(the genome tag vocabulary) is planned; the rule for the next milestone is now
-mechanical rather than a decision.
+**M8 opens the replacement, and it is `m08a`, `m08b`, … — milestone-prefixed,
+zero-padded to two digits, unbounded.** Extending the hex ids again (`ffca`,
+`ffcb`, …) would still sort and would stop saying anything: the ids no longer
+group, and nothing in one says which milestone shipped it. `m` sorts after
+`f`, so every M8 revision sorts after every M7 one (verified by listing the
+directory) — which is the only thing the hex convention ever bought (Alembic
+orders by `down_revision` and never cared). `m08a` (`curated_rows` +
+`llm_calls`) is the first and `m08b` (the genome tag vocabulary) is planned;
+the rule for the next milestone is now mechanical rather than a decision:
+`m09a`, then `m10a`.
+
+**The zero-padding is the whole point and must not be "simplified" away.**
+Unpadded, `sorted(["m8a", "m9a", "m10a"])` is `["m10a", "m11a", "m8a", "m9a"]`
+— `m10a` sorts *first*, because `"1" < "8"` and string comparison never
+reaches the `0`. That is exactly the failure this convention replaced the hex
+scheme to avoid, and it would have landed one milestone after the convention
+was introduced. Two digits carries to M99.
+
+**The general shape, because it bit twice in one milestone in two
+subsystems: an identifier minted by *counting* and then compared as a *string*
+sorts wrong at the first two-digit value.** M8 Task 8 shipped `m8a` and had to
+rename it; M8 Task 7 shipped `curated_rows.slug` as `curated-1`, `curated-2`,
+… which `HomeService`'s `(-score, slug)` tie-break orders
+`curated-1 < curated-10 < curated-2` (filed for Task 15). Both were sold on
+the ordering being *obvious*, which is the tell: if an id is going to be
+compared as text, pad it at the point it is minted, or sort on the integer it
+came from rather than on its rendering.
 **`tests/integration/test_migrations.py`'s down/up cycle needs attention from
 every group that adds a migration, and the `-1` half breaking is the design,
 not the defect.** The `-1`-from-head half asserts on whatever the *current*
-head reverses, so it has to be re-pointed every time — Group F did it for
-`ffa`, M7 Task 36 for `ffc`, M8 Task 8 for `m8a`.
+head reverses, so it has to be re-pointed every time. **Four landings, four
+loud breaks** — Group F re-pointed it for `ffa`, `af64ba2` (the `ffb`
+migration itself) for `ffb`, M7 Task 36 for `ffc`, and M8 Task 8 for `m08a`.
 
 **An inherited `-1` assertion that had teeth cannot survive a new head, and
 the failure is always loud.** Having teeth *means* being true at the state
@@ -74,14 +92,14 @@ the part that is easy to get backwards. Measured against the real chain on
 | `-1` lands at | inherited assertion | value there | verdict |
 |---|---|---|---|
 | `ffb` (`-1` from `ffc`) | `ffb`'s **negative** `"blend_fingerprint" not in …` | present | **fails** |
-| `ffc` (`-1` from `m8a`) | `ffc`'s **positive** `"ix_titles_popularity" in …` | absent | **fails** |
+| `ffc` (`-1` from `m08a`) | `ffc`'s **positive** `"ix_titles_popularity" in …` | absent | **fails** |
 
 Both spellings, both loud. The trap is the off-by-one: `-1` from the *new*
 head lands on the **old head's applied state**, not on the old head's parent,
 so an artefact the old head created is present there and one it dropped is
 absent there — in each case the opposite of what the inherited assertion says.
 `ffc.upgrade()` is what drops `ix_titles_popularity`; only `ffc.downgrade()`
-restores it, and `-1` from `m8a` never runs that.
+restores it, and `-1` from `m08a` never runs that.
 
 **So the alarm is a `-1` half that stays green after a new migration lands.**
 That means the assertion it inherited was true at both states, i.e. it never
@@ -91,12 +109,15 @@ defect in the *previous* author's assertion, never in the new migration.
 
 The repair, every time: assert on the new head's own artefact, **in whichever
 direction that head's `downgrade()` establishes** — you do not choose it, a
-creating head gives you `not in` (`m8a`) and a dropping head gives you `in`
+creating head gives you `not in` (`m08a`) and a dropping head gives you `in`
 (`ffc`) — and move the displaced assertion into the revision-pinned block,
 which does not drift. **A table-creating head needs an assertion per table,
-not one** — `m8a` drops `curated_rows` and `llm_calls`, and a `downgrade()`
-that forgets the second passes a single-index check; `llm_calls` carries no
-index beyond its primary key, so `pk_llm_calls` is what stands for it.
+not one** — `m08a` drops `curated_rows` and `llm_calls`, and a `downgrade()`
+that forgets the second passes a check naming only the first; `llm_calls`
+carries no index beyond its primary key, so `pk_llm_calls` is what stands for
+it. Do not pad that block with an assertion an index cannot fail independently
+of its table's primary key — `m08a` shipped one and it was removed as
+redundant.
 Related: `run_alembic` used to infer its direction from the target string, so a
 bare revision id ran `upgrade` — a silent no-op — and it now takes an explicit
 `direction`.
