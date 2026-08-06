@@ -58,6 +58,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
+from usher.adapters.llm import OpenAICompatibleClient
 from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestIndex
 from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
 from usher.config import Settings
@@ -84,6 +85,7 @@ from usher.ports.credentials import CredentialStore
 from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher, NullEventPublisher
 from usher.ports.jobs import JobQueue
+from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
 from usher.ports.repository import (
     CollectionRepository,
@@ -677,6 +679,46 @@ async def embedder(
                 "embedding model unavailable; index jobs will not be claimed: {e}", e=exc
             )
         return None, nothing
+    return built, built.aclose
+
+
+async def llm_client(
+    settings: Settings, *, report: bool = True
+) -> tuple[LLMClient | None, Callable[[], Awaitable[None]]]:
+    """The completion client and the callable that releases it.
+
+    **Deliberately the same shape as `embedder` and `metadata_provider`
+    above**, down to the return type, and for the same reasons: one per
+    process rather than per worker pass, `(None, no-op)` rather than a raise
+    so a deployment without an LLM is *narrowed* rather than unstartable, and
+    this is the one place the degradation is reported.
+
+    **Off by default is the honest default twice over here.** Nine of ten row
+    providers need no model, so `GET /home` is a shorter screen rather than a
+    broken one -- that is `embedding_enabled`'s argument. The second reason is
+    this project's only one of its kind: turning this on sends the household's
+    watch history to whatever `USHER_LLM_BASE_URL` names, which may be a
+    machine the household does not own. A default that curated out of the box
+    would make that something an operator discovers rather than chooses.
+
+    **No lazy import and no extra**, unlike the embedder. There is nothing to
+    import lazily -- the client is httpx, which every entry point already
+    loads -- which is the whole of ADR-0027 arriving as an absence.
+    """
+    if not settings.llm_enabled:
+        if report:
+            logger.warning("no LLM configured; curate jobs will not be claimed")
+        return None, nothing
+
+    built = OpenAICompatibleClient(
+        model=settings.llm_model,
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        max_output_tokens=settings.llm_max_output_tokens,
+        timeout_seconds=settings.llm_timeout_seconds,
+        price_in_per_mtok=settings.llm_price_in_per_mtok,
+        price_out_per_mtok=settings.llm_price_out_per_mtok,
+    )
     return built, built.aclose
 
 

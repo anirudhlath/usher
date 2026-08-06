@@ -1,11 +1,19 @@
 """Application configuration, read from the environment."""
 
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# A local OpenAI-compatible server, because this project's reference
+# deployment is self-hosted. Declared here rather than in
+# `usher.adapters.llm` deliberately: a deployment default is a property of
+# the configuration layer, and `OpenAICompatibleClient` takes `base_url` as a
+# required argument so it holds no opinion about where it is pointed.
+DEFAULT_LLM_BASE_URL = "http://localhost:8000/v1"
 
 # Not a credential -- a placeholder value kept only to detect and reject it.
 # .env.example itself ships USHER_SECRET_KEY= (blank, not this string) so a
@@ -245,6 +253,58 @@ class Settings(BaseSettings):
     # cache, so the variable would be inert there in any case.)
     embedding_offline: bool = True
 
+    # The LLM (PRD 06's curation, PRD 05's query expansion). Read by
+    # `composition.llm_client`, which is the one place any of them is
+    # touched.
+    #
+    # **Off by default, and that is the honest default twice over.** It is
+    # the `embedding_enabled` argument -- a deployment with this off is
+    # *narrowed*, since nine of ten row providers need no model at all -- and
+    # it is also the only setting in this file whose "on" state sends the
+    # household's data to a machine the household may not own. A default that
+    # curated out of the box would make that a thing an operator discovers
+    # rather than chooses.
+    llm_enabled: bool = False
+    # The provider abstraction, and the whole of it (ADR-0027). OpenAI,
+    # OpenRouter, Together, Groq, DeepSeek, Mistral, vLLM, llama.cpp, Ollama
+    # and LM Studio all serve `POST {base_url}/chat/completions`, which is
+    # what makes `litellm` a dependency bought for wire formats reachable
+    # through OpenRouter anyway. **The default is localhost** because this
+    # project's reference deployment is self-hosted; a default naming a hosted
+    # provider would be a default that sends a watch history off the box.
+    llm_base_url: str = Field(default=DEFAULT_LLM_BASE_URL, min_length=1)
+    # `SecretStr`, and `None` is a first-class value: a local vLLM or an
+    # Ollama needs no credential, and sending `Bearer None` is how a client
+    # fails against the deployment this is actually for.
+    llm_api_key: SecretStr | None = None
+    llm_model: str = Field(default="gpt-4o-mini", min_length=1)
+    # The token ceiling on one completion. It is a correctness setting rather
+    # than a cost one: measured, a completion that hits the ceiling under
+    # guided decoding comes back as *valid* JSON with rows missing off the
+    # end, so the adapter refuses `finish_reason == "length"` outright. Five
+    # rows of eight cards with a reason each is ~500 tokens; 2048 is room to
+    # be wrong without paying for a 32k answer nobody reads.
+    llm_max_output_tokens: int = Field(default=2048, ge=256, le=32_768)
+    # A generation is a background job with a whole backoff schedule behind
+    # it, so a long timeout costs a worker pass rather than a request. 120 s
+    # is roughly 20x the slowest measured completion (6.5 s, for the UUID arm
+    # ADR-0028 rejects).
+    llm_timeout_seconds: float = Field(default=120.0, gt=0)
+    # Cost, in dollars per million tokens, because **no provider reports
+    # cost** -- the live `usage` object carries token counts and nothing else,
+    # which is why PRD 10's "litellm reports per-call cost natively" is
+    # corrected. `Decimal`, never `float`: this number is summed over a month
+    # and 1,200 in at $3/Mtok plus 340 out at $15/Mtok is exactly 0.0087.
+    #
+    # Both default to 0, which is the *honest* value for a local model and the
+    # wrong one for a hosted model an operator forgot to price. That failure
+    # is a cost dashboard reading zero, and the mitigation is that
+    # `llm_calls.tokens_in`/`tokens_out` are recorded exactly, so spend is
+    # recomputable from the ledger afterwards. A bundled price table would be
+    # a third-party dataset in the repository.
+    llm_price_in_per_mtok: Decimal = Field(default=Decimal(0), ge=0)
+    llm_price_out_per_mtok: Decimal = Field(default=Decimal(0), ge=0)
+
     # The retrieval half. Every one of these is read by
     # `composition.build_pipeline`, which constructs the two indexes and
     # `SearchService`.
@@ -414,12 +474,21 @@ class Settings(BaseSettings):
             )
         return self
 
-    @field_validator("tmdb_api_key", "otlp_endpoint", mode="before")
+    @field_validator("tmdb_api_key", "otlp_endpoint", "llm_api_key", mode="before")
     @classmethod
     def _blank_to_none(cls, value: object) -> object:
         """An env var that is present but empty (as `.env.example` ships
         `USHER_TMDB_API_KEY=` and `OTEL_EXPORTER_OTLP_ENDPOINT=`) means
-        "not set", not "set to the empty string" — keep `str | None` honest."""
+        "not set", not "set to the empty string" — keep `str | None` honest.
+
+        **`llm_api_key` joined this list because the suite caught it**, and it
+        is the one of the three where the empty string is not merely untidy:
+        a local vLLM or Ollama is configured with no credential at all, so
+        `USHER_LLM_API_KEY=` is the *documented* way to say so — and a
+        `SecretStr("")` is truthy enough to build an `Authorization: Bearer `
+        header, which a permissive server accepts and a strict one rejects
+        with a 401 naming a credential the operator never set.
+        """
         if isinstance(value, str) and value == "":
             return None
         return value

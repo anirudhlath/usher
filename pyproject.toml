@@ -249,7 +249,7 @@ allow_indirect_imports = true
 # The last time that step was skipped, five contracts reported KEPT against a
 # violation none of them constrained.
 [[tool.importlinter.contracts]]
-name = "no concrete search or embedding implementation escapes its package"
+name = "no concrete search, embedding or LLM implementation escapes its package"
 type = "forbidden"
 source_modules = [
     "usher.domain",
@@ -258,5 +258,13 @@ source_modules = [
     "usher.api",
     "usher.db",
 ]
-forbidden_modules = ["usher.adapters.search", "usher.adapters.embedding"]
+forbidden_modules = [
+    "usher.adapters.search",
+    "usher.adapters.embedding",
+    # M8. `OpenAICompatibleClient` is exactly the class ADR-0027 says may one
+    # day be joined by a `LiteLLMClient` -- the ADR closes with "cheap to
+    # reverse", and this contract is what makes that true of the code rather
+    # than only of the argument.
+    "usher.adapters.llm",
+]
 allow_indirect_imports = true
