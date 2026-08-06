@@ -507,3 +507,22 @@ demonstrate. Worth knowing in both directions: it is a legitimate
 equivalent-mutant control for a transactional repository, and it is a reason a
 fake's divergence list needs an entry for where the fake is **stricter**, not
 only for where it is more forgiving.
+
+**A premise guard is an assertion like any other, and one of M8 Task 9's could
+not fail.** Found 2026-08-06 in review. `CLAUDE.md` requires every ordering
+case to assert its own premise (`assert far_id < near_id`), and the ordering
+case for `list_for_user` guarded its slug premise as
+`sorted(rows, key=slug) != list(by_position.values())` — where `by_position`
+was built from `reversed(range(10))`, so the right-hand side is *descending*
+position order and "slug order differs from descending position order" is
+trivially true. Planting the defect the guard names — the zero-padded scheme
+`curated-01`…`curated-10`, which makes slug order exactly equal ascending
+position order — left it green. The spelling with teeth compares two `sorted`
+calls, one per key. **The rule that generalises: the premise guards exist
+because a fixture's alignment is the thing nobody re-checks, which makes them
+the assertions most likely to be trusted and least likely to be exercised — so
+plant the defect each one names and watch it fail, exactly as for the case's
+own assertions.** Note the failure mode is quiet rather than loud: the case
+still killed `ORDER BY slug` through its final assertions, so a dead guard does
+not break anything today, it just stops being the thing that notices when a
+later fixture change re-aligns the two orders.
