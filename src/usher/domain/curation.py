@@ -20,8 +20,9 @@ prevent rather than trusting it to have run.
 import uuid
 from decimal import Decimal
 from enum import StrEnum
+from typing import Self
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, model_validator
 
 from usher.domain.base import DomainModel
 
@@ -152,19 +153,34 @@ class LLMCall(DomainModel):
     # that produces no rows at all -- query expansion is one.
     generation_id: uuid.UUID | None = None
 
-    def model_post_init(self, _context: object) -> None:
-        """`ok` and `error` must agree.
-
-        A failed call with no error is a row an operator cannot act on, and a
-        successful call carrying one reads as a failure in every `WHERE error
+    @model_validator(mode="after")
+    def _ok_and_error_must_agree(self) -> Self:
+        """A failed call with no error is a row an operator cannot act on, and
+        a successful call carrying one reads as a failure in every `WHERE error
         IS NOT NULL` anybody will write. Enforced here rather than as a CHECK
         alone, because the model is what the service constructs and the CHECK
         would report it one layer too late.
+
+        **`model_validator(mode="after")` and deliberately not
+        `model_post_init`, which is what this was.** They differ on exactly one
+        input and it is the one the test suite needs:
+        `model_construct` **skips a validator and runs a post-init hook**. Five
+        existing cases across the repository build an otherwise-unconstructible
+        row with `model_construct` precisely so the *database* CHECK is what
+        rejects it, proving the constraint is real rather than trusting pydantic
+        to have run first -- and the paragraph above promises such a CHECK on
+        `llm_calls`. Under `model_post_init` that case is unwritable for this
+        one table, because the model refuses to be built wrong even on purpose.
+        `WatchState._exactly_one_of_title_or_episode` is the sibling with this
+        same "two fields must agree" shape and it is spelled this way; the
+        second, smaller reason is that a post-init hook raises a bare
+        `ValueError` where every other model here raises `ValidationError`.
         """
         if self.ok and self.error is not None:
             raise ValueError("a successful call carries no error")
         if not self.ok and not self.error:
             raise ValueError("a failed call must say what went wrong")
+        return self
 
 
 __all__ = ["CuratedRow", "LLMCall", "LLMPurpose"]

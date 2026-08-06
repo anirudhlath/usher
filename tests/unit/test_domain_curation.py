@@ -249,19 +249,29 @@ def test_a_row_with_nothing_to_explain_carries_none_and_not_an_empty_string() ->
     assert _row(reason="").reason == ""
 
 
-def test_an_empty_slug_title_or_model_name_is_rejected() -> None:
-    """Kills dropping `min_length=1` from the three text columns.
+def test_an_empty_text_column_is_rejected_on_either_model() -> None:
+    """Kills dropping `min_length=1` from any of the four text columns.
 
-    An empty `slug` is the sharpest of the three and has the shape of
-    `Job.key`'s: `RowCache` is keyed `(user_id, slug)`, so every curated row of
-    a household would collapse onto one entry -- five rows becoming one, with
-    the survivor chosen by write order. An empty `title` is a heading with no
-    text above a real shelf, and an empty `model_name` is what makes "these rows
-    were written by a model we no longer run" unanswerable.
+    An empty `slug` is the sharpest and has the shape of `Job.key`'s:
+    `RowCache` is keyed `(user_id, slug)`, so every curated row of a household
+    would collapse onto one entry -- five rows becoming one, with the survivor
+    chosen by write order. An empty `title` is a heading with no text above a
+    real shelf, and an empty `model_name` is what makes "these rows were written
+    by a model we no longer run" unanswerable.
+
+    **`LLMCall.model` is the fourth and it is covered here rather than left to
+    its twin**, which is how it went uncovered: this case looped over
+    `CuratedRow`'s three, so deleting the identical constraint on the ledger
+    passed the whole file. The argument lands harder there. `model_name` on a
+    row answers a question an operator asks occasionally; `GROUP BY model` on
+    `llm_calls` **is** PRD 10's cost panel, so an empty one puts real spend in
+    an unlabelled bucket that no per-model price can ever be applied to.
     """
     for blank in ("slug", "title", "model_name"):
         with pytest.raises(ValidationError):
             _row(**{blank: ""})
+    with pytest.raises(ValidationError):
+        _call(model="")
 
 
 def test_a_generated_at_without_a_timezone_is_rejected() -> None:
@@ -324,9 +334,14 @@ def test_an_llm_call_carries_prd_10s_columns() -> None:
     makes dashboard 5's "cost per curated row" a join against `curated_rows`
     rather than a correlation on timestamps.
     """
-    generation = uuid.uuid4()
-    call = _call(generation_id=generation)
-    assert isinstance(call.id, uuid.UUID)
+    call_id, generation = uuid.uuid4(), uuid.uuid4()
+    call = _call(id=call_id, generation_id=generation)
+    # Distinct values asserted by identity, for `CuratedRow`'s reason one model
+    # up: `id` and `generation_id` are both `uuid.UUID`, so an `isinstance`
+    # check ratifies a model that aliased one onto the other -- and this pair
+    # aliased is the one that breaks the ledger's whole purpose, since
+    # `generation_id` is what dashboard 5 joins `curated_rows` on.
+    assert call.id == call_id
     assert call.at.tzinfo is not None
     assert call.model == "gemma-4-26b-a4b"
     assert call.purpose is LLMPurpose.CURATION
@@ -342,7 +357,7 @@ def test_an_llm_call_carries_prd_10s_columns() -> None:
 def test_the_two_legal_states_of_the_ledger_are_both_constructible() -> None:
     """The control for the two refusals below.
 
-    Without it, `model_post_init` raising unconditionally passes both of them --
+    Without it, `_ok_and_error_must_agree` raising unconditionally passes both of
     a guard that refuses everything is indistinguishable from a guard that
     refuses the right things, judged only by what it rejects.
     """
@@ -351,7 +366,7 @@ def test_the_two_legal_states_of_the_ledger_are_both_constructible() -> None:
 
 
 def test_a_successful_call_carries_no_error() -> None:
-    """Kills inverting or deleting the first `model_post_init` clause.
+    """Kills inverting or deleting the first `_ok_and_error_must_agree` clause.
 
     A success carrying an error string reads as a failure in every `WHERE error
     IS NOT NULL` anybody will write against this table, which is the first query
@@ -362,7 +377,8 @@ def test_a_successful_call_carries_no_error() -> None:
 
 
 def test_a_failed_call_must_say_what_went_wrong_and_an_empty_string_does_not() -> None:
-    """Kills deleting the second `model_post_init` clause, and kills weakening
+    """Kills deleting the second `_ok_and_error_must_agree` clause, and kills
+    weakening
     it from `not self.error` to `self.error is None`.
 
     The second mutation is the one that survives a carelessly written case. A
@@ -378,11 +394,58 @@ def test_a_failed_call_must_say_what_went_wrong_and_an_empty_string_does_not() -
         _call(ok=False, error="")
 
 
+def test_model_construct_can_still_build_the_row_the_validator_refuses() -> None:
+    """**The escape hatch is deliberate, and it is why this invariant is a
+    `model_validator(mode="after")` rather than a `model_post_init`.**
+
+    Kills spelling it as `model_post_init`, which is what it was. The two hooks
+    agree on every input except this one: `model_construct` bypasses validators
+    and *runs* post-init hooks, so under the old spelling the line below raised
+    and this case could not be written at all.
+
+    That matters because of what the other side of the boundary owes. This
+    invariant is enforced twice on purpose -- here, where the service builds the
+    row, and again as a CHECK on `llm_calls`, because a model is not a
+    constraint and nothing stops a future writer reaching the table another way.
+    Proving the CHECK is real means presenting the database with a row pydantic
+    would have refused, and `model_construct` is the only way to make one.
+    Five cases across this repository already do exactly that
+    (`test_sync_run_repository.py`, `test_episode_repository.py`,
+    `test_person_repository.py`, `test_credit_repository.py`), which is what
+    makes this the house style rather than a preference --
+    `WatchState._exactly_one_of_title_or_episode` is the sibling with this same
+    shape and is spelled the same way.
+
+    So this case is not asserting that an invalid `LLMCall` is acceptable. It
+    is asserting that one can be *manufactured*, so that Task 8's integration
+    suite can watch Postgres reject it rather than trusting that pydantic ran
+    first.
+    """
+    smuggled = LLMCall.model_construct(
+        id=uuid.uuid4(),
+        at=datetime.now(UTC),
+        model="gemma-4-26b-a4b",
+        purpose=LLMPurpose.CURATION,
+        tokens_in=1,
+        tokens_out=0,
+        cost_usd=Decimal("0"),
+        latency_ms=1,
+        ok=False,
+        error=None,
+        generation_id=None,
+    )
+    assert (smuggled.ok, smuggled.error) == (False, None)
+    # And the ordinary constructor still refuses the identical field set, so
+    # the hatch is the only way in rather than a hole in the invariant.
+    with pytest.raises(ValidationError):
+        _call(ok=False, error=None)
+
+
 def test_a_call_that_answered_perfectly_and_kept_nothing_is_a_failure() -> None:
     """**ADR-0028 rule 3, which is why `ok` is not "the HTTP call returned
     200".**
 
-    Kills any reading of `ok` as transport health -- a `model_post_init` clause
+    Kills any reading of `ok` as transport health -- a validator clause
     tying `ok = false` to a zero cost or zero output tokens, which is the shape
     "a failed call cost nothing" takes when someone writes it down.
 
@@ -428,18 +491,22 @@ def test_cost_is_a_decimal_because_a_month_of_these_is_summed() -> None:
     """Kills `cost_usd: float`.
 
     $3/Mtok on 1,200 tokens is exactly 0.0036, which binary floating point
-    cannot represent -- so the assertion that has teeth is not the `isinstance`
-    but the sum. A thousand calls at that price is exactly $3.60 and `float`
-    answers 3.60000000000004 -- measured, not asserted -- which is a cost
-    dashboard that disagrees with itself depending on how the rows were grouped,
-    and a total that never equals the sum of its own monthly subtotals.
+    cannot represent -- so the assertion is the *sum*, and there is deliberately
+    no `isinstance` above it. There was, and it shadowed this: under
+    `cost_usd: float` the case died on the type check and the line that makes
+    the argument never ran. A thousand calls at that price is exactly $3.60 and
+    `float` answers 3.60000000000004 -- measured, not asserted -- which is a
+    cost dashboard that disagrees with itself depending on how the rows were
+    grouped, and a total that never equals the sum of its own monthly subtotals.
+    Standing alone, the sum kills the mutation on
+    `TypeError: unsupported operand type(s)`, which is the failure that names
+    the wrong implementation.
 
     `Decimal` is pinned on the port too (`test_llm_usage_cost_is_decimal_not_
     float`), and this is the end of that chain: `LLMUsage.cost_usd` is what gets
     written here.
     """
     call = _call(cost_usd=Decimal("0.0036"))
-    assert isinstance(call.cost_usd, Decimal)
     assert sum((call.cost_usd for _ in range(1000)), Decimal(0)) == Decimal("3.60")
 
 
@@ -516,7 +583,7 @@ def test_an_llm_call_is_frozen_and_refuses_an_unknown_field() -> None:
     `extra="forbid"` earns its keep here on the field pair this model exists to
     keep honest: `LLMCall(..., ok=False, err="...")` -- the abbreviation -- would
     otherwise construct a failed call with `error=None`, which is the exact row
-    `model_post_init` refuses, arriving past it through a typo.
+    `_ok_and_error_must_agree` refuses, arriving past it through a typo.
     """
     call = _call()
     with pytest.raises(ValidationError):
@@ -566,7 +633,13 @@ def test_the_purpose_a_port_caller_imports_is_the_one_a_domain_model_types() -> 
 
     `is` rather than `==`: these are `StrEnum` members, so two independent
     declarations compare **equal** on value and would pass an `==` assertion
-    while still being different objects with different identities.
+    while still being different objects with different identities. The
+    member-level consequence (`ports.LLMPurpose.CURATION is not
+    domain.LLMPurpose.CURATION`) is what actually bites, and it is stated here
+    rather than asserted: under the re-declaration the module-level check
+    already fails, and under the correct implementation the member check is the
+    tautology `X.CURATION is X.CURATION`. There is no implementation that fails
+    one without the other, so it was a line that could never carry the case.
 
     The layering half of this needs no case: `lint-imports`' `hexagonal
     layering` contract already refuses `usher.domain -> usher.ports`, verified
@@ -581,9 +654,9 @@ def test_the_purpose_a_port_caller_imports_is_the_one_a_domain_model_types() -> 
     declare public reads as an accident to whoever tidies next.
     """
     import usher.domain.curation as domain_module
+    import usher.ports.llm as port_module
     from usher.ports.llm import LLMPurpose as PortLLMPurpose
 
     assert PortLLMPurpose is LLMPurpose
-    assert PortLLMPurpose.CURATION is LLMPurpose.CURATION
     assert "LLMPurpose" in domain_module.__all__
-    assert "LLMPurpose" in __import__("usher.ports.llm", fromlist=["__all__"]).__all__
+    assert "LLMPurpose" in port_module.__all__
