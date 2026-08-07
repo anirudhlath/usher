@@ -167,9 +167,10 @@ async def test_a_parked_generation_is_accepted_and_left_parked(
     because `FakeJobQueue.enqueue` skips a `PARKED` row before it reaches the
     promotion branch. So this is the one shape of "accepted" that delivers
     *nothing* until an operator intervenes, which is why the route's docstring
-    names it and why the response deliberately carries no priority: a body
-    saying `100` over a row still sitting at `('parked', 100)`... would be
-    describing a request rather than the queue.
+    names it and why the response deliberately carries no priority --
+    `usher.api.dto.rows` is where that argument lives, and the short form is
+    that the route never reads the row back, so any priority it printed would
+    be the one it sent.
 
     Teeth in two directions: a route that worked around the park (a second
     enqueue at a higher priority, a `fail`/`clear` dance) fails on the status,
@@ -304,7 +305,6 @@ async def test_an_unreachable_queue_is_not_translated_into_a_503(unreachable: Fa
             response = await connected.post(ROUTE)
 
     assert response.status_code == 500
-    assert response.status_code != 503
 
 
 def test_the_regenerate_module_holds_no_llm_client_and_has_no_503_to_give() -> None:
@@ -323,6 +323,23 @@ def test_the_regenerate_module_holds_no_llm_client_and_has_no_503_to_give() -> N
     *No 503.* There is no status code and no `status.HTTP_503_*` member in the
     module, so the deferral of PRD 07's RFC 9457 envelope is a property of the
     code and not of the cases above.
+
+    **What a name list cannot do, and what covers it.** This scan is only ever
+    as complete as the tuple below, and the tuple had a reachable hole:
+    `usher.composition.build_curation_service` is the one public factory in
+    `src/` whose entire job is to return a `CurationService` holding an
+    `LLMClient`, and it is spelled with none of these words -- a router doing
+    `from usher.composition import build_curation_service` passed this case,
+    every other contract, mypy and both suites. `CurationServiceDep` is caught
+    here only because `CurationService` is a substring of it, so a rename to
+    `CuratorDep` would be silent too. Both holes are closed by
+    `pyproject.toml`'s eighth import contract, which forbids *every* router
+    from naming `usher.composition`, `usher.services.curation` or
+    `usher.ports.llm`. Neither check replaces the other: the contract is a
+    property of the import graph and says nothing about what a module does
+    with what it imported, and this scan reads one module's own text -- it
+    sees `503` and `SERVICE_UNAVAILABLE`, which no import graph can, and it
+    sees only the module it is pointed at.
 
     The name scan runs over the module with its **docstrings removed**, the way
     `tests/unit/test_rows_curated.py::test_the_curated_module_holds_no_llm_client_and_cannot_complete_anything`

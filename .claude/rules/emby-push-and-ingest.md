@@ -698,7 +698,7 @@ uv run pytest tests/unit                         # 1319 passed + 1 skipped, no D
 uv run pytest tests/unit/test_adapters_emby_contract.py  # the contract suite against the real adapter
 uv run mypy src tests                            # strict, including tests/
 uv run ruff check --no-cache . && uv run ruff format --check .
-uv run lint-imports                              # 7 kept, 0 broken
+uv run lint-imports                              # 8 kept, 0 broken
 
 # Register a source and read its health, against a running app:
 curl -sS -X POST http://localhost:8000/admin/sources \

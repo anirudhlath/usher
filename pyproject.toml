@@ -268,3 +268,56 @@ forbidden_modules = [
     "usher.adapters.llm",
 ]
 allow_indirect_imports = true
+
+# M8. PRD 06's *"Generation happens in a background job -- never in the request
+# path"*, as a property of the import graph rather than of a name list.
+#
+# `tests/unit/test_api_rows.py` and `tests/unit/test_rows_curated.py` already
+# scan their own module for `LLMClient`, `CurationService` and friends, and a
+# name scan is the right shape there -- behaviour cannot distinguish "never
+# reached an LLM" from "reached one and swallowed the failure". But a name scan
+# is only ever as complete as its list, and the list had a reachable hole:
+# `composition.build_curation_service` is the one public factory in `src/`
+# whose entire job is to return a `CurationService` holding an `LLMClient`
+# (`composition.py` calls it exactly that way when it registers the `curate`
+# handler), and it is spelled with none of the forbidden words. A router doing
+#
+#     from usher.composition import build_curation_service
+#
+# was planted and passed every gate step -- ruff, mypy, all seven contracts
+# above, and both suites. `api/deps.py` already imports from
+# `usher.composition`, so that is the door somebody adding in-request
+# generation reaches for, not a hypothetical one. The same hole swallows a
+# rename: the scan catches `CurationServiceDep` only because the string
+# `CurationService` is inside it, and `CuratorDep` would be silent.
+#
+# `usher.composition` is deliberately absent from every contract above (see the
+# comment on the previous one), so nothing constrained this at all. Naming it
+# here closes that for the one package where an in-request completion would
+# actually be bought.
+#
+# `allow_indirect_imports` is load-bearing for the reason it is on the two
+# contracts above, and this contract does not hold without it: every router
+# imports `usher.api.deps`, which is the API's composition root and imports
+# `usher.composition` on purpose, so `usher.api.routers.health ->
+# usher.api.deps -> usher.composition` is an indirect chain a forbidden
+# contract reports by default. Measured: without the flag this contract is
+# BROKEN at HEAD on three chains through `api/deps.py` and `api/lanes.py`,
+# which is the reverse of what it is for. With it, the line drawn is the one
+# that matters -- a router may reach a service through a dependency, and may
+# not *name* the wiring, the curation service or the LLM port itself.
+#
+# Verified in both directions: KEPT at HEAD, and BROKEN on each of the three
+# forbidden modules planted directly (`usher.composition` in
+# `routers/rows.py`; `usher.services.curation` and `usher.ports.llm` in
+# `routers/home.py`, which no name scan in the suite covers at all).
+[[tool.importlinter.contracts]]
+name = "no router names the wiring, the curation service or the LLM port"
+type = "forbidden"
+source_modules = ["usher.api.routers"]
+forbidden_modules = [
+    "usher.composition",
+    "usher.services.curation",
+    "usher.ports.llm",
+]
+allow_indirect_imports = true

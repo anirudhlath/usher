@@ -1257,3 +1257,28 @@ check is not this task's and neither is currently wrong. **The general form,
 which is the reusable half: a guard that scans source *text* has two failure
 modes and this repository had only written down the first — prose that trips
 it, and prose that answers it.**
+
+**A third failure mode of the same guard, found 2026-08-07 reviewing M8 Task
+17: a forbidden-name list is only as complete as the list, and the escape was
+a public factory.** `tests/unit/test_api_rows.py` forbids the regenerate route
+from naming `LLMClient`, `complete_json`, `LLMUsage`, `CurationService`, `503`
+or `SERVICE_UNAVAILABLE`, and rejects an imported module with an `llm` dotted
+part. `composition.build_curation_service` — the one public factory in `src/`
+whose entire job is to return a `CurationService` holding an `LLMClient` — is
+spelled with none of those. A router doing `from usher.composition import
+build_curation_service` was planted and **passed all five gate steps**: ruff,
+`ruff format --check`, mypy over 434 files, all seven import contracts, 2,789
+unit / 4 skipped and 882 integration / 8 skipped. (One incidental: the plant
+has to go in its isort position or ruff answers `I001`, so the *careless*
+version of this defect is caught by the formatter and the careful one is not —
+which is the wrong way round for a guard to behave.) The same hole swallows a
+rename:
+`CurationServiceDep` is caught only because `CurationService` is a substring of
+it, and `CuratorDep` would be silent. Closed by an eighth import contract
+(`.claude/rules/api-telemetry-and-lanes.md` has the graph reasoning and the
+`allow_indirect_imports` measurement), because a graph property covers every
+router rather than the one module a scan is pointed at. **Neither check
+subsumes the other** — the contract cannot see `503`, and the scan cannot see a
+router nobody wrote a case for — so the rule is: *when a structural guard is
+the whole argument for a claim, ask what the claim's own subject is named
+elsewhere in `src/`, and prefer a graph property wherever one is expressible.*

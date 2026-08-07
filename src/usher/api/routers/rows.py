@@ -19,9 +19,11 @@ that a reader can still act on -- see `usher.api.dto.rows` for the columns
 deliberately absent and what each of them would misstate.
 
 **It does not promise that a completion will be bought, and there is no return
-value here that could.** Three measured behaviours of `_ENQUEUE`, all in
-`usher.domain.jobs.JobKind.CURATE` and pinned by
-`tests/integration/test_job_queue.py`:
+value here that could.** Four measured behaviours of `_ENQUEUE` -- the first
+three in `usher.domain.jobs.JobKind.CURATE`, pinned by
+`tests/integration/test_job_queue.py`; the fourth pinned at this route, in
+`tests/integration/test_rows_route.py`, because it is a consequence of the
+priority this route sends and of no other:
 
 - **A repeat at the same priority writes 0 rows and is coalesced**, which is
   PRD 06's *"one modest completion per user per day"* working. The 202 is the
@@ -42,6 +44,22 @@ value here that could.** Three measured behaviours of `_ENQUEUE`, all in
   releases it. This is the shape of "accepted" that delivers nothing, and the
   channel that shows it is `usher sync-status` and PRD 10's
   `usher.jobs.parked{kind="curate"}`, not this response.
+- **A repeat does not repoint the trace link, and from this route it never
+  can.** `_ENQUEUE` sets `traceparent = COALESCE(excluded.traceparent,
+  jobs.traceparent)` *inside* the `DO UPDATE` gated on `jobs.priority <
+  excluded.priority`. The statement names that cost and offers exactly one
+  escape from it -- *"a demand promotion (M5) raises the priority and
+  therefore does write"* -- and **that escape is unavailable here**, because
+  `DEMAND` is the top of the scale, so a repeat from this route can never
+  promote and therefore never rewrites the link. Every press after the first
+  is traced to a span the row does not reference: the worker links back to
+  whichever press *created* the row, minutes or hours earlier. That is the
+  first bullet seen from telemetry rather than a second defect -- the run that
+  happens is the one the first press asked for, so the link it carries is the
+  correct one for the work being done -- but it means the trace is not a
+  channel for "did the press I just made do anything". Pinned by
+  `tests/integration/test_rows_route.py::test_asking_twice_writes_nothing_the_second_time`,
+  which already observes the unchanged `updated_at` this follows from.
 
 ## `USHER_LLM_ENABLED=false` still answers 202, and the route does not look
 
@@ -62,11 +80,13 @@ purpose: `tests/unit/test_config.py::test_every_setting_is_read_by_something`
 scans `src/` for `.<field>`, so prose spelling it that way satisfies that
 check on behalf of a reader which, here, does not exist.)
 
-The cost is real and is stated rather than hidden: an operator who disabled
-the LLM everywhere and then asks for a regeneration gets an accepted request
-and a row nothing will ever claim. Two things keep that from being silent, and
-neither is a status code. It is **one row, not a leak** -- `(kind, key)` is
-unique, so pressing the button a hundred times leaves one. And it shows up as
+The cost is real and is stated rather than hidden: a deployment that has not
+enabled the LLM -- **which is the shipped default** (`usher.config`), so this
+is what the button does out of the box rather than something an operator has
+to arrange first -- answers 202 to a regeneration and leaves a row nothing will
+ever claim. Two things keep that from being silent, and neither is a status
+code. It is **one row, not a leak** -- `(kind, key)` is unique, so pressing the
+button a hundred times leaves one. And it shows up as
 PRD 10's `usher.jobs.queued{kind="curate"}` never returning to zero, which is
 the series that gauge exists to carry: `depth()` promises a key per kind for
 exactly this reason, because a gauge that stops reporting a series is
@@ -146,9 +166,16 @@ async def regenerate_rows(queue: JobQueueDep, user_id: DefaultUserIdDep) -> Rege
                 # The same rung `api/routers/titles.py`'s demand promotion uses
                 # (`services/titles.py`): a human is waiting on this, so it goes
                 # in front of the nightly sweep. Promote-never-demote means it
-                # also lifts a `curate` job some background enqueue left at a
-                # lower rung, which is the behaviour an operator pressing this
-                # button is asking for.
+                # would also lift a `curate` job a *future* background enqueue
+                # had left at a lower rung -- future deliberately, because no
+                # such producer exists: this is the only site in `src/` that
+                # enqueues the kind at all, `usher curate` generates directly
+                # rather than enqueueing, and nothing schedules it -- the
+                # nightly run is an operator's cron entry invoking that
+                # command, the way `usher similar --rebuild` already is. So
+                # the promotion is the behaviour an operator pressing this
+                # button would be asking for, not one anything can exercise
+                # today.
                 priority=JobPriority.DEMAND,
                 # PRD 10's "why did the title I just opened take 45 seconds",
                 # for the one kind whose answer is measured in dollars: the

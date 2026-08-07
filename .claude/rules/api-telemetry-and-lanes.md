@@ -192,6 +192,25 @@ chains by default (unlike contract six's `allow_indirect_imports = true`).
 Verified by planting `from usher.composition import Pipeline` in
 `usher/services/push.py`: **4 kept, 2 broken.**
 
+**That argument covers the core layers and does not cover `usher.api`, which
+M8 had to close with an eighth contract (2026-08-07).** Contracts two and
+three are sourced at `usher.domain`, `usher.ports` and `usher.services` only,
+so the indirect chain that catches a core module reaching `usher.composition`
+does not exist for a router — and `usher.api` is a composition root, so it is
+*allowed* to reach `usher.db` and `usher.adapters` directly. A router doing
+`from usher.composition import build_curation_service` (the one public factory
+in `src/` that returns a `CurationService` holding an `LLMClient`) therefore
+passed all seven contracts, ruff, mypy and both suites — planted and measured.
+The eighth contract forbids `usher.api.routers` from naming
+`usher.composition`, `usher.services.curation` or `usher.ports.llm`.
+**It requires `allow_indirect_imports = true` and does not hold without it**:
+every router imports `usher.api.deps`, which is the API's composition root and
+imports `usher.composition` on purpose, so unflagged the contract is BROKEN at
+HEAD on three chains through `api/deps.py` and `api/lanes.py`. With the flag
+the line drawn is the intended one — a router may *reach* the wiring through a
+dependency and may not *name* it. Verified BROKEN on each of the three
+forbidden modules planted directly, in `routers/rows.py` and `routers/home.py`.
+
 Verified working as of Group F (telemetry bootstrap, FastAPI app with health
 endpoints, then hardened in a follow-up review pass) — the app is now a
 runnable service:

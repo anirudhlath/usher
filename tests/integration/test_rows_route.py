@@ -185,6 +185,19 @@ async def test_asking_twice_writes_nothing_the_second_time(
     The 202 is unconditional on all of that, which is the other half: an
     operator pressing the button twice has not made a mistake, and `enqueue`
     cannot tell this request from the first anyway.
+
+    **`traceparent` is asserted unchanged for the same reason, and it is the
+    consequence this route's docstring had to grow a fourth bullet for.**
+    `traceparent = COALESCE(excluded.traceparent, jobs.traceparent)` sits
+    inside that same `DO UPDATE`, and `_ENQUEUE`'s own comment names the one
+    escape from it -- *"a demand promotion (M5) raises the priority and
+    therefore does write"*. This route always enqueues at `DEMAND`, the top of
+    the scale, so that escape is unreachable here and no repeat can ever
+    repoint the link: the worker's span links back to whichever press created
+    the row, not to the one an operator just made. That is not a defect --
+    the run that happens *is* the first press's -- but it is a property the
+    `updated_at` assertion above already forces and nothing stated, which is
+    the shape of thing that gets rediscovered as a surprise.
     """
     first = await client.post(ROUTE)
     before = await _curate_rows(sessions)
@@ -197,6 +210,10 @@ async def test_asking_twice_writes_nothing_the_second_time(
     assert len(after) == 1, "two requests for one household are one row"
     assert after[0].updated_at == before[0].updated_at, (
         "the repeat rewrote the row, so `WHERE jobs.priority < excluded.priority` is not holding"
+    )
+    assert before[0].traceparent is not None, "the first press left no link to repoint"
+    assert after[0].traceparent == before[0].traceparent, (
+        "the repeat repointed the trace link, which a request at `DEMAND` cannot do"
     )
 
 

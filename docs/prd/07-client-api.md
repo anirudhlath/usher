@@ -250,6 +250,18 @@ be added if a client turns out to need flexible field selection.
 > `priority` and the row count are all absent from the body for the same
 > reason: each would be describing the request and calling it the queue.
 >
+> **A fourth consequence, for anyone reading a trace rather than a response:**
+> the row's `traceparent` is rewritten only by an enqueue that *raises* the
+> priority, and this route always asks for `DEMAND`, which is the top of the
+> scale. A repeat therefore never repoints the link, and the worker's span
+> links back to whichever press created the row — minutes or hours before the
+> press an operator may be trying to follow. That is the coalescing above seen
+> from telemetry rather than a second behaviour: the generation that runs is
+> the one the first press asked for, so the link it carries is right for the
+> work being done. It does mean a trace is not the channel for "did the press
+> I just made do anything"; `usher sync-status` and
+> [10](10-telemetry-and-dashboards.md)'s queue gauges are.
+>
 > **`USHER_LLM_ENABLED=false` still answers 202, and the route reads no setting
 > at all.** A deployment with the LLM disabled registers no `curate` handler,
 > so the job is enqueued and stays `pending` — the same shape `JobKind.INDEX`
@@ -261,10 +273,12 @@ be added if a client turns out to need flexible field selection.
 > deployment — [08](08-operations.md) describes exactly that split,
 > `USHER_WORKER_ENABLED=false` on the server and a second container running
 > `usher work` — and a route consulting the setting would refuse exactly that
-> shape on evidence it does not have. The cost is real and is not hidden: an
-> operator who disabled the LLM everywhere gets an accepted request nothing
-> will claim. It is **one row, not a leak** — `(kind, key)` is unique — and it
-> is visible as [10](10-telemetry-and-dashboards.md)'s
+> shape on evidence it does not have. The cost is real and is not hidden: a
+> deployment that has not enabled the LLM — **which is the shipped default**,
+> so this is what the button does out of the box rather than something an
+> operator has to arrange — gets an accepted request nothing will claim. It is
+> **one row, not a leak** — `(kind, key)` is unique — and it is visible as
+> [10](10-telemetry-and-dashboards.md)'s
 > `usher.jobs.queued{kind="curate"}` never returning to zero, which is the
 > series `JobQueue.depth()` promises a key per kind in order to carry.
 
