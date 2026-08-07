@@ -269,6 +269,15 @@ class TitleRepository(ABC):
         that, over the ids this returns, because the two questions have
         different bounds and folding them together would make the limit mean
         something different on every household.
+
+        ⚠️ **`list_unwatched_candidates` below deliberately does the opposite,
+        and this cross-reference exists so neither sentence is read as the
+        rule.** The argument in the paragraph above is about *this* `limit`,
+        which is a candidate budget feeding a 20-card row; there `limit` **is**
+        the answer's size, so a watched-filter applied after it shrinks the
+        result most for the household with the most history, and a caller
+        cannot repair that without an unbounded over-read. Same two questions,
+        opposite correct answers, because the two limits mean different things.
         """
 
     @abstractmethod
@@ -326,14 +335,33 @@ class TitleRepository(ABC):
           the read is scoped to owned titles, single-digit thousands -- and
           unbounded here, where the candidate set is the whole catalog and the
           skeletons are most of it.
-        - **Then `id`, and the tiebreak is load-bearing rather than tidy.**
-          On a bootstrap-only catalog `vote_count` is NULL for every row, so
-          every candidate ties with every other on all three preceding keys
-          and "whatever the storage returned" decides the entire pool. This
-          repository has been bitten by an `ORDER BY` with no `id` tail twice
-          (`list_owned_by_tag` records one, `UPDATE … RETURNING` the other);
-          here the cost of losing it is that the service's index->UUID map
-          silently stops describing the same films.
+        - **Then `id`, and it decides *membership* rather than merely order.**
+          This is the canonical statement of the tiebreak's argument; the
+          contract case and PRD 06 point here rather than restating it.
+
+          The two keys above `vote_count` are **booleans**, so they partition
+          rather than order, and `vote_count` itself is NULL on **732,220 of a
+          measured 1,271,570-title catalog** -- the bootstrap writes it on
+          539,350 through `BulkCatalogRepository.apply_ratings` (measured
+          2026-08-05, M7 Task 36; the number is recorded in
+          `adapters/search/postgres.py`). So the ordinary shape of this answer
+          is four strata whose tails are one large tie, and `limit` falls
+          inside one of them: with no total order, two reads of one unchanged
+          household return different **sets**, not merely different orders,
+          and ADR-0028's index->UUID map is then a map of a pool that no
+          longer exists. This repository has been bitten by an `ORDER BY` with
+          no `id` tail twice (`list_owned_by_tag` records one, `UPDATE …
+          RETURNING` the other).
+
+          ⚠️ **Not the argument `list_owned_by_tag` makes for its own `id`
+          tail, and an earlier draft of this docstring made that one by
+          swapping the column into it.** It claimed `vote_count` is NULL on
+          *every* row of a bootstrap-only catalog, which the same measurement
+          refutes: under `NULLS LAST` the 539,350 voted rows sort **above**
+          every unvoted one, so on exactly that catalog `vote_count` is what
+          orders the head of the pool. The `popularity` sentence above is the
+          one that survives being read that way, because `popularity` really
+          is NULL until `link_crosswalk` runs.
 
         **"Unwatched" is `played`, rolled up through `episodes.title_id`, and
         it is the same predicate `played_title_ids` spells.** Both halves are

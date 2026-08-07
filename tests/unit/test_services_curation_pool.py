@@ -17,6 +17,14 @@ The four, each with the case that pins it:
 | a centroid, a mostly-unembedded pool | `test_a_candidate_with_no_vector_keeps_its_index` |
 | the full configuration | `test_a_centroid_re_ranks_the_pool_it_is_given` |
 
+**A configuration is only pinned by a case whose fixture cannot also be the
+configuration next to it**, which cost the first row of that table a rewrite: it
+originally seeded a household with no history at all, which is *state-identical*
+to row two, so it passed for the wrong reason and a planted no-embedder path
+that read a stored centroid survived it. Row one now starts from a household
+that already has a `user_taste` row on file, so the only thing standing between
+it and a re-rank is `embedder is None`.
+
 **Every cosine here is planted, never hoped for.**
 `tests/unit/test_services_taste.py`'s module docstring records why: a
 `FakeEmbedder` is a hash, so the similarity between two titles is whatever the
@@ -44,6 +52,7 @@ one it merely correlates with:
   genre, so neither ranking key is constant across the pool.
 """
 
+import inspect
 import math
 import uuid
 from collections.abc import Sequence
@@ -62,7 +71,7 @@ from usher.domain.ids import new_id
 from usher.domain.taste import Centroid
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
-from usher.services.curation_pool import CandidatePoolService
+from usher.services.curation_pool import DEFAULT_POOL_SIZE, CandidatePoolService
 from usher.services.taste import TasteService
 
 NOW = datetime(2026, 8, 6, 3, 0, tzinfo=UTC)
@@ -249,17 +258,33 @@ async def test_with_no_embedder_the_pool_is_the_base_order() -> None:
     still fire, and the curated shelves are simply absent forever with
     nothing counting their absence.
 
-    Seeded worst-first so insertion order and `ORDER BY id` are the reverse of
-    the answer, and the assertion is the whole list rather than a length.
+    **The household here has a real, stored centroid, and that is what makes
+    the case about the *embedder* rather than about the history.** An earlier
+    version seeded nothing at all, which is state-identical to configuration 2
+    below -- so it passed for the "no watch history" reason and a planted
+    no-embedder path that read `user_taste` anyway survived it. This one is
+    also the honest production shape: a deployment that had an embedder and
+    turned it off still has its `user_taste` rows, and `TasteService.centroid`
+    checks `self._embedder is None` **before** reading them for exactly that
+    reason.
+
+    Seeded so that the stored centroid, if it were consulted, would give the
+    opposite answer -- asserted as a premise rather than assumed.
     """
-    household = _Household()
-    quiet = await household.title("A Quiet Film", vote_count=5, owned=True)
-    loud = await household.title("A Loud Film", vote_count=500_000, owned=True)
-    assert quiet.id < loud.id, "the fixture must make id order and vote order disagree"
+    household = await _household_with_a_centroid()
+    far = await household.title(
+        "Popular And Wrong", vote_count=900_000, owned=True, vector=_pole(2)
+    )
+    near = await household.title("Quiet And Right", vote_count=3, owned=True, vector=_pole(0))
+    stored = await _centroid_of(household)
+    assert stored is not None, "the premise: a centroid is on file for this household"
+    assert _cos(stored.vector, _pole(0)) > _cos(stored.vector, _pole(2)), (
+        "the premise: the stored centroid must prefer the title the base order ranks second"
+    )
 
     pool = await household.service(embedder=None).for_user(USER)
 
-    assert [one.id for one in pool] == [loud.id, quiet.id]
+    assert [one.id for one in pool] == [far.id, near.id]
 
 
 async def test_with_no_embedder_the_embedding_table_is_never_read() -> None:
@@ -565,14 +590,30 @@ async def test_the_cap_survives_the_re_rank() -> None:
     re-rank that re-read the catalog, or that appended the embedded members to
     the pool it was handed, produces a longer pool than the prompt was
     budgeted for.
+
+    **Positional as well as long**, because a length is satisfied by any three
+    rows. The three the cap must keep are the three most-voted, and they are
+    seeded at three *distinct* angles so the answer also shows the re-rank
+    running inside the cap; the three it must drop all sit on the centroid's
+    own pole, so a re-rank that re-**selected** on proximity rather than
+    re-ordering within the cap would pull them in and still answer with three.
     """
     household = await _household_with_a_centroid()
-    for index in range(6):
-        await household.title(f"Candidate {index}", vote_count=index, vector=_pole(index % 3))
+    _, quarter = planted_pair(math.pi / 4, dimension=_DIMENSION)
+    # Dropped by the cap, and the most centroid-proximate things in the
+    # catalog: the distractor a re-selecting implementation takes.
+    dropped = [
+        await household.title(f"Low Voted {index}", vote_count=index, vector=_pole(0))
+        for index in range(3)
+    ]
+    farthest = await household.title("Kept, Farthest", vote_count=5, vector=_pole(1))
+    middle = await household.title("Kept, Middling", vote_count=4, vector=quarter)
+    nearest = await household.title("Kept, Nearest", vote_count=3, vector=_pole(0))
+    assert dropped, "the fixture must seed something for the cap to drop"
 
     pool = await household.service(embedder=FakeEmbedder(), size=3).for_user(USER)
 
-    assert len(pool) == 3
+    assert [one.id for one in pool] == [nearest.id, middle.id, farthest.id]
 
 
 async def test_the_household_affinities_are_what_the_read_is_asked_for() -> None:
@@ -687,11 +728,41 @@ async def _centroid_of(household: _Household) -> Centroid | None:
 @pytest.mark.parametrize("size", [1, 3])
 async def test_the_size_is_honoured_whatever_it_is(size: int) -> None:
     """Two sizes rather than one, because a cap hard-coded to the default is a
-    cap that passes every case written against the default."""
+    cap that passes every case written against the default.
+
+    Positional as well, and seeded worst-first: a length alone is satisfied by
+    any `size` rows, which is what a cap applied before the ordering returns.
+    """
     household = _Household()
-    for index in range(6):
-        await household.title(f"Candidate {index}", vote_count=index)
+    seeded = [await household.title(f"Candidate {index}", vote_count=index) for index in range(6)]
 
     pool = await household.service(embedder=None, size=size).for_user(USER)
 
-    assert len(pool) == size
+    assert [one.id for one in pool] == [one.id for one in reversed(seeded)][:size]
+
+
+def test_the_measured_two_hundred_has_one_source_and_three_readers() -> None:
+    """`200` appears three times -- `DEFAULT_POOL_SIZE`, the port's `limit`
+    default, and `Settings.curation_pool_size` -- and nothing made them agree.
+
+    Only `.env.example` was pinned to `config.py`
+    (`tests/unit/test_deployment_config.py`); the other two could drift apart
+    silently, and the number is not decorative: ADR-0028's handle measurements
+    were all taken against a 200-film pool, so a default that quietly became
+    something else would make the recorded prompt-token figure describe a pool
+    nobody sends. One source, three readers, one assertion.
+
+    Read off `model_fields` rather than off a constructed `Settings`, because
+    constructing one reads the process environment and `.env`: a case that
+    instantiated it would pass or fail on whatever the operator running the
+    suite happens to export, which is a different assertion than "the declared
+    default is 200".
+    """
+    from usher.config import Settings
+    from usher.ports.repository import TitleRepository
+
+    port_default = inspect.signature(TitleRepository.list_unwatched_candidates).parameters["limit"]
+
+    assert DEFAULT_POOL_SIZE == 200
+    assert Settings.model_fields["curation_pool_size"].default == DEFAULT_POOL_SIZE
+    assert port_default.default == DEFAULT_POOL_SIZE

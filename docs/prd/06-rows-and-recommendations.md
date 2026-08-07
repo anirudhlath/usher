@@ -652,10 +652,14 @@ Generation runs nightly and on demand:
      Ownership and popularity are **ranking keys**, which is what keeps
      *"the pool spans the whole catalog"* true. The order is `owned DESC,
      carries an affinity genre DESC, vote_count DESC NULLS LAST, id` — and
-     the `id` tail is not tidiness: on a bootstrap-only catalog `vote_count`
-     is NULL for every row, so without it the pool's whole order is whatever
-     the storage returned, and [ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s
-     integer handles stop naming the same films between two reads.
+     the `id` tail decides **membership** rather than only order, because the
+     `LIMIT` falls inside a tie: losing it makes two reads of one unchanged
+     household return different *sets*, so
+     [ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s integer handles
+     stop naming the same films. The measurement behind that — how much of a
+     real catalog carries no `vote_count` at all — is stated once, on
+     `TitleRepository.list_unwatched_candidates`, and deliberately not
+     repeated here.
    - **`vote_count`, not `popularity`.** `titles.popularity` was measured NULL
      on all 1,271,138 rows of a bootstrap-only catalog and is
      `NOT NULL DEFAULT 0` in `tmdb_ids`, so leading with it lets a

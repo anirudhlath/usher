@@ -133,6 +133,19 @@ class FakeTitleRepository(TitleRepository):
       household is accepted here and is a `ForeignKeyViolationError` there --
       which is why the integration arm's `user_id` fixture writes a real row
       rather than minting a bare id.
+    - **`media_items.available` is not modelled at all.** `available_copies`
+      holds the *available* half by construction, so a retracted copy leaves
+      no trace and the statement's `WHERE available` predicate is unobservable
+      from here. `test_a_copy_the_source_has_retracted_does_not_rank_as_owned`
+      is therefore load-bearing only in the integration run, and the
+      corresponding mutation survived the whole suite until that case existed.
+    - **`available_copies` cannot tell an episode's copy from a title's**, so
+      the divergence from `owned_title_ids` -- no `episode_id IS NULL` bound
+      -- is likewise Postgres-only. The list stores an episode id for the
+      episode case, which records the caller's intent and changes no answer
+      here; only a real `media_items` row carrying **both** ids (the
+      production shape, per `ports/ingest.py`'s `MediaItemTarget`) can fail
+      against a spurious bound.
     """
 
     def __init__(self) -> None:

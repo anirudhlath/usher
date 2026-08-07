@@ -982,10 +982,12 @@ class TitleRepositoryCandidateContract:
         7 is a different film on a re-read -- and the service's index->UUID
         map is then a map of nothing.
 
-        Ties here are ordinary rather than exotic: `titles.vote_count` was
-        NULL on all 1,271,138 rows of a bootstrap-only catalog, so on that
-        deployment *every* candidate ties with every other on all three
-        preceding keys.
+        Why ties are ordinary rather than exotic here, and why losing the tail
+        changes the pool's *membership* rather than only its order, is argued
+        once on `TitleRepository.list_unwatched_candidates` and deliberately
+        not restated: a count that lives in four places is a count three of
+        them will eventually disagree with, which this milestone has already
+        paid for twice.
 
         The two are inserted in **descending** id order, so insertion order
         -- which is heap order on a freshly-seeded table and dict order in

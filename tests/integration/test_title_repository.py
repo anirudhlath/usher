@@ -491,10 +491,24 @@ class TestPostgresTitleRepositoryCandidates(TitleRepositoryCandidateContract):
         async def _own(
             title_id: uuid.UUID, *, episode: bool = False, available: bool = True
         ) -> None:
-            # `TitleRepositoryOwnedContract.own`'s reasoning verbatim: a real
-            # `media_items` row, `episode_id` left NULL even for the episode
-            # case, so a spurious `episode_id IS NULL` bound would still
-            # accept it and the fake's half is what pins the divergence.
+            # **`episode=True` writes a real `episode_id`, and
+            # `TitleRepositoryOwnedContract.own` deliberately does not.** That
+            # fixture leaves it NULL because `episodes` needs a `seasons` row
+            # and a `titles` row and it has no helper for either; this class
+            # does, so the excuse does not transfer -- and copying it made the
+            # case vacuous. Measured: with `episode_id` left NULL, adding
+            # `MediaItemRow.episode_id.is_(None)` to the ownership subquery
+            # gives **12 passed, 0 failed** here, so the bound the case exists
+            # to rule out was unobservable on the only arm that has it.
+            #
+            # Both ids together is also the production shape rather than a
+            # test convenience: `ports/ingest.py`'s `MediaItemTarget` records
+            # that an episode's row holds **both**, because `IngestService`
+            # writes `title_id` (the series' canonical title) alongside
+            # `episode_id` for a client browsing a season. So a semi-join
+            # carrying `episode_id IS NULL` reports every series in a real
+            # library as unowned, which on 999,827 episodes of 1,126,674 items
+            # is most of it.
             #
             # `available=False` writes a real retracted row -- what
             # `mark_unseen_unavailable` leaves behind -- which the fake cannot
@@ -506,7 +520,7 @@ class TestPostgresTitleRepositoryCandidates(TitleRepositoryCandidateContract):
                     source_id=owning_source_id,
                     external_id=str(new_id()),
                     title_id=title_id,
-                    episode_id=None,
+                    episode_id=await _add_episode(session, title_id) if episode else None,
                     available=available,
                     last_seen_at=datetime.now(UTC),
                 )
@@ -555,28 +569,7 @@ class TestPostgresTitleRepositoryCandidates(TitleRepositoryCandidateContract):
     @pytest.fixture
     def episode_of(self, session: AsyncSession) -> Callable[[uuid.UUID], Awaitable[uuid.UUID]]:
         async def _episode_of(series_id: uuid.UUID) -> uuid.UUID:
-            # `episodes.season_id` and `episodes.title_id` are both NOT NULL
-            # with `ON DELETE CASCADE`, so neither can be invented -- the
-            # season is what makes the roll-up a real two-table join.
-            season_id = new_id()
-            await session.execute(
-                text(
-                    "INSERT INTO seasons (id, title_id, season_number) "
-                    "VALUES (CAST(:id AS uuid), CAST(:title_id AS uuid), 1)"
-                ),
-                {"id": season_id, "title_id": series_id},
-            )
-            episode_id = new_id()
-            await session.execute(
-                text(
-                    "INSERT INTO episodes "
-                    "  (id, title_id, season_id, season_number, episode_number) "
-                    "VALUES (CAST(:id AS uuid), CAST(:title_id AS uuid), "
-                    "        CAST(:season_id AS uuid), 1, 1)"
-                ),
-                {"id": episode_id, "title_id": series_id, "season_id": season_id},
-            )
-            return episode_id
+            return await _add_episode(session, series_id)
 
         return _episode_of
 
@@ -588,3 +581,53 @@ async def _add_user(session: AsyncSession) -> uuid.UUID:
         {"id": identifier, "name": f"viewer-{identifier}"},
     )
     return identifier
+
+
+async def _add_episode(session: AsyncSession, series_id: uuid.UUID) -> uuid.UUID:
+    """One real episode of `series_id`'s season 1, minting the season once.
+
+    `episodes.season_id` and `episodes.title_id` are both NOT NULL with
+    `ON DELETE CASCADE`, so neither can be invented -- the season is what makes
+    the watched roll-up a real two-table join rather than a self-join on a
+    column that happens to be there.
+
+    **The season is reused rather than re-inserted**, because
+    `uq_seasons_title_season_number` refuses a second season 1 for one title
+    and both callers here -- `own(episode=True)` and `episode_of` -- can reach
+    the same series in one case. `episode_number` counts the rows already
+    present for the same reason: `uq_episodes_season_episode_number` refuses a
+    duplicate, and a fixture that raised on its second call would fail the case
+    for a reason no implementation could cause.
+    """
+    season_id = (
+        await session.execute(
+            text("SELECT id FROM seasons WHERE title_id = CAST(:t AS uuid) AND season_number = 1"),
+            {"t": series_id},
+        )
+    ).scalar_one_or_none()
+    if season_id is None:
+        season_id = new_id()
+        await session.execute(
+            text(
+                "INSERT INTO seasons (id, title_id, season_number) "
+                "VALUES (CAST(:id AS uuid), CAST(:title_id AS uuid), 1)"
+            ),
+            {"id": season_id, "title_id": series_id},
+        )
+    number = (
+        await session.execute(
+            text("SELECT count(*) FROM episodes WHERE season_id = CAST(:s AS uuid)"),
+            {"s": season_id},
+        )
+    ).scalar_one() + 1
+    episode_id = new_id()
+    await session.execute(
+        text(
+            "INSERT INTO episodes "
+            "  (id, title_id, season_id, season_number, episode_number) "
+            "VALUES (CAST(:id AS uuid), CAST(:title_id AS uuid), "
+            "        CAST(:season_id AS uuid), 1, :number)"
+        ),
+        {"id": episode_id, "title_id": series_id, "season_id": season_id, "number": number},
+    )
+    return episode_id

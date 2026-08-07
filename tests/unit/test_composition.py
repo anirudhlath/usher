@@ -23,6 +23,7 @@ from typing import Any, cast
 import pytest
 from loguru import logger
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credit_repository import FakeCreditRepository
@@ -38,6 +39,7 @@ from tests.fakes.title_repository import FakeTitleRepository
 from usher.composition import (
     Pipeline,
     build_enrich_service,
+    build_pipeline,
     build_worker,
     embedder,
     metadata_provider,
@@ -410,3 +412,29 @@ def _raising(exc: Exception) -> Callable[[Settings], Embedder]:
 
 async def _never_resolves(_: str) -> SourceBinding | None:
     return None
+
+
+async def test_the_pool_and_the_screen_read_one_taste_service() -> None:
+    """`build_pipeline` wires `Pipeline.taste` and `Pipeline.pool.taste` to the
+    **same object**, and until now that was a comment rather than a check.
+
+    Two `TasteService` instances over one session are not merely wasteful.
+    `centroid()` *writes*: it reads `user_taste`, and on a miss recomputes and
+    `put`s -- including the written refusal for a household below
+    `_MIN_TITLES`. Two of them in one generation means two reads and up to two
+    writes of one row, and the second is computed against a watermark the first
+    may already have moved, which is the self-certifying staleness that
+    method's own docstring exists to rule out.
+
+    A real `AsyncSession` over a real engine, because the claim is about
+    identity in the wiring rather than about a fake: `create_async_engine` does
+    not connect, and nothing here issues a statement, so this stays in the unit
+    suite where a wiring assertion belongs.
+    """
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        pipeline = build_pipeline(AsyncSession(engine), _settings())
+
+        assert pipeline.pool.taste is pipeline.taste
+    finally:
+        await engine.dispose()

@@ -555,10 +555,12 @@ see `.claude/rules/db-and-sql.md` for the numbers. Reported as a survivor with
 its evidence rather than replaced by a kill that would have been about
 something else.
 
-**Three fixtures that could not fail, all in one task, and all three found by
+**Five fixtures that could not fail, all in one task — three found by the
+task's own sweep, two more by review afterwards, and every one of them found by
 running a plant rather than by reading the case.** M8 Task 11's sweep over
-`TitleRepository.list_unwatched_candidates` and `CandidatePoolService`: 31
-mutations, **29 killed**, one predicted equivalent and one control. The two
+`TitleRepository.list_unwatched_candidates` and `CandidatePoolService`, after
+review: **37 mutations, 35 killed**, one predicted equivalent and one control
+(31 and 29 before review added the six the findings below are about). The two
 survivors that were *not* predicted were both a fixture holding something
 constant:
 
@@ -588,6 +590,37 @@ constant:
   names*; the corollary this adds is that **a guard with no such plant is not a
   weak guard, it is a deleted one** — eight of that task's nine guards failed
   on their own message and the ninth had no message to fail on.
+
+**And two more in the same task, found in review, both of which the three
+above should have caught and did not.**
+
+- **A fixture comment copied "verbatim" carries a justification that stopped
+  being true.** `TitleRepositoryOwnedContract.own` writes `episode_id = NULL`
+  even for its episode case, and says why: `episodes` needs a `seasons` row and
+  a `titles` row and that mixin has no helper for either. The new
+  `TitleRepositoryCandidateContract` copied the fixture *and the comment* — but
+  it **does** have that helper (`episode_of`), so the excuse did not transfer
+  and the case meant to rule out an `episode_id IS NULL` semi-join bound could
+  not fail: planting the bound gave **12 passed, 0 failed**. Worse, `NULL` is
+  not the production shape at all — `ports/ingest.py`'s `MediaItemTarget`
+  records that an episode's `media_items` row holds **both** ids. **The general
+  form: a comment justifying a fixture's shape is a claim about the fixture's
+  *surroundings*, so copying it to a new class re-asserts something nobody
+  re-checked.** Third instance of "has any fixture, anywhere, ever set this to
+  the other value?" in one task, and the first where the answer was documented
+  and stale rather than merely absent.
+- **A configuration is only pinned by a case whose fixture is not also the
+  configuration next to it.** `CandidatePoolService` has to be right in four
+  configurations and a docstring table named the case pinning each. Row one
+  ("no embedder") seeded a household with no watch history — which is
+  *state-identical* to row two ("an embedder, no history"), because both reach
+  `centroid() is None`. So it passed for row two's reason, and a planted
+  no-embedder path that read `user_taste` anyway survived it; the configuration
+  was really pinned by a case filed under row four. The repair is a fixture
+  that can only be that configuration: a household with a **stored** centroid,
+  so the only thing between it and a re-rank is `embedder is None`. **Ask of
+  every table mapping a case to a scenario: could this fixture also be the row
+  above or below?**
 
 **The `-q`/`-qq` trap bit a sweep harness, and it presents as DID-NOT-RUN.**
 `addopts` already carries `-q`, so a harness adding its own makes it `-qq`,
