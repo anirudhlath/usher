@@ -720,10 +720,84 @@ got.** Nearest relative is "a membership assertion is not an ordering test":
 both are satisfied by an implementation doing something else entirely, and both
 read as coverage.
 
-**Sweep totals for the same task, for calibration:** 36 mutations over one
-pure module, 34 killed, 1 control surviving as designed, 1 real coverage gap
-(above). The three defences against the `.pyc` collision recorded further up
-were in force throughout — `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept
-before every run, and an equivalent-mutant control — which mattered here for
-exactly the reason that entry predicts: the module's own test file runs in
-**0.10 s**, well inside the one-second mtime resolution.
+**Sweep totals for the same task, for calibration, and this is the breakdown to
+quote:** 36 mutations over one pure module — **34 killed, 1 control surviving
+as designed, 1 unintended survivor** which was the real coverage gap above, now
+closed and killed on re-run. Commit `e902b38`'s message partitions the same run
+as *"35 as expected"* by grouping the intended control with the kills; both
+totals are 36 and neither is wrong, but the three-way split is the one that
+says something, because it separates *"the suite caught it"* from *"the suite
+was designed not to catch it"* from *"the suite missed it"*.
+
+The three defences against the `.pyc` collision recorded further up were in
+force throughout — `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept before
+every run, and an equivalent-mutant control — which mattered here for exactly
+the reason that entry predicts: the module's own test file runs in **0.10 s**,
+well inside the one-second mtime resolution.
+
+**Three more assertions that could not fail in the same module, all found in
+review after the sweep reported clean, and two of them are arithmetic that is
+correct at almost every input.**
+
+- **An off-by-one in a *width* calculation is invisible except at a power of
+  ten, and the obvious fixture is not there.** `curation_validate` pads
+  `curated_rows.slug` to `len(str(len(rows)))`. Mutating that to
+  `len(rows) - 1` **survived all 56 cases**, because the only multi-row slug
+  case used **12** rows and `len("12") == len("11") == 2`. At exactly **ten**
+  the mutant emits `curated-1 … curated-10` — the original lexicographic defect
+  restored. The case that closes it is parametrised over 9, 10 and 11, and the
+  plant fails **`[10]` alone**, which is the whole finding: the bracketing
+  values are there to show that they cannot see it. **The general form: when an
+  assertion covers arithmetic over a size, pick the input where the arithmetic
+  *changes*, not a comfortably large one — for anything involving `len(str(n))`
+  that is a power of ten, and for a comparison it is the boundary.** Same shape
+  as "nine rows cannot show the bug" one round earlier, arriving at the fix for
+  that bug rather than at the bug.
+- **A guard on one of two twin invariants is unpinned when every case reaches
+  the type through a constructor that never violates it.** `CurationKept`'s
+  "no empty rows" guard was pinned from the first commit; `CurationRejected`'s
+  "no empty error" twin was not, so weakening `if not self.error:` to
+  `if self.error is None:` survived everything — every other case builds a
+  `CurationRejected` through `validate_curation`, which never passes `""`. The
+  damage is two layers away and on the failure path:
+  `LLMCall._ok_and_error_must_agree` and `ck_llm_calls_ok_error_agree` both
+  refuse an empty error, so the row the cost ledger exists for is the one that
+  would fail to write. **Ask of every pair of symmetric guards whether both are
+  reached by a case, or only the one whose sibling was easy to write.**
+- **An amendment that leaves the superseded claim standing forty lines below is
+  a silent contradiction.** ADR-0028's Decision was amended from two drop
+  reasons to five; its Consequences section still read *"Two counters and two
+  reasons mean…"*, and a docstring on `CuratedRowRepository.list_for_user`
+  still asserted the slug sorting defect the same commit had fixed. Neither is
+  code, and both are the kind of stale "verified" fact `prd-maintenance.md`
+  calls worse than none. **Amending a document means grepping it — and the
+  code — for the claim being amended, not editing the paragraph that prompted
+  the amendment.**
+
+**Sweeping in a `cp -a` copy of the repo silently sweeps the *original*, and
+the log reads as a clean set of survivors.** Found 2026-08-06 while reviewing
+M8 Task 13, by a reviewer whose own first sweep was invalid. "Copy the tree to
+`/tmp` and mutate there, so the real checkout is never touched" is an
+attractive move and now a common one — it removes the in-place sweep's rule
+that nothing else may use the tree. It does not work by default: `cp -a`
+copies `.venv/` **including `.venv/bin/pytest`, whose shebang is an absolute
+path to the source venv's interpreter**, and `uv run pytest` in the copy
+therefore starts the original interpreter, resolves `usher` through the
+original `site-packages` `.pth`, and imports the **unmutated** module. Every
+mutation survives, which reads as a suite with no teeth rather than as a
+harness that measured nothing.
+
+**This is the documented venv-shebang trap in a new location**, and it belongs
+with the sweep rules rather than only with the deployment ones, because the
+symptom inverts: the same trap in a deployment context produces an obvious
+failure, and here it produces a plausible, complete, wrong result. Same family
+as the `.pyc` collision above and as `sitecustomize.py` not being on
+`PYTHONPATH` — all three are a run that ran, against the wrong code.
+
+Two defences, and the second is the one that generalises: rebuild the copy's
+environment (`uv sync` in the copy) rather than trusting `cp -a`, and **assert
+the module's `__file__` resolves under the copy before every run**. The
+`__file__` check is cheap, it is independent of how the environment was built,
+and unlike the shebang it keeps working when the next person reaches for
+`rsync`, a container mount, or a worktree. An in-place sweep gets the same
+assurance for free, which is a real argument for staying in place.

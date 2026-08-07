@@ -482,6 +482,25 @@ def test_an_empty_success_is_not_constructible() -> None:
         CurationKept(rows=(), dropped=dict.fromkeys(DropReason, 0))
 
 
+def test_a_rejection_with_nothing_to_say_is_not_constructible() -> None:
+    """`CurationKept`'s guard above was pinned from the first commit and this
+    twin was not, which made `if not self.error:` weakenable to
+    `if self.error is None:` with the whole suite still green -- because every
+    other case here reaches `CurationRejected` through `validate_curation`,
+    which never builds one with an empty string.
+
+    An empty error is not a cosmetic defect. It is the exact state
+    `LLMCall._ok_and_error_must_agree` and `ck_llm_calls_ok_error_agree` both
+    refuse, so it would be constructible here and rejected two layers later,
+    at the moment the cost ledger is written -- on the failure path, which is
+    the row the ledger exists for. The same shape as the plan's standing
+    warning about `str(exc)` being `""` for an exception raised with no
+    arguments.
+    """
+    with pytest.raises(ValueError, match="what went wrong"):
+        CurationRejected(error="", dropped=dict.fromkeys(DropReason, 0))
+
+
 def test_a_rejection_has_no_rows_attribute_to_mistake_for_an_empty_one() -> None:
     """The other half. `CurationRejected` is not a `CurationKept` with an empty
     tuple in it -- it has no `rows` at all, so `for row in outcome.rows` on the
@@ -754,6 +773,32 @@ def test_the_model_s_row_order_survives_and_the_slugs_sort_in_it() -> None:
     assert sorted(slugs) == slugs
     unpadded = [f"{SLUG_PREFIX}-{n}" for n in range(1, 13)]
     assert sorted(unpadded) != unpadded, "the premise: the unpadded spelling sorts wrong"
+
+
+@pytest.mark.parametrize("count", [9, 10, 11])
+def test_the_slug_width_is_right_at_the_row_count_that_changes_it(count: int) -> None:
+    """**Ten, specifically, and the case above cannot stand in for it.**
+
+    The width is `len(str(len(rows)))`, and an off-by-one in that arithmetic --
+    `len(rows) - 1` -- is invisible at almost every row count, because
+    `len(str(n))` and `len(str(n - 1))` agree everywhere except at a power of
+    ten. Twelve rows is one of the places they agree (`len("12") == len("11")
+    == 2`), so the twelve-row case above passes that mutant unchanged, and it
+    was written to catch the *unpadded* defect rather than this one.
+
+    At exactly ten the mutant computes width 1 and emits `curated-1` …
+    `curated-10`, which is the original defect restored -- so ten is the
+    smallest row count that can see it, and it is bracketed by nine and eleven
+    so the case is about the boundary rather than about ten.
+    """
+    outcome = kept(a_response(*(a_row(11, 4, title=f"Row {n}") for n in range(count))), min_cards=1)
+    slugs = [row.slug for row in outcome.rows]
+    width = len(str(count))
+    assert slugs == [f"{SLUG_PREFIX}-{n:0{width}d}" for n in range(1, count + 1)]
+    # The property the padding exists for, asserted directly rather than via
+    # the format string that produced it.
+    assert sorted(slugs) == slugs
+    assert [row.title for row in outcome.rows] == [f"Row {n}" for n in range(count)]
 
 
 def test_a_discarded_row_leaves_a_gap_rather_than_renumbering() -> None:

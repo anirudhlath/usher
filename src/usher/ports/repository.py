@@ -3113,10 +3113,23 @@ class CuratedRowRepository(ABC):
         may re-sort it. `position` indexes the list the model returned, so it
         is the whole of the order; `id` breaks a tie only so that two reads of
         one generation agree, and no generation should ever produce one.
-        Neither `slug` nor `id` is the key: the slugs are minted `curated-1`,
-        `curated-2`, … and sort `curated-1 < curated-10 < curated-2`, and a
-        UUIDv7 primary key agrees with insertion order, so both are *right on
-        a small fixture and wrong in production*.
+        Neither `slug` nor `id` is the key, and **the reason is no longer that
+        the slug sorts wrong.** This paragraph read *"the slugs are minted
+        `curated-1`, `curated-2`, … and sort `curated-1 < curated-10 <
+        curated-2`"*, which was true when it was written and is not true now:
+        M8 Task 13 made `services.curation_validate` -- the only thing that
+        mints a curated slug -- zero-pad it to the width of the generation, so
+        ten rows are `curated-01` … `curated-10` and the lexicographic order
+        *is* the model's order.
+
+        The conclusion is unchanged and the argument is now the stronger one:
+        `position` is the field that **means** the ordering, and a slug that
+        happens to sort correctly is a rendering that agrees with it. Ordering
+        on the rendering would silently become wrong again the day anything
+        else mints one, or the day a slug carries something other than a
+        count. A UUIDv7 primary key is the same mistake without the reprieve:
+        it agrees with insertion order, so it is *right on a small fixture and
+        wrong in production*.
 
         **Only the newest generation, and the filter defends a state the write
         path here does not by itself reach.** `replace_for_user` is

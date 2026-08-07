@@ -32,10 +32,19 @@ M99.
 milestone:** an identifier minted by *counting* and then compared as a
 *string* sorts wrong at the first two-digit value. Task 7 hit the identical
 bug in `curated_rows.slug` — `curated-1 < curated-10 < curated-2` under
-`HomeService`'s `(-score, slug)` tie-break — and it is filed for Task 15. Same
-root cause, two subsystems, one milestone, and both were sold on the ordering
-being obvious. Recorded in `.claude/rules/db-and-sql.md` in this same commit,
-beside the entry saying the old convention ran out.
+`HomeService`'s `(-score, slug)` tie-break. Same root cause, two subsystems,
+one milestone, and both were sold on the ordering being obvious. Recorded in
+`.claude/rules/db-and-sql.md` in this same commit, beside the entry saying the
+old convention ran out.
+
+**Closed in Task 13, not Task 15 as this paragraph said it was filed for.**
+`services.curation_validate` is the only thing that mints a curated slug, and
+it zero-pads to the width of the generation — three rows stay `curated-1` …
+`curated-3`, ten become `curated-01` … `curated-10`. The fix went where the
+value is minted rather than where it is read, which is the first of the two
+repairs the general shape above admits; this migration's own `m08a` is the
+second (pad the identifier), and the reason the slug took the same one is that
+a reader ordering on `position` still exists and should not have to know.
 
 **Two tables that share no column, no foreign key and no lifetime**, in one
 migration because they are written by one service in one transaction and

@@ -44,31 +44,42 @@ pool's range is dropped and *counted*.
 `llm_calls.ok = false` with a reason, not a success that wrote nothing.
 
 `usher.curation.dropped` carries a `reason` label with a **closed** vocabulary,
-because those reasons produce the same empty screen and have different fixes.
+because `not_in_pool` and `unparseable` produce the same empty screen and have
+opposite fixes.
 
 🔶 **Amended 2026-08-06 by the implementation (Task 13): the vocabulary is
-five, not two.** This paragraph read *"exactly two values, `not_in_pool` and
-`unparseable`"* and the pair is still the load-bearing one — it is the split
-the 108/108 run produced and the only one this ADR has evidence for. What
-building the validator showed is that three more drops exist, each with a
-different next step for an operator, and that folding any of them into the
-original two reports a fix that is not the fix:
+five, not two.** This paragraph read *"exactly two values"*, and that pair is
+still the load-bearing one — it is the split the 108/108 run produced and the
+only one this ADR has evidence for. What building the validator showed is that
+three more drops exist and that folding any of them into the original two
+misreports what happened.
 
-- **`duplicate`** (a card): the model named a real candidate twice. Under
-  `not_in_pool` it reads as invention when nothing was invented; under
-  `unparseable` it reads as a schema problem when the schema was obeyed.
-- **`row_unusable`** (a **row**): the row was not readable or not renderable
-  — not an object, no title, a non-string title or reason, prose past the
-  bound.
+**The honest claim is a different *diagnosis*, not a different lever.** Two of
+the five share a fix with a member of the original pair, and pretending
+otherwise would be the inflation a closed vocabulary exists to resist:
+`duplicate` and `not_in_pool` both point at the prompt or the temperature, and
+`row_unusable` and `unparseable` both point at the schema or
+`response_format`. What differs is what an operator *concludes* from the
+number, and that is enough — a counter whose value means two different things
+is one nobody can act on:
+
+- **`duplicate`** (a card): the model named a real candidate twice. Merged into
+  `not_in_pool` it reports **invention where none occurred** — the same lever,
+  pulled for a reason that is not true.
+- **`row_unusable`** (a **row**): not an object, no title, a non-string title
+  or reason, prose past the bound.
 - **`row_too_short`** (a **row**): fewer than the minimum survived, which is
   ADR-0014's discard-rather-than-pad arriving as a *number*. It is the
-  second-order effect of the three card reasons and the one an operator reads
-  first, so it cannot share a counter with any of them.
+  second-order effect of the three card reasons, so a counter it shared with
+  any of them could not answer the one question it exists for — whether the
+  rows collapsed because the cards were eaten or because the pool had nothing
+  to say.
 
-Two of the five count **rows** and three count **cards**, which is why the row
-ones carry the prefix: summing the whole label set is meaningless, and the
-names say so rather than a comment saying so. The tally always carries all five
-keys, zeros included — a reason absent from a tally is indistinguishable from a
+**The load-bearing half of the widening is the unit split, not the count.** Two
+of the five count **rows** and three count **cards**, which is why the row ones
+carry the prefix: summing the whole label set is meaningless, and the names say
+so rather than a comment saying so. The tally always carries all five keys,
+zeros included — a reason absent from a tally is indistinguishable from a
 reason nobody counts, which is this ADR's own subject one level up.
 `src/usher/services/curation_validate.py` holds the one copy of the argument.
 
@@ -84,9 +95,12 @@ reason nobody counts, which is this ADR's own subject one level up.
 - **The pool becomes the whole security boundary**, and it is one small,
   local, testable object. Everything the model can possibly say about which
   titles to show is a choice among things the household could already see.
-- **A total drop is legible.** Two counters and two reasons mean "the model
-  gave me nothing" and "my comparison was wrong" are different lines in the
-  same report, which is the only reason the second one below was ever found.
+- **A total drop is legible.** Separate counters mean "the model gave me
+  nothing" and "my comparison was wrong" are different lines in the same
+  report, which is the only reason the second one below was ever found.
+  (**Amended: five counters, not two** — see the amendment in Decision above.
+  This bullet read *"two counters and two reasons"* and the argument is
+  unchanged by the count.)
 - **Three times the prompt budget back.** A 200-title pool addressed by UUID
   is 9,041 prompt tokens before the history or the instructions; by index it
   is 2,924. On a 16k-context model that is the difference between a pool that
