@@ -728,6 +728,7 @@ class TitleRepositoryCandidateContract:
         vote_count: int | None = None,
         kind: TitleKind = TitleKind.MOVIE,
         title_id: uuid.UUID | None = None,
+        enrichment_state: EnrichmentState = EnrichmentState.ENRICHED,
     ) -> Title:
         """One catalog row, with an id nameable for the tiebreak case.
 
@@ -736,13 +737,20 @@ class TitleRepositoryCandidateContract:
         `ORDER BY id` and "no ordering at all" the same answer, and the
         tiebreak is then unobservable.
 
-        **Every candidate is `ENRICHED` and none of these cases is about the
-        tier, which is a statement about the read rather than about the
-        fixture.** `list_unwatched_candidates` has no `enrichment_state`
-        predicate and no `enrichment_state` key: a skeleton is as eligible as
-        an enriched title, deliberately, because the pool spans the whole
-        catalog and the skeleton tier is most of it. The constructor needs
-        *some* value and this is the one that says "nothing here turns on it".
+        **`enrichment_state` defaults to `ENRICHED` and exactly one case
+        passes something else, which is what makes the default a statement
+        about the read rather than about the fixture.**
+        `list_unwatched_candidates` has no `enrichment_state` predicate and no
+        `enrichment_state` key: a skeleton is as eligible as an enriched
+        title, deliberately, because the pool spans the whole catalog and the
+        skeleton tier is most of it. That was argued in prose here and seeded
+        by nothing -- and "has any fixture, anywhere, ever set this to the
+        other value?" is the question this milestone has already answered
+        "no" to three times, once per surviving mutant. So
+        `test_a_skeleton_is_as_eligible_a_candidate_as_an_enriched_title`
+        seeds the other value, and a predicate added on this column fails a
+        case instead of passing every one of them.
+
         Whether a prompt should be handed a candidate with no overview and no
         genres is a real question and it is the *prompt's*, which is Task 12's
         -- if the answer ever becomes "no", it lands as a predicate here with
@@ -755,7 +763,7 @@ class TitleRepositoryCandidateContract:
             sort_name=name.lower(),
             genres=genres,
             vote_count=vote_count,
-            enrichment_state=EnrichmentState.ENRICHED,
+            enrichment_state=enrichment_state,
         )
 
     async def test_a_title_the_household_finished_is_not_a_candidate(
@@ -1064,3 +1072,51 @@ class TitleRepositoryCandidateContract:
         rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
 
         assert [row.id for row in rows] == [loud.id, quiet.id]
+
+    async def test_a_skeleton_is_as_eligible_a_candidate_as_an_enriched_title(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own
+    ) -> None:
+        """**The tier the pool is mostly made of, seeded for the first time.**
+
+        `list_unwatched_candidates` has no `enrichment_state` predicate on
+        purpose -- the port says the pool *"spans the whole catalog"* and that
+        the skeleton tier is most of it -- and until this case every fixture
+        in both arms wrote `ENRICHED`, so a predicate narrowing the read to
+        the enriched tier would have passed every case in the suite. That is
+        the same shape as `media_items.available`, whose mutation survived
+        everything until a fixture wrote the other value, and as
+        `titles.popularity` before it: **a predicate on a column no fixture
+        ever writes falsely is unobservable.**
+
+        The defect is not hypothetical and it is quiet. M6 measured the
+        enriched tier at single-digit thousands against a 1.27M-title catalog,
+        so a narrowed read still answers with a full-looking, plausible,
+        well-ordered pool -- of the couple of thousand titles TMDb enrichment
+        happened to reach -- and the household's own recently-imported library
+        is absent from it forever, with nothing counting the absence. PRD 08's
+        operator rule is sharper still: a fresh install that has bootstrapped
+        but not yet enriched has *no* enriched titles at all, so the pool is
+        empty and curation never fires.
+
+        The skeleton is the **most-voted** row and is seeded **second**, so it
+        is neither first in id order nor reachable by accident: a read that
+        dropped it answers with one row, and a read that kept it but lost the
+        `vote_count` key answers in the other order.
+        """
+        enriched = self._candidate("Enriched And Quiet", vote_count=5)
+        skeleton = self._candidate(
+            "A Skeleton Everybody Voted For",
+            vote_count=500_000,
+            enrichment_state=EnrichmentState.SKELETON,
+        )
+        for one in (enriched, skeleton):
+            await repo.add(one)
+            await own(one.id)
+        assert enriched.id < skeleton.id, (
+            "the premise: the answer must be the reverse of id order, or "
+            "`ORDER BY id` alone would produce it"
+        )
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
+
+        assert [row.id for row in rows] == [skeleton.id, enriched.id]

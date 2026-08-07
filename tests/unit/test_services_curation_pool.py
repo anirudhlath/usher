@@ -497,12 +497,32 @@ async def test_a_vector_of_another_width_leaves_its_candidate_where_it_was() -> 
     Treated as "no vector" rather than as a failure, which is the same answer
     the port already gives for a NULL one: a candidate the centroid cannot
     speak about keeps the position the signals that need no model gave it.
+
+    **Two premises, and this case had neither.** Its answer is a *swap* of the
+    two embedded members, so it rests on the centroid disagreeing with the
+    base order exactly as `test_a_candidate_with_no_vector_keeps_its_index`
+    does -- seed `bottom` on the centroid's own pole and the expected list is
+    the re-rank's answer; seed it anywhere else and the expected list is
+    unreachable, with nothing saying which. And the width itself is a fact
+    about the fake rather than about the literal three floats above: a later
+    `_DIMENSION` of 3 would make `narrow` an ordinary embedded candidate and
+    the case would quietly become a second copy of the re-rank case.
     """
     household = await _household_with_a_centroid()
     narrow = await household.title("A Vector From Another Model", vote_count=500, owned=True)
     await household.embeddings.given(narrow.id, [1.0, 0.0, 0.0])
     top = await household.title("Above It", vote_count=900, owned=True, vector=_pole(2))
     bottom = await household.title("Below It", vote_count=100, owned=True, vector=_pole(0))
+    centroid = await _centroid_of(household)
+    assert centroid is not None, "the premise: this household has a centroid"
+    stored = household.embeddings.rows[narrow.id].embedding
+    assert stored is not None and len(stored) != len(centroid.vector), (
+        "the premise: the fake must really be holding a vector of another width"
+    )
+    bottom_vector, top_vector = await _stored_vectors(household, bottom, top)
+    assert _cos(centroid.vector, bottom_vector) > _cos(centroid.vector, top_vector), (
+        "the premise: the centroid must disagree with the base order"
+    )
 
     pool = await household.service(embedder=FakeEmbedder()).for_user(USER)
     candidates = [one.id for one in pool if one.id in {top.id, narrow.id, bottom.id}]
@@ -535,9 +555,20 @@ async def test_a_vector_of_no_direction_leaves_its_candidate_where_it_was() -> N
     await household.embeddings.given(origin.id, [0.0] * _DIMENSION)
     top = await household.title("Above It", vote_count=900, owned=True, vector=_pole(2))
     bottom = await household.title("Below It", vote_count=100, owned=True, vector=_pole(0))
+    centroid = await _centroid_of(household)
+    assert centroid is not None, "the premise: this household has a centroid"
     stored = household.embeddings.rows[origin.id].embedding
     assert stored is not None and not any(stored), (
         "the premise: the fake must really be holding a zero vector"
+    )
+    # The same angular premise the width case above carries, and for the same
+    # reason: the expected list is a *swap* of the two embedded members, so it
+    # is the re-rank's answer only while the centroid disagrees with the base
+    # order. Without it a fixture that moved `bottom` off the centroid's pole
+    # would leave the case asserting an order nothing produces.
+    bottom_vector, top_vector = await _stored_vectors(household, bottom, top)
+    assert _cos(centroid.vector, bottom_vector) > _cos(centroid.vector, top_vector), (
+        "the premise: the centroid must disagree with the base order"
     )
 
     pool = await household.service(embedder=FakeEmbedder()).for_user(USER)
@@ -568,7 +599,8 @@ async def test_a_centroid_re_ranks_the_pool_it_is_given() -> None:
     near = await household.title("Quiet And Right", vote_count=3, owned=True, vector=_pole(0))
     centroid = await _centroid_of(household)
     assert centroid is not None, "the premise: this household has a centroid"
-    assert _cos(centroid.vector, _pole(0)) > _cos(centroid.vector, _pole(2)), (
+    near_vector, far_vector = await _stored_vectors(household, near, far)
+    assert _cos(centroid.vector, near_vector) > _cos(centroid.vector, far_vector), (
         "the premise: the centroid must prefer the title the base order ranks second"
     )
 
@@ -712,8 +744,14 @@ async def test_the_household_affinities_are_what_the_read_is_asked_for() -> None
     asked: list[tuple[str, ...]] = []
     original = household.titles.list_unwatched_candidates
 
+    # **`limit` carries no default here either, and that is the point of the
+    # spelling.** A stand-in for a port method is a seventh copy of that
+    # method's signature, so a `limit: int = 200` left behind on it is a copy
+    # of the very number `test_the_measured_two_hundred_is_declared_once_and_
+    # read_once` deleted from the other three -- sitting in the pinning file,
+    # where nothing would ever look for it. Spelled required, it cannot drift.
     async def _recorded(
-        user_id: uuid.UUID, *, genres: Sequence[str] = (), limit: int = 200
+        user_id: uuid.UUID, *, genres: Sequence[str] = (), limit: int
     ) -> list[Title]:
         asked.append(tuple(genres))
         return await original(user_id, genres=genres, limit=limit)
@@ -808,6 +846,19 @@ async def _stored_vectors(household: _Household, *titles: Title) -> list[tuple[f
     the fixture. Same family as the `similarities[0] < 1.0` guard this file
     deleted, and the reason that one was deleted rather than repaired: there
     was no fixture fact behind it at all.
+
+    **That repair fixed four of five, and the fifth was found by the next
+    review rather than by the round that went looking for the shape.**
+    `test_a_centroid_re_ranks_the_pool_it_is_given` kept the literal spelling
+    for one more commit, so the file simultaneously documented the defect here
+    and shipped an instance of it forty lines down. Two more cases -- the
+    another-width and zero-norm ones -- had no angular premise **at all**,
+    which is why counting repairs is the wrong check: both assert a *swap* of
+    two embedded members and so rest on the same centroid-disagrees-with-the-
+    base-order fact the repaired guards state, and a search for guards to
+    repair cannot see a case that never wrote one. **Enumerate the cases whose
+    expected answer depends on the fixture's angles, not the guards that
+    happen to exist.**
     """
     vectors = await household.embeddings.list_for_titles([one.id for one in titles])
     return [vectors[one.id] for one in titles]

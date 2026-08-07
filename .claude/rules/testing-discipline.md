@@ -673,6 +673,57 @@ been hiding them.**
   (`given` takes any `Sequence[float]`) is what makes a port's promise
   breakable on purpose, and that is what such a guard needs.
 
+**A round that repairs every instance of a shape repairs the instances it
+searched for, and the search is the thing to check.** Found 2026-08-07, a
+fourth review round on the same file. The round above repaired **four**
+literal-computed angular guards in `test_services_curation_pool.py` and wrote
+the finding into `_stored_vectors`' own docstring; a **fifth** was still there
+one commit later, in `test_a_centroid_re_ranks_the_pool_it_is_given`, so the
+file documented the defect in one function and shipped it forty lines down.
+Both halves matter and the second is the general one:
+
+- **The literal spelling survives a grep for the repaired spelling.** The
+  repair was applied where `_stored_vectors` was easy to reach and the
+  remaining copy read exactly like the recorded defect, `_cos(centroid.vector,
+  _pole(0)) > _cos(centroid.vector, _pole(2))`.
+- **Two more cases had no angular premise at all, and counting guards cannot
+  find those.** `test_a_vector_of_another_width_…` and
+  `test_a_vector_of_no_direction_…` each assert a *swap* of two embedded
+  members, so each rests on the same "the centroid disagrees with the base
+  order" fact the five repaired guards state — and neither had written one, so
+  a fixture that moved `bottom` off the centroid's pole would have left both
+  asserting an order nothing produces. **Enumerate the cases whose expected
+  answer depends on a fixture fact, not the guards that happen to exist**; the
+  second enumeration is a subset of the first and is the one everybody makes.
+
+Same round, the third instance in this task of **"has any fixture, anywhere,
+ever set this to the other value?"** — after `media_items.available` and
+`titles.popularity`. Every candidate fixture in *both* arms of
+`TitleRepositoryCandidateContract` wrote `enrichment_state = ENRICHED`, and the
+port docstring says the read deliberately has no such predicate because the
+skeleton tier is most of the catalog. Planting `enrichment_state = ENRICHED`
+into each implementation now fails **exactly one case on each arm — the new
+one** (out of 47 unit and 64 integration), which is the measurement saying it
+survived both files whole at 46 and 63. The damage is quiet rather than loud,
+which is why it is worth a case:
+the narrowed read still answers with a full-looking, well-ordered pool of
+whatever TMDb enrichment reached (single-digit thousands against 1.27M), and on
+a fresh install that has bootstrapped but not enriched it answers with nothing
+at all. `test_a_skeleton_is_as_eligible_a_candidate_as_an_enriched_title` seeds
+the other value and kills the plant on both arms, naming only itself.
+**A prose paragraph explaining why a column is not filtered on is not a check;
+it is the reason nobody wrote one.**
+
+**And one review finding measured and declined rather than applied.**
+`_cosine` recomputes the centroid's norm once per candidate, which reads as an
+obvious hoist. Measured over a full 200-candidate pool at 384 dimensions
+(medians of 30 runs): **5.97 ms → 4.29 ms**, i.e. 1.7 ms once per household in
+a nightly job, bought with a third parameter that can disagree with the first.
+Declined, with the number written into `_cosine`'s docstring so the next reader
+does not re-derive it. **A performance finding with no measurement behind it is
+a design change with no argument behind it**, and the cheap move is to measure
+it once and record the result in the place that invites the question.
+
 **The `-q`/`-qq` trap bit a sweep harness, and it presents as DID-NOT-RUN.**
 `addopts` already carries `-q`, so a harness adding its own makes it `-qq`,
 which suppresses the `N passed, M failed` summary line entirely — on a *green*
