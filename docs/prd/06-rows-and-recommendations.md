@@ -156,6 +156,19 @@ slug-keyed rule would couple the composer to the catalog.
 `LLMRow.build()` only *hydrates* stored output. Generation happens in a
 background job — never in the request path.
 
+> **Three surfaces reach that job and only one of them reports what it did.**
+> `POST /admin/rows/regenerate` enqueues a `curate` job and answers 202 with
+> the key; `usher work` claims it, but only if this process built an
+> `LLMClient` at all. ✅ **M8** adds `usher curate`, which runs one generation
+> *in the foreground* against a real database and prints what it bought — the
+> pool it chose from, the rows kept, the drops by reason with all five reasons
+> and their zeros, the token counts and the cost. It is the only place an
+> operator sees the answer in the same breath as the request, which is what a
+> command that spends money owes: a 202 says nothing about what a completion
+> returned, and the ledger row it leaves behind is a row somebody has to go
+> and query. It writes through the same `CurationService` as the job, so it is
+> a surface rather than a second implementation.
+
 > **"Until regenerated" was this table's TTL cell and it is corrected here: it
 > is the *artefact's* lifetime, not the cache's, and read as a TTL it inverts.**
 > The stored row really is immutable until a generation replaces it — but

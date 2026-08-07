@@ -85,17 +85,23 @@ stack *because* the stack is one flag away.
 **Also:**
 
 - **The shape is asserted by AST as well as by behaviour.** Every behavioural
-  case here passes equally well against fourteen `try`/`except` pairs, one per
-  command — which is the shape that rots, because command fifteen is written
-  by copying an arm and not the handler. A case walks `main`'s body and
+  case here passes equally well against one `try`/`except` pair per command —
+  which is the shape that rots, because the *next* command is written by
+  copying an arm and not the handler. M8's `usher curate` is that next
+  command, and it inherited the boundary by adding a `_dispatch` arm and a row
+  in the argv table, with no handler of its own. A case walks `main`'s body and
   requires exactly one `Try`, with `get_settings`, `configure_telemetry` and
   `_dispatch` all inside it. One case about this implementation, one about the
   next — the same pairing [0025](0025-rows-build-sequentially.md) uses.
 - **`SystemExit` passes through untouched**, and that is free rather than
   arranged: it is a `BaseException` and the handlers name only `Exception`
   subclasses. Pinned anyway, because "free" stops being true the moment
-  somebody widens the tuple — and three places in `cli.py` already exit with
-  a message chosen for the failure it describes.
+  somebody widens the tuple — and five places in `cli.py` exit with a message
+  chosen for the failure it describes: `_as_uuid`, the semantic-search guard,
+  `similar`'s cross-argument rule, and both of M8 `usher curate`'s (no LLM
+  configured, and a generation that did not happen). It was three when this
+  ADR was written; the mechanism is what the bullet is about, and the count is
+  restated rather than left stale.
 - **The parametrised case runs over the parser's own subcommand list**, so a
   command added without a row in the table fails rather than quietly sitting
   outside the boundary.
@@ -113,7 +119,10 @@ stack *because* the stack is one flag away.
   better.
 - **Per-command handling.** Rejected on the shape argument above, and
   measurable rather than aesthetic: the finding named two commands, and all
-  fourteen had the defect.
+  fourteen the CLI advertised on **2026-08-05** had the defect. Stated with
+  its date because it is a measurement rather than a count to keep current —
+  the parser advertises fifteen since M8's `usher curate`, and every one of
+  them is still inside the one boundary.
 - **Truncating or reformatting the exception's own message.** The message is
   the operator's information. The boundary drops the *stack* and keeps the
   message intact — except for a rejected settings value, which is the one

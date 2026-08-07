@@ -37,6 +37,7 @@ from usher.composition import (
     QueueGauges,
     SearchGauges,
     SourceRegistry,
+    build_curation_service,
     build_derive_service,
     build_pipeline,
     build_worker,
@@ -58,6 +59,7 @@ from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
 from usher.ports.bulk import GenomeVector, ImdbTitle
+from usher.ports.errors import PortDataMalformed
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
 from usher.ports.repository import BulkCatalogRepository, GenomeCoverage
@@ -65,6 +67,8 @@ from usher.ports.rows import RowContext
 from usher.ports.search import SearchFilters, SearchMode
 from usher.ports.source import SourceAdapter
 from usher.services.bootstrap import BootstrapService
+from usher.services.curation import CurationReport
+from usher.services.curation_validate import DropReason
 from usher.services.home import ComposeReport, HomeService
 from usher.services.rows.cache import RowCache
 from usher.services.search import SemanticSearchUnavailable
@@ -1092,6 +1096,172 @@ def _print_home_report(report: ComposeReport, *, cold: Sequence[float], warm: fl
     )
 
 
+async def _curate(settings: Settings) -> None:
+    """One generation for the default household, at a terminal.
+
+    **Ships alongside `POST /admin/rows/regenerate` and `JobKind.CURATE`
+    rather than instead of them**, which is `usher home`'s relationship to
+    `GET /home`: the route promises a 202 and says nothing about when the
+    work runs, and the job is claimed by whichever worker has a client. This
+    command is the one surface where an operator gets the *answer* -- what
+    the pool was, what survived, what it cost -- in the same breath as the
+    request. PRD 06's "one modest completion per user per day" is a budget
+    this command spends one of, so it prints what it bought.
+
+    ## The disabled deployment answers before anything is opened
+
+    **There is no `CurationService` to build.** `composition.llm_client`
+    answers `(None, no-op)` for `USHER_LLM_ENABLED=false` and
+    `CurationService` spells its client `LLMClient`, never
+    `LLMClient | None`, so "no client, no curation" is a `mypy` fact at the
+    composition root rather than a branch inside the service. Every other
+    surface in this milestone degrades around that: `GET /home` is a shorter
+    screen because nine of ten providers need no model, and `usher work`
+    keeps five job kinds because `build_worker` registers `CURATE` under the
+    same guard `INDEX` sits behind. **This command has exactly one job**, so
+    there is nothing to narrow to, and a run that printed an empty report
+    and exited 0 would tell a cron entry that curation is running.
+
+    So it is `SystemExit` with a sentence -- the convention `_as_uuid`, the
+    semantic-search guard and `similar`'s cross-argument rule already use,
+    and which `main`'s boundary passes through untouched because
+    `SystemExit` is a `BaseException`. Not a new exception type and not a
+    second handler: a deployment configured without a model has not
+    *failed*, it said so once, at startup.
+
+    `report=False` for `usher search`'s reason. `llm_client`'s own warning is
+    *"curate jobs will not be claimed"*, which is right for `usher work` and
+    wrong twice over here -- this process claims no jobs, and
+    `_print_home_report`'s printed-not-logged rule would put a JSON envelope
+    in front of the answer.
+    The sentence below names the two settings instead, which is better
+    information rather than the same information.
+
+    ## The two conditions that raise, and why one arm covers both
+
+    `generate()` raises `PortDataMalformed` for an **empty candidate pool**
+    (PRD 08's "every command works against an empty database"; the one path
+    that attempts no call and so writes no `llm_calls` row) and for a
+    **generation that validated to zero rows** (ADR-0028's rule 3, carrying
+    `CurationRejected.error`, which is numbers and label names only). The
+    adapter raises the same type for a completion this endpoint could not
+    produce -- a truncated answer, a schema it will not accept, a prompt over
+    the context length -- and every one of those messages is a written
+    sentence that names its own fix.
+
+    **That family is exactly the one `JobWorker` parks**: retrying does not
+    help, so a human has to act, which is ADR-0026's own test for what an
+    operator-facing message is. The CLI's equivalent of parking is a sentence
+    and exit 1. Everything else keeps its stack, exactly as `OPERATOR_ERRORS`
+    leaves everything it does not name.
+
+    **The arm does not branch on which of the three it was**, and that is a
+    decision rather than an omission. The service's own message is the
+    diagnosis in each case and they read nothing alike; a CLI that wanted to
+    add a per-case next step would have to tell them apart by sniffing the
+    message or by reading `PortDataMalformed.detail`, which is coupling to a
+    field whose documented job is naming an offending record. What the arm
+    *does* add is the one fact none of the three messages carries and every
+    operator asks first: **nothing was written, so last night's screen still
+    stands** -- PRD 08's degradation row, true on all three paths because
+    `replace_for_user` is reached on exactly one.
+
+    `--traceback` does not reopen it, for `_settings_problem`'s reason
+    rather than its own: these stacks are this project's own frames raising
+    a message that is already complete, so re-raising adds lines and no
+    diagnosis.
+    """
+    # Built before the session and released in the same `finally` as
+    # `usher search`'s embedder: it is a once-per-process resource
+    # (`composition.llm_client` opens an `httpx.AsyncClient` with its own
+    # pool), which for a command is once.
+    client, aclose_client = await llm_client(settings, report=False)
+    if client is None:
+        # Before the `try`, because there is nothing to release: the factory
+        # hands back `composition.nothing` on this path, and awaiting a
+        # shared module-level no-op would read as cleanup that happened.
+        raise SystemExit(
+            "usher curate: this deployment has no LLM, so there is no generation to run "
+            "(set USHER_LLM_ENABLED=true and point USHER_LLM_BASE_URL at an "
+            "OpenAI-compatible endpoint)"
+        )
+    try:
+        async with _session_for(settings) as session:
+            pipeline = build_pipeline(session, settings)
+            service = build_curation_service(pipeline, settings, client)
+            # `ensure_default_user`, not `default_user`: this command needs an
+            # id and nothing else, and PRD 01's authentication seam is a
+            # singleton row until M9 gives it a request to come from.
+            user_id = await ensure_default_user(session)
+            try:
+                report = await service.generate(user_id)
+            except PortDataMalformed as exc:
+                raise SystemExit(
+                    f"usher curate: {exc}\n"
+                    "(nothing was written -- the household's previous rows still stand)"
+                ) from exc
+            _print_curation_report(report)
+    finally:
+        await aclose_client()
+
+
+def _print_curation_report(report: CurationReport) -> None:
+    """The operator's answer. `print`, never `logger` -- `_print_home_report`'s
+    split, and the same reason: a command's answer is stdout.
+
+    Every number here comes off the `CurationReport` rather than being
+    re-derived. **The pool size is the one that could not be re-derived
+    honestly**: asking `CandidatePoolService` again would build a *second*
+    pool -- a second catalog read, a second centroid, and a number equal to
+    the first only by luck of nothing having been watched in between -- and
+    summing the rows that came back cannot see the rows that are missing.
+
+    `cost_usd` is a `Decimal` and stays one all the way to the screen. Eight
+    decimal places because that is what `llm_calls.cost_usd`'s
+    `NUMERIC(12, 8)` stores, so this line and
+    `SELECT sum(cost_usd) FROM llm_calls` show an operator the same digits.
+    """
+    print(f"generation: {report.generation_id}")
+    print(f"pool: {report.pool_size} candidates")
+    cards = sum(len(row.card_title_ids) for row in report.rows)
+    print(f"kept: {len(report.rows)} rows, {cards} cards")
+    for row in report.rows:
+        print(f"  {row.slug:<14}{row.title:<48}{len(row.card_title_ids):>3} cards")
+    # **All five, zeros included**, iterating the map the validator built
+    # rather than filtering it: a reason absent from a report is
+    # indistinguishable from a reason nobody counts, which is the tally's own
+    # subject one level up -- and at a terminal there is no second export to
+    # compare against.
+    print("dropped (all five reasons, zeros included -- an absent line and a")
+    print("         reason nobody counts read the same):")
+    for reason, count in report.dropped.items():
+        print(f"  {reason.value:<16}{count:>4} {_drop_unit(reason)}")
+    usage = report.usage
+    print(
+        f"tokens: {usage.tokens_in} in, {usage.tokens_out} out   "
+        # Never `float(...)`: the two disagree below the column's own
+        # precision, which is where a per-token price on a cheap model lands.
+        f"cost: ${usage.cost_usd:.8f}   "
+        f"latency: {usage.latency_ms} ms   "
+        # What answered, not what was asked -- PRD 10 groups spend by model
+        # and a proxy serving a different one is the state
+        # `curated_rows.model_name` exists to make queryable.
+        f"model: {usage.model}"
+    )
+
+
+def _drop_unit(reason: DropReason) -> str:
+    """`rows` or `cards`, read off the member's own name.
+
+    Two of the five count rows and three count cards, so summing across the
+    label is meaningless -- and the `row_` prefix is what
+    `curation_validate`'s vocabulary uses to say so out loud. Derived rather
+    than tabulated here, because a table is a second copy that a sixth member
+    can arrive without a row in.
+    """
+    return "rows" if reason.value.startswith("row_") else "cards"
+
+
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
     """Probe a source's push channel once, or run the lanes in the foreground.
 
@@ -1301,6 +1471,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="cold compositions to time; the cache is cleared before each",
     )
 
+    # **No arguments at all**, and `--user` is the one deliberately absent:
+    # PRD 01 leaves authentication as a seam and `usher.db.users` is what
+    # stands in it, a singleton `is_default` row. A flag naming a household
+    # would be an id an operator has no way to look up on a deployment that
+    # has exactly one -- it lands with the request that carries a user, which
+    # is M9's.
+    sub.add_parser("curate", help="run one LLM generation for the default user")
+
     push = sub.add_parser("push", help="run the push lane, or probe a source's push channel")
     push.add_argument("--source", default=None, help="source name; omit for every enabled source")
     push.add_argument(
@@ -1455,9 +1633,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     credential (see `_settings_problem`).
 
     `SystemExit` is untouched by all of it: it is a `BaseException`, the
-    handlers below name only `Exception` subclasses, and three places in
+    handlers below name only `Exception` subclasses, and five places in
     this module already exit with a message chosen for the failure it
-    describes.
+    describes -- `_as_uuid`, the semantic-search guard, `similar`'s
+    cross-argument rule, and both of `curate`'s (no LLM configured, and a
+    generation that did not happen).
     """
     argv = sys.argv[1:] if argv is None else list(argv)
     args = parse_args(list(argv) if argv else ["serve"])
@@ -1546,6 +1726,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
         )
     elif args.command == "home":
         asyncio.run(_home(settings, limit=args.limit, repeat=args.repeat))
+    elif args.command == "curate":
+        asyncio.run(_curate(settings))
     elif args.command == "push":
         asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
     else:

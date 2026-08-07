@@ -64,6 +64,7 @@ _MINIMAL_ARGV: dict[str, list[str]] = {
     "suggest": ["suggest", "du"],
     "similar": ["similar", "--rebuild"],
     "home": ["home"],
+    "curate": ["curate"],
     "push": ["push"],
 }
 
@@ -85,9 +86,12 @@ def _raising(exc: BaseException) -> Callable[..., Coroutine[Any, Any, None]]:
 def _every_command_raises(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
     """Make every dispatch target fail identically.
 
-    Reached by walking the module rather than by listing the fourteen
+    Reached by walking the module rather than by listing the dispatch
     coroutines, for the same reason the argv table is checked against the
     parser: a hand-written list agrees with itself and with nothing else.
+    **Count-free deliberately** -- this docstring said "the fourteen
+    coroutines" until M8 added a fifteenth command, which is a number nobody
+    re-derives and the walk never needed.
     """
     for name, value in vars(usher_cli).items():
         if name.startswith("_") and inspect.iscoroutinefunction(value):
@@ -394,10 +398,11 @@ def _function_def(name: str) -> ast.FunctionDef:
 def test_the_boundary_is_one_try_around_the_whole_dispatch() -> None:
     """One case about this implementation, one about the next.
 
-    The behavioural cases above pass just as well against fourteen
-    `try`/`except` pairs, one per arm -- which is the shape that rots,
-    because the fifteenth command is written by copying an arm and not the
-    handler. This asserts the shape instead: `main` has exactly one `try`,
+    The behavioural cases above pass just as well against one `try`/`except`
+    pair per arm -- which is the shape that rots, because the *next* command
+    is written by copying an arm and not the handler, and M8's `usher curate`
+    is the one that arrived and proved it. This asserts the shape instead:
+    `main` has exactly one `try`,
     and everything that can fail -- reading the settings, configuring
     telemetry, dispatching -- is inside it.
     """

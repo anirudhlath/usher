@@ -343,6 +343,38 @@ never an alternative to it. `--resolve` and `--title` are used together, and
 `parse_args` refuses one without the other: `attach_title` writes what it is
 given, so `--resolve` alone would blank a link instead of creating one.
 
+**A command's `_dispatch` arm is unpinned by the CLI-wide boundary sweep,
+because that sweep makes both arms fail identically on purpose.** Found
+2026-08-07 by M8 Task 18's sweep. `_dispatch`'s `else` is `serve`, so a
+subcommand that parses and has no arm of its own does not fail — it starts
+uvicorn. `tests/unit/test_cli_errors.py::
+test_every_command_reports_a_dead_database_the_same_way` runs over every
+subcommand and cannot see it: `_every_command_raises` patches every dispatch
+coroutine **and** `uvicorn.run` to raise the same exception, which is exactly
+what makes it a test of the *boundary* and exactly what makes the two arms
+indistinguishable. Measured — deleting `elif args.command == "curate"` left
+the whole selection green. The case that closes it makes the two differ
+(`_curate` records, `uvicorn.run` raises), and it is the same shape as the
+`argv is None` defect one layer up, where `usher sync-status` silently
+started the HTTP server and looked like it worked because the server does
+start. **A new command owes this case; the boundary table does not supply
+it.**
+
+**`UsherPortError` is not in `OPERATOR_ERRORS`, and for the LLM that means
+`httpx.HTTPError` can never fire there.** Verified 2026-08-07 by
+`issubclass(PortUnavailable, cli.OPERATOR_ERRORS)` → `False` for the base and
+all four leaves. `OpenAICompatibleClient` translates every transport failure
+into `PortUnavailable`/`PortAuthFailed`/`PortRateLimited` *before* it crosses
+the port boundary — which is what the taxonomy is for — so the family the
+tuple names is unreachable from that adapter, and `usher curate` against an
+unreachable `USHER_LLM_BASE_URL` gets a stack rather than a sentence. That is
+ADR-0026's own motivating defect in a family the ADR does not name. **Not
+fixed by Task 18**, which handles only `PortDataMalformed` (the family
+`JobWorker` parks, i.e. the one no retry helps) inside the command itself:
+widening the tuple is a change to a settled ADR across fifteen commands and
+that ADR asks for evidence per family before it grows. Recorded here so the
+next reader does not re-derive it.
+
 `usher.db.users.ensure_default_user` creates the row nothing ever had.
 `usher.domain.watch.User` documents a singleton `is_default` user as what
 stands in PRD 01's authentication seam and `watch_states.user_id` is a real

@@ -754,9 +754,12 @@ async def embedder(
     below is about a *lane* -- "index jobs will not be claimed" -- which is
     exactly right for `usher work`, the server's worker lane and `usher push`,
     and is wrong twice over for `usher search`: it advises about work that
-    process does not do, and `cli.py:153-154`'s rule says an operator's report
-    is printed rather than logged, so with `USHER_LOG_JSON=true` (the default)
-    it is a JSON envelope in front of the search results. `_search` prints its
+    process does not do, and `cli._print_home_report`'s rule says an operator's
+    report is printed rather than logged, so with `USHER_LOG_JSON=true` (the
+    default) it is a JSON envelope in front of the search results. That rule
+    was cited as `cli.py:153-154` in two places until 2026-08-07, by which
+    point those lines held an `httpx.AsyncClient` construction inside
+    `_bootstrap`. `_search` prints its
     own line, which names the setting and the extra instead of a lane, so the
     information is not lost -- it is better. Pinned by
     `tests/integration/test_cli_pipeline.py::

@@ -296,6 +296,73 @@ command prints the rule for revisiting that (p95 > 400 ms *and* no provider
 ≥ 50% of build time) beside the numbers, so it is read off the output rather
 than recomputed.
 
+`usher curate` runs one LLM generation for the default household and prints
+what it bought.
+
+```bash
+uv run usher curate                # one completion, one generation, one report
+```
+
+```
+generation: 019fdbeb-6858-79b6-9c6e-1d5654baef71
+pool: 200 candidates
+kept: 2 rows, 11 cards
+  curated-1     Slow-burn sci-fi for a rainy night                5 cards
+  curated-2     Quietly devastating, quietly funny                6 cards
+dropped (all five reasons, zeros included -- an absent line and a
+         reason nobody counts read the same):
+  not_in_pool        1 cards
+  unparseable        0 cards
+  duplicate          0 cards
+  row_unusable       0 rows
+  row_too_short      0 rows
+tokens: 4812 in, 391 out   cost: $0.00042100   latency: 2314 ms   model: served/qwen3-30b-a3b
+```
+
+**Illustrative, not a measurement**: the layout is a real run's, captured from
+`tests/integration/test_cli_pipeline.py`'s fixtures, with the pool at the
+shipped `USHER_CURATION_POOL_SIZE` default of 200 and a scripted completion
+standing in for a model's. M8's live verification is where the real numbers
+land.
+
+It takes no arguments at all. The household is the singleton default user
+that stands in for authentication until M9, so a `--user` flag would be an id
+nobody can look up on a deployment that has exactly one.
+
+**It is one of three surfaces onto the same `CurationService`** — the other
+two are `POST /admin/rows/regenerate`, which enqueues a `curate` job and
+answers 202, and `usher work`, which claims it. This is the only one that
+reports the answer, which is what a command that spends money owes: a 202
+says nothing about what the completion returned.
+
+**All five drop reasons print every time, zeros included.** A reason absent
+from a report is indistinguishable from a reason nobody counts, and at a
+terminal there is no second export to compare against. Two of them count
+*rows* (`row_unusable`, `row_too_short` — the `row_` prefix says so) and
+three count *cards*, so summing across them means nothing. `not_in_pool` and
+`unparseable` produce the same empty screen and have opposite fixes: the
+first is the model inventing a candidate (look at the prompt, the
+temperature, the pool size) and the second is a shape the reader could not
+use at all (look at `response_format` and the schema).
+
+Three things make it exit 1 with a sentence instead of a report, and none of
+them is a stack:
+
+- **`USHER_LLM_ENABLED=false`** — there is no client, so there is no service
+  to build. Unlike `GET /home` (a shorter screen) and `usher work` (five
+  other job kinds), this command has exactly one job, so it says so rather
+  than exiting 0 having done nothing.
+- **An empty candidate pool** — an empty catalog, or a household that has
+  watched everything. Nothing is attempted and **nothing is billed**: this is
+  the one path in the whole milestone that writes no `llm_calls` row.
+- **A generation that validated to nothing** — the call worked, the money is
+  spent, and the message is the tally (`not_in_pool=5, row_too_short=1`).
+  Numbers and label names only; nothing the model wrote reaches the screen.
+
+In all three the household's previous rows still stand, and the message says
+so — a curated screen that has not changed since last night otherwise looks
+identical to one that was just replaced.
+
 **Nothing runs the rebuild for you**, and that is stated rather than implied.
 A title's neighbours go stale when *some other* title gets an embedding, which
 no per-row predicate can decide — so unlike everything else Usher derives,

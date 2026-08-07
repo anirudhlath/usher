@@ -223,6 +223,7 @@ uv run usher similar --rebuild               # recompute title_neighbors
 
 uv run usher derive                          # re-derive people/credits/collections
 uv run usher home                            # compose the home screen
+uv run usher curate                          # one LLM generation; pool, rows, drops, tokens, cost
 
 uv sync --extra embedding                    # optional: fastembed, 167 MiB, no torch
 ```

@@ -384,14 +384,31 @@ unreachable.
   — it does not start a multi-hour download unprompted.
 - Bootstrap is resumable and checkpointed; a restart mid-import continues.
 - **The operator trigger is `usher` (also `python -m usher`), and it exists
-  before the HTTP surface does.** `bootstrap` / `bootstrap-status` (M2) and
-  `sync` / `sync-status` / `unmatched` / `work` (M4) are the CLI composition
-  root, documented command by command in `README.md`;
-  [07](07-client-api.md)'s `POST /admin/sources/{id}/sync` and the two
-  `/admin/unmatched` routes are M9's and are built over the same services.
+  before the HTTP surface does.** `serve` (M1), `bootstrap` /
+  `bootstrap-status` (M2), `sync` / `sync-status` / `unmatched` / `work`
+  (M4), `push` (M5), `index` / `search` / `suggest` / `similar` (M6),
+  `derive` / `home` (M7) and `curate` (M8) — all fifteen the parser
+  advertises — are the CLI composition root, documented command by command in
+  `README.md`; [07](07-client-api.md)'s `POST /admin/sources/{id}/sync` and
+  the two `/admin/unmatched` routes are M9's and are built over the same
+  services. **The list above was four milestones stale**, naming six of the
+  fifteen, and is restated here in full rather than extended by one.
   Every one of them has to work against an *empty* database — a command an
   operator can only run after a successful sync is no use for diagnosing
-  why the sync did not happen.
+  why the sync did not happen. `curate` is where that rule costs something,
+  because an empty catalog is an empty candidate pool and there is no
+  generation to run: it says so and exits 1 rather than buying a completion
+  with a guaranteed empty answer, and it is the one path in
+  [06](06-rows-and-recommendations.md)'s curation that writes no `llm_calls`
+  row at all.
+- **A command whose only job needs a subsystem this deployment does not have
+  says so and exits 1.** `usher curate` with `USHER_LLM_ENABLED=false` has no
+  `LLMClient` and therefore no `CurationService` to build — the composition
+  root, not the service, is what knows that. Unlike `GET /home` (nine of ten
+  row providers need no model, so the screen is shorter) and `usher work`
+  (five of six job kinds need none, so `curate` is simply left unclaimed),
+  there is nothing here to narrow to, and a run that printed an empty report
+  and exited 0 would tell a cron entry that curation is running.
 - **`--allow-full-retraction` is the only way past ADR-0015's ceiling**, and
   it is a flag rather than a configuration default because it is the one
   input that can mark a whole library unavailable.
