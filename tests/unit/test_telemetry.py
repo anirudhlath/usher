@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 import pytest
@@ -138,6 +139,47 @@ def test_diagnose_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert captured["diagnose"] is False
     assert captured["backtrace"] is False
+
+
+def test_httpxs_per_request_info_line_does_not_reach_the_sink() -> None:
+    """**A command's answer is stdout, and `httpx` was writing to it.**
+
+    `httpx` logs `HTTP Request: <method> <url> "<status>"` at INFO once per
+    request, and `_InterceptHandler` -- correctly -- redirects every stdlib
+    record into loguru, whose sink is `sys.stdout` at INFO on the shipped
+    defaults. Measured 2026-08-07 against a loopback server: one request put a
+    ~900-character JSON envelope on stdout *in front of* the command's own
+    output. `usher search` and `usher curate` both pass `report=False` to
+    their factories to keep exactly that off the answer, and that call could
+    only silence Usher's own line.
+
+    Two arms, and the second is what stops the fix being "log nothing":
+    INFO is dropped, WARNING still arrives. Asserted through a **DEBUG** sink,
+    so the suppression has to be the stdlib logger's own level and not the
+    loguru sink's -- a fix that raised the sink threshold instead would pass
+    an INFO-sink version of this case and still print on a deployment running
+    `USHER_LOG_LEVEL=DEBUG`.
+
+    Nothing observable is lost: `configure_tracing` instruments `httpx`
+    unconditionally, so the same request is already a client span with method,
+    URL and status on it.
+    """
+    httpx_logger = logging.getLogger("httpx")
+    before = httpx_logger.level
+    configure_logging(_settings_with_telemetry_disabled())
+
+    sink: list[str] = []
+    handler = logger.add(sink.append, level="DEBUG")
+    try:
+        httpx_logger.info('HTTP Request: POST http://model/v1/chat/completions "HTTP/1.1 200 OK"')
+        assert sink == [], f"httpx's per-request line reached the sink: {sink}"
+
+        httpx_logger.warning("Connection pool is full, discarding connection")
+        assert len(sink) == 1, "a real httpx problem was silenced along with the noise"
+        assert "Connection pool is full" in sink[0]
+    finally:
+        logger.remove(handler)
+        httpx_logger.setLevel(before)
 
 
 def test_no_metric_exporter_constructed_when_telemetry_disabled(

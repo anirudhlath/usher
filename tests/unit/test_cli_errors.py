@@ -40,6 +40,24 @@ import uvicorn
 from sqlalchemy.exc import OperationalError
 
 from usher import cli as usher_cli
+from usher.ports.errors import (
+    PortAuthFailed,
+    PortDataMalformed,
+    PortRateLimited,
+    PortUnavailable,
+    RepositoryConflict,
+    RepositoryNotFound,
+    UsherPortError,
+)
+
+# The three `UsherPortError` subclasses that do *not* live in
+# `ports/errors.py`. Imported here rather than left to `__subclasses__()`
+# finding them by luck of another import: a class nothing has imported is not
+# a subclass Python will report, and the case below is an exhaustiveness
+# assertion.
+from usher.ports.ingest import AvailabilitySweepRefused
+from usher.ports.search import FilterNotSupported
+from usher.ports.source import SourceNotSupported
 
 # A value that must never appear in anything this module asserts on. Spelled
 # once so a leak fails loudly rather than being read past.
@@ -435,3 +453,167 @@ def test_the_boundary_catches_families_and_not_exception() -> None:
     assert Exception not in usher_cli.OPERATOR_ERRORS
     assert BaseException not in usher_cli.OPERATOR_ERRORS
     assert OSError in usher_cli.OPERATOR_ERRORS
+
+
+def test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple() -> None:
+    """**The shape of ADR-0026's 2026-08-07 amendment, asserted rather than
+    described**, and the assertion that fails on the one-line version of it.
+
+    `OPERATOR_ERRORS + (UsherPortError,)` is what an implementer reaches for
+    on reading "an unreachable LLM endpoint should be a sentence", and it
+    passes every behavioural case in this module. It also swallows
+    `PortDataMalformed` from the embedder (`fastembed` returning a different
+    number of vectors than texts, which its own adapter calls the most
+    damaging bug available in that milestone) and `RepositoryConflict` from
+    `TitleNeighborRepository.replace` (a score outside `[0, 1]` or a
+    self-neighbour, which that repository documents as a bug in the blend
+    rather than a conflict a retry clears).
+
+    So the line is drawn between the port families about **reaching** an
+    upstream and everything else, and both halves are pinned -- a later
+    widening to the base class fails here rather than in review.
+
+    **`UsherPortError` has nine subclasses, not the six in
+    `ports/errors.py`.** `SourceNotSupported`, `FilterNotSupported` and
+    `AvailabilitySweepRefused` live beside the ports whose contract they
+    belong to, which is documented at each of them and is easy to miss from
+    the taxonomy module -- so the set is read off `__subclasses__()` rather
+    than written out, and a tenth member arriving with no decision about it
+    fails here instead of defaulting into either half.
+    """
+    reaching = {PortUnavailable, PortAuthFailed, PortRateLimited}
+    everything_else = set(UsherPortError.__subclasses__()) - reaching
+    # The six that stay out, named so the count is checkable: three that are
+    # about what came back or what we tried to write and carry deliberate
+    # bug tripwires, and three that no measured path reaches this boundary
+    # with -- `ReconcileService` and `PushService` absorb two of them, and
+    # `_TRANSLATORS` covers every `SearchFilters` field, so the third fires
+    # only for a field a later milestone forgets.
+    assert everything_else == {
+        RepositoryConflict,
+        RepositoryNotFound,
+        PortDataMalformed,
+        SourceNotSupported,
+        FilterNotSupported,
+        AvailabilitySweepRefused,
+    }
+
+    assert UsherPortError not in usher_cli.OPERATOR_ERRORS
+    assert not issubclass(UsherPortError, usher_cli.OPERATOR_ERRORS)
+    for family in reaching:
+        assert issubclass(family, usher_cli.OPERATOR_ERRORS), family
+    for family in everything_else:
+        assert not issubclass(family, usher_cli.OPERATOR_ERRORS), family
+
+
+def test_an_unreachable_llm_endpoint_is_a_message_rather_than_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**ADR-0026's own motivating defect, in the family the ADR did not
+    name.**
+
+    `OpenAICompatibleClient` translates every transport failure into a port
+    error *before* it crosses the boundary -- which is what the taxonomy is
+    for -- so `httpx.HTTPError` can never fire for it and
+    `usher curate` against a `USHER_LLM_BASE_URL` with nothing listening used
+    to print a stack ending in `PortUnavailable: POST /chat/completions
+    failed: ConnectError`. Measured 2026-08-07 by driving
+    `OpenAICompatibleClient.complete_json` at a loopback port with nothing
+    bound: that is exactly the exception and exactly the message, and
+    `isinstance(exc, cli.OPERATOR_ERRORS)` was `False`.
+
+    It is the *most likely* runtime failure of a cron'd `usher curate`, and
+    the operator has already been billed for it by the time they read it:
+    `CurationService.generate` writes and commits the `llm_calls` row on its
+    way out. Being handed a stack on top of that is the wart ADR-0026 was
+    written about.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        usher_cli,
+        "_curate",
+        _raising(PortUnavailable("POST /chat/completions failed: ConnectError")),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        usher_cli.main(["curate"])
+
+    message = str(exit_info.value)
+    assert isinstance(exit_info.value.code, str)
+    assert "curate" in message
+    assert "POST /chat/completions failed: ConnectError" in message
+    assert "Traceback" not in message
+    # The flag still reopens it, which is what makes the boundary allowed to
+    # drop the stack at all.
+    assert "--traceback" in message
+
+
+def test_a_rejected_credential_and_a_rate_limit_read_the_same_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other two thirds of the transport half, and neither is worth a
+    stack: `USHER_LLM_API_KEY` is wrong, or the endpoint asked to be backed
+    off and a CLI has no backoff schedule to apply."""
+    _configured(monkeypatch)
+
+    monkeypatch.setattr(
+        usher_cli, "_sync", _raising(PortAuthFailed("TMDb rejected the configured API key"))
+    )
+    with pytest.raises(SystemExit) as rejected:
+        usher_cli.main(["sync"])
+    assert "TMDb rejected the configured API key" in str(rejected.value)
+    assert "Traceback" not in str(rejected.value)
+
+    monkeypatch.setattr(usher_cli, "_curate", _raising(PortRateLimited(30.0)))
+    with pytest.raises(SystemExit) as limited:
+        usher_cli.main(["curate"])
+    assert "retry_after=30.0" in str(limited.value)
+    assert "Traceback" not in str(limited.value)
+
+
+def test_a_repository_conflict_keeps_its_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**The half of the amendment that is a refusal**, and the case that
+    fails if somebody later widens the tuple to `UsherPortError`.
+
+    `PostgresTitleNeighborRepository.replace` raises this for a score outside
+    `[0, 1]`, a self-neighbour, a negative rank or a title id naming no row --
+    all four CHECKs or foreign keys, and all four *a bug in the blend* rather
+    than something an operator can start, fix or wait for.
+    `usher similar --rebuild` is where it surfaces, and the stack is the bug
+    report. Same argument `test_a_programming_error_keeps_its_traceback`
+    makes for `AttributeError`, one taxonomy over.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        usher_cli,
+        "_similar",
+        _raising(RepositoryConflict("a neighbour batch violates the table's own bounds")),
+    )
+
+    with pytest.raises(RepositoryConflict):
+        usher_cli.main(["similar", "--rebuild"])
+
+
+def test_a_malformed_upstream_payload_keeps_its_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`FastEmbedEmbedder` raises this when it hands back a different number
+    of vectors than it was given texts -- title *n*'s vector landing on title
+    *m*, which its own adapter calls the most damaging bug available in that
+    milestone and which no operator action reaches. `usher search --mode
+    semantic` is where it surfaces.
+
+    The commands that *can* answer a `PortDataMalformed` sensibly do it
+    themselves, in the arm that knows what the message means:
+    `_vocabulary_line` prints it as a status line, `_curate` turns it into a
+    sentence about last night's screen. Neither is the boundary's to guess.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setattr(
+        usher_cli,
+        "_search",
+        _raising(PortDataMalformed("bge-small returned 3 vectors for 4 texts")),
+    )
+
+    with pytest.raises(PortDataMalformed):
+        usher_cli.main(["search", "dune"])

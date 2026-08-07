@@ -360,20 +360,53 @@ started the HTTP server and looked like it worked because the server does
 start. **A new command owes this case; the boundary table does not supply
 it.**
 
-**`UsherPortError` is not in `OPERATOR_ERRORS`, and for the LLM that means
-`httpx.HTTPError` can never fire there.** Verified 2026-08-07 by
-`issubclass(PortUnavailable, cli.OPERATOR_ERRORS)` → `False` for the base and
-all four leaves. `OpenAICompatibleClient` translates every transport failure
-into `PortUnavailable`/`PortAuthFailed`/`PortRateLimited` *before* it crosses
-the port boundary — which is what the taxonomy is for — so the family the
-tuple names is unreachable from that adapter, and `usher curate` against an
-unreachable `USHER_LLM_BASE_URL` gets a stack rather than a sentence. That is
-ADR-0026's own motivating defect in a family the ADR does not name. **Not
-fixed by Task 18**, which handles only `PortDataMalformed` (the family
-`JobWorker` parks, i.e. the one no retry helps) inside the command itself:
-widening the tuple is a change to a settled ADR across fifteen commands and
-that ADR asks for evidence per family before it grows. Recorded here so the
-next reader does not re-derive it.
+**`httpx.HTTPError` can never fire behind a port, so the CLI boundary was
+blind to every adapter in the project — fixed 2026-08-07 by widening
+`OPERATOR_ERRORS`, and the interesting half is the six families that stayed
+out.** Verified 2026-08-07 by `issubclass(family, cli.OPERATOR_ERRORS)` →
+`False` for `UsherPortError` and **all nine** of its subclasses.
+`OpenAICompatibleClient` translates every transport failure into
+`PortUnavailable`/`PortAuthFailed`/`PortRateLimited` *before* it crosses the
+port boundary — which is what the taxonomy is for — so the family the tuple
+named was unreachable from that adapter, and `usher curate` against an
+unreachable `USHER_LLM_BASE_URL` printed a **stack** ending in
+`PortUnavailable: POST /chat/completions failed: ConnectError`, having already
+committed the `llm_calls` row. Billed *and* handed a stack; ADR-0026's own
+motivating defect in a family the ADR did not name.
+
+- **Task 18 declined it and Task 18's review reopened it.** The refusal was
+  *"widening a settled ADR wants evidence per family"* — a good bar, and the
+  reproduction above is the evidence. The tuple now carries
+  `PortUnavailable`, `PortAuthFailed`, `PortRateLimited`; see ADR-0026's
+  **Amendment**, which is where the argument lives.
+- **`UsherPortError` itself is the one-line version and it is wrong.** All
+  fifteen commands were swept: seven have a path where widening changes
+  behaviour, and only three of those are cleanly operator-fixable. The other
+  four reach the boundary through raise sites the repositories document as
+  tripwires for **bugs in this project's own code** —
+  `TitleNeighborRepository.replace`'s bounds (*"a bug in the blend"*), the
+  credits delete's scope (*"the one job it has"*), `curated_rows`' assembly
+  CHECKs, and `FastEmbedEmbedder`'s vectors-to-texts mismatch (*"the most
+  damaging bug available in this milestone"*). The line drawn is **reaching
+  an upstream** against **everything else**.
+- **`UsherPortError` has nine subclasses, not four and not six, and this file
+  said four.** `SourceNotSupported` (`ports/source.py`),
+  `FilterNotSupported` (`ports/search.py`) and `AvailabilitySweepRefused`
+  (`ports/ingest.py`) live beside their own port rather than in
+  `ports/errors.py`, so a reader who greps the taxonomy module undercounts by
+  three — twice, in two reviews. `test_the_port_taxonomy_is_split_and_the_
+  base_class_is_not_in_the_tuple` now reads the set off `__subclasses__()`
+  (importing all three explicitly, since a class nothing imported is a
+  subclass Python does not report) so the count cannot go stale again.
+  All three stay out for a *different* reason from the content families:
+  `ReconcileService` and `PushService` absorb two of them and
+  `PostgresSearchIndex._TRANSLATORS` covers every `SearchFilters` field, so
+  no measured path reaches the boundary with one.
+- **`PortDataMalformed` staying out is load-bearing in two places**:
+  `cli._vocabulary_line` catches it and prints it as a status line, and
+  `cli._curate` turns it into a sentence about last night's screen. Both are
+  a command that knows what the message *means*, which ADR-0026 permits — as
+  distinct from the per-command *boundary* it rejects.
 
 `usher.db.users.ensure_default_user` creates the row nothing ever had.
 `usher.domain.watch.User` documents a singleton `is_default` user as what

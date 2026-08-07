@@ -110,8 +110,9 @@ uv run usher --traceback <command>   # the full stack, when one line is not enou
 ```
 
 When something an operator can fix goes wrong — the database is not up, a
-`.env` value is wrong, a source is unreachable — every command exits 1 with
-one line rather than a stack:
+`.env` value is wrong, a source or the LLM endpoint is unreachable, a
+credential is rejected, an upstream asks to be backed off — every command
+exits 1 with one line rather than a stack:
 
 ```
 usher bootstrap-status: ConnectionRefusedError: [Errno 111] Connect call failed ('127.0.0.1', 5432)
@@ -372,7 +373,7 @@ kept: 2 rows, 11 cards
   curated-2     Quietly devastating, quietly funny                6 cards
 dropped (all five reasons, zeros included -- an absent line and a
          reason nobody counts read the same):
-  not_in_pool        1 cards
+  not_in_pool        1 card
   unparseable        0 cards
   duplicate          0 cards
   row_unusable       0 rows
@@ -383,8 +384,10 @@ tokens: 4812 in, 391 out   cost: $0.00042100   latency: 2314 ms   model: served/
 **Illustrative, not a measurement**: the layout is a real run's, captured from
 `tests/integration/test_cli_pipeline.py`'s fixtures, with the pool at the
 shipped `USHER_CURATION_POOL_SIZE` default of 200 and a scripted completion
-standing in for a model's. M8's live verification is where the real numbers
-land.
+standing in for a model's. Only the usage line is that fixture's verbatim —
+**the two rows, the eleven cards, the `not_in_pool 1` and the model name are
+invented**, so read the shape and not the numbers. M8's live verification is
+where the real ones land.
 
 It takes no arguments at all. The household is the singleton default user
 that stands in for authentication until M9, so a `--user` flag would be an id
@@ -420,9 +423,22 @@ them is a stack:
   spent, and the message is the tally (`not_in_pool=5, row_too_short=1`).
   Numbers and label names only; nothing the model wrote reaches the screen.
 
-In all three the household's previous rows still stand, and the message says
-so — a curated screen that has not changed since last night otherwise looks
-identical to one that was just replaced.
+In all three the household's previous rows still stand, and the two that reach
+the service say so — a curated screen that has not changed since last night
+otherwise looks identical to one that was just replaced. The disabled
+deployment carries no such clause, because it never had a generation to
+replace them with.
+
+**The message does not say "nothing was written", and that is deliberate.**
+Only the empty pool writes nothing at all; the other two are billed, and a
+sentence claiming otherwise would tell an operator they were not charged on
+the one path where they were. What was or was not written to `llm_calls` is a
+question `llm_calls` answers.
+
+An endpoint that is down, rate-limiting or refusing the key is a fourth
+sentence and not a stack, but it comes from the CLI-wide boundary above rather
+than from this command, so it names the endpoint instead of the screen —
+**and it is still billed**, exactly like the other two that reach the model.
 
 **Nothing runs the rebuild for you**, and that is stated rather than implied.
 A title's neighbours go stale when *some other* title gets an embedding, which

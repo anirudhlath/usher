@@ -124,6 +124,28 @@ def configure_logging(settings: Settings) -> None:
         logging.getLogger(name).propagate = True
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
 
+    # **`httpx` logs one INFO line per request, and the redirect above is what
+    # made it visible.** Measured 2026-08-07 on the shipped defaults
+    # (`USHER_LOG_JSON=true`, `USHER_LOG_LEVEL=INFO`, sink `sys.stdout`): a
+    # single request prints a ~900-character JSON envelope reading
+    # `httpx._client:_send_single_request - HTTP Request: POST … "HTTP/1.0
+    # 200 OK"` on **stdout**, which is where every CLI command puts its
+    # answer. `usher curate` therefore opened with a log record about its own
+    # completion before printing the report -- exactly the interleaving
+    # `_print_home_report`'s printed-not-logged rule exists to prevent, and
+    # the reason `usher search` and `usher curate` pass `report=False` to
+    # their factories in the first place. That call turns off *Usher's* line
+    # and could do nothing about this one.
+    #
+    # WARNING and above still arrive, so a real failure is not silenced. And
+    # nothing is lost that PRD 10 depends on: `configure_tracing` instruments
+    # `httpx` unconditionally, so every one of these requests is already a
+    # client span carrying method, URL and status -- this line was a second,
+    # unstructured copy of a fact the trace holds better. Verified no test or
+    # script in this repository reads it (`grep -rn "HTTP Request"` finds
+    # nothing outside `httpx` itself).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 def configure_tracing(settings: Settings) -> None:
     """Install a real SDK `TracerProvider` unconditionally and instrument

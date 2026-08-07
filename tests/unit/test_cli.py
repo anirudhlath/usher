@@ -721,9 +721,11 @@ async def test_the_status_report_says_a_vocabulary_that_was_never_loaded_is_miss
 
 
 async def test_the_status_report_renders_a_mismatched_vocabulary_rather_than_raising() -> None:
-    """`PortDataMalformed` is a `UsherPortError` and `UsherPortError` is not
-    in `OPERATOR_ERRORS`, so letting it out of a status command answers "what
-    state is my genome in?" with a stack trace about the answer being bad.
+    """`PortDataMalformed` is deliberately not in `OPERATOR_ERRORS` -- the
+    three `UsherPortError` subclasses ADR-0026's 2026-08-07 amendment added
+    are the transport ones, and this is a content one -- so letting it out of
+    a status command answers "what state is my genome in?" with a stack trace
+    about the answer being bad.
 
     Both release tokens have to survive into the line: "the vocabulary is
     wrong" without naming what is stored is not something an operator can act

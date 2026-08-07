@@ -1525,3 +1525,62 @@ holds it" are different claims, and a boolean guard with two arms needs a
 fixture per arm exactly as a `WHERE` clause with two predicates does** (the
 "two predicates, one selectivity" entry above, arriving at a disjunction in
 Python instead of a conjunction in SQL).
+
+**M8 Task 18's review round: 12 plants — 9 killed, 3 equivalent-mutant
+controls surviving as designed, 0 unintended survivors, 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-07 in place over
+`src/usher/cli.py` and `src/usher/telemetry.py`, with the three `.pyc`
+defences in force and every kill checked against the case it was aimed at —
+each of the nine names that case and nothing else, except the always-plural
+plant, which correctly takes three (two unit, one integration). The three
+controls, each against every gate step:
+
+| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `OPERATOR_ERRORS`' `PortAuthFailed` and `PortRateLimited` entries swapped | PASS | PASS | PASS | PASS | PASS |
+| `_print_curation_report`'s `kept =` / `cards =` bindings swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `cli._unit`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first two are facts about the *code*: an `except` tuple is matched by
+`isinstance` over classes that are pairwise disjoint, so its order is
+unobservable, and two pure reads of the same tuple cannot observe each other.
+The docstring reword was checked against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`, which finds
+eight files and **none** of them scans `cli.py` or `telemetry.py`.
+
+Three findings worth carrying:
+
+- **A `sink == []` assertion is a false green wherever the fixture makes the
+  logging impossible.** `usher curate`'s success path prints a report and, on
+  the shipped defaults, printed a ~900-character `httpx` INFO envelope on
+  stdout in front of it — `report=False` silences *Usher's* line and can do
+  nothing about a third-party library's. The obvious case for it cannot see
+  it: the integration fixture substitutes `FakeLLMClient`, which opens no
+  socket, so `sink == []` over that fixture passes against a shipped path
+  that logs. The case with teeth is one layer down, in
+  `tests/unit/test_telemetry.py`, driving the **stdlib** logger directly
+  through `configure_logging` — and it asserts through a **DEBUG** loguru
+  sink, so a "fix" that raised the sink threshold instead would fail it.
+  Second arm too (`WARNING` still arrives), which the `CRITICAL` plant kills
+  on its own. **General form: before writing a negative assertion about
+  output, ask what in the fixture makes the output impossible, and put the
+  case where that thing is real.** Same family as "a run that did not run is
+  not a pass", in the fixture rather than the harness.
+- **`Class.__subclasses__()` is the only honest way to enumerate a taxonomy,
+  and it needs the imports to have happened.** `UsherPortError` has **nine**
+  subclasses; `.claude/rules/config-cli-and-deployment.md` said "the base and
+  all four leaves" and a review said six. Both counted `ports/errors.py` and
+  missed `SourceNotSupported`, `FilterNotSupported` and
+  `AvailabilitySweepRefused`, which live beside the ports whose contract they
+  belong to. The exhaustiveness assertion imports all three explicitly, since
+  a class nothing has imported is a subclass Python does not report — an
+  assertion over `__subclasses__()` alone would have silently agreed with the
+  undercount. **Never hand-write the members of a taxonomy a case is about to
+  make a claim over.**
+- **A message assertion and a database assertion in the same case can be made
+  to contradict each other, and that is what gives a wording fix teeth.**
+  `usher curate`'s failure sentence claimed "nothing was written" on a path
+  the same case pins as billed (`len(ledger) == 1`). `"previous rows still
+  stand" in message` is satisfied by both wordings; `"nothing was written"
+  not in message`, sitting six lines above `len(ledger) == 1`, is not — and
+  the pair reads as one argument rather than two assertions.

@@ -242,8 +242,36 @@ def test_the_two_row_reasons_count_rows_and_the_three_card_reasons_count_cards(
     assert _line(DropReason.NOT_IN_POOL).endswith("4 cards"), _line(DropReason.NOT_IN_POOL)
     assert _line(DropReason.UNPARSEABLE).endswith("3 cards"), _line(DropReason.UNPARSEABLE)
     assert _line(DropReason.DUPLICATE).endswith("2 cards"), _line(DropReason.DUPLICATE)
-    assert _line(DropReason.ROW_UNUSABLE).endswith("1 rows"), _line(DropReason.ROW_UNUSABLE)
+    assert _line(DropReason.ROW_UNUSABLE).endswith("1 row"), _line(DropReason.ROW_UNUSABLE)
     assert _line(DropReason.ROW_TOO_SHORT).endswith("5 rows"), _line(DropReason.ROW_TOO_SHORT)
+
+
+def test_a_tally_of_one_does_not_read_as_a_tally_of_several(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`1 row`, not `1 rows`, and on all three lines that print a count.
+
+    Cosmetic, and the three sites are why it is a case rather than a fix in
+    one place: `kept:`, each kept row's card count and the drop tally format
+    a number beside a unit independently, so a plural hardcoded at one of
+    them leaves the other two printing `1 cards`. A generation of one row of
+    one card that dropped one of each kind reaches all three at once.
+    """
+    _print_curation_report(
+        _report(
+            rows=(_row("curated-1", title="One of everything", cards=1),),
+            dropped={
+                **_NOTHING_DROPPED,
+                DropReason.NOT_IN_POOL: 1,
+                DropReason.ROW_UNUSABLE: 1,
+            },
+        )
+    )
+
+    out = capsys.readouterr().out
+    assert "kept: 1 row, 1 card" in out, out
+    assert "1 rows" not in out, out
+    assert "1 cards" not in out, out
 
 
 def test_the_report_prints_the_tokens_and_the_model_that_answered(

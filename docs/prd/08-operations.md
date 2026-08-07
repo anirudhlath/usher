@@ -426,11 +426,18 @@ unreachable.
   frames whose only operator-facing content was the last one. `main` has a
   single `try` around the whole dispatch which names the families an operator
   can act on — `OSError`, `SQLAlchemyError`, `httpx.HTTPError`,
-  `ValidationError` — and answers each with one line and exit 1;
-  `usher --traceback <command>` re-raises. **`Exception` is deliberately not
-  among them**, so a bug still gets its full traceback, and Ctrl-C exits 130
-  rather than printing one. Why those families and not `Exception`, and why
-  the settings case is redacted, are
+  `ValidationError`, and since M8 the port taxonomy's transport half
+  (`PortUnavailable`, `PortAuthFailed`, `PortRateLimited`) — and answers each
+  with one line and exit 1; `usher --traceback <command>` re-raises.
+  **`Exception` is deliberately not among them**, so a bug still gets its full
+  traceback, and Ctrl-C exits 130 rather than printing one. Neither is
+  `UsherPortError` itself: an adapter translates its transport's failures
+  before they cross, so `httpx.HTTPError` is unreachable behind a port and the
+  three transport members had to be named — but `RepositoryConflict`,
+  `RepositoryNotFound` and `PortDataMalformed` keep their stacks, because
+  several of their raise sites are deliberate tripwires for bugs in Usher's
+  own code. Why those families and not `Exception`, why the settings case is
+  redacted, and the per-family evidence for the M8 widening are
   [ADR-0026](decisions/0026-the-cli-boundary-names-families.md).
 
 ### Backup — the asymmetry is the point

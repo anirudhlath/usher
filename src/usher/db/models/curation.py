@@ -61,7 +61,7 @@ curated row that mentioned it. Three consequences, in the order they arrive:
   resolve.
 - **`LLMRow.build`'s hydration shortens the shelf.** A card whose title is
   gone is a lookup that returns nothing, so the shelf loses a card and the
-  heading stays. That is [ADR-0014](../../../docs/prd/decisions/0014-absence-is-not-zero.md)'s
+  heading stays. That is [ADR-0014](../../../../docs/prd/decisions/0014-absence-is-not-zero.md)'s
   shape and it is the same degradation the validator already produces. The
   cases are `tests/unit/test_rows_curated.py`'s, and the vanished id sits in
   the *middle* of the array there, which is what rules out a hydration that

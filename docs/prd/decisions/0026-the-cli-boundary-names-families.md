@@ -1,6 +1,7 @@
 # ADR-0026 — The CLI's error boundary names families, and `Exception` is not one of them
 
-**Status:** Accepted — extends [08](../08-operations.md)
+**Status:** Accepted — extends [08](../08-operations.md); **amended 2026-08-07**
+(the port taxonomy's transport half joins `OPERATOR_ERRORS`; see Amendment)
 
 ## Context
 
@@ -32,8 +33,10 @@ what a boundary is allowed to catch.
 
 **`main` has exactly one `try`, and it catches enumerated families.**
 
-`cli.OPERATOR_ERRORS` is `(OSError, SQLAlchemyError, httpx.HTTPError)`, with
-`ValidationError` handled separately for the reason below. A family belongs
+`cli.OPERATOR_ERRORS` is `(OSError, SQLAlchemyError, httpx.HTTPError)` —
+**amended 2026-08-07 to add `PortUnavailable`, `PortAuthFailed` and
+`PortRateLimited`; see Amendment below** — with `ValidationError` handled
+separately for the reason below. A family belongs
 in the tuple when an operator can act on it: start the database, fix the URL,
 reconnect the network, correct the `.env`. **Everything else keeps its full
 traceback**, because a stack is the right output for a failure whose audience
@@ -164,13 +167,106 @@ Two mutations were applied in place and both were killed:
 
 30 cases in `tests/unit/test_cli_errors.py`; suite 3,247 passed / 5 skipped.
 
+## Amendment — 2026-08-07: the transport half of the port taxonomy joins the tuple
+
+**Status of the amendment:** Accepted. The decision above stands; the tuple it
+names grows by three, and the reasoning for the six that stay out is here
+rather than in a comment.
+
+`cli.OPERATOR_ERRORS` is now:
+
+```python
+(OSError, SQLAlchemyError, httpx.HTTPError, PortUnavailable, PortAuthFailed, PortRateLimited)
+```
+
+**The defect.** `usher curate` against an unreachable `USHER_LLM_BASE_URL`
+printed a **traceback** ending in `usher.ports.errors.PortUnavailable:
+POST /chat/completions failed: ConnectError`, and exited 1 having already
+written and committed an `llm_calls` row — so the operator was billed *and*
+handed a stack. That is this ADR's own motivating defect, in a family this ADR
+does not name, on the most likely runtime failure of a cron'd `usher curate`.
+
+**Why `httpx.HTTPError` did not cover it, which is the part worth keeping.**
+Reproduced 2026-08-07 against a loopback port with nothing bound:
+`OpenAICompatibleClient._send` wraps its only `httpx` call in
+`_UNTRANSLATED_FAILURES` → `PortUnavailable`, and a `response.json()` failure
+lands as `ValueError` → `PortDataMalformed`. Translating before the boundary is
+what the taxonomy is *for* ([09](0009-repositories-are-ports.md), PRD 01), so
+**`httpx.HTTPError` is unreachable behind any port in this project** — and
+every HTTP client in it (`adapters/llm`, `adapters/emby`, `adapters/tmdb`,
+`adapters/bulk`) is behind one. Measured the same day: `issubclass(family,
+OPERATOR_ERRORS)` was `False` for `UsherPortError` and for **all nine** of its
+subclasses. `httpx.HTTPError` is kept anyway — nothing else covers a bare
+`httpx` call added outside an adapter later.
+
+**Why not `UsherPortError` itself, which is the one-line version.** Every
+command was swept for a path where widening changes behaviour. Seven of the
+fifteen have one, and only three of those are cleanly operator-fixable. The
+rest reach the boundary through raise sites the repositories themselves
+document as **tripwires for bugs in this project's own code**, and a one-line
+message is exactly what those must not become — the whole subject of the
+Decision above, arriving through a different door:
+
+| would be muted | raise site says |
+|---|---|
+| `usher similar --rebuild` | a score outside `[0, 1]`, a self-neighbour, a negative rank — *"a bug in the blend rather than a conflict a retry could clear"* (`db/repositories/search.py`) |
+| `usher derive --backfill` | the natural key doing *"the one job it has: making a bug in the delete's SCOPE raise"* (`db/repositories/people.py`) |
+| `usher curate` | `curated_rows`' six CHECKs and a batch carrying one row id twice — *"a reachable caller-assembly mistake"* (`db/repositories/curation.py`) |
+| `usher search --mode semantic` | a vectors-to-texts length mismatch — *"the most damaging bug available in this milestone"* (`adapters/embedding/fastembed.py`) |
+| `usher sync` | `RepositoryNotFound` on a `RUNNING` row this process committed itself and has since lost |
+
+So the line is **reaching an upstream** against **everything else**.
+`PortUnavailable`, `PortAuthFailed` and `PortRateLimited` are conditions an
+operator starts, fixes or waits for. `RepositoryConflict`,
+`RepositoryNotFound` and `PortDataMalformed` keep their stacks.
+
+**And three subclasses nobody was counting.** `UsherPortError` has **nine**
+subclasses, not six: `SourceNotSupported`, `FilterNotSupported` and
+`AvailabilitySweepRefused` live beside the ports whose contract they belong to
+rather than in `ports/errors.py`. All three stay out, for a different reason
+from the three above — **no measured path reaches this boundary with one.**
+`ReconcileService` absorbs `AvailabilitySweepRefused` and records a `FAILED`
+run; `PushService` absorbs `SourceNotSupported`; and
+`PostgresSearchIndex._TRANSLATORS` covers every `SearchFilters` field, so
+`FilterNotSupported` fires only for a field a later milestone forgets. This ADR
+asks for evidence per family, and there is none for these three yet.
+
+**What the amendment does not change.** `PortDataMalformed` staying out is
+load-bearing in two places that already depend on it and were re-checked:
+`cli._vocabulary_line` catches it and prints it as a status line rather than
+letting `usher bootstrap-status` answer "what state is my genome in?" with a
+stack, and `cli._curate` turns it into a sentence about last night's screen.
+Both are the per-command handling this ADR permits — a command that knows what
+the message *means* — as distinct from the per-command *boundary* it rejects.
+
+**The one cost, named rather than discovered later.**
+`EmbySessionClient`/`EmbySourceAdapter` raise `PortUnavailable("this source
+adapter has been closed")` as a lifecycle guard, and that is a bug in this
+project rather than an operator's problem. It now reads as one line. Accepted
+because the message is itself the complete diagnosis — unlike
+`AttributeError: 'NoneType' object has no attribute 'id'`, which is the shape
+this ADR was written about — and because `--traceback` is one flag away.
+
+**Pinned by:**
+`test_an_unreachable_llm_endpoint_is_a_message_rather_than_a_traceback`,
+`test_a_rejected_credential_and_a_rate_limit_read_the_same_way`,
+`test_a_repository_conflict_keeps_its_traceback`,
+`test_a_malformed_upstream_payload_keeps_its_traceback`, and
+`test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple`,
+which reads the set off `UsherPortError.__subclasses__()` so a tenth member
+cannot arrive without a decision about it. The last three are what fail if
+somebody later widens the tuple to the base class.
+
 ## Uncertainty
 
 ⚠️ **`OPERATOR_ERRORS` is a claim about today's failure modes, and it will be
 incomplete.** The families were chosen from what the CLI actually does — one
 database, one HTTP client, one settings source — and a milestone that adds a
 subprocess, a message broker or a filesystem watcher adds a family with it.
-The tuple is public and carries its own comment for that reason.
+The tuple is public and carries its own comment for that reason. **This
+prediction fired within one milestone**, and not in the direction it was
+looking: the new family was not a new subsystem but the *existing* one growing
+a port boundary that made `httpx.HTTPError` unreachable. See the Amendment.
 
 ⚠️ **`str(exc)` on a SQLAlchemy error includes the statement and its bound
 parameters.** No credential reaches a bound parameter in this system — source

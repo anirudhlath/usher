@@ -1052,7 +1052,7 @@ async def test_curate_writes_a_generation_and_reports_what_it_bought(
     pool = int(re.search(r"pool: (\d+) candidates", out).group(1))  # type: ignore[union-attr]
     assert pool >= 10, out
     assert pool > _CARDS, "the pool size was the kept-card count, not the pool"
-    assert f"kept: 1 rows, {_CARDS} cards" in out, out
+    assert f"kept: 1 row, {_CARDS} cards" in out, out
     assert "Slow-burn sci-fi for a rainy night" in out, out
     for reason in DropReason:
         assert reason.value in out, f"{reason.value} is missing from the report: {out}"
@@ -1104,6 +1104,16 @@ async def test_curate_says_what_it_dropped_when_nothing_survived(
     Both database assertions matter and the second is the one a missing commit
     breaks: last night's screen still stands, *and* the spend is on the record
     anyway.
+
+    **And the message may not say "nothing was written", which is what it said
+    until 2026-08-07.** The two assertions below are a contradiction unless the
+    sentence is right: this case requires `len(ledger) == 1` -- the call was
+    billed -- so a message telling the operator nothing was written is telling
+    them they were not charged, on the one path in this milestone where the
+    money is gone and the screen is unchanged. That is the exact state
+    ADR-0028's rule 3 exists to make visible, inverted at the terminal. The
+    clause the arm is *for* is the screen one, which is true on all three paths
+    and is asserted above.
     """
     await _seed_candidates(cli_settings, 10)
     invented = range(9001, 9001 + _CARDS)
@@ -1116,6 +1126,7 @@ async def test_curate_says_what_it_dropped_when_nothing_survived(
     assert f"{DropReason.NOT_IN_POOL.value}={_CARDS}" in message, message
     assert f"{DropReason.ROW_TOO_SHORT.value}=1" in message, message
     assert "previous rows still stand" in message, message
+    assert "nothing was written" not in message, message
     assert "Traceback" not in message, message
     # Nothing the model wrote reaches the screen on this path: the heading was
     # the model's prose and the tally is numbers and label names.

@@ -33,7 +33,7 @@ otherwise be lost and re-litigated in six months.
 | [0023](0023-a-provider-proposes-it-does-not-decide.md) | A provider proposes; the composer decides | Accepted — settles PRD 06's composition sketch |
 | [0024](0024-the-genome-is-one-dense-vector-per-title.md) | The tag genome is one dense `halfvec(1128)` per title, not a tall relevance table | Accepted — corrects PRD 02 |
 | [0025](0025-rows-build-sequentially.md) | Rows build sequentially, because `AsyncSession` is not concurrency-safe | Accepted — corrects PRD 06 |
-| [0026](0026-the-cli-boundary-names-families.md) | The CLI's error boundary names families, and `Exception` is not one of them | Accepted — extends PRD 08 |
+| [0026](0026-the-cli-boundary-names-families.md) | The CLI's error boundary names families, and `Exception` is not one of them | Accepted — extends PRD 08; amended 2026-08-07 |
 | [0027](0027-the-llm-client-is-one-http-call.md) | The `LLMClient` is one HTTP call, and `litellm` is not taken | Accepted — corrects PRD 01, 06 and 10 |
 | [0028](0028-the-pool-is-the-contract.md) | The pool is the contract: candidates are indices, and the validator does not trust the schema | Accepted — settles PRD 06's validation step |
 

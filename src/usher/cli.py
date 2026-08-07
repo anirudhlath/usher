@@ -61,7 +61,12 @@ from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
 from usher.ports.bulk import GenomeVector, ImdbTitle
-from usher.ports.errors import PortDataMalformed
+from usher.ports.errors import (
+    PortAuthFailed,
+    PortDataMalformed,
+    PortRateLimited,
+    PortUnavailable,
+)
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
 from usher.ports.repository import BulkCatalogRepository, GenomeCoverage, GenomeRepository
@@ -111,6 +116,32 @@ _IDLE_SLEEP_SECONDS = 5.0
 # TCP connection out **unwrapped** -- the exact failure M7's smoke test hit
 # was a bare `ConnectionRefusedError`, and a handler keyed on
 # `SQLAlchemyError` would have missed the one case this boundary exists for.
+#
+# **Three of `UsherPortError`'s nine subclasses are here and six are not**, and
+# that split is the whole of what M8 added (ADR-0026's Amendment, 2026-08-07).
+# `httpx.HTTPError` cannot fire for anything behind a port: an adapter's job is
+# to translate its transport's failures *before* they cross, so `httpx` never
+# reaches this line from `adapters/llm`, `adapters/emby` or `adapters/tmdb` --
+# which left `usher curate` against an unreachable `USHER_LLM_BASE_URL`
+# answering with a stack, ADR-0026's own motivating defect in a family it did
+# not name.
+#
+# The line drawn is *reaching* an upstream against everything else. The three
+# below are conditions an operator acts on. `RepositoryConflict`,
+# `RepositoryNotFound` and `PortDataMalformed` stay out because several of
+# their raise sites are deliberate tripwires for bugs in this project's own
+# code (`title_neighbors`' bounds, the credits delete's scope, a curated batch
+# this project assembled wrong), and a one-line message is exactly what those
+# must not become. `SourceNotSupported`, `FilterNotSupported` and
+# `AvailabilitySweepRefused` -- the three that live beside their own port
+# rather than in `ports/errors.py`, which is why nobody counts them -- stay out
+# for the opposite reason: no measured path reaches this boundary with one, and
+# ADR-0026 asks for evidence per family before the tuple grows.
+#
+# `tests/unit/test_cli_errors.py::
+# test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple`
+# reads the set off `__subclasses__()`, so a tenth member cannot arrive
+# without a decision about it.
 OPERATOR_ERRORS: tuple[type[Exception], ...] = (
     # A refused connection, a name that does not resolve, a full disk, a
     # bulk dataset that is not where it was left.
@@ -118,9 +149,23 @@ OPERATOR_ERRORS: tuple[type[Exception], ...] = (
     # Everything the driver does wrap: a missing table (`alembic upgrade
     # head` never ran), a dead pool, a permission the role does not have.
     SQLAlchemyError,
-    # TMDb, Emby, and every bulk download. An unreachable source is the same
-    # class of operator problem as an unreachable database.
+    # TMDb, Emby, and every bulk download that is *not* behind a port -- and
+    # every one of them is behind a port today, which is why the three below
+    # exist. Kept because an adapter is free to let one through and because
+    # nothing else covers a bare `httpx` call added later.
     httpx.HTTPError,
+    # The port taxonomy's transport half. The upstream could not be reached,
+    # or did not answer in time -- start the endpoint, fix the URL, wait for
+    # the model to load. Also the embedding runtime, whose own adapter says a
+    # restart fixes every case it raises this for.
+    PortUnavailable,
+    # The credential was rejected. `USHER_LLM_API_KEY`, `USHER_TMDB_API_KEY`,
+    # a source's stored password -- an operator fixes all three, and none of
+    # them is worth sixty frames.
+    PortAuthFailed,
+    # The upstream asked to be backed off. A CLI has no backoff schedule to
+    # apply, so the honest answer at a terminal is the sentence and exit 1.
+    PortRateLimited,
 )
 # Shorter than this and a rejected value is not a credential, and scrubbing
 # it would mangle the message it appears in ("not 4" -> "not <redacted>").
@@ -264,10 +309,14 @@ async def _movielens(
     run, and both halves are decisions.**
 
     *After*, because before it would have to `ensure_local` outside
-    `import_dataset`'s `except UsherPortError`, and `UsherPortError` is not in
-    `OPERATOR_ERRORS` -- an unreachable `files.grouplens.org` would print a
-    stack instead of a sentence. Afterwards the archive is already local and
-    the only failures left are a parse and the database.
+    `import_dataset`'s `except UsherPortError`. Afterwards the archive is
+    already local and the only failures left are a parse and the database --
+    which still matters, because the parse failure is a `PortDataMalformed`
+    and that family is deliberately **not** in `OPERATOR_ERRORS` (ADR-0026's
+    2026-08-07 amendment put the transport half in and left the content half
+    to keep its stack). The download half of the original argument no longer
+    applies: an unreachable `files.grouplens.org` raises `PortUnavailable`,
+    which is now a sentence wherever it is raised.
 
     *Only on COMPLETED*, because a vocabulary is what explains the vectors and
     a failed drain has not finished writing them. The run that eventually
@@ -400,10 +449,11 @@ async def _vocabulary_line(genome: GenomeRepository, coverage: GenomeCoverage) -
     engine and is not.
 
     The refusal is *caught and printed*, not raised: `PortDataMalformed` is
-    not in `OPERATOR_ERRORS` (it is a `UsherPortError`), so letting it out of
-    a status command would answer "what state is my genome in?" with a stack
-    trace about the answer being bad. Task 18's `usher curate` makes the same
-    call for the same family.
+    deliberately not in `OPERATOR_ERRORS` -- the three `UsherPortError`
+    subclasses ADR-0026's amendment added are the transport ones, and this is
+    a content one -- so letting it out of a status command would answer "what
+    state is my genome in?" with a stack trace about the answer being bad.
+    Task 18's `usher curate` makes the same call for the same family.
     """
     if not coverage.revisions:
         return "genome vocabulary: no vectors to name"
@@ -1301,6 +1351,19 @@ async def _curate(settings: Settings) -> None:
     The sentence below names the two settings instead, which is better
     information rather than the same information.
 
+    **It took a second fix for that to be true of the run that succeeds**, and
+    the first one was defending an outcome it could not deliver. `report=False`
+    silences Usher's own line; `httpx` was writing one of its own, at INFO,
+    once per request, through `_InterceptHandler` and onto the same stdout --
+    so on the shipped defaults the report opened with a ~900-character JSON
+    envelope about its own completion. Measured 2026-08-07, quieted in
+    `configure_telemetry`, pinned by
+    `test_httpxs_per_request_info_line_does_not_reach_the_sink`. Worth stating
+    here because the equivalent case for this command cannot catch it: the
+    integration fixture substitutes `FakeLLMClient`, which opens no socket, so
+    a `sink == []` assertion over it would be green against a shipped path
+    that logs.
+
     ## The two conditions that raise, and why one arm covers both
 
     `generate()` raises `PortDataMalformed` for an **empty candidate pool**
@@ -1319,6 +1382,18 @@ async def _curate(settings: Settings) -> None:
     and exit 1. Everything else keeps its stack, exactly as `OPERATOR_ERRORS`
     leaves everything it does not name.
 
+    **An endpoint that is down, rate-limiting or refusing the key is not this
+    arm's**, and since ADR-0026's 2026-08-07 amendment it is not a stack
+    either -- `PortUnavailable`, `PortRateLimited` and `PortAuthFailed` are in
+    `OPERATOR_ERRORS`, so `main`'s one boundary answers them, one layer out,
+    with the same sentence-and-exit-1 every other command gets. This arm is
+    deliberately not widened to meet them: the boundary already has the
+    families whose fix is "start it, wait, fix the key", and a second handler
+    here would be the per-command shape ADR-0026 exists to refuse. It costs
+    them the screen clause below, which is the honest trade -- `replace_for_user`
+    is unreached on those paths too, but the message an operator needs first is
+    the endpoint's.
+
     **The arm does not branch on which of the three it was**, and that is a
     decision rather than an omission. The service's own message is the
     diagnosis in each case and they read nothing alike; a CLI that wanted to
@@ -1326,9 +1401,25 @@ async def _curate(settings: Settings) -> None:
     message or by reading `PortDataMalformed.detail`, which is coupling to a
     field whose documented job is naming an offending record. What the arm
     *does* add is the one fact none of the three messages carries and every
-    operator asks first: **nothing was written, so last night's screen still
-    stands** -- PRD 08's degradation row, true on all three paths because
-    `replace_for_user` is reached on exactly one.
+    operator asks first: **last night's screen still stands** -- PRD 08's
+    degradation row, true on all three paths because `replace_for_user` is
+    reached on exactly one.
+
+    **It says that and not "nothing was written", and the difference is the
+    money.** Only the empty pool attempts no call. The other two reach
+    `CurationService._settle`, which writes a **committed** `llm_calls` row
+    with `ok = false` and the real token counts -- deliberately, because a
+    failure with zeroed tokens is indistinguishable from a call that never
+    happened. So "nothing was written" was false on two of the three paths,
+    and false in the direction that matters: on a generation that validated
+    to zero rows the operator has been *charged*, which is the exact state
+    ADR-0028's rule 3 exists to make visible. This command's own integration
+    case asserts the contradiction --
+    `test_curate_says_what_it_dropped_when_nothing_survived` requires
+    `len(ledger) == 1`, "the call was billed and the ledger has to say so".
+    The screen is what this sentence is about; the spend is what `llm_calls`
+    is for, and the tokens and cost this command prints on the path that
+    succeeds.
 
     `--traceback` does not reopen it, for `_settings_problem`'s reason
     rather than its own: these stacks are this project's own frames raising
@@ -1361,8 +1452,7 @@ async def _curate(settings: Settings) -> None:
                 report = await service.generate(user_id)
             except PortDataMalformed as exc:
                 raise SystemExit(
-                    f"usher curate: {exc}\n"
-                    "(nothing was written -- the household's previous rows still stand)"
+                    f"usher curate: {exc}\n(the household's previous rows still stand)"
                 ) from exc
             _print_curation_report(report)
     finally:
@@ -1387,10 +1477,12 @@ def _print_curation_report(report: CurationReport) -> None:
     """
     print(f"generation: {report.generation_id}")
     print(f"pool: {report.pool_size} candidates")
+    kept = len(report.rows)
     cards = sum(len(row.card_title_ids) for row in report.rows)
-    print(f"kept: {len(report.rows)} rows, {cards} cards")
+    print(f"kept: {kept} {_unit('row', kept)}, {cards} {_unit('card', cards)}")
     for row in report.rows:
-        print(f"  {row.slug:<14}{row.title:<48}{len(row.card_title_ids):>3} cards")
+        count = len(row.card_title_ids)
+        print(f"  {row.slug:<14}{row.title:<48}{count:>3} {_unit('card', count)}")
     # **All five, zeros included**, iterating the map the validator built
     # rather than filtering it: a reason absent from a report is
     # indistinguishable from a reason nobody counts, which is the tally's own
@@ -1399,7 +1491,7 @@ def _print_curation_report(report: CurationReport) -> None:
     print("dropped (all five reasons, zeros included -- an absent line and a")
     print("         reason nobody counts read the same):")
     for reason, count in report.dropped.items():
-        print(f"  {reason.value:<16}{count:>4} {_drop_unit(reason)}")
+        print(f"  {reason.value:<16}{count:>4} {_unit(_drop_unit(reason), count)}")
     usage = report.usage
     print(
         f"tokens: {usage.tokens_in} in, {usage.tokens_out} out   "
@@ -1415,15 +1507,31 @@ def _print_curation_report(report: CurationReport) -> None:
 
 
 def _drop_unit(reason: DropReason) -> str:
-    """`rows` or `cards`, read off the member's own name.
+    """`row` or `card`, read off the member's own name.
 
     Two of the five count rows and three count cards, so summing across the
     label is meaningless -- and the `row_` prefix is what
     `curation_validate`'s vocabulary uses to say so out loud. Derived rather
     than tabulated here, because a table is a second copy that a sixth member
     can arrive without a row in.
+
+    Singular, because the noun and the number that agrees with it are two
+    decisions and only one of them is about the vocabulary. `_unit` makes the
+    other.
     """
-    return "rows" if reason.value.startswith("row_") else "cards"
+    return "row" if reason.value.startswith("row_") else "card"
+
+
+def _unit(noun: str, count: int) -> str:
+    """`1 row`, `2 rows` -- the form of the noun `count` agrees with.
+
+    Cosmetic and worth the function anyway: three lines of this report format
+    a count beside a unit (`kept:`, each kept row's cards, each drop reason),
+    so a plural hardcoded at one of them leaves the other two printing
+    `1 cards` -- and a report whose own prose reads unproofed invites the
+    numbers beside it to be read the same way.
+    """
+    return noun if count == 1 else f"{noun}s"
 
 
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:

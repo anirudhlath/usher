@@ -3348,7 +3348,7 @@ class LLMCallRepository(ABC):
         pool raises before the client is touched, and an empty catalog is an
         operator's problem rather than an event of the LLM subsystem.
         PRD 06's record rule and
-        [ADR-0028](../../docs/prd/decisions/0028-the-pool-is-the-contract.md)'s
+        [ADR-0028](../../../docs/prd/decisions/0028-the-pool-is-the-contract.md)'s
         rule 3 are the two halves of that.
 
         **Takes the domain model, not its eleven parts**, and the reason is
