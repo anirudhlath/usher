@@ -47,6 +47,28 @@ for a client to re-sort by (ADR-0006 puts the composition on the server).
    invites every client to compute a fraction against a number that never came
    from the household's own copy.
 
+**And the wrong `CuratedProvider`s, which is the other half of this module and
+the tenth member of the registry (M8 task 15):**
+
+7. **Reads the table rather than the household.** `list_for_user(ctx.user.id)`
+   is the whole of the scope, and the `user_id` predicate one layer down is the
+   one this subsystem's Postgres read actually got wrong -- it survived all
+   fourteen of its cases, because a `generation_id` is minted per generation
+   and every fixture gave each household a fresh one.
+8. **Proposes the whole generation.** `curation_validate` deliberately caps
+   nothing, so the `0-5 rows` bound is PRD 06's, is a product bound, and lives
+   here as `MAX_CURATED_ROWS`.
+9. **Takes the wrong five** -- the last five, or the five that sort first by
+   heading. The ordering is the only judgement the completion was bought for,
+   so the survivors are the model's first five and nothing here sorts.
+10. **Scores them apart.** A per-row decrement is a second spelling of an order
+    the positional slug already carries; see `CURATED_SCORE`.
+11. **Generates.** A provider holding an `LLMClient` puts a paid network round
+    trip inside `GET /home`, and it would *work* --
+    `test_no_provider_reaches_a_port_the_context_does_not_carry` cannot see it,
+    because `usher.ports.llm` is under `usher.ports` and passes that scan
+    whole. Asserted on this module's imports and its own source text.
+
 **A curated slug is unique within one generation and is not a stable name across
 generations**, because the padding width is a property of the generation: nine
 rows mint `curated-1` and ten mint `curated-01`. That premise is stated once, in
@@ -62,9 +84,9 @@ import uuid
 from collections.abc import Sequence
 from datetime import timedelta
 
-from usher.domain.curation import CuratedRow
+from usher.domain.curation import SLUG_PREFIX, CuratedRow
 from usher.domain.rows import DisplayHint, RowFamily
-from usher.ports.rows import RowContext
+from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.services.rows.base import BaseRow
 
 # **Five minutes, and PRD 06's "until regenerated" is the artefact's lifetime
@@ -146,4 +168,124 @@ class LLMRow(BaseRow):
         return self._row.card_title_ids
 
 
-__all__ = ["LLMRow"]
+# **0.85, flat, and the two things it has to be are different kinds of fact.**
+#
+# *Strictly below 1.0* is `test_no_provider_but_continue_watching_can_reach_the_
+# top_score`, a registry invariant: PRD 06 gives `ContinueWatchingProvider`
+# *"1 row, always ranked first"*, that guarantee is `ScoredRow.pinned`, and the
+# score ladder is kept in agreement with the pin so the composer's sort is not
+# quietly fighting it. Nothing here is pinned; a second pinned provider would
+# be two rows claiming one position, which is a guarantee that becomes a tie.
+#
+# *Where in (0.3, 0.9)* is a product judgement, and this is it. The two rows
+# above are about **intent** -- Continue Watching is a title the household is
+# in the middle of and Next Up (0.90) is the next episode of one they are
+# watching -- and a shelf a model proposed overnight must never outrank
+# something somebody is literally watching. Every other provider's ceiling is a
+# **discovery** claim computed from one signal: one seed's neighbour list
+# (0.80), one library event (0.75), one genre's lift (0.70), one recurring face
+# (0.65), the calendar (0.60), one collection (0.55), one crossing of the
+# two-year line (0.35). This one reads the household's whole recent history
+# against a 200-title pool, and it is the only row on the screen that cost
+# money -- so it sits above all seven and below both intent rows.
+#
+# **Being outranked here is not "shown later", it is "not shown".** The screen
+# is ten rows and a rich household proposes more than ten; a curated score
+# under `BecauseYouWatchedProvider`'s 0.80 would fill the screen before the
+# shelves this milestone bought were reached, every night, on exactly the
+# households the completion is most worth buying for. That is spend with no
+# screen to show for it, which is the failure PRD 10's dashboard 5 exists to
+# make visible and which a constant is cheaper than.
+#
+# **Flat, and that is a decision rather than an omission.** The composer ranks
+# on `(-score, slug)`, and a curated slug is positional and zero-padded to the
+# width of its generation (`domain/curation.py`), so the *tie* is already the
+# model's own ordering, stated exactly once.
+# `BecauseYouWatchedProvider._SEED_STEP` exists for the opposite reason: its
+# slugs carry a seed id, so its tie alphabetises. A decrement here would be a
+# second spelling of an order the slug already carries, and two spellings of
+# one order are two things that can disagree.
+CURATED_SCORE = 0.85
+
+# **PRD 06's `CuratedProvider | 0-5 rows`, and the cap is this provider's
+# because it is a product bound rather than a safety one.**
+# `services.curation_validate` deliberately caps nothing -- every card in a
+# hundredth row is still a title the household could watch, so nothing about
+# the *stored* generation is wrong at any length -- and the amendment that
+# settled that names this constant as where the bound belongs.
+#
+# `curation_prompt.MAX_ROWS` asks the model for at most five and is a
+# different kind of number: a request, which a model may ignore. This is what a
+# household is shown when it does. The two are allowed to differ, in one
+# direction only -- a prompt asking for more than this discards the excess here
+# with nothing counting it -- and
+# `test_the_shelf_budget_is_never_smaller_than_what_the_prompt_asks_for` is the
+# guard on that direction.
+#
+# `HomeService._MAX_PER_FAMILY` is 4 and `CURATED` is a family, so at most four
+# of these five ever reach a screen. That is not a reason to make this four:
+# the family cap is about crowding *between* families on one screen and moves
+# with the composer, and PRD 06's budget is about what this provider is
+# entitled to propose. `BecauseYouWatchedProvider` proposes three under the
+# same cap for the same reason.
+MAX_CURATED_ROWS = 5
+
+
+class CuratedProvider(RowProvider):
+    """0-5 rows: whatever last night's generation left in `curated_rows`.
+
+    **The tenth provider, and the only one whose signal no re-run
+    reproduces.** The other nine ask the catalog or the household a question
+    with a predicate and get the same answer twice; this one reads an artefact
+    that was bought, validated and stored hours ago by a different process.
+    That is the whole of the difference, and it is why `propose` is one port
+    call with no arithmetic in it: there is nothing here to recompute and
+    nothing to decide that the generation did not already decide.
+
+    **It has no constructor argument, unlike `row_providers`' one deployment
+    fact.** Whether an LLM is configured is not visible here and must not be:
+    a deployment with `USHER_LLM_ENABLED=false` has an empty `curated_rows`
+    and therefore no curated shelves, which is the same answer this provider
+    gives a household whose first generation has not run yet -- fewer rows,
+    not worse rows (ADR-0022's phrase, one subsystem over). A flag would make
+    those two states different code paths with one observable outcome.
+    """
+
+    def __init__(self, *, limit: int = MAX_CURATED_ROWS) -> None:
+        self._limit = limit
+
+    @property
+    def slug_prefix(self) -> str:
+        return SLUG_PREFIX
+
+    async def propose(self, ctx: RowContext) -> Sequence[ScoredRow]:
+        """This household's newest generation, cut to the budget.
+
+        **`ctx.user.id`, and the scope is the whole of the correctness here.**
+        `PostgresCuratedRowRepository.list_for_user` had its `user_id`
+        predicate deleted in a sweep and passed all fourteen of its cases,
+        because every fixture minted a fresh `generation_id` per household and
+        the two predicates were then equally selective. One layer up the same
+        mistake crosses a *screen* rather than a count: another household's
+        headings, their reasons, and a shelf of films this one has already
+        watched, rendered as a personal recommendation.
+
+        **The slice is `[:limit]`, taken from the read's own order.**
+        `list_for_user` orders by `position`, which is the model's ordering and
+        the only judgement the completion was bought for -- so the shelves that
+        survive the budget are its first five and not the five that sort first
+        by heading, by id or by anything else. Nothing here sorts.
+
+        **A slug is unique inside the generation this read answered and is not
+        a name across two.** The padding width is a property of the generation,
+        so nine rows mint `curated-1` and ten mint `curated-01`; this provider
+        reads what it was handed and compares it to nothing, which is what
+        keeps that instability confined to `RowCache`, where the old width's
+        entry is orphaned rather than overwritten. The one copy of that
+        argument is `domain/curation.py`'s `slug` comment.
+        """
+        stored = await ctx.curated.list_for_user(ctx.user.id)
+        return [ScoredRow(row=LLMRow(row), score=CURATED_SCORE) for row in stored[: self._limit]]
+
+
+__all__ = ["CURATED_SCORE", "MAX_CURATED_ROWS", "CuratedProvider", "LLMRow"]

@@ -1004,6 +1004,7 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
             credits=pipeline.credits,
             collections=pipeline.collections,
             affinities=await pipeline.taste.genre_affinity(user.id),
+            curated=pipeline.curated_rows,
         )
         cache = RowCache(clock=lambda: datetime.now(UTC))
         service = HomeService(pipeline.row_providers, cache=cache, max_rows=limit)

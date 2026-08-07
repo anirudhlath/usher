@@ -8,17 +8,20 @@ rows in registry order.
 """
 
 import ast
+import dataclasses
 import inspect
 import pathlib
 import uuid
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 
+from tests.fakes.taste_repository import FakeTasteRepository
+from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.unit.rows import USER, Library, days_ago
 from usher.api.app import create_app
 from usher.api.deps import get_home_service, get_row_cache, get_row_context
@@ -29,6 +32,7 @@ from usher.ports.rows import RowContext
 from usher.services.home import HomeService
 from usher.services.rows import ROW_PROVIDERS
 from usher.services.rows.cache import RowCache
+from usher.services.taste import TasteService
 
 EXTERNAL_ID = "emby-item-9f31a2"
 
@@ -122,6 +126,61 @@ async def library_only() -> AsyncIterator[httpx.AsyncClient]:
             yield connected
 
 
+async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -> None:
+    """**The one thing every other case in this file overrides away**, and the
+    gap M8 Task 15's mutation sweep found: `_app` replaces `get_row_context`
+    with a `Library`'s, so nothing in the unit suite has ever built the real
+    one -- and `curated=None` in it survived all 2,743 cases while being
+    perfectly type-annotated at the call site.
+
+    `RowContext` is a frozen dataclass with no runtime validation, so a field
+    the route wires to `None` constructs happily and fails as an
+    `AttributeError` inside whichever provider reads it, on the first request,
+    in production. `mypy` catches the spelling in this plant; it does not catch
+    an `Optional` widened by a later change, and a type checker is not the
+    thing this file is for.
+
+    **The assertion is behavioural rather than a `None` scan**, because a scan
+    is a second list to keep in step: every registered provider is asked to
+    propose against the real context, and every one must answer `[]` on a
+    household with nothing seeded. Together with
+    `test_every_row_context_field_is_read_by_at_least_one_provider` -- which
+    guarantees each field *has* a reader -- that makes the route's wiring
+    covered field by field, by construction, for the thirteenth as much as for
+    the twelfth.
+    """
+    library = Library()
+    taste = TasteService(
+        watch_states=library.watch_states,
+        embeddings=FakeTitleEmbeddingRepository(),
+        titles=library.titles,
+        taste=FakeTasteRepository(library.watch_states),
+        embedder=None,
+        now=lambda: datetime.now(UTC),
+    )
+
+    ctx = await get_row_context(
+        user=USER,
+        titles=library.titles,
+        media_items=library.media_items,
+        watch_states=library.watch_states,
+        episodes=library.episodes,
+        neighbors=library.neighbors,
+        people=library.people,
+        credits=library.credits,
+        collections=library.collections,
+        curated=library.curated_rows,
+        taste=taste,
+    )
+
+    assert len(dataclasses.fields(ctx)) >= 12, "the context lost fields, so this proves nothing"
+    assert len(ROW_PROVIDERS) == 10, "the registry shrank, so this proves nothing"
+    for provider in ROW_PROVIDERS:
+        assert await provider.propose(ctx) == [], (
+            f"{type(provider).__name__} could not read the context the route builds"
+        )
+
+
 async def test_the_screen_is_rows_in_the_order_the_server_composed_them(
     client: httpx.AsyncClient, seeded: _Seeded
 ) -> None:
@@ -161,15 +220,21 @@ def test_a_row_with_nothing_to_explain_carries_a_null_reason_and_not_an_empty_st
     and it cannot be told from a row that had something to say and said
     nothing. Kills `reason: str = ""` on the DTO.
 
-    **Asserted at the DTO rather than through the route, and that is a finding
-    rather than a convenience.** All nine shipped providers return a sentence
-    -- `BuiltRow.reason` is `str | None` and *nothing in `src/` returns
-    `None`* -- so the null arm is a shape the wire promises and no provider
-    currently reaches. Written through the route it would be a case that could
-    only ever assert the positive arm, which is the vacuous-pass failure this
-    milestone is about; written here it holds the DTO to the contract
-    `/openapi.json` publishes. Recorded for M8, whose `CuratedProvider` is the
-    first plausible row with nothing to explain.
+    **Asserted at the DTO rather than through the route, and the reason it was
+    a finding has now expired.** All nine of M7's providers return a sentence,
+    so `BuiltRow.reason`'s null arm was a shape the wire promised and *nothing
+    in `src/` reached* -- written through the route the case could only ever
+    have asserted the positive arm, which is the vacuous-pass failure M7 is
+    named for. It stays at the DTO because that is what holds the contract
+    `/openapi.json` publishes.
+
+    ✅ **M8 supplied the reader M7 recorded this waiting for.** `LLMRow` passes
+    the stored `reason` through, `None` included -- `curation_validate` turns a
+    blank one into `None` rather than `""` for this case's own argument -- and
+    `CuratedProvider` is what puts such a row on a screen.
+    `test_rows_curated.py::test_a_row_the_model_gave_no_reason_for_has_no_
+    subtitle_not_an_empty_one` is the behavioural half, so the wire's null arm
+    now has a producer as well as a promise.
     """
     row = BuiltRow(
         slug="a-row-with-nothing-to-say",
@@ -288,13 +353,22 @@ def test_the_home_service_and_every_provider_hold_no_source_adapter() -> None:
     **string** annotation, which is the one form needing no import at all; and
     an `ast.ImportFrom`-only scan does not see `import usher.ports.source`.
 
-    Scans **every** registered provider, not just the composer: nine providers
-    is nine chances, and a guard scoped to one of them reads as coverage. Same
+    Scans **every** registered provider, not just the composer: ten providers
+    is ten chances, and a guard scoped to one of them reads as coverage. Same
     lesson M6's sweep recorded when a docstring guard scoped to the class missed
     the method.
+
+    **The count moves with the registry and the claim does not**, which is why
+    this update is mechanical where `test_rows_invariants.py`'s is not: it is a
+    guard on the guard ("the sweep lost providers"), and nothing about a tenth
+    provider makes a source adapter more or less reachable. What *is* new about
+    `CuratedProvider` is the port it must not hold, and `usher.ports.source` is
+    not it -- `test_rows_curated.py::test_the_curated_module_holds_no_llm_
+    client_and_cannot_complete_anything` is this case's sibling for the one
+    that matters.
     """
     modules: list[type] = [HomeService, *(type(provider) for provider in ROW_PROVIDERS)]
-    assert len(modules) == 10, "the sweep lost providers, so it proves nothing"
+    assert len(modules) == 11, "the sweep lost providers, so it proves nothing"
 
     for target in modules:
         source = pathlib.Path(inspect.getfile(target)).read_text()

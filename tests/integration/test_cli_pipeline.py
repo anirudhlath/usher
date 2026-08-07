@@ -662,7 +662,7 @@ async def test_home_composes_a_screen_against_an_empty_database(
     await _home(cli_settings, limit=10, repeat=1)
 
     out = capsys.readouterr().out
-    assert "9 providers, 9 proposed nothing" in out
+    assert "10 providers, 10 proposed nothing" in out
     assert "screen: 0 rows, 0 cards" in out
 
 
@@ -675,8 +675,17 @@ async def test_home_prints_a_line_for_a_provider_that_proposed_nothing(
     left out of `ROW_PROVIDERS` survives review.
 
     Kills a report built by iterating the *proposals* rather than the registry.
-    Asserted by name for every one of the nine, because a count is satisfied by
-    a report printing one provider nine times.
+    Asserted by name for every one of the **ten**, because a count is satisfied
+    by a report printing one provider ten times.
+
+    **A superset passes this case and that is why the tenth had to be added
+    deliberately.** M8 registered `CuratedProvider` and every assertion below
+    stayed green -- the report simply grew a line nothing looked at -- which is
+    the same shape as the report dropping a silent provider, arriving from the
+    other direction. The count in
+    `test_home_composes_a_screen_against_an_empty_database` above is what
+    actually failed, so the two cases are load-bearing together and neither is
+    on its own.
     """
     await _home(cli_settings, limit=10, repeat=1)
 
@@ -691,6 +700,7 @@ async def test_home_prints_a_line_for_a_provider_that_proposed_nothing(
         "genre-affinity",
         "seasonal",
         "people",
+        "curated",
     ):
         assert any(line.startswith(slug) and " 0 " in line for line in lines), slug
 

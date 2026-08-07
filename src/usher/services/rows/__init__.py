@@ -1,4 +1,4 @@
-"""The nine row providers, and the registry that is the composition point.
+"""The ten row providers, and the registry that is the composition point.
 
 **A provider that is not registered is dead code**, so the registry is here
 rather than in `HomeService`: a provider enabled by *registration in code* is
@@ -10,8 +10,9 @@ it homeless -- Task 2 settles the scores as module constants and creates no
 module -- and the amendment puts it beside the registry. It imports each
 provider's own constant rather than repeating the number, so the table cannot
 drift from the providers it describes, and Group I asserts the observed range
-across it: **nine incomparable scales make the composer's sort meaningless
-while looking exactly like a sort.**
+across it: **ten incomparable scales make the composer's sort meaningless
+while looking exactly like a sort.** That invariant is what M8's
+`CURATED_SCORE` was chosen against, and it did not have to move to admit it.
 
 **A score is not the pin.** `ContinueWatchingProvider` is PRD 06's *"1 row,
 always ranked first"* and that guarantee is `ScoredRow.pinned`, a flag Group A
@@ -31,6 +32,7 @@ from usher.services.rows.continue_watching import (
     CONTINUE_WATCHING_SCORE,
     ContinueWatchingProvider,
 )
+from usher.services.rows.curated import CURATED_SCORE, CuratedProvider
 from usher.services.rows.franchise import FRANCHISE_SCORE_CEILING, FranchiseProvider
 from usher.services.rows.genre_affinity import (
     GENRE_AFFINITY_SCORE_CEILING,
@@ -50,9 +52,16 @@ from usher.services.rows.seasonal import SEASONAL_SCORE, SeasonalProvider
 # whose score is a function of time -- "new" is the one relevance claim that
 # genuinely decays -- so its entry is what it scores on an import that landed
 # this morning.
+#
+# Read as a ladder it is also the argument for `CURATED_SCORE`, which is the
+# first entry here chosen against the whole table rather than against one
+# sibling: 1.0 and 0.90 are the two rows about *intent*, everything at 0.80 and
+# below is a discovery claim from a single signal, and 0.85 is the gap between
+# them.
 BASE_SCORES: Mapping[str, float] = {
     ContinueWatchingProvider.__name__: CONTINUE_WATCHING_SCORE,
     NextUpProvider.__name__: NEXT_UP_SCORE,
+    CuratedProvider.__name__: CURATED_SCORE,
     RecentlyAddedProvider.__name__: RECENTLY_ADDED_SCORE_CEILING,
     RediscoverProvider.__name__: REDISCOVER_SCORE,
     BecauseYouWatchedProvider.__name__: BECAUSE_YOU_WATCHED_SCORE_CEILING,
@@ -82,6 +91,7 @@ __all__ = [
     "BASE_SCORES",
     "BECAUSE_YOU_WATCHED_SCORE_CEILING",
     "CONTINUE_WATCHING_SCORE",
+    "CURATED_SCORE",
     "FRANCHISE_SCORE_CEILING",
     "GENRE_AFFINITY_SCORE_CEILING",
     "NEXT_UP_SCORE",
@@ -95,6 +105,7 @@ __all__ = [
     "BecauseYouWatchedProvider",
     "Chapter",
     "ContinueWatchingProvider",
+    "CuratedProvider",
     "FranchiseProvider",
     "GenreAffinityProvider",
     "NextUpProvider",
@@ -112,10 +123,20 @@ def row_providers(*, semantic: bool = False) -> tuple[RowProvider, ...]:
 
     A provider that is not registered is dead code -- and dead code that looks
     exactly like a provider with nothing to say, which is the one failure this
-    milestone cannot see from the outside. Group I's own case asserts this
-    holds nine once every provider exists; it holds eight here, and the one
-    that is missing is named rather than implied: `People`, task 28. `CuratedProvider` is M8's whole
-    family (boundary call 2) and is deliberately not among them.
+    milestone cannot see from the outside. **It holds ten, which is PRD 06's
+    table whole**, and `test_rows_invariants.py` asserts that by name rather
+    than by count, because a count passes against a registry holding one
+    provider twice.
+
+    **This paragraph named eight and a ninth still to come, and both numbers
+    were false the moment `PeopleProvider` landed in the tuple below.** It is
+    recorded rather than quietly corrected, because that is the shape this
+    docstring was carrying: a *restated* fact, true when written, in a file
+    nobody re-reads when they edit the tuple three lines down. The M8 amendment
+    that added the tenth is the same trap one milestone later, and the defence
+    is the same one this module already relies on for `BASE_SCORES` -- state a
+    fact where it is derived, and where it cannot be derived, let the case that
+    enumerates the registry be the copy that fails.
 
     **A function rather than a bare tuple, and exactly one deployment fact
     reaches it.** `BecauseYouWatchedProvider` says a different sentence when
@@ -142,6 +163,13 @@ def row_providers(*, semantic: bool = False) -> tuple[RowProvider, ...]:
         GenreAffinityProvider(),
         SeasonalProvider(),
         PeopleProvider(),
+        # **M8's, and it takes no argument from the deployment.** Whether an
+        # LLM is configured is not a fact this provider may see: with
+        # `USHER_LLM_ENABLED=false` there is no generation and therefore no
+        # curated shelf, which is the same answer a household gets on the day
+        # before its first one runs. Two states, one observable outcome, no
+        # branch -- fewer rows, not worse rows.
+        CuratedProvider(),
     )
 
 

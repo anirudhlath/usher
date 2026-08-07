@@ -224,9 +224,11 @@ class BuiltRow(DomainModel):
     slug: str = Field(min_length=1)
     title: str = Field(min_length=1)
     # PRD 06: "the `reason` field is already written to be spoken aloud, not
-    # just displayed" -- Alfred reads it out. That is a real constraint on the
+    # just displayed" -- Alfred reads it out. That is a real constraint on M7's
     # nine providers: "Because you watched Dune" is speakable and
-    # "cosine>0.82 seed=a3f9" is not. `None` when a row needs no explanation.
+    # "cosine>0.82 seed=a3f9" is not. `None` when a row needs no explanation,
+    # and M8's `LLMRow` is the first thing in `src/` to return it -- it hands
+    # the stored `reason` through, `None` included.
     reason: str | None = None
     family: RowFamily
     # On the row, never on the card: a hint describes the shelf, and a card

@@ -82,8 +82,11 @@ _compose_duration = _meter.create_histogram(
 # provider" -- and `BecauseYouWatchedProvider` mints one slug per seed, so a
 # slug label's cardinality is the household's watch history and, in time, the
 # catalog. A label whose cardinality grows with the catalog is a metrics-backend
-# outage rather than a dashboard. Bounded at nine here; ten when M8 registers
-# `CuratedProvider`.
+# outage rather than a dashboard. **Bounded at ten**, which is the whole
+# registry: M8 task 15 registered `CuratedProvider` and `curated` is the tenth
+# label. The sharpest instance of the rule is that provider's own -- its row
+# slugs are `curated-01`, `curated-02`, … per generation, so a slug label there
+# is unbounded in the number of shelves a model has ever proposed.
 _row_build_duration = _meter.create_histogram(
     "usher.row.build.duration", unit="s", description="Wall time to build one row, by provider"
 )

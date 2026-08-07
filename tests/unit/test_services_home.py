@@ -383,8 +383,8 @@ async def test_the_default_row_ceiling_is_reachable_now_that_a_third_family_exis
     assert sum(_builds(provider) for provider in providers) == 10
 
 
-def test_the_registry_holds_the_nine_providers_m7_ships_under_their_own_names() -> None:
-    """Asserted by **name**, not by count: `len(...) == 9` is satisfied by
+def test_the_registry_holds_the_ten_providers_prd_06_specifies_under_their_own_names() -> None:
+    """Asserted by **name**, not by count: `len(...) == 10` is satisfied by
     registering one provider twice, and a provider that is not registered is
     dead code (boundary call 9 -- registration in code *is* the enable switch,
     and there is no `row_providers` table).
@@ -396,10 +396,13 @@ def test_the_registry_holds_the_nine_providers_m7_ships_under_their_own_names() 
     sees, so renaming a class is a refactor and renaming this is a deliberate
     change to something outside the codebase.
 
-    **This case fails when M8 adds `CuratedProvider`, deliberately.** M8
-    updates it in the same commit that registers the tenth; a registry
-    assertion a later milestone can grow past without touching is one that
-    would not have caught a provider left out of the tuple.
+    **This case was written to fail when M8 added `CuratedProvider`, and it
+    did.** M8 Task 15 updates it in the same commit that registers the tenth,
+    which is the whole of what "deliberately" bought: a registry assertion a
+    later milestone can grow past without touching is one that would not have
+    caught a provider left out of the tuple. `curated` is the new member, and
+    it is the label a dashboard will group the one row on this screen that
+    cost money under.
     """
     from usher.services.rows import ROW_PROVIDERS
 
@@ -413,6 +416,7 @@ def test_the_registry_holds_the_nine_providers_m7_ships_under_their_own_names() 
         "seasonal",
         "people",
         "rediscover",
+        "curated",
     }
 
 

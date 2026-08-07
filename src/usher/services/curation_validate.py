@@ -164,7 +164,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
-from usher.domain.curation import CuratedRow
+from usher.domain.curation import SLUG_PREFIX, CuratedRow
 from usher.domain.ids import new_id
 
 #: The keys the completion is read through. Constants rather than literals so
@@ -177,13 +177,13 @@ TITLE_KEY = "title"
 REASON_KEY = "reason"
 ITEM_IDS_KEY = "item_ids"
 
-#: `curated-01`, `curated-02`, … The composer breaks score ties on `slug` and
-#: every curated row carries the same base score, so this string is what
-#: carries the model's row ordering onto the screen. Zero-padded to the width
-#: of the generation for the reason this milestone already learned once from
-#: `m8a` sorting *after* `m10a`: `sorted(["curated-10", "curated-2"])` puts the
-#: tenth row first.
-SLUG_PREFIX = "curated"
+#: `SLUG_PREFIX` is **imported** above and re-exported here, rather than
+#: declared. It moved to `usher.domain.curation` when M8 Task 15 gave it a
+#: second reader: `CuratedProvider` declares it as its `slug_prefix` and may
+#: not import this module (a provider may reach only `usher.domain`,
+#: `usher.ports` and `usher.services.rows`). The argument for the scheme, and
+#: for the placement, is beside `CuratedRow.slug`; this module is still the
+#: only thing that *mints* one.
 
 #: The floor a row has to clear, restating `SeasonalProvider`'s and
 #: `RediscoverProvider`'s rather than inventing a second number: *"an empty or

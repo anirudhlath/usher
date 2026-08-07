@@ -1112,3 +1112,40 @@ never `cp -a` (see the venv-shebang entry above). This is a stricter reading of
 the "never dispatch multiple implementation subagents in parallel" rule than
 conflict-avoidance implies — the conflict is not in the filesystem, it is in
 the measurement.
+
+**A dependency every test overrides is a dependency no test covers, and the
+type checker is what has been holding it.** Found 2026-08-07 by M8 Task 15's
+sweep. `tests/unit/test_api_home.py` builds a real `create_app()` and then
+replaces `get_row_context` with a `Library`'s, deliberately and correctly —
+that is what makes the router, the DTO and `HomeService`'s ordering testable
+with no database. The consequence nobody had stated: **`get_row_context` itself
+had never been executed by the unit suite**, so wiring one of its twelve fields
+to `None` (`curated=None  # type: ignore[arg-type]`) passed all 2,743 cases.
+`RowContext` is a frozen dataclass with no runtime validation, so it constructs;
+the failure is an `AttributeError` inside whichever provider reads the field, on
+the first request. `tests/integration/test_pipeline_deps.py` does not see it
+either — that file proves each `Depends` graph *resolves*, which a `None`
+argument does not disturb.
+
+**`mypy --strict` is the only thing in the gate that catches it, and the plant
+needed a `# type: ignore` to get past it** — which is the honest way to read the
+result rather than a reason to leave it. A `Sequence | None` widened by a later
+change, or a field defaulted to `None` "temporarily", is the same defect with no
+`ignore` to grep for. The repair is one case that calls the provider function
+directly over fakes and then **asks every registered provider to propose against
+what it built**; paired with
+`test_every_row_context_field_is_read_by_at_least_one_provider` (each field has
+a reader) it covers the wiring field by field with no list to keep in step, so
+the thirteenth field is covered the day it is added. **The general form: for any
+composition-root function a test suite routinely overrides, ask what executes
+the real one — and prefer a behavioural assertion over a `not None` scan,
+because the scan is the second list.**
+
+Same task, a smaller one worth carrying: **a `"Forbidden" not in source` scan
+fails on the module's own explanation.** `services/rows/curated.py` argues at
+length about the `LLMClient` it must not hold, so the obvious structural guard
+(the shape `test_the_home_service_and_every_provider_hold_no_source_adapter`
+uses) reports the docstring and would be "fixed" by deleting the argument. Scan
+`ast.unparse` of a docstring-stripped tree instead: identifiers and **string
+annotations** survive it — which is the half that matters, since a string
+annotation is the one form needing no import — and only prose is dropped.

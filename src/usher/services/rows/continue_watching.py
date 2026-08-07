@@ -23,7 +23,7 @@ a test whose docstring cannot say what it kills is a test that kills nothing:
 Both halves of the predicate live in `WatchStateRepository.list_in_progress`
 and neither is re-derived here -- this provider reads one port method and
 orders nothing itself, which is what makes 3 a defect in the *repository*
-rather than a defect nine providers could each reintroduce.
+rather than a defect ten providers could each reintroduce.
 """
 
 import uuid

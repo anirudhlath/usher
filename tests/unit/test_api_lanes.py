@@ -33,6 +33,7 @@ from pydantic import SecretStr
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credential_store import FakeCredentialStore
 from tests.fakes.credit_repository import FakeCreditRepository
+from tests.fakes.curated_row_repository import FakeCuratedRowRepository
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
@@ -283,6 +284,12 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
         ),
         similar=SimilarityService(embeddings, neighbors, titles, commit),
         row_providers=ROW_PROVIDERS,
+        # Over the port double rather than `cast(Any, None)`, on the terms
+        # `search` above states: no lane reads a curated row -- generation
+        # is `JobKind.CURATE`'s and rendering is `GET /home`'s -- and a
+        # field left unset here is one a lane could start reading without
+        # this file noticing.
+        curated_rows=FakeCuratedRowRepository(),
         taste=taste,
         # No lane reads it -- generation is `JobKind.CURATE`'s, which is a
         # later task -- so this is here for the same reason `taste` is: the

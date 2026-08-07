@@ -268,8 +268,9 @@ a property of a request boundary that no command can exhibit, so there the
 route is the deliverable. What the command is for is the rule that every
 operator command works against an empty database, and the arithmetic that rule
 is hunting: the taste centroid is a mean, and the mean of zero embeddings is
-0/0. Against an empty household it exits 0 and prints nine providers that
-proposed nothing.
+0/0. Against an empty household it exits 0 and prints ten providers that
+proposed nothing — ten since M8 registered `CuratedProvider`, which on an empty
+database is a household whose nightly generation has never run.
 
 **Every registered provider gets a line, including the ones that proposed
 nothing** — an absent provider and a silent one are the two states a composed

@@ -20,6 +20,7 @@ from usher.composition import adapter_factory
 from usher.config import Settings
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
+from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
@@ -41,6 +42,7 @@ from usher.ports.jobs import JobQueue
 from usher.ports.repository import (
     CollectionRepository,
     CreditRepository,
+    CuratedRowRepository,
     EpisodeRepository,
     MediaItemRepository,
     PersonRepository,
@@ -522,6 +524,22 @@ def get_taste_repository(session: SessionDep) -> TasteRepository:
     return PostgresTasteRepository(session)
 
 
+def get_curated_row_repository(session: SessionDep) -> CuratedRowRepository:
+    """The read half only, and that is what a request is allowed to have.
+
+    `CuratedRowRepository` also carries `replace_for_user`, which is a
+    *generation*: one paid completion, a validator, and a delete-then-insert
+    over a household's whole screen. Nothing on this path may reach it -- the
+    write belongs to `JobKind.CURATE` under `usher work`, and
+    `POST /admin/rows/regenerate` enqueues that rather than doing it. The port
+    is handed over whole because splitting a repository in two to express which
+    half a caller uses is a second port for one table; what keeps the write off
+    this path is that `CuratedProvider` is the only thing here that holds one
+    and it calls `list_for_user`.
+    """
+    return PostgresCuratedRowRepository(session)
+
+
 async def get_default_user(session: SessionDep) -> User:
     """The singleton default user as a **model**, not just an id.
 
@@ -578,9 +596,10 @@ async def get_row_context(
     people: Annotated[PersonRepository, Depends(get_person_repository)],
     credits: Annotated[CreditRepository, Depends(get_credit_repository)],
     collections: Annotated[CollectionRepository, Depends(get_collection_repository)],
+    curated: Annotated[CuratedRowRepository, Depends(get_curated_row_repository)],
     taste: Annotated[TasteService, Depends(get_taste_service)],
 ) -> RowContext:
-    """The eleven values a row may reach, for one request, for one user.
+    """The twelve values a row may reach, for one request, for one user.
 
     **`affinities` is a value the composer hands over, not a service a
     provider reaches.** A provider may import only `domain/` and `ports/`, so
@@ -593,6 +612,13 @@ async def get_row_context(
     value that is structurally `None` on this path -- `TasteService.centroid`
     returns `None` without an embedder and this route deliberately holds none.
     `TasteService` is still injected, for `genre_affinity`.
+
+    **`curated` is M8's, and it is a repository on the same terms as the other
+    nine.** `CuratedProvider` hydrates what a background job stored; nothing on
+    this path generates anything, so `GET /home` acquires no `LLMClient`, no
+    API key and no reason to 503 when the endpoint is down. A deployment with
+    `USHER_LLM_ENABLED=false` reads an empty table and gets a home screen with
+    fewer rows -- the same shape as a deployment with no embedder.
 
     **No `AsyncSession` here either**, which is the structural half of trap 4:
     a row holding repositories has no session to share, so there is nothing for
@@ -614,6 +640,7 @@ async def get_row_context(
         credits=credits,
         collections=collections,
         affinities=await taste.genre_affinity(user.id),
+        curated=curated,
     )
 
 

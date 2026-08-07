@@ -120,7 +120,7 @@ class BaseRow(Row):
     async def _chapters(self, ctx: RowContext) -> Mapping[uuid.UUID, Chapter]:
         """Which episode each card is about, for the rows that are about one.
 
-        Empty by default, which is the answer for seven of the nine providers:
+        Empty by default, which is the answer for eight of the ten providers:
         a card with no chapter carries `episode_id=None` and
         `episode_label=None` rather than a placeholder, so a client's branch is
         "is this an episode card" and never "is this label meaningful".

@@ -26,6 +26,29 @@ from pydantic import AwareDatetime, Field, model_validator
 
 from usher.domain.base import DomainModel
 
+#: `curated-01`, `curated-02`, … The composer breaks score ties on `slug` and
+#: every curated row carries the same base score
+#: (`services.rows.curated.CURATED_SCORE`), so this string is what carries the
+#: model's row ordering onto the screen. Zero-padded to the width of the
+#: generation for the reason this milestone already learned once from `m8a`
+#: sorting *after* `m10a`: `sorted(["curated-10", "curated-2"])` puts the tenth
+#: row first.
+#:
+#: **In `domain/` rather than beside the code that mints it, because two layers
+#: read it and one of them may not import the other.**
+#: `services.curation_validate` is the only thing that mints a curated slug and
+#: `services.rows.curated.CuratedProvider` declares this as its `slug_prefix`
+#: -- and a provider may import only `usher.domain`, `usher.ports` and
+#: `usher.services.rows` (`test_no_provider_reaches_a_port_the_context_does_
+#: not_carry`), so the validator is unreachable from it. The alternative was
+#: two literals and a case asserting they agree, which is a check that runs
+#: after the drift; `list_unwatched_candidates`' three copies of `limit = 200`
+#: is the same shape one subsystem over, and the fix there was also to delete
+#: the copies. `services.curation_validate` re-exports this name, so every
+#: existing import still resolves -- exactly as `usher.ports.llm` re-exports
+#: `LLMPurpose` below.
+SLUG_PREFIX = "curated"
+
 
 class LLMPurpose(StrEnum):
     """`llm_calls.purpose` (PRD 10) -- a closed vocabulary so it stays a
@@ -124,10 +147,10 @@ class CuratedRow(DomainModel):
     slug: str = Field(min_length=1)
     title: str = Field(min_length=1)
     # `None` is reachable here and is not reachable from any M7 provider --
-    # all nine return a sentence. `test_api_home.py` records this as the first
-    # plausible row with nothing to explain, and a model that returns an empty
-    # reason should produce a row with no subtitle rather than a row with an
-    # empty one.
+    # all nine return a sentence -- so `LLMRow`, which hands this field through
+    # unchanged, is the first thing in `src/` to put a null `reason` on the
+    # wire. A model that returns an empty reason should produce a row with no
+    # subtitle rather than a row with an empty one.
     reason: str | None = None
     card_title_ids: tuple[uuid.UUID, ...] = Field(min_length=1)
     # The model's own ordering of the rows within one generation. `ge=0`
@@ -221,4 +244,4 @@ class LLMCall(DomainModel):
         return self
 
 
-__all__ = ["CuratedRow", "LLMCall", "LLMPurpose"]
+__all__ = ["SLUG_PREFIX", "CuratedRow", "LLMCall", "LLMPurpose"]

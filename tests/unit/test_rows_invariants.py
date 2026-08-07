@@ -1,10 +1,20 @@
 """The properties no single provider's file can state.
 
-All nine providers exist and are registered as of Task 28, so five things
-become assertable that are otherwise distributed across nine modules'
+All nine of M7's providers existed and were registered as of Task 28, so five
+things became assertable that are otherwise distributed across nine modules'
 constants and nine modules' degradation tables -- which is to say, asserted
-nowhere. Each of them fails the day a **tenth** provider is written, which is
-the point: these are the guards on providers that do not exist yet.
+nowhere. Each of them was written to fail the day a **tenth** provider was
+written, which was the point: these were the guards on a provider that did not
+exist yet.
+
+**M8 Task 15 is that day, and this is the record of what the guards caught.**
+`CuratedProvider` inherited all five parametrised cases without a line of new
+code in them, and it fired on two of the counted ones -- the class-name
+registry and `len(BASE_SCORES)` -- which are updated here as the deliberate
+half of registering the tenth. The two score invariants are the interesting
+ones: neither changed a character, and both now say something they could not
+say before, because `CURATED_SCORE` is the first score in this project chosen
+against a table rather than against a sibling provider.
 
 **Scope, so this is not a land grab.** This file asserts properties *of the
 providers*. Tasks 29-31 own the composition properties -- that the build is
@@ -21,6 +31,7 @@ from tests.unit.rows import NOW, Library, days_ago
 from usher.ports.rows import RowProvider
 from usher.services.rows import BASE_SCORES, ROW_PROVIDERS, row_providers
 from usher.services.rows.continue_watching import CONTINUE_WATCHING_SCORE
+from usher.services.rows.curated import CURATED_SCORE
 
 # The blend these arranged rows claim to have been computed under. A literal,
 # never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
@@ -52,10 +63,19 @@ def test_the_registry_holds_every_provider_this_milestone_ships() -> None:
     looks exactly like a provider with nothing to say, which is the one failure
     this milestone cannot see from the outside.
 
-    Nine, which is PRD 06's ten less `CuratedProvider` (boundary call 2: M8
-    owns that whole family, and PRD 06's table is annotated rather than
-    silently shipped short). Asserted by name rather than by count, because a
-    count passes against a registry holding the same provider twice.
+    **Ten, which is PRD 06's table whole**, and this list is no longer
+    annotated: M7 held nine and named the missing one (boundary call 2 gave
+    `curated_rows`, `LLMRow`, `CuratedProvider` and
+    `POST /admin/rows/regenerate` to M8 as one family), and M8 Task 15 is the
+    task that registers it. Updating this case is the deliberate half of that
+    registration -- a registry assertion a later milestone can grow past
+    without touching is one that would not have caught a provider left out of
+    the tuple.
+
+    Asserted by name rather than by count, because a count passes against a
+    registry holding the same provider twice. The count is asserted *as well*,
+    because a set assertion passes against a registry holding the same provider
+    twice too.
     """
     assert {_named(provider) for provider in ROW_PROVIDERS} == {
         "ContinueWatchingProvider",
@@ -67,8 +87,9 @@ def test_the_registry_holds_every_provider_this_milestone_ships() -> None:
         "GenreAffinityProvider",
         "SeasonalProvider",
         "PeopleProvider",
+        "CuratedProvider",
     }
-    assert len(ROW_PROVIDERS) == 9
+    assert len(ROW_PROVIDERS) == 10
     assert set(BASE_SCORES) == {_named(provider) for provider in ROW_PROVIDERS}
 
 
@@ -78,8 +99,16 @@ async def test_every_proposed_row_carries_its_providers_slug_prefix() -> None:
 
     A provider declares one `slug_prefix`; the rows it proposes mint slugs from
     it (`because-you-watched-<seed>`, `franchise-<id>`, `seasonal-halloween`).
-    So the metric label is bounded at nine where the row slug is bounded by the
+    So the metric label is bounded at ten where the row slug is bounded by the
     catalog, and the two are still known to be the same provider.
+
+    **`CuratedProvider` is in this sweep and cannot be checked by it**, which
+    is worth stating rather than leaving to be discovered: the household below
+    has no curated generation -- a generation is something a nightly job
+    leaves, not something a household accumulates -- so that provider
+    correctly proposes nothing here and contributes nothing to `observed`.
+    `test_rows_curated.py::test_every_proposed_shelf_carries_the_providers_own_
+    slug_prefix` is where it is checked instead.
 
     The failure this kills is a provider whose prefix and whose rows have
     drifted apart -- a dashboard panel labelled `people` charting nothing,
@@ -133,10 +162,16 @@ def test_no_provider_but_continue_watching_can_reach_the_top_score() -> None:
     also holds the largest score any provider can return, so the two orderings
     agree and the composer's sort is not quietly fighting its own pin.
 
-    Nothing else holds that property. It is distributed across nine modules'
-    constants, and it fails the day a tenth provider is written with a ceiling
-    of 1.0 -- which is a change nobody would think to check against a file
+    Nothing else holds that property. It is distributed across ten modules'
+    constants, and it was written to fail the day a tenth provider arrived with
+    a ceiling of 1.0 -- a change nobody would think to check against a file
     they are not editing.
+
+    **It did not fail, and not one character of it changed when the tenth
+    landed**, which is the strongest thing this case can report: `CURATED_SCORE`
+    is the first score in this project picked against the whole table rather
+    than against one sibling, and this is what made "below Continue Watching"
+    a checked fact rather than a sentence in a commit message.
 
     `BASE_SCORES` imports each provider's own constant rather than restating
     it, so this cannot drift from the providers it measures.
@@ -159,11 +194,56 @@ def test_every_registered_score_is_on_one_comparable_scale() -> None:
     asserted as a range rather than pinned per provider, so a provider added
     with a score of 12.0 -- or of 0.0006 -- fails here rather than silently
     taking or ceding the whole screen.
+
+    **The count moves to ten with Task 15 and the range does not move at all.**
+    Only the count is updated here, deliberately: a tenth entry is what makes
+    the sweep cover the tenth provider, and a range widened to admit a new
+    score would be this case ratifying whatever arrived instead of measuring
+    it. `CURATED_SCORE` is 0.85 and sits inside the range as written.
     """
-    assert len(BASE_SCORES) == 9
+    assert len(BASE_SCORES) == 10
     for name, ceiling in BASE_SCORES.items():
         assert 0.0 < ceiling <= 1.0, f"{name} is off the scale at {ceiling}"
     assert min(BASE_SCORES.values()) >= 0.3, "a provider whose ceiling is noise"
+
+
+def test_a_curated_shelf_outranks_every_discovery_row_and_neither_row_about_intent() -> None:
+    """**The argument for `CURATED_SCORE`, as two comparisons rather than a
+    literal.**
+
+    A score is a product judgement and `0.85` is one, so pinning the number
+    would be a change-detector on a dial. What is *not* a judgement anybody may
+    quietly reverse is the shape of the ladder it was chosen against, and this
+    case is that shape:
+
+    - **Below both rows about intent.** Continue Watching is a title the
+      household is in the middle of and Next Up is the next episode of one they
+      are watching. A shelf a model proposed overnight outranking either is a
+      screen that interrupts somebody mid-film to make a suggestion.
+    - **Above every discovery ceiling.** All seven are computed from a single
+      signal -- one seed's neighbours, one library event, one genre's lift, one
+      recurring face, the calendar, one collection, one crossing of the
+      two-year line. This one reads the household's whole recent history
+      against a 200-title pool and is the only row on the screen that cost
+      money. **Being outranked here is "not shown", not "shown lower"**: the
+      screen is ten rows and a rich household proposes more, so a curated score
+      under `BecauseYouWatchedProvider`'s would be spend with no screen to show
+      for it, on exactly the households curation is most worth buying for.
+
+    Kills a `CURATED_SCORE` moved into the discovery band, which is invisible
+    to every other case in this file -- `0.75` is inside the comparable-scale
+    range, below Continue Watching, and collides with `RecentlyAddedProvider`
+    so the composer's tiebreak silently decides between them by slug.
+    """
+    intent = {"ContinueWatchingProvider", "NextUpProvider", "CuratedProvider"}
+    discovery = {name: score for name, score in BASE_SCORES.items() if name not in intent}
+
+    assert len(discovery) == 7, "the ladder changed shape; re-derive it rather than widening this"
+    assert CURATED_SCORE < BASE_SCORES["NextUpProvider"] < BASE_SCORES["ContinueWatchingProvider"]
+    for name, ceiling in discovery.items():
+        assert ceiling < CURATED_SCORE, (
+            f"{name} can reach or exceed the one row on this screen that cost money"
+        )
 
 
 @_REGISTERED
@@ -236,11 +316,16 @@ async def test_every_provider_composes_without_an_embedder(provider: RowProvider
     """The shipped default (ADR-0022). No embedder, `title_neighbors` holding
     metadata-only scores, and no provider raises.
 
-    Two of the nine change what they *say*: `BecauseYouWatchedProvider` softens
+    One of the ten changes what it *says*: `BecauseYouWatchedProvider` softens
     its sentence, which is a constructor argument and is covered in its own
     file. Nothing changes what it *does*, and `GenreAffinityProvider` in
     particular returns the same rows either way -- Task 23's whole argument,
-    asserted here where all nine are visible at once.
+    asserted here where all ten are visible at once. **`CuratedProvider` is the
+    sharpest member of this sweep and the least obvious**: a curated generation
+    is built from a candidate pool that *does* re-rank on a centroid when one
+    exists, so "no embedder" changes what a previous night wrote and changes
+    nothing about reading it -- which is the whole point of hydrating stored
+    output in the request path.
     """
     library = await _populated()
     await library.finished(await library.title("Something Watched"), at=NOW)

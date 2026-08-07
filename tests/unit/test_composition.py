@@ -89,6 +89,11 @@ def _pipeline_over_fakes(*, titles: TitleRepository, queue: JobQueue) -> Pipelin
         embeddings=FakeTitleEmbeddingRepository(),
         neighbors=unused,
         taste_rows=FakeTasteRepository(),
+        # `unused`, and it is the honest value: nothing on the enrich or
+        # derive wiring path this file is about reads a curated row.
+        # `CuratedProvider` reaches this port through `RowContext`, which
+        # `usher home` assembles and `build_pipeline` does not.
+        curated_rows=unused,
         people=people,
         credits=FakeCreditRepository(people, titles_store),
         collections=FakeCollectionRepository(),

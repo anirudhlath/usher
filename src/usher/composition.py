@@ -64,6 +64,7 @@ from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
 from usher.config import Settings
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
+from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
@@ -90,6 +91,7 @@ from usher.ports.metadata import MetadataProvider
 from usher.ports.repository import (
     CollectionRepository,
     CreditRepository,
+    CuratedRowRepository,
     EpisodeRepository,
     MediaItemRepository,
     PersonRepository,
@@ -191,6 +193,14 @@ class Pipeline:
     embeddings: TitleEmbeddingRepository
     neighbors: TitleNeighborRepository
     taste_rows: TasteRepository
+    # M8's table, and the field is here because `usher home` assembles a
+    # `RowContext` from this pipeline exactly as `api/deps.py` assembles one
+    # from its request-scoped dependencies -- `CuratedProvider` reads
+    # `list_for_user` through the context and a CLI that could not fill that
+    # field would compose a screen the route does not. `CurationService`, which
+    # is what *writes* through this port, is still not wired here: tasks 16 and
+    # 18 own that, and this field is the read half arriving with its reader.
+    curated_rows: CuratedRowRepository
     people: PersonRepository
     credits: CreditRepository
     collections: CollectionRepository
@@ -283,6 +293,7 @@ def build_pipeline(
     embeddings = PostgresTitleEmbeddingRepository(session)
     neighbors = PostgresTitleNeighborRepository(session)
     taste_rows = PostgresTasteRepository(session)
+    curated_rows = PostgresCuratedRowRepository(session)
     queue = PostgresJobQueue(
         session,
         max_attempts=settings.job_max_attempts,
@@ -329,6 +340,7 @@ def build_pipeline(
         embeddings=embeddings,
         neighbors=neighbors,
         taste_rows=taste_rows,
+        curated_rows=curated_rows,
         people=people,
         credits=credits,
         collections=collections,

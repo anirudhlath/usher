@@ -50,8 +50,8 @@ either way.
 absent row are different states, and the composer's metrics count them
 separately.
 
-`RowContext` is a frozen dataclass of ports plus an injected clock — **eleven
-fields as shipped in M7**:
+`RowContext` is a frozen dataclass of ports plus an injected clock — eleven
+fields as shipped in M7 and ✅ **twelve as of M8**:
 
 ```python
 user: User                          now: Callable[[], AwareDatetime]
@@ -59,12 +59,12 @@ titles: TitleRepository             media_items: MediaItemRepository
 watch_states: WatchStateRepository  episodes: EpisodeRepository
 neighbors: TitleNeighborRepository  people: PersonRepository
 credits: CreditRepository           collections: CollectionRepository
-affinities: Sequence[GenreAffinity]
+affinities: Sequence[GenreAffinity]  curated: CuratedRowRepository
 ```
 
 - **No `AsyncSession`, and that is checked rather than commented.**
   `AsyncSession` is not safe for concurrent use, so a context carrying one is
-  a context nine providers can `asyncio.gather` over — which *usually works*,
+  a context ten providers can `asyncio.gather` over — which *usually works*,
   and fails as an intermittent error under load. A row holding repositories
   has no session to share.
 - **The clock is injected** because `SeasonalProvider` fires on a calendar
@@ -74,6 +74,14 @@ affinities: Sequence[GenreAffinity]
   context rather than each provider's constructor because providers are
   registered once, and a per-request clock cannot be a singleton's
   constructor argument.
+- **`curated` is the twelfth and it arrived with its reader.** M8's
+  `CuratedProvider` and this field land in one change, which is the discipline
+  the two deleted fields below did not have — the port and the table existed
+  three tasks earlier, which is exactly the pull that put `search` here three
+  groups before anything retrieved. It is the *repository*, not a generation's
+  rows: a provider is constructed once at import, so per-household data cannot
+  ride on its constructor, and pre-reading the rows would make every
+  `GET /home` pay for a shelf the composer may not select.
 - **`search: SearchIndex` and `taste: Centroid | None` were specified here and
   are not shipped.** Nine providers were built and none read either. Every row
   turned out to be a *predicate over a repository* rather than a retrieval, so
@@ -218,11 +226,11 @@ consecutive similarity rows; cap per family), builds the top N
 > **"Concurrently" was wrong and is corrected here rather than implemented**
 > ([09](09-roadmap.md)'s M7 boundary call 8). `AsyncSession` is explicitly not
 > safe for concurrent use — two coroutines awaiting on one session interleave
-> on one connection — so `asyncio.gather` over nine providers sharing a
+> on one connection — so `asyncio.gather` over ten providers sharing a
 > request's session is a corruption, and one that *usually works*: two short
 > reads frequently complete, and the failure is an intermittent
 > `InvalidRequestError` or a result set attributed to the wrong query, under
-> load. The two escapes are worse at this scale — a session per row is nine
+> load. The two escapes are worse at this scale — a session per row is ten
 > connections for one home screen, and a semaphore has no lane to belong to.
 > Every provider's query is a bounded local read;
 > `usher.home.compose.duration` and the per-provider `usher.row.build.duration`
@@ -290,8 +298,9 @@ consecutive similarity rows; cap per family), builds the top N
 > Each provider declares a `slug_prefix` (`continue-watching`,
 > `because-you-watched`), and every row it proposes mints its slug from that
 > constant. It is what `usher.row.build.duration`'s `provider` label and
-> `usher home`'s report both carry: bounded at nine, where a row slug is
-> bounded by the catalog.
+> `usher home`'s report both carry: bounded at ten, where a row slug is
+> bounded by the catalog — `because-you-watched-<seed>` per seed and
+> `curated-01`, `curated-02`, … per shelf per generation.
 
 | Provider | Fires when | Emits |
 |---|---|---|
@@ -303,22 +312,47 @@ consecutive similarity rows; cap per family), builds the top N
 | `GenreAffinityProvider` | ⏳ **The household watches a genre disproportionately to its share of their library** — *not* "taste centroid concentrated in a genre"; see the Taste section | 1–3 rows |
 | `SeasonalProvider` | Calendar window (Halloween, holidays) — **curated by the author, not derived**; see below | 0–1 rows |
 | `PeopleProvider` | Recurring director or actor in history — **3 distinct engaged titles, in a cast or directing credit**; see below | 0–2 rows |
-| `CuratedProvider` | ⏳ **not built in M7 — M8 owns it**, with `curated_rows`/`LLMRow`/`POST /admin/rows/regenerate`; see below | 0–5 rows |
+| `CuratedProvider` | ✅ **M8** — a generation is in `curated_rows`; it hydrates, never generates. `0–5` is enforced *here*, because the validator deliberately caps nothing; see below | 0–5 rows |
 | `RediscoverProvider` | Watched > 2 years ago, **most-rewatched first** — there is no rating column; see below | 0–1 rows |
 
-**Nine of these ten are registered as of M7; `CuratedProvider` is the tenth
-and M8 owns it whole** (boundary call 2, and the table above is annotated
-rather than silently shipped short). The registry is
-`services/rows/__init__.py`'s `ROW_PROVIDERS`, and it is the composition
-point: **a provider that is not registered is dead code, and dead code that
-looks exactly like a provider with nothing to say** — which is the one failure
-a composed home screen cannot show from the outside. It holds nine, asserted by
-name rather than by count, and four cross-provider invariants are parametrised
-over it, so a tenth provider is covered by four cases the day it is written:
-that only Continue Watching reaches the top score, that every provider returns
-nothing against an empty database, that none falls back to popular titles on a
-household that has watched nothing, and that every one composes with no
-embedder.
+✅ **All ten are registered as of M8.** Nine landed in M7 and boundary call 2
+gave `CuratedProvider` — with `curated_rows`, `LLMRow` and
+`POST /admin/rows/regenerate` — to M8 as one family, so this table was
+annotated rather than silently shipped short; M8's task 15 registered the
+tenth. The registry is `services/rows/__init__.py`'s `ROW_PROVIDERS`, and it is
+the composition point: **a provider that is not registered is dead code, and
+dead code that looks exactly like a provider with nothing to say** — which is
+the one failure a composed home screen cannot show from the outside. It holds
+ten, asserted by name rather than by count, and four cross-provider invariants
+are parametrised over it, so the tenth provider was covered by four cases on
+the day it was written: that only Continue Watching reaches the top score, that
+every provider returns nothing against an empty database, that none falls back
+to popular titles on a household that has watched nothing, and that every one
+composes with no embedder.
+
+**`CuratedProvider` is deliberately not on the "may fire on a household that
+has watched nothing" allowlist**, which the other three library-shaped
+providers are on: a curated shelf **is** a claim about the person, so proposing
+one for a household with no generation would be the popular-titles fallback
+arriving through the one door that costs money.
+
+**Its score is `0.85` and it is the first in this project chosen against the
+whole table rather than against one sibling.** Continue Watching (1.0, pinned)
+and Next Up (0.90) are about *intent* — something the household is in the
+middle of, and the next episode of something they are watching — and a shelf a
+model proposed overnight must never outrank either. Everything at 0.80 and
+below is a discovery claim computed from a single signal (one seed's
+neighbours, one library event, one genre's lift, one recurring face, the
+calendar, one collection, one crossing of the two-year line); this one reads
+the household's whole recent history against a 200-title pool and is the only
+row on the screen that cost money, so it sits above all seven. **Being
+outranked here is "not shown" rather than "shown lower"** — the screen is ten
+rows and a rich household proposes more — so a score below 0.80 would be spend
+with no screen to show for it on exactly the households curation is most worth
+buying for. Every shelf in one generation carries the *same* score, because
+`(-score, slug)` already breaks the tie on a positional, zero-padded slug: the
+model's ordering is spelled once, in the slug, and a per-row decrement would be
+a second spelling of it.
 
 **`SeasonalProvider`'s calendar→signal mapping is a taste judgement with no
 data source, and it is the only thing in `services/` of that kind.** Nothing in
@@ -522,11 +556,14 @@ table left open.** M7's `WatchStateRepository.list_in_progress` settles them.
   episodes.
 
 Adding a row type is a subclass and a registration. Nothing else changes — and
-as of M7 that is **a checked claim rather than an aspiration**. The registry
-holds nine providers, asserted by name *and* by count, the composition point is
-one tuple in `services/rows/__init__.py`, and **five cross-provider invariants
-are parametrised over that registry**, so a tenth provider inherits five cases
-on the day it is written: that it returns nothing against an empty database,
+as of M7 that is **a checked claim rather than an aspiration**. ✅ **M8 spent
+it, and the claim held**: registering `CuratedProvider` was a subclass, a
+tuple entry, a `BASE_SCORES` entry and one new `RowContext` field, and the
+registry now holds ten providers, asserted by name *and* by count, the
+composition point is one tuple in `services/rows/__init__.py`, and **five
+cross-provider invariants are parametrised over that registry**, so the tenth
+provider inherited five cases on the day it was written: that it returns
+nothing against an empty database,
 that it does not fall back to popular titles on a household that has watched
 nothing, that it composes with no embedder, that its cases name the wrong
 implementation they rule out, and that it reaches no port the context does not
@@ -808,7 +845,7 @@ the model sees 200 titles it might plausibly recommend, not a catalog.
 | Built rows | ✅ Per-row TTL, in-process — 60 s (Continue Watching, Next Up) to 12 h (Seasonal), each row's own |
 | Composed home screen | ✅ 30 s per user, in-process |
 | **Neighbour tables** | ⚠️ **Not rebuilt on anything.** This row was false in M6 and is false now; what changed is that half of it is finally *observable* — see below |
-| Curated rows | ⏳ **M8**, with `CuratedProvider` and `curated_rows` |
+| Curated rows | ✅ **M8** — 5 min per built row, in-process, on `CuratedProvider`'s rows out of `curated_rows`. Not "until regenerated": the artefact is immutable until a generation replaces it, and this number is how long a household keeps seeing last night's shelf after tonight's replaced it, because the job runs in another process |
 | Taste centroid | ⏳ **Recomputed when the household's `max(watch_states.updated_at)` moves** — a fingerprint, not an event |
 | Genre affinity | ⏳ **Not cached at all** |
 
