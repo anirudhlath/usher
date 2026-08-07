@@ -287,10 +287,17 @@ class CurationService:
         self._model = model
         self._min_cards = min_cards
         self._now = now
-        # Injected for the reason `OpenAICompatibleClient` injects its own: the
-        # latency of a *failed* call is the number this ledger cannot get from
-        # an `LLMUsage` that was never returned, and a 120-second timeout is
-        # the most expensive thing this service can do.
+        # Injected because the latency of a *failed* call is the number this
+        # ledger cannot get from an `LLMUsage` that was never returned, and a
+        # 120-second timeout is the most expensive thing this service can do.
+        # **Not for the reason `OpenAICompatibleClient` injects its own**, which
+        # this comment used to claim: `_ledger_row` prefers `usage.latency_ms`
+        # whenever a usage came back, so the adapter's clock is what PRD 10
+        # plots on every *successful* generation and this one is reached only
+        # on the arm where there is no usage at all. Two different halves of
+        # one column, and each needs its own case
+        # (`test_the_latency_is_the_whole_send_and_not_what_was_left_after_it`
+        # for the adapter's).
         self._clock = clock
 
     async def generate(self, user_id: uuid.UUID) -> CurationReport:

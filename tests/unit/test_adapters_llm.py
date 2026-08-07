@@ -1,6 +1,6 @@
 """`OpenAICompatibleClient` over `httpx.MockTransport`. No network.
 
-Five things a scripted `FakeLLMClient` can never show, and each is a
+Six things a scripted `FakeLLMClient` can never show, and each is a
 measurement from this milestone's live probes rather than a defensive guess:
 
 - **The fence.** With no `response_format` at all, 5 of 5 responses from a
@@ -17,9 +17,15 @@ measurement from this milestone's live probes rather than a defensive guess:
   because `HTTPXClientInstrumentor` records the full URL as a span attribute.
 - **The cost.** No provider reports it, so it is computed here from two
   configured prices ([ADR-0027]).
+- **The latency.** A scripted fake *reports* a number; only this client
+  *measures* one, and `CurationService._ledger_row` prefers whatever came back
+  in the `LLMUsage` whenever one did -- so on every successful generation the
+  number PRD 10's latency panel plots is the one computed here.
 """
 
+import inspect
 import json
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -48,6 +54,52 @@ _SCHEMA: dict[str, Any] = {
 # A sentinel, because `None` is a meaningful value here -- a provider that
 # omits `usage` entirely is a real shape and one case is about it.
 _REPORTED = object()
+
+#: Where the injected clock starts. **Deliberately not zero**, for the reason
+#: `tests/unit/test_services_curation.py` gives one layer up: `time.monotonic`'s
+#: epoch is arbitrary, so a fixture starting at `0.0` makes `clock() - started`
+#: and `clock()` the identical number and an absolute reading is invisible on
+#: the one field this client takes an injected clock in order to measure.
+_T0 = 1_000.0
+
+#: How long this file's transport takes to answer, and **why it is not the
+#: 1,420 ms the live run measured as its median.** `_T0 + 1.42` is `1001.42`,
+#: which is not representable in binary, so `int((1001.42 - 1000.0) * 1000)` is
+#: **1419** -- an exact assertion on a measured-looking constant would have
+#: been an off-by-one nobody could read as anything but a defect. 1.5 is
+#: dyadic, so every step below is exact.
+_SEND_SECONDS = 1.5
+
+#: **A literal, deliberately not `int(_SEND_SECONDS * 1000)`**, and that is the
+#: same finding rather than a second one: the derived spelling performs a
+#: *different* computation from the client's, which subtracts first. Measured
+#: -- at 1.42 they answer **1420** and **1419** -- so a derivation would agree
+#: here, silently disagree the day somebody puts the measured median back, and
+#: fail on the arithmetic rather than on the code. Change one, recompute the
+#: other the way `complete_json` does.
+_SEND_MS = 1_500
+
+
+class _Clock:
+    """A monotonic clock that moves only when the transport does.
+
+    **A two-tick iterator cannot see this defect and that is the whole design
+    of this fixture.** `iter([_T0, _T0 + elapsed])` hands out the same two
+    numbers whether `started` is read before the send or after it, so both
+    spellings compute the identical delta -- the fixture would be measuring the
+    iterator rather than the code. Moving the clock *inside* the handler is
+    what puts the request on one side of the reading and makes "the send is in
+    the measured window" a thing an assertion can be wrong about.
+    """
+
+    def __init__(self) -> None:
+        self.now = _T0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 def _completion(
@@ -250,11 +302,16 @@ async def test_a_truncated_completion_is_refused_and_names_the_cap() -> None:
 
 
 async def test_usage_is_read_from_the_response() -> None:
+    """`latency_ms` is deliberately **not** asserted here: it is the one field
+    of `LLMUsage` that is measured rather than read, so it belongs with the
+    clock below. The `>= 0` bound this case used to carry could not fail --
+    `max(0, ...)` clamps it -- and was the only assertion about latency
+    anywhere in the repository.
+    """
     _body, usage = await _complete(_client())
     assert usage.tokens_in == 1200
     assert usage.tokens_out == 340
     assert usage.model == "served/model-1"
-    assert usage.latency_ms >= 0
 
 
 async def test_cost_is_computed_from_the_configured_prices_in_decimal() -> None:
@@ -302,6 +359,72 @@ async def test_the_reported_model_falls_back_to_the_configured_one() -> None:
     del body["model"]
     _b, usage = await _complete(_client(body=body))
     assert usage.model == "served/model-1"
+
+
+# --------------------------------------------------------------------------
+# The latency, which is the number that reaches the ledger
+
+
+async def test_the_latency_is_the_whole_send_and_not_what_was_left_after_it() -> None:
+    """**The success path's latency, pinned to the millisecond.**
+
+    `CurationService._ledger_row` writes `latency_ms=usage.latency_ms` whenever
+    a usage came back, so on every successful generation the number PRD 10's
+    latency panel plots is this one -- the service's own stopwatch is the
+    *fallback*, reached only when the call failed and there is no `LLMUsage` to
+    read. Until this case the only assertion anywhere was `latency_ms >= 0`,
+    which `max(0, ...)` makes unfalsifiable, and **no test in the repository
+    ever passed this client a clock** although it takes one for exactly this.
+
+    Two spellings of the defect, and this case exists for the second:
+
+    - **The careless one** -- `int(self._clock() * 1000)`, an absolute reading
+      of a clock whose epoch is arbitrary -- is caught by `ruff` as
+      `F841 Local variable 'started' is assigned to but never used`. That is
+      the gate holding it, not the suite. Killed here anyway: the assertion
+      would read `1_001_500`.
+    - **The careful one** -- `started` re-read *after* `await self._send(...)`,
+      so the measured window excludes the request -- passes every gate step.
+      It reports **0 ms** for a 1,500 ms completion, and a flat panel is the
+      failure shape M8's live run already recorded a taste of: a 1,420 ms
+      median that nothing in the suite could tell from zero.
+
+    Same finding as M8 Task 12's `_T0`, one layer down and on the arm that
+    matters more. That task fixed `CurationService`, whose measured number is
+    only ever written on the **failure** path; the adapter's is written on the
+    **success** path -- every ordinary night -- and was left with the same
+    shape.
+    """
+    clock = _Clock()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        # The request costs time, and it is the only thing here that does.
+        clock.advance(_SEND_SECONDS)
+        return httpx.Response(200, json=_completion(json.dumps({"ok": True})))
+
+    _body, usage = await _complete(_client(handler, clock=clock))
+
+    assert usage.latency_ms == _SEND_MS, "a delta across the send, not a reading beside it"
+
+
+def test_the_clock_default_is_the_monotonic_one() -> None:
+    """Pinned on the signature, because the behavioural version cannot fail.
+
+    `time.monotonic` drifting to `time.time` is a genuine equivalent mutant
+    here -- both reads come from the same callable, so the delta is identical
+    -- and the two differ only across a wall-clock adjustment, which cannot be
+    induced against a builtin used as a default. Measured and recorded the same
+    way for `CurationService` and `QueryExpansionService`, which each pin their
+    own default on the signature for the same reason.
+
+    The half that *is* behavioural is the case above, and the two are not
+    interchangeable: this one says which clock ships, that one says the
+    reading is a delta across the send.
+    """
+    default = inspect.signature(OpenAICompatibleClient.__init__).parameters["clock"].default
+
+    assert default is time.monotonic
+    assert time.monotonic is not time.time, "the premise: these are two different clocks"
 
 
 # --------------------------------------------------------------------------

@@ -1270,8 +1270,11 @@ build_curation_service` was planted and **passed all five gate steps**: ruff,
 `ruff format --check`, mypy over 434 files, all seven import contracts, 2,789
 unit / 4 skipped and 882 integration / 8 skipped. (One incidental: the plant
 has to go in its isort position or ruff answers `I001`, so the *careless*
-version of this defect is caught by the formatter and the careful one is not —
-which is the wrong way round for a guard to behave.) The same hole swallows a
+version of this defect is caught and the careful one is not — which is the
+wrong way round for a guard to behave. **By `ruff check`, not by the formatter**
+— corrected 2026-08-07 by measurement, and this is the first of the two
+instances the "careless spelling / careful spelling" entry at the end of this
+file names as a shape.) The same hole swallows a
 rename:
 `CurationServiceDep` is caught only because `CurationService` is a substring of
 it, and `CuratorDep` would be silent. Closed by an eighth import contract
@@ -1584,3 +1587,143 @@ Three findings worth carrying:
   stand" in message` is satisfied by both wordings; `"nothing was written"
   not in message`, sitting six lines above `len(ledger) == 1`, is not — and
   the pair reads as one argument rather than two assertions.
+
+**A defect has a careless spelling and a careful one, a linter usually catches
+only the careless one, and reporting "the tools hold it" on that basis is
+backwards.** Two instances make this a shape rather than two anecdotes, and it
+is worth naming because the careless spelling is the one an author writes by
+accident and the careful one is the one that ships:
+
+| the defect | careless spelling | caught by | careful spelling | caught by |
+|---|---|---|---|---|
+| a router reaching the LLM through the composition root (M8 Task 17) | the import placed outside its isort position | `ruff check` `I001` | the import in its isort position | nothing, until an eighth import contract |
+| `OpenAICompatibleClient`'s latency read as an absolute rather than a delta (M8 final sweep) | `int(self._clock() * 1000)`, leaving `started` dangling | `ruff check` `F841` | `started` re-read *after* `await self._send(...)` | nothing, until the case below |
+
+Both rows are `ruff check` and **neither is `ruff format`** — measured
+2026-08-07 against `--isolated`, because the Task 17 entry above credited
+`I001` to "the formatter" and that is wrong: `I` is in `[tool.ruff.lint]
+select`, `ruff format` leaves import order alone (`rc=0`, *"1 file already
+formatted"*, on the same probe `ruff check --select I` answers `rc=1` for).
+**The rule: when a plant dies on a linter, spell it again without the lint
+error before writing anything down.** A linter fires on the *shape* of the
+edit — an unused name, an unsorted block — and the defect is in the
+*semantics*, which is why the two come apart at all. Same family as, and the
+generalisation of, the standing rule that a survivor caught by a type checker
+has to name the tool and measure it: "the gate holds it" and "the suite holds
+it" are different claims, and here they are different claims about the same
+line depending on how it was typed.
+
+**And the second appearance of *"a fixture clock that starts at zero makes a
+delta and an absolute reading the same number"*, on the arm that matters more.**
+M8 Task 12 found it in `CurationService` and fixed it with `_T0 = 1_000.0`; the
+final whole-suite sweep found `OpenAICompatibleClient` left with the identical
+shape, and the difference between the two is which path they are on.
+`_ledger_row` — in `CurationService` and in `QueryExpansionService` both —
+prefers `usage.latency_ms` whenever a usage came back, so **the service's clock
+is the failure-path fallback and the adapter's is what `llm_calls.latency_ms`
+holds on every successful generation**, i.e. the number PRD 10's latency panel
+plots every ordinary night. The adapter takes an injected `clock` for exactly
+that and **no test in the repository had ever passed it one**; the only
+assertion anywhere was `assert usage.latency_ms >= 0`, which the `max(0, …)`
+clamp makes unfalsifiable. Measured at `7bc4bab`: the careful spelling passes
+`ruff check`, `ruff format --check`, `mypy` over 437 files, `lint-imports`
+(8 kept), 2,900 unit and 899 integration, and reports **0 ms for a 1,500 ms
+completion**. Three things worth carrying:
+
+- **A two-tick iterator cannot see this defect, which is why the first draft of
+  the fixture would have ratified it.** `iter([_T0, _T0 + elapsed])` hands out
+  the same two numbers whether `started` is read before the send or after it,
+  so both spellings compute the identical delta — the fixture measures the
+  iterator, not the code. What has teeth is a clock the **transport** moves:
+  `_Clock.advance` called from inside the `httpx.MockTransport` handler puts
+  the request on one side of the reading, and "the send is inside the measured
+  window" becomes a thing an assertion can be wrong about. Same family as *"a
+  fixture whose origin is the identity element of the operation under test
+  cannot distinguish the operation from its absence"*, one level up: here it is
+  the fixture's *shape* rather than its origin that is the identity element.
+- **An exact assertion on a measured-looking constant is an off-by-one waiting
+  to be read as a defect.** The live run's median was 1,420 ms, and
+  `int((1_000.0 + 1.42 - 1_000.0) * 1000)` is **1419** — `1001.42` is not
+  representable in binary. The fixture uses **1.5 s / 1,500 ms**, which is
+  dyadic and therefore exact at every step, with the measured median named in
+  prose instead. **Before pinning an exact number computed through floating
+  point, check the arithmetic in the interpreter rather than on paper.**
+- **The contract suite is the wrong home for it, decided rather than
+  overlooked.** `LLMClientContract` runs against `FakeLLMClient`, against
+  `OpenAICompatibleClient` over `httpx.MockTransport`, and against a live
+  endpoint. Latency is the one `LLMUsage` field that is *measured* rather than
+  reported, and only one of the three measures it: the fake returns whatever
+  `usage()` was scripted with, so the assertion would be a test of the script,
+  and the live arm cannot hold a fixture clock at all. Pinning it there would
+  mean requiring an injected clock of every `LLMClient` — an implementation
+  detail written into a port contract — and would go green on 2 of 3 arms for
+  the wrong reason, which reads as coverage of the adapter. **A contract suite
+  can only assert what every implementation is obliged to do; a number one
+  implementation computes belongs beside that implementation.** The reasoning
+  is in the contract's own module docstring so the next reader does not
+  re-derive it, and that case's three `>= 0` bounds are now labelled as a floor
+  on the taxonomy rather than as a test of any number.
+
+**A guard whose subject is a *write* is invisible to every case that asserts a
+return value, and both of them return the same thing.** Same sweep.
+`CandidatePoolService.for_user` has `if not pool: return pool` in front of
+`await self.taste.centroid(user_id)`, and `test_an_empty_catalog_is_an_empty_pool`
+could not see it: `[] == []` on both sides. Two spellings pass **all** of ruff,
+`ruff format --check`, `mypy` (437 files), `lint-imports` (8 kept), 2,900 unit
+and 899 integration — the guard deleted outright, and the lint-clean respelling
+that *moves* the return to after the centroid read — and they are not
+equivalent to each other or to the shipped code, because `TasteService.
+centroid` **writes a refusal row** for a household below `_MIN_TITLES` (a
+skipped write is the recompute-forever bug that column exists to prevent). So
+with the read reached at all, a household with nothing to recommend to gets a
+stored `user_taste` row: exactly *"a write this service must not make on behalf
+of a household it has nothing to recommend to"*, which the module docstring
+already said and nothing checked, plus a wasted round trip per nightly
+generation. Closed by
+`test_an_empty_pool_writes_no_taste_row_for_the_household_it_has_nothing_for`,
+which asserts `FakeTasteRepository.writes == 0`; re-planted, both spellings
+fail **that case alone**, on `assert 1 == 0`. Two shapes:
+
+- **`writes == 0` is also what a collaborator that never writes produces**, so
+  the case carries its premise as a second arm: the *same* household, service
+  and embedder, asked again with one candidate in the catalog, must reach
+  `writes == 1`. The pool being non-empty is then the only thing that changed,
+  which is what makes the first arm a statement about the guard. Note the
+  embedder has to be configured for the write to be reachable at all —
+  `centroid` answers `None` and touches nothing without one — so this is
+  configuration 2's fixture asked a question about a *port call* rather than
+  about an ordering.
+- **The general form: for every early return, ask what the code after it
+  *does* as well as what it returns.** A guard in front of a pure read is a
+  performance decision and a legitimate equivalent mutant; a guard in front of
+  a call that writes is a correctness decision, and the two are
+  indistinguishable from the return value. Nearest relative is
+  `test_with_no_embedder_the_embedding_table_is_never_read`, which already
+  makes the structural half of this argument about a *read* one branch over —
+  it was there to copy and nobody had.
+
+**Round totals for those two, because the three-way split is the one that says
+something:** 5 plants over `adapters/llm/openai_compatible.py` and
+`services/curation_pool.py` — **4 killed, 1 equivalent-mutant control surviving
+as designed, 0 unintended survivors, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0
+DID-NOT-RUN.** Each kill names **exactly** the case written for it and nothing
+else, and each fails on the number rather than on a `NameError` reached from an
+`except` clause: `assert 0 == 1500` and `assert 1001500 == 1500` for the two
+latency spellings, `assert 1 == 0` for both pool-guard spellings. Run
+2026-08-07 in place against the whole `tests/unit` selection (2,903 cases,
+~20 s a run) with the three `.pyc` defences in force —
+`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept before every run, and the
+control — plus `compile()` for the dry run, `cp` backups keyed on the **full
+path**, the plant asserted present (`path.read_text() == mutated`) and the
+restore asserted by reading the file back and by `md5sum`, only `^FAILED` lines
+read as kills, no `-q` added, and a signal handler. Gate green before and
+after: **2,903 unit / 4 skipped**, **899 integration / 8 skipped**, mypy over
+437 files, `lint-imports` 8 kept / 0 broken, PRD link check `OK`.
+
+| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `complete_json`'s two `span.set_attribute` calls swapped | PASS | PASS | PASS | PASS | PASS |
+
+It is a fact about the *code* rather than about what the tools look at: an OTel
+span's attributes are a map, both calls are side-effect-free reads of an
+argument and an attribute, and neither can observe the other.

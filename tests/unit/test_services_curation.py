@@ -1128,8 +1128,17 @@ def test_the_shipped_clock_is_the_monotonic_one() -> None:
     What is still worth pinning is *which* callable ships, because the
     difference is real where it matters: `time.time()` going backwards mid-call
     yields a negative delta that `_ms` clamps to `0`, and PRD 10 reads a
-    120-second timeout as instantaneous. Same argument
-    `OpenAICompatibleClient` makes for injecting its own.
+    120-second timeout as instantaneous.
+
+    `OpenAICompatibleClient` pins the same default the same way and **not for
+    the same reason**, which this docstring used to elide: its clock is on the
+    *success* path -- `_ledger_row` prefers `usage.latency_ms` whenever a usage
+    came back -- so the number it measures is the one PRD 10 plots every
+    ordinary night, while this one is reached only when nothing came back at
+    all. It was left with a `latency_ms >= 0` bound and no injected clock in
+    any test until M8's final sweep;
+    `tests/unit/test_adapters_llm.py::test_the_latency_is_the_whole_send_and_not_what_was_left_after_it`
+    is its half.
     """
     default = inspect.signature(CurationService.__init__).parameters["clock"].default
 

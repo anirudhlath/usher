@@ -40,6 +40,16 @@ describing a bundled price table rather than a response field. Two configured
 per-million-token prices, in `Decimal`, defaulting to `0`, which is the honest
 value for a local model.
 
+**Latency is measured here, and on a successful generation this is the number
+PRD 10 plots.** `CurationService` and `QueryExpansionService` each carry a
+stopwatch of their own, but `_ledger_row` in both prefers whatever came back in
+the `LLMUsage` whenever one did -- so their number is the *fallback* for a call
+that failed and never produced a usage, and this one is what the ledger's
+`latency_ms` column holds every ordinary night. The clock is injected for that
+rather than for symmetry: a delta across `_send` is the whole of what this
+class can be wrong about, and with the shipped `time.monotonic` nothing can
+hold the two readings apart to check.
+
 **The credential is a header and never a URL.** `HTTPXClientInstrumentor` is
 wired in `configure_tracing` and records the full URL as a span attribute --
 the reason `TmdbClient` prefers a bearer token, applied here where there is no

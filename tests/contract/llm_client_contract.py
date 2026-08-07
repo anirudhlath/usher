@@ -16,6 +16,24 @@ shape of the answer, the shape of the failure, and the fact that usage comes
 back at all -- which is the half `usher.db.repositories.curation` writes to a
 ledger and which an implementation returning only the parsed object would
 pass every content assertion without.
+
+**And `latency_ms` is the second thing it does not assert, decided rather than
+overlooked.** M8's final sweep found the number unpinned everywhere -- the only
+assertion in the repository was `latency_ms >= 0`, which
+`OpenAICompatibleClient`'s `max(0, ...)` clamp makes unfalsifiable -- and the
+obvious repair is to pin it here, where all three implementations meet. It
+belongs in `tests/unit/test_adapters_llm.py` instead, for a reason that is
+about what each arm *is*: latency is the one field of `LLMUsage` that is
+**measured** rather than reported, and only one of the three implementations
+measures it. `FakeLLMClient` hands back whatever `usage()` was scripted with,
+so a green assertion there would be a test of the script, and green on 2 of 3
+arms for the wrong reason reads as coverage of the adapter. The live subclass
+cannot hold a fixture clock at all -- its latency is a real network -- which is
+why its own control asserts `latency_ms > 0` and stops. Pinning the number
+would mean requiring an injected clock of every `LLMClient`, i.e. writing an
+implementation detail into a port contract. So the exact millisecond is pinned
+once, against the one class that computes it, by
+`tests/unit/test_adapters_llm.py::test_the_latency_is_the_whole_send_and_not_what_was_left_after_it`.
 """
 
 from abc import ABC, abstractmethod
@@ -64,7 +82,13 @@ class LLMClientContract(ABC):
         """Kills a usage object assembled from defaults.
 
         `model` is what PRD 10's dashboard groups spend by, so an empty
-        string there collapses every model into one bar.
+        string there collapses every model into one bar -- and `assert
+        usage.model` is the line doing the killing. The three bounds below are
+        a floor on the *taxonomy*, not a test of any number: `LLMUsage` is a
+        plain frozen dataclass with no validation, so a negative is a shape an
+        implementation could hand back, and none of the three that exist can.
+        The module docstring says where `latency_ms` itself is pinned and why
+        it is not pinned here.
         """
         client = self.client()
         _body, usage = await client.complete_json(

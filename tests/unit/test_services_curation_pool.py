@@ -796,6 +796,49 @@ async def test_an_empty_catalog_is_an_empty_pool() -> None:
     assert await household.service(embedder=None).for_user(USER) == []
 
 
+async def test_an_empty_pool_writes_no_taste_row_for_the_household_it_has_nothing_for() -> None:
+    """**The empty-pool guard's real subject, which is a write and not a
+    return value.**
+
+    `for_user` returns `pool` before `taste.centroid(user_id)`, and the case
+    above cannot see why: `[] == []` on both sides of the guard. Two spellings
+    of the defect pass every gate step -- deleting the early return outright,
+    and the lint-clean respelling that *moves* it to after the centroid read --
+    and they are **not** equivalent to each other or to the shipped code.
+    `TasteService.centroid` writes a **refusal row** for a household below
+    `_MIN_TITLES`, deliberately (a skipped write is the recompute-forever bug
+    that column exists to prevent), so with the read reached at all this
+    household gets a stored `user_taste` row: exactly *"a write this service
+    must not make on behalf of a household it has nothing to recommend to"*,
+    plus a wasted round trip per nightly generation.
+
+    The embedder has to be configured for the write to be reachable at all --
+    `centroid` answers `None` and touches nothing when it is `None` -- so this
+    is configuration 2's fixture asked a question about a *port call* rather
+    than about an ordering.
+
+    **The premise is the second half and it needs the pool to be the only
+    thing that changed.** `writes == 0` is also what a `TasteService` that
+    never writes produces, so the same household, the same service and the
+    same embedder are asked again with one candidate in the catalog; that
+    arm's `writes == 1` is what makes the first arm mean something.
+    """
+    household = _Household()
+    service = household.service(embedder=FakeEmbedder())
+
+    assert await service.for_user(USER) == []
+
+    assert household.taste_rows.writes == 0, "no candidates, so no centroid read and no write"
+    assert household.taste_rows.rows == {}
+
+    await household.title("A Film Nobody Has Watched", vote_count=5, owned=True)
+
+    assert await service.for_user(USER) != []
+    assert household.taste_rows.writes == 1, (
+        "the premise: with a pool to re-rank the very same fixture does write a refusal row"
+    )
+
+
 async def test_the_pool_is_this_households_and_not_the_deployments() -> None:
     """The `user_id` reaches both the read and the taste service.
 
