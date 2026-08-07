@@ -105,7 +105,7 @@ class FakeTitleRepository(TitleRepository):
     `_provider_id_conflict`), so this fake does the same.
 
     **Where `list_unwatched_candidates` here is more forgiving than the
-    statement, on purpose. Five, each of which the paired
+    statement, on purpose. Seven, each of which the paired
     `tests/integration/test_title_repository.py` run is what actually closes:**
 
     - **"No ordering at all" is not expressible.** `list.sort` is stable, so
@@ -347,7 +347,7 @@ class FakeTitleRepository(TitleRepository):
         user_id: uuid.UUID,
         *,
         genres: Sequence[str] = (),
-        limit: int = 200,
+        limit: int,
     ) -> list[Title]:
         affine = set(genres)
         seen = self._played_title_ids(user_id)

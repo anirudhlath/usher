@@ -176,23 +176,33 @@ def _reranked(
     centroid: Centroid,
     vectors: Mapping[uuid.UUID, tuple[float, ...]],
 ) -> list[Title]:
-    """`pool` with its comparable members permuted by proximity, in place.
+    """A **new** list: `pool` with its comparable members permuted by
+    proximity, each staying inside the set of positions they already held.
 
-    "In place" is the whole property: the returned list has the same length,
-    the same members, and the same titles at every index the centroid could
-    not speak about. See the module docstring for what that defends.
+    Nothing is mutated -- `pool` is untouched and the answer is a fresh list --
+    and the docstring says so because "in place" is the phrase this function
+    invites and means the opposite in Python.
+
+    The property is *positional*: the answer has the same length, the same
+    members, and the same title at every index the centroid could not speak
+    about. See the module docstring for what that defends.
     """
-    scored: list[tuple[int, int, float]] = []
+    # `(base rank, similarity)` for the members the centroid can speak about,
+    # built by walking `pool` in order, so this list is ascending in its first
+    # field by construction.
+    scored: list[tuple[int, float]] = []
     for rank, one in enumerate(pool):
         similarity = _cosine(centroid.vector, vectors.get(one.id))
         if similarity is not None:
-            scored.append((rank, rank, similarity))
+            scored.append((rank, similarity))
     if len(scored) < 2:
         # Nothing to permute. Returned as a copy rather than as `pool` itself
         # so every path out of here has the same aliasing, which is what stops
         # a caller from mutating the repository's own list on one branch only.
         return list(pool)
-    slots = [rank for rank, _, _ in scored]
+    # The positions the comparable members occupy -- ascending, and the only
+    # indices this function is allowed to write to.
+    slots = [rank for rank, _ in scored]
     # `-similarity` then the base rank: two candidates at the same cosine keep
     # the order the signals that need no model gave them, rather than
     # whichever `sorted` happened to see first. Exact ties are ordinary here,
@@ -207,9 +217,9 @@ def _reranked(
     # that already implies it -- one of them is a property of `sorted`, the
     # other is a property of this function, and a later rewrite that built
     # `scored` any other way would silently lose the first.
-    ordered = sorted(scored, key=lambda entry: (-entry[2], entry[1]))
+    ordered = sorted(scored, key=lambda entry: (-entry[1], entry[0]))
     reranked = list(pool)
-    for slot, (rank, _, _) in zip(slots, ordered, strict=True):
+    for slot, (rank, _) in zip(slots, ordered, strict=True):
         reranked[slot] = pool[rank]
     return reranked
 

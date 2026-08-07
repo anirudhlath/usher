@@ -641,6 +641,13 @@ class TitleRepositoryOwnedContract:
         assert [row.id for row in rows] == [watched.id]
 
 
+#: A limit comfortably above every fixture below, so a case that is not about
+#: the cap is not silently about it either. `limit` has no default on the port
+#: -- deliberately, see `list_unwatched_candidates` -- so every call states its
+#: own bound, and `test_the_limit_keeps_the_best_rather_than_the_first_found`
+#: is the one case that passes something smaller than what it seeded.
+_ROOMY = 50
+
 #: Makes a title playable, the way each arm spells it -- a list entry for the
 #: fake, a real `media_items` row for Postgres.
 Own = Callable[..., Awaitable[None]]
@@ -728,6 +735,18 @@ class TitleRepositoryCandidateContract:
         monotonic, so a fixture that mints in insertion order makes
         `ORDER BY id` and "no ordering at all" the same answer, and the
         tiebreak is then unobservable.
+
+        **Every candidate is `ENRICHED` and none of these cases is about the
+        tier, which is a statement about the read rather than about the
+        fixture.** `list_unwatched_candidates` has no `enrichment_state`
+        predicate and no `enrichment_state` key: a skeleton is as eligible as
+        an enriched title, deliberately, because the pool spans the whole
+        catalog and the skeleton tier is most of it. The constructor needs
+        *some* value and this is the one that says "nothing here turns on it".
+        Whether a prompt should be handed a candidate with no overview and no
+        genres is a real question and it is the *prompt's*, which is Task 12's
+        -- if the answer ever becomes "no", it lands as a predicate here with
+        its own case, not as a fixture that quietly stopped seeding one tier.
         """
         return Title(
             id=title_id if title_id is not None else new_id(),
@@ -757,7 +776,7 @@ class TitleRepositoryCandidateContract:
             await own(one.id)
         await watch(user_id, title_id=seen.id, played=True)
 
-        rows = await repo.list_unwatched_candidates(user_id)
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
 
         assert [row.id for row in rows] == [fresh.id]
 
@@ -787,7 +806,7 @@ class TitleRepositoryCandidateContract:
             await own(one.id)
         await watch(user_id, episode_id=await episode_of(midway.id), played=True)
 
-        rows = await repo.list_unwatched_candidates(user_id)
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
 
         assert [row.id for row in rows] == [untouched.id]
 
@@ -811,7 +830,7 @@ class TitleRepositoryCandidateContract:
             await own(one.id)
         await watch(user_id, title_id=abandoned.id, played=False)
 
-        rows = await repo.list_unwatched_candidates(user_id)
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
 
         assert [row.id for row in rows] == [abandoned.id, untouched.id]
 
@@ -838,7 +857,7 @@ class TitleRepositoryCandidateContract:
             await own(one.id)
         await watch(other_user_id, title_id=theirs.id, played=True)
 
-        rows = await repo.list_unwatched_candidates(user_id)
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
 
         assert [row.id for row in rows] == [theirs.id, mine.id]
 
@@ -860,7 +879,7 @@ class TitleRepositoryCandidateContract:
             await repo.add(one)
         await own(owned.id)
 
-        rows = await repo.list_unwatched_candidates(user_id)
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
 
         assert [row.id for row in rows] == [owned.id, unowned.id]
 
@@ -881,7 +900,7 @@ class TitleRepositoryCandidateContract:
             await repo.add(one)
         await own(series.id, episode=True)
 
-        rows = await repo.list_unwatched_candidates(user_id)
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
 
         assert [row.id for row in rows] == [series.id, stranger.id]
 
@@ -911,7 +930,7 @@ class TitleRepositoryCandidateContract:
         await own(retracted.id, available=False)
         await own(kept.id)
 
-        rows = await repo.list_unwatched_candidates(user_id)
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
 
         assert [row.id for row in rows] == [kept.id, retracted.id]
 
@@ -934,7 +953,7 @@ class TitleRepositoryCandidateContract:
             await repo.add(one)
             await own(one.id)
 
-        rows = await repo.list_unwatched_candidates(user_id, genres=("Western",))
+        rows = await repo.list_unwatched_candidates(user_id, genres=("Western",), limit=_ROOMY)
 
         assert [row.id for row in rows] == [affine.id, stranger.id]
 
@@ -969,7 +988,7 @@ class TitleRepositoryCandidateContract:
             "the fixture must make id order and the unknown/zero split disagree"
         )
 
-        rows = await repo.list_unwatched_candidates(user_id, genres=())
+        rows = await repo.list_unwatched_candidates(user_id, genres=(), limit=_ROOMY)
 
         assert [row.id for row in rows] == [loud.id, quiet.id, never_voted.id, unknown.id]
 
@@ -1001,7 +1020,7 @@ class TitleRepositoryCandidateContract:
             await repo.add(one)
             await own(one.id)
 
-        rows = await repo.list_unwatched_candidates(user_id)
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
 
         assert [row.id for row in rows] == [first, second]
 
@@ -1042,6 +1061,6 @@ class TitleRepositoryCandidateContract:
             await repo.add(one)
             await own(one.id)
 
-        rows = await repo.list_unwatched_candidates(user_id)
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
 
         assert [row.id for row in rows] == [loud.id, quiet.id]

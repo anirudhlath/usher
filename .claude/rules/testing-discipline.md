@@ -555,14 +555,14 @@ see `.claude/rules/db-and-sql.md` for the numbers. Reported as a survivor with
 its evidence rather than replaced by a kill that would have been about
 something else.
 
-**Five fixtures that could not fail, all in one task — three found by the
-task's own sweep, two more by review afterwards, and every one of them found by
+**Ten assertions that could not fail, all in one task — three found by the
+task's own sweep, seven more across two reviews, and every one of them found by
 running a plant rather than by reading the case.** M8 Task 11's sweep over
 `TitleRepository.list_unwatched_candidates` and `CandidatePoolService`, after
-review: **37 mutations, 35 killed**, one predicted equivalent and one control
-(31 and 29 before review added the six the findings below are about). The two
-survivors that were *not* predicted were both a fixture holding something
-constant:
+two review rounds: **41 mutations, 39 killed**, one predicted equivalent and
+one control (31 and 29 before review added the ten the findings below are
+about). The two survivors that were *not* predicted were both a fixture holding
+something constant:
 
 - **`NULLS LAST` is unobservable without a genuine zero.** The Python spelling
   of a nullable descending sort collapses a NULL through `-(vote_count or 0)`,
@@ -621,6 +621,57 @@ above should have caught and did not.**
   so the only thing between it and a re-rank is `embedder is None`. **Ask of
   every table mapping a case to a scenario: could this fixture also be the row
   above or below?**
+
+**And a third round found four more of one shape, plus the harness bug that had
+been hiding them.**
+
+- **A premise guard computed from a *literal* is a guard no fixture change can
+  falsify.** Four of `test_services_curation_pool.py`'s angular guards read
+  `_cos(centroid.vector, _pole(0)) > _cos(centroid.vector, _pole(2))` — the
+  module-level constants a case had *passed to* its fixture builder, not what
+  the fixture stored. Move a title onto a different pole and the guard is
+  unchanged: the case fails on its own final assertion and the guard never
+  runs. The repair is to read the vectors back through the port
+  (`_stored_vectors`), which makes the premise a statement about the fixture.
+  Same family as the `similarities[0] < 1.0` guard deleted one round earlier,
+  and the reason that one was deleted rather than repaired: there was no
+  fixture fact behind it at all.
+- **A guard-verification harness must require the guard's message on pytest's
+  `E` line, not anywhere in the output.** This is what hid the four above.
+  pytest prints the failing assertion's *surrounding source* as context, so a
+  guard's own text appears in the traceback of a case that failed on a
+  different assertion entirely — and `message in output` scores that as "failed
+  on its own guard". Under the loose check the round reported 10/10; under
+  `line.lstrip().startswith("E ") and message in line` the same runs reported
+  8/13, and the four repairs above are the difference. Nearest relative is the
+  `-q`/`-qq` trap: both are a harness reading the wrong thing and reporting
+  confidence.
+- **A plant must falsify exactly one guard.** One plant moved a *kept*
+  candidate onto another kept candidate's pole to test the "dropped are
+  nearest" premise, and tripped the "kept are strictly ordered" premise first —
+  scored as a miss when it was really an ambiguous plant. Move the *other*
+  population instead.
+- **A `limit` with a default in three signatures is three numbers, and the two
+  implementations can disagree in silence.** `list_unwatched_candidates`
+  shipped `limit: int = 200` on the port, on `PostgresTitleRepository` and on
+  `FakeTitleRepository`. Measured: setting the fake's to `5` left the whole
+  unit suite green and the Postgres one's to `5` left the whole integration
+  suite green, because no contract case called without a limit while seeding
+  more than five candidates. **The two arms of a contract suite could disagree
+  about the size of the artefact the suite exists to pin, and an assertion that
+  three literals are equal is a check that runs after the drift.** Fixed by
+  deleting all three defaults — one definition, no copies, `DERIVED_COLUMNS`'
+  shape — which also gets a curation-policy number off a persistence port. The
+  general form: **before writing a test that asserts N copies of a constant
+  agree, ask whether the copies need to exist.**
+- **A guard against a promise nobody breaks is a guard nothing exercises.**
+  `_cosine`'s `if norms == 0.0: return None` defends against a zero vector that
+  `TitleEmbeddingRepository.list_for_titles` promises never to return — so
+  deleting it left all 2,587 unit cases green while three sentences of
+  docstring called it load-bearing. It is not an equivalent mutant: the defect
+  is a `ZeroDivisionError` inside a nightly job. A fake's seeding affordance
+  (`given` takes any `Sequence[float]`) is what makes a port's promise
+  breakable on purpose, and that is what such a guard needs.
 
 **The `-q`/`-qq` trap bit a sweep harness, and it presents as DID-NOT-RUN.**
 `addopts` already carries `-q`, so a harness adding its own makes it `-qq`,

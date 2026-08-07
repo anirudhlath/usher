@@ -407,7 +407,7 @@ class PostgresTitleRepository(TitleRepository):
         user_id: uuid.UUID,
         *,
         genres: Sequence[str] = (),
-        limit: int = 200,
+        limit: int,
     ) -> list[Title]:
         # **Ownership is a LEFT JOIN here and an `EXISTS` in
         # `list_owned_by_tag`, and the difference is where it sits in the

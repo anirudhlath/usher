@@ -286,9 +286,28 @@ class TitleRepository(ABC):
         user_id: uuid.UUID,
         *,
         genres: Sequence[str] = (),
-        limit: int = 200,
+        limit: int,
     ) -> list[Title]:
         """The curation pool: titles this household has not seen, best first.
+
+        **`limit` has no default, and that is a decision rather than an
+        omission.** It shipped as `= 200` in three signatures -- here, the
+        Postgres implementation and the fake -- and nothing made those three
+        agree: measured, changing the fake's to `5` left the whole unit suite
+        green and changing `PostgresTitleRepository`'s to `5` left the whole
+        integration suite green, because no contract case called without it
+        while seeding more than five candidates. Two implementation defaults
+        free to disagree with each other and with the port is the exact
+        failure a contract suite exists to prevent, and asserting three
+        literals are equal would be a check that runs *after* the drift. So
+        there is one definition and no copies, which is `DERIVED_COLUMNS`' and
+        `_PROVIDER_ID_CONSTRAINTS`' shape.
+
+        The second reason is layering: 200 is a *curation policy* number --
+        `USHER_CURATION_POOL_SIZE`, argued from a prompt's token budget -- and
+        a persistence port has no business carrying a default for it.
+        `CandidatePoolService.for_user` is the only caller in `src/` and
+        always passes `limit=self._size`.
 
         **The whole of `CandidatePoolService`'s retrieval, and the substrate
         of [ADR-0028](../../../docs/prd/decisions/0028-the-pool-is-the-contract.md).**
@@ -328,13 +347,21 @@ class TitleRepository(ABC):
         - **Then `vote_count`, and deliberately not `popularity`.**
           `list_owned_by_tag` leads with `popularity` and this read does not,
           which is a divergence rather than an oversight: `titles.popularity`
-          was measured NULL on all 1,271,138 rows of a bootstrap-only catalog
-          and is `NOT NULL DEFAULT 0` in `tmdb_ids`, so on a partially-linked
-          catalog a crosswalk-linked skeleton at `0.0` outranks an unlinked
-          title with half a million votes. That hazard is bounded there --
-          the read is scoped to owned titles, single-digit thousands -- and
-          unbounded here, where the candidate set is the whole catalog and the
-          skeletons are most of it.
+          was measured NULL on all **1,271,138** rows of a `--phase imdb`
+          catalog (M6, 2026-08-03) and is `NOT NULL DEFAULT 0` in `tmdb_ids`,
+          so on a partially-linked catalog a crosswalk-linked skeleton at
+          `0.0` outranks an unlinked title with half a million votes. That
+          hazard is bounded there -- the read is scoped to owned titles,
+          single-digit thousands -- and unbounded here, where the candidate
+          set is the whole catalog and the skeletons are most of it.
+
+          ⚠️ **That total and the one below it are four lines apart and
+          differ, which is deliberate and is why both carry their date.**
+          1,271,138 is M6's `--phase imdb` catalog; 1,271,570 is M7 Task 36's
+          `--phase all` one, measured 2026-08-05 after `link_crosswalk` ran
+          and 432 more titles had landed. Two measurements of two catalogs, a
+          milestone apart — not one number restated wrongly, which is exactly
+          the failure the next bullet exists to record.
         - **Then `id`, and it decides *membership* rather than merely order.**
           This is the canonical statement of the tiebreak's argument; the
           contract case and PRD 06 point here rather than restating it.

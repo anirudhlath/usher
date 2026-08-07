@@ -66,11 +66,13 @@ from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository, FakeWatchRow
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
+from usher.config import Settings
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.taste import Centroid
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
+from usher.ports.repository import TitleRepository
 from usher.services.curation_pool import DEFAULT_POOL_SIZE, CandidatePoolService
 from usher.services.taste import TasteService
 
@@ -191,21 +193,27 @@ class _Household:
             await self.embeddings.given(one.id, vector, genres=tuple(genres))
         return one
 
-    async def watched(
-        self,
-        title: Title,
-        *,
-        played: bool = True,
-        play_count: int = 1,
-        user_id: uuid.UUID = USER,
-    ) -> None:
-        """One watch state, written into **both** stores that read one table.
+    async def watched(self, title: Title, *, user_id: uuid.UUID = USER) -> None:
+        """One *finished* watch state, written into **both** stores that stand
+        in for one table.
 
         `FakeWatchStateRepository` is what `TasteService` reads for the
         centroid's window; `FakeTitleRepository.watch_states` is what the pool
         read anti-joins. In production these are one `watch_states` row, and a
         helper that wrote only the first would let the centroid be built from
         titles the pool still offered back.
+
+        **`played` and `play_count` were parameters and are gone.** No caller
+        ever passed either, so both were defaults wearing the shape of a
+        choice -- `RowCard.artwork`'s argument, in a fixture: a knob whose
+        other arm is never taken is a branch nobody has checked, and the day
+        somebody takes it every case written against the default is already
+        wrong. Neither belongs here anyway. An unplayed state is what
+        `TitleRepositoryCandidateContract`'s
+        `test_a_title_started_and_abandoned_is_still_a_candidate` is for, on
+        both arms, where the predicate actually lives; and `play_count`'s only
+        effect is `TasteService`'s rewatch weighting, which is that service's
+        own file and changes nothing this one asserts.
         """
         self._seeded += 1
         await self.watch_states.merge_from_source(
@@ -216,16 +224,18 @@ class _Household:
                     episode_id=None,
                     position_seconds=7200,
                     runtime_seconds=7200,
-                    played=played,
-                    play_count=play_count,
+                    played=True,
+                    play_count=1,
                     last_played_at=NOW - timedelta(days=self._seeded),
                     observed_at=NOW - timedelta(seconds=10_000 - self._seeded),
                 )
             ]
         )
-        self.titles.watch_states.append(FakeWatchRow(user_id, title.id, None, played))
+        self.titles.watch_states.append(FakeWatchRow(user_id, title.id, None, True))
 
-    def service(self, *, embedder: FakeEmbedder | None, size: int = 200) -> CandidatePoolService:
+    def service(
+        self, *, embedder: FakeEmbedder | None, size: int = DEFAULT_POOL_SIZE
+    ) -> CandidatePoolService:
         return CandidatePoolService(
             titles=self.titles,
             embeddings=self.embeddings,
@@ -278,7 +288,8 @@ async def test_with_no_embedder_the_pool_is_the_base_order() -> None:
     near = await household.title("Quiet And Right", vote_count=3, owned=True, vector=_pole(0))
     stored = await _centroid_of(household)
     assert stored is not None, "the premise: a centroid is on file for this household"
-    assert _cos(stored.vector, _pole(0)) > _cos(stored.vector, _pole(2)), (
+    near_vector, far_vector = await _stored_vectors(household, near, far)
+    assert _cos(stored.vector, near_vector) > _cos(stored.vector, far_vector), (
         "the premise: the stored centroid must prefer the title the base order ranks second"
     )
 
@@ -312,8 +323,14 @@ async def test_with_no_embedder_the_embedding_table_is_never_read() -> None:
 
     household.embeddings.list_for_titles = _counted  # type: ignore[method-assign]
 
-    await household.service(embedder=None).for_user(USER)
+    pool = await household.service(embedder=None).for_user(USER)
 
+    # **The pool is asserted non-empty first, and that is not decoration.**
+    # `for_user` returns before the centroid read when the pool is empty, so
+    # `seen == []` is *also* what an implementation with no candidates
+    # produces -- planting `pool = []` above the early return leaves the
+    # assertion below green. Two facts, so the second means something.
+    assert len(pool) == 2
     assert seen == []
 
 
@@ -437,7 +454,8 @@ async def test_a_candidate_with_no_vector_keeps_its_index() -> None:
     )
     centroid = await _centroid_of(household)
     assert centroid is not None, "the premise: this household has a centroid"
-    assert _cos(centroid.vector, _pole(0)) > _cos(centroid.vector, _pole(2)), (
+    bottom_vector, top_vector = await _stored_vectors(household, bottom, top)
+    assert _cos(centroid.vector, bottom_vector) > _cos(centroid.vector, top_vector), (
         "the premise: the centroid must disagree with the base order"
     )
 
@@ -492,6 +510,42 @@ async def test_a_vector_of_another_width_leaves_its_candidate_where_it_was() -> 
     assert candidates == [bottom.id, narrow.id, top.id]
 
 
+async def test_a_vector_of_no_direction_leaves_its_candidate_where_it_was() -> None:
+    """The third way `_cosine` can decline, and the only one whose defect is a
+    **raise** rather than a wrong number: a stored vector of all zeros divides
+    by zero, inside a nightly job, and takes the generation with it.
+
+    `TitleEmbeddingRepository.list_for_titles` promises never to hand back a
+    zero vector -- a NULL row and a missing row are both simply absent -- so
+    the guard exists against a promise rather than against a caller, which is
+    exactly why nothing exercised it: **deleting `if norms == 0.0: return
+    None` left the whole 2,587-case unit suite green**, found in review. It is
+    not an equivalent mutant, it is an untested one, and the same three
+    sentences of docstring on `_cosine` claim it is load-bearing.
+
+    Seeded through the fake's `given`, which takes an arbitrary
+    `Sequence[float]` and asks no questions -- the affordance that makes a
+    port's promise breakable on purpose. Same `[bottom, zero, top]` shape as
+    the case above, because the answer is the same one: a candidate the
+    centroid cannot be compared against keeps the index the model-free signals
+    gave it.
+    """
+    household = await _household_with_a_centroid()
+    origin = await household.title("A Vector Pointing Nowhere", vote_count=500, owned=True)
+    await household.embeddings.given(origin.id, [0.0] * _DIMENSION)
+    top = await household.title("Above It", vote_count=900, owned=True, vector=_pole(2))
+    bottom = await household.title("Below It", vote_count=100, owned=True, vector=_pole(0))
+    stored = household.embeddings.rows[origin.id].embedding
+    assert stored is not None and not any(stored), (
+        "the premise: the fake must really be holding a zero vector"
+    )
+
+    pool = await household.service(embedder=FakeEmbedder()).for_user(USER)
+    candidates = [one.id for one in pool if one.id in {top.id, origin.id, bottom.id}]
+
+    assert candidates == [bottom.id, origin.id, top.id]
+
+
 # --- configuration 4: the full one ----------------------------------------
 
 
@@ -542,8 +596,11 @@ async def test_the_re_rank_orders_by_proximity_rather_than_by_a_threshold() -> N
     middle = await household.title("Middling", vote_count=500, owned=True, vector=quarter)
     nearest = await household.title("Nearest", vote_count=100, owned=True, vector=eighth)
     centroid = await _centroid_of(household)
-    assert centroid is not None
-    similarities = [_cos(centroid.vector, v) for v in (eighth, quarter, _pole(1))]
+    assert centroid is not None, "the premise: this household has a centroid"
+    similarities = [
+        _cos(centroid.vector, v)
+        for v in await _stored_vectors(household, nearest, middle, farthest)
+    ]
     # **Strict, and `== sorted(..., reverse=True)` is not.** That spelling
     # admits ties, so a fixture that handed the same pole to two of the three
     # would satisfy it while making the case unable to see a partition-style
@@ -609,7 +666,27 @@ async def test_the_cap_survives_the_re_rank() -> None:
     farthest = await household.title("Kept, Farthest", vote_count=5, vector=_pole(1))
     middle = await household.title("Kept, Middling", vote_count=4, vector=quarter)
     nearest = await household.title("Kept, Nearest", vote_count=3, vector=_pole(0))
-    assert dropped, "the fixture must seed something for the cap to drop"
+    centroid = await _centroid_of(household)
+    assert centroid is not None, "the premise: this household has a centroid"
+    # **Two premises, and the weaker one was the only one here.** `assert
+    # dropped` guards a literal `range(3)` -- a fact about the line above it,
+    # which is the shape M8 Task 9's dead guard had. What the case actually
+    # rests on is angular: the three the cap keeps must be strictly ordered by
+    # proximity (or the expected order is not the re-rank's answer), and the
+    # three it drops must be *nearer* than two of them (or a re-selecting
+    # implementation would have no reason to reach for them).
+    kept = [
+        _cos(centroid.vector, v)
+        for v in await _stored_vectors(household, nearest, middle, farthest)
+    ]
+    assert kept[0] > kept[1] > kept[2], (
+        "the premise: the three kept candidates must be strictly ordered by proximity"
+    )
+    lost = [_cos(centroid.vector, v) for v in await _stored_vectors(household, *dropped)]
+    assert len(lost) == 3 and min(lost) > kept[1], (
+        "the premise: every dropped candidate is nearer the centroid than two of the "
+        "kept ones, so a re-selecting implementation would take them"
+    )
 
     pool = await household.service(embedder=FakeEmbedder(), size=3).for_user(USER)
 
@@ -714,6 +791,28 @@ async def _household_with_a_centroid() -> _Household:
     return household
 
 
+async def _stored_vectors(household: _Household, *titles: Title) -> list[tuple[float, ...]]:
+    """What the fixture actually stored for each title, in the order asked.
+
+    **A premise guard computed from the *literal* vector a case handed to
+    `title()` is a guard no fixture change can falsify** -- it is an assertion
+    about two module-level constants wearing the shape of an assertion about
+    the fixture. Four of this file's guards were written that way and all four
+    survived a plant that moved a title onto a different pole: the case failed,
+    on its own final assertion, and the guard never ran. (Found only after the
+    harness was tightened to require the guard's own message on pytest's `E`
+    line; matching it anywhere in the output matches the *source context*
+    pytest prints around a different failing assertion.)
+
+    Reading the vectors back through the port is what makes the premise about
+    the fixture. Same family as the `similarities[0] < 1.0` guard this file
+    deleted, and the reason that one was deleted rather than repaired: there
+    was no fixture fact behind it at all.
+    """
+    vectors = await household.embeddings.list_for_titles([one.id for one in titles])
+    return [vectors[one.id] for one in titles]
+
+
 async def _centroid_of(household: _Household) -> Centroid | None:
     """The centroid `CandidatePoolService` would see, read through the same
     service it reads it through.
@@ -741,16 +840,30 @@ async def test_the_size_is_honoured_whatever_it_is(size: int) -> None:
     assert [one.id for one in pool] == [one.id for one in reversed(seeded)][:size]
 
 
-def test_the_measured_two_hundred_has_one_source_and_three_readers() -> None:
-    """`200` appears three times -- `DEFAULT_POOL_SIZE`, the port's `limit`
-    default, and `Settings.curation_pool_size` -- and nothing made them agree.
+def test_the_measured_two_hundred_is_declared_once_and_read_once() -> None:
+    """`200` used to appear **six** times and this case pinned three of them.
 
-    Only `.env.example` was pinned to `config.py`
-    (`tests/unit/test_deployment_config.py`); the other two could drift apart
-    silently, and the number is not decorative: ADR-0028's handle measurements
-    were all taken against a 200-film pool, so a default that quietly became
-    something else would make the recorded prompt-token figure describe a pool
-    nobody sends. One source, three readers, one assertion.
+    The three it missed were the two implementation defaults
+    (`PostgresTitleRepository` and `FakeTitleRepository`) and this file's own
+    `_Household.service`. Measured in review: setting the fake's to `5` left
+    the whole unit suite green and setting the Postgres one's to `5` left the
+    whole integration suite green, because no contract case called without a
+    limit while seeding more than five candidates -- so the two arms of a
+    contract suite could disagree with each other about the size of the very
+    artefact ADR-0028's index handles address.
+
+    **Fixed by deletion rather than by a wider assertion.** `limit` now has no
+    default on the port or on either implementation, which is
+    `DERIVED_COLUMNS`' and `_PROVIDER_ID_CONSTRAINTS`' shape: one definition,
+    no copies. Asserting that N literals are equal is a check that runs
+    *after* the drift; deleting them makes the drift unspellable. What is left
+    is two -- the constant and the setting's default -- and only that pair can
+    still disagree, so only that pair needs an assertion.
+
+    The number is not decorative: ADR-0028's three handle arms all ran against
+    a 200-film pool at ~14.6 prompt tokens a candidate, so a default that
+    quietly became something else would make the recorded figure describe a
+    pool nobody sends.
 
     Read off `model_fields` rather than off a constructed `Settings`, because
     constructing one reads the process environment and `.env`: a case that
@@ -758,11 +871,10 @@ def test_the_measured_two_hundred_has_one_source_and_three_readers() -> None:
     suite happens to export, which is a different assertion than "the declared
     default is 200".
     """
-    from usher.config import Settings
-    from usher.ports.repository import TitleRepository
-
-    port_default = inspect.signature(TitleRepository.list_unwatched_candidates).parameters["limit"]
+    limit = inspect.signature(TitleRepository.list_unwatched_candidates).parameters["limit"]
 
     assert DEFAULT_POOL_SIZE == 200
     assert Settings.model_fields["curation_pool_size"].default == DEFAULT_POOL_SIZE
-    assert port_default.default == DEFAULT_POOL_SIZE
+    assert limit.default is inspect.Parameter.empty, (
+        "the port must not carry a curation-policy default"
+    )

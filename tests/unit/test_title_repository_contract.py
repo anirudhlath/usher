@@ -64,8 +64,13 @@ class TestFakeTitleRepositoryCandidates(TitleRepositoryCandidateContract):
             # `test_a_copy_the_source_has_retracted_does_not_rank_as_owned` is
             # load-bearing in the integration run and merely available in this
             # one, the same asymmetry the episode case has one mixin up.
+            #
+            # It returns without touching the store at all. An earlier version
+            # wrote an empty list under the title's id, which was a no-op
+            # dressed as a record -- `bool([])` is what a title with no entry
+            # already answers -- and a line that looks like a write and is not
+            # is worse than the absence it models.
             if not available:
-                repo.available_copies.setdefault(title_id, [])
                 return
             copies = repo.available_copies.setdefault(title_id, [])
             copies.append(new_id() if episode else None)
