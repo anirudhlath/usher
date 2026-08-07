@@ -10,9 +10,11 @@ it homeless -- Task 2 settles the scores as module constants and creates no
 module -- and the amendment puts it beside the registry. It imports each
 provider's own constant rather than repeating the number, so the table cannot
 drift from the providers it describes, and Group I asserts the observed range
-across it: **ten incomparable scales make the composer's sort meaningless
-while looking exactly like a sort.** That invariant is what M8's
-`CURATED_SCORE` was chosen against, and it did not have to move to admit it.
+across it. **The risk that makes the range worth asserting is stated once, on
+`ports/rows.py`'s `ScoredRow`, and without a count** -- this sentence used to
+carry one, `ports/rows.py` carried a different one, and `test_rows_invariants.
+py` carried a third. That invariant is what M8's `CURATED_SCORE` was chosen
+against, and it did not have to move to admit it.
 
 **A score is not the pin.** `ContinueWatchingProvider` is PRD 06's *"1 row,
 always ranked first"* and that guarantee is `ScoredRow.pinned`, a flag Group A

@@ -88,10 +88,15 @@ _PROVIDERS = {
     "credits": get_credit_repository,
     "collections": get_collection_repository,
     # M8's, and it is here for this file's own reason rather than for
-    # symmetry: `get_row_context` grew a twelfth `Depends` when
-    # `CuratedProvider` was registered, and a dependency annotated without
-    # `Depends` raises `FastAPIError` at route registration, which no unit
-    # test overriding `get_row_context` can see.
+    # symmetry: `get_row_context` grew a **tenth** `Depends` when
+    # `CuratedProvider` was registered -- measured, `inspect.signature` has 11
+    # parameters and `curated` is the 10th -- and a dependency annotated
+    # without `Depends` raises `FastAPIError` at route registration, which no
+    # unit test overriding `get_row_context` can see. This comment read
+    # "twelfth", which is `RowContext`'s *field* count: that includes `now` and
+    # `affinities`, and neither is a `Depends` (the clock is a lambda the
+    # function closes over, the affinities are awaited off `taste`). Two counts
+    # of two different things, one sentence.
     "curated_rows": get_curated_row_repository,
     "taste_repository": get_taste_repository,
     "default_user": get_default_user,

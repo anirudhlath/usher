@@ -68,11 +68,20 @@ from pydantic import AwareDatetime
 
 from usher.domain.rows import BuiltRow
 
-# One household's row cache is `_MAX_ENTRIES` slugs. Nine providers propose
+# One household's row cache is `_MAX_ENTRIES` slugs. Ten providers propose
 # roughly a dozen rows a screen, so this is ~80 screens' worth of distinct
 # `because-you-watched-<seed>` and `franchise-<id>` slugs before anything is
 # evicted -- generous for a 30 s screen and small enough that the dict cannot
 # become a leak. Not a `Settings` field, for the reason `_MAX_ROWS` is not.
+#
+# **The tenth provider adds a second way to mint a slug nothing will ask for
+# again, and the sizing above does not model it.** A curated slug is zero-padded
+# to the width of its generation (`domain/curation.py`), so a household whose
+# generation crosses a power of ten re-mints every shelf under a new name and
+# orphans the old width's entries -- at most `MAX_CURATED_ROWS` of them, once,
+# per crossing. Against 512 and a 5-minute curated TTL that is noise, which is
+# why the number does not move; recorded so the next person to re-derive the
+# budget does not have to rediscover the term.
 _MAX_ENTRIES = 512
 
 

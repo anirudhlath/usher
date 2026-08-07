@@ -53,7 +53,7 @@ cards can go missing between the write and the render.
     model's ordering, and the composer already has the first: it breaks score
     ties on `slug`, and a curated slug is positional and zero-padded to the
     generation's width. Two spellings of one order eventually disagree, and
-    `curation_validate.SLUG_PREFIX`'s own comment already assumes there is
+    `domain/curation.py`'s `SLUG_PREFIX` comment already assumes there is
     only one ("every curated row carries the same base score").
     `BecauseYouWatchedProvider` needs `_SEED_STEP` for the *opposite* reason --
     its slugs carry a seed id, so its tie alphabetises.
@@ -72,10 +72,21 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
 from tests.unit.rows import USER, Library
 from usher.domain.curation import SLUG_PREFIX, CuratedRow
 from usher.domain.ids import new_id
 from usher.domain.rows import DisplayHint, RowFamily
+
+# The composer's own ordering, imported rather than re-spelled -- see
+# `test_one_score_for_the_whole_generation...`. Private to `services/home.py`
+# because nothing in `src/` may sort candidates but the composer; a test that
+# asserts the composer's order has to name the composer's order.
+from usher.services.home import _Candidate, _ranking
 from usher.services.rows.curated import CURATED_SCORE, MAX_CURATED_ROWS, CuratedProvider, LLMRow
 
 # The instant a generation ran. A fixed literal rather than `datetime.now`:
@@ -474,6 +485,83 @@ def test_the_shelf_budget_is_never_smaller_than_what_the_prompt_asks_for() -> No
     )
 
 
+@pytest.mark.parametrize(
+    ("generated", "discarded"), [(3, 0), (MAX_CURATED_ROWS, 0), (MAX_CURATED_ROWS + 2, 2)]
+)
+async def test_the_shelves_the_budget_discards_are_counted(generated: int, discarded: int) -> None:
+    """**The one drop on this screen `ProviderReport` structurally cannot see.**
+
+    That report splits `proposed`/`selected`/`built` precisely because PRD 06's
+    "drops any that build empty" is otherwise invisible, so the composer's
+    family-cap drop of curated row #5 is legible as `proposed 5, selected 4`.
+    `ProviderReport.proposed` is `len(provider.propose(ctx))` -- the **post**-cut
+    number -- so a seven-shelf generation prints `curated 5` and the two
+    bought, validated and stored shelves this provider threw away are recorded
+    nowhere at all. Same argument as the one that split that dataclass into
+    three fields, applied to the third drop.
+
+    `test_the_shelf_budget_is_never_smaller_than_what_the_prompt_asks_for`
+    guards the *prompt* direction, which cannot happen without somebody editing
+    a constant. This is the direction that happens at runtime with no code
+    change: `curation_validate` deliberately caps nothing, so a model ignoring
+    `MIN_ROWS`/`MAX_ROWS` is stored at whatever length it returned.
+
+    **Three arms, and the two zeros are not padding.** An implementation that
+    records the count only when it is non-zero passes the third arm alone, and
+    a value absent from an export is indistinguishable from a value nobody
+    records -- which is the argument `usher.curation.dropped` already rests on
+    one layer down. `MAX_CURATED_ROWS` exactly is the boundary, so the middle
+    arm is where an off-by-one in the slice would show.
+
+    A local `TracerProvider` rather than the global one, so this case neither
+    reads nor leaves state that `tests/unit/test_services_home_sequential.py`
+    and `tests/unit/test_telemetry.py` also touch.
+    """
+    library = Library()
+    await _generation(library, generated)
+    assert len(await library.curated_rows.list_for_user(USER.id)) == generated, (
+        "the premise: the generation really is this long"
+    )
+    exporter = InMemorySpanExporter()
+    tracing = TracerProvider()
+    tracing.add_span_processor(SimpleSpanProcessor(exporter))
+
+    with tracing.get_tracer(__name__).start_as_current_span("home.compose"):
+        proposed = await CuratedProvider().propose(library.context())
+
+    assert len(proposed) == min(generated, MAX_CURATED_ROWS)
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1, "the harness recorded no span, so this proves nothing"
+    assert spans[0].attributes is not None
+    assert spans[0].attributes["usher.home.curated.discarded"] == discarded
+
+
+def test_this_provider_takes_no_constructor_argument() -> None:
+    """**The class docstring says so three lines above `__init__`, and for one
+    commit `__init__` said otherwise.**
+
+    It shipped as `def __init__(self, *, limit: int = MAX_CURATED_ROWS)` under a
+    docstring reading *"It has no constructor argument"* -- the restated-fact
+    failure `row_providers`' own docstring spends a paragraph retiring, in a new
+    module, at three lines' distance. Nothing ever passed it, so nothing
+    observed the contradiction.
+
+    Two facts, and they are different in kind. **No deployment fact** is the one
+    the docstring argues: a household with `USHER_LLM_ENABLED=false` and a
+    household whose first generation has not run get the same empty answer
+    through the same code path, and an `llm_enabled` flag here would make two
+    states two branches with one observable outcome. **No tuning dial** is the
+    second: eight siblings take a `limit`, and theirs are card counts and
+    candidate pool sizes while this one is PRD 06's `0-5 rows` product bound --
+    a per-instance override of which is a sixth curated shelf nobody decided to
+    paint.
+
+    Asserted on the signature because both defects are additions to it, and
+    because a behavioural assertion cannot see an argument nothing passes.
+    """
+    assert list(inspect.signature(CuratedProvider).parameters) == []
+
+
 async def test_every_curated_shelf_is_scored_alike_so_the_slug_tiebreak_is_the_models_order() -> (
     None
 ):
@@ -482,9 +570,12 @@ async def test_every_curated_shelf_is_scored_alike_so_the_slug_tiebreak_is_the_m
     The composer ranks on `(-score, slug)`, and a curated slug is positional
     and zero-padded to the width of its generation -- so the *tie* is the
     model's own ordering, already, exactly once.
-    `curation_validate.SLUG_PREFIX`'s own comment says so ("every curated row
+    `domain/curation.py`'s `SLUG_PREFIX` comment says so ("every curated row
     carries the same base score"), and this is the case that makes that
-    sentence true rather than aspirational.
+    sentence true rather than aspirational. The citation read
+    `curation_validate.SLUG_PREFIX` for one commit -- the same commit that
+    moved the constant out of the validator, so the drift and its correction
+    shipped together.
 
     Kills a per-row decrement. `BecauseYouWatchedProvider` has one
     (`_SEED_STEP`) and needs it for the *opposite* reason: its slugs carry a
@@ -498,6 +589,16 @@ async def test_every_curated_shelf_is_scored_alike_so_the_slug_tiebreak_is_the_m
     composer's tiebreak alphabetises the judgement the completion was bought
     for. Five proposals is what makes a decrement observable at all -- a
     one-row generation ties with itself.
+
+    **The ordering is `usher.services.home._ranking` itself, imported.** This
+    case re-spelled it as `key=lambda one: (-one.score, one.row.slug)` for one
+    commit, which is the exact objection the paragraph above raises against a
+    per-row decrement: two spellings of one order are two things that can
+    disagree, and a re-spelled composer here would pass against a composer that
+    had changed. `_ranking` takes a `_Candidate`, so the pairing this file has
+    to build is the one the composer builds -- which is also the shape
+    `_Candidate`'s own docstring argues for, a pairing carried rather than
+    reconstructed.
     """
     library = Library()
     for position in range(10):
@@ -508,11 +609,14 @@ async def test_every_curated_shelf_is_scored_alike_so_the_slug_tiebreak_is_the_m
         "the premise: a ten-row generation is zero-padded to a width of two"
     )
 
-    proposed = await CuratedProvider().propose(library.context())
+    provider = CuratedProvider()
+    proposed = await provider.propose(library.context())
 
     assert len(proposed) > 1, "one proposal ties with itself, so this would prove nothing"
     assert {one.score for one in proposed} == {CURATED_SCORE}
-    composed = sorted(proposed, key=lambda one: (-one.score, one.row.slug))
+    composed = sorted(
+        (_Candidate(provider=provider, proposal=one) for one in proposed), key=_ranking
+    )
     assert [one.row.slug for one in composed] == [one.slug for one in stored[:MAX_CURATED_ROWS]]
 
 

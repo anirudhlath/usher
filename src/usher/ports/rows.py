@@ -159,7 +159,8 @@ class RowContext:
     - **A constructor argument on the provider.** Providers are enabled by
       registration in code (boundary call 9), so they are constructed once,
       and this is per-request, per-user data. That is the same argument that
-      put the clock on this context rather than on nine constructors.
+      put the clock on this context rather than on one constructor per
+      registered provider.
     - **Recomputing it inside the provider.** Two of `genre_affinity`'s three
       inputs are already here; the third is
       `TasteRepository.library_genre_counts()`. So the provider would need a
@@ -341,11 +342,20 @@ class ScoredRow:
     **What is deliberately not constrained: the scale.** Whether a provider
     modulates its base score per proposal (a fresher seed ranking higher) is
     left open, and this port permits it because `score` is a float here rather
-    than a lookup the composer performs. The named risk is nine incomparable
-    scales, which makes the composer's sort meaningless while looking exactly
-    like a sort. Group I asserts the observed range across all registered
-    providers; this port does not, because a bound invented here would be a
-    number nobody measured.
+    than a lookup the composer performs. **The named risk is one incomparable
+    scale per registered provider, which makes the composer's sort meaningless
+    while looking exactly like a sort.** Group I asserts the observed range
+    across all registered providers; this port does not, because a bound
+    invented here would be a number nobody measured.
+
+    This paragraph is the **one** copy of that risk, and it carries no count on
+    purpose. It shipped as "nine incomparable scales" and stayed nine through
+    M8's tenth provider while `services/rows/__init__.py` said ten and
+    `test_rows_invariants.py` said nine -- three live copies of one sentence
+    disagreeing, in a commit whose message offered *"neither score invariant
+    changed a character"* as evidence of stability. A restated number is a
+    number that drifts; the count is `len(BASE_SCORES)` and is derived where it
+    is asserted.
     """
 
     row: Row

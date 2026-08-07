@@ -476,6 +476,27 @@ one intended survivor. **The faster the selection, the worse this gets** — a
 per-task sweep over one file is precisely where runs are short enough to
 collide, and a whole-suite sweep at 40 s a run never would have shown it.
 
+⚠️ **The `__all__` control is a control on the *suite*, not a change nothing
+catches, and reporting it as the latter is wrong.** Measured 2026-08-07 on M8
+Task 15's review: reordering `usher/services/rows/curated.py`'s `__all__` is
+caught by `uv run ruff check` — `RUF022 __all__ is not sorted`, which is in
+`[tool.ruff.lint] select`. It still does exactly the job the paragraph above
+asks of it (a mutation pytest must not kill, proving the harness is not scoring
+every run as a kill), because a sweep runs pytest and not the gate. Two
+corollaries for the sentence a sweep result gets written up in: say *"survived
+the suite"*, never *"nothing catches it"*, and pick controls that survive
+`ruff`/`mypy`/`lint-imports` too if the claim is going to be about the gate.
+Same family as **"a survivor list is only true of the selection it was measured
+against"** one entry down. Related, from the same review: a control that is
+*behaviourally* equivalent is not therefore unkillable — restating a score
+constant's literal, or returning a `slug_prefix` as a literal instead of the
+imported name, both survive the suite behaviourally and this repository kills
+exactly that class **structurally** elsewhere
+(`test_the_curated_module_holds_no_llm_client_and_cannot_complete_anything`
+asserts over `ast.unparse` of the module). Write "cannot be killed
+behaviourally", which is a claim about the assertions; "genuinely cannot be
+killed" is a claim about the repository and is false here.
+
 **Two predicates, one selectivity: a `WHERE` clause is unobservable when
 another clause in the same statement happens to be exactly as selective, and
 every fixture in the suite makes it so.** Found 2026-08-06 by M8 Task 9's
@@ -1123,23 +1144,59 @@ had never been executed by the unit suite**, so wiring one of its twelve fields
 to `None` (`curated=None  # type: ignore[arg-type]`) passed all 2,743 cases.
 `RowContext` is a frozen dataclass with no runtime validation, so it constructs;
 the failure is an `AttributeError` inside whichever provider reads the field, on
-the first request. `tests/integration/test_pipeline_deps.py` does not see it
-either — that file proves each `Depends` graph *resolves*, which a `None`
-argument does not disturb.
+the first request.
 
-**`mypy --strict` is the only thing in the gate that catches it, and the plant
-needed a `# type: ignore` to get past it** — which is the honest way to read the
-result rather than a reason to leave it. A `Sequence | None` widened by a later
-change, or a field defaulted to `None` "temporarily", is the same defect with no
-`ignore` to grep for. The repair is one case that calls the provider function
-directly over fakes and then **asks every registered provider to propose against
-what it built**; paired with
+**Corrected 2026-08-07, and both corrections are about scope.** The sweep that
+found this was scoped to `tests/unit`, correctly self-filed as a caveat — and
+the write-up then converted that scoping into two claims about the *gate* and
+about *coverage*, neither of which survives measurement. Re-measured at
+`786c5b4` by planting `None` into each of `get_row_context`'s ten
+repository/user arguments in turn and running each suite whole:
+
+| plant | `tests/unit` (2,759) | `tests/integration` (866) |
+|---|---|---|
+| `titles`, `episodes` | SURVIVED | `titles` KILLED, `episodes` **SURVIVED** |
+| the other eight | KILLED | KILLED |
+
+- **`mypy --strict` is not the only thing in the gate that catches it.**
+  `tests/integration/test_pipeline_spans.py` issues a real `probe.get("/home")`
+  against `create_app()` with **no dependency overrides**, asserts `200` and a
+  non-empty `rows`, and kills **9 of the 10** — including the `titles` plant the
+  unit suite misses. It was added by M7's own `342e476 feat(api): GET /home`, so
+  the coverage predates the finding by a milestone.
+- **`tests/integration/test_pipeline_deps.py` sees one of them.** That file does
+  mostly prove each `Depends` graph *resolves*, which a `None` argument does not
+  disturb — but
+  `test_the_row_context_carries_the_stored_user_and_not_a_fresh_one` reads the
+  context back and kills `user=None`.
+- **`GET /home` is not untested end to end.** It has exactly one such case, and
+  the honest statement of the residual gap is one field, not ten:
+  **`episodes=None` survives all 2,759 unit and all 866 integration cases.**
+  `NextUpProvider` is the only reader, it reads at hydration time, and no case
+  anywhere composes a real context over a household with an unfinished series.
+
+**And the repair's own generalisation was wrong, which is why the case now
+carries two assertions.** *"Paired with
 `test_every_row_context_field_is_read_by_at_least_one_provider` (each field has
-a reader) it covers the wiring field by field with no list to keep in step, so
-the thirteenth field is covered the day it is added. **The general form: for any
-composition-root function a test suite routinely overrides, ask what executes
-the real one — and prefer a behavioural assertion over a `not None` scan,
-because the scan is the second list.**
+a reader) it covers the wiring field by field with no list to keep in step"* is
+not a mechanism. That case scans `services/rows/` for the string `ctx.<name>`;
+it says a reader *exists*, not that the behavioural assertion *reaches* it — and
+the behavioural assertion only asks every provider to `propose()` against an
+**empty** household, so the `titles`/`media_items` reads, which are mostly
+hydration-time (`Row.build`), are never executed. Measured: 8 of 10.
+
+The second assertion is the `None` scan the first draft dismissed as "a second
+list", and it is not one:
+`[f.name for f in dataclasses.fields(ctx) if getattr(ctx, f.name) is None] == []`
+is derived from the dataclass, so it grows with it and there is nothing to keep
+in step. Nothing on the real context is legitimately `None` — `affinities` is
+`()` and `now` is a callable. It kills all ten. **The general form, restated:
+for any composition-root function a test suite routinely overrides, ask what
+executes the real one — and when the answer is "one behavioural case", ask which
+of its arguments that case's fixture actually reaches, because a behavioural
+assertion covers the code path it runs and a structural one covers the shape.
+Neither subsumes the other, and "each field has a reader somewhere" is not
+evidence that this case reached it.**
 
 Same task, a smaller one worth carrying: **a `"Forbidden" not in source` scan
 fails on the module's own explanation.** `services/rows/curated.py` argues at

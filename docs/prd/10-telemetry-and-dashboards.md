@@ -97,7 +97,9 @@ reader would assume:
 - **The provider is an *attribute*, not part of the span name.** `row.build`
   carries `usher.row.provider` (the `slug_prefix`), `usher.row.slug` and
   `usher.row.cards`; `home.compose` carries `usher.home.proposed`,
-  `usher.home.built` and `usher.home.rows`. So "find the one slow provider" is
+  `usher.home.built`, `usher.home.rows` and — M8's, set by `CuratedProvider`
+  itself rather than by the composer — `usher.home.curated.discarded`. So
+  "find the one slow provider" is
   a group-by on an attribute, not a scan of span names — which is what keeps
   the name cardinality at two where `because-you-watched-<seed>` would have
   made it catalog-sized. **Dashboard 4 can have its breakdown**, from either
@@ -185,20 +187,23 @@ dashboard query has to know:
 A blank query is deliberately not a data point: a search box sends one between
 every keystroke.
 
-**`provider`'s vocabulary is the nine `slug_prefix` constants**, and it is
+**`provider`'s vocabulary is the ten `slug_prefix` constants**, and it is
 written down here for the reason the paragraph above gives — `continue-watching`,
 `next-up`, `recently-added`, `rediscover`, `because-you-watched`, `franchise`,
-`genre-affinity`, `seasonal`, `people`. Ten when M8 registers
+`genre-affinity`, `seasonal`, `people`, `curated`. The tenth arrived with M8's
 `CuratedProvider`. Four things a dashboard query has to know:
 
 - **It is the provider's prefix, never the row's slug.** `because-you-watched`
   emits one row *per seed* — `because-you-watched-<title id>` — so a slug-keyed
   label would be bounded by the catalog rather than by the registry. Bounded at
-  nine is the whole reason the label is affordable on a per-request histogram.
+  ten is the whole reason the label is affordable on a per-request histogram,
+  and `curated` is the sharpest instance: its row slugs are `curated-01`,
+  `curated-02`, … per generation, so a slug label there is unbounded in the
+  number of shelves a model has ever proposed.
 - **It is not the class name.** `services/rows/__init__.py` also keys a
   `BASE_SCORES` map by `__name__`; that is a different vocabulary for a
-  different purpose, and confusing the two produces a panel with nine empty
-  series and nine populated ones.
+  different purpose, and confusing the two produces a panel with ten empty
+  series and ten populated ones.
 - **`provider` on this metric and `provider` on `usher.provider.requests` are
   different vocabularies under one label name.** The latter is a *metadata*
   provider (`tmdb`). They never appear on the same series, but a dashboard
@@ -236,6 +241,22 @@ that looks like in production. Four things a dashboard query has to know:
   anything; what an operator reads is the ratio of the two. "How many rows did
   *this* generation produce" is on `curation.generate`'s span, attached to the
   generation that produced it.
+
+**`usher.home.curated.discarded` is the third drop, and it is a span attribute
+for the same reason.** The validator's two counters answer *"is the validator
+eating the output"*; this one answers *"is the screen eating it"*.
+`CuratedProvider` cuts the stored generation to PRD 06's `0-5 rows` and
+`services.curation_validate` deliberately caps nothing, so a model that ignores
+the prompt's row range has its excess shelves bought, validated, stored — and
+then dropped on the request path with nothing else recording it.
+`ComposeReport`'s `ProviderReport` structurally cannot: its `proposed` is the
+**post**-cut count, so a seven-shelf generation reads `proposed 5` and the two
+discards are invisible. This is dashboard 5's *"spend with no screen to show
+for it"* made countable, so it belongs beside the composition that discarded
+them rather than in a third counter — the same call this section's last bullet
+makes for "how many rows did this generation produce". **Set on every
+composition, zeros included**, for the reason every drop reason is exported
+every time.
 
 `usher.home.compose.duration` carries **no labels**, and that is a decision:
 the natural one would be the row count or the user, and the first is an

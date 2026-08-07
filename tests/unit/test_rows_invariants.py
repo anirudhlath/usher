@@ -279,9 +279,14 @@ def test_no_provider_but_continue_watching_can_reach_the_top_score() -> None:
 
 
 def test_every_registered_score_is_on_one_comparable_scale() -> None:
-    """**Nine incomparable scales make the composer's sort meaningless while
-    looking exactly like a sort**, which is the risk `ports/rows.py` names when
-    it declines to constrain the scale and hands the measurement here.
+    """**The measurement `ports/rows.py` declines to make and hands here**: it
+    permits a provider to modulate its base score per proposal, and names the
+    risk -- one incomparable scale per registered provider, which makes the
+    composer's sort meaningless while looking exactly like a sort. That
+    sentence is stated there and deliberately not restated here, because this
+    docstring, `ports/rows.py` and `services/rows/__init__.py` each carried
+    their own count of it and two of the three went stale the day the tenth
+    provider registered.
 
     Measured rather than designed: every ceiling is in (0, 1], and the range is
     asserted as a range rather than pinned per provider, so a provider added

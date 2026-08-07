@@ -84,6 +84,8 @@ import uuid
 from collections.abc import Sequence
 from datetime import timedelta
 
+from opentelemetry import trace
+
 from usher.domain.curation import SLUG_PREFIX, CuratedRow
 from usher.domain.rows import DisplayHint, RowFamily
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
@@ -177,7 +179,14 @@ class LLMRow(BaseRow):
 # quietly fighting it. Nothing here is pinned; a second pinned provider would
 # be two rows claiming one position, which is a guarantee that becomes a tie.
 #
-# *Where in (0.3, 0.9)* is a product judgement, and this is it. The two rows
+# *Where in the band* is a product judgement, and this is it. The band the
+# comparable-scale invariant leaves open is [0.3, 1.0); the band the ladder case
+# under it actually enforces is **(0.80, 0.90) exclusive**, measured 2026-08-07
+# by planting each endpoint -- `0.805` and `0.899` pass all 2,759 unit cases,
+# `0.80` and `0.90` fail `test_a_curated_shelf_outranks_every_discovery_row_and_
+# neither_row_about_intent` on its own line. So the judgement this comment
+# argues is which number inside a hundredth-wide window, and the window is not
+# the one an earlier draft of this sentence named. The two rows
 # above are about **intent** -- Continue Watching is a title the household is
 # in the middle of and Next Up (0.90) is the next episode of one they are
 # watching -- and a shelf a model proposed overnight must never outrank
@@ -217,10 +226,11 @@ CURATED_SCORE = 0.85
 # `curation_prompt.MAX_ROWS` asks the model for at most five and is a
 # different kind of number: a request, which a model may ignore. This is what a
 # household is shown when it does. The two are allowed to differ, in one
-# direction only -- a prompt asking for more than this discards the excess here
-# with nothing counting it -- and
-# `test_the_shelf_budget_is_never_smaller_than_what_the_prompt_asks_for` is the
-# guard on that direction.
+# direction only, and `test_the_shelf_budget_is_never_smaller_than_what_the_
+# prompt_asks_for` is the guard on that direction -- **the direction that needs
+# a code change**. The direction that happens at *runtime*, with no code change
+# at all, is a model ignoring `MIN_ROWS`/`MAX_ROWS`, which `curation_validate`
+# deliberately does not cap; `propose` counts what it drops for that reason.
 #
 # `HomeService._MAX_PER_FAMILY` is 4 and `CURATED` is a family, so at most four
 # of these five ever reach a screen. That is not a reason to make this four:
@@ -242,17 +252,30 @@ class CuratedProvider(RowProvider):
     call with no arithmetic in it: there is nothing here to recompute and
     nothing to decide that the generation did not already decide.
 
-    **It has no constructor argument, unlike `row_providers`' one deployment
-    fact.** Whether an LLM is configured is not visible here and must not be:
-    a deployment with `USHER_LLM_ENABLED=false` has an empty `curated_rows`
-    and therefore no curated shelves, which is the same answer this provider
-    gives a household whose first generation has not run yet -- fewer rows,
-    not worse rows (ADR-0022's phrase, one subsystem over). A flag would make
-    those two states different code paths with one observable outcome.
-    """
+    **It has no constructor argument at all, unlike `row_providers`' one
+    deployment fact and unlike the eight siblings that take a tuning `limit`.**
+    Whether an LLM is configured is not visible here and must not be: a
+    deployment with `USHER_LLM_ENABLED=false` has an empty `curated_rows` and
+    therefore no curated shelves, which is the same answer this provider gives
+    a household whose first generation has not run yet -- fewer rows, not worse
+    rows (ADR-0022's phrase, one subsystem over). A flag would make those two
+    states different code paths with one observable outcome.
 
-    def __init__(self, *, limit: int = MAX_CURATED_ROWS) -> None:
-        self._limit = limit
+    **And no `limit` either, which is where this sentence and the code
+    disagreed for one commit.** It shipped as
+    `def __init__(self, *, limit: int = MAX_CURATED_ROWS)` three lines under a
+    docstring saying there was no constructor argument -- the *restated fact*
+    failure `row_providers`' own docstring spends a paragraph retiring, in a
+    new module, at three lines' distance. Nothing in `src/` or `tests/` ever
+    passed it. Deleted rather than the sentence, because the eight siblings'
+    `limit` is a **tuning dial** over card counts and candidate pools while
+    this number is PRD 06's `0-5 rows` **product bound**, argued as such by
+    `MAX_CURATED_ROWS`' own comment -- and a per-instance override of a product
+    bound is a sixth curated shelf nobody decided to paint. One spelling, on
+    the constant, where the argument for it already lives.
+    `test_this_provider_takes_no_constructor_argument` is what makes the
+    paragraph checkable rather than merely restated.
+    """
 
     @property
     def slug_prefix(self) -> str:
@@ -270,11 +293,33 @@ class CuratedProvider(RowProvider):
         headings, their reasons, and a shelf of films this one has already
         watched, rendered as a personal recommendation.
 
-        **The slice is `[:limit]`, taken from the read's own order.**
-        `list_for_user` orders by `position`, which is the model's ordering and
-        the only judgement the completion was bought for -- so the shelves that
-        survive the budget are its first five and not the five that sort first
-        by heading, by id or by anything else. Nothing here sorts.
+        **The slice is `[:MAX_CURATED_ROWS]`, taken from the read's own
+        order.** `list_for_user` orders by `position`, which is the model's
+        ordering and the only judgement the completion was bought for -- so the
+        shelves that survive the budget are its first five and not the five that
+        sort first by heading, by id or by anything else. Nothing here sorts.
+
+        **What the slice throws away is counted, and it is the one drop on this
+        screen that `ProviderReport` structurally cannot see.** That report
+        splits `proposed`/`selected`/`built` precisely because PRD 06's "drops
+        any that build empty" is otherwise invisible, so the composer's
+        family-cap drop of curated row #5 reads as `proposed 5, selected 4`. But
+        `proposed` is the **post**-cut number: a nine-shelf generation prints
+        `curated 5` and the four bought-and-stored shelves it discarded appear
+        nowhere. `MAX_CURATED_ROWS`' comment calls that "spend with no screen to
+        show for it, which is exactly what PRD 10's dashboard 5 exists to make
+        visible", and a comment naming a gap is not an instrument.
+
+        So the count goes on the ambient span -- `usher.home.curated.discarded`
+        on `home.compose`, PRD 10's span attribute for it -- rather than on a
+        third metric: PRD 10 argues `usher.curation.rows`/`.dropped` are the
+        milestone's only two, and "how many did *this* composition discard" is
+        the same shape as "how many rows did *this* generation produce", which
+        that document already puts on a span. **Recorded every time, zeros
+        included**, for the reason `usher.curation.dropped` exports every reason
+        every time: a value absent from the export is indistinguishable from a
+        value nobody records. Outside a span the set is a no-op, which is what
+        `get_current_span` returning `INVALID_SPAN` means.
 
         **A slug is unique inside the generation this read answered and is not
         a name across two.** The padding width is a property of the generation,
@@ -285,7 +330,11 @@ class CuratedProvider(RowProvider):
         argument is `domain/curation.py`'s `slug` comment.
         """
         stored = await ctx.curated.list_for_user(ctx.user.id)
-        return [ScoredRow(row=LLMRow(row), score=CURATED_SCORE) for row in stored[: self._limit]]
+        kept = stored[:MAX_CURATED_ROWS]
+        trace.get_current_span().set_attribute(
+            "usher.home.curated.discarded", len(stored) - len(kept)
+        )
+        return [ScoredRow(row=LLMRow(row), score=CURATED_SCORE) for row in kept]
 
 
 __all__ = ["CURATED_SCORE", "MAX_CURATED_ROWS", "CuratedProvider", "LLMRow"]

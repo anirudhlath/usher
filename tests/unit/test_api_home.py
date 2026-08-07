@@ -140,14 +140,43 @@ async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -
     an `Optional` widened by a later change, and a type checker is not the
     thing this file is for.
 
-    **The assertion is behavioural rather than a `None` scan**, because a scan
-    is a second list to keep in step: every registered provider is asked to
-    propose against the real context, and every one must answer `[]` on a
-    household with nothing seeded. Together with
-    `test_every_row_context_field_is_read_by_at_least_one_provider` -- which
-    guarantees each field *has* a reader -- that makes the route's wiring
-    covered field by field, by construction, for the thirteenth as much as for
-    the twelfth.
+    **`mypy` is not the only thing in the gate that catches it, and saying so
+    was wrong** (corrected 2026-08-07).
+    `tests/integration/test_pipeline_spans.py` has driven a real `GET /home`
+    against `create_app()` with no dependency overrides since M7's own
+    `342e476`, and it kills 9 of these 10 plants;
+    `test_pipeline_deps.py::test_the_row_context_carries_the_stored_user_and_
+    not_a_fresh_one` kills `user`. What this case buys is **speed and
+    locality**, not exclusivity: it needs no Docker and it fails naming the
+    context rather than naming a span tree. The one plant nothing anywhere
+    catches is `episodes=None` -- 2,759 unit and 866 integration cases, all
+    green -- because `NextUpProvider` reads it at hydration time and no case
+    composes a real context over a household with an unfinished series.
+
+    **Two assertions, because the behavioural one alone does not generalise.**
+    Measured 2026-08-07, planting `None` into each of `get_row_context`'s ten
+    repository/user arguments in turn and running the whole unit suite against
+    the behavioural assertion by itself: **8 killed, 2 survived** --
+    `titles=None` and `episodes=None` both passed all 2,759 cases. The
+    behavioural half only asks every provider to `propose()` against an
+    **empty** household, and `titles`/`media_items` are read mostly at
+    *hydration* time (`Row.build`), which no empty household reaches. Pairing
+    it with `test_every_row_context_field_is_read_by_at_least_one_provider`
+    does not close that: **that case scans `services/rows/` for the string
+    `ctx.<name>`, which says a reader exists, not that this case reaches it.**
+
+    So the `None` scan below is kept, and it is **not** the "second list" the
+    first draft of this docstring dismissed -- it is derived from
+    `dataclasses.fields(ctx)`, so it grows with the dataclass and there is
+    nothing to keep in step. Nothing on the real context is legitimately
+    `None`: `affinities` is `()` when no genre cleared the floors and `now` is
+    a callable. It kills all ten, including the two the behavioural half
+    cannot see.
+
+    The behavioural half is kept anyway, and it is the half with the *reason*
+    in it: a scan proves the field is populated, and `propose()` proves it is
+    populated with something a provider can actually call. Between them, the
+    thirteenth field is covered the day it is added.
     """
     library = Library()
     taste = TasteService(
@@ -175,6 +204,11 @@ async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -
 
     assert len(dataclasses.fields(ctx)) >= 12, "the context lost fields, so this proves nothing"
     assert len(ROW_PROVIDERS) == 10, "the registry shrank, so this proves nothing"
+
+    assert [one.name for one in dataclasses.fields(ctx) if getattr(ctx, one.name) is None] == [], (
+        "the route wired a context field to None"
+    )
+
     for provider in ROW_PROVIDERS:
         assert await provider.propose(ctx) == [], (
             f"{type(provider).__name__} could not read the context the route builds"

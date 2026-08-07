@@ -254,7 +254,7 @@ class HomeService:
         cached = None if self._cache is None else self._cache.get_screen(ctx.user.id)
         if cached is not None:
             # A screen hit does not re-propose. `propose` is the cheap phase,
-            # not the free one -- nine bounded reads is still nine round trips
+            # not the free one -- ten bounded reads is still ten round trips
             # for an answer already on hand. The report is empty of providers
             # for the same reason: none of them ran.
             return ComposeReport(rows=cached, providers=(), duration_seconds=0.0)

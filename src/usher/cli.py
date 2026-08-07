@@ -1069,8 +1069,8 @@ def _print_home_report(report: ComposeReport, *, cold: Sequence[float], warm: fl
     )
     # **The second half of boundary call 8's rule, computed rather than left to
     # the reader.** If one provider is most of the wall clock, parallelising
-    # nine of them converges on that provider's latency and buys nothing -- the
-    # finding is a query to fix.
+    # the other nine converges on that provider's latency and buys nothing --
+    # the finding is a query to fix.
     total_build = sum(one.build_seconds for one in report.providers)
     if total_build > 0:
         slowest = max(report.providers, key=lambda entry: entry.build_seconds)
