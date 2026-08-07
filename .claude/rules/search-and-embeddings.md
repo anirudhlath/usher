@@ -369,8 +369,60 @@ refuses outright while `--mode fused` narrows to full-text *and says which*.
 `usher index` loads no model at all: staleness is a question about a recorded
 model **name**.
 
-**Query expansion ships in M8, off by default, and its position is the whole
-cost argument.** `QueryExpansionService.expand` is called from exactly one
+**Query expansion was measured on 2026-08-07 and it makes retrieval worse, so
+it ships behind its own switch, default off.** PRD 05 has called it the
+cheaper, better-evidenced lever for mood queries since M1 — on the literature's
+authority, with nothing in this project measuring it. Run against the local
+vLLM serving `gemma-4-26b-a4b`, over **5 mood queries × 150 real TMDb overviews
+for the 150 most-voted catalog titles**, embedded with the shipped
+`compose_document` and the shipped `FastEmbedEmbedder`, **targets written down
+before any cosine was computed**:
+
+| | raw query | expanded |
+|---|---|---|
+| MRR | **0.733** | 0.373 |
+| recall@10 | **0.800** | 0.533 |
+
+The typed query wins **4 of 5** queries outright and ties the 5th. **The
+label-free control is what makes this a mechanism rather than a bad draw**:
+pairwise cosine *between the five queries themselves* rises **0.5417 → 0.5975
+mean and 0.6328 → 0.7784 max** after rewriting — five distinct searches come
+back more alike than they went in — and the top hit's z-score falls in 3 of 5.
+The rewrites are generic critic prose (*"A dramatic exploration of profound
+isolation and psychological survival…"*) that collapses toward the corpus
+centroid, and *Arrival*, *Seven*, *Requiem for a Dream* and *Prisoners*
+dominate the expanded top-5 of **unrelated** queries.
+
+**The caveat travels with the numbers and is not small:** one model, one
+150-document corpus, five queries. It is thin — and it is the only measurement
+that exists, against a PRD claim that rested on the literature alone, so the
+default follows it. `USHER_QUERY_EXPANSION_ENABLED` is therefore a **second**
+setting, independent of `USHER_LLM_ENABLED` and `false` even when that is
+`true`; the fourth combination (expansion on, no client) is refused by a
+`Settings` validator rather than silently ignored, because a knob that is on
+and means nothing is the failure `extra="forbid"` exists to prevent. M8 Task
+20's argument that *"a second setting's only honest default is 'follow the
+first'"* was sound while expansion was believed to help and is superseded by
+this measurement, not deleted.
+
+**And expansion is billed on searches the semantic lane cannot serve, which
+this run also found and which is not fixed.** The guard is `embedder is None`,
+not *"anything is embedded"*. Measured with `USHER_EMBEDDING_ENABLED=true` and
+`title_embeddings` empty: `usher search --mode fused` bought a completion,
+printed `expanded: …`, returned `semantic_coverage=0.000`, and *then* printed
+*"no title in the filtered population has an embedding"* — **the warning
+arrives after the money**, on every fused search of every not-yet-backfilled
+deployment. `--mode full_text` correctly bought nothing. Not repaired here
+because the correct predicate — *does any title in the **filtered** population
+have a vector* — is not answerable before the vector that does the filtering
+exists, and the cheap global stand-in (`SELECT 1 FROM title_embeddings LIMIT
+1`) is a different guard costing a new `TitleEmbeddingRepository` port method,
+two implementations, a contract case and a read on every fused search. The new
+setting reduces the exposure to deployments that opted in; it does not close
+it.
+
+**Its position is the whole cost argument.**
+`QueryExpansionService.expand` is called from exactly one
 line -- the line before `SearchService`'s `self._embedder.embed([...])`, inside
 the `else` of the `embedder is None` branch. Four things follow and each is a
 case: a `full_text` search buys no completion (no embed to sit in front of), a
@@ -385,25 +437,38 @@ Three decisions worth not re-deriving. **Only the vector comes from the
 rewrite**: `SearchRequest.query` stays the typed string, so under RRF the
 lexical lane still matches the viewer's own words and a rewrite that drifted
 cannot take an exact-title search with it. **`SearchService.expander` is
-`SearchService | None`-shaped optional and `QueryExpansionService.client` is
-not** -- M8's rule everywhere else is that an `LLMClient` holder is built or
-not built (`CurationService`), and that works only because a deployment with
-no LLM runs no curation; a `SearchService` is built on every deployment there
-is, so "built or not built" has no state left to express and the choice is
-between an optional collaborator and a second class. It is the same call
-ADR-0022 already made for `embedder`, one layer up. **A failure is absorbed**:
+`QueryExpansionService | None`-shaped optional and
+`QueryExpansionService.client` is not** -- M8's rule everywhere else is that an
+`LLMClient` holder is built or not built (`CurationService`), and that works
+only because a deployment with no LLM runs no curation; a `SearchService` is
+built on every deployment there is, so "built or not built" has no state left
+to express and the choice is between an optional collaborator and a second
+class. It is the shape this project has never needed for `embedder`, one
+parameter over — a precedent by absence: ADR-0022 argues the embedder is
+optional and never considers or refuses a second `SearchService` class, so
+"the same call ADR-0022 already made" (which this file and `services/search.py`
+both said until 2026-08-07) overstated it. **A failure is absorbed**:
 `expand` never raises, and an unreachable endpoint, an unparseable answer or a
 blank/over-long rewrite all leave the search running on the typed query --
 while still writing the `llm_calls` row, because a ledger holding only the
 successes understates spend by exactly the failures.
 
-**And the reported-not-substituted rule has a shape**:
-`SearchAnswer.expanded_query` is the text that was embedded and `None` when
-the query was embedded as typed, so it is populated on exactly the searches
-that bought a completion and `usher search` prints it above the results. A
-field echoing the typed query when nothing was expanded would put a line on
-every search of every default deployment and mean nothing -- which is the
-mutation the CLI case kills.
+**And the reported-not-substituted rule has a shape, and it is one-directional
+— this file claimed a biconditional until 2026-08-07 and the biconditional is
+false.** `SearchAnswer.expanded_query` is the text that was embedded and `None`
+when the query was embedded as typed, so **a populated field means a completion
+was bought, and an absent one means nothing about spend**. `usher search`
+prints it above the results. The counterexample is measured, not hypothetical:
+a completion that answers with the wrong key is bought and billed in full —
+`tokens_in=1000`, `tokens_out=200`, one `llm_calls` row, `ok=False`,
+`error=NO_USABLE_QUERY` — and `expand` returns `None`, so the field is `None`
+and the CLI prints nothing. Same for an upstream failure. The old wording
+(*"populated on exactly the searches that bought a completion"*) invites *"no
+`expanded:` line ⇒ no spend"*, which is exactly backwards for the two failure
+paths the billed-on-every-attempt rule exists to make visible. A field echoing
+the typed query when nothing was expanded would instead put a line on every
+search of every default deployment and mean nothing -- which is the mutation
+the CLI case kills.
 
 **Nothing runs `usher similar --rebuild` for you**, and that is the one
 freshness gap in the milestone, written down as a gap rather than dressed up:

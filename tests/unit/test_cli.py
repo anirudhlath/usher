@@ -937,6 +937,10 @@ async def test_a_semantic_search_hands_the_completion_client_to_the_pipeline(
     The client is released on the way out, in the same `finally` as the
     embedder: one `httpx.AsyncClient` per command, closed however the command
     ends.
+
+    This is the **only** configuration that reaches a client -- a non-full-text
+    mode, an embedder that loaded, and `USHER_QUERY_EXPANSION_ENABLED=true` --
+    and each of the other three has its own case below.
     """
     built = FakeLLMClient()
     closed = 0
@@ -950,16 +954,83 @@ async def test_a_semantic_search_hands_the_completion_client_to_the_pipeline(
         assert report is False, "the lane sentence belongs to `usher work`"
         return built, _closer
 
+    monkeypatch.setattr("usher.cli.embedder", _an_embedder)
     monkeypatch.setattr("usher.cli.llm_client", _client)
     monkeypatch.setattr("usher.cli._session_for", _no_session)
     monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
 
     await _search(
-        _cli_settings(), query="isolation in space", mode="fused", limit=5, filters=SearchFilters()
+        _cli_settings(llm_enabled=True, query_expansion_enabled=True),
+        query="isolation in space",
+        mode="fused",
+        limit=5,
+        filters=SearchFilters(),
     )
 
     assert captured["llm"] is built
     assert closed == 1
+
+
+async def test_a_search_with_no_embedding_model_opens_no_completion_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The narrowed deployment, and it was paying for a pool until
+    2026-08-07.** `embedder(settings, report=False)` answering `(None, nothing)`
+    is the whole of ADR-0022's optionality at this layer: `SearchService` then
+    narrows a `fused` request to full-text before it ever reaches an expander,
+    so no completion is bought and none could be. The client built for it was
+    an `httpx.AsyncClient` and its connection pool opened and closed for
+    nothing -- verbatim the cost the `full_text` guard one case down exists to
+    avoid, on the configuration a deployment without the embedding extra uses
+    for every fused search it runs.
+
+    The expansion switch is deliberately **on** here, so the case can only pass
+    by reading the embedder's answer.
+    """
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("usher.cli.llm_client", _never_a_client)
+    monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
+
+    settings = _cli_settings(llm_enabled=True, query_expansion_enabled=True)
+    assert settings.embedding_enabled is False, "the premise: no model on this deployment"
+
+    await _search(
+        settings, query="isolation in space", mode="fused", limit=5, filters=SearchFilters()
+    )
+
+    assert captured["llm"] is None
+
+
+async def test_a_search_on_a_deployment_that_curates_but_does_not_expand_opens_no_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second switch, at the CLI. `USHER_LLM_ENABLED=true` with
+    `USHER_QUERY_EXPANSION_ENABLED=false` is the ordinary M8 deployment after
+    PRD 05's 2026-08-07 measurement, and on it `build_pipeline` builds no
+    expander -- so a client opened here is a pool bought for a service that
+    will not exist.
+
+    The embedder is present and the mode is `fused`, so the only thing between
+    this and a client is the setting.
+    """
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("usher.cli.embedder", _an_embedder)
+    monkeypatch.setattr("usher.cli.llm_client", _never_a_client)
+    monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
+
+    await _search(
+        _cli_settings(llm_enabled=True),
+        query="isolation in space",
+        mode="fused",
+        limit=5,
+        filters=SearchFilters(),
+    )
+
+    assert captured["llm"] is None
 
 
 async def test_a_full_text_search_opens_no_completion_client_at_all(
@@ -977,15 +1048,13 @@ async def test_a_full_text_search_opens_no_completion_client_at_all(
     """
     captured: dict[str, object] = {}
 
-    async def _never(*_: object, **__: object) -> object:
-        raise AssertionError("a full-text search opened a completion client")
-
-    monkeypatch.setattr("usher.cli.llm_client", _never)
+    monkeypatch.setattr("usher.cli.embedder", _an_embedder)
+    monkeypatch.setattr("usher.cli.llm_client", _never_a_client)
     monkeypatch.setattr("usher.cli._session_for", _no_session)
     monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
 
     await _search(
-        _cli_settings(),
+        _cli_settings(llm_enabled=True, query_expansion_enabled=True),
         query="the quiet vacuum",
         mode="full_text",
         limit=5,
@@ -995,8 +1064,38 @@ async def test_a_full_text_search_opens_no_completion_client_at_all(
     assert captured["llm"] is None
 
 
-def _cli_settings() -> Settings:
-    return Settings(database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher", secret_key="0" * 32)
+async def _never_a_client(*_: object, **__: object) -> object:
+    """A `composition.llm_client` that fails the case rather than answering.
+
+    Sharper than asserting `captured["llm"] is None` alone, which is also what
+    a `_search` that built a client, closed it and forgot to pass it produces
+    -- the pool would still have been opened, which is the whole subject of the
+    three cases that use this.
+    """
+    raise AssertionError("a search with nothing to expand opened a completion client")
+
+
+async def _an_embedder(_: Settings, *, report: bool = True) -> object:
+    """`composition.embedder`, with a model that loaded.
+
+    A stand-in rather than a real `FastEmbedEmbedder`: `_search` only ever
+    tests this for `None` and hands it to a `build_pipeline` these cases have
+    replaced, so anything not-`None` is the whole of the fixture.
+    """
+    assert report is False, "the lane sentence belongs to `usher work`"
+
+    async def _aclose() -> None:
+        return None
+
+    return object(), _aclose
+
+
+def _cli_settings(**rest: object) -> Settings:
+    return Settings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
+        secret_key="0" * 32,
+        **rest,  # type: ignore[arg-type]
+    )
 
 
 @contextlib.asynccontextmanager

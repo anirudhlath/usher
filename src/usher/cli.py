@@ -895,13 +895,31 @@ async def _search(
     object holding the model -- which is why this passes primitives to
     `SearchService.search` and never a `SearchRequest`.
 
-    **The completion client is built on exactly the same condition, and that
-    is the condition rather than a convenience.** Query expansion sits in front
-    of the embed, so a mode with no embed has no call in front of one and a
-    client built for it would open a connection pool for nothing. With
-    `USHER_LLM_ENABLED=false` -- the shipped default -- `composition.llm_client`
-    answers `(None, no-op)` and `build_pipeline` builds no expander, so this
-    whole command is byte for byte what M6 shipped.
+    **The completion client is built only when a rewrite could actually be
+    bought, and that condition has three parts because the cost has three ways
+    of being wasted.** Query expansion sits in front of the embed, so: a mode
+    with no embed has no call to put in front of one; a deployment whose
+    embedder did not load has no embed either, and `SearchService` narrows to
+    full-text before it ever reaches an expander; and
+    `USHER_QUERY_EXPANSION_ENABLED` is `false` by default even where the LLM is
+    on, so `build_pipeline` would decline to build the expander anyway. In each
+    of the three an `httpx.AsyncClient` and its pool would be opened and closed
+    for nothing -- which is verbatim the cost the `full_text` guard exists for,
+    and the middle one was live until 2026-08-07: `embedder(...)` answering
+    `(None, nothing)` on the line above did not stop the client below it.
+
+    **Spelled as two conjuncts rather than three**, because `model` is built
+    only for a non-`full_text` mode, so `model is not None` already answers the
+    first part -- and a third clause restating it would be a condition no
+    configuration can make false on its own, i.e. exactly the unobservable code
+    this project keeps finding in mutation sweeps.
+
+    The pair reads as one question -- *is there an embed for a completion to
+    sit in front of, and does this deployment want one?* -- and it mirrors
+    `build_pipeline`'s `llm is None or not settings.query_expansion_enabled`
+    rather than duplicating it: that decides whether the *service* exists, this
+    decides whether the *pool* is opened, and only this side can be asked
+    before a pipeline exists.
     """
     requested = SearchMode(mode)
     model, aclose_model = (
@@ -915,14 +933,17 @@ async def _search(
         if requested is not SearchMode.FULL_TEXT
         else (None, nothing)
     )
-    # After the embedder, so a model that fails to load cannot leak a
-    # connection pool: `llm_client` is pure construction and cannot raise,
-    # `embedder` is the one that can. `report=False` for the reason above --
-    # that factory's line is *"curate jobs will not be claimed"*, which is
-    # about a lane this process does not run.
+    # After the embedder, and reading its answer: `model is None` is the
+    # narrowed deployment, and there is nothing to expand for. `llm_client` is
+    # pure construction and cannot raise, `embedder` is the one that can, so
+    # this order also keeps a failed model load from leaking a pool.
+    # `report=False` for the reason above -- that factory's line is *"curate
+    # jobs will not be claimed"*, which is about a lane this process does not
+    # run. `query_expansion_enabled` implies `llm_enabled` (`config.py` refuses
+    # the other pairing), so the switch is asked about once here.
     client, aclose_client = (
         await llm_client(settings, report=False)
-        if requested is not SearchMode.FULL_TEXT
+        if model is not None and settings.query_expansion_enabled
         else (None, nothing)
     )
     try:
@@ -962,8 +983,12 @@ def _print_search_answer(answer: SearchAnswer) -> None:
         # looks surprising: a viewer who searched for one thing and got results
         # for another cannot tell a good expansion from a bad one without
         # seeing it, and neither can an operator reading their bug report.
-        # `expanded_query` is `None` on every path that bought no completion,
-        # so this line never appears on a deployment with the LLM off.
+        # `expanded_query` is `None` on every path that embedded the query as
+        # typed, so this line never appears on a deployment with expansion off.
+        # **It is not a spend report and must not be read as one**: a call that
+        # answered with the wrong key is billed in full and still leaves this
+        # `None`, so no line here means the query was embedded as typed, never
+        # that nothing was bought. `llm_calls` is where spend is legible.
         print(f"expanded: {answer.expanded_query}")
     for rank, result in enumerate(answer.results, start=1):
         year = f" ({result.year})" if result.year else ""

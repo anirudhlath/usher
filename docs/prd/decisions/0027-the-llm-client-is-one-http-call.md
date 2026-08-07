@@ -107,6 +107,18 @@ because no provider reports it — see Evidence.
   live. The rejection stands on its first clause, and the sentence is kept
   because it is the argument that was made.)*
 
+  🔴 **Amended 2026-08-07, later the same day: `QUERY_EXPANSION` is live in the
+  code and is emitted by no default deployment.** The retrieval measurement in
+  [05](../05-search-and-similarity.md) — MRR 0.733 → 0.373 against a local
+  `gemma-4-26b-a4b` — put query expansion behind its own setting,
+  `USHER_QUERY_EXPANSION_ENABLED`, off even where `USHER_LLM_ENABLED` is on. So
+  "both members of the vocabulary are now live" is true of `src/` and false of
+  any deployment that has not opted in, and PRD 10's `usher.llm.purpose`
+  group-by will read `curation` only on almost every install. **This does not
+  disturb the decision**: the client is one `POST /v1/chat/completions` either
+  way, it is bought by curation alone, and if anything the argument against a
+  146 MB dependency is stronger now that one of its two consumers is opt-in.
+
 ## Evidence
 
 Measured 2026-08-06 UTC on this host, Python 3.13, marginal cost over a venv

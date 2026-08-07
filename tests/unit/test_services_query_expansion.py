@@ -37,6 +37,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from loguru import logger
 
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient, usage
@@ -515,6 +516,90 @@ async def test_a_bug_in_the_ledger_is_not_swallowed_as_an_upstream_failure() -> 
     )
     with pytest.raises(TypeError):
         await harness.service.expand(_TYPED)
+
+
+async def test_a_bug_in_the_client_is_not_absorbed_as_an_upstream_failure() -> None:
+    """The same distinction one method **up**, and it was unpinned until
+    2026-08-07: widening `expand`'s `except UsherPortError` to
+    `except Exception` survived the whole unit suite (2,882 cases when review
+    found it) and passes ruff, `ruff format --check`, mypy and `lint-imports`
+    unchanged -- measured, all four, not reasoned about. With this case present
+    the same plant fails **this case alone**, out of 2,893.
+
+    It is not an equivalent mutant, and the difference is visible in the one
+    table that exists to make spend legible. Shipped, a `RuntimeError` from the
+    client is a **bug**: it leaves `expand` with no ledger row, because nothing
+    was billed and nothing upstream failed. Widened, the same bug is absorbed
+    into `error`, billed as an upstream failure with zero tokens, and every
+    search goes on succeeding -- so an operator reading `llm_calls` sees an
+    outage where there is a defect, and the two have opposite fixes.
+
+    Asserted on the **absence of a row** as well as on the raise: a service
+    that re-raised *after* settling would pass the first half alone while still
+    writing the misfiled row this case is about.
+    """
+    harness = _harness(RuntimeError("a bug, not an upstream"))
+    with pytest.raises(RuntimeError):
+        await harness.service.expand(_TYPED)
+    assert harness.ledger.calls == []
+
+
+# --- the operator's real-time signal ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (PortUnavailable("the endpoint refused the connection"), "the endpoint refused"),
+        ({"something": "else"}, NO_USABLE_QUERY),
+    ],
+    ids=["upstream", "unusable"],
+)
+async def test_an_attempt_that_produced_nothing_says_so_while_it_is_happening(
+    body: dict[str, Any] | BaseException, expected: str
+) -> None:
+    """**The `expanded:` line's absence is not a signal, so this is.**
+
+    Every failure here is absorbed, which means the viewer gets results and
+    `usher search` prints nothing at all -- `SearchAnswer.expanded_query` is
+    `None` and `_print_search_answer` correctly stays silent. So on a
+    deployment that opted into expansion and pointed it at a dead endpoint,
+    the only two records that money was spent are the `llm_calls` row (durable,
+    and nobody is looking at it yet) and this line (immediate).
+
+    Asserted on the **error text** rather than on the sentence around it, and
+    that is the assertion with teeth rather than a change-detector: an upstream
+    failure and `NO_USABLE_QUERY` have opposite fixes (the network against the
+    prompt), so a warning that fired without saying which one happened would
+    send an operator to the wrong half. Deleting the whole `logger.warning`
+    survived the suite until this case landed.
+    """
+    sink: list[str] = []
+    handler = logger.add(sink.append, level="WARNING")
+    try:
+        harness = _harness(body)
+        assert await harness.service.expand(_TYPED) is None
+    finally:
+        logger.remove(handler)
+
+    assert len(sink) == 1, sink
+    assert expected in sink[0], sink[0]
+
+
+async def test_an_expansion_that_worked_warns_about_nothing() -> None:
+    """The control that makes the case above evidence. A warning on the path
+    that *succeeded* is the per-request equivalent of the once-per-pass line
+    `composition.metadata_provider` exists to have moved: it trains an operator
+    to ignore the one that matters."""
+    sink: list[str] = []
+    handler = logger.add(sink.append, level="WARNING")
+    try:
+        harness = _harness({QUERY_KEY: "a crew alone in orbit"})
+        assert await harness.service.expand(_TYPED) == "a crew alone in orbit"
+    finally:
+        logger.remove(handler)
+
+    assert sink == []
 
 
 # --- the clock -------------------------------------------------------------

@@ -263,10 +263,17 @@ class SearchAnswer:
     caller passed. Without it a viewer searches for one thing and gets results
     for another with nothing to say so -- and cannot tell a good expansion from
     a bad one, which is also the first thing an operator reading their bug
-    report needs. It is `None` on every path that bought no completion: the
-    shipped default with no LLM, a `full_text` search, a blank query, a
-    deployment with no embedder, and an expansion that failed or came back
-    unusable.
+    report needs. It is `None` on every path that embedded the query **as
+    typed**: the shipped default with expansion off, a `full_text` search, a
+    blank query, a deployment with no embedder, and an expansion that failed or
+    came back unusable.
+
+    **That last item bought a completion, which is why the framing is "embedded
+    as typed" rather than "bought no completion".** A call that answered with
+    the wrong key is billed in full -- real tokens, a real cost, one `llm_calls`
+    row with `ok = false` -- and still leaves this field `None`. So the
+    implication runs one way only: a populated `expanded_query` means a
+    completion was bought, and an absent one means nothing about spend.
     """
 
     results: tuple[SearchResult, ...] = ()
@@ -315,8 +322,11 @@ class SearchService:
     a `SearchService` is built on every deployment there is, and "built or not
     built" has no state left to express. The choice is therefore between an
     optional collaborator and a second `SearchService` class, and the second is
-    the one this project already refused for `embedder` -- which is the
-    precedent that settles it. `expander` is the same kind of thing as
+    the one this project has never needed for `embedder`, which is the same
+    shape one parameter over -- which is the precedent that settles it.
+    (ADR-0022 argues the embedder is optional; it does not consider a second
+    class, so this is a precedent by absence rather than by refusal.)
+    `expander` is the same kind of thing as
     `embedder`, one layer up: a capability an operator may not have installed,
     on a service that must work without it, checked in exactly one place. The
     `LLMClient | None` branch M8 argues against lives on `QueryExpansionService`
@@ -344,9 +354,12 @@ class SearchService:
         # trigram are PRD 05's catalog-lookup tier and serve all 1,271,138
         # titles with no model at all.
         self._embedder = embedder
-        # Optional on the same terms and off by default: `USHER_LLM_ENABLED` is
-        # `false`, so `composition.build_pipeline` is handed no client and
-        # builds none of this. With it absent every line below is M6's.
+        # Optional on the same terms and off by default **twice**:
+        # `USHER_LLM_ENABLED` is `false`, so `composition.build_pipeline` is
+        # handed no client; and `USHER_QUERY_EXPANSION_ENABLED` is `false` even
+        # when it is handed one, because PRD 05's 2026-08-07 measurement put
+        # expansion's effect on retrieval the wrong way round. With this absent
+        # every line below is M6's.
         self._expander = expander
 
     async def search(

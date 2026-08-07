@@ -870,7 +870,7 @@ async def test_an_expansion_is_billed_to_the_pipelines_own_ledger_and_model() ->
     client = FakeLLMClient()
     try:
         session = AsyncSession(engine)
-        pipeline = build_pipeline(session, _settings(llm_model="wired/asked-1"), llm=client)
+        pipeline = build_pipeline(session, _expanding(llm_model="wired/asked-1"), llm=client)
 
         expander = pipeline.search._expander
         assert expander is not None
@@ -880,3 +880,73 @@ async def test_an_expansion_is_billed_to_the_pipelines_own_ledger_and_model() ->
         assert expander._model == "wired/asked-1"
     finally:
         await engine.dispose()
+
+
+async def test_a_client_is_necessary_and_not_sufficient_for_an_expander() -> None:
+    """**The second switch, at the wiring layer, and the state it is for is the
+    ordinary M8 deployment.** `USHER_LLM_ENABLED=true` with
+    `USHER_QUERY_EXPANSION_ENABLED=false` is a household that wants curated
+    rows and does not want its searches rewritten -- which is what PRD 05's
+    2026-08-07 measurement (MRR 0.733 -> 0.373) makes the default rather than
+    an eccentric choice.
+
+    The distinction this case exists for is that the client is **present**
+    here. `test_a_pipeline_with_no_llm_client_gives_search_nothing_to_expand_with`
+    above reaches the same `None` through the `llm is None` arm, so it is
+    satisfied by a `build_pipeline` that ignores the setting entirely; only a
+    fixture holding a real client can tell the two arms apart.
+    """
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    settings = _settings(llm_enabled=True)
+    assert settings.query_expansion_enabled is False, "the premise: off even with the LLM on"
+    try:
+        pipeline = build_pipeline(AsyncSession(engine), settings, llm=FakeLLMClient())
+
+        assert pipeline.search._expander is None
+    finally:
+        await engine.dispose()
+
+
+async def test_a_switch_on_with_no_client_to_hand_still_builds_no_expander() -> None:
+    """The mirror of the case above, and the configuration it is about is
+    ordinary rather than contrived.
+
+    `unit_of_work` -- what `usher.api.lanes` and `usher work` build every unit
+    of work through -- calls `build_pipeline` with **no `llm`**, because a lane
+    has no use for a completion client. On a deployment with both switches on,
+    that is `query_expansion_enabled=True` arriving beside `llm is None`, which
+    is exactly the state a `build_pipeline` that consulted only the setting
+    would construct a `QueryExpansionService(client=None)` for: a service whose
+    first `complete_json` is an `AttributeError` inside a search.
+
+    Found 2026-08-07 by this task's sweep. Dropping the `llm is None` disjunct
+    survived all 2,892 unit cases -- because the only case reaching that arm
+    had the setting off, so the mutant answered `None` for the other reason.
+    It is caught by `mypy` (`client` narrows to `LLMClient` only through the
+    `is None` test), so the *gate* was never open; the **suite** was, and
+    "mypy holds it" is a claim about one tool rather than about the wiring.
+    """
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    settings = _expanding()
+    assert settings.query_expansion_enabled is True, "the premise: the switch really is on"
+    try:
+        pipeline = build_pipeline(AsyncSession(engine), settings)
+
+        assert pipeline.search._expander is None
+    finally:
+        await engine.dispose()
+
+
+def _expanding(**rest: object) -> Settings:
+    """The only configuration that buys a rewrite: both switches on.
+
+    A helper rather than a literal pair at each call site because `config.py`
+    refuses `query_expansion_enabled` without `llm_enabled`, so the two always
+    travel together and a case that set one would fail on validation rather
+    than on its own subject.
+    """
+    return _settings(
+        llm_enabled=True,
+        query_expansion_enabled=True,
+        **rest,  # type: ignore[arg-type]
+    )

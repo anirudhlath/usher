@@ -1463,3 +1463,65 @@ costs three lines and the survivor is a gap rather than an equivalence.*
   the loop has `m8t20_sweep.py` in its own `argv`. It looks exactly like a
   sweep that is still running. Use a bracket class (`pgrep -f
   "[m]8t20_sweep"`) or `pgrep -x`.
+
+**M8 Task 21's sweep: 18 mutations over the query-expansion switch — 14 killed
+on the first pass, 3 equivalent-mutant controls surviving as designed, 1
+unintended survivor since closed (so 15 of 15 behavioural mutations killed on
+re-run).** The three-way split is the one that says something; "15 killed"
+alone would hide the gap the round was for. Run 2026-08-07 in place against the
+**whole
+`tests/unit` selection** (2,892 cases, ~20 s a run), over `config.py`,
+`composition.py`, `cli.py` and `services/query_expansion.py`. **0 BAD-ANCHOR,
+0 BROKEN-MUTATION, 0 DID-NOT-RUN.** `PYTHONDONTWRITEBYTECODE=1`, `__pycache__`
+swept before every run, `compile()` for the dry run, `cp` backups keyed on the
+**full path**, the plant asserted present (`path.read_text() == mutated`) and
+the restore asserted by reading the file back, only `^FAILED` lines read as
+kills, no `-q` added, and a signal handler. Baseline established green on a
+clean tree first: **2,883 unit / 4 skipped**, **899 integration / 8 skipped**,
+ruff, `ruff format --check`, mypy over 437 files, 8 import contracts. **Every
+kill was checked against the case written for it** — each of the 15 names the
+case its mutation was aimed at, with the only collateral being the inverted
+validator (5 cases, because a settings model that refuses the *reachable*
+pairing takes every fixture configured that way with it).
+
+The three controls, each against every gate step — all three pass all five:
+
+| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `cli._search`'s two conjuncts swapped (`settings.query_expansion_enabled and model is not None`) | PASS | PASS | PASS | PASS | PASS |
+| `build_pipeline`'s two disjuncts swapped (`not settings.query_expansion_enabled or llm is None`) | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `_query_expansion_needs_a_client`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first two are facts about the *code* rather than about what the tools look
+at: both operands of each are side-effect-free pure reads (an `is None` test
+and an attribute read on a settings model), so short-circuit order cannot be
+observed. The docstring reword was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`, which finds
+`test_ports_metadata.py`, `test_ports_embedding.py`, `test_rows_curated.py`,
+`test_rows_invariants.py`, `test_services_curation.py`,
+`test_services_home_sequential.py`, `test_api_rows.py` and
+`tests/integration/test_services_reconcile.py` — **none of which scans
+`config.py`, `composition.py`, `cli.py` or `services/query_expansion.py`.**
+
+**The unintended survivor is a new shape: a two-armed guard whose second arm is
+held by `mypy` and by nothing in the suite.** `build_pipeline`'s
+`if llm is None or not settings.query_expansion_enabled` — dropping the *first*
+disjunct survived all 2,892 unit cases, because the only case reaching that arm
+had the setting off, so the mutant answered `None` for the other reason. It is
+**not** an equivalent mutant and it is **not** a hole in the gate:
+`QueryExpansionService.client` is `LLMClient`, `llm` is `LLMClient | None`, and
+the `is None` test is the only thing that narrows it, so `mypy` reports
+`arg-type` on the mutant (measured — ruff, `ruff format --check` and
+`lint-imports` all pass, mypy is the one that fails). The reachable damage is
+real: `unit_of_work`, which is how `usher.api.lanes` and `usher work` build
+every pipeline, passes **no `llm`**, so on a deployment with both switches on
+the mutant constructs a `QueryExpansionService(client=None)` whose first
+`complete_json` is an `AttributeError` inside a search. Closed by
+`test_a_switch_on_with_no_client_to_hand_still_builds_no_expander`, which seeds
+exactly that configuration; re-planted, the mutation fails **that case alone**.
+**The rule this adds: when a survivor is caught by a *type* checker rather than
+by a test, say which tool and measure it — "the gate holds it" and "the suite
+holds it" are different claims, and a boolean guard with two arms needs a
+fixture per arm exactly as a `WHERE` clause with two predicates does** (the
+"two predicates, one selectivity" entry above, arriving at a disjunction in
+Python instead of a conjunction in SQL).

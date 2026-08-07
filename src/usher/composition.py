@@ -295,12 +295,22 @@ def build_pipeline(
 
     `llm` is `None` on the same terms, and is `None` by default twice over:
     `USHER_LLM_ENABLED` is `false`, so `composition.llm_client` answers
-    `(None, no-op)` even for a caller that asks. Given one, this builds the
-    `QueryExpansionService` that sits in front of `SearchService`'s embed --
-    over **this session's** `llm_calls` and **this session's** commit, because
-    a ledger row written through anything else is spend recorded in a
-    transaction nobody commits. Given none, `SearchService` gets no expander
-    and every line of the search path is what M6 shipped.
+    `(None, no-op)` even for a caller that asks.
+
+    **A client is necessary and not sufficient**, which is the whole of the two
+    switches at the wiring layer. `USHER_QUERY_EXPANSION_ENABLED` is `false`
+    even on a deployment that has turned the LLM on, because the measurement
+    behind it is about retrieval quality rather than about cost (PRD 05), so an
+    operator who wants curated rows does not thereby want their queries
+    rewritten. Both conditions are live: a client is absent on every default
+    deployment, and it is *present and unused here* on every deployment that
+    curates without expanding -- which is the ordinary M8 shape. Given both,
+    this builds the `QueryExpansionService` that sits in front of
+    `SearchService`'s embed, over **this session's** `llm_calls` and **this
+    session's** commit, because a ledger row written through anything else is
+    spend recorded in a transaction nobody commits. Given either one missing,
+    `SearchService` gets no expander and every line of the search path is what
+    M6 shipped.
 
     **The client reaches nothing else from here.** The other consumer of a
     completion is `CurationService`, which `build_curation_service` composes
@@ -424,7 +434,7 @@ def build_pipeline(
             # function is the only place that holds one of each.
             expander=(
                 None
-                if llm is None
+                if llm is None or not settings.query_expansion_enabled
                 else QueryExpansionService(
                     client=llm,
                     ledger=llm_calls,

@@ -268,15 +268,21 @@ class Settings(BaseSettings):
     # curated out of the box would make that a thing an operator discovers
     # rather than chooses.
     #
-    # **One switch, two spenders**, which is worth stating because the second
-    # arrived a milestone after the first: curation buys one completion per
-    # household per generation, and query expansion buys one per semantic or
-    # fused search. There is deliberately no second setting to separate them.
-    # A `USHER_SEARCH_QUERY_EXPANSION` would be a knob whose only honest
-    # default is "follow the switch above", and this project has already
-    # learned what a setting that nothing sets differently costs; an operator
-    # who wants to see what expansion is spending has `llm_calls` grouped by
-    # `purpose`, which is exactly what that column is for.
+    # **Two spenders, and since 2026-08-07 two switches.** Curation buys one
+    # completion per household per generation; query expansion buys one per
+    # semantic or fused search. This field is the *client*: with it false there
+    # is no `LLMClient` anywhere in the process and neither spender exists.
+    # `query_expansion_enabled` below is the second half.
+    #
+    # This block argued until 2026-08-07 that a second setting's only honest
+    # default is "follow the switch above". **That argument is replaced by a
+    # measurement rather than deleted**, because it was sound only while
+    # expansion was believed to help: measured against a local
+    # `gemma-4-26b-a4b`, expansion moved MRR 0.733 -> 0.373 and recall@10
+    # 0.800 -> 0.533 over five mood queries and 150 real overviews. Two
+    # features with opposite expected values cannot share a switch, and
+    # `llm_calls` grouped by `purpose` -- the old argument's answer -- reports
+    # what expansion cost *after* it has been paid.
     llm_enabled: bool = False
     # The provider abstraction, and the whole of it (ADR-0027). OpenAI,
     # OpenRouter, Together, Groq, DeepSeek, Mistral, vLLM, llama.cpp, Ollama
@@ -354,6 +360,37 @@ class Settings(BaseSettings):
     # `curation_min_cards` field until 2026-08-07; no such field was ever
     # shipped, and the sentence read as though one had been.)
     curation_pool_size: int = Field(default=200, ge=1, le=1000)
+
+    # PRD 05's query expansion: one completion rewriting the query before
+    # `SearchService` embeds it. Read by `composition.build_pipeline`, which
+    # builds the `QueryExpansionService` or does not, and by `cli._search`,
+    # which uses it to decide whether opening an `httpx.AsyncClient` for the
+    # command would buy anything.
+    #
+    # **Named for the feature rather than for the client or for the lane**, the
+    # call `curation_pool_size` already made one block up: `llm_*` is the
+    # endpoint and its credential, `search_*` is the retrieval tuning
+    # `build_pipeline` hands to the two indexes, and this is neither -- it is a
+    # switch on one LLM *feature*, which is what `curation_*` is too.
+    #
+    # **Off by default, and that default is a measurement rather than caution.**
+    # PRD 05 has named query expansion the cheaper, better-evidenced lever for
+    # mood queries since M1, on the literature's authority. Run on 2026-08-07
+    # against a local `gemma-4-26b-a4b` -- five mood queries against the 150
+    # most-voted catalog titles' real overviews, embedded with the shipped
+    # `compose_document` and the shipped `FastEmbedEmbedder`, targets written
+    # down before any cosine was computed -- it made retrieval **worse**: MRR
+    # 0.733 -> 0.373, recall@10 0.800 -> 0.533, with the typed query winning
+    # four of the five queries and tying the fifth. A label-free control says
+    # why: pairwise cosine *between the five queries themselves* rose from
+    # 0.5417 to 0.5975 mean and 0.6328 to 0.7784 max, so five distinct searches
+    # came back more alike than they went in. See
+    # `docs/prd/05-search-and-similarity.md` for the caveats, which are real --
+    # one model, one 150-document corpus, five queries.
+    #
+    # **`true` here with `llm_enabled` false is refused rather than ignored**
+    # -- see `_query_expansion_needs_a_client` below.
+    query_expansion_enabled: bool = False
 
     # The retrieval half. Every one of these is read by
     # `composition.build_pipeline`, which constructs the two indexes and
@@ -521,6 +558,45 @@ class Settings(BaseSettings):
             raise ValueError(
                 "USHER_SEARCH_SUGGEST_CANDIDATES must exceed USHER_SEARCH_RESULT_LIMIT "
                 "-- the edit-distance re-rank has to have more candidates than it keeps"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _query_expansion_needs_a_client(self) -> "Settings":
+        """The one combination of the two LLM switches that cannot mean
+        anything, refused at startup rather than left to mean nothing.
+
+        Query expansion is a completion in front of an embed. With
+        `llm_enabled` false there is no `LLMClient` in the process at all --
+        `composition.llm_client` answers `(None, no-op)` and `build_pipeline`
+        has nothing to build a `QueryExpansionService` from -- so
+        `USHER_QUERY_EXPANSION_ENABLED=true` beside it is a knob an operator
+        turned with no effect. That is the failure `extra="forbid"` and
+        `USHER_COMPOSE_` both exist to prevent, arriving as a *state* rather
+        than as a typo, and this project has already paid for it once:
+        `USHER_WORKER_ENABLED` was documented, worked when delivered directly,
+        and was silently ignored where the docs pointed.
+
+        The other three combinations are all reachable and all meaningful, so
+        this refusal is the whole of the coupling between the two fields:
+        off/off is the shipped default, on/off is an LLM deployment that
+        curates and embeds every query as typed, and on/on adds the rewrite.
+
+        **The message names both variables**, which is not cosmetic: an
+        operator who kills spend by setting `USHER_LLM_ENABLED=false` meets
+        this on the next start, and a sentence naming only the field that was
+        set would send them to delete the line they meant to keep rather than
+        to the line that makes it work.
+
+        A cross-field rule for `_suggest_cap_leaves_room_to_choose`'s reason:
+        neither field can express it alone, and a bound that is a real
+        constraint belongs in the type system wherever it fits.
+        """
+        if self.query_expansion_enabled and not self.llm_enabled:
+            raise ValueError(
+                "USHER_QUERY_EXPANSION_ENABLED=true needs USHER_LLM_ENABLED=true "
+                "-- query expansion is one completion in front of the embed, and "
+                "with no LLM there is no completion to put there"
             )
         return self
 

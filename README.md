@@ -271,9 +271,11 @@ model refuses outright rather than narrowing — it is the one question
 full-text cannot answer, so a plausible answer to a different one is worse
 than none.
 
-**With `USHER_LLM_ENABLED=true`, a semantic or fused search first spends one
-completion rewriting the query into the language a synopsis is written in, and
-prints what it embedded:**
+**Query expansion is built, is off by default, and the default is a
+measurement.** With `USHER_QUERY_EXPANSION_ENABLED=true` (which also needs
+`USHER_LLM_ENABLED=true`, and is refused at startup without it), a semantic or
+fused search first spends one completion rewriting the query into the language
+a synopsis is written in, and prints what it embedded:
 
 ```
 $ uv run usher search "movies about isolation in space"
@@ -282,16 +284,34 @@ expanded: a lone crew adrift, silence, deep-space confinement, psychological dri
 mode=fused results=12 semantic_coverage=0.884
 ```
 
+🔴 **Measured on 2026-08-07, it made retrieval worse, which is why it is a
+second switch rather than part of the first.** Against a local
+`gemma-4-26b-a4b`, over five mood queries and the 150 most-voted titles' real
+overviews, expansion moved MRR **0.733 → 0.373** and recall@10 **0.800 →
+0.533**; the typed query won four of the five queries and tied the fifth. The
+rewrites drift toward generic critic prose, which sits near the middle of a
+corpus of synopses — measured directly, the five queries became *more like each
+other* after rewriting (mean pairwise cosine 0.5417 → 0.5975). One model, one
+150-document corpus, five queries: thin, and it is the only measurement there
+is. Turn it on to try it against your own model; `llm_calls` grouped by
+`purpose` is what it cost.
+
 The `expanded:` line is not optional decoration — a viewer who searched for one
 thing and got results for another cannot tell a good rewrite from a bad one
 without seeing it. It appears only when a completion actually produced one, so
-on the default deployment (`USHER_LLM_ENABLED=false`) the output is unchanged
-and no completion is bought. Neither is one bought by `--mode full_text`, by a
-blank query, by a deployment with no embedding model, or by `usher suggest` —
-type-ahead has no semantic lane, which is what keeps this off the path a client
-drives per keystroke. Every attempt lands in `llm_calls` with
-`purpose = 'query_expansion'`, including the ones that failed; an unreachable
-endpoint or an unusable answer leaves the search to run on the words you typed.
+on the default deployment the output is unchanged and no completion is bought.
+Neither is one bought by `--mode full_text`, by a blank query, by a deployment
+with no embedding model, or by `usher suggest` — type-ahead has no semantic
+lane, which is what keeps this off the path a client drives per keystroke.
+Every attempt lands in `llm_calls` with `purpose = 'query_expansion'`,
+including the ones that failed; an unreachable endpoint or an unusable answer
+leaves the search to run on the words you typed **and is still billed**, so an
+absent `expanded:` line says nothing about whether money was spent.
+
+⚠️ **Run `usher index --backfill` before turning it on.** The guard in front of
+the completion is *"this deployment has an embedding model"*, not *"anything is
+actually embedded"* — so with a model installed and nothing indexed yet, every
+fused search buys a rewrite and then reports `semantic_coverage=0.000`.
 
 Every `SearchFilters` field has a flag and no filter has two, which is
 deliberate: an engine that cannot express a filter raises rather than ignoring

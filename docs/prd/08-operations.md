@@ -20,7 +20,15 @@ environment setting on `usher.config.Settings` and is documented in
 cannot discover and a documented key that is not a setting are both test
 failures (`tests/unit/test_deployment_config.py`). M6 added nine of them,
 four `USHER_EMBEDDING_*` and five `USHER_SEARCH_*`. **M8 added eight
-`USHER_LLM_*` plus `USHER_CURATION_POOL_SIZE`**, and that last one is worth
+`USHER_LLM_*` plus `USHER_CURATION_POOL_SIZE` and
+`USHER_QUERY_EXPANSION_ENABLED`** — ten. That last one arrived on 2026-08-07
+and is the one place this project ships **two** switches over one dependency:
+`USHER_LLM_ENABLED` builds the client, and query expansion is off even when it
+is on, because the retrieval measurement in
+[05](05-search-and-similarity.md) put expansion's effect the wrong way round
+(MRR 0.733 → 0.373). Setting it true with no client is refused at startup
+rather than ignored, which is this document's dead-config rule applied to a
+*state* rather than to a typo. `USHER_CURATION_POOL_SIZE` is worth
 its own line because it looks like the "row weights" case below and is not:
 the pool is assembled, sent and discarded, so there is no half-computed
 artefact, and what the number is really about is the *context window of

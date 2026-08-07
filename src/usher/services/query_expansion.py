@@ -2,10 +2,21 @@
 
 *"Movies about isolation in space"* is a question full-text cannot answer and
 that the semantic lane answers badly, because the words a viewer types are not
-the words a synopsis is written in. [PRD 05](../../../docs/prd/05-search-and-
-similarity.md) names the cheap, well-evidenced fix -- **rewrite the query into
-narrative language and embed *that*** -- and prices it against the alternative:
-one call per query, rather than enriching 1.3M records.
+the words a synopsis is written in.
+[PRD 05](../../../docs/prd/05-search-and-similarity.md) named the cheap,
+well-evidenced fix -- **rewrite the query into narrative language and embed
+*that*** -- and priced it against the alternative: one call per query, rather
+than enriching 1.3M records.
+
+**And then it was measured, and it made retrieval worse.** Run 2026-08-07
+against a local `gemma-4-26b-a4b` over five mood queries and the 150 most-voted
+catalog titles' real overviews, expansion moved MRR **0.733 -> 0.373** and
+recall@10 **0.800 -> 0.533**, with the typed query winning four of five queries
+and tying the fifth. So `USHER_QUERY_EXPANSION_ENABLED` is a second switch,
+default `false`, independent of `USHER_LLM_ENABLED` -- this module ships, and
+nothing builds it unless an operator asks. PRD 05 carries the numbers, the
+label-free control and the caveats (one model, one 150-document corpus, five
+queries).
 
 ## Where the call sits, and why exactly there
 
@@ -208,10 +219,13 @@ class QueryExpansionService:
     **`client` is `LLMClient`, never `LLMClient | None`** -- the shape the rest
     of M8 uses. `composition.llm_client` answers `(None, no-op)` for
     `USHER_LLM_ENABLED=false`, so the composition root simply does not build
-    this service, exactly as it does not build `CurationService`. The
-    optionality a *search* genuinely needs lives one layer up, on
-    `SearchService.expander`, because a `SearchService` is built on every
-    deployment and this is not.
+    this service, exactly as it does not build `CurationService`. Since
+    2026-08-07 it also declines to build it whenever
+    `USHER_QUERY_EXPANSION_ENABLED` is `false`, which is the default even where
+    a client exists -- so the "built or not built" shape now has two reasons
+    not to build rather than one. The optionality a *search* genuinely needs
+    lives one layer up, on `SearchService.expander`, because a `SearchService`
+    is built on every deployment and this is not.
 
     **`model` is `settings.llm_model` and is not defaulted.** It is the same
     string `OpenAICompatibleClient` was built with, and the only honest value
@@ -248,12 +262,21 @@ class QueryExpansionService:
     async def expand(self, query: str) -> str | None:
         """The rewrite to embed, or `None` to embed what the viewer typed.
 
-        **Never raises for the caller**, which is the decision this method is:
-        an expansion enhances one lane of a search that is answerable without
-        it, so an LLM outage narrows the search rather than failing it. The
-        contrast is `CurationService.generate`, which re-raises because the
-        generation is the whole job and the exception type is all `JobWorker`
-        has to work with.
+        **Never raises for an upstream failure**, which is the decision this
+        method is: an expansion enhances one lane of a search that is
+        answerable without it, so an LLM outage narrows the search rather than
+        failing it. The contrast is `CurationService.generate`, which re-raises
+        because the generation is the whole job and the exception type is all
+        `JobWorker` has to work with.
+
+        **"Never raises" without that qualifier would be false**, and pinned
+        false: `except UsherPortError` is deliberately not `except Exception`
+        here and in `_record`, so a `TypeError` out of either propagates
+        straight through this method. That is the point rather than an
+        oversight -- a bug absorbed into `error` would be billed as an outage,
+        and the two have opposite fixes.
+        (`test_a_bug_in_the_client_is_not_absorbed_as_an_upstream_failure`,
+        `test_a_bug_in_the_ledger_is_not_swallowed_as_an_upstream_failure`.)
 
         **`_settle` is reached on exactly one line**, whichever way the attempt
         went. *Record and commit* is one rule, and curation already learned
@@ -272,6 +295,17 @@ class QueryExpansionService:
                 purpose=LLMPurpose.QUERY_EXPANSION,
             )
         except UsherPortError as exc:
+            # **`UsherPortError` and never `Exception`**, `_record`'s rule on
+            # the path one method up. Widening this survived the whole unit
+            # suite (2,882 cases when review found it on 2026-08-07) and still
+            # passes ruff, `ruff format --check`, mypy and `lint-imports`
+            # unchanged -- re-measured with the case below present, it now
+            # fails that case alone out of 2,893. It is
+            # not equivalent -- a `RuntimeError` from the client is a bug that
+            # should leave `expand` with no ledger row at all, and absorbed
+            # here it is billed as an upstream failure while every search goes
+            # on succeeding, so the ledger reclassifies a defect as an outage.
+            #
             # **Never a bare `str(exc)`.** It is `""` for an exception raised
             # with no arguments, `LLMCall` refuses a failed call with a blank
             # error, and the row lost would be the one this ledger exists for.
@@ -285,6 +319,15 @@ class QueryExpansionService:
             error = None if expanded is not None else NO_USABLE_QUERY
         await self._settle(started, usage=usage, error=error)
         if error is not None:
+            # **The only immediate signal that money bought nothing.** The
+            # failure is absorbed, so the viewer gets results and
+            # `_print_search_answer` prints no `expanded:` line -- an absence,
+            # which says nothing on its own. The `llm_calls` row is the durable
+            # record and nobody is querying it while the endpoint is down. The
+            # `error` is interpolated rather than summarised because an
+            # upstream failure and `NO_USABLE_QUERY` have opposite fixes (the
+            # network against the prompt). Deleting this whole call survived
+            # the suite until 2026-08-07; it is pinned now.
             logger.warning(
                 "query expansion produced nothing; the query was embedded as typed: {error}",
                 error=error,
