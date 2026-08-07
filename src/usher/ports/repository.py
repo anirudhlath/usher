@@ -272,6 +272,106 @@ class TitleRepository(ABC):
         """
 
     @abstractmethod
+    async def list_unwatched_candidates(
+        self,
+        user_id: uuid.UUID,
+        *,
+        genres: Sequence[str] = (),
+        limit: int = 200,
+    ) -> list[Title]:
+        """The curation pool: titles this household has not seen, best first.
+
+        **The whole of `CandidatePoolService`'s retrieval, and the substrate
+        of [ADR-0028](../../../docs/prd/decisions/0028-the-pool-is-the-contract.md).**
+        The prompt addresses candidates by a small integer index, so this
+        answer's *size*, *order* and *stability* are what the index means. A
+        pool that comes back short, or in a different order on a second read
+        of an unchanged catalog, is a prompt whose handles denote something
+        else than they did an hour ago.
+
+        **Membership is "unwatched", and nothing else.** Ownership and
+        popularity are ranking keys rather than filters, because PRD 06 says
+        the pool *"spans the whole catalog, not just the library, so
+        suggestions can include things to seek out"* -- and because a
+        popularity floor is a constant nobody measured that would empty the
+        pool on a catalog with no vote counts.
+
+        **Ordered `owned DESC, carries an affinity genre DESC, vote_count
+        DESC NULLS LAST, id`**, which is M8 boundary call 5's own enumeration
+        of the signals that need no model -- *"unwatched, owned or popular,
+        genre affinity, `titles.vote_count`"* -- read as the order it is
+        written in:
+
+        - **Owned first**, because a shelf the household can play tonight is
+          worth more than one it has to go and find, and an unowned card
+          renders with `RowCard.owned = False` rather than being unreachable.
+          The two are strata rather than a blend: there is no measured
+          exchange rate between "in the library" and "half a million votes",
+          and inventing one would be a number this project could not defend.
+        - **Then genre affinity**, the only household-shaped signal in the
+          base order. `genres` is `TasteService.genre_affinity`'s answer
+          projected to names, and **empty is the common case rather than a
+          degenerate one**: it is what a household with no watch history
+          produces, and what every household produces before its first sync.
+          So it is a sort key and never a predicate -- as a predicate it would
+          hand an empty pool to exactly those households, which is
+          `GenreAffinityProvider`'s corrected failure arriving one layer down.
+        - **Then `vote_count`, and deliberately not `popularity`.**
+          `list_owned_by_tag` leads with `popularity` and this read does not,
+          which is a divergence rather than an oversight: `titles.popularity`
+          was measured NULL on all 1,271,138 rows of a bootstrap-only catalog
+          and is `NOT NULL DEFAULT 0` in `tmdb_ids`, so on a partially-linked
+          catalog a crosswalk-linked skeleton at `0.0` outranks an unlinked
+          title with half a million votes. That hazard is bounded there --
+          the read is scoped to owned titles, single-digit thousands -- and
+          unbounded here, where the candidate set is the whole catalog and the
+          skeletons are most of it.
+        - **Then `id`, and the tiebreak is load-bearing rather than tidy.**
+          On a bootstrap-only catalog `vote_count` is NULL for every row, so
+          every candidate ties with every other on all three preceding keys
+          and "whatever the storage returned" decides the entire pool. This
+          repository has been bitten by an `ORDER BY` with no `id` tail twice
+          (`list_owned_by_tag` records one, `UPDATE … RETURNING` the other);
+          here the cost of losing it is that the service's index->UUID map
+          silently stops describing the same films.
+
+        **"Unwatched" is `played`, rolled up through `episodes.title_id`, and
+        it is the same predicate `played_title_ids` spells.** Both halves are
+        needed and each rules out a different populated answer: `played`
+        rather than "has a watch state", because a walk writes a row per item
+        it observed and that predicate is the owned library -- so the pool
+        would become everything the household does *not* own; and the
+        roll-up, because a watched episode's row carries `episode_id` with a
+        NULL `title_id`, so a title-keyed exclusion offers back every series
+        the household is midway through, on a library that is 89% episodes.
+
+        **It is inside the statement rather than subtracted afterwards, which
+        is this port's one real departure from `list_owned_by_tag`'s recorded
+        position.** That method says *"nothing about watched is expressed
+        here … folding them together would make the limit mean something
+        different on every household"*, and for a 60-candidate budget feeding
+        a 20-card row that is right. Here it is exactly backwards: `limit`
+        **is** the pool size, ADR-0028's measurements are scoped to 200, and a
+        filter applied after a `LIMIT` shrinks the pool most for the household
+        with the most history -- the household curation is worth the most to.
+        A caller cannot repair that without an unbounded over-read.
+
+        `limit` rows at most, fewer only when the catalog holds fewer. An
+        empty answer means the household has seen everything in a catalog this
+        small, which is a real state on a fresh install and not an error.
+
+        **The cost is a scan and a top-N sort of the whole catalog, and that
+        is accepted rather than indexed.** No index can serve this order --
+        two of its four keys are computed, and `ffc` already dropped
+        `ix_titles_popularity` after measuring that a plain descending btree
+        does not serve `DESC NULLS LAST` anyway -- and adding one for a
+        statement that runs once per household per night would be
+        `ix_titles_popularity`'s mistake repeated. M8's boundary call 2 is
+        what makes that affordable: generation is a background job and is
+        never on a request path.
+        """
+
+    @abstractmethod
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         """Catalog size broken down by enrichment tier.
 

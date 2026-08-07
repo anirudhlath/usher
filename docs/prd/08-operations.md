@@ -19,7 +19,16 @@ environment setting on `usher.config.Settings` and is documented in
 `.env.example` — completeness in both directions, so a setting an operator
 cannot discover and a documented key that is not a setting are both test
 failures (`tests/unit/test_deployment_config.py`). M6 added nine of them,
-four `USHER_EMBEDDING_*` and five `USHER_SEARCH_*`. **M7 added none**, and
+four `USHER_EMBEDDING_*` and five `USHER_SEARCH_*`. **M8 added eight
+`USHER_LLM_*` plus `USHER_CURATION_POOL_SIZE`**, and that last one is worth
+its own line because it looks like the "row weights" case below and is not:
+the pool is assembled, sent and discarded, so there is no half-computed
+artefact, and what the number is really about is the *context window of
+whatever model `USHER_LLM_BASE_URL` names* — a deployment fact, measured at
+~14.6 prompt tokens a candidate
+([ADR-0028](decisions/0028-the-pool-is-the-contract.md)), which an operator
+must be able to change without editing code. Its sibling is
+`USHER_LLM_MAX_OUTPUT_TOKENS`, not the row scores. **M7 added none**, and
 that is recorded so the count reads as a current statement rather than as a
 tally somebody stopped keeping: every M7 constant that could have been a
 setting is deliberately code — the similarity weights and pool sizes

@@ -9,6 +9,7 @@ from sqlalchemy import Table, event, insert, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from tests.contract.title_repository_contract import (
+    TitleRepositoryCandidateContract,
     TitleRepositoryContract,
     TitleRepositoryOwnedContract,
 )
@@ -438,3 +439,152 @@ class TestPostgresTitleRepositoryOwned(TitleRepositoryOwnedContract):
             )
 
         return _own
+
+
+class TestPostgresTitleRepositoryCandidates(TitleRepositoryCandidateContract):
+    """`list_unwatched_candidates` against real Postgres, which is where its
+    three Postgres-shaped halves can fail.
+
+    The `NOT EXISTS` roll-up through `episodes.title_id` is the one that
+    matters: the fake reproduces it as a dict lookup, which is naturally the
+    right shape, and only a real `LEFT JOIN episodes` can be written the wrong
+    way round. The other two are `NULLS LAST` under a descending sort -- whose
+    default is the opposite of what the read wants -- and the `&&` operator on
+    a generic `ARRAY(Text)` column, which `list_owned_by_tag` already records
+    raising `NotImplementedError` for its sibling `@>`.
+
+    Real `users` rows too: `watch_states.user_id` is a foreign key, so the
+    fake's bare ids would be a different test.
+    """
+
+    @pytest.fixture
+    def repo(self, session: AsyncSession) -> PostgresTitleRepository:
+        return PostgresTitleRepository(session)
+
+    @pytest_asyncio.fixture
+    async def owning_source_id(self, session: AsyncSession) -> uuid.UUID:
+        source = Source(
+            kind=SourceKind.EMBY,
+            name=f"Candidate Contract Source {new_id()}",
+            base_url="https://emby.invalid",
+            credentials_ref=f"ref-{new_id()}",
+            device_id=str(new_id()),
+        )
+        await PostgresSourceRepository(session).add(source)
+        return source.id
+
+    @pytest_asyncio.fixture
+    async def user_id(self, session: AsyncSession) -> uuid.UUID:
+        return await _add_user(session)
+
+    @pytest_asyncio.fixture
+    async def other_user_id(self, session: AsyncSession) -> uuid.UUID:
+        """A second household member, so the read's `user_id` predicate has
+        something to exclude. On a single-household deployment a lost
+        `WHERE user_id` is invisible."""
+        return await _add_user(session)
+
+    @pytest.fixture
+    def own(
+        self, session: AsyncSession, owning_source_id: uuid.UUID
+    ) -> Callable[..., Awaitable[None]]:
+        async def _own(
+            title_id: uuid.UUID, *, episode: bool = False, available: bool = True
+        ) -> None:
+            # `TitleRepositoryOwnedContract.own`'s reasoning verbatim: a real
+            # `media_items` row, `episode_id` left NULL even for the episode
+            # case, so a spurious `episode_id IS NULL` bound would still
+            # accept it and the fake's half is what pins the divergence.
+            #
+            # `available=False` writes a real retracted row -- what
+            # `mark_unseen_unavailable` leaves behind -- which the fake cannot
+            # express and which is the only way the read's own `available`
+            # predicate is observable at all.
+            await session.execute(
+                insert(cast(Table, MediaItemRow.__table__)).values(
+                    id=new_id(),
+                    source_id=owning_source_id,
+                    external_id=str(new_id()),
+                    title_id=title_id,
+                    episode_id=None,
+                    available=available,
+                    last_seen_at=datetime.now(UTC),
+                )
+            )
+
+        return _own
+
+    @pytest.fixture
+    def watch(self, session: AsyncSession) -> Callable[..., Awaitable[None]]:
+        async def _watch(
+            user_id: uuid.UUID,
+            *,
+            title_id: uuid.UUID | None = None,
+            episode_id: uuid.UUID | None = None,
+            played: bool = True,
+        ) -> None:
+            # Raw, rather than through `merge_from_source`: that path is a
+            # two-statement upsert with its own dedup and its own conflict
+            # rule, and a fixture that went through it would be testing that
+            # instead. `ck_watch_states_exactly_one_target` still applies,
+            # which is what makes a case naming neither target impossible to
+            # write by accident.
+            await session.execute(
+                text(
+                    "INSERT INTO watch_states "
+                    "  (id, user_id, title_id, episode_id, position_seconds, played, origin) "
+                    "VALUES (CAST(:id AS uuid), CAST(:user_id AS uuid), "
+                    "        CAST(:title_id AS uuid), CAST(:episode_id AS uuid), "
+                    "        :position_seconds, :played, 'source')"
+                ),
+                {
+                    "id": new_id(),
+                    "user_id": user_id,
+                    "title_id": title_id,
+                    "episode_id": episode_id,
+                    # A real position on the abandoned case, so "has a state"
+                    # and "played" are two different rows rather than two
+                    # readings of one blank one.
+                    "position_seconds": 0 if played else 720,
+                    "played": played,
+                },
+            )
+
+        return _watch
+
+    @pytest.fixture
+    def episode_of(self, session: AsyncSession) -> Callable[[uuid.UUID], Awaitable[uuid.UUID]]:
+        async def _episode_of(series_id: uuid.UUID) -> uuid.UUID:
+            # `episodes.season_id` and `episodes.title_id` are both NOT NULL
+            # with `ON DELETE CASCADE`, so neither can be invented -- the
+            # season is what makes the roll-up a real two-table join.
+            season_id = new_id()
+            await session.execute(
+                text(
+                    "INSERT INTO seasons (id, title_id, season_number) "
+                    "VALUES (CAST(:id AS uuid), CAST(:title_id AS uuid), 1)"
+                ),
+                {"id": season_id, "title_id": series_id},
+            )
+            episode_id = new_id()
+            await session.execute(
+                text(
+                    "INSERT INTO episodes "
+                    "  (id, title_id, season_id, season_number, episode_number) "
+                    "VALUES (CAST(:id AS uuid), CAST(:title_id AS uuid), "
+                    "        CAST(:season_id AS uuid), 1, 1)"
+                ),
+                {"id": episode_id, "title_id": series_id, "season_id": season_id},
+            )
+            return episode_id
+
+        return _episode_of
+
+
+async def _add_user(session: AsyncSession) -> uuid.UUID:
+    identifier = new_id()
+    await session.execute(
+        text("INSERT INTO users (id, name) VALUES (CAST(:id AS uuid), :name)"),
+        {"id": identifier, "name": f"viewer-{identifier}"},
+    )
+    return identifier

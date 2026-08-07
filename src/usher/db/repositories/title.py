@@ -66,15 +66,17 @@ autoflush fails.
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import Text, exists, func, nulls_last, select
+from sqlalchemy import Text, exists, func, literal, nulls_last, select
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
+from usher.db.models.episode import EpisodeRow
 from usher.db.models.source import MediaItemRow
 from usher.db.models.title import DERIVED_COLUMNS, TitleRow
+from usher.db.models.watch import WatchStateRow
 from usher.db.repositories._errors import constraint_name
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
@@ -396,6 +398,87 @@ class PostgresTitleRepository(TitleRepository):
             nulls_last(TitleRow.vote_count.desc()),
             TitleRow.id,
         ).limit(limit)
+        with self._session.no_autoflush:  # see get()'s comment
+            result = await self._session.execute(statement)
+        return [_to_domain(row) for row in result.scalars().all()]
+
+    async def list_unwatched_candidates(
+        self,
+        user_id: uuid.UUID,
+        *,
+        genres: Sequence[str] = (),
+        limit: int = 200,
+    ) -> list[Title]:
+        # **Ownership is a LEFT JOIN here and an `EXISTS` in
+        # `list_owned_by_tag`, and the difference is where it sits in the
+        # statement.** There it is a `WHERE` predicate over an already-narrow
+        # candidate set, which Postgres plans as a semi-join and which
+        # short-circuits. Here it is a *sort key* over the whole catalog, and
+        # a correlated subquery in an `ORDER BY` cannot be turned into a join
+        # at all -- it is one SubPlan execution per candidate row, which at
+        # 1.27M rows is the difference between a nightly job and a nightly
+        # incident. Reasoned from the planner's own rules rather than measured
+        # at scale; what is *not* a guess is that the two spellings agree, and
+        # the contract suite is what says so on both arms.
+        #
+        # `DISTINCT`, so a 20,000-episode series contributes one row rather
+        # than 20,000 and the join cannot multiply the catalog out. No
+        # `episode_id IS NULL` bound, deliberately and exactly as
+        # `list_owned_by_tag` has none: a series owned only through its
+        # episode files is owned, which is the normal case on a library that
+        # is 89% episodes.
+        owned_titles = (
+            select(MediaItemRow.title_id)
+            .where(MediaItemRow.available.is_(True), MediaItemRow.title_id.is_not(None))
+            .distinct()
+            .subquery("owned_titles")
+        )
+        owned = owned_titles.c.title_id.is_not(None)
+        # The exclusion, and it is `played_title_ids`' predicate: `played`
+        # rather than "has a watch state", and `COALESCE(ws.title_id,
+        # e.title_id)` so a watched episode takes its series with it. A
+        # correlated `NOT EXISTS` is what Postgres plans as an anti-join,
+        # which is why this one *is* a subquery where the ownership key above
+        # is not.
+        watched = (
+            select(literal(1))
+            .select_from(WatchStateRow)
+            .outerjoin(EpisodeRow, EpisodeRow.id == WatchStateRow.episode_id)
+            .where(
+                WatchStateRow.user_id == user_id,
+                WatchStateRow.played.is_(True),
+                func.coalesce(WatchStateRow.title_id, EpisodeRow.title_id) == TitleRow.id,
+            )
+            .exists()
+        )
+        # `&&` written out for the reason `list_owned_by_tag` writes `@>` out:
+        # the generic `ARRAY` these columns are declared with implements
+        # neither operator through SQLAlchemy's own helpers, and the model
+        # declares the generic one deliberately. An empty `genres` is a real
+        # and common argument -- a household with no history has no
+        # affinities -- and `genres && '{}'` is false for every row, which
+        # leaves the remaining keys deciding the whole order.
+        affine = TitleRow.genres.bool_op("&&")(sql_cast(list(genres), PG_ARRAY(Text)))
+        statement = (
+            select(TitleRow)
+            .options(defer(TitleRow.search_document, raiseload=True))
+            .outerjoin(owned_titles, owned_titles.c.title_id == TitleRow.id)
+            .where(~watched)
+            .order_by(
+                owned.desc(),
+                affine.desc(),
+                # `nulls_last` spelled out: Postgres defaults a DESC sort to
+                # NULLS FIRST, and on a bootstrap-only catalog every row's
+                # `vote_count` can be NULL -- so the default would put the
+                # unknown population above the known one and then let the
+                # `id` tail decide the pool.
+                nulls_last(TitleRow.vote_count.desc()),
+                # ADR-0028's stability, and the only reason two reads of one
+                # unchanged catalog agree about what index 7 names.
+                TitleRow.id,
+            )
+            .limit(limit)
+        )
         with self._session.no_autoflush:  # see get()'s comment
             result = await self._session.execute(statement)
         return [_to_domain(row) for row in result.scalars().all()]

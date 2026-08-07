@@ -105,6 +105,7 @@ from usher.ports.repository import (
 )
 from usher.ports.rows import RowProvider
 from usher.ports.source import SourceAdapter, SourceAdapterFactory
+from usher.services.curation_pool import CandidatePoolService
 from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
 from usher.services.handlers import (
@@ -201,6 +202,10 @@ class Pipeline:
     search: SearchService
     similar: SimilarityService
     taste: TasteService
+    # M8's candidate pool. A *service* rather than a port, unlike every field
+    # above it except the other five services: it composes two repository
+    # reads and `TasteService`, and `CurationService` is what will hold it.
+    pool: CandidatePoolService
     # The registry itself, not a list assembled here. A provider enabled by
     # *registration in code* is boundary call 9, and a list a composition
     # root builds by hand is a list the tenth provider is forgotten from --
@@ -294,6 +299,22 @@ def build_pipeline(
         episodes=episodes,
         queue=queue,
     )
+    # **The embedder is passed here too and may be `None`, which is the shipped
+    # default.** `CandidatePoolService` then gets `None` from
+    # `TasteService.centroid` and returns the base order whole -- M8's boundary
+    # call 5, and the reason the pool is built from signals that need no model.
+    # Built as a local rather than inline for one reason: `Pipeline.taste` and
+    # `CandidatePoolService.taste` must be the *same* service, or a household
+    # would have two definitions of its own taste and the stored centroid would
+    # be written twice per generation.
+    taste = TasteService(
+        watch_states=watch_states,
+        embeddings=embeddings,
+        titles=titles,
+        taste=taste_rows,
+        embedder=embedder,
+        now=lambda: datetime.now(UTC),
+    )
     return Pipeline(
         sources=sources,
         credentials=credentials,
@@ -375,13 +396,15 @@ def build_pipeline(
         # term rather than zeroing it), so "Because you watched Dune" is a
         # causal claim nothing computed and the sentence softens.
         row_providers=row_providers(semantic=embedder is not None),
-        taste=TasteService(
-            watch_states=watch_states,
-            embeddings=embeddings,
+        taste=taste,
+        # The pool is the whole of M8's retrieval half, and its size is the
+        # prompt's token budget -- ~14.6 prompt tokens a candidate, measured.
+        # This is `USHER_CURATION_POOL_SIZE`'s one reader.
+        pool=CandidatePoolService(
             titles=titles,
-            taste=taste_rows,
-            embedder=embedder,
-            now=lambda: datetime.now(UTC),
+            embeddings=embeddings,
+            taste=taste,
+            size=settings.curation_pool_size,
         ),
         events=publisher,
         commit=session.commit,

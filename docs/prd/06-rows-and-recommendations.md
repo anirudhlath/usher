@@ -631,7 +631,7 @@ Generation runs nightly and on demand:
    down applies here unchanged: rewatched (`play_count >= 2`) weighs 1.00,
    merely finished weighs 0.60.
 
-   ⏳ **And the centroid cannot be the pre-filter's spine, because on the
+   ✅ **And the centroid cannot be the pre-filter's spine, because on the
    shipped configuration there is no centroid.** `USHER_EMBEDDING_ENABLED`
    defaults to `False`, so implementing that clause literally makes curation
    the feature that never fires on a default deployment — **which is exactly
@@ -641,6 +641,36 @@ Generation runs nightly and on demand:
    that need no model, and the centroid **re-orders** it when one is
    available — which is also what finally gives `TasteService.centroid` a
    caller in `src/`, a gap M7 shipped and named.
+
+   ✅ **Built in M8 as `CandidatePoolService` over
+   `TitleRepository.list_unwatched_candidates`, and three details of the
+   sentence above are sharper than it is:**
+
+   - **Membership is "unwatched", full stop** — `played`, rolled up through
+     `episodes.title_id` so a watched episode takes its series with it, and
+     expressed *inside* the statement rather than subtracted after a `LIMIT`.
+     Ownership and popularity are **ranking keys**, which is what keeps
+     *"the pool spans the whole catalog"* true. The order is `owned DESC,
+     carries an affinity genre DESC, vote_count DESC NULLS LAST, id` — and
+     the `id` tail is not tidiness: on a bootstrap-only catalog `vote_count`
+     is NULL for every row, so without it the pool's whole order is whatever
+     the storage returned, and [ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s
+     integer handles stop naming the same films between two reads.
+   - **`vote_count`, not `popularity`.** `titles.popularity` was measured NULL
+     on all 1,271,138 rows of a bootstrap-only catalog and is
+     `NOT NULL DEFAULT 0` in `tmdb_ids`, so leading with it lets a
+     crosswalk-linked skeleton at `0.0` outrank an unlinked title with half a
+     million votes — bounded where `list_owned_by_tag` uses it (owned titles
+     only) and unbounded over the whole catalog.
+   - **The re-rank permutes the embedded members among the positions they
+     already occupy**, so a candidate the centroid cannot speak about — no
+     vector, a NULL one, or one of another model's width — keeps its exact
+     index. That is stronger than "unembedded candidates are not dropped" and
+     is chosen for the reason M7 quoted the genome's *candidate-pair* rate
+     (1.81%) rather than its coverage: an artefact whose shape depends on how
+     far `usher index --backfill` has drained is one that changes for reasons
+     the household cannot see. The pool is a function of the household, not
+     of the embedder.
 2. **One structured call** to any OpenAI-compatible endpoint →
    `[{title, reason, item_ids ⊆ pool}]`, 3–5 rows. (This read *"via litellm"*
    until M8 priced that dependency at +146 MB and 29 distributions against a

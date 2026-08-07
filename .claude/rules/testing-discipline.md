@@ -554,3 +554,47 @@ equivalent:** `cost_usd` written as a `float`. Measured rather than argued —
 see `.claude/rules/db-and-sql.md` for the numbers. Reported as a survivor with
 its evidence rather than replaced by a kill that would have been about
 something else.
+
+**Three fixtures that could not fail, all in one task, and all three found by
+running a plant rather than by reading the case.** M8 Task 11's sweep over
+`TitleRepository.list_unwatched_candidates` and `CandidatePoolService`: 31
+mutations, **29 killed**, one predicted equivalent and one control. The two
+survivors that were *not* predicted were both a fixture holding something
+constant:
+
+- **`NULLS LAST` is unobservable without a genuine zero.** The Python spelling
+  of a nullable descending sort collapses a NULL through `-(vote_count or 0)`,
+  and with no title actually voted **0** in the fixture that collapse produces
+  the identical list — so deleting the fake's `vote_count is None` key survived
+  the whole suite. Postgres's half fails loudly (its default is NULLS FIRST, so
+  the unknown goes to the top), which is the shape to watch for: **a
+  divergence where only one arm can see the defect reads as coverage on both.**
+  The repair is one row, `vote_count=0`, seeded so it also disagrees on id
+  order.
+- **A predicate on a column no fixture ever writes falsely is unobservable.**
+  `media_items.available` is written `true` by every `own()` helper in the
+  suite, so deleting `WHERE available` from the ownership join survived
+  everything. It is not a hypothetical column: `mark_unseen_unavailable` sets
+  it false for every item a walk stops seeing, so a retracted copy is the
+  ordinary state of a deleted film. **Ask of every boolean predicate: has any
+  fixture, anywhere, ever set this to the other value?** Note the same gap
+  exists in `TitleRepositoryOwnedContract`, which has no such case either.
+- **And a premise guard that protected nothing, deleted rather than
+  strengthened.** `assert similarities[0] < 1.0` ("none of the three is the
+  centroid itself") read as a premise and had no defect behind it: a candidate
+  sitting exactly on the centroid is still strictly nearest, so no plant that
+  falsifies the guard breaks the case. Found by planting it and watching the
+  suite stay green. The rule from M8 Task 9 was *plant the defect each guard
+  names*; the corollary this adds is that **a guard with no such plant is not a
+  weak guard, it is a deleted one** — eight of that task's nine guards failed
+  on their own message and the ninth had no message to fail on.
+
+**The `-q`/`-qq` trap bit a sweep harness, and it presents as DID-NOT-RUN.**
+`addopts` already carries `-q`, so a harness adding its own makes it `-qq`,
+which suppresses the `N passed, M failed` summary line entirely — on a *green*
+run there is no line at all. The verdict regex then matches nothing and eight
+mutations were scored `DID-NOT-RUN` while their own `FAILED …` lines were
+printed in the same output. Caught only because the harness prints the failing
+case names beside the verdict; a harness that printed the verdict alone would
+have reported eight mutations as unobserved. Harnesses in this repository must
+not pass `-q`.

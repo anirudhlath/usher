@@ -68,6 +68,7 @@ from usher.ports.source import (
     SourceItem,
     SourceItemKind,
 )
+from usher.services.curation_pool import CandidatePoolService
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
@@ -228,6 +229,14 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
     # slot here would fail at construction instead of at the lane behaviour
     # each of these cases is about.
     people = FakePersonRepository()
+    taste = TasteService(
+        watch_states=watch_states,
+        embeddings=embeddings,
+        titles=titles,
+        taste=FakeTasteRepository(watch_states),
+        embedder=None,
+        now=lambda: datetime.now(UTC),
+    )
     return Pipeline(
         sources=fakes.sources,
         credentials=fakes.credentials,
@@ -274,14 +283,13 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
         ),
         similar=SimilarityService(embeddings, neighbors, titles, commit),
         row_providers=ROW_PROVIDERS,
-        taste=TasteService(
-            watch_states=watch_states,
-            embeddings=embeddings,
-            titles=titles,
-            taste=FakeTasteRepository(watch_states),
-            embedder=None,
-            now=lambda: datetime.now(UTC),
-        ),
+        taste=taste,
+        # No lane reads it -- generation is `JobKind.CURATE`'s, which is a
+        # later task -- so this is here for the same reason `taste` is: the
+        # dataclass has no defaults, deliberately, so a field added later is
+        # a compile error at every construction site rather than a `None`
+        # that surfaces as an `AttributeError` on the one path that reads it.
+        pool=CandidatePoolService(titles=titles, embeddings=embeddings, taste=taste, size=8),
         events=fakes.events,
         commit=commit,
     )

@@ -305,6 +305,38 @@ class Settings(BaseSettings):
     llm_price_in_per_mtok: Decimal = Field(default=Decimal(0), ge=0)
     llm_price_out_per_mtok: Decimal = Field(default=Decimal(0), ge=0)
 
+    # How many candidates one generation's prompt carries. Read by
+    # `composition.build_pipeline`, which hands it to `CandidatePoolService`.
+    #
+    # **A setting rather than a constant, and the sibling that settles it is
+    # `llm_max_output_tokens` rather than `taste.py`'s constants.** Those are
+    # not settings because `user_taste` is a *stored* artefact and a knob that
+    # changes what "taste" means leaves every cached centroid computed under
+    # the old meaning with nothing to tell them apart. Nothing here is stored:
+    # a pool is assembled, sent, and discarded, and `curated_rows` is
+    # regenerated nightly by a process no re-run reproduces anyway. What this
+    # number is really about is the *context window of whatever model
+    # `USHER_LLM_BASE_URL` names*, which is a deployment fact and not a
+    # product one -- a 16k local model and a 200k hosted one have genuinely
+    # different right answers, and an operator must be able to say so without
+    # editing code.
+    #
+    # 200 is measured rather than round: ADR-0028's three handle arms all ran
+    # against a 200-film pool, where the index spelling costs **2,924 prompt
+    # tokens** -- so a candidate is ~14.6 tokens, and the same pool addressed
+    # by UUID is 9,041, i.e. most of a 16k budget spent on identifiers.
+    #
+    # `le=1000` is that arithmetic: ~14.6 tokens a candidate puts 1,000 at
+    # ~14.6k before the watch history or the instructions, which no 16k model
+    # can answer. A context-length 400 is a permanent failure for that prompt
+    # whose only fix is a smaller pool (trap 13), so the ceiling is a bound on
+    # a misconfiguration that parks a job rather than degrading it. `ge=1`
+    # rather than something friendlier because a pool of one is a legal,
+    # useless configuration and this file does not invent product minima --
+    # what a *row* needs is `curation_min_cards`, which is the validator's and
+    # is not this.
+    curation_pool_size: int = Field(default=200, ge=1, le=1000)
+
     # The retrieval half. Every one of these is read by
     # `composition.build_pipeline`, which constructs the two indexes and
     # `SearchService`.
