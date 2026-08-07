@@ -41,6 +41,7 @@ from usher.composition import (
     build_pipeline,
     build_worker,
     embedder,
+    llm_client,
     metadata_provider,
     nothing,
     open_adapter,
@@ -497,7 +498,8 @@ async def _unmatched(
 
 
 async def _work(settings: Settings, *, once: bool) -> None:
-    """Run queued jobs: `match`, `enrich`, `watch_history`, `index`.
+    """Run queued jobs: `match`, `enrich`, `watch_history`, `index`, `derive`,
+    `curate`.
 
     Owns the one `httpx.AsyncClient` behind `TmdbClient`, because the token
     bucket that keeps this deployment under TMDb's ~40 rps ceiling lives on
@@ -520,6 +522,11 @@ async def _work(settings: Settings, *, once: bool) -> None:
         # `build_worker` runs once per pass below, and a load there is 4.84 s
         # cold / 0.13 s warm over 65 MB of ONNX.
         model, aclose_model = await embedder(settings)
+        # And the completion client, on the same terms: one per process, not
+        # one per pass. `USHER_LLM_ENABLED=false` is the shipped default and
+        # answers `(None, no-op)`, which is what leaves `curate` unclaimed
+        # here rather than parked.
+        client, aclose_client = await llm_client(settings)
         pipeline = build_pipeline(session, settings, provider=provider)
         registry = SourceRegistry(pipeline)
         gauges = QueueGauges()
@@ -537,6 +544,7 @@ async def _work(settings: Settings, *, once: bool) -> None:
                 settings,
                 provider=provider,
                 embedder=model,
+                client=client,
                 resolve=registry.resolve,
                 user_id=await ensure_default_user(session),
             )
@@ -560,6 +568,7 @@ async def _work(settings: Settings, *, once: bool) -> None:
             await registry.aclose()
             await aclose()
             await aclose_model()
+            await aclose_client()
 
 
 async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:

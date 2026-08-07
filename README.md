@@ -180,6 +180,14 @@ uv run usher work --once   # one pass over the queue, then exit
 uv run usher work          # stay up, polling
 ```
 
+**Three of the six job kinds are claimed only by a process configured for
+them**, and a worker that is not simply leaves them for one that is rather
+than failing them: `enrich` and `derive` need `USHER_TMDB_API_KEY`, `index`
+needs the `embedding` extra, and `curate` needs `USHER_LLM_ENABLED=true`.
+The last one is the one to know about before you turn it on — a `curate` job
+is where this project spends money, one completion per household per run,
+against whatever `USHER_LLM_BASE_URL` names.
+
 `usher index` reports how much of the search index is out of date. **The bare
 form only reads**, so it is safe to run on a production box while diagnosing
 something; `--backfill` is the writing form and enqueues one `index` job per

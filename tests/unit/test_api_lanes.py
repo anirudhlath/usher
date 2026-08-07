@@ -38,6 +38,8 @@ from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.job_queue import FakeJobQueue
+from tests.fakes.llm_call_repository import FakeLLMCallRepository
+from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
@@ -56,10 +58,12 @@ from usher.composition import Pipeline
 from usher.config import Settings
 from usher.domain.enums import SourceKind
 from usher.domain.ids import new_id
-from usher.domain.jobs import Job, JobKind
+from usher.domain.jobs import Job, JobKind, JobPriority, JobStatus
 from usher.domain.source import Source
 from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
+from usher.ports.jobs import JobRequest
+from usher.ports.llm import LLMClient
 from usher.ports.repository import MediaItemRepository
 from usher.ports.source import (
     SourceAdapter,
@@ -290,6 +294,12 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
         # field left unset here is one a lane could start reading without
         # this file noticing.
         curated_rows=FakeCuratedRowRepository(),
+        # Over the port double for the same reason, one table over. The
+        # worker lane *does* reach this one whenever it holds an
+        # `LLMClient` -- `build_curation_service` writes the cost ledger
+        # through it -- so an unset field here is an `AttributeError` on
+        # the first generation rather than a compile error.
+        llm_calls=FakeLLMCallRepository(),
         taste=taste,
         # No lane reads it -- generation is `JobKind.CURATE`'s, which is a
         # later task -- so this is here for the same reason `taste` is: the
@@ -307,6 +317,7 @@ def _supervisor(
     *,
     worker_idle_seconds: float = 5.0,
     embedder: Embedder | None = None,
+    client: LLMClient | None = None,
     **overrides: object,
 ) -> LaneSupervisor:
     settings = Settings(
@@ -329,6 +340,7 @@ def _supervisor(
         fakes.events,
         user_id=_user_id,
         embedder=embedder,
+        client=client,
         idle_seconds=worker_idle_seconds,
     )
 
@@ -839,4 +851,64 @@ async def test_a_worker_lane_without_an_embedder_never_claims_index_work(
 
     assert fakes.queue.claimed_kinds
     for kinds in fakes.queue.claimed_kinds:
+        assert JobKind.INDEX not in kinds
+
+
+async def test_a_worker_lane_without_an_llm_client_never_claims_curate_work(
+    fakes: _Fakes,
+) -> None:
+    """The same guard as the embedder's, one lane over, and observed the same
+    way: through what the lane *asked the queue for* rather than through the
+    wiring.
+
+    `usher.composition.llm_client` answers `(None, no-op)` for
+    `USHER_LLM_ENABLED=false`, which is the shipped default, so this is what
+    nearly every deployment runs. A lane that claimed `curate` anyway would
+    reach a handler it does not have -- and the composition root cannot even
+    build the service, because `CurationService`'s client is `LLMClient` and
+    not `LLMClient | None`.
+
+    Enqueued rather than asserted against an empty queue: `claimed_kinds`
+    records what was asked for whether or not anything was there, but a job
+    surviving the pass is the operator-visible half -- curate work waits for a
+    process that can run it instead of parking (PRD 08 reserves parking for
+    work a human has to look at).
+    """
+    await fakes.queue.enqueue(
+        [JobRequest(kind=JobKind.CURATE, key=str(USER_ID), priority=JobPriority.BACKFILL)]
+    )
+
+    supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
+    await supervisor.start()
+    await _drain(lambda: fakes.queue.claims >= 1, bound=2.0)
+    await supervisor.stop()
+
+    assert fakes.queue.claimed_kinds
+    for kinds in fakes.queue.claimed_kinds:
+        assert JobKind.CURATE not in kinds
+    assert [job.status for job in fakes.queue.jobs_of(JobKind.CURATE)] == [JobStatus.PENDING]
+
+
+async def test_a_worker_lane_with_an_llm_client_claims_curate_work(fakes: _Fakes) -> None:
+    """The control that makes the case above evidence rather than a
+    tautology, and the only thing that proves the client the composition root
+    built ever reaches `build_worker`.
+
+    `LaneSupervisor` carries the client for the reason it carries the
+    embedder: both are per-*process* resources, and `_run_worker` rebuilds
+    everything else once per pass. A supervisor that accepted one and dropped
+    it on the floor passes every other case in this file -- and turns
+    `USHER_LLM_ENABLED=true` into a queue that grows forever.
+
+    `INDEX` is asserted absent alongside it so the two cannot drift into "one
+    optional collaborator turns both lanes on".
+    """
+    supervisor = _supervisor(fakes, worker_idle_seconds=0.001, client=FakeLLMClient())
+    await supervisor.start()
+    await _drain(lambda: fakes.queue.claims >= 1, bound=2.0)
+    await supervisor.stop()
+
+    assert fakes.queue.claimed_kinds
+    for kinds in fakes.queue.claimed_kinds:
+        assert JobKind.CURATE in kinds
         assert JobKind.INDEX not in kinds

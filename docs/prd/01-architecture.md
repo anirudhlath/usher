@@ -277,6 +277,20 @@ the same `JobWorker` as `match` and `enrich`, so its "1 batch worker" is
 really "whatever the one worker is doing next".
 `USHER_EMBEDDING_BATCH_SIZE` is the embedder's internal batch, not a lane.
 
+✅ **M8 adds a sixth thing to that same one worker and no row to this table,
+which is a decision rather than an omission.** `JobKind.CURATE` is registered
+on the same `JobWorker`, guarded on an `LLMClient` existing exactly as `INDEX`
+is guarded on an embedder — so a deployment with `USHER_LLM_ENABLED=false`
+(the default) never claims one. The operational consequence worth stating is
+that a generation holds the single worker for as long as the completion takes,
+up to `USHER_LLM_TIMEOUT_SECONDS` (120 s), while `match`, `enrich`, `index` and
+`derive` wait behind it. That is acceptable at the shape this runs in — PRD 06
+budgets *one* completion per household per day, against a queue whose other
+kinds are minutes of background work — and it is the number to look at first if
+a queue ever appears to stall on a curating deployment. A lane of its own is
+the fix if it stops being acceptable, not a semaphore: the ceiling here is one
+upstream call, not concurrency.
+
 **The row-build row is the one line in this table that is a decision rather
 than a design**, and it is here because a concurrency table that silently omits
 the one loop a reader would expect to find in it is how somebody adds

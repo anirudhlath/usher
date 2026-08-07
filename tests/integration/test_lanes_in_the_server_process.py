@@ -117,6 +117,11 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
     async with sessions() as session:
         for statement in (
             "DELETE FROM jobs",
+            # M8's cost ledger, which cascades from nothing: it has no
+            # `user_id` at all (`generation_id` is its only correlation key,
+            # which is what makes PRD 10's dashboard 5 a join rather than a
+            # lookup), so a committing curate case has to clean it up itself.
+            "DELETE FROM llm_calls",
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM sources",
         ):
@@ -207,6 +212,110 @@ async def test_the_worker_lane_is_off_when_the_setting_is(
         assert app.state.lanes.worker_running() is False
         await asyncio.sleep(0.2)
         assert await _queue_depth(sessions) == 1
+
+
+async def _curate_status(sessions: async_sessionmaker[AsyncSession], key: str) -> str | None:
+    async with sessions() as session:
+        return (
+            await session.execute(
+                text("SELECT status FROM jobs WHERE kind = 'curate' AND key = :key"), {"key": key}
+            )
+        ).scalar_one_or_none()
+
+
+async def test_a_curate_job_parks_in_the_server_process_when_there_is_nothing_to_curate(
+    postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
+) -> None:
+    """**The wiring `create_app` has that no unit test can see**, and it is
+    the shape a `RowContext.curated = None` took when `mypy` was the only
+    thing holding it: `tests/unit/test_api_lanes.py` proves a `LaneSupervisor`
+    *given* an `LLMClient` claims curate work, and says nothing about whether
+    the lifespan ever builds one. So this starts nothing but the app.
+
+    Three facts in one run, and each has a different wrong answer behind it:
+
+    - **`llm_client(settings)` is called and its result reaches
+      `build_worker`.** Without it the row is never claimed and stays
+      `pending` -- which is exactly the control below, so the two together
+      are what make either one evidence.
+    - **`PortDataMalformed` parks rather than backing off**, which is the
+      classification PRD 06 rests on: an empty catalog is an operator's
+      problem and does not improve on a backoff schedule, so five more
+      attempts are five more completions at five times the price.
+    - **An empty catalog costs nothing.** `CurationService` raises *before*
+      the client is touched, so this case runs against the default
+      `USHER_LLM_BASE_URL` with `llm_enabled=True` and opens no socket --
+      which is also why it is `llm_calls`-free: nothing was attempted for a
+      ledger to hold a row about.
+
+    PRD 08's operator rule ("every command works against an empty database")
+    is the reason the fixture seeds no catalog at all: this *is* the shape a
+    fresh install has, not an edge case constructed for the test.
+    """
+    settings = Settings(
+        database_url=postgres_url,
+        secret_key=SECRET_KEY,
+        worker_enabled=True,
+        push_enabled=False,
+        llm_enabled=True,
+    )
+    household = str(new_id())
+    async with sessions() as session:
+        await build_pipeline(session, settings).queue.enqueue(
+            [JobRequest(kind=JobKind.CURATE, key=household, priority=JobPriority.BACKFILL)]
+        )
+        await session.commit()
+
+    async with LifespanManager(create_app(settings)):
+        deadline = time.perf_counter() + BOUND_SECONDS
+        while (
+            await _curate_status(sessions, household)
+        ) != "parked" and time.perf_counter() < deadline:
+            await asyncio.sleep(0.05)
+
+    assert await _curate_status(sessions, household) == "parked", (
+        "the curate job was never claimed and parked; the server process built no LLM client"
+    )
+    # The whole table, not a household's rows: `llm_calls` carries no
+    # `user_id`, and the `clean` fixture empties it either side of this case.
+    async with sessions() as session:
+        billed = (await session.execute(text("SELECT count(*) FROM llm_calls"))).scalar_one()
+    assert int(billed) == 0, "an empty catalog was billed for a completion"
+
+
+async def test_a_curate_job_waits_for_a_process_that_has_a_model(
+    postgres_url: str, sessions: async_sessionmaker[AsyncSession], clean: None
+) -> None:
+    """The mirror, and the reason the case above is evidence: without it,
+    "the job parked" could be anything in the process.
+
+    `USHER_LLM_ENABLED=false` is the shipped default, so this is what nearly
+    every deployment does with a curate job -- it leaves it `pending` for a
+    process that can run it. Parking it instead would fill PRD 08's review
+    list with work whose only problem was the process it was offered to, and
+    a parked job needs a human to release it. Same bargain `index` takes on a
+    deployment without the embedding extra.
+    """
+    settings = Settings(
+        database_url=postgres_url,
+        secret_key=SECRET_KEY,
+        worker_enabled=True,
+        push_enabled=False,
+    )
+    assert settings.llm_enabled is False, "the premise: off is the shipped default"
+    household = str(new_id())
+    async with sessions() as session:
+        await build_pipeline(session, settings).queue.enqueue(
+            [JobRequest(kind=JobKind.CURATE, key=household, priority=JobPriority.BACKFILL)]
+        )
+        await session.commit()
+
+    async with LifespanManager(create_app(settings)):
+        # Long enough for several passes at the lane's own floor to have
+        # claimed it if it were going to: the first pass is immediate.
+        await asyncio.sleep(0.2)
+
+    assert await _curate_status(sessions, household) == "pending"
 
 
 class _Adapters(SourceAdapterFactory):

@@ -14,6 +14,7 @@ from usher.api.routers import events, health, home, sources, titles
 from usher.composition import (
     DefaultUserId,
     embedder,
+    llm_client,
     metadata_provider,
     nothing,
     unit_of_work,
@@ -49,6 +50,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         model, close_model = (
             await embedder(settings) if settings.worker_enabled else (None, nothing)
         )
+        # The completion client, on the same terms again: one per process,
+        # built only where a worker will use it. `USHER_LLM_ENABLED=false` is
+        # the shipped default and answers `(None, no-op)`, which is what
+        # leaves `JobKind.CURATE` unregistered -- so a push-only or
+        # LLM-less deployment holds no `httpx.AsyncClient` with no reader.
+        client, close_client = (
+            await llm_client(settings) if settings.worker_enabled else (None, nothing)
+        )
         lanes = LaneSupervisor(
             settings,
             unit_of_work(session_factory, settings, events=bus, provider=provider),
@@ -56,6 +65,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             user_id=DefaultUserId(session_factory),
             provider=provider,
             embedder=model,
+            client=client,
             rows=row_cache,
         )
         app.state.lanes = lanes
@@ -86,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await lanes.stop()
             await close_provider()
             await close_model()
+            await close_client()
             await engine.dispose()
 
     app = FastAPI(

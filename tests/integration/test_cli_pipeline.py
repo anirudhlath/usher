@@ -109,6 +109,10 @@ async def _purge(settings: Settings) -> None:
     async with _session_for(settings) as session:
         for statement in (
             "DELETE FROM jobs",
+            # M8's cost ledger, which cascades from nothing and has no
+            # `user_id` to scope a delete by -- so a committing curate case
+            # has to clear the table.
+            "DELETE FROM llm_calls",
             "DELETE FROM watch_states",
             "DELETE FROM media_items",
             "DELETE FROM users WHERE name = 'default'",
@@ -143,11 +147,14 @@ async def test_unmatched_reports_an_empty_review_queue(
 async def test_work_runs_a_pass_over_an_empty_queue(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`work --once` against an empty database. It builds every service, the
-    handler for all three kinds it can serve, requeues whatever a previous
-    process left `running`, claims nothing, and exits -- and it creates the
-    singleton default user on the way, which nothing before M4 ever did and
-    without which `watch_states.user_id` has no row to point at."""
+    """`work --once` against an empty database. It builds every service and a
+    handler per kind this deployment can serve -- **two** of the six here,
+    since `enrich` and `derive` want a TMDb key, `index` wants the embedding
+    extra and `curate` wants `USHER_LLM_ENABLED`, and this fixture configures
+    none of the three -- requeues whatever a previous process left `running`,
+    claims nothing, and exits. It creates the singleton default user on the
+    way, which nothing before M4 ever did and without which
+    `watch_states.user_id` has no row to point at."""
     await _work(cli_settings, once=True)
     assert "0 jobs" in capsys.readouterr().out
     async with _session_for(cli_settings) as session:
@@ -157,6 +164,65 @@ async def test_work_runs_a_pass_over_an_empty_queue(
             )
         ).scalar_one()
     assert stored is not None
+
+
+async def test_work_parks_a_curate_job_it_cannot_serve_and_buys_nothing(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_slate: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """**`usher work` is the second composition root, and this is the only
+    thing that says it builds an `LLMClient` at all.**
+
+    `tests/integration/test_lanes_in_the_server_process.py` makes the same
+    claim about `create_app`; the two roots are exactly what
+    `usher.composition` exists to keep in step, and "one root gains a
+    collaborator and the other keeps answering as though it had none" is the
+    drift that module's docstring names. Without this case, deleting
+    `_work`'s `llm_client(settings)` leaves the whole suite green and turns
+    `USHER_LLM_ENABLED=true` on a split deployment into a queue that grows
+    forever.
+
+    Parked rather than completed, and against an **empty** database on
+    purpose: `CurationService` refuses an empty candidate pool with
+    `PortDataMalformed` *before* the client is touched, so this exercises the
+    whole claim/handle/classify path at a cost of nothing and opens no socket
+    -- which is the same reason PRD 08's "every command works against an
+    empty database" is the rule this file is built around.
+
+    Its own settings rather than the shared `cli_settings` fixture, because
+    the one thing under test is a setting the shared fixture does not set.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", postgres_url)
+    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
+    monkeypatch.setenv("USHER_LLM_ENABLED", "true")
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.llm_enabled is True, "the premise: the fixture really turned it on"
+    household = new_id()
+    async with _session_for(settings) as session:
+        await build_pipeline(session, settings).queue.enqueue(
+            [JobRequest(kind=JobKind.CURATE, key=str(household), priority=JobPriority.BACKFILL)]
+        )
+        await session.commit()
+
+    await _work(settings, once=True)
+
+    assert "1 jobs" in capsys.readouterr().out
+    async with _session_for(settings) as session:
+        status = (
+            await session.execute(
+                text("SELECT status FROM jobs WHERE kind = 'curate' AND key = :k"),
+                {"k": str(household)},
+            )
+        ).scalar_one()
+        # The whole table: `llm_calls` carries no `user_id` -- `generation_id`
+        # is its only correlation key -- and `_purge` empties it either side.
+        billed = (await session.execute(text("SELECT count(*) FROM llm_calls"))).scalar_one()
+    assert status == "parked", "the curate job was never claimed; this root built no LLM client"
+    assert int(billed) == 0, "an empty catalog was billed for a completion"
+    get_settings.cache_clear()
 
 
 async def test_the_default_user_is_created_once_and_is_stable(

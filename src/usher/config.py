@@ -333,8 +333,13 @@ class Settings(BaseSettings):
     # a misconfiguration that parks a job rather than degrading it. `ge=1`
     # rather than something friendlier because a pool of one is a legal,
     # useless configuration and this file does not invent product minima --
-    # what a *row* needs is `curation_min_cards`, which is the validator's and
-    # is not this.
+    # what a *row* needs is a card floor, which is the validator's
+    # `DEFAULT_MIN_CARDS` and is deliberately **not** a setting: it crosses the
+    # prompt, the request schema and the validator from one definition, and
+    # `composition.build_curation_service` takes that default rather than
+    # wiring a second value that can disagree with it. (This comment named a
+    # `curation_min_cards` field until 2026-08-07; no such field was ever
+    # shipped, and the sentence read as though one had been.)
     curation_pool_size: int = Field(default=200, ge=1, le=1000)
 
     # The retrieval half. Every one of these is read by

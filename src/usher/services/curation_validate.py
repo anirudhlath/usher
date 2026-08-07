@@ -124,12 +124,15 @@ test the five above pass and a sixth for "too long" would fail.
 
 ## Two things this module deliberately does not do
 
-- **It does not cap the number of rows.** `USHER_CURATION_MAX_ROWS` is a
-  product bound, not a safety one -- every card in a hundredth row is still a
-  title the household could watch -- and PRD 06 already gives
-  `CuratedProvider` a `0-5 rows` budget, which is where a cap belongs. The
-  slug's width adapts instead, so the model's ordering survives however many
-  rows arrive.
+- **It does not cap the number of rows.** A row cap is a product bound, not a
+  safety one -- every card in a hundredth row is still a title the household
+  could watch -- and PRD 06 already gives `CuratedProvider` a `0-5 rows`
+  budget, which is where a cap belongs. The slug's width adapts instead, so
+  the model's ordering survives however many rows arrive. (This paragraph
+  named `USHER_CURATION_MAX_ROWS` until 2026-08-07. M8 Task 3 planned that
+  setting and never shipped it, so the sentence asserted a lever an operator
+  would have gone looking for; the budget it points at is `CuratedProvider`'s
+  constant, which PRD 08's row-weights-are-code rule keeps out of `Settings`.)
 - **It does not sanitise prose.** There is nothing downstream that interprets
   `title` or `reason`: they are `Text` columns and a heading. The defence is a
   **bound** (`MAX_TITLE_CHARS`, `MAX_REASON_CHARS`), enforced here, and a row
@@ -187,9 +190,18 @@ ITEM_IDS_KEY = "item_ids"
 
 #: The floor a row has to clear, restating `SeasonalProvider`'s and
 #: `RediscoverProvider`'s rather than inventing a second number: *"an empty or
-#: two-card row is worse than none"*. A parameter on `validate_curation`, so
-#: `USHER_CURATION_MIN_CARDS` can override it without this module reading
-#: settings.
+#: two-card row is worse than none"*. A parameter on `validate_curation` rather
+#: than a constant read inside it, so a caller can override it without this
+#: module reading settings.
+#:
+#: **No caller overrides it and there is no setting**, corrected 2026-08-07
+#: when `composition.build_curation_service` — the one place a setting would be
+#: wired — landed and did not wire one. `USHER_CURATION_MIN_CARDS` was planned
+#: for M8 Task 3 and never shipped; this constant is the single definition, and
+#: it crosses the prompt, the request schema and this validator, so a second
+#: copy on `Settings` would be a fourth place for the three to disagree. Adding
+#: it owes a reader **and** an `.env.example` line in the same commit, because
+#: `test_deployment_config.py` checks completeness both ways.
 DEFAULT_MIN_CARDS = 5
 
 #: See the module docstring's last paragraph. Inclusive bounds.

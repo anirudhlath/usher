@@ -66,6 +66,47 @@ class JobKind(StrEnum):
     in it, and the only lever would be a `JobPriority` rung that does not
     exist between `BACKFILL` and `NEW`.
 
+    `curate` buys one LLM completion and replaces one household's
+    `curated_rows` (PRD 06). **Its key is a `user_id`**, which is what makes
+    `(kind, key)` do the milestone's central cost work rather than merely
+    tidying the queue. Nothing keyed per *request* -- a `generation_id`, a
+    timestamp -- deduplicates at all, and a key naming no household would put
+    two households on one screen.
+
+    **What the queue actually does with a repeat, measured against real
+    Postgres rather than reasoned from the statement** (2026-08-07, one
+    session, `PostgresJobQueue`). Enqueueing `(curate, A)` writes **1** row;
+    enqueueing it again at the same priority writes **0** and leaves one row;
+    twice inside one batch writes **0** more (`SELECT DISTINCT ON (kind,
+    key)`); at `DEMAND` it writes **1** as a promotion of the same row, not a
+    second one; and `(curate, B)` writes **1**, so two households really are
+    two jobs. Two halves of that are worth knowing before building on it:
+
+    - **A request arriving while the generation is `running` is coalesced
+      into it and is not re-scheduled.** Measured: 0 rows written, and
+      `complete()` then deletes the row the second request landed on, so the
+      queue is empty afterwards. For "one completion per household per day"
+      that is the wanted answer; for a caller that wants a *fresh* generation
+      after the one in flight, it is not, and the caller has to notice.
+    - **A parked `curate` job is not un-parked or promoted by asking again**,
+      even at `DEMAND`. Measured: 0 rows written and the row still
+      `('parked', 20)`. That is `_ENQUEUE`'s `WHERE jobs.status <> 'parked'`,
+      and it is the right answer -- an empty catalog does not stop being
+      empty because something asked twice -- but it means an operator has to
+      release the row, exactly as for every other kind.
+
+    **It is the first kind whose registration is conditional**, and that is
+    not the stub M4 forbade. `composition.build_worker` registers it only
+    when `composition.llm_client` built one, exactly as it registers `index`
+    only when an embedder exists, and `run_once` claims `list(self._handlers)`
+    -- so a deployment with `USHER_LLM_ENABLED=false` leaves curate work
+    pending for a process that can run it rather than parking work whose only
+    problem is the process it was offered to. The member itself is
+    unconditional because it is domain vocabulary two things outside the
+    worker need: the enqueue site (`POST /admin/rows/regenerate`) and
+    `depth()`, which promises a key per kind so PRD 10's `usher.jobs.queued`
+    never stops reporting a series.
+
     **Adding a member here needs no migration**, verified rather than
     assumed: `db/models/jobs.py` declares `kind` through `enum_column`, whose
     `native_enum=False` compiles to a plain `VARCHAR(32)` and whose
@@ -79,6 +120,7 @@ class JobKind(StrEnum):
     WATCH_HISTORY = "watch_history"
     INDEX = "index"
     DERIVE = "derive"
+    CURATE = "curate"
 
 
 class JobStatus(StrEnum):

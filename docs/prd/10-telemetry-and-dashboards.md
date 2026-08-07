@@ -52,8 +52,9 @@ index.title                       ← M6, a child of job.index
 home.compose                      ← M7, one per GET /home or usher home
 └── row.build                        one per row actually built
 
-curation.generate                 ← M8, one per generation
-└── llm.complete                     the one completion it is allowed
+job.curate                        ← M8, a worker's root span like the three
+└── curation.generate                above it; one per generation
+    └── llm.complete                 the one completion it is allowed
 
 bootstrap.import
 ├── bootstrap.batch

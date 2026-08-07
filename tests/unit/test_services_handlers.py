@@ -13,6 +13,7 @@ vocabulary meets the pipeline's. Two properties carry most of the cases:
 
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -31,13 +32,16 @@ from usher.domain.enums import EnrichmentState, MatchMethod, SourceKind, TitleKi
 from usher.domain.jobs import Job, JobKind
 from usher.domain.source import Source
 from usher.domain.title import Title
-from usher.ports.errors import PortDataMalformed
+from usher.ports.errors import PortDataMalformed, UsherPortError
 from usher.ports.ingest import MediaItemUpsert
+from usher.ports.llm import LLMUsage
 from usher.ports.metadata import MetadataCandidate
 from usher.ports.source import SourceItem, SourceItemKind, SourceWatchState
+from usher.services.curation import CurationReport, CurationService
 from usher.services.enrich import EnrichService
 from usher.services.handlers import (
     SourceBinding,
+    curate_handler,
     enrich_handler,
     match_handler,
     watch_history_handler,
@@ -122,6 +126,118 @@ async def test_an_enrich_key_that_is_not_a_uuid_parks_rather_than_killing_the_wo
     )
     with pytest.raises(PortDataMalformed):
         await enrich_handler(service)(Job(kind=JobKind.ENRICH, key="not-a-uuid"))
+
+
+# -- curate ---------------------------------------------------------------
+
+
+class _RecordingCuration(CurationService):
+    """A `CurationService` that records **which household** it was asked for.
+
+    A subclass rather than a fake because there is no port between the
+    handler and the service: `curate_handler`'s whole job is to turn
+    `job.key` into the one argument of this one call, so what a case has to
+    see is the argument. `__init__` deliberately does not call `super()` --
+    every collaborator it would store is unreachable from `generate` here,
+    and building the five of them would make these cases about the service.
+
+    `tests/unit/test_composition.py` is where a *real* service runs through a
+    *registered* handler, so "the handler calls generate at all" is not
+    resting on this double.
+    """
+
+    def __init__(self, *, raises: UsherPortError | None = None) -> None:
+        self.seen: list[uuid.UUID] = []
+        self._raises = raises
+
+    async def generate(self, user_id: uuid.UUID) -> CurationReport:
+        self.seen.append(user_id)
+        if self._raises is not None:
+            raise self._raises
+        return CurationReport(
+            generation_id=uuid.UUID("0197a5b0-0000-7000-8000-0000000000c0"),
+            pool_size=200,
+            rows=(),
+            dropped={},
+            usage=LLMUsage(
+                model="test/scripted-1",
+                tokens_in=10,
+                tokens_out=2,
+                cost_usd=Decimal("0"),
+                latency_ms=1,
+            ),
+        )
+
+
+async def test_the_curate_handler_generates_for_the_household_its_key_names() -> None:
+    """**The key is the household, and nothing else in this handler may
+    decide which one.**
+
+    `watch_history_handler` one section down takes a `user_id` at
+    *construction*, because M4 has one user and a walk's job key is a
+    source's `external_id` with no household in it. Curate is the opposite
+    shape: `(kind, key)` is what makes two requests for one household buy one
+    completion, so the household has to be in the key -- and a handler that
+    took the composition root's default user instead would still dedup
+    correctly, still park correctly, and quietly write household B's
+    generation onto household A's screen.
+
+    So the case asks for a household that is **not** the one every other
+    fixture in this file uses, and asserts on the argument rather than on the
+    fact that something ran.
+    """
+    other = uuid.UUID("0197a5b0-0000-7000-8000-0000000000bb")
+    assert other != _USER, "the premise: the key names a household the root did not bind"
+    service = _RecordingCuration()
+
+    await curate_handler(service)(Job(kind=JobKind.CURATE, key=str(other)))
+
+    assert service.seen == [other]
+
+
+async def test_a_curate_key_that_is_not_a_uuid_parks_rather_than_killing_the_worker() -> None:
+    """`_title_id`'s reason, for a key that is not a title id.
+
+    `uuid.UUID("not-a-uuid")` raises a `ValueError`, and `JobWorker`
+    deliberately lets anything that is not a `UsherPortError` propagate -- so
+    an unconverted key takes the worker process down instead of parking its
+    own job. The conversion is shared with the three title-keyed kinds rather
+    than written a fourth time; what differs is the sentence, because "job
+    key is not a title id" is wrong about a household.
+    """
+    service = _RecordingCuration()
+
+    with pytest.raises(PortDataMalformed) as raised:
+        await curate_handler(service)(Job(kind=JobKind.CURATE, key="not-a-uuid"))
+
+    # The diagnostics, not the verdict: every kind's unparseable key produces
+    # the identical exception type, and the operator reading `jobs.last_error`
+    # needs to be told which of two different things the key failed to be.
+    assert "user id" in str(raised.value)
+    assert service.seen == [], "the key was converted after the service was called"
+
+
+async def test_the_curate_handler_does_not_absorb_a_failed_generation() -> None:
+    """PRD 06: *"failure is non-fatal to the screen and fatal to the job"*.
+
+    The screen half is `CurationService`'s -- a failed generation never
+    reaches `replace_for_user`, so last night's rows stand. The job half is
+    this line: a handler that caught the raise would `complete()` the job,
+    delete its row, and lose a generation with nothing anywhere saying so.
+    Parked or backed off is the only honest outcome, and `JobWorker` can only
+    decide that from an exception it is allowed to see.
+
+    Driven with `PortDataMalformed` because it is the one `generate` raises
+    for both of its own non-upstream conditions (an empty pool; a generation
+    that validated to zero rows), and it is the one `JobWorker` parks on
+    rather than spending four more completions.
+    """
+    service = _RecordingCuration(raises=PortDataMalformed("nothing to curate"))
+
+    with pytest.raises(PortDataMalformed):
+        await curate_handler(service)(Job(kind=JobKind.CURATE, key=str(_USER)))
+
+    assert service.seen == [_USER], "the premise: the service really was reached"
 
 
 # -- match ----------------------------------------------------------------

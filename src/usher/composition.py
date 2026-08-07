@@ -67,6 +67,7 @@ from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
+from usher.db.repositories.llm_call import PostgresLLMCallRepository
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
@@ -93,6 +94,7 @@ from usher.ports.repository import (
     CreditRepository,
     CuratedRowRepository,
     EpisodeRepository,
+    LLMCallRepository,
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
@@ -107,11 +109,13 @@ from usher.ports.repository import (
 )
 from usher.ports.rows import RowProvider
 from usher.ports.source import SourceAdapter, SourceAdapterFactory
+from usher.services.curation import CurationService
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
 from usher.services.handlers import (
     SourceBinding,
+    curate_handler,
     derive_handler,
     enrich_handler,
     index_handler,
@@ -197,10 +201,17 @@ class Pipeline:
     # `RowContext` from this pipeline exactly as `api/deps.py` assembles one
     # from its request-scoped dependencies -- `CuratedProvider` reads
     # `list_for_user` through the context and a CLI that could not fill that
-    # field would compose a screen the route does not. `CurationService`, which
-    # is what *writes* through this port, is still not wired here: tasks 16 and
-    # 18 own that, and this field is the read half arriving with its reader.
+    # field would compose a screen the route does not. `build_curation_service`
+    # is the *write* half, and it reaches this same field: one table, one
+    # object, which is what stops a generation landing somewhere nothing serves
+    # from.
     curated_rows: CuratedRowRepository
+    # M8's cost ledger. Write-only from here -- nothing in `src/` reads it
+    # back, and PRD 10's spend dashboards are SQL against the table -- so it
+    # is on the pipeline for the reason every other port is: `services/` may
+    # not import `db/` (ADR-0009), and a `CurationService` handed a ledger of
+    # its own would attribute a real charge to an object nobody reads.
+    llm_calls: LLMCallRepository
     people: PersonRepository
     credits: CreditRepository
     collections: CollectionRepository
@@ -294,6 +305,7 @@ def build_pipeline(
     neighbors = PostgresTitleNeighborRepository(session)
     taste_rows = PostgresTasteRepository(session)
     curated_rows = PostgresCuratedRowRepository(session)
+    llm_calls = PostgresLLMCallRepository(session)
     queue = PostgresJobQueue(
         session,
         max_attempts=settings.job_max_attempts,
@@ -341,6 +353,7 @@ def build_pipeline(
         neighbors=neighbors,
         taste_rows=taste_rows,
         curated_rows=curated_rows,
+        llm_calls=llm_calls,
         people=people,
         credits=credits,
         collections=collections,
@@ -510,6 +523,7 @@ def build_worker(
     *,
     provider: MetadataProvider | None,
     embedder: Embedder | None,
+    client: LLMClient | None,
     resolve: Callable[[str], Awaitable[SourceBinding | None]],
     user_id: uuid.UUID,
 ) -> JobWorker:
@@ -555,6 +569,19 @@ def build_worker(
     # broken.
     if embedder is not None:
         worker.register(JobKind.INDEX, index_handler(build_index_service(pipeline, embedder)))
+    # Guarded exactly as INDEX is, on the client this deployment either has or
+    # does not, and the guard is a `mypy` fact rather than a convention:
+    # `CurationService` spells its client `LLMClient`, never `LLMClient | None`,
+    # so "no client, no curation" cannot be spelled any other way from here.
+    # The *member* `JobKind.CURATE` is unconditional -- two things outside the
+    # worker need the vocabulary, the enqueue site and `depth()`'s promise of a
+    # key per kind -- and only the registration moves, which is what leaves
+    # curate work pending for a process that can run it rather than parking
+    # work whose only problem was the process it was offered to.
+    if client is not None:
+        worker.register(
+            JobKind.CURATE, curate_handler(build_curation_service(pipeline, settings, client))
+        )
     return worker
 
 
@@ -575,6 +602,61 @@ def build_derive_service(pipeline: Pipeline, provider: MetadataProvider) -> Deri
         credits=pipeline.credits,
         collections=pipeline.collections,
         commit=pipeline.commit,
+    )
+
+
+def build_curation_service(
+    pipeline: Pipeline, settings: Settings, client: LLMClient
+) -> CurationService:
+    """One session's repositories plus the process's completion client.
+
+    **The same asymmetry `build_index_service` has**, and for the same reason:
+    everything on `pipeline` is rebuilt per worker pass and the `client` is
+    not. `llm_client` builds one per *process* -- an `httpx.AsyncClient` with
+    its own connection pool, rebuilt every 5 s by `lanes._run_worker`
+    otherwise -- exactly as `embedder` does for a 65 MB ONNX session.
+
+    **`client` is `LLMClient`, never `LLMClient | None`**, which is the whole
+    of why this factory is reached only from `build_worker`'s guard.
+    `composition.llm_client` already answers `(None, no-op)` with a warning
+    for `USHER_LLM_ENABLED=false`, so the composition root is the one layer
+    that can know a deployment has no model -- and spelling the parameter
+    non-optional makes "no client, no curation" something `mypy` enforces
+    there instead of a `self._client is None` branch unreachable from `src/`.
+
+    **`model` is `settings.llm_model` and is not defaulted.** It is the same
+    string `OpenAICompatibleClient` was built with a few lines up, and it is
+    the only honest value for `llm_calls.model` on the path where no response
+    came back to read one from. A default here would be a second value that
+    silently disagrees with the client's.
+
+    `min_cards` is deliberately **not** wired to a setting.
+    `USHER_CURATION_MIN_CARDS` was planned and never shipped;
+    `curation_validate.DEFAULT_MIN_CARDS` is the one definition, and it
+    crosses the prompt, the schema and the validator, so a second copy on
+    `Settings` would be a fourth place for the three to disagree. The day an
+    operator needs it, it lands with a reader and an `.env.example` line in
+    the same commit.
+    """
+    return CurationService(
+        pool=pipeline.pool,
+        # The *same* `WatchStateRepository` and `TitleRepository` the pool
+        # reads from. This is what a composition root is for: `services/` may
+        # not import `db/` (ADR-0009), so nothing below here can discover that
+        # the household's history and its candidate pool are two sides of one
+        # table -- and a second pair would let the prompt recommend what the
+        # household just finished.
+        watch_states=pipeline.watch_states,
+        titles=pipeline.titles,
+        client=client,
+        rows=pipeline.curated_rows,
+        ledger=pipeline.llm_calls,
+        # One commit per generation, covering `replace_for_user` *and* the
+        # ledger row: PRD 10's dashboard 5 is `llm_calls JOIN curated_rows
+        # USING (generation_id)`, so a commit between them is a window in
+        # which a screen exists with no cost attributed to it.
+        commit=pipeline.commit,
+        model=settings.llm_model,
     )
 
 
@@ -974,12 +1056,14 @@ __all__ = [
     "SearchGauges",
     "SourceRegistry",
     "adapter_factory",
+    "build_curation_service",
     "build_enrich_service",
     "build_index_service",
     "build_pipeline",
     "build_push_applier",
     "build_worker",
     "embedder",
+    "llm_client",
     "metadata_provider",
     "nothing",
     "open_adapter",
