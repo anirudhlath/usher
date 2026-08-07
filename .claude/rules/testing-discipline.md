@@ -645,3 +645,34 @@ only because the next grep looked for a symbol that should have been there.
 gets a `cp` backup, and the restore is verified by reading the file back
 rather than by the suite going green** — a suite that was green before the
 plant is green again after a revert that took the edits with it.
+
+**A rejection is not an assertion: two implementations that fail for opposite
+reasons produce the identical failure value, and only the *count* tells them
+apart.** Found 2026-08-06 by M8 Task 13's sweep over the curation validator.
+`{"rows": "11"}` must be refused because a `str` is a `Sequence` and the looser
+`isinstance(raw, list | str)` check would read a scalar one character at a time.
+The case asserted `isinstance(outcome, CurationRejected)` and
+`assert outcome.error` — and **the mutation survived**, because iterating
+`"11"` finds two characters, neither of which is an object, drops both, reaches
+zero surviving rows and rejects *anyway*. Same verdict, arrived at by
+manufacturing two rows that never existed: the tally read `row_unusable=2` and
+the error said *"no row survived validation of 2 returned"* about a response
+that returned none.
+
+The assertion with teeth is `set(outcome.dropped.values()) == {0}` — a response
+that carried no rows dropped nothing. **The general form: when a function's
+failure value is a single shape reached by many paths, asserting *that it
+failed* is the weakest possible check, and it is the one everybody writes.
+Assert the diagnostics — the count, the reason, the number in the message —
+because those are what distinguish the failure you meant from the failure you
+got.** Nearest relative is "a membership assertion is not an ordering test":
+both are satisfied by an implementation doing something else entirely, and both
+read as coverage.
+
+**Sweep totals for the same task, for calibration:** 36 mutations over one
+pure module, 34 killed, 1 control surviving as designed, 1 real coverage gap
+(above). The three defences against the `.pyc` collision recorded further up
+were in force throughout — `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept
+before every run, and an equivalent-mutant control — which mattered here for
+exactly the reason that entry predicts: the module's own test file runs in
+**0.10 s**, well inside the one-second mtime resolution.
