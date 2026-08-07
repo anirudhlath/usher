@@ -7,8 +7,11 @@ wiring nothing checks.
 
 import argparse
 import asyncio
+import contextlib
 import dataclasses
+import uuid
 import zipfile
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import httpx
@@ -17,6 +20,7 @@ import pytest
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.genome_repository import FakeGenomeRepository
 from tests.fakes.import_run_repository import FakeImportRunRepository
+from tests.fakes.llm_client import FakeLLMClient
 from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.cli import (
     PHASES,
@@ -24,8 +28,10 @@ from usher.cli import (
     _as_uuid,
     _filters_from,
     _movielens,
+    _print_search_answer,
     _report_coverage,
     _run_lanes,
+    _search,
     _vocabulary_line,
     build_parser,
     parse_args,
@@ -33,10 +39,12 @@ from usher.cli import (
 from usher.config import Settings
 from usher.domain.bootstrap import ImportRunStatus
 from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.search import SearchResult
 from usher.ports.bulk import GENOME_TAG_COUNT, ImdbTitle
 from usher.ports.repository import GenomeCoverage
 from usher.ports.search import SearchFilters, SearchMode
 from usher.services.bootstrap import BootstrapService
+from usher.services.search import SearchAnswer
 
 
 def test_no_arguments_still_means_serve() -> None:
@@ -832,3 +840,173 @@ def test_home_has_no_cross_argument_rule_and_that_is_deliberate() -> None:
     """
     both = parse_args(["home", "--limit", "3", "--repeat", "5"])
     assert (both.limit, both.repeat) == (3, 5)
+
+
+# --- `usher search`, query expansion --------------------------------------
+#
+# `_print_search_answer` is a pure function over a `SearchAnswer` -- the split
+# `_print_curation_report` already makes -- so the report an operator reads can
+# be driven without a database. `_search`'s two cases below drive the
+# composition root itself, because "the client was built" and "the client
+# reached the pipeline" are different claims and only the second is the one
+# that decides whether a search on the *only* user-facing surface ever expands.
+
+
+def _answer(**changes: object) -> SearchAnswer:
+    return dataclasses.replace(
+        SearchAnswer(
+            results=(
+                SearchResult(
+                    title_id=uuid.UUID(int=0x11),
+                    kind=TitleKind.MOVIE,
+                    name="The Quiet Vacuum",
+                    year=2019,
+                    popularity=None,
+                    owned=False,
+                    score=0.5,
+                ),
+            ),
+            requested_mode=SearchMode.FUSED,
+            mode=SearchMode.FUSED,
+            semantic_coverage=1.0,
+        ),
+        **changes,  # type: ignore[arg-type]
+    )
+
+
+def test_an_expanded_query_is_printed_and_printed_before_the_results(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """**"Reported, never silently substituted", at the one surface a person
+    reads.** A span attribute is not a report and a `llm_calls` row is not
+    either: both are for an operator with a query console, and the person who
+    typed the search has neither. Without this line a viewer searches for one
+    thing, gets results for another, and has nothing to tell a good expansion
+    from a bad one.
+
+    Before the results, because it is the question they are the answer to. The
+    ordering assertion is what fails if the line drifts below the summary,
+    where it reads as a footnote about a search already scrolled past.
+    """
+    _print_search_answer(_answer(expanded_query="a crew alone in orbit"))
+
+    out = capsys.readouterr().out
+    assert "a crew alone in orbit" in out, out
+    assert out.index("a crew alone in orbit") < out.index("The Quiet Vacuum"), out
+
+
+def test_a_search_that_bought_no_completion_prints_no_expansion_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The shipped default is `USHER_LLM_ENABLED=false`, so `expanded_query` is
+    `None` on every search of every default deployment -- and a report that
+    echoed the typed query there would print a line about a rewrite nobody
+    bought, on every run, forever. The rest of the report is asserted too, so
+    "print nothing at all" is not a pass.
+    """
+    _print_search_answer(_answer())
+
+    out = capsys.readouterr().out
+    assert "expanded" not in out, out
+    assert "The Quiet Vacuum" in out, out
+    assert "mode=fused" in out, out
+
+
+async def test_a_semantic_search_hands_the_completion_client_to_the_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The wiring that decides whether the only user-facing search surface
+    ever expands anything.** `build_pipeline` builds the expander, and it can
+    only do so from a client -- so a `_search` that opened one and forgot to
+    pass it would leak a connection pool per run and expand nothing, with no
+    error and a report that correctly says no expansion happened.
+
+    The client is released on the way out, in the same `finally` as the
+    embedder: one `httpx.AsyncClient` per command, closed however the command
+    ends.
+    """
+    built = FakeLLMClient()
+    closed = 0
+    captured: dict[str, object] = {}
+
+    async def _closer() -> None:
+        nonlocal closed
+        closed += 1
+
+    async def _client(_: Settings, *, report: bool = True) -> object:
+        assert report is False, "the lane sentence belongs to `usher work`"
+        return built, _closer
+
+    monkeypatch.setattr("usher.cli.llm_client", _client)
+    monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
+
+    await _search(
+        _cli_settings(), query="isolation in space", mode="fused", limit=5, filters=SearchFilters()
+    )
+
+    assert captured["llm"] is built
+    assert closed == 1
+
+
+async def test_a_full_text_search_opens_no_completion_client_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The call sits in front of the embed, so a mode with no embed has nothing
+    to expand for -- and a client built anyway is an `httpx.AsyncClient` and a
+    connection pool opened once per run of the mode a deployment with no
+    embedding extra uses for *everything*.
+
+    Not a correctness claim about spend: `SearchService` would not call an
+    expander on this path either (`test_a_full_text_search_buys_no_completion`
+    is where that lives). This is the resource half, and it is the half only
+    the composition root can get wrong.
+    """
+    captured: dict[str, object] = {}
+
+    async def _never(*_: object, **__: object) -> object:
+        raise AssertionError("a full-text search opened a completion client")
+
+    monkeypatch.setattr("usher.cli.llm_client", _never)
+    monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
+
+    await _search(
+        _cli_settings(),
+        query="the quiet vacuum",
+        mode="full_text",
+        limit=5,
+        filters=SearchFilters(),
+    )
+
+    assert captured["llm"] is None
+
+
+def _cli_settings() -> Settings:
+    return Settings(database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher", secret_key="0" * 32)
+
+
+@contextlib.asynccontextmanager
+async def _no_session(_: Settings) -> AsyncIterator[None]:
+    """`_session_for`, without the engine. The claim under test is about what
+    `_search` hands to `build_pipeline`, and opening a real connection would
+    make it a claim about Postgres."""
+    yield None
+
+
+def _recording_pipeline(captured: dict[str, object]) -> Callable[..., object]:
+    """A `build_pipeline` that records its keyword arguments and answers a
+    `SearchAnswer` with nothing in it."""
+
+    class _Search:
+        async def search(self, query: str, **_: object) -> SearchAnswer:
+            return SearchAnswer()
+
+    class _Pipeline:
+        search = _Search()
+
+    def _build(_session: object, _settings: Settings, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return _Pipeline()
+
+    return _build

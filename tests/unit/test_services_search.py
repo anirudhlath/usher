@@ -23,14 +23,18 @@ scans this file.
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
 from tests.fakes.embedding import FakeEmbedder
+from tests.fakes.llm_call_repository import FakeLLMCallRepository
+from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from usher.domain.enums import TitleKind
 from usher.domain.title import Title
+from usher.ports.errors import PortUnavailable
 from usher.ports.ingest import MediaItemUpsert
 from usher.ports.search import (
     SearchDocument,
@@ -42,6 +46,7 @@ from usher.ports.search import (
     SearchRequest,
     SuggestIndex,
 )
+from usher.services.query_expansion import QUERY_KEY, QueryExpansionService
 from usher.services.search import SearchService, SemanticSearchUnavailable
 
 # Fixed ids, ordered on purpose. `_UNOWNED < _OWNED` and `_ZERO_POP <
@@ -161,6 +166,32 @@ def _copy(title_id: uuid.UUID) -> MediaItemUpsert:
     )
 
 
+class _Expander:
+    """A real `QueryExpansionService` over a scripted client, plus the two
+    things a case asserts on: how many completions were bought, and what landed
+    in the ledger.
+
+    Deliberately **not** a stubbed expander. The property under test is *how
+    many completions one search buys*, and a stub that recorded a call would
+    make every path look identical to the one the composition root builds while
+    proving nothing about it.
+    """
+
+    def __init__(self, *bodies: dict[str, Any] | BaseException) -> None:
+        self.client = FakeLLMClient.returning(*bodies)
+        self.ledger = FakeLLMCallRepository()
+        self.commits = 0
+        self.service = QueryExpansionService(
+            client=self.client,
+            ledger=self.ledger,
+            commit=self._commit,
+            model="test/asked-1",
+        )
+
+    async def _commit(self) -> None:
+        self.commits += 1
+
+
 async def _service(
     index: SearchIndex,
     *,
@@ -168,6 +199,7 @@ async def _service(
     owned: frozenset[uuid.UUID] = frozenset(),
     suggestions: SuggestIndex | None = None,
     result_limit: int = 50,
+    expander: _Expander | None = None,
 ) -> SearchService:
     """The service over fakes, with the whole invented catalog already stored.
 
@@ -188,6 +220,7 @@ async def _service(
         media_items,
         result_limit=result_limit,
         embedder=embedder,
+        expander=None if expander is None else expander.service,
     )
 
 
@@ -247,6 +280,191 @@ async def test_a_blank_prefix_never_reaches_the_suggest_index() -> None:
     service = await _service(_ScriptedIndex(SearchOutcome()), suggestions=suggestions)
     assert await service.suggest("  ") == ()
     assert suggestions.calls == []
+
+
+# --- query expansion -------------------------------------------------------
+#
+# **The cost claim is half of what these cases are for**, so most of them are
+# about the searches that buy *no* completion. `usher suggest` is the one that
+# would hurt: a client sends it per keystroke, and an expansion there would
+# invert this milestone's whole "one completion per unit of work" argument.
+
+
+async def test_the_expansion_is_what_gets_embedded_and_the_answer_reports_it() -> None:
+    """**Both halves of the clause, in one case, because either alone is the
+    defect.** Embedding the rewrite without reporting it is a viewer who
+    searched for one thing, got results for another, and has nothing to tell a
+    good expansion from a bad one -- and neither has an operator reading their
+    bug report. Reporting a rewrite that was not embedded is the same lie from
+    the other side.
+
+    The distractor is that `query` is *also* a plausible value for
+    `expanded_query`: a service that reported the typed string would pass any
+    assertion that the field is merely populated.
+    """
+    embedder = FakeEmbedder()
+    index = _ScriptedIndex(SearchOutcome())
+    expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
+    service = await _service(index, embedder=embedder, expander=expander)
+
+    answer = await service.search("movies about isolation in space", mode=SearchMode.SEMANTIC)
+
+    assert embedder.calls == [["a crew alone in orbit"]]
+    assert answer.expanded_query == "a crew alone in orbit"
+    assert index.requests[0].query_vector == tuple(
+        (await embedder.embed(["a crew alone in orbit"]))[0]
+    )
+
+
+async def test_the_full_text_lane_still_sees_the_words_the_viewer_typed() -> None:
+    """**Only the vector is computed from the rewrite.** Under RRF the lexical
+    lane goes on matching the viewer's own words while the semantic lane
+    matches the paraphrase, which is strictly more signal than either alone.
+
+    Fails: substituting the rewrite into `SearchRequest.query` as well, which
+    leaves *no* lane holding the original -- so a rewrite that drifted turns an
+    exact-title search into a search for something else, with a `tsquery` full
+    of words the viewer never wrote and nothing to notice it.
+    """
+    index = _ScriptedIndex(SearchOutcome())
+    expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
+    service = await _service(index, embedder=FakeEmbedder(), expander=expander)
+
+    await service.search("movies about isolation in space", mode=SearchMode.FUSED)
+
+    assert index.requests[0].query == "movies about isolation in space"
+
+
+async def test_with_no_expander_the_query_is_embedded_as_typed_and_nothing_is_reported() -> None:
+    """**The shipped default, byte for byte.** `USHER_LLM_ENABLED` is `false`,
+    so `composition.llm_client` answers `(None, no-op)`, no expander is built,
+    and this path has to be exactly M6's. Fails: an `expanded_query` populated
+    with the typed string, which would print a line on every search of every
+    deployment for a completion nobody bought."""
+    embedder = FakeEmbedder()
+    service = await _service(_ScriptedIndex(SearchOutcome()), embedder=embedder)
+
+    answer = await service.search("movies about isolation in space", mode=SearchMode.SEMANTIC)
+
+    assert embedder.calls == [["movies about isolation in space"]]
+    assert answer.expanded_query is None
+
+
+async def test_an_expansion_that_produced_nothing_leaves_the_query_as_typed() -> None:
+    """PRD 08's degradation rule reaching the caller: the endpoint is down, the
+    attempt is billed, and the search is served on the words the viewer typed.
+
+    Fails twice over -- a `SearchService` that let the `UsherPortError` out
+    would fail a search over an optional enhancement, and one that reported an
+    `expanded_query` here would name a rewrite that does not exist.
+    """
+    embedder = FakeEmbedder()
+    expander = _Expander(PortUnavailable("the endpoint refused the connection"))
+    service = await _service(_ScriptedIndex(SearchOutcome()), embedder=embedder, expander=expander)
+
+    answer = await service.search("movies about isolation in space", mode=SearchMode.SEMANTIC)
+
+    assert embedder.calls == [["movies about isolation in space"]]
+    assert answer.expanded_query is None
+    assert len(expander.ledger.calls) == 1, "an attempted call is a billed call"
+
+
+async def test_one_search_buys_exactly_one_completion() -> None:
+    """`FakeLLMClient` repeats its last scripted response forever, so a second
+    call is invisible to every assertion about *what* came back. One completion
+    per unit of work is the milestone's cost argument and the count is the only
+    thing that states it."""
+    expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
+    service = await _service(
+        _ScriptedIndex(SearchOutcome()), embedder=FakeEmbedder(), expander=expander
+    )
+
+    await service.search("movies about isolation in space", mode=SearchMode.FUSED)
+
+    assert len(expander.client.calls) == 1
+    assert len(expander.ledger.calls) == 1
+
+
+async def test_a_full_text_search_buys_no_completion() -> None:
+    """The call sits in front of the *embed*, so a lane with no embed has no
+    call in front of it. Fails: an expansion at the top of `search`, which
+    bills every `--mode full-text` run -- the mode a deployment with no
+    embedding extra uses for everything."""
+    embedder = FakeEmbedder()
+    expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
+    service = await _service(_ScriptedIndex(SearchOutcome()), embedder=embedder, expander=expander)
+
+    answer = await service.search("vacuum", mode=SearchMode.FULL_TEXT)
+
+    assert expander.client.calls == []
+    assert embedder.calls == []
+    assert answer.expanded_query is None
+
+
+async def test_a_blank_query_buys_no_completion() -> None:
+    """The blank-query refusal is *before* the model and therefore before this.
+    A search box sends one between every keystroke, so an expansion above that
+    guard is a completion per keypress -- the exact inverse of this milestone's
+    cost argument, arriving on its most frequent path."""
+    expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
+    service = await _service(
+        _ScriptedIndex(SearchOutcome()), embedder=FakeEmbedder(), expander=expander
+    )
+
+    answer = await service.search("   ", mode=SearchMode.SEMANTIC)
+
+    assert expander.client.calls == []
+    assert answer.expanded_query is None
+
+
+async def test_a_fused_search_with_no_embedder_buys_no_completion() -> None:
+    """Nothing is going to be embedded, so there is nothing to expand *for*.
+    Fails: an expansion in front of the `embedder is None` branch, which buys a
+    rewrite and then throws it away -- billed, on every fused search of a
+    deployment that has no model at all, which is the shipped default."""
+    expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
+    index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=1.0),)))
+    service = await _service(index, embedder=None, expander=expander)
+
+    answer = await service.search("movies about isolation in space", mode=SearchMode.FUSED)
+
+    assert expander.client.calls == []
+    assert answer.degraded is True
+    assert answer.expanded_query is None
+
+
+async def test_a_semantic_search_with_no_embedder_buys_no_completion() -> None:
+    """The other arm of the same branch. `SemanticSearchUnavailable` is raised
+    before anything is spent, because a deployment configured without a model
+    has not failed -- it said so once, at startup -- and charging it for the
+    sentence would be spend an operator has to explain away."""
+    expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
+    service = await _service(_ScriptedIndex(SearchOutcome()), embedder=None, expander=expander)
+
+    with pytest.raises(SemanticSearchUnavailable):
+        await service.search("movies about isolation in space", mode=SearchMode.SEMANTIC)
+
+    assert expander.client.calls == []
+    assert expander.ledger.calls == []
+
+
+async def test_type_ahead_buys_no_completion() -> None:
+    """**The one that would hurt.** `suggest` is what a client calls per
+    keystroke; it has no semantic lane at all, so it has no embed for an
+    expansion to sit in front of. Fails: an expansion factored to the top of
+    the service and shared by both entry points, which is the tidy-looking
+    version and is a completion per keypress."""
+    suggestions = _ScriptedSuggest((SearchHit(title_id=_QUIET, score=1.0),))
+    expander = _Expander({QUERY_KEY: "a crew alone in orbit"})
+    service = await _service(
+        _ScriptedIndex(SearchOutcome()),
+        embedder=FakeEmbedder(),
+        suggestions=suggestions,
+        expander=expander,
+    )
+
+    assert await service.suggest("the quie") != ()
+    assert expander.client.calls == []
 
 
 # --- degradation -----------------------------------------------------------

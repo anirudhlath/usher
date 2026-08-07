@@ -369,6 +369,42 @@ refuses outright while `--mode fused` narrows to full-text *and says which*.
 `usher index` loads no model at all: staleness is a question about a recorded
 model **name**.
 
+**Query expansion ships in M8, off by default, and its position is the whole
+cost argument.** `QueryExpansionService.expand` is called from exactly one
+line -- the line before `SearchService`'s `self._embedder.embed([...])`, inside
+the `else` of the `embedder is None` branch. Four things follow and each is a
+case: a `full_text` search buys no completion (no embed to sit in front of), a
+deployment with no embedder buys none (`semantic` raises and `fused` narrows
+before reaching it), a blank query buys none (refused before the model), and
+**`usher suggest` buys none** -- `SuggestIndex` is its own port with no
+semantic lane, which is what keeps a completion off the path a client drives
+per keystroke. The unit of spend is one search that was going to embed
+something.
+
+Three decisions worth not re-deriving. **Only the vector comes from the
+rewrite**: `SearchRequest.query` stays the typed string, so under RRF the
+lexical lane still matches the viewer's own words and a rewrite that drifted
+cannot take an exact-title search with it. **`SearchService.expander` is
+`SearchService | None`-shaped optional and `QueryExpansionService.client` is
+not** -- M8's rule everywhere else is that an `LLMClient` holder is built or
+not built (`CurationService`), and that works only because a deployment with
+no LLM runs no curation; a `SearchService` is built on every deployment there
+is, so "built or not built" has no state left to express and the choice is
+between an optional collaborator and a second class. It is the same call
+ADR-0022 already made for `embedder`, one layer up. **A failure is absorbed**:
+`expand` never raises, and an unreachable endpoint, an unparseable answer or a
+blank/over-long rewrite all leave the search running on the typed query --
+while still writing the `llm_calls` row, because a ledger holding only the
+successes understates spend by exactly the failures.
+
+**And the reported-not-substituted rule has a shape**:
+`SearchAnswer.expanded_query` is the text that was embedded and `None` when
+the query was embedded as typed, so it is populated on exactly the searches
+that bought a completion and `usher search` prints it above the results. A
+field echoing the typed query when nothing was expanded would put a line on
+every search of every default deployment and mean nothing -- which is the
+mutation the CLI case kills.
+
 **Nothing runs `usher similar --rebuild` for you**, and that is the one
 freshness gap in the milestone, written down as a gap rather than dressed up:
 a title's neighbours go stale when *some other* title gets an embedding,

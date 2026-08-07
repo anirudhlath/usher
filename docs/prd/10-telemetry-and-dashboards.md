@@ -422,8 +422,10 @@ the same `generation_id` on every row of one generation, so the panel is
 outcome through that join rather than by denormalising a household onto a cost
 row, which is what keeps this a spend ledger rather than a second copy of the
 curation record. `NULL` for a purpose that produces no rows at all — query
-expansion is one, and once it ships those are the majority of the table, which
-is why the index that eventually serves this join is partial on
+expansion is one, **shipped in M8 and writing `NULL` here on every row**
+([05](05-search-and-similarity.md)), so on a deployment that both curates and
+searches those rows are the majority of the table, which is why the index that
+eventually serves this join is partial on
 `generation_id IS NOT NULL`. **No foreign key**, in either direction: a
 generation is three to five `curated_rows` rows, so that column is not unique
 and must not become so; and any foreign key would make a ledger row deletable

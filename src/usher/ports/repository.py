@@ -3383,10 +3383,10 @@ class LLMCallRepository(ABC):
         column, so the analogous refusal has nothing to compare. Nothing here
         raises `ValueError`.
 
-        **One call, never a batch, and the shape is not provisional.** Every
-        named call site records exactly once: `CurationService` makes one
-        completion per generation, and query expansion (Task 20) makes one per
-        search -- one per *request*, not a set assembled and flushed later. A
+        **One call, never a batch, and the shape is not provisional.** Both
+        call sites record exactly once: `CurationService` makes one completion
+        per generation, and `QueryExpansionService` makes one per search that
+        embeds -- one per *request*, not a set assembled and flushed later. A
         batch would also be wrong in kind for the failure path, where the
         whole value of the row is that it is written at the moment of failure
         rather than accumulated into something a crash loses. This flushes and

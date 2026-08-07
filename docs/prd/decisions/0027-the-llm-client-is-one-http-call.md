@@ -101,7 +101,11 @@ because no provider reports it — see Evidence.
   a POST.
 - **Waiting for M9.** The port has existed since M1 with no implementation and
   `LLMPurpose.QUERY_EXPANSION` is a member nothing emits — which this project
-  treats as a defect wherever else it appears.
+  treats as a defect wherever else it appears. *(That second clause described
+  the state on 2026-08-06 and stopped being true on 2026-08-07:
+  `QueryExpansionService` emits it, so both members of the vocabulary are now
+  live. The rejection stands on its first clause, and the sentence is kept
+  because it is the argument that was made.)*
 
 ## Evidence
 

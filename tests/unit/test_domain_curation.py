@@ -604,10 +604,12 @@ def test_the_purpose_vocabulary_is_closed_at_the_two_that_have_call_sites() -> N
     spelling. An exact set rather than a membership check, so a third member
     cannot arrive without this list moving and someone reading that rule.
 
-    `QUERY_EXPANSION` is itself the member with no emitter until Task 20 adds
-    one, which is the exception this vocabulary is allowed and the reason it is
-    worth stating: it is declared because PRD 10 names it as a column value, not
-    because something writes it today.
+    **Both members have a call site as of 2026-08-07** and the name of this
+    case has stopped being aspirational: `CurationService` emits `CURATION`
+    and `QueryExpansionService` emits `QUERY_EXPANSION`. It was declared in M1
+    because PRD 10 names it as a column value and went four milestones with no
+    emitter -- which is why the exception used to be written down here, and why
+    it is worth recording that it closed rather than deleting the sentence.
     """
     assert set(LLMPurpose) == {LLMPurpose.CURATION, LLMPurpose.QUERY_EXPANSION}
     assert {p.value for p in LLMPurpose} == {"curation", "query_expansion"}

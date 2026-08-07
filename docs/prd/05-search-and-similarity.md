@@ -573,12 +573,45 @@ expansion**: one LLM call rewriting an emotional query into narrative language
 before embedding, which measurably improves retrieval — one call per query,
 rather than enriching 1.3M records.
 
-⏳ **Query expansion is not built, and M6 declined it deliberately.**
-`ports/llm.py` declares `LLMClient` and `LLMPurpose.QUERY_EXPANSION`, and
-**there is no implementation of that port anywhere in `src/`** until M8. Adding
-a second unimplemented port dependency to the search path buys nothing M6 can
-measure, so **M6 embeds the query exactly as typed.** The seam is
-`SearchService.search`'s query string, and M8 or M9 wraps it. Boundary call 6.
+✅ **Built in M8, off by default, and reported rather than substituted.**
+M6 declined it deliberately — `ports/llm.py` declared `LLMClient` and
+`LLMPurpose.QUERY_EXPANSION` with no implementation of that port anywhere in
+`src/`, and adding a second unimplemented port dependency to the search path
+bought nothing M6 could measure, so **M6 embedded the query exactly as
+typed** (boundary call 6). M8 supplies the implementation ([ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md))
+and `usher.services.query_expansion.QueryExpansionService` is the wrapper the
+seam was left for.
+
+- **Where the call sits.** In front of `SearchService`'s embed, and nowhere
+  else. So a `full_text` search buys no completion, a deployment with no
+  embedder buys none (there is nothing to embed), a blank query buys none (it
+  is refused before the model), and **`usher suggest` buys none** — type-ahead
+  has no semantic lane, which is what keeps this off the one path a client
+  drives per keystroke. The unit of spend is *one search that was going to
+  embed something*, exactly as curation's is one generation.
+- **Only the vector is computed from the rewrite.** `SearchRequest.query` is
+  still the typed string, so under RRF the lexical lane goes on matching the
+  viewer's own words while the semantic lane matches the paraphrase.
+- **Off by default.** `USHER_LLM_ENABLED` is `false`, `composition.llm_client`
+  answers `(None, no-op)`, `build_pipeline` builds no expander, and the search
+  path is byte for byte M6's. No second setting: an operator who turns the LLM
+  on gets curation *and* expansion, which is why the field is reported on every
+  search that bought one.
+- **Reported, never silently substituted.** `SearchAnswer.expanded_query` is
+  the text that was embedded, `None` when the query was embedded as typed, and
+  `usher search` prints it above the results. A viewer who searched for one
+  thing and got results for another cannot otherwise tell a good expansion from
+  a bad one, and neither can an operator reading their bug report.
+- **A failure narrows rather than fails** ([08](08-operations.md)): an
+  unreachable endpoint, an unparseable answer or a rewrite that is blank or
+  over `MAX_QUERY_CHARS` all leave the search to run on the typed query. The
+  attempt is still billed — one `llm_calls` row per attempted call, `ok`
+  derived from `error`, `generation_id` null because this purpose produces no
+  rows ([10](10-telemetry-and-dashboards.md)).
+- **Not measured.** The retrieval improvement above is the literature's, not
+  this project's: nothing here measures MRR against a real catalog with
+  expansion on. M9's `search_queries` is where a real evaluation set comes
+  from.
 
 ## Ranking
 

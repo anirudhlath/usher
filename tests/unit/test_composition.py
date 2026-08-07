@@ -831,3 +831,52 @@ async def test_the_pool_and_the_screen_read_one_taste_service() -> None:
         assert pipeline.pool.taste is pipeline.taste
     finally:
         await engine.dispose()
+
+
+async def test_a_pipeline_with_no_llm_client_gives_search_nothing_to_expand_with() -> None:
+    """**The shipped default, at the wiring layer.** `USHER_LLM_ENABLED` is
+    `false`, so `llm_client` answers `(None, no-op)` and no caller has one to
+    pass -- and a `build_pipeline` that built an expander anyway would need a
+    client it does not have. What this pins is that the *absence* survives:
+    with no `llm=`, `SearchService` holds no expander and every search on every
+    default deployment embeds the query exactly as typed.
+
+    Reaching `_expander` is deliberate. A wiring assertion has nothing else to
+    look at -- the behavioural half needs a real `PostgresSearchIndex` -- and
+    this is the same shape as `pipeline.pool.taste is pipeline.taste` above.
+    """
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    try:
+        pipeline = build_pipeline(AsyncSession(engine), _settings())
+
+        assert pipeline.search._expander is None
+    finally:
+        await engine.dispose()
+
+
+async def test_an_expansion_is_billed_to_the_pipelines_own_ledger_and_model() -> None:
+    """Three wirings, and each is a different way for the spend to go missing.
+
+    A ledger that is **not** `pipeline.llm_calls` writes into a repository over
+    another session, so the row never reaches the transaction the search
+    commits. A commit that is not the session's leaves the row to be rolled
+    back when the read closes -- and a search writes nothing else, so there is
+    no second write to carry it. And a `model` that is not `settings.llm_model`
+    is a `llm_calls.model` disagreeing with the string the client was built
+    with, on exactly the path where no response came back to read one from,
+    which is the column PRD 10 groups spend by.
+    """
+    engine = create_async_engine("postgresql+asyncpg://usher:usher@127.0.0.1:1/usher")
+    client = FakeLLMClient()
+    try:
+        session = AsyncSession(engine)
+        pipeline = build_pipeline(session, _settings(llm_model="wired/asked-1"), llm=client)
+
+        expander = pipeline.search._expander
+        assert expander is not None
+        assert expander._client is client
+        assert expander._ledger is pipeline.llm_calls
+        assert expander._commit == session.commit
+        assert expander._model == "wired/asked-1"
+    finally:
+        await engine.dispose()

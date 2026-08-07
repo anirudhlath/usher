@@ -437,8 +437,9 @@ class LLMCallRow(Base):
     # parser and a validator.
     error: Mapped[str | None] = mapped_column(Text)
     # Nullable, because a purpose that produces no rows at all has no
-    # generation -- query expansion is one, and once Task 20 ships it these
-    # are the majority of the table.
+    # generation -- query expansion is one, and `QueryExpansionService` writes
+    # `NULL` here on every row it records, so on a deployment that curates and
+    # is searched these are the majority of the table.
     generation_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
 
     __table_args__ = (

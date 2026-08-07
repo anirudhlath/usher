@@ -390,8 +390,10 @@ def upgrade() -> None:
         # `LLMCall._ok_and_error_must_agree`.
         sa.Column("error", sa.Text(), nullable=True),
         # Nullable: a purpose that produces no rows at all has no generation.
-        # Query expansion is one, and once Task 20 ships these are the
-        # majority of the table. No foreign key -- see this docstring.
+        # Query expansion is one, and `QueryExpansionService` writes one row
+        # per search that embeds, so on a deployment that curates and is
+        # searched these are the majority of the table. No foreign key -- see
+        # this docstring.
         sa.Column("generation_id", sa.dialects.postgresql.UUID(as_uuid=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_llm_calls"),
         sa.CheckConstraint("model <> ''", name="ck_llm_calls_model_not_empty"),

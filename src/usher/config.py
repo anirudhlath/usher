@@ -254,8 +254,11 @@ class Settings(BaseSettings):
     embedding_offline: bool = True
 
     # The LLM (PRD 06's curation, PRD 05's query expansion). Read by
-    # `composition.llm_client`, which is the one place any of them is
-    # touched.
+    # `composition.llm_client`, which is the one place all but one of them is
+    # touched -- the exception is the model name, which is also read by
+    # `build_curation_service` and `build_pipeline` so that `llm_calls.model`
+    # records the string the client was built with on the path where no
+    # response came back to read one from.
     #
     # **Off by default, and that is the honest default twice over.** It is
     # the `embedding_enabled` argument -- a deployment with this off is
@@ -264,6 +267,16 @@ class Settings(BaseSettings):
     # household's data to a machine the household may not own. A default that
     # curated out of the box would make that a thing an operator discovers
     # rather than chooses.
+    #
+    # **One switch, two spenders**, which is worth stating because the second
+    # arrived a milestone after the first: curation buys one completion per
+    # household per generation, and query expansion buys one per semantic or
+    # fused search. There is deliberately no second setting to separate them.
+    # A `USHER_SEARCH_QUERY_EXPANSION` would be a knob whose only honest
+    # default is "follow the switch above", and this project has already
+    # learned what a setting that nothing sets differently costs; an operator
+    # who wants to see what expansion is spending has `llm_calls` grouped by
+    # `purpose`, which is exactly what that column is for.
     llm_enabled: bool = False
     # The provider abstraction, and the whole of it (ADR-0027). OpenAI,
     # OpenRouter, Together, Groq, DeepSeek, Mistral, vLLM, llama.cpp, Ollama

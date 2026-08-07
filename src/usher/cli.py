@@ -73,7 +73,7 @@ from usher.services.curation import CurationReport
 from usher.services.curation_validate import DropReason
 from usher.services.home import ComposeReport, HomeService
 from usher.services.rows.cache import RowCache
-from usher.services.search import SemanticSearchUnavailable
+from usher.services.search import SearchAnswer, SemanticSearchUnavailable
 from usher.telemetry import (
     configure_telemetry,
     register_queue_gauges,
@@ -879,6 +879,14 @@ async def _search(
     request with no vector, so the only object that can construct one is the
     object holding the model -- which is why this passes primitives to
     `SearchService.search` and never a `SearchRequest`.
+
+    **The completion client is built on exactly the same condition, and that
+    is the condition rather than a convenience.** Query expansion sits in front
+    of the embed, so a mode with no embed has no call in front of one and a
+    client built for it would open a connection pool for nothing. With
+    `USHER_LLM_ENABLED=false` -- the shipped default -- `composition.llm_client`
+    answers `(None, no-op)` and `build_pipeline` builds no expander, so this
+    whole command is byte for byte what M6 shipped.
     """
     requested = SearchMode(mode)
     model, aclose_model = (
@@ -892,9 +900,19 @@ async def _search(
         if requested is not SearchMode.FULL_TEXT
         else (None, nothing)
     )
+    # After the embedder, so a model that fails to load cannot leak a
+    # connection pool: `llm_client` is pure construction and cannot raise,
+    # `embedder` is the one that can. `report=False` for the reason above --
+    # that factory's line is *"curate jobs will not be claimed"*, which is
+    # about a lane this process does not run.
+    client, aclose_client = (
+        await llm_client(settings, report=False)
+        if requested is not SearchMode.FULL_TEXT
+        else (None, nothing)
+    )
     try:
         async with _session_for(settings) as session:
-            pipeline = build_pipeline(session, settings, embedder=model)
+            pipeline = build_pipeline(session, settings, embedder=model, llm=client)
             try:
                 answer = await pipeline.search.search(
                     query, mode=requested, limit=limit, filters=filters
@@ -907,8 +925,31 @@ async def _search(
                 # treatment `_as_uuid` gives a bad id.
                 raise SystemExit(f"{exc} -- try --mode fused, or run `usher index`") from exc
     finally:
+        await aclose_client()
         await aclose_model()
 
+    _print_search_answer(answer)
+
+
+def _print_search_answer(answer: SearchAnswer) -> None:
+    """The operator's answer. `print`, never `logger` -- `_print_home_report`'s
+    and `_print_curation_report`'s split, and the same reason: a command's
+    answer is stdout.
+
+    A function of its own rather than a tail of `_search`, for
+    `_print_curation_report`'s reason: everything above it needs a database and
+    everything here needs a `SearchAnswer`, and the expanded-query line is the
+    one report in this milestone whose *absence* is the defect.
+    """
+    if answer.expanded_query is not None:
+        # **Before the results, because it is the question they answer.**
+        # Reported on every search that bought a rewrite, not only when it
+        # looks surprising: a viewer who searched for one thing and got results
+        # for another cannot tell a good expansion from a bad one without
+        # seeing it, and neither can an operator reading their bug report.
+        # `expanded_query` is `None` on every path that bought no completion,
+        # so this line never appears on a deployment with the LLM off.
+        print(f"expanded: {answer.expanded_query}")
     for rank, result in enumerate(answer.results, start=1):
         year = f" ({result.year})" if result.year else ""
         owned = "*" if result.owned else " "

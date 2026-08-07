@@ -94,10 +94,16 @@ be added if a client turns out to need flexible field selection.
 > command line, exactly as M2 did for `bootstrap` and M4 for the ingest
 > pipeline ([09](09-roadmap.md)'s M6 boundary call 1). M9 adds routers over
 > finished wiring, and is where this document's RFC 9457 envelope is defined.
-> One shape note for whoever writes them: `semantic=` in the sketch above is a
+> Two shape notes for whoever writes them. `semantic=` in the sketch above is a
 > boolean, and the shipped `SearchRequest` carries a three-valued
 > `SearchMode` (`full_text` / `semantic` / `fused`), because a bool cannot
-> express fusion at all.
+> express fusion at all. And **`SearchAnswer.expanded_query` has to reach the
+> response body**: M8 put an LLM rewrite in front of the semantic embed
+> ([05](05-search-and-similarity.md)) under the rule that it is *reported,
+> never silently substituted*, and `usher search` prints it. A route that
+> dropped the field would make an expansion invisible to exactly the surface
+> most people search from — the same class of defect `requested_mode` beside
+> `mode` exists to prevent one field over.
 
 ### Resources
 

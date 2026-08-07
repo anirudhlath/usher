@@ -127,6 +127,7 @@ from usher.services.ingest import IngestService
 from usher.services.jobs import JobWorker
 from usher.services.matching import MatchService
 from usher.services.push import PushApplyService
+from usher.services.query_expansion import QueryExpansionService
 from usher.services.reconcile import ReconcileService
 from usher.services.rows import row_providers
 from usher.services.rows.cache import RowCache
@@ -262,6 +263,7 @@ def build_pipeline(
     max_retract_fraction: float | None = None,
     provider: MetadataProvider | None = None,
     embedder: Embedder | None = None,
+    llm: LLMClient | None = None,
 ) -> Pipeline:
     """Wire one session into the whole ingest pipeline.
 
@@ -290,6 +292,21 @@ def build_pipeline(
     every other caller passes nothing and gets a `SearchService` whose
     full-text and trigram lanes work exactly as well. That is the whole of
     ADR-0022's "the embedder is optional" at the wiring layer.
+
+    `llm` is `None` on the same terms, and is `None` by default twice over:
+    `USHER_LLM_ENABLED` is `false`, so `composition.llm_client` answers
+    `(None, no-op)` even for a caller that asks. Given one, this builds the
+    `QueryExpansionService` that sits in front of `SearchService`'s embed --
+    over **this session's** `llm_calls` and **this session's** commit, because
+    a ledger row written through anything else is spend recorded in a
+    transaction nobody commits. Given none, `SearchService` gets no expander
+    and every line of the search path is what M6 shipped.
+
+    **The client reaches nothing else from here.** The other consumer of a
+    completion is `CurationService`, which `build_curation_service` composes
+    from this pipeline *plus* the client -- deliberately a second factory,
+    because everything on a pipeline is rebuilt per worker pass and the client
+    is not.
     """
     publisher = NullEventPublisher() if events is None else events
     sources = PostgresSourceRepository(session)
@@ -401,6 +418,20 @@ def build_pipeline(
             media_items,
             result_limit=settings.search_result_limit,
             embedder=embedder,
+            # **Built here rather than passed in, and the ledger is the
+            # reason.** An expansion is billed to `llm_calls` and committed,
+            # both of which are per-session; the client is per-process. This
+            # function is the only place that holds one of each.
+            expander=(
+                None
+                if llm is None
+                else QueryExpansionService(
+                    client=llm,
+                    ledger=llm_calls,
+                    commit=session.commit,
+                    model=settings.llm_model,
+                )
+            ),
         ),
         # **No embedder here, in either form.** The rebuild reads stored
         # vectors and never embeds anything, which is why `usher similar`

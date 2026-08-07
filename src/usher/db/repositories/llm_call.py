@@ -70,8 +70,9 @@ _INSERT_CALL = text(
     # `test_a_cost_is_stored_exactly` is what refuses that.
     bindparam("cost_usd", type_=Numeric(COST_PRECISION, COST_SCALE, asdecimal=True)),
     # Nullable, and the `None` is a state rather than an omission: a purpose
-    # that produces no rows at all has no generation, and once Task 20 ships
-    # query expansion those are the majority of this table.
+    # that produces no rows at all has no generation, and `QueryExpansionService`
+    # writes exactly that on every row, so on a deployment that curates and is
+    # searched those are the majority of this table.
     bindparam("generation_id", type_=PGUUID(as_uuid=True)),
 )
 

@@ -1379,3 +1379,68 @@ expression on a path only the failing cases reach has to be checked for the
 names it introduces** — the cheap check is that the mutated file's new
 identifiers are already imported, and the cheap tell is a kill whose failing
 cases are *exactly* the ones written for that clause.
+
+**M8 Task 20's sweep: 55 mutations over query expansion — 51 killed, 3
+equivalent-mutant controls surviving as designed, 1 measured survivor since
+closed.** Run 2026-08-07 in place against the **whole `tests/unit` selection**
+(2,881 cases, ~20 s a run), over `services/query_expansion.py`,
+`services/search.py`, `composition.py` and `cli.py`. **0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-RUN.** `PYTHONDONTWRITEBYTECODE=1`, `__pycache__`
+swept before every run, `compile()` for the dry run, `cp` backups keyed on the
+**full path**, the plant asserted present (`path.read_text() == mutated`) and
+the restore asserted by reading the file back, only `^FAILED` lines read as
+kills, no `-q` added, and a signal handler. Baseline established green on a
+clean tree first: **2,819 unit / 4 skipped**, **899 integration / 8 skipped**.
+The three controls, each against every gate step — all three pass all five:
+
+| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `_ledger_row`'s `tokens_in`/`tokens_out` keyword arguments swapped | PASS | PASS | PASS | PASS | PASS |
+| `SearchService.__init__`'s `self._titles`/`self._media_items` writes swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `_settle`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first two are facts about the *code* rather than about what the tools look
+at: keyword arguments are evaluated in written order and both expressions are
+side-effect-free, and two attribute writes from two distinct parameters cannot
+observe each other. The docstring reword was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`, which finds
+`test_ports_metadata.py`, `test_rows_curated.py`, `test_ports_embedding.py`,
+`test_services_home_sequential.py`, `test_services_curation.py`,
+`test_api_rows.py`, `test_rows_invariants.py` and
+`tests/integration/test_services_reconcile.py` — **none of which scans
+`services/query_expansion.py`, `services/search.py`, `composition.py` or
+`cli.py`.**
+
+**The one real survivor and why it was closed rather than reported.** `_ms`'
+`max(0, …)` clamp deleted survived all 2,881 cases. It is *not* an equivalent
+mutant: `latency_ms` is `ge=0` on `LLMCall` and `>= 0` in the column, so a
+negative delta is a `ValidationError` raised from inside `_ledger_row`, on the
+path that has just spent money, and out through an `expand` whose caller was
+promised it never raises. `time.monotonic` is non-decreasing by contract, so
+the clamp is unreachable with the shipped clock — **the injected one is the
+only thing that can break the promise, which is exactly what makes a guard
+against a promise nobody breaks testable at all** (same shape as `_cosine`'s
+zero-norm guard). Re-planted after the case landed, it fails **that case
+alone**. The general form: *when a guard survives, ask which collaborator
+could falsify the promise it defends; if one is already injected, the case
+costs three lines and the survivor is a gap rather than an equivalence.*
+
+**And two shapes worth carrying, both about where a sweep has to look.**
+
+- **A prompt sweep's yield is near 100% and this one confirms it a second
+  time.** Eight of the 55 mutations are prompt or sanitiser mutations
+  (`build_expansion_prompt`), and all eight died — because every one of them
+  had a case *written for it by name*. The artefact was enumerated before the
+  control flow was, which is the method M8 Task 12's blind spot produced. The
+  boundary is stated in the test file rather than left implicit: the key, the
+  character bound, the JSON instruction, the query's own rendering, the order
+  of the two blocks and "every declared rule reaches the prompt" are pinned;
+  **the wording of the rules and of the role sentence is not**, and a rule
+  deleted from `EXPANSION_RULES` itself is deliberately outside the case that
+  iterates it.
+- **A `pgrep -f <pattern>` wait loop matches its own command line.** Not a
+  mutation finding but it cost this task ~15 minutes: `until ! pgrep -f
+  "m8t20_sweep.py"; do sleep 15; done` never exits, because the shell running
+  the loop has `m8t20_sweep.py` in its own `argv`. It looks exactly like a
+  sweep that is still running. Use a bracket class (`pgrep -f
+  "[m]8t20_sweep"`) or `pgrep -x`.

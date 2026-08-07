@@ -265,6 +265,28 @@ model refuses outright rather than narrowing — it is the one question
 full-text cannot answer, so a plausible answer to a different one is worse
 than none.
 
+**With `USHER_LLM_ENABLED=true`, a semantic or fused search first spends one
+completion rewriting the query into the language a synopsis is written in, and
+prints what it embedded:**
+
+```
+$ uv run usher search "movies about isolation in space"
+expanded: a lone crew adrift, silence, deep-space confinement, psychological drift
+  1   0.7000  ...
+mode=fused results=12 semantic_coverage=0.884
+```
+
+The `expanded:` line is not optional decoration — a viewer who searched for one
+thing and got results for another cannot tell a good rewrite from a bad one
+without seeing it. It appears only when a completion actually produced one, so
+on the default deployment (`USHER_LLM_ENABLED=false`) the output is unchanged
+and no completion is bought. Neither is one bought by `--mode full_text`, by a
+blank query, by a deployment with no embedding model, or by `usher suggest` —
+type-ahead has no semantic lane, which is what keeps this off the path a client
+drives per keystroke. Every attempt lands in `llm_calls` with
+`purpose = 'query_expansion'`, including the ones that failed; an unreachable
+endpoint or an unusable answer leaves the search to run on the words you typed.
+
 Every `SearchFilters` field has a flag and no filter has two, which is
 deliberate: an engine that cannot express a filter raises rather than ignoring
 it, because an ignored filter returns *more* results and reads as working.

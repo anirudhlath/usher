@@ -367,8 +367,9 @@ class LLMCallRepositoryContract:
         value every other case uses.
 
         `LLMPurpose.QUERY_EXPANSION` produces no rows at all, so its ledger
-        entry belongs to no generation; once Task 20 ships, these are the
-        *majority* of the table, and `m08a`'s deferred
+        entry belongs to no generation. `QueryExpansionService` writes one per
+        search that embeds, so on a deployment that curates and is searched
+        these are the *majority* of the table, and `m08a`'s deferred
         `ix_llm_calls_generation_id` is declared partial for exactly that
         reason. A ledger that could not store them would drop the cheaper half
         of the spend and leave the expensive half looking like the whole.
