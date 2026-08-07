@@ -497,6 +497,36 @@ asserts over `ast.unparse` of the module). Write "cannot be killed
 behaviourally", which is a claim about the assertions; "genuinely cannot be
 killed" is a claim about the repository and is false here.
 
+**The corollary was written down and then not applied to the very next task,
+so here are two controls that pass the whole gate.** M8 Task 16 shipped the
+same defect one commit later — both its reported "equivalent-mutant controls"
+were `__all__` reorders, i.e. mutations `ruff` rejects, which demonstrate
+nothing about whether the *suite* would catch a defect that could ship.
+Re-measured 2026-08-07 against the whole 2,7xx-case `tests/unit` **and** all
+four gate steps:
+
+| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| two independent `worker.register` calls in `composition.build_worker` swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `curate_handler`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+| `services/handlers.py`'s `__all__` reordered | PASS | **rc=1 `RUF022`** | PASS | PASS | PASS |
+
+The register swap is the better of the two, because its equivalence is a
+*fact about the code* rather than about what the tools look at:
+`JobWorker.register` writes a dict, `registered_kinds` returns a `frozenset`,
+`run_once` passes `list(self._handlers)` to a `claim` that spells it
+`kind = ANY(:kinds)` in Postgres and `set(kinds)` in the fake — so no layer
+below the registration can observe the order. A docstring reword is the
+cheaper one and is safe **only after checking that no case scans that
+module's prose**: `grep -rn "getdoc\|__doc__\|ast.unparse\|getsource" tests/`
+finds guards over `ports/embedding.py`, `ports/metadata.py`,
+`services/home.py`, `services/curation.py`, `services/reconcile.py` and
+`services/rows/`, and a control planted in one of those is a kill waiting to
+be misread as a suite with teeth.
+**Run the control against the gate, not only against pytest, and put the
+verdict per step in the write-up** — one line per tool is what makes the
+difference between the two claims visible.
+
 **Two predicates, one selectivity: a `WHERE` clause is unobservable when
 another clause in the same statement happens to be exactly as selective, and
 every fixture in the suite makes it so.** Found 2026-08-06 by M8 Task 9's

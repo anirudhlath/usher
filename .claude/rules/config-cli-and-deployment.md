@@ -119,7 +119,11 @@ warnings, which is the failure a log level exists to prevent. It moved to
 `composition.metadata_provider`, which is where the decision is *made* and
 which each of the three composition roots calls exactly once per process —
 and which a push-only deployment never reaches at all, correctly, since with
-no worker there are no enrich jobs to leave unclaimed. `usher work` was
+no worker there are no enrich jobs to leave unclaimed. (The sentence itself
+reads `enrich and derive jobs will not be claimed` since 2026-08-07 — M7 put
+`DERIVE` behind the same `provider is not None` guard and left this line
+promising one kind while two went unclaimed. The finding above is about
+*where* the line lives, not its wording.) `usher work` was
 already calling `build_worker` once outside its loop, so that root saw one
 warning either way; the lane was the one at 5 s. The case that has teeth
 drains **three** worker passes and asserts the sink is empty — asserting

@@ -32,7 +32,7 @@ with", both of which answer from local state.
 """
 
 import uuid
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
 import pytest
 import pytest_asyncio
@@ -72,6 +72,9 @@ from usher.ports.search import SearchFilters
 # express "this row came from a different blend", which is the whole state the
 # column exists to describe.
 _FP = "arranged-by-a-test"
+
+# The shape every `(thing, close it)` pair in `usher.composition` returns.
+AsyncCloser = Callable[[], Awaitable[None]]
 
 
 @pytest.fixture
@@ -223,6 +226,48 @@ async def test_work_parks_a_curate_job_it_cannot_serve_and_buys_nothing(
     assert status == "parked", "the curate job was never claimed; this root built no LLM client"
     assert int(billed) == 0, "an empty catalog was billed for a completion"
     get_settings.cache_clear()
+
+
+async def test_work_releases_every_process_resource_it_built(
+    cli_settings: Settings, monkeypatch: pytest.MonkeyPatch, clean_slate: None
+) -> None:
+    """The `usher work` half of `create_app`'s
+    `test_the_lifespan_releases_every_process_resource_it_built`, and the two
+    are one claim about two roots -- which is what `usher.composition` exists
+    to keep in step.
+
+    Measured before writing it: deleting any one of `aclose()`,
+    `aclose_model()` or `aclose_client()` from `_work`'s `finally` left
+    `tests/unit` and `tests/integration` fully green. `aclose_client()` is
+    M8's line and the other two are inherited; all three are pinned here
+    rather than only the new one.
+
+    The three factories are substituted for the reason the API case states:
+    on this deployment's settings the real ones all answer
+    `(None, composition.nothing)`, and `nothing` is one shared module-level
+    no-op, so a real run cannot tell "released the thing" from "awaited the
+    no-op". `--once` so the loop exits and the `finally` actually runs.
+    """
+    calls: list[str] = []
+
+    def _factory(name: str) -> Callable[..., Awaitable[tuple[None, AsyncCloser]]]:
+        async def _build(*_: object, **__: object) -> tuple[None, AsyncCloser]:
+            async def _close() -> None:
+                calls.append(name)
+
+            return None, _close
+
+        return _build
+
+    monkeypatch.setattr("usher.cli.metadata_provider", _factory("provider"))
+    monkeypatch.setattr("usher.cli.embedder", _factory("embedder"))
+    monkeypatch.setattr("usher.cli.llm_client", _factory("client"))
+
+    await _work(cli_settings, once=True)
+
+    assert sorted(calls) == ["client", "embedder", "provider"], (
+        "`usher work` built three process-lifetime resources and did not release all three"
+    )
 
 
 async def test_the_default_user_is_created_once_and_is_stable(

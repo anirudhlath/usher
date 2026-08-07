@@ -180,10 +180,11 @@ uv run usher work --once   # one pass over the queue, then exit
 uv run usher work          # stay up, polling
 ```
 
-**Three of the six job kinds are claimed only by a process configured for
+**Four of the six job kinds are claimed only by a process configured for
 them**, and a worker that is not simply leaves them for one that is rather
 than failing them: `enrich` and `derive` need `USHER_TMDB_API_KEY`, `index`
 needs the `embedding` extra, and `curate` needs `USHER_LLM_ENABLED=true`.
+Only `match` and `watch_history` are registered in every build.
 The last one is the one to know about before you turn it on — a `curate` job
 is where this project spends money, one completion per household per run,
 against whatever `USHER_LLM_BASE_URL` names.

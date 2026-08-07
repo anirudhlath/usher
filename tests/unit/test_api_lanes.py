@@ -288,11 +288,12 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
         ),
         similar=SimilarityService(embeddings, neighbors, titles, commit),
         row_providers=ROW_PROVIDERS,
-        # Over the port double rather than `cast(Any, None)`, on the terms
-        # `search` above states: no lane reads a curated row -- generation
-        # is `JobKind.CURATE`'s and rendering is `GET /home`'s -- and a
-        # field left unset here is one a lane could start reading without
-        # this file noticing.
+        # Over the port double rather than `cast(Any, None)`, and no longer
+        # only on the terms `search` above states: the worker lane *writes*
+        # this one whenever it holds an `LLMClient`, because
+        # `build_curation_service` takes `rows=pipeline.curated_rows` and a
+        # generation replaces the household's shelves through it. Rendering
+        # is still only `GET /home`'s.
         curated_rows=FakeCuratedRowRepository(),
         # Over the port double for the same reason, one table over. The
         # worker lane *does* reach this one whenever it holds an
@@ -301,11 +302,13 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
         # the first generation rather than a compile error.
         llm_calls=FakeLLMCallRepository(),
         taste=taste,
-        # No lane reads it -- generation is `JobKind.CURATE`'s, which is a
-        # later task -- so this is here for the same reason `taste` is: the
-        # dataclass has no defaults, deliberately, so a field added later is
-        # a compile error at every construction site rather than a `None`
-        # that surfaces as an `AttributeError` on the one path that reads it.
+        # Read by the worker lane on the same terms as the two above:
+        # `build_curation_service` takes `pool=pipeline.pool`, and the pool
+        # is the first thing a generation asks for. Still constructed here
+        # for the reason `taste` is, which has not changed: the dataclass has
+        # no defaults, deliberately, so a field added later is a compile
+        # error at every construction site rather than a `None` that
+        # surfaces as an `AttributeError` on the one path that reads it.
         pool=CandidatePoolService(titles=titles, embeddings=embeddings, taste=taste, size=8),
         events=fakes.events,
         commit=commit,

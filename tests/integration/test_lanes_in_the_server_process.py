@@ -31,7 +31,7 @@ work handed to `LaneSupervisor`.
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
@@ -67,6 +67,8 @@ CREDENTIALS = SourceCredentials(username="usher", password=SecretStr("correct-ho
 # against `IDLE_SLEEP_SECONDS = 5.0`: the first pass is immediate, so a
 # working lane finishes in milliseconds and only a broken one waits.
 BOUND_SECONDS = 20.0
+# The shape every `(thing, close it)` pair in `usher.composition` returns.
+AsyncCloser = Callable[[], Awaitable[None]]
 
 
 @pytest.fixture
@@ -316,6 +318,75 @@ async def test_a_curate_job_waits_for_a_process_that_has_a_model(
         await asyncio.sleep(0.2)
 
     assert await _curate_status(sessions, household) == "pending"
+
+
+class _Closes:
+    """Counts what a composition root actually released.
+
+    A `(thing, close it)` pair whose `close it` is never called is the one
+    defect neither a fake nor `mypy` can see: the object is built, the
+    process works, and the transport leaks. `FakeLLMClient` carries a
+    `closed` counter for the same reason and nothing had ever read it.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def factory(self, name: str) -> Callable[..., Awaitable[tuple[None, AsyncCloser]]]:
+        async def _build(*_: object, **__: object) -> tuple[None, AsyncCloser]:
+            async def _close() -> None:
+                self.calls.append(name)
+
+            return None, _close
+
+        return _build
+
+
+async def test_the_lifespan_releases_every_process_resource_it_built(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch, clean: None
+) -> None:
+    """**`create_app`'s `finally` is asserted rather than read.**
+
+    Its own comment says a skipped cleanup here "is a real leak, not a
+    theoretical one. This is that milestone; the comment stops being a
+    prediction" -- and until this case nothing in the suite could tell the
+    difference. Measured before writing it: deleting any one of
+    `close_provider()`, `close_model()` or `close_client()` from that
+    `finally` left `tests/unit` and `tests/integration` fully green. The
+    `close_client()` line is M8's and the other two are inherited, so this
+    closes all three rather than only the new one -- a case that pinned the
+    newest resource and left its two neighbours unobserved would be the same
+    gap with a shorter list.
+
+    The three factories are substituted rather than the real ones driven,
+    because the *real* `metadata_provider`/`embedder`/`llm_client` all answer
+    `(None, nothing)` on this deployment's settings and `nothing` is a
+    module-level no-op shared by every degradation path -- so a real run
+    cannot distinguish "closed the thing" from "closed the no-op". Each stub
+    hands back a distinct closer, which is what makes the count and the
+    identity of what was released both observable.
+
+    `worker_enabled=True` is the premise: all three are built only where a
+    worker will use them, so a push-only process legitimately closes
+    nothing.
+    """
+    closes = _Closes()
+    monkeypatch.setattr("usher.api.app.metadata_provider", closes.factory("provider"))
+    monkeypatch.setattr("usher.api.app.embedder", closes.factory("embedder"))
+    monkeypatch.setattr("usher.api.app.llm_client", closes.factory("client"))
+    settings = Settings(
+        database_url=postgres_url,
+        secret_key=SECRET_KEY,
+        worker_enabled=True,
+        push_enabled=False,
+    )
+
+    async with LifespanManager(create_app(settings)):
+        assert closes.calls == [], "a resource was released while the process was still up"
+
+    assert sorted(closes.calls) == ["client", "embedder", "provider"], (
+        "the lifespan built three process-lifetime resources and did not release all three"
+    )
 
 
 class _Adapters(SourceAdapterFactory):

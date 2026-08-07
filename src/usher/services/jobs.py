@@ -77,11 +77,14 @@ class JobWorker:
 
         A read-only view rather than a test reaching into `_handlers`, and
         the property that assertion needs is the one `run_once` relies on:
-        two of the four kinds are registered conditionally (`ENRICH` on a
-        TMDb key, `INDEX` on an embedder), so "this deployment cannot run
-        that kind" is wiring a test has to be able to see. A mutable dict
-        handed out would let a caller register a handler the worker never
-        knew about, which is the same silent gap the other way round.
+        **four of the six kinds are registered conditionally** by
+        `composition.build_worker` -- `ENRICH` and `DERIVE` on a TMDb key,
+        `INDEX` on an embedder, `CURATE` on an `LLMClient` -- so "this
+        deployment cannot run that kind" is wiring a test has to be able to
+        see, and only `MATCH` and `WATCH_HISTORY` are in every build. A
+        mutable dict handed out would let a caller register a handler the
+        worker never knew about, which is the same silent gap the other way
+        round.
         """
         return frozenset(self._handlers)
 

@@ -276,9 +276,14 @@ def _uuid_key(job: Job, expected: str) -> uuid.UUID:
 
     A `ValueError` from `uuid.UUID` is not a `UsherPortError`, and
     `JobWorker` lets those propagate deliberately — so an unparseable key
-    would kill the worker rather than park its one job. Every kind's key
-    passes through here, so there is one conversion and one raise rather than
-    four chances for one of them to raise the wrong type.
+    would kill the worker rather than park its one job. Every **UUID-keyed**
+    kind's key passes through here -- `enrich`, `index` and `derive` via
+    `_title_id`, `curate` via `_user_id` -- so there is one conversion and one
+    raise rather than four chances for one of them to raise the wrong type.
+    `match` and `watch_history` never reach it: their key is a source's own
+    `external_id`, an opaque string that is handed to the adapter as it
+    stands, which is the module docstring's three-category split arriving at
+    the converter that only serves one of the three.
     """
     try:
         return uuid.UUID(job.key)

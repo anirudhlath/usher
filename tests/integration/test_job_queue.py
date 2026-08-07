@@ -537,6 +537,143 @@ async def test_completing_an_unknown_id_does_not_disturb_the_queue(
     assert (await session.execute(text("SELECT count(*) FROM jobs"))).scalar_one() == 1
 
 
+async def _running_row(session: AsyncSession, key: str) -> tuple[str, int] | None:
+    row = (
+        await session.execute(
+            text("SELECT status, priority FROM jobs WHERE kind = 'curate' AND key = :key"),
+            {"key": key},
+        )
+    ).first()
+    return None if row is None else (row.status, row.priority)
+
+
+# (the running row's priority, the repeat's priority, rows written, the
+# priority left on the row). Measured against pgvector/pgvector:pg17 through
+# `PostgresJobQueue` on 2026-08-07 -- see the two cases below for what each
+# half means and why the second one matters more than it reads.
+_REPEAT_WHILE_RUNNING = [
+    (JobPriority.BACKFILL, JobPriority.BACKFILL, 0, JobPriority.BACKFILL),
+    (JobPriority.DEMAND, JobPriority.DEMAND, 0, JobPriority.DEMAND),
+    (JobPriority.NEW, JobPriority.BACKFILL, 0, JobPriority.NEW),
+    (JobPriority.BACKFILL, JobPriority.NEW, 1, JobPriority.NEW),
+    (JobPriority.BACKFILL, JobPriority.DEMAND, 1, JobPriority.DEMAND),
+]
+
+
+@pytest.mark.parametrize(("running_at", "asked_at", "written", "left_at"), _REPEAT_WHILE_RUNNING)
+async def test_a_repeat_of_a_running_job_is_written_only_when_it_promotes(
+    session: AsyncSession,
+    queue: PostgresJobQueue,
+    running_at: JobPriority,
+    asked_at: JobPriority,
+    written: int,
+    left_at: JobPriority,
+) -> None:
+    """`_ENQUEUE`'s `WHERE` decides this, and `status = 'running'` is not in
+    it.
+
+    The clause is `jobs.status <> 'parked' AND jobs.priority <
+    excluded.priority`, so what a repeat costs while the job is *running*
+    turns entirely on the second half -- and "0 rows written" is a statement
+    about the two priorities rather than about the job being in flight. Both
+    halves are here because the interesting reading is the contrast: three
+    rows write nothing, two write a row, and the row is the same row in all
+    five.
+
+    `JobKind.CURATE` is the kind this is filed under (its `Job.key` is a
+    `user_id`, so a repeat is a second household asking for the *same*
+    household's shelves), but nothing here is curation-specific -- the
+    statement has no `kind` in it.
+    """
+    key = str(uuid.uuid4())
+    await queue.enqueue([JobRequest(kind=JobKind.CURATE, key=key, priority=running_at)])
+    claimed = await queue.claim([JobKind.CURATE])
+    assert await _running_row(session, key) == (JobStatus.RUNNING, running_at), (
+        "the premise: the job the repeat repeats is in flight"
+    )
+
+    assert (
+        await queue.enqueue([JobRequest(kind=JobKind.CURATE, key=key, priority=asked_at)])
+    ) == written
+
+    assert await _running_row(session, key) == (JobStatus.RUNNING, left_at), (
+        "one row, still running, at whichever priority GREATEST kept"
+    )
+    assert (await session.execute(text("SELECT count(*) FROM jobs"))).scalar_one() == 1
+    await queue.complete(claimed[0].id)
+
+
+async def test_a_promoting_repeat_of_a_running_job_reports_success_and_is_discarded_anyway(
+    session: AsyncSession, queue: PostgresJobQueue
+) -> None:
+    """**`enqueue`'s return value does not tell a caller whether its request
+    will run**, and this is the case where it says the wrong thing.
+
+    A repeat at a *strictly higher* priority than the running row satisfies
+    `jobs.priority < excluded.priority`, so `enqueue` writes 1 and reports
+    success -- but it wrote a promotion of the row already in flight, not a
+    second job. `complete()` deletes that row by id when the in-flight run
+    finishes, and the work the caller asked for never happens. The queue is
+    empty afterwards and nothing re-enqueues it.
+
+    That matters at exactly the priority a demand endpoint uses. `POST
+    /admin/rows/regenerate` and `api/routes/titles.py`'s existing promotion
+    both enqueue at `JobPriority.DEMAND`, so a caller reading `written == 0`
+    as "coalesced into the run in flight" gets a **false negative** here: the
+    count is 1 and the request is still lost. The distinction is not
+    observable through the port at all -- an enqueue that created a job and
+    an enqueue that promoted one both return 1 -- so a caller that needs a
+    *fresh* generation after the one in flight has to arrange it above the
+    queue.
+    """
+    key = str(uuid.uuid4())
+    await queue.enqueue([JobRequest(kind=JobKind.CURATE, key=key, priority=JobPriority.BACKFILL)])
+    claimed = await queue.claim([JobKind.CURATE])
+    assert claimed[0].priority < JobPriority.DEMAND, (
+        "the premise: the running row is below the priority the repeat asks for, "
+        "which is the only reason the repeat writes at all"
+    )
+
+    written = await queue.enqueue(
+        [JobRequest(kind=JobKind.CURATE, key=key, priority=JobPriority.DEMAND)]
+    )
+    assert written == 1, "a promotion is a write, and `enqueue` reports it as one"
+    assert await _running_row(session, key) == (JobStatus.RUNNING, JobPriority.DEMAND), (
+        "the same row, promoted -- not a second job"
+    )
+
+    await queue.complete(claimed[0].id)
+    assert await _running_row(session, key) is None, "the completion took the promoted row with it"
+    assert await queue.claim([JobKind.CURATE]) == [], (
+        "nothing is left to run for the request `enqueue` told the caller it had accepted"
+    )
+
+
+async def test_a_promoting_repeat_survives_a_retryable_failure_of_the_run_it_promoted(
+    session: AsyncSession, queue: PostgresJobQueue, clear_backoff: ClearBackoff
+) -> None:
+    """The loss above is `complete()`'s, not the promotion's.
+
+    Same sequence, and the in-flight run *fails* retryably instead of
+    succeeding: `_FAIL` puts the row back to `pending` rather than deleting
+    it, so the promoted priority is what the next claim sees and the repeat
+    is served by the retry. Worth pinning beside the discard, because it is
+    what makes "the request is discarded" a statement about the successful
+    path specifically rather than about the queue in general.
+    """
+    key = str(uuid.uuid4())
+    await queue.enqueue([JobRequest(kind=JobKind.CURATE, key=key, priority=JobPriority.BACKFILL)])
+    claimed = await queue.claim([JobKind.CURATE])
+    await queue.enqueue([JobRequest(kind=JobKind.CURATE, key=key, priority=JobPriority.DEMAND)])
+
+    await queue.fail(claimed[0].id, error="upstream said 503", retryable=True)
+    assert await _running_row(session, key) == (JobStatus.PENDING, JobPriority.DEMAND)
+
+    await clear_backoff()
+    reclaimed = await queue.claim([JobKind.CURATE])
+    assert [job.key for job in reclaimed] == [key]
+
+
 async def test_the_claim_ordering_survives_a_planner_that_ignores_the_index(
     session: AsyncSession, queue: PostgresJobQueue
 ) -> None:

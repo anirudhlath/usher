@@ -77,6 +77,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Creates tasks and opens no connection -- see `LaneSupervisor.start`.
         # That is what keeps `/health` answering 200 with Postgres down.
         await lanes.start()
+        # **The `try:` opens here rather than at the engine, so a raise from
+        # `metadata_provider`, `embedder`, `llm_client` or `lanes.start()`
+        # leaks whatever was already built.** Three resources now instead of
+        # M5's two, so the window widened by one this milestone. Measured and
+        # left alone rather than overlooked: each of those four raises only
+        # on a misconfiguration this process cannot survive anyway (a bad
+        # DSN, a missing ONNX model, an unusable base URL), the process exits
+        # seconds later, and the operating system reclaims the socket and the
+        # mapping. `contextlib.AsyncExitStack` is the fix if any of the four
+        # ever becomes recoverable -- push each closer as it is built and let
+        # the stack unwind in reverse -- and `usher work`'s `finally`
+        # (`cli._work`) has the same shape and would take the same change.
         try:
             yield
         finally:

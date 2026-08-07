@@ -680,9 +680,12 @@ async def metadata_provider(
     """The TMDb provider and the callable that closes its transport.
 
     Returns `(None, no-op)` when no key is configured, rather than raising:
-    `match` and `watch_history` jobs need no provider at all, and a worker
-    that refused to start without a TMDb key would take two working lanes
-    down with the third.
+    **four of the six job kinds need no provider at all** -- `match`,
+    `watch_history`, `index` and `curate` -- so a worker that refused to
+    start without a TMDb key would take four working kinds down with the two
+    that need one. (`derive` is the second: `build_worker` registers it under
+    the same `provider is not None` guard as `enrich`, because a derivation
+    reads the payload that enrichment cached.)
 
     One client per *process*, not per job or per pass, because the token
     bucket that keeps this deployment under TMDb's ~40 rps ceiling lives on
@@ -700,7 +703,10 @@ async def metadata_provider(
     jobs to leave unclaimed.
     """
     if settings.tmdb_api_key is None:
-        logger.warning("no TMDb API key configured; enrich jobs will not be claimed")
+        # Both kinds named, not just `enrich`: `derive` has been registered
+        # under this same guard since M7 and this sentence still promised an
+        # operator that one kind would go unclaimed while two did.
+        logger.warning("no TMDb API key configured; enrich and derive jobs will not be claimed")
         return None, nothing
     client = httpx.AsyncClient(timeout=settings.source_timeout_seconds)
     provider = TmdbMetadataProvider(
@@ -730,10 +736,11 @@ async def embedder(
     the logs saying so. The precedent is on record in this repository at
     ~17,280 log lines a day for a *string*; a model is not a string.
 
-    *`(None, no-op)` rather than a raise.* `match`, `enrich` and
-    `watch_history` need no model, and PRD 05's catalog-lookup tier -- the one
-    serving 1.27M titles -- needs none either. A worker refusing to start
-    without one would take three working lanes down with the fourth, and a
+    *`(None, no-op)` rather than a raise.* **`index` is the only one of the
+    six job kinds that needs a model**; `match`, `watch_history`, `enrich`,
+    `derive` and `curate` need none, and PRD 05's catalog-lookup tier -- the
+    one serving 1.27M titles -- needs none either. A worker refusing to start
+    without one would take five working kinds down with the sixth, and a
     `create_app` that did would turn a missing extra into a server that will
     not boot.
 

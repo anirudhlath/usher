@@ -283,8 +283,11 @@ on the same `JobWorker`, guarded on an `LLMClient` existing exactly as `INDEX`
 is guarded on an embedder — so a deployment with `USHER_LLM_ENABLED=false`
 (the default) never claims one. The operational consequence worth stating is
 that a generation holds the single worker for as long as the completion takes,
-up to `USHER_LLM_TIMEOUT_SECONDS` (120 s), while `match`, `enrich`, `index` and
-`derive` wait behind it. That is acceptable at the shape this runs in — PRD 06
+up to `USHER_LLM_TIMEOUT_SECONDS` (120 s), while the other five kinds —
+`match`, `watch_history`, `enrich`, `index` and `derive` — wait behind it.
+`watch_history` is worth naming rather than eliding: with `match` it is one of
+only two kinds *every* deployment registers, so it is the one waiting on the
+deployment that has nothing else configured. That is acceptable at the shape this runs in — PRD 06
 budgets *one* completion per household per day, against a queue whose other
 kinds are minutes of background work — and it is the number to look at first if
 a queue ever appears to stall on a curating deployment. A lane of its own is
