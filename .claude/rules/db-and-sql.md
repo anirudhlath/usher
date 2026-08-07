@@ -73,6 +73,17 @@ rename it; M8 Task 7 shipped `curated_rows.slug` as `curated-1`, `curated-2`,
 the ordering being *obvious*, which is the tell: if an id is going to be
 compared as text, pad it at the point it is minted, or sort on the integer it
 came from rather than on its rendering.
+
+**Closed in Task 13 rather than 15, by the first rule above rather than the
+second**, because the validator is the only thing that mints a curated slug and
+a fix in `CuratedProvider` would have been a second place that knows the
+scheme. `services.curation_validate` pads to the width of the generation --
+three rows stay `curated-1` … `curated-3` and twelve become `curated-01` …
+`curated-12` -- so a `text` column and a `(-score, slug)` tie-break carry the
+model's ordering at any row count.
+`test_the_model_s_row_order_survives_and_the_slugs_sort_in_it` asserts the
+unpadded spelling really does sort wrong as its own premise, so it cannot pass
+because twelve rows happened to be nine.
 **`tests/integration/test_migrations.py`'s down/up cycle needs attention from
 every group that adds a migration, and the `-1` half breaking is the design,
 not the defect.** The `-1`-from-head half asserts on whatever the *current*

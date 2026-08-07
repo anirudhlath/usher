@@ -43,9 +43,34 @@ pool's range is dropped and *counted*.
 **3. A generation that validates to zero rows is a failure**, recorded as
 `llm_calls.ok = false` with a reason, not a success that wrote nothing.
 
-`usher.curation.dropped` carries a `reason` label with exactly two values,
-`not_in_pool` and `unparseable`, because those two produce the same empty
-screen and have opposite fixes.
+`usher.curation.dropped` carries a `reason` label with a **closed** vocabulary,
+because those reasons produce the same empty screen and have different fixes.
+
+🔶 **Amended 2026-08-06 by the implementation (Task 13): the vocabulary is
+five, not two.** This paragraph read *"exactly two values, `not_in_pool` and
+`unparseable`"* and the pair is still the load-bearing one — it is the split
+the 108/108 run produced and the only one this ADR has evidence for. What
+building the validator showed is that three more drops exist, each with a
+different next step for an operator, and that folding any of them into the
+original two reports a fix that is not the fix:
+
+- **`duplicate`** (a card): the model named a real candidate twice. Under
+  `not_in_pool` it reads as invention when nothing was invented; under
+  `unparseable` it reads as a schema problem when the schema was obeyed.
+- **`row_unusable`** (a **row**): the row was not readable or not renderable
+  — not an object, no title, a non-string title or reason, prose past the
+  bound.
+- **`row_too_short`** (a **row**): fewer than the minimum survived, which is
+  ADR-0014's discard-rather-than-pad arriving as a *number*. It is the
+  second-order effect of the three card reasons and the one an operator reads
+  first, so it cannot share a counter with any of them.
+
+Two of the five count **rows** and three count **cards**, which is why the row
+ones carry the prefix: summing the whole label set is meaningless, and the
+names say so rather than a comment saying so. The tally always carries all five
+keys, zeros included — a reason absent from a tally is indistinguishable from a
+reason nobody counts, which is this ADR's own subject one level up.
+`src/usher/services/curation_validate.py` holds the one copy of the argument.
 
 ## Consequences
 

@@ -703,6 +703,35 @@ Generation runs nightly and on demand:
    `not_in_pool` from `unparseable`, and **a generation that validates to zero
    rows is a failure rather than an empty success**.
    [ADR-0028](decisions/0028-the-pool-is-the-contract.md).
+
+   ✅ **Built in M8 as `usher.services.curation_validate`, a module of pure
+   functions over a parsed `dict` and the generation's own index → UUID map.**
+   Four things about it are sharper than the paragraph above:
+
+   - **The map is a `Mapping[int, UUID]`, and the validator does no arithmetic
+     on it.** Which handles were sent is a fact the caller owns, so a sparse
+     pool and a 1-based prompt (what ADR-0028 measured) need no special case,
+     and `pool[-1]` — legal Python, and a real film — is unreachable.
+   - **Coercion is `str(value).strip()` for `int` and `str` only.** A `bool` is
+     refused before the `int` branch (`isinstance(True, int)` is `True`); a
+     `float` is refused rather than rounded, because `int(11.5)` is also 11 and
+     a rule that accepts `11.0` must invent an answer for the other. Prose is
+     never coerced at all: a non-string `title` is a dropped row, not `str(11)`
+     on a television.
+   - **The reason label is five, not two** — `duplicate`, `row_unusable` and
+     `row_too_short` join the original pair, each because it names a different
+     next step. ADR-0028 carries the amendment and the argument.
+   - **Zero rows is unrepresentable as a success**, not merely checked for: the
+     return type is a union whose success arm cannot be built with an empty
+     `rows` and whose failure arm has no `rows` attribute at all.
+
+   ⚠️ **The validator does not cap the number of rows**, deliberately: every
+   card in a hundredth row is still a title the household could watch, so a cap
+   is a product bound rather than a safety one and belongs with
+   `CuratedProvider`'s `0–5 rows` budget. What it does own is the *ordering* —
+   `curated_rows.slug` is zero-padded to the width of the generation, because
+   the composer breaks score ties on `slug` and `curated-10` sorts before
+   `curated-2`.
 4. **Persist** as `curated_rows`.
 
 Failure is non-fatal: previous rows stay until successfully replaced. Cost is

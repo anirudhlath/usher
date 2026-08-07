@@ -91,6 +91,16 @@ class CuratedRow(DomainModel):
     # whose key is `(user_id, slug)`; and the composer breaks score ties on
     # `slug`, so a positional slug makes the model's own ordering the
     # tiebreak instead of an alphabetisation of its prose.
+    #
+    # **Zero-padded to the width of the generation** by
+    # `services.curation_validate`, which is the only thing that mints one --
+    # so ten rows are `curated-01` … `curated-10` and three are `curated-1` …
+    # `curated-3`. Unpadded, the tiebreak above orders
+    # `curated-1 < curated-10 < curated-2`, which alphabetises exactly the
+    # judgement the completion was bought for. This is the same defect as M8's
+    # `m8a` sorting after `m10a`, one subsystem over: an identifier minted by
+    # counting and compared as a string sorts wrong at its first two-digit
+    # value, so it is padded where it is minted.
     slug: str = Field(min_length=1)
     title: str = Field(min_length=1)
     # `None` is reachable here and is not reachable from any M7 provider --

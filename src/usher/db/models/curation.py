@@ -242,10 +242,12 @@ class CuratedRowRow(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    # `curated-1`, `curated-2`, … `RowCache` keys on `(user_id, slug)` and
-    # the composer breaks score ties on `slug`, so this is minted from the
-    # row's position rather than slugified from the model's title -- see
-    # `CuratedRow.slug`'s comment for the three reasons.
+    # `curated-1`, `curated-2`, … zero-padded to the width of the generation,
+    # so ten rows are `curated-01` … `curated-10`. `RowCache` keys on
+    # `(user_id, slug)` and the composer breaks score ties on `slug`, so this
+    # is minted from the row's position rather than slugified from the model's
+    # title -- see `CuratedRow.slug`'s comment for the three reasons and for
+    # why the padding is not cosmetic.
     slug: Mapped[str] = mapped_column(Text, nullable=False)
     # The model's own prose, rendered as the shelf heading -- the one string
     # in this schema that a language model wrote and a user reads verbatim,
