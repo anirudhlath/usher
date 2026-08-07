@@ -85,20 +85,32 @@ consequences:
   records URLs; a prompt on a span would put a household's viewing history in
   whatever collects traces.
 
-## The prompt is code, and so are the numbers in it
+## Three modules, and the two that are pure
 
-PRD 08's *"row weights are code"* applies verbatim: the prompt text, the row
-budget and the heading length are constants here rather than settings. The one
-number that is *not* free to differ is `min_cards` -- a prompt asking for four
-cards under a validator demanding five drops every row and reports
-`row_too_short`, a generation that failed because two numbers in two files
-disagreed -- so it is one parameter, rendered into the prompt and passed to
-`validate_curation`.
+This one orchestrates: it reads ports, spends money, writes rows, records
+spend and raises. Everything either side of the call is a pure function
+elsewhere -- `curation_prompt` builds the body, `curation_validate` reads the
+answer -- and neither takes a port, a clock or a session.
+
+That is a testability boundary rather than a tidiness one. Both are
+*artefacts*: a prompt whose only real consumer is a language model, and a
+tally whose only real consumer is a dashboard. `.claude/rules/testing-
+discipline.md` records what happens to an artefact reachable only through an
+orchestrator -- a sweep that walked this module's control flow was blind to
+sixteen live prompt mutants, because nothing observes a prompt unless a case
+opts in by name, and opting in cost a household, four fakes, a pool service, a
+taste service and a scripted client per substring. Given a module, the artefact
+has a consumer inside the process.
+
+`min_cards` is the one number that crosses all three and may not differ
+between them -- a prompt asking for four cards under a validator demanding five
+drops every row and reports `row_too_short` -- so it is one parameter, threaded
+from here into `build_prompt`, `_schema` and `validate_curation`.
 """
 
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -111,17 +123,16 @@ from pydantic import AwareDatetime
 
 from usher.domain.curation import CuratedRow, LLMCall, LLMPurpose
 from usher.domain.ids import new_id
-from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, UsherPortError
 from usher.ports.llm import LLMClient, LLMUsage
 from usher.ports.repository import (
     CuratedRowRepository,
     LLMCallRepository,
-    RecentWatch,
     TitleRepository,
     WatchStateRepository,
 )
 from usher.services.curation_pool import CandidatePoolService
+from usher.services.curation_prompt import build_prompt, history_lines
 from usher.services.curation_validate import (
     DEFAULT_MIN_CARDS,
     ITEM_IDS_KEY,
@@ -166,14 +177,6 @@ _rows_dropped = _meter.create_counter(
     "usher.curation.dropped", unit="1", description="Curated rows and cards dropped, by reason"
 )
 
-#: PRD 06's *"3-5 rows"*. Code rather than settings, per the module docstring.
-#: Not a cap this module enforces -- the validator deliberately does not cap
-#: rows either, because every card in a sixth row is still a title the
-#: household could watch, and the product bound lives with `CuratedProvider`'s
-#: `0-5 rows` budget.
-MIN_ROWS = 3
-MAX_ROWS = 5
-
 #: How many finished titles the prompt describes. **Deliberately not
 #: `WatchStateRepository.list_recent`'s own default of 20**, for two reasons
 #: that point the same way: a constant equal to a default is a constant no
@@ -181,21 +184,12 @@ MAX_ROWS = 5
 #: a persistence port -- nothing else knows what a prompt costs. Half of
 #: `TasteService._WINDOW`'s 50, which is a centroid's window: an average is
 #: happy to have a long tail, and a list somebody reads is not.
+#:
+#: **Stays here rather than in `curation_prompt`**, unlike the row budget and
+#: the heading width: it is the `limit` of a port read, and the read is what
+#: this layer owns. `curation_prompt` never sees it -- it renders whatever
+#: history it is handed.
 HISTORY_SIZE = 25
-
-#: What the prompt asks a heading to fit in. A *request*, not a bound --
-#: `MAX_TITLE_CHARS` is the validator's 200 and a longer heading is dropped
-#: there. This is the width a shelf looks right at, which is a product opinion
-#: and belongs in the prompt with the rest of them.
-MAX_HEADING_CHARS = 60
-
-# The candidate line, and the reason it is one line. `titles.name` is
-# third-party text -- it arrives from a media server or from TMDb -- and a
-# newline inside one would render a second numbered line into the candidate
-# list, i.e. a handle naming a film the household does not own, which is the
-# one thing the pool being the contract is *about*. `" ".join(value.split())`
-# collapses every kind of whitespace, not just `\n`.
-_SEPARATOR = " - "
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,7 +321,9 @@ class CurationService:
             # single line that has to agree with the prompt's rendering.
             handles = {index: title.id for index, title in enumerate(candidates, start=1)}
 
-            prompt = self._prompt(candidates, await self._history(user_id))
+            prompt = build_prompt(
+                candidates, await self._history(user_id), min_cards=self._min_cards
+            )
             schema = _schema(len(candidates), min_cards=self._min_cards)
 
             started = self._clock()
@@ -337,19 +333,16 @@ class CurationService:
                 )
             except UsherPortError as exc:
                 span.set_attribute("usher.failed", True)
-                await self._record(
-                    self._ledger_row(
-                        generation_id,
-                        usage=None,
-                        elapsed_ms=_ms(self._clock() - started),
-                        # **Never a bare `str(exc)`.** It is `""` for an
-                        # exception raised with no arguments, `LLMCall` refuses
-                        # a failed call with a blank error, and the row lost
-                        # would be the one this ledger exists for.
-                        error=str(exc) or type(exc).__name__,
-                    )
+                await self._settle(
+                    generation_id,
+                    started,
+                    usage=None,
+                    # **Never a bare `str(exc)`.** It is `""` for an exception
+                    # raised with no arguments, `LLMCall` refuses a failed call
+                    # with a blank error, and the row lost would be the one
+                    # this ledger exists for.
+                    error=str(exc) or type(exc).__name__,
                 )
-                await self._commit()
                 logger.warning(
                     "curation for {user} could not reach the model: {error}",
                     user=user_id,
@@ -380,15 +373,7 @@ class CurationService:
                 # failure with zeroed tokens is indistinguishable from a call
                 # that never happened.
                 span.set_attribute("usher.failed", True)
-                await self._record(
-                    self._ledger_row(
-                        generation_id,
-                        usage=usage,
-                        elapsed_ms=_ms(self._clock() - started),
-                        error=outcome.error,
-                    )
-                )
-                await self._commit()
+                await self._settle(generation_id, started, usage=usage, error=outcome.error)
                 logger.warning(
                     "curation for {user} produced nothing usable: {error}",
                     user=user_id,
@@ -397,15 +382,7 @@ class CurationService:
                 raise PortDataMalformed(outcome.error)
 
             await self._rows.replace_for_user(user_id, outcome.rows)
-            await self._record(
-                self._ledger_row(
-                    generation_id,
-                    usage=usage,
-                    elapsed_ms=_ms(self._clock() - started),
-                    error=None,
-                )
-            )
-            await self._commit()
+            await self._settle(generation_id, started, usage=usage, error=None)
             return CurationReport(
                 generation_id=generation_id,
                 pool_size=len(candidates),
@@ -417,89 +394,80 @@ class CurationService:
     # ------------------------------------------------------------- assemble
 
     async def _history(self, user_id: uuid.UUID) -> list[str]:
-        """The household's recent viewing, most recent first, as prompt lines.
+        """The two reads behind the prompt's history, rendered by
+        `curation_prompt.history_lines`.
 
-        **The recency order is restored from `list_recent`'s answer**, never
-        taken from the catalog read: `TitleRepository.list_by_ids` is one
-        `IN (...)` and promises no order at all, so a prompt rendered straight
-        from it describes the household in whatever order the store happened to
-        hold -- which reads as a recency claim and is not one.
+        **The read is at this layer and the rendering is not**, which is the
+        seam: this method is the only thing here that touches a port, and
+        splitting it is what lets the numbering, `described` and `_engagement`
+        be reached without seeding a household, four fakes, a pool service, a
+        taste service and a scripted client to assert one substring.
 
-        A watch state whose title is gone is skipped rather than rendered as a
-        blank line; the numbering counts what was rendered, so the list has no
-        gaps.
+        Two reads rather than one join, because `list_recent` answers in
+        recency order and `list_by_ids` is one `IN (...)` promising no order at
+        all -- so the order the prompt claims is `recent`'s, restored by
+        `history_lines` walking `recent` and using the catalog only as a
+        lookup.
         """
         recent = await self._watch_states.list_recent(user_id, limit=HISTORY_SIZE)
         if not recent:
             # No second read for a household that has finished nothing. A cold
-            # start is the normal state, not an edge case.
+            # start is the normal state, not an edge case, and it is
+            # `_COLD_START`'s branch of the prompt rather than an empty one.
             return []
         catalog = {
             title.id: title
             for title in await self._titles.list_by_ids([entry.title_id for entry in recent])
         }
-        lines: list[str] = []
-        for entry in recent:
-            title = catalog.get(entry.title_id)
-            if title is None:
-                continue
-            lines.append(f"{len(lines) + 1}. {_described(title)}{_engagement(entry)}")
-        return lines
-
-    def _prompt(self, candidates: Sequence[Title], history: Sequence[str]) -> str:
-        """The one string that crosses the wire.
-
-        Ordered context first, instructions last: the rules are what the model
-        is answering *with*, and they are the part that must survive a long
-        candidate list.
-        """
-        # Implicit concatenation, so a source line under 100 characters is not
-        # also a *rendered* line break in the middle of a sentence.
-        lines = [
-            "You are choosing what to put on the home screen of one household's "
-            "own film and television library.",
-            "",
-        ]
-        if history:
-            lines.append("This household recently finished, most recent first:")
-            lines.extend(history)
-        else:
-            lines.append("This household has not finished anything yet.")
-        lines += [
-            "",
-            "Candidates. Choose only from this list, and name each one by the "
-            "number in front of it:",
-        ]
-        lines += [
-            f"{index}. {_described(title)}{_genres(title)}"
-            for index, title in enumerate(candidates, start=1)
-        ]
-        lines += ["", *self._instructions(len(candidates))]
-        return "\n".join(lines)
-
-    def _instructions(self, pool_size: int) -> list[str]:
-        """The rules, with the two numbers that have to agree with something
-        else rendered rather than written: `pool_size` is the bound the
-        validator checks and `min_cards` is the floor it enforces."""
-        return [
-            "Answer with JSON in exactly this shape and nothing else:",
-            _SHAPE,
-            "",
-            f"- Return between {MIN_ROWS} and {MAX_ROWS} rows.",
-            f'- "{ITEM_IDS_KEY}": at least {self._min_cards} candidate numbers, '
-            f"each between 1 and {pool_size}. Numbers only -- never a name, "
-            "never a year, never a number outside that range, and never the "
-            "same number twice in one row.",
-            f'- "{TITLE_KEY}": a short shelf heading, at most '
-            f"{MAX_HEADING_CHARS} characters. No spoilers.",
-            f'- "{REASON_KEY}": one sentence saying what these have in common.',
-            "- Group by something a person would recognise -- a mood, a period, "
-            "a theme, a filmmaker -- rather than by one genre, and never by how "
-            "popular something is.",
-            "- Do not use the same candidate in more than one row.",
-        ]
+        return history_lines(recent, catalog)
 
     # -------------------------------------------------------------- ledger
+
+    async def _settle(
+        self,
+        generation_id: uuid.UUID,
+        started: float,
+        *,
+        usage: LLMUsage | None,
+        error: str | None,
+    ) -> None:
+        """Close out one attempted completion: write its `llm_calls` row, then
+        commit.
+
+        **One function because it is one rule.** *Record on every path that
+        attempted a call, and commit what you recorded* holds on all three of
+        `generate`'s exits, and it used to be spelled three times -- which made
+        the rule a convention rather than a structure, and made deleting one of
+        the three commits invisible. It is the *rejected* arm that cannot
+        afford that: the call worked, the money is spent, `replace_for_user`
+        is never reached, and this row is the only record the spend happened at
+        all -- so an uncommitted one is rolled back by `JobWorker`'s own
+        failed-job transaction and the ledger loses exactly the failure
+        [ADR-0028](../../../docs/prd/decisions/0028-the-pool-is-the-contract.md)'s
+        rule 3 exists to make visible. Same `_row` -> `_row` + `_cards` split
+        `curation_validate` made, for the same reason.
+
+        **The clock is read here**, so `elapsed_ms` is a delta from `started`
+        on every path and no caller can hand over an absolute reading. It is
+        the *fallback* latency -- `_ledger_row` prefers whatever the adapter
+        measured whenever an `LLMUsage` came back -- and the path with no usage
+        is the one it exists for, where a 120-second timeout has no other
+        record.
+
+        Not the commit boundary for `curated_rows`: the success path calls
+        `replace_for_user` **before** this, so one commit covers both writes
+        and PRD 10's `llm_calls JOIN curated_rows USING (generation_id)` never
+        sees a screen with no cost attributed to it.
+        """
+        await self._record(
+            self._ledger_row(
+                generation_id,
+                usage=usage,
+                elapsed_ms=_ms(self._clock() - started),
+                error=error,
+            )
+        )
+        await self._commit()
 
     def _ledger_row(
         self,
@@ -647,44 +615,6 @@ def _schema(pool_size: int, *, min_cards: int) -> dict[str, Any]:
     }
 
 
-#: The example object in the prompt, built from the same four constants the
-#: schema and the validator use.
-_SHAPE = (
-    f'{{"{ROWS_KEY}": [{{"{TITLE_KEY}": "...", "{REASON_KEY}": "...", '
-    f'"{ITEM_IDS_KEY}": [4, 17, 2, 39, 8]}}]}}'
-)
-
-
-def _described(title: Title) -> str:
-    """`Name (Year)`, on one line. See `_SEPARATOR` for why the collapse
-    matters."""
-    year = f" ({title.year})" if title.year is not None else ""
-    return f"{_one_line(title.name)}{year}"
-
-
-def _genres(title: Title) -> str:
-    return f"{_SEPARATOR}{', '.join(title.genres)}" if title.genres else ""
-
-
-def _engagement(entry: RecentWatch) -> str:
-    """PRD 06's *"recent watch history with ratings"*, with the substitution
-    this schema forces: there is no rating column and M7 declined to invent
-    one, so the engagement signal `watch_states` actually carries is the
-    rewatch. A single viewing says nothing extra and costs tokens to say."""
-    return f", watched {entry.play_count} times" if entry.play_count >= 2 else ""
-
-
-def _one_line(value: str) -> str:
-    """Every run of whitespace collapsed to one space.
-
-    Not cosmetic: `titles.name` is third-party text and a newline in one would
-    render a second numbered line into the candidate list -- a handle naming
-    something that was never in the pool, which is the one property the pool
-    being the contract exists to guarantee.
-    """
-    return " ".join(value.split())
-
-
 def _ms(seconds: float) -> int:
     """`latency_ms`, which is `ge=0` on the model and `>= 0` in the column."""
     return max(0, int(seconds * 1000))
@@ -692,9 +622,6 @@ def _ms(seconds: float) -> int:
 
 __all__ = [
     "HISTORY_SIZE",
-    "MAX_HEADING_CHARS",
-    "MAX_ROWS",
-    "MIN_ROWS",
     "CurationReport",
     "CurationService",
 ]

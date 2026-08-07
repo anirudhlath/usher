@@ -1,4 +1,4 @@
-"""`llm_calls` — one row per completion, whether or not it worked.
+"""`llm_calls` — one row per *attempted* completion, whether or not it worked.
 
 Implements `LLMCallRepository` (`usher.ports.repository`). One statement, no
 read, no scope: this is the smallest repository in the package, and every

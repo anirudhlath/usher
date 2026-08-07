@@ -3181,7 +3181,8 @@ class CuratedRowRepository(ABC):
 
 
 class LLMCallRepository(ABC):
-    """`llm_calls` -- PRD 10's cost ledger, one row per completion.
+    """`llm_calls` -- PRD 10's cost ledger, one row per *attempted*
+    completion.
 
     **One method, append-only, and no read at all.** That is the port's
     central decision and it is a deferral with a date on it: every reader
@@ -3218,7 +3219,20 @@ class LLMCallRepository(ABC):
 
     @abstractmethod
     async def record(self, call: LLMCall) -> None:
-        """Append one completion to the ledger, whether or not it worked.
+        """Append one *attempted* completion to the ledger, whether or not it
+        worked -- and "worked" is not "got an answer".
+
+        **One row per attempt**, which is narrower than one per call and wider
+        than one per answer. A call that never reached the endpoint is a row,
+        with zeroed tokens and the model this deployment asked for; a call that
+        answered perfectly and validated to nothing is a row too, `ok = false`
+        with the real tokens and the real cost. The single path that writes
+        none is the one that attempted nothing at all -- an empty candidate
+        pool raises before the client is touched, and an empty catalog is an
+        operator's problem rather than an event of the LLM subsystem.
+        PRD 06's record rule and
+        [ADR-0028](../../docs/prd/decisions/0028-the-pool-is-the-contract.md)'s
+        rule 3 are the two halves of that.
 
         **Takes the domain model, not its eleven parts**, and the reason is
         not brevity. `LLMCall` already enforces the one invariant this row has

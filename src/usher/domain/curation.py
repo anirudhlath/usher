@@ -139,12 +139,20 @@ class CuratedRow(DomainModel):
 
 
 class LLMCall(DomainModel):
-    """One completion, whether or not it worked.
+    """One *attempted* completion, whether or not it worked.
 
     [PRD 10](../../../docs/prd/10-telemetry-and-dashboards.md)'s ten columns.
     **A cost ledger with only the successes in it understates spend by exactly
     the failures**, which are the calls an operator most wants to see, so
     `record()` is called on both paths and `ok` is the discriminator.
+
+    **Per attempt rather than per completion**, and the difference is a row: a
+    call that never reached the endpoint completed nothing and is still one,
+    with zeroed tokens and the model this deployment asked for. What is *not* a
+    row is a path that attempted nothing -- `CurationService` raises on an
+    empty candidate pool before the client is touched, because no completion
+    was attempted, none was billed, and a row saying otherwise is spend an
+    operator has to explain away.
 
     **`ok` is not "the HTTP call returned 200".** It is "this generation
     produced something", and the two are allowed to disagree in exactly one

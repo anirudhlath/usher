@@ -1000,3 +1000,93 @@ the line drawn is: **every constant and every rendered number in a prompt gets
 a case, and so does every rule a validator will drop a row for** (ADR-0028
 sends an operator reading `duplicate` or `not_in_pool` to the prompt, so there
 has to be a rule there to fix).
+
+**Two of those five were wrong to leave alive by that same line, and the test
+for "is this framing prose?" is not how the sentence reads.** Corrected
+2026-08-07 on the next review round. `"This household has not finished anything
+yet."` is a **branch**, not framing: it is one arm of `if history:`, most
+fixtures in the project seed no watch history so it is the arm that actually
+renders, and deleting it left a prompt that jumps from the role sentence
+straight to 200 candidates with no statement about the household at all —
+indistinguishable, to the model, from a prompt whose history was lost on the
+way. And the `reason` bullet's *"one sentence"* is a **bound**: `MAX_REASON_CHARS
+= 1000` and `validate_curation` does not truncate an over-long reason, it drops
+the whole row as `row_unusable` — while the *heading* width beside it, whose
+worst case is cosmetic, was already pinned. **Ask of a prompt sentence whether
+it is one arm of a conditional and whether a validator will discard anything
+over it, before asking whether it is prose somebody might tune.**
+
+**An assertion whose subject is fixed by a model validator cannot fail, and
+`assert x.error` next to `assert x.ok is False` is the shape.**
+`LLMCall._ok_and_error_must_agree` refuses `ok=False` beside a falsy `error` —
+`None`, `""` and `0` all raise — so once a case has pinned `ok`, a truthy check
+on `error` is unfalsifiable. It sat on a live mutant for a whole round:
+`error=type(exc).__name__` in place of `str(exc) or type(exc).__name__` reduced
+four distinct operator-facing sentences (*"the endpoint refused the
+connection"*, *"the LLM endpoint rejected the configured credential"*) to a
+bare class name on the one row a cost ledger exists for, and passed all 42
+cases. The other half of the same expression *was* pinned, by the no-arguments
+case — **half a `or` is not the expression**, and it was the half three
+docstrings argue about. General form: **before writing `assert x.field`, ask
+what values the type permits at that point; if the invariant already excludes
+the falsy ones, the assertion is decoration.** Same family as "a rejection is
+not an assertion", one layer down: there the failure value was reachable many
+ways, here it is unreachable any other way.
+
+**A rule spelled three times is a rule one deletion is invisible in.**
+`CurationService.generate` had `await self._record(self._ledger_row(...))`
+followed by `await self._commit()` **verbatim at three exits**, and deleting
+the commit from the *rejected* arm passed all 42 cases — the arm where the call
+succeeded, the money is spent, `replace_for_user` is never reached and the
+`llm_calls` row is the only record the spend happened, so an uncommitted one is
+rolled back by `JobWorker`'s own failed-job transaction. Two independent
+repairs, and both were needed: a case asserting `events == ["ledger",
+"commit"]` on that arm (`events.count("ledger") == 1`, which the parametrised
+case already had, is satisfied by a service that never commits), and collapsing
+the three copies into one `_settle` so the rule is structural rather than
+conventional. **The structural half is what generalises: when a spec sentence
+contains an "and" — *record **and** commit*, *validate **and** count* — check
+whether the code says it once or once per path, because a sweep can only delete
+what a case can see, and N copies means N chances for one to go quiet.**
+
+**A fixture clock that starts at zero makes a delta and an absolute reading the
+same number.** `ticks = iter([0.0, elapsed, ...])` fed a service that computes
+`_ms(clock() - started)`, so planting `_ms(clock())` — an absolute reading of a
+clock whose epoch is arbitrary — **survived all 42 cases**, on the one field the
+service takes an injected clock in order to measure. A non-zero origin
+(`_T0 = 1_000.0`) kills it on its own with no new case. **The general form is
+the `ORDER BY`-under-UUIDv7 trap in the time domain: a fixture whose origin is
+the identity element of the operation under test cannot distinguish the
+operation from its absence.** Zero for subtraction, one for multiplication,
+insertion order for a sort.
+
+**And the mirror of it, measured and reported rather than replaced by a kill
+about something else:** `clock: Callable[[], float] = time.monotonic` drifting
+to `time.time` is a genuine **equivalent mutant** here, because both reads come
+from the same callable and the delta is identical. The two differ only across a
+wall-clock adjustment, which cannot be induced against a builtin used as a
+default — so that one is pinned on the signature
+(`parameters["clock"].default is time.monotonic`), with the measurement written
+into the case, rather than on a recorded number no implementation can get
+wrong. A behavioural assertion there (`latency_ms < 60_000`) is itself an
+assertion that cannot fail: `_ms` clamps a negative delta to `0`.
+
+**`replace("\n", " ")` survives a `\r\n` case, because `str.splitlines()` splits
+on `\r` too.** Sanitising third-party text into one prompt line, the assertion
+*"no line starts with `999.`"* is satisfied by the narrower collapse on **both**
+a `\n` and a `\r\n` input: with the `\n` replaced by a space, `splitlines()`
+still breaks at the surviving `\r` and the forged line now begins with that
+space. Measured — the mutant survived a six-arm parametrisation asserting only
+the negative. The assertion with teeth is the **whole rendered line**, identical
+across every arm, and the arms have to include `\r`, `\t`, ` ` and runs of
+spaces, because `" ".join(value.split())` collapses all of them and every
+narrower spelling collapses a proper subset. **Negative assertions about a
+rendering are satisfied by renderings that are still wrong; assert the line.**
+
+**Round totals, 2026-08-07:** 60 plants over `services/curation.py`,
+`services/curation_prompt.py` and two fakes — **56 killed, 4 equivalent-mutant
+controls surviving as designed, 0 unintended survivors**, after two survivors
+found mid-round (the `\r\n` one above and the `time.time` one) were respectively
+closed and reclassified with evidence. The three `.pyc`-collision defences were
+in force throughout: both curation test files run in **0.26 s** together, well
+inside the one-second mtime resolution that entry is about.

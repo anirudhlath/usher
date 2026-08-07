@@ -364,7 +364,8 @@ class CuratedRowRow(Base):
 
 
 class LLMCallRow(Base):
-    """One completion, whether or not it worked — PRD 10's cost ledger.
+    """One *attempted* completion, whether or not it worked — PRD 10's cost
+    ledger.
 
     **`record()` is called on both paths and `ok` is the discriminator**, so
     a ledger holding only the successes understates spend by exactly the

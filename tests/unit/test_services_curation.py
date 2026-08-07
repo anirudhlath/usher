@@ -26,12 +26,25 @@ the wrong reason produces the identical `CurationRejected`.
 - **`list_by_ids` is unordered on purpose** (`FakeTitleRepository` says so, and
   the real one is one `IN (...)`), so a prompt rendering history straight from
   that read is asserted against, not hoped for.
+
+**What is deliberately *not* here: the prompt's text.**
+`test_services_curation_prompt.py` calls `build_prompt`, `instructions` and
+`history_lines` directly, with a list of `Title`s and no household at all. What
+stayed is what needs an orchestrator to be true -- the two-port read behind the
+history and the order it restores, `HISTORY_SIZE` as the `limit` of that read,
+`min_cards` reaching the prompt **and** `validate_curation` from one place, the
+handle map agreeing with the numbering the model was sent, and the guarantee
+that no identifier survives the whole assembly. A case here that only greps
+`client.calls[0].prompt` for a substring is one seeding four fakes, a
+`CandidatePoolService`, a `TasteService` and a scripted client to test a pure
+function, and it belongs in the other file.
 """
 
 import ast
 import contextlib
 import inspect
 import re
+import time
 import uuid
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
@@ -68,14 +81,7 @@ from usher.ports.errors import (
 )
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.services import curation as curation_module
-from usher.services.curation import (
-    HISTORY_SIZE,
-    MAX_HEADING_CHARS,
-    MAX_ROWS,
-    MIN_ROWS,
-    CurationReport,
-    CurationService,
-)
+from usher.services.curation import HISTORY_SIZE, CurationService
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.curation_validate import (
     DEFAULT_MIN_CARDS,
@@ -100,6 +106,12 @@ ASKED = "test/asked-1"
 #: 8-4-4-4-12. The prompt must never carry one: ADR-0028's whole scheme is
 #: that a handle is bounds-checkable and a UUID is not.
 _UUID = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
+
+#: Where the injected monotonic clock starts. Deliberately **not** zero:
+#: `time.monotonic()`'s epoch is arbitrary, and a fixture that starts at zero
+#: makes `clock() - started` and `clock()` the same number -- which is the one
+#: distinction the injected clock exists to draw.
+_T0 = 1_000.0
 
 
 class _Household:
@@ -172,15 +184,20 @@ class _Household:
             )
         return one
 
-    async def watched(self, title: Title, *, play_count: int = 1) -> None:
+    async def watched(self, title: Title, *, play_count: int = 1, user: uuid.UUID = USER) -> None:
         """One finished watch state, in **both** stores that stand in for one
         table -- `list_recent` (the prompt's history) reads one and
-        `list_unwatched_candidates` (the pool) reads the other."""
+        `list_unwatched_candidates` (the pool) reads the other.
+
+        `user` is a parameter because every read this service makes is keyed by
+        one and a fixture with a single household cannot tell a keyed read from
+        an unkeyed one.
+        """
         self._seeded += 1
         await self.watch_states.merge_from_source(
             [
                 WatchStateMerge(
-                    user_id=USER,
+                    user_id=user,
                     title_id=title.id,
                     episode_id=None,
                     position_seconds=7200,
@@ -192,7 +209,7 @@ class _Household:
                 )
             ]
         )
-        self.titles.watch_states.append(FakeWatchRow(USER, title.id, None, True))
+        self.titles.watch_states.append(FakeWatchRow(user, title.id, None, True))
 
     def pool(self) -> CandidatePoolService:
         return CandidatePoolService(
@@ -217,7 +234,15 @@ class _Household:
         min_cards: int = DEFAULT_MIN_CARDS,
         elapsed: float = 0.25,
     ) -> CurationService:
-        ticks = iter([0.0, elapsed, elapsed, elapsed])
+        # **A non-zero origin, because `time.monotonic()`'s epoch is
+        # arbitrary and a fixture starting at `0.0` makes two different
+        # implementations agree.** With the first tick at zero,
+        # `_ms(clock() - started)` and `_ms(clock())` compute the identical
+        # number, so an *absolute* clock read -- on the one field this service
+        # takes an injected clock in order to measure -- is invisible. At
+        # `_T0` the delta is still `elapsed` and the absolute read is a
+        # thousand seconds larger.
+        ticks = iter([_T0, _T0 + elapsed, _T0 + elapsed, _T0 + elapsed])
         return CurationService(
             pool=self.pool(),
             watch_states=self.watch_states,
@@ -225,14 +250,14 @@ class _Household:
             client=client,
             rows=self.rows,
             ledger=self.ledger,
-            commit=self._commit,
+            commit=self.commit,
             model=ASKED,
             min_cards=min_cards,
             now=lambda: NOW,
-            clock=lambda: next(ticks, elapsed),
+            clock=lambda: next(ticks, _T0 + elapsed),
         )
 
-    async def _commit(self) -> None:
+    async def commit(self) -> None:
         self.events.append("commit")
 
 
@@ -266,9 +291,17 @@ class _RecordingLedger(FakeLLMCallRepository):
         super().__init__()
         self._events = events
         self.refuse = refuse
+        #: Anything that is **not** a `UsherPortError`, so a case can prove
+        #: `_record`'s handler is narrow. `except Exception` there would turn a
+        #: bug in this project into a silently-swallowed one on the path that
+        #: has just spent money, which is the shape `generate`'s own docstring
+        #: calls a blindfold.
+        self.refuse_with: BaseException | None = None
 
     async def record(self, call: LLMCall) -> None:
         self._events.append("ledger")
+        if self.refuse_with is not None:
+            raise self.refuse_with
         if self.refuse:
             raise RepositoryConflict(
                 "numeric field overflow", constraint="llm_calls_cost_usd_check"
@@ -363,18 +396,31 @@ async def test_a_generation_writes_one_screen_and_one_successful_ledger_row() ->
 
     report = await service.generate(USER)
 
-    assert isinstance(report, CurationReport)
     assert report.pool_size == len(pool)
     assert [row.title for row in report.rows] == ["Quiet Thrillers"]
     assert report.usage.tokens_in == 2_924
+    # **The priced-higher half on most providers**, and the one nothing read
+    # back: `tokens_in` was asserted three times in this file and `tokens_out`
+    # nowhere, so both copies of it -- the report's and the ledger row's --
+    # could be zeroed with every case green.
+    assert report.usage.tokens_out == 316
     assert report.dropped == dict.fromkeys(DropReason, 0)
 
     stored = await household.rows.list_for_user(USER)
     assert [row.card_title_ids for row in stored] == [tuple(one.id for one in pool[:5])]
+    # **The model that *answered*, on the rows as well as on the ledger.**
+    # `self._model` is what this deployment asked for and is a perfectly
+    # plausible value here, which is why the fixture makes the two differ:
+    # `curated_rows.model_name` is how PRD 10's *"these rows were written by a
+    # model we no longer run"* stays a query, and the same fact on
+    # `llm_calls.model` is pinned twice while this one was pinned nowhere.
+    assert {row.model_name for row in stored} == {"served/mixtral-1"}
+    assert ASKED != "served/mixtral-1", "the premise: asked and served disagree"
     assert [call.ok for call in household.ledger.calls] == [True]
     assert household.ledger.calls[0].error is None
     assert household.ledger.calls[0].purpose is LLMPurpose.CURATION
     assert household.ledger.calls[0].model == "served/mixtral-1"
+    assert household.ledger.calls[0].tokens_out == 316
     # The same purpose on the wire, where the adapter puts it on
     # `usher.llm.purpose`. PRD 10 groups spend by purpose in SQL and traces by
     # that attribute, and the two disagreeing is a milestone's spend filed
@@ -394,6 +440,29 @@ async def test_the_rows_and_the_ledger_entry_land_in_one_transaction() -> None:
     await service.generate(USER)
 
     assert household.events == ["rows", "ledger", "commit"]
+
+
+async def test_a_successful_call_records_the_latency_the_adapter_measured() -> None:
+    """The other arm of `_ledger_row`'s ternary, and the one PRD 10 reads on
+    the ordinary night.
+
+    `usage.latency_ms` is what the *adapter* measured -- the whole transport,
+    including whatever retries it made inside one `complete_json` -- and this
+    service's own stopwatch is the fallback for the path where no `LLMUsage`
+    came back at all. Only the fallback was covered
+    (`test_a_failed_call_records_the_latency_it_spent_failing`), so
+    `latency_ms=elapsed_ms` unconditionally was green: the two numbers are
+    made to disagree here, and loudly.
+    """
+    household = _Household()
+    await _candidates(household)
+    client = FakeLLMClient.returning(
+        _payload(_row("Quiet Thrillers", _five())), usages=[usage(latency_ms=1_874)]
+    )
+
+    await household.service(client, elapsed=0.25).generate(USER)
+
+    assert household.ledger.calls[0].latency_ms == 1_874, "what the adapter measured"
 
 
 async def test_the_ledger_row_and_the_curated_rows_share_one_generation_id() -> None:
@@ -450,23 +519,59 @@ async def test_an_upstream_failure_is_recorded_and_leaves_last_nights_screen_up(
     assert household.rows.calls == 0, "replace_for_user must not be reached"
     assert await household.rows.list_for_user(USER) == yesterday
     assert [call.ok for call in household.ledger.calls] == [False]
-    assert household.ledger.calls[0].error
+    # **The message, because `assert ...error` cannot fail.**
+    # `LLMCall._ok_and_error_must_agree` refuses `ok=False` beside a falsy
+    # error -- `None`, `""` and `0` all raise -- so once the line above has
+    # pinned `ok`, a truthy check is unfalsifiable. What it leaves alive is the
+    # half of `str(exc) or type(exc).__name__` that carries the sentence an
+    # operator reads: `error=type(exc).__name__` reduces *"the endpoint refused
+    # the connection"* to `PortUnavailable` on the one row this ledger exists
+    # for, and does it to all four of these. The `or` fallback is the other
+    # half, pinned by
+    # `test_an_exception_with_no_arguments_still_writes_an_error_an_operator_can_read`.
+    assert str(failure), "the premise: each of these four failures carries a message"
+    assert str(failure) in (household.ledger.calls[0].error or "")
     assert household.ledger.calls[0].tokens_in == 0
+    assert household.ledger.calls[0].tokens_out == 0
     assert household.ledger.calls[0].cost_usd == Decimal(0)
     assert household.ledger.calls[0].model == ASKED
 
 
-async def test_a_failed_generation_commits_the_ledger_row_it_wrote() -> None:
+@pytest.mark.parametrize(
+    "response",
+    [
+        PortUnavailable("down"),
+        _payload(_row("Invented", [900, 901, 902, 903, 904])),
+    ],
+    ids=["upstream_failed", "validated_to_nothing"],
+)
+async def test_a_failed_generation_commits_the_ledger_row_it_wrote(
+    response: dict[str, Any] | BaseException,
+) -> None:
     """`JobWorker` marks the job failed in its own transaction after the
     handler raises, and a service that left the ledger row unflushed and
     uncommitted would lose exactly the rows an operator most wants -- the
     failures. `EnrichService._record_failure` commits before re-raising for
-    the same reason."""
+    the same reason.
+
+    **Both failure arms, and the second is the expensive one.** The upstream
+    arm loses a row about a call that bought nothing; the rejected arm loses
+    the row for a call that *worked* -- the 108/108 shape, where the money is
+    spent, `replace_for_user` is never reached and the `llm_calls` entry is the
+    only record the spend happened at all. `_settle` is one function precisely
+    so the two arms cannot drift, and this case is what says so from outside
+    it: with the commit deleted from either arm, the row rolls back inside
+    `JobWorker`'s own failed-job transaction and the ledger loses exactly the
+    failure PRD 06's record rule and ADR-0028's rule 3 exist to preserve.
+    `test_record_is_called_exactly_once_per_generation` reaches the same arms
+    and cannot see it: `events.count("ledger") == 1` is satisfied by a service
+    that never commits.
+    """
     household = _Household()
     await _candidates(household)
-    service = household.service(FakeLLMClient.returning(PortUnavailable("down")))
+    service = household.service(FakeLLMClient.returning(response))
 
-    with pytest.raises(PortUnavailable):
+    with pytest.raises(UsherPortError):
         await service.generate(USER)
 
     assert household.events == ["ledger", "commit"]
@@ -536,8 +641,15 @@ async def test_a_completion_that_validates_to_zero_rows_is_a_failure_not_an_empt
     assert await household.rows.list_for_user(USER) == yesterday
     recorded = household.ledger.calls[0]
     assert recorded.ok is False
-    assert recorded.error
+    # Not `assert recorded.error`: `ok is False` already implies a truthy error
+    # -- `LLMCall._ok_and_error_must_agree` refuses every other combination --
+    # so that is a check that cannot fail. The validator's own tally, rendered
+    # into the sentence, is what tells "the validator ate a well-formed answer"
+    # from a service writing its own generic string over it.
+    assert recorded.error is not None
+    assert f"{DropReason.NOT_IN_POOL.value}=5" in recorded.error
     assert recorded.tokens_in == 2_924
+    assert recorded.tokens_out == 316
     assert recorded.cost_usd == Decimal("0.0036")
     assert recorded.model == "fake/scripted-1", "the model that answered, not the one asked"
 
@@ -622,6 +734,68 @@ async def test_a_ledger_write_that_fails_does_not_replace_the_failure_it_was_rec
         await service.generate(USER)
 
     assert raised.value.retry_after == 30.0
+
+
+async def test_a_refused_ledger_write_says_so_in_the_log_because_nothing_else_will() -> None:
+    """**The log line is the entire justification for swallowing**, and it was
+    pinned by nothing: replacing `logger.error` with `pass` left every case
+    green, while the module docstring, `_record`'s docstring and the case above
+    all say *"it is logged loudly and swallowed"*.
+
+    With no line there is no evidence anywhere that a completion was bought and
+    not recorded -- the generation returns a report, the screen is written, the
+    job succeeds, and `llm_calls` is short by one row for a reason nothing
+    states. The cause is a misconfigured price, which is a thing an operator
+    fixes and only if they are told.
+
+    Three facts, because each is what makes the line actionable: the
+    `generation_id` (the join key, so the spend can be reconciled against the
+    rows that *were* written), the purpose, and the repository's own message.
+    """
+    from loguru import logger
+
+    messages: list[str] = []
+    sink = logger.add(messages.append, level="ERROR", format="{message}")
+    household = _Household()
+    await _candidates(household)
+    service = household.service(FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five()))))
+    household.ledger.refuse = True
+    try:
+        report = await service.generate(USER)
+    finally:
+        logger.remove(sink)
+
+    assert len(messages) == 1
+    assert str(report.generation_id) in messages[0]
+    assert LLMPurpose.CURATION.value in messages[0]
+    assert "numeric field overflow" in messages[0]
+
+
+async def test_a_bug_in_the_ledger_write_is_not_swallowed_as_an_upstream_failure() -> None:
+    """`except UsherPortError` and deliberately **not** `except Exception`,
+    which `_record`'s docstring calls load-bearing and nothing held there:
+    widening it left every case green.
+
+    The swallow is licensed by one specific argument -- the money is spent, the
+    cause is a configured price, and a retry buys a second completion to write
+    the same unwritable row. None of that is true of a `TypeError` in this
+    module or a `ValidationError` from a domain model, and `generate`'s own
+    docstring calls `except Exception` a blindfold: a bug in this service is
+    not an upstream failure and the queue must not learn about one as though it
+    were. Swallowed, it also completes the job, so the generation reports
+    success with the spend unrecorded and nothing raises anywhere.
+    """
+    household = _Household()
+    await _candidates(household)
+    service = household.service(FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five()))))
+    household.ledger.refuse_with = TypeError("a bug in this module, not an upstream failure")
+
+    with pytest.raises(TypeError):
+        await service.generate(USER)
+
+    assert not isinstance(household.ledger.refuse_with, UsherPortError), (
+        "the premise: this is the failure the handler must not catch"
+    )
 
 
 # --- the pool is the contract ---------------------------------------------
@@ -776,36 +950,6 @@ async def test_the_watch_history_reaches_the_prompt_most_recent_first() -> None:
     assert "1. Watched Last Night" in prompt
 
 
-async def test_a_rewatch_is_marked_in_the_history() -> None:
-    """`watch_states` has no rating column, so PRD 06's *"with ratings"* is
-    substituted by the engagement signal this schema does have: rewatched
-    weighs more than merely finished, and the prompt is where that reaches the
-    model.
-
-    **The silence on the other side is the assertion with teeth.** A single
-    viewing carries no clause at all -- `_engagement`'s docstring says so, and
-    it is the half a threshold mutation moves: widened to `>= 1`, every one of
-    up to `HISTORY_SIZE` lines gains *", watched 1 times"*, which says nothing
-    and is billed per token. `marked != plain` cannot see that.
-    """
-    household = _Household()
-    await _candidates(household)
-    again = await household.title("Watched Twice", vote_count=2)
-    once = await household.title("Watched Once", vote_count=1)
-    await household.watched(once, play_count=1)
-    await household.watched(again, play_count=4)
-    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
-
-    await household.service(client).generate(USER)
-
-    lines = client.calls[0].prompt.splitlines()
-    marked = next(line for line in lines if "Watched Twice" in line)
-    plain = next(line for line in lines if "Watched Once" in line)
-    assert "4" in marked
-    assert marked != plain and "4" not in plain
-    assert "watched" not in plain, "one viewing says nothing extra and costs tokens to say"
-
-
 async def test_the_history_is_bounded_and_the_pool_is_the_pools_own_bound() -> None:
     """The prompt's token budget is ~14.6 tokens a candidate, measured, and a
     household with ten thousand finished films would otherwise send all of
@@ -822,27 +966,6 @@ async def test_the_history_is_bounded_and_the_pool_is_the_pools_own_bound() -> N
 
     rendered = [line for line in client.calls[0].prompt.splitlines() if "Old Film" in line]
     assert len(rendered) == HISTORY_SIZE
-
-
-async def test_a_candidate_name_cannot_forge_a_candidate_line() -> None:
-    """`titles.name` is third-party text: it arrives from a media server or
-    from TMDb, and a newline in it would put a second numbered line in the
-    candidate list -- a handle naming a film the household does not own, which
-    is the one thing the pool is the contract *about*. Collapsed to one line
-    where it is rendered."""
-    household = _Household()
-    await _candidates(household)
-    await household.title("Forged\n999. A Film Nobody Owns", vote_count=99_000_000)
-    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
-
-    await household.service(client).generate(USER)
-
-    prompt = client.calls[0].prompt
-    # A *line* of its own is the forgery; the same text inside a candidate's
-    # name is just a name. `"999. …" not in prompt` would be asserting the
-    # latter, which no rendering can honour.
-    assert not any(line.startswith("999.") for line in prompt.splitlines())
-    assert "Forged 999. A Film Nobody Owns" in prompt
 
 
 async def test_the_prompt_asks_for_the_minimum_the_validator_enforces() -> None:
@@ -874,150 +997,8 @@ async def test_the_prompt_asks_for_the_minimum_the_validator_enforces() -> None:
     assert report.dropped[DropReason.ROW_TOO_SHORT] == 1
 
 
-async def test_the_prompt_asks_for_the_row_budget_the_screen_has() -> None:
-    """PRD 06's *"3-5 rows"*, and it is prompt text rather than a setting for
-    PRD 08's row-weights-are-code reason."""
-    household = _Household()
-    await _candidates(household)
-    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
-
-    await household.service(client).generate(USER)
-
-    # The phrase, not the digits: a bare `"3" in prompt` is satisfied by the
-    # third candidate's line and by half the years in the catalog.
-    assert f"between {MIN_ROWS} and {MAX_ROWS} rows" in client.calls[0].prompt
-
-
-async def test_the_prompt_states_the_bound_the_validator_checks() -> None:
-    """The pool's length is the third place ADR-0028's bound is written down --
-    the map, the schema and this sentence -- and it is the only one the model
-    reads. Found by mutation: deleting it from the prompt survived every case
-    in this file, because the map and the schema are each pinned by their own,
-    and a model left to infer the range from the length of a 200-line list is
-    the arm that measured worst.
-    """
-    household = _Household()
-    pool = await _candidates(household)
-    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
-
-    await household.service(client).generate(USER)
-
-    assert f"each between 1 and {len(pool)}" in client.calls[0].prompt
-
-
-async def test_the_prompt_asks_for_a_heading_that_fits_a_shelf() -> None:
-    """`MAX_HEADING_CHARS` is the third constant this prompt renders, and it
-    was the one no case proved was read: deleting *"at most 60 characters"*
-    from the instruction passed all 35 cases, because nothing else in this
-    repository states that number at all.
-
-    It is a **request** rather than a bound -- the validator's own limit is
-    `MAX_TITLE_CHARS = 200` and a longer heading is dropped there -- which is
-    exactly why the prompt is the only place it can be observed. A generation
-    whose headings are all 180 characters wide is a screen that looks wrong on
-    every client and reports nothing anywhere.
-    """
-    household = _Household()
-    await _candidates(household)
-    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
-
-    await household.service(client).generate(USER)
-
-    # The phrase, not the digits: a bare `"60" in prompt` is satisfied by a
-    # year, by a vote count, or by the sixtieth candidate's own line.
-    assert f"at most {MAX_HEADING_CHARS} characters" in client.calls[0].prompt
-
-
-async def test_the_prompt_shows_the_example_object_the_schema_asks_for() -> None:
-    """`_SHAPE` is built from the same four key constants as the schema and the
-    reader, and it is the only one of the three the *model* sees.
-
-    Deleting it survived every case, because
-    `test_the_schema_names_the_keys_the_validator_reads` pins the `json_schema`
-    -- which ADR-0028 calls an optimisation and never the contract, honoured by
-    a subset of providers. On a provider that ignores `response_format`, this
-    line is the whole of what says which keys to emit, and a completion using
-    other ones is a 100% `unparseable` generation at full price.
-
-    Asserted structurally rather than character by character: the example is a
-    line of its own, it carries all four keys, it is introduced as the only
-    thing to answer with, and **it comes after the candidates rather than
-    before them** -- `_prompt`'s own ordering claim, which is that the rules
-    are what the model answers *with* and are the part that has to survive a
-    200-line list. Rendering them first also survived every case.
-    """
-    household = _Household()
-    pool = await _candidates(household)
-    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
-
-    await household.service(client).generate(USER)
-
-    lines = client.calls[0].prompt.splitlines()
-    shapes = [index for index, line in enumerate(lines) if line.startswith(f'{{"{ROWS_KEY}"')]
-    assert len(shapes) == 1, "the example object is one line of the prompt"
-    shape = lines[shapes[0]]
-    assert all(f'"{key}"' in shape for key in (TITLE_KEY, REASON_KEY, ITEM_IDS_KEY))
-    introduction = lines[shapes[0] - 1]
-    assert "JSON" in introduction and "nothing else" in introduction
-    last_candidate = [
-        index for index, line in enumerate(lines) if line.startswith(f"{len(pool)}. ")
-    ]
-    assert last_candidate and max(last_candidate) < shapes[0], "context first, rules last"
-
-
-async def test_the_prompt_forbids_what_the_validator_drops_cards_for() -> None:
-    """ADR-0028's amended vocabulary says `not_in_pool` and `duplicate` *"both
-    point at the prompt or the temperature"* -- so an operator sent to the
-    prompt by either counter has to find a rule there to fix.
-
-    Both survived deletion. `not_in_pool`'s rule is two sentences: the bound
-    (`test_the_prompt_states_the_bound_the_validator_checks`) and the
-    instruction to choose from the list at all, which is ADR-0028's rule 1 as
-    the model reads it. `duplicate` counts cards and is earned two ways --
-    within a row and across rows -- so the prompt states both, and the
-    validator drops for both.
-    """
-    household = _Household()
-    await _candidates(household)
-    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
-
-    await household.service(client).generate(USER)
-
-    prompt = client.calls[0].prompt
-    assert "Choose only from this list" in prompt
-    assert "never the same number twice in one row" in prompt
-    assert "Do not use the same candidate in more than one row" in prompt
-
-
-async def test_a_candidate_line_carries_the_year_and_the_genres() -> None:
-    """The whole line, because every part of it is a token this generation pays
-    for and something the model is asked to group by.
-
-    The prompt asks for shelves grouped by *"a mood, a period, a theme"*, and
-    the period and the theme are exactly the two fields beyond the name that
-    the line carries. Each was deletable with all 35 cases green: every
-    candidate in this file's fixtures is seeded with the default year and **no
-    genres at all**, so `_genres` returned `""` for all of them and `_SEPARATOR`
-    -- a module constant with a paragraph of docstring about why it renders on
-    one line -- was proven read by nothing.
-    """
-    household = _Household()
-    await _candidates(household)
-    # The largest vote count in the fixture, so this is candidate 1 and the
-    # assertion can name its handle rather than search for it.
-    grouped = await household.title(
-        "A Film With Genres", vote_count=99_000_000, year=1974, genres=("Crime", "Drama")
-    )
-    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
-
-    await household.service(client).generate(USER)
-
-    lines = client.calls[0].prompt.splitlines()
-    rendered = [line for line in lines if grouped.name in line]
-    assert rendered == [f"1. {grouped.name} (1974) - Crime, Drama"]
-
-
-async def test_the_schema_names_the_keys_the_validator_reads() -> None:
+@pytest.mark.parametrize("min_cards", [DEFAULT_MIN_CARDS, 7], ids=["default", "raised"])
+async def test_the_schema_names_the_keys_the_validator_reads(min_cards: int) -> None:
     """A schema saying `ids` and a validator reading `item_ids` is a generation
     that drops 100% of a correct answer. Both are written against the four
     constants the validator exports, and this is what fails if one moves.
@@ -1025,21 +1006,188 @@ async def test_the_schema_names_the_keys_the_validator_reads() -> None:
     The schema is an **optimisation**: guided decoding guarantees shape and
     says nothing about denotation, which is why the bound is *also* in the
     schema and the validator checks it anyway.
+
+    **Both objects, not only the row.** `_schema`'s docstring says
+    `additionalProperties: false` and a `required` naming every property are
+    *"what `strict: true` demands"* -- and only the inner object was checked,
+    so relaxing either at the top level was invisible. Under a provider that
+    honours `strict`, a schema that fails its own strictness rules is not a
+    degraded response, it is a **400 on every request**, which is a curation
+    subsystem that never produces a row and never records a call.
+
+    The `description` too, because it is the item bound's only spelling: the
+    floor is deliberately **not** `minItems` (which forces a model with fewer
+    good answers to pad rather than to narrow -- measured), so this sentence is
+    the whole of what a guided decoder is told about how many to emit.
     """
     household = _Household()
-    pool = await _candidates(household)
-    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
+    pool = await _candidates(household, count=12)
+    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", list(range(1, 8)))))
 
-    await household.service(client).generate(USER)
+    await household.service(client, min_cards=min_cards).generate(USER)
 
     schema = client.calls[0].schema
+    assert schema["additionalProperties"] is False, "strict: true refuses an open object"
+    assert set(schema["required"]) == {ROWS_KEY}, "strict: true requires every property"
     row = schema["properties"][ROWS_KEY]["items"]
     assert set(row["properties"]) == {TITLE_KEY, REASON_KEY, ITEM_IDS_KEY}
     assert row["additionalProperties"] is False
     assert set(row["required"]) == {TITLE_KEY, REASON_KEY, ITEM_IDS_KEY}
-    handle = row["properties"][ITEM_IDS_KEY]["items"]
+    items = row["properties"][ITEM_IDS_KEY]
+    assert f"at least {min_cards} of them" in items["description"]
+    assert "minItems" not in items, "a floor here makes a narrow model pad instead"
+    handle = items["items"]
     assert handle["type"] == "integer"
     assert (handle["minimum"], handle["maximum"]) == (1, len(pool))
+
+
+def _shipped(household: _Household, client: FakeLLMClient) -> CurationService:
+    """`CurationService` with **only its required arguments**, which is what a
+    composition root hands it and what nothing else in this file does.
+
+    `_Household.service` overrides `min_cards`, `now` and `clock`, and `src/`
+    does not build this service at all until Task 16 -- so all three defaults
+    had no exercising caller anywhere and could drift with the whole suite
+    green. `d05c624` is the precedent and it is the same shape one layer down:
+    a `limit` default written into three signatures, where two implementations
+    disagreed about the size of the artefact a contract suite existed to pin,
+    because no case ever called without it.
+    """
+    return CurationService(
+        pool=household.pool(),
+        watch_states=household.watch_states,
+        titles=household.titles,
+        client=client,
+        rows=household.rows,
+        ledger=household.ledger,
+        commit=household.commit,
+        model=ASKED,
+    )
+
+
+async def test_the_shipped_min_cards_is_the_floor_the_validator_ships_with() -> None:
+    """The prompt's copy and the validator's copy are one number, and this is
+    the case that says which number it is when nobody passes one.
+
+    Asserted where it *changes the answer* rather than as an equality between
+    two constants: a four-card row and a five-card row, so the default is read
+    off which one survives. A default of 2 or 4 keeps both and reports no
+    drop.
+    """
+    household = _Household()
+    await _candidates(household, count=12)
+    client = FakeLLMClient.returning(
+        _payload(_row("Four Cards", [1, 2, 3, 4]), _row("Five Cards", [5, 6, 7, 8, 9]))
+    )
+
+    report = await _shipped(household, client).generate(USER)
+
+    assert DEFAULT_MIN_CARDS == 5, "the premise: four is short of the floor and five clears it"
+    assert [row.title for row in report.rows] == ["Five Cards"]
+    assert report.dropped[DropReason.ROW_TOO_SHORT] == 1
+    assert f"at least {DEFAULT_MIN_CARDS} candidate numbers" in client.calls[0].prompt
+
+
+async def test_the_shipped_now_is_the_real_clock_rather_than_a_fixed_one() -> None:
+    """`llm_calls.at` is the column every PRD 10 spend query groups by, so a
+    ledger stamped with one constant is a month of spend filed under one
+    second.
+
+    Aware is not the assertion: every domain model types these `AwareDatetime`,
+    so a naive default raises rather than lying. A *fixed* aware one is the
+    drift nothing would catch, so this brackets the row against the real clock
+    on either side. The failure arm, because that is where the service's own
+    `now` is the only clock in play.
+    """
+    household = _Household()
+    await _candidates(household)
+    before = datetime.now(UTC)
+
+    with pytest.raises(PortUnavailable):
+        await _shipped(household, FakeLLMClient.returning(PortUnavailable("down"))).generate(USER)
+
+    stamped = household.ledger.calls[0]
+    assert stamped.at.tzinfo is not None
+    assert before <= stamped.at <= datetime.now(UTC), "the real clock, not a frozen one"
+
+
+def test_the_shipped_clock_is_the_monotonic_one() -> None:
+    """**Asserted on the signature, because the behavioural version of this
+    check cannot fail, and that was measured rather than assumed.**
+
+    `latency_ms` is `_ms(clock() - started)`: both reads come from the same
+    callable, so substituting `time.time` for `time.monotonic` changes the
+    delta by nothing at all. Planted, it survives every case in this file --
+    correctly, because the two differ only across a wall-clock adjustment (an
+    NTP step, an operator setting the date), which cannot be induced against a
+    builtin used as a default. An assertion on the recorded number would be one
+    that no implementation can fail, which is the family of defect this round
+    exists to remove.
+
+    What is still worth pinning is *which* callable ships, because the
+    difference is real where it matters: `time.time()` going backwards mid-call
+    yields a negative delta that `_ms` clamps to `0`, and PRD 10 reads a
+    120-second timeout as instantaneous. Same argument
+    `OpenAICompatibleClient` makes for injecting its own.
+    """
+    default = inspect.signature(CurationService.__init__).parameters["clock"].default
+
+    assert default is time.monotonic
+    assert time.monotonic is not time.time, "the premise: these are two different clocks"
+
+
+async def test_another_households_history_and_screen_stay_out_of_this_generation() -> None:
+    """**No case in this file involved a second household at all**, and that is
+    precisely how a cross-household leak survived fourteen cases on this branch:
+    `PostgresCuratedRowRepository.list_for_user`'s `user_id` predicate was
+    deletable because a `generation_id` happened to be exactly as selective in
+    every single-household fixture.
+
+    Every read this service makes is keyed by a household -- `list_recent` for
+    the history, `list_unwatched_candidates` for the pool, `replace_for_user`
+    for the screen -- so every one of them is a place that key can be dropped,
+    and the body those reads assemble is the most sensitive one this project
+    sends anywhere.
+
+    Both directions in one case: nothing of theirs comes *in* to the prompt,
+    and nothing of theirs is destroyed on the way *out*.
+    """
+    household = _Household()
+    await _candidates(household)
+    mine = await household.title("Only I Finished This", vote_count=3)
+    theirs = await household.title("Only They Finished This", vote_count=2)
+    await household.watched(mine)
+    await household.watched(theirs, user=OTHER)
+    their_screen = [
+        CuratedRow(
+            id=new_id(),
+            user_id=OTHER,
+            slug="curated-1",
+            title="Their Shelf",
+            reason=None,
+            card_title_ids=(theirs.id,),
+            position=0,
+            model_name="served/yesterday-1",
+            generation_id=new_id(),
+            generated_at=NOW - timedelta(days=1),
+        )
+    ]
+    await household.rows.replace_for_user(OTHER, their_screen)
+    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
+
+    await household.service(client).generate(USER)
+
+    lines = client.calls[0].prompt.splitlines()
+    heading = lines.index("This household recently finished, most recent first:")
+    history = lines[heading + 1 : lines.index("", heading)]
+    assert history == [f"1. {mine.name} (2019)"]
+    # The premise, and it is what makes the line above an assertion rather than
+    # a coincidence: their film *is* in this prompt -- as a candidate, which is
+    # correct, because a title this household has not finished is a title it
+    # could watch. What may not appear is the claim that *this* household
+    # finished it.
+    assert any(line.endswith(f"{theirs.name} (2019)") for line in lines)
+    assert await household.rows.list_for_user(OTHER) == their_screen
 
 
 # --- one completion, and one ledger row for it ----------------------------
@@ -1152,16 +1300,37 @@ async def test_the_span_carries_what_an_operator_groups_by(
     assert pool[0].name not in body
 
 
+@pytest.mark.parametrize(
+    ("response", "seed_a_pool"),
+    [
+        (PortUnavailable("down"), True),
+        (_payload(_row("Invented", [900, 901, 902, 903, 904])), True),
+        (_payload(_row("Impossible", _five())), False),
+    ],
+    ids=["upstream_failed", "validated_to_nothing", "empty_pool"],
+)
 async def test_a_failed_generation_says_so_on_its_span(
     span_exporter: InMemorySpanExporter,
+    response: dict[str, Any] | BaseException,
+    seed_a_pool: bool,
 ) -> None:
     """`EnrichService`'s `usher.failed`, on the service whose failures cost
-    money."""
-    household = _Household()
-    await _candidates(household)
-    service = household.service(FakeLLMClient.returning(PortUnavailable("down")))
+    money.
 
-    with pytest.raises(PortUnavailable):
+    **All three failure arms, because "find the generations that failed" is a
+    group-by and a group missing two thirds of its members is worse than an
+    empty one.** The attribute is set at three separate sites, so one case
+    pins one site: dropping it from the empty-pool raise or from the
+    validated-to-nothing raise both left the file green. The rejected
+    generation is the one an operator actually hunts for -- the call worked,
+    the money is spent, and the screen looks deliberate.
+    """
+    household = _Household()
+    if seed_a_pool:
+        await _candidates(household)
+    service = household.service(FakeLLMClient.returning(response))
+
+    with pytest.raises(UsherPortError):
         await service.generate(USER)
 
     span = next(
