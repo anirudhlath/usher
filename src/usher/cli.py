@@ -277,9 +277,24 @@ async def _movielens(
     problem.** A catalog bootstrapped under M7 has a *completed*
     `movielens.genome` checkpoint and no vocabulary at all: re-running the
     phase resumes from that cursor, yields no batch, writes no vector -- and
-    still reaches this, because the run it returns is `COMPLETED`. A version
-    gated on rows having been written would leave exactly that deployment
-    without one, forever, with nothing to say so.
+    still reaches this, because the run it returns is `COMPLETED`.
+
+    **`run.rows_written` is the wrong predicate, and not for the reason it
+    looks like.** It is *cumulative across resumes*:
+    `PostgresImportRunRepository.start()` keeps it when the revision has not
+    moved, `BootstrapService._drain` adds each batch's count to the stored
+    one, and an archive that *has* moved resets it to 0 and then re-imports
+    every row. So on the upgrade path above it reads truthy and writes the
+    vocabulary anyway -- measured 2026-08-07, `if run.rows_written:` in place
+    of this line passes all 2,883 unit and all 899 integration cases. The two
+    spellings differ only for a *completed* run that has never written a
+    vector, which is a catalog holding no genome movie at all, and there a
+    vocabulary explains nothing. `COMPLETED` is the honest predicate because
+    "the drain finished" is the question being asked; the defect worth
+    guarding against is a **per-run** tally, which does leave the M7 upgrade
+    without a vocabulary and which
+    `test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_vocabulary`
+    fails on.
     """
     if await catalog.count_titles() == 0:
         print(

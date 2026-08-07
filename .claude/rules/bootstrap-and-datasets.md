@@ -49,6 +49,20 @@ one-element list whose `[0]` parses as a perfectly good `tagId` -- the shipped
 `_tag_count` read exactly that field and was blind to it, which was harmless
 while the names were being thrown away and is not now that `m08b` stores them.
 
+**Two follow-ups from the review of that measurement, 2026-08-07.** The
+universal-newline property was asserted in *three* source files and covered by
+no test — every fixture in `tests/unit/test_adapters_bulk_movielens.py` is
+built with `"\n".join(...)`, so `newline=""` on that `TextIOWrapper` passed all
+2,882 unit cases while putting a trailing `\r` on all 1,128 stored names.
+`test_a_crlf_bodied_member_stores_no_carriage_return_in_a_tag_name` is the
+CRLF-bodied fixture that closes it, and it is the only case in the suite that
+fails against that plant. And the empty-name refusal is now `not name.strip()`,
+not `not name`: `ck_genome_tags_tag_not_empty` is `tag <> ''`, which accepts
+`'   '`, so before the parser was tightened a whitespace-only lane would have
+been stored by both layers. Unreachable in the measured file (all 1,128 names
+are `strip()`-stable), which is why the CHECK was left alone rather than
+re-spelled `btrim(tag) <> ''` in a migration for a value nothing can produce.
+
 **`ml-32m` has no genome and `ml-25m` may not be redistributed, so `ml-latest`
 is forced rather than preferred.** `ml-32m.zip` (05/2024) is the newest full
 release and dropped the genome entirely — four members only. `ml-25m` has one

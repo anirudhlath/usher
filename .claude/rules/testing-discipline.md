@@ -1296,8 +1296,11 @@ asserted present (`path.read_text() == mutated`) before any verdict, only
 `^FAILED` lines read as kills, and a signal handler so an interrupt could not
 leave the tree mutated. Baseline established green on a clean tree first:
 **2,817 unit / 4 skipped**, **898 integration / 8 skipped**, ruff, `ruff format
---check`, mypy over 435 files, 8 import contracts. (The two cases the round
-added to close its own findings take the final numbers to **2,819 / 899**.)
+--check`, mypy over 435 files, 8 import contracts. (The **three** cases the
+round added to close its own findings — two unit, one integration — take the
+final numbers to **2,819 / 899**. It said "two" until 2026-08-07: the count
+was taken from the unit column alone, which is the arithmetic error to expect
+whenever a round reports one number for a suite that has two.)
 
 **The three controls, each against every gate step** — which is the check the
 `__all__` entry above exists to force, and all three pass all five:
@@ -1348,6 +1351,22 @@ would actually write is a **per-run** tally, and that one fails
 whether the mutant and the original differ on any state the system can be in —
 a counter that accumulates across runs is not the counter the gate was reaching
 for.**
+
+**And the same task shipped the *opposite* claim in two files, which is the
+half worth carrying.** `cli._movielens`' docstring and that case's own
+docstring both argued that a gate on rows-written *"would leave exactly that
+deployment without one, forever, with nothing to say so"* — the sweep had
+already measured that it would not, and the second copy of it was a test
+docstring claiming a kill the test does not make. Re-measured at `d4189b7` on
+2026-08-07, after Task 20: `if run.rows_written:` passes **2,883 unit and 899
+integration**, i.e. the whole suite, while a per-run tally fails that one case
+alone (measured twice — at 2,882 before this round's own case landed and again
+at 2,883 after, because a number quoted in a docstring is compared against the
+suite a later reader runs, not against the one it was taken from). Both passages now carry the sweep's argument instead. **A survivor a
+sweep reports is a claim about the code, so it has to be reconciled with every
+docstring arguing the opposite — a sweep finding that contradicts a shipped
+comment means one of the two is being shipped wrong, and the comment is the
+one nobody re-runs.**
 
 **And the second survivor is the one whose first measurement was wrong, which
 is the more useful half.** `except DBAPIError` in `replace_genome_tags`

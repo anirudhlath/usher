@@ -170,7 +170,10 @@ class GenomeTag:
     member_lines`): **1,128 rows**, `tagId` exactly `1…1128` and ascending, no
     name empty, no name containing a comma, 1,128 distinct names, longest 65
     characters. The file is CRLF-terminated and `member_lines`' universal-
-    newline decode already removes the `\\r`, so nothing here strips one.
+    newline decode already removes the `\\r`, so nothing here strips one --
+    pinned by `test_a_crlf_bodied_member_stores_no_carriage_return_in_a_tag_
+    name`, which is a CRLF-bodied fixture because every other one in that file
+    is `"\\n".join(...)` and cannot see the difference.
 
     **`tag_id` carries no ceiling on this dataclass**, deliberately, and the
     ceiling it does have is stated where it can be enforced against a whole

@@ -439,8 +439,10 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     false. The direction of the assertion has nothing to do with it: `ffc`'s
     was positive (`in`) and broke; `ffb`'s was negative (`not in`) and broke
     too, because `-1`-from-`ffc` lands at the `ffb` state where
-    `blend_fingerprint` is present. Four landings, four loud breaks (`ffa`,
-    `ffb`, `ffc`, `m08a`). **So the alarm to watch for is a `-1` half that stays
+    `blend_fingerprint` is present. Five landings, five loud breaks (`ffa`,
+    `ffb`, `ffc`, `m08a`, `m08b`) -- the same five the paragraph above counts,
+    which is the point of stating the number in both places. **So the alarm to
+    watch for is a `-1` half that stays
     green after a new migration**, which means the assertion it inherited
     never had teeth. `.claude/rules/db-and-sql.md` carries the measurement.
 

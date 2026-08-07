@@ -88,9 +88,10 @@ because twelve rows happened to be nine.
 **`tests/integration/test_migrations.py`'s down/up cycle needs attention from
 every group that adds a migration, and the `-1` half breaking is the design,
 not the defect.** The `-1`-from-head half asserts on whatever the *current*
-head reverses, so it has to be re-pointed every time. **Four landings, four
+head reverses, so it has to be re-pointed every time. **Five landings, five
 loud breaks** — Group F re-pointed it for `ffa`, `af64ba2` (the `ffb`
-migration itself) for `ffb`, M7 Task 36 for `ffc`, and M8 Task 8 for `m08a`.
+migration itself) for `ffb`, M7 Task 36 for `ffc`, M8 Task 8 for `m08a`, and
+M8 Task 19 for `m08b`.
 
 **An inherited `-1` assertion that had teeth cannot survive a new head, and
 the failure is always loud.** Having teeth *means* being true at the state

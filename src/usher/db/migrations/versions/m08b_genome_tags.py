@@ -88,7 +88,12 @@ all**, which `is_row_refusal` cannot inspect. That is decision 3.
 
 - `ck_genome_tags_tag_not_empty` — a lane named by the empty string reads as
   labelled and says nothing, which is worse than a missing row, because a
-  missing row is what the contiguity precondition catches.
+  missing row is what the contiguity precondition catches. **It is `tag <> ''`
+  and not `btrim(tag) <> ''`, which means it accepts `'   '`**; the loader
+  refuses that (`MovieLensGenomeDataset._vocabulary` checks `not name.strip()`)
+  and all 1,128 measured names are `strip()`-stable, so tightening the CHECK
+  would be a migration for a value nothing can currently produce. Recorded
+  here rather than left for the next reader to re-derive from the SQL.
 - `ck_genome_tags_revision_not_empty` — an empty revision matches no
   `genome_scores` row, so every read of the vocabulary would refuse and the
   table would be silently inert. `genome_scores.genome_revision` carries no

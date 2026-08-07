@@ -422,11 +422,20 @@ async def test_a_tag_row_with_no_name_is_malformed(tmp_path: Path) -> None:
     and storing one puts an empty string on a lane whose vector position is
     still fully populated, which is a vocabulary that *looks* complete.
 
-    Both shapes: a row with no comma at all (`split(",", 1)` gives one field
-    and the shipped `[0]`-only reader is blind to it) and a row whose name is
-    the empty string.
+    Three shapes: a row with no comma at all (`split(",", 1)` gives one field
+    and the shipped `[0]`-only reader is blind to it), a row whose name is the
+    empty string, and a row whose name is **only whitespace** -- which `not
+    name` accepts and `ck_genome_tags_tag_not_empty`'s `tag <> ''` accepts
+    too, so nothing below this parser would refuse it. It is unreachable in
+    the measured file (all 1,128 names are `strip()`-stable) and the refusal's
+    own argument applies to it verbatim: a lane named `"   "` reads as
+    labelled and says nothing.
     """
-    for body in ("1,a synthetic tag\n2\n3,a third", "1,a synthetic tag\n2,\n3,a third"):
+    for body in (
+        "1,a synthetic tag\n2\n3,a third",
+        "1,a synthetic tag\n2,\n3,a third",
+        "1,a synthetic tag\n2,   \n3,a third",
+    ):
         cache = _archive(
             tmp_path, links=_LINKS, genome_tags=f"tagId,tag\n{body}", genome_scores=_SCORES
         )
@@ -434,6 +443,40 @@ async def test_a_tag_row_with_no_name_is_malformed(tmp_path: Path) -> None:
             with pytest.raises(PortDataMalformed) as exc_info:
                 await _dataset(client, cache).tag_vocabulary('"fixture"')
         assert exc_info.value.detail == "2"
+
+
+async def test_a_crlf_bodied_member_stores_no_carriage_return_in_a_tag_name(
+    tmp_path: Path,
+) -> None:
+    """The real member is **CRLF**-terminated -- 1,129 CRLF, 0 bare LF, 0 bare
+    CR, measured 2026-08-07 -- and every other fixture in this file is built
+    with `"\\n".join(...)`, so the whole fixture population is blind to the
+    one property that makes them representative.
+
+    `CachedDatasetFile.member_lines` decodes through `io.TextIOWrapper` in
+    universal-newline mode, so the `\\r` is gone before its `rstrip("\\n")`
+    runs. Three source files assert that in prose and nothing asserted it in
+    a test: spelled `newline=""` -- the one-word change a reader makes to
+    "keep the bytes as they are" -- every one of the 1,128 stored names would
+    end in a `\\r`, on the table whose whole purpose is to say what a lane
+    means, and the failure would surface as a rendered sentence rather than
+    as an error.
+
+    The scores member is left `\\n`-bodied deliberately: this case is about
+    the names, which are what a `\\r` becomes visible in.
+    """
+    crlf = "".join(
+        f"{line}\r\n"
+        for line in ("tagId,tag", "1,a synthetic tag", "2,another synthetic tag", "3,a third")
+    )
+    cache = _archive(tmp_path, links=_LINKS, genome_tags=crlf, genome_scores=_SCORES)
+    async with httpx.AsyncClient(transport=_local(cache)) as client:
+        vocabulary = await _dataset(client, cache).tag_vocabulary('"fixture"')
+    assert vocabulary == (
+        GenomeTag(tag_id=1, tag="a synthetic tag"),
+        GenomeTag(tag_id=2, tag="another synthetic tag"),
+        GenomeTag(tag_id=3, tag="a third"),
+    )
 
 
 async def test_the_tag_vocabulary_fetches_the_archive_when_it_is_not_already_cached(

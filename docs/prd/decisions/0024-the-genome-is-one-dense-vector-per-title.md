@@ -44,8 +44,9 @@ positions mean the same thing. `genome-tags.csv` is read by the importer to
 verify contiguity and width, then thrown away.
 
 **Amended 2026-08-07 (M8 Task 19), on the terms this decision set out.**
-`genome_tags(tag_id, tag, genome_revision)` ships in migration `m08b`, loaded by the same `bootstrap --phase movielens`
-from the member it was already reading. Nothing about the *vector* shape
+`genome_tags(tag_id, tag, genome_revision)` ships in migration `m08b`, loaded
+by the same `bootstrap --phase movielens` from the member it was already
+reading. Nothing about the *vector* shape
 changes; what changed is that a consumer of the names arrived, exactly as the
 "Also" section below predicted, and `genome_revision` is what the vocabulary's
 own copy of that column is compared against.

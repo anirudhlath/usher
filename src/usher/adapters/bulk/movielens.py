@@ -308,6 +308,14 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         distinguishable, and `split` hands that back as a one-element list
         whose `[0]` parses as a perfectly good `tagId`.
 
+        **The empty-name refusal is `not name.strip()`, not `not name`**, and
+        the difference is the only defence there is: `ck_genome_tags_tag_not_
+        empty` is spelled `tag <> ''`, which a name of `"   "` satisfies, so a
+        whitespace-only lane would reach the table and read as labelled. All
+        1,128 measured names are `strip()`-stable, so this is hardening rather
+        than a live bug -- and it is why the CHECK was left as it is rather
+        than re-spelled `btrim(tag) <> ''` in a second migration.
+
         Contiguity is checked before width, and both are checked before the
         names are of any use. The vector is built *by index* from `tagId`, so
         a gap means every position after it is off by one, in every vector,
@@ -334,10 +342,10 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
                 raise PortDataMalformed(
                     "MovieLens genome-tags.csv has a non-integer tagId", detail=head
                 ) from exc
-            if not separator or not name:
+            if not separator or not name.strip():
                 raise PortDataMalformed(
                     "MovieLens genome-tags.csv has a tagId with no tag name; a lane named "
-                    "by an empty string is a vocabulary that still looks complete",
+                    "by nothing but whitespace is a vocabulary that still looks complete",
                     detail=head,
                 )
             tags.append(GenomeTag(tag_id=tag_id, tag=name))

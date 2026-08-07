@@ -186,11 +186,6 @@ CREATE TEMP TABLE stg_genome (
 ) ON COMMIT DROP
 """
 
-# `enrichment_state <> 'skeleton'` twice, deliberately: `enriched_with_vector`
-# is counted by joining `genome_scores` back to `titles` rather than by
-# counting vectors, because those two agree only while every genome-bearing
-# title happens to be enriched -- which is true of a fresh bootstrap and false
-# of every real deployment.
 # One bound-parameter `INSERT`, executemany'd over 1,128 records, and neither
 # half of that is incidental. **Bound values, not an interpolated `VALUES`
 # list**, so the only thing SQLSTATE class 22 can be about is a value a caller
@@ -203,6 +198,11 @@ _INSERT_GENOME_TAG = text(
     "VALUES (:tag_id, :tag, :genome_revision)"
 )
 
+# `enrichment_state <> 'skeleton'` twice, deliberately: `enriched_with_vector`
+# is counted by joining `genome_scores` back to `titles` rather than by
+# counting vectors, because those two agree only while every genome-bearing
+# title happens to be enriched -- which is true of a fresh bootstrap and false
+# of every real deployment.
 _GENOME_COVERAGE = """
 SELECT
   (SELECT count(*) FROM genome_scores)                                AS with_vector,

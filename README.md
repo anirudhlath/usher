@@ -149,10 +149,16 @@ re-run — it resumes from its completed checkpoint, writes no vector, and loads
 the words. `usher bootstrap-status` says which state a deployment is in:
 
 ```text
-titles in catalog: 1271138
+titles in catalog: 1271570
 genome vectors: 15565
 genome vocabulary: 1128 tags
 ```
+
+All three lines are **one** catalog — the 1,271,570-title bootstrap the genome
+phase was measured against on 2026-08-04. (The 1,271,138 quoted for search
+further up is a different, earlier catalog; both figures carry their date
+wherever they appear, because a terminal block mixing two is a reading no
+single run produces.)
 
 **Sync a source** — walks a registered media server into the catalog
 (matching, ingest, availability sweep), then walks its watch state.

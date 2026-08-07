@@ -611,9 +611,22 @@ async def test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_voca
     goes.** A catalog bootstrapped under M7 has a *completed*
     `movielens.genome` checkpoint and no vocabulary at all, because `ffa`
     deliberately did not store one. Re-running the phase resumes from that
-    cursor, yields no batch and writes no vector -- so an implementation that
-    loaded the vocabulary only when rows were written would leave exactly that
-    deployment without one, forever, with nothing to say so.
+    cursor, yields no batch and writes no vector -- and the vocabulary has to
+    land anyway. Deleting the write kills this (measured), and so does gating
+    it on a **per-run** count of rows written, which is the defect an
+    implementer would actually introduce.
+
+    **What this case does not kill is `if run.rows_written:`, and an earlier
+    version of this docstring claimed it did.** `ImportRun.rows_written` is
+    *cumulative across resumes* -- `PostgresImportRunRepository.start()` keeps
+    it when the revision has not moved -- so the second run below inherits the
+    first's count, that gate reads truthy, and the vocabulary is written for
+    the wrong reason. Measured 2026-08-07: the `rows_written` spelling passes
+    all 2,883 unit and all 899 integration cases, this one included. It is
+    still not the predicate to ship (`_movielens`' own docstring has the
+    argument), but the reason is that the two answers differ only for a
+    completed run that never wrote a vector at all -- not anything this case
+    can see.
 
     Modelled by running the phase twice against one catalog: the second run
     resumes from the first's completed cursor, which is the state a re-run
