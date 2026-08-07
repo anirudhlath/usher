@@ -883,3 +883,69 @@ spelling of a `Mapping` field is hashable**, so "frozen therefore hashable" is
 wrong for any dataclass with one — buying it means a
 `tuple[tuple[K, V], ...]` field every reader has to rebuild into a map. Wrap
 for the immutability, and do not claim the hash.
+
+**A mutation sweep that enumerates a module's *decisions* is blind to its
+*artefacts*, and an artefact whose only real consumer is outside the process is
+where every survivor collects.** Correcting M8 Task 12's own reported result.
+Commit `c9e5eb9`'s message claims **"29 mutations, 29 killed, 1
+equivalent-mutant control surviving as designed"**; a review then planted two
+mutations that the same 35 cases did not catch, and a follow-up sweep scoped to
+the prompt found **fourteen more**. The honest total for that commit is
+therefore *29 measured, 29 killed, 1 control, and an unmeasured region holding
+at least 16 live mutants* — and the number is the least interesting part,
+because both of the reviewer's two and all fourteen of the follow-up's sit in
+the same blind spot:
+
+- **The two the review found.** A **second, discarded
+  `await complete_json(...)`** immediately before the real one passed all 35
+  cases — PRD 06's *"one modest completion per user per day"*, the milestone's
+  central cost claim, pinned by nothing. And deleting *"at most
+  `MAX_HEADING_CHARS` characters"* from the prompt passed all 35 — the same
+  defect class the commit message *reports having found and closed* for
+  `"each between 1 and N"`, one constant over.
+- **The fourteen the follow-up found**, all in the prompt: the example JSON
+  object (`_SHAPE`), the *"Answer with JSON … and nothing else"* line that
+  introduces it, the instruction block's position (rendering the rules
+  **before** the 200-line candidate list, against `_prompt`'s own stated
+  ordering), *"Choose only from this list"*, both no-duplicate clauses, the
+  candidate line's **year** and **genres** and the `_SEPARATOR` between them,
+  the history's 1-based numbering, `_engagement`'s `play_count >= 2` threshold
+  (widened to `>= 1`, every history line gains a *", watched 1 times"* that
+  says nothing and is billed per token), and `LLMPurpose.CURATION` on the wire
+  — which lands on `usher.llm.purpose`, PRD 10's group-by, while the *ledger*
+  row's purpose stayed correct and asserted.
+
+**The hole in the method, which is the part worth carrying.** The sweep walked
+the module's control flow and its consumed constants, and scored each mutation
+against the suite. Every mutation it caught damaged something a case *reads
+back through a port* — a handle map, a ledger row, a span, a returned report.
+The prompt is the one artefact this module produces whose only real consumer is
+a language model, i.e. outside the process and absent from every test, so
+nothing about it is observed unless a case **opted in by name**. Mutation
+coverage of such an artefact is exactly the list of opt-ins and is never
+sampled by the suite at large — which is why a *single* prompt survivor found
+by a reviewer should be read as a survey result rather than as an incident.
+**Enumerate a module's outputs before enumerating its mutations, and for each
+ask "does any case read this at all?" — if the answer is "only the ones written
+for it", sweep that artefact exhaustively and expect the yield to be near
+100%.** Second half of the same hole: **a fake that is deliberately forgiving
+makes the *number* of interactions unobservable.** `FakeLLMClient` repeats its
+last scripted response forever (documented, and right for a contract suite), so
+`client.calls[0]` is satisfied by any number of calls ≥ 1 and *no* case
+constrained the count. Every count a spec states — one completion, one ledger
+row, one commit — needs its own `len(...) == 1`, and the ledger's count does
+not imply the wire's: one row for two billed calls is precisely the
+understates-spend defect the `record()` rule exists to prevent, arriving
+through the door that rule does not cover.
+
+**Closed 2026-08-06.** 42 cases (from 35), and the prompt sweep re-run at
+**26 mutations — 20 killed, 5 deliberately unpinned, 1 control surviving as
+designed**. The five left alive are framing prose with no constant, no rendered
+number and no `DropReason` behind them: the role sentence, the two history
+headers, the *"Group by something a person would recognise"* rule and the
+`reason` bullet's wording. Named here rather than pinned, because a verbatim
+assertion on the sentences most likely to be *tuned* is a change-detector, and
+the line drawn is: **every constant and every rendered number in a prompt gets
+a case, and so does every rule a validator will drop a row for** (ADR-0028
+sends an operator reading `duplicate` or `not_in_pool` to the prompt, so there
+has to be a rule there to fix).

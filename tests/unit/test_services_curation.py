@@ -70,6 +70,7 @@ from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.services import curation as curation_module
 from usher.services.curation import (
     HISTORY_SIZE,
+    MAX_HEADING_CHARS,
     MAX_ROWS,
     MIN_ROWS,
     CurationReport,
@@ -374,6 +375,11 @@ async def test_a_generation_writes_one_screen_and_one_successful_ledger_row() ->
     assert household.ledger.calls[0].error is None
     assert household.ledger.calls[0].purpose is LLMPurpose.CURATION
     assert household.ledger.calls[0].model == "served/mixtral-1"
+    # The same purpose on the wire, where the adapter puts it on
+    # `usher.llm.purpose`. PRD 10 groups spend by purpose in SQL and traces by
+    # that attribute, and the two disagreeing is a milestone's spend filed
+    # under a purpose this service does not have.
+    assert client.calls[0].purpose is LLMPurpose.CURATION
 
 
 async def test_the_rows_and_the_ledger_entry_land_in_one_transaction() -> None:
@@ -716,8 +722,13 @@ async def test_an_empty_pool_never_reaches_the_model() -> None:
     charge with a guaranteed empty answer.
 
     **No ledger row, and that is the one path where `record()` is not called.**
-    `llm_calls` is one row per *completion*; there was none, and `LLMCall.model`
-    is `min_length=1` with no honest value for a call nobody made.
+    The rule the service implements is *record on every path that attempted a
+    call*: the upstream-failure path completed nothing either and still writes
+    a row, so this is not an argument about `LLMCall.model` having no honest
+    value -- `self._model` is what that path writes and it is just as available
+    here. What is missing is the event: nothing was attempted and nothing was
+    billed, and a `llm_calls` row for an empty catalog is spend an operator has
+    to explain away.
     """
     household = _Household()
     client = FakeLLMClient.returning(_payload(_row("Impossible", _five())))
@@ -759,13 +770,24 @@ async def test_the_watch_history_reaches_the_prompt_most_recent_first() -> None:
     assert prompt.index("Watched Last Night") < prompt.index("Watched Longer Ago"), (
         "the history is most-recent-first"
     )
+    # 1-based, like the candidate list beside it. A history numbered from 0
+    # next to candidates numbered from 1 is the off-by-one ADR-0028's handle
+    # scheme is about, rendered into the same prompt.
+    assert "1. Watched Last Night" in prompt
 
 
 async def test_a_rewatch_is_marked_in_the_history() -> None:
     """`watch_states` has no rating column, so PRD 06's *"with ratings"* is
     substituted by the engagement signal this schema does have: rewatched
     weighs more than merely finished, and the prompt is where that reaches the
-    model."""
+    model.
+
+    **The silence on the other side is the assertion with teeth.** A single
+    viewing carries no clause at all -- `_engagement`'s docstring says so, and
+    it is the half a threshold mutation moves: widened to `>= 1`, every one of
+    up to `HISTORY_SIZE` lines gains *", watched 1 times"*, which says nothing
+    and is billed per token. `marked != plain` cannot see that.
+    """
     household = _Household()
     await _candidates(household)
     again = await household.title("Watched Twice", vote_count=2)
@@ -781,6 +803,7 @@ async def test_a_rewatch_is_marked_in_the_history() -> None:
     plain = next(line for line in lines if "Watched Once" in line)
     assert "4" in marked
     assert marked != plain and "4" not in plain
+    assert "watched" not in plain, "one viewing says nothing extra and costs tokens to say"
 
 
 async def test_the_history_is_bounded_and_the_pool_is_the_pools_own_bound() -> None:
@@ -882,6 +905,118 @@ async def test_the_prompt_states_the_bound_the_validator_checks() -> None:
     assert f"each between 1 and {len(pool)}" in client.calls[0].prompt
 
 
+async def test_the_prompt_asks_for_a_heading_that_fits_a_shelf() -> None:
+    """`MAX_HEADING_CHARS` is the third constant this prompt renders, and it
+    was the one no case proved was read: deleting *"at most 60 characters"*
+    from the instruction passed all 35 cases, because nothing else in this
+    repository states that number at all.
+
+    It is a **request** rather than a bound -- the validator's own limit is
+    `MAX_TITLE_CHARS = 200` and a longer heading is dropped there -- which is
+    exactly why the prompt is the only place it can be observed. A generation
+    whose headings are all 180 characters wide is a screen that looks wrong on
+    every client and reports nothing anywhere.
+    """
+    household = _Household()
+    await _candidates(household)
+    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
+
+    await household.service(client).generate(USER)
+
+    # The phrase, not the digits: a bare `"60" in prompt` is satisfied by a
+    # year, by a vote count, or by the sixtieth candidate's own line.
+    assert f"at most {MAX_HEADING_CHARS} characters" in client.calls[0].prompt
+
+
+async def test_the_prompt_shows_the_example_object_the_schema_asks_for() -> None:
+    """`_SHAPE` is built from the same four key constants as the schema and the
+    reader, and it is the only one of the three the *model* sees.
+
+    Deleting it survived every case, because
+    `test_the_schema_names_the_keys_the_validator_reads` pins the `json_schema`
+    -- which ADR-0028 calls an optimisation and never the contract, honoured by
+    a subset of providers. On a provider that ignores `response_format`, this
+    line is the whole of what says which keys to emit, and a completion using
+    other ones is a 100% `unparseable` generation at full price.
+
+    Asserted structurally rather than character by character: the example is a
+    line of its own, it carries all four keys, it is introduced as the only
+    thing to answer with, and **it comes after the candidates rather than
+    before them** -- `_prompt`'s own ordering claim, which is that the rules
+    are what the model answers *with* and are the part that has to survive a
+    200-line list. Rendering them first also survived every case.
+    """
+    household = _Household()
+    pool = await _candidates(household)
+    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
+
+    await household.service(client).generate(USER)
+
+    lines = client.calls[0].prompt.splitlines()
+    shapes = [index for index, line in enumerate(lines) if line.startswith(f'{{"{ROWS_KEY}"')]
+    assert len(shapes) == 1, "the example object is one line of the prompt"
+    shape = lines[shapes[0]]
+    assert all(f'"{key}"' in shape for key in (TITLE_KEY, REASON_KEY, ITEM_IDS_KEY))
+    introduction = lines[shapes[0] - 1]
+    assert "JSON" in introduction and "nothing else" in introduction
+    last_candidate = [
+        index for index, line in enumerate(lines) if line.startswith(f"{len(pool)}. ")
+    ]
+    assert last_candidate and max(last_candidate) < shapes[0], "context first, rules last"
+
+
+async def test_the_prompt_forbids_what_the_validator_drops_cards_for() -> None:
+    """ADR-0028's amended vocabulary says `not_in_pool` and `duplicate` *"both
+    point at the prompt or the temperature"* -- so an operator sent to the
+    prompt by either counter has to find a rule there to fix.
+
+    Both survived deletion. `not_in_pool`'s rule is two sentences: the bound
+    (`test_the_prompt_states_the_bound_the_validator_checks`) and the
+    instruction to choose from the list at all, which is ADR-0028's rule 1 as
+    the model reads it. `duplicate` counts cards and is earned two ways --
+    within a row and across rows -- so the prompt states both, and the
+    validator drops for both.
+    """
+    household = _Household()
+    await _candidates(household)
+    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
+
+    await household.service(client).generate(USER)
+
+    prompt = client.calls[0].prompt
+    assert "Choose only from this list" in prompt
+    assert "never the same number twice in one row" in prompt
+    assert "Do not use the same candidate in more than one row" in prompt
+
+
+async def test_a_candidate_line_carries_the_year_and_the_genres() -> None:
+    """The whole line, because every part of it is a token this generation pays
+    for and something the model is asked to group by.
+
+    The prompt asks for shelves grouped by *"a mood, a period, a theme"*, and
+    the period and the theme are exactly the two fields beyond the name that
+    the line carries. Each was deletable with all 35 cases green: every
+    candidate in this file's fixtures is seeded with the default year and **no
+    genres at all**, so `_genres` returned `""` for all of them and `_SEPARATOR`
+    -- a module constant with a paragraph of docstring about why it renders on
+    one line -- was proven read by nothing.
+    """
+    household = _Household()
+    await _candidates(household)
+    # The largest vote count in the fixture, so this is candidate 1 and the
+    # assertion can name its handle rather than search for it.
+    grouped = await household.title(
+        "A Film With Genres", vote_count=99_000_000, year=1974, genres=("Crime", "Drama")
+    )
+    client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
+
+    await household.service(client).generate(USER)
+
+    lines = client.calls[0].prompt.splitlines()
+    rendered = [line for line in lines if grouped.name in line]
+    assert rendered == [f"1. {grouped.name} (1974) - Crime, Drama"]
+
+
 async def test_the_schema_names_the_keys_the_validator_reads() -> None:
     """A schema saying `ids` and a validator reading `item_ids` is a generation
     that drops 100% of a correct answer. Both are written against the four
@@ -907,7 +1042,52 @@ async def test_the_schema_names_the_keys_the_validator_reads() -> None:
     assert (handle["minimum"], handle["maximum"]) == (1, len(pool))
 
 
-# --- the ledger is written on every path ----------------------------------
+# --- one completion, and one ledger row for it ----------------------------
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _payload(_row("Quiet Thrillers", _five())),
+        PortUnavailable("down"),
+        _payload(_row("Invented", [900, 901, 902, 903, 904])),
+    ],
+    ids=["generated", "upstream_failed", "validated_to_nothing"],
+)
+async def test_exactly_one_completion_is_bought_per_generation(
+    response: dict[str, Any] | BaseException,
+) -> None:
+    """PRD 06's *"one modest completion per user per day"*, which is the
+    milestone's whole cost claim and which **the ledger cannot see**.
+
+    `record()` writes one row per generation, so a service that called
+    `complete_json` twice and recorded once bills twice and reports once --
+    the ledger-understates-spend defect the record rule exists to prevent,
+    arriving through the one door that rule does not cover.
+    `test_record_is_called_exactly_once_per_generation` is green under exactly
+    that service.
+
+    **Nothing else in this file pins the count.** `FakeLLMClient` repeats its
+    last scripted response forever -- deliberately, and its docstring says so
+    -- so every case reading `client.calls[0]` is satisfied by any number of
+    calls at all, as long as it is at least one.
+
+    **All three arms that reach the client, not only the happy path.** A retry
+    loop that fired twice before giving up is invisible in the same way, and on
+    the two failure arms it is worse: the row it writes reads one call's tokens
+    for two calls' spend, over an `ok = false` an operator is already reading
+    as the expensive case. The fourth path buys nothing at all and
+    `test_an_empty_pool_never_reaches_the_model` pins that end.
+    """
+    household = _Household()
+    await _candidates(household)
+    client = FakeLLMClient.returning(response)
+
+    # Which exception is not this case's subject; the arms above pin those.
+    with contextlib.suppress(UsherPortError):
+        await household.service(client).generate(USER)
+
+    assert len(client.calls) == 1
 
 
 @pytest.mark.parametrize(

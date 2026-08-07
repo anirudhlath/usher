@@ -8,9 +8,9 @@ absorbed it would complete the job and lose the work silently). The two
 promises are kept by the same shape: `replace_for_user` is reached on exactly
 one path, and every other path raises after writing a ledger row.
 
-## The ledger is written on every path that made a completion
+## The ledger is written on every path that attempted a completion
 
-`llm_calls` is one row per *completion*, `ok` is the discriminator, and
+`llm_calls` is one row per *attempt*, `ok` is the discriminator, and
 **`ok` is not "the HTTP call returned 200"**: a call that answered perfectly
 and validated to zero rows is `ok = false` with a reason
 ([ADR-0028](../../../docs/prd/decisions/0028-the-pool-is-the-contract.md)'s
@@ -36,10 +36,20 @@ Two traps on that path, both of which lose the row the ledger exists for:
   rather than anything a retry fixes, and raising would buy a second completion
   to write the same unwritable row -- five times, on the queue's backoff.
 
-**The one path that records nothing is the one that made no completion.** An
-empty candidate pool raises before the client is touched: there is no answer
-to bill, and `LLMCall.model` is `min_length=1` with no honest value for a call
-nobody made.
+**The one path that records nothing is the one that attempted nothing.** An
+empty candidate pool raises before the client is touched, so the rule this
+module implements is *record on every path that **attempted** a call* --
+narrower than "every path", and wider than "every path that got an answer",
+because the upstream-failure path got no answer either and writes its row all
+the same.
+
+It is **not** an argument from `LLMCall.model`'s `min_length=1`. That field has
+a perfectly honest value for a call nobody made -- `self._model`, the model
+this deployment asked for, which is exactly what the upstream-failure path
+writes for a call that also completed nothing. What excludes the empty pool is
+that it is not an event of the LLM subsystem at all: an empty catalog is an
+operator's problem, no completion was attempted, none was billed, and a row
+saying otherwise is spend an operator has to explain away.
 
 ## Two failures, two exception types, and the choice is `JobWorker`'s policy
 
@@ -302,10 +312,10 @@ class CurationService:
             if not candidates:
                 # **Before the client, and therefore before the ledger.** A
                 # completion bought for a household with nothing to recommend
-                # is a charge with a guaranteed empty answer, and there is no
-                # `LLMCall` to write for a call nobody made. Malformed rather
-                # than unavailable: an empty catalog is an operator's problem
-                # and does not improve on a backoff schedule.
+                # is a charge with a guaranteed empty answer, and nothing was
+                # attempted here for the ledger to hold a row about. Malformed
+                # rather than unavailable: an empty catalog is an operator's
+                # problem and does not improve on a backoff schedule.
                 span.set_attribute("usher.failed", True)
                 raise PortDataMalformed(
                     "the candidate pool is empty; there is nothing to curate",

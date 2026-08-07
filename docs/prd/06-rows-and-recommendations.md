@@ -762,10 +762,12 @@ five things about the assembled whole are sharper than the list above.**
   A generation that validated to **nothing** raises `PortDataMalformed`: the
   three things that produce it are permanent properties of that request, so
   five more completions reach the same answer at five times the price.
-- **`llm_calls` gets a row on every path that made a completion**, `ok = false`
-  included — and the one path that writes none is the one that made no
-  completion, because an empty candidate pool raises before the client is
-  touched and there is no honest `model` for a call nobody made.
+- **`llm_calls` gets a row on every path that *attempted* a completion**,
+  `ok = false` included — a call that never got an answer is still a row, with
+  zeroed tokens and the model this deployment asked for. The one path that
+  writes none is the one that attempted nothing: an empty candidate pool raises
+  before the client is touched, and an empty catalog is an operator's problem
+  rather than an event of the LLM subsystem.
 
 Failure is non-fatal: previous rows stay until successfully replaced. Cost is
 one modest completion per user per day.
