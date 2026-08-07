@@ -29,14 +29,20 @@ because an adjacency rule is about what a person sees -- and applying it at
 selection ships a real, invisible defect: `[S, X, S, S]` selected, `X` builds
 empty, `[S, S, S]` returned, nothing raised and nothing logged.
 
-**A consequence of the two numbers, recorded because it is not obvious.** With
-`_MAX_PER_FAMILY = 4` and two families, the longest screen this composer can
-return today is **nine** rows -- one pinned plus four `SOURCE` plus four
-`SIMILARITY` -- and not `_MAX_ROWS`. `_MAX_ROWS` becomes reachable when M8
-registers `CuratedProvider` and `RowFamily` grows its third member. The
-ceiling stays 10 rather than 9 deliberately: it bounds the *screen*, and a
-bound that happened to equal today's arithmetic would silently stop bounding
-anything the day a family is added.
+**A consequence of the two numbers, and M8 is where it stopped being
+hypothetical.** With `_MAX_PER_FAMILY = 4` and *two* families the longest
+screen this composer could return was **nine** rows -- one pinned plus four
+`SOURCE` plus four `SIMILARITY` -- so `_MAX_ROWS` truncated nothing at any
+input, and the only case reaching that slice injected a smaller `max_rows`.
+`RowFamily` grew `CURATED` alongside the `LLMRow` that emits it (M8 task 14),
+thirteen candidates now get past the cap, and the ceiling does the work its
+name claims. `test_the_default_row_ceiling_is_reachable_now_that_a_third_
+family_exists` pins it, on what was **built** rather than on what came back:
+`_order` bounds the returned sequence by the same number, so deleting
+`_select`'s slice still returns ten rows -- having hydrated thirteen. The
+ceiling stayed 10 rather than 9 for exactly this reason: a bound that happened
+to equal the day's arithmetic would silently stop bounding anything the day a
+family was added.
 
 **The build loop is a `for`, and that is a decision rather than an accident.**
 `AsyncSession` is not safe for concurrent use, so `asyncio.gather` over

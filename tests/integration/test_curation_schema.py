@@ -185,8 +185,9 @@ async def test_deleting_a_title_leaves_a_dangling_card_id_rather_than_failing(
     table's `ON DELETE CASCADE` would empty this row inside the database,
     producing the heading-with-no-shelf that `min_length=1` exists to refuse,
     and `ON DELETE RESTRICT` would make a title undeletable because a model
-    mentioned it last night. The hydration in `LLMRow.build` is where a
-    missing card is handled, and it is Task 14's case.
+    mentioned it last night. The hydration in `LLMRow.build` is where a missing
+    card is handled, and `tests/unit/test_rows_curated.py` is where that is
+    pinned -- dropped rather than raised, with the heading kept.
     """
     user_id = await _user(session)
     kept = await _title(session, "The Quiet Vacuum")

@@ -62,9 +62,11 @@ curated row that mentioned it. Three consequences, in the order they arrive:
 - **`LLMRow.build`'s hydration shortens the shelf.** A card whose title is
   gone is a lookup that returns nothing, so the shelf loses a card and the
   heading stays. That is [ADR-0014](../../../docs/prd/decisions/0014-absence-is-not-zero.md)'s
-  shape and it is the same degradation the validator already produces.
-  Task 14 owns the case; a shelf that empties entirely must be dropped rather
-  than rendered as a heading with nothing under it.
+  shape and it is the same degradation the validator already produces. The
+  cases are `tests/unit/test_rows_curated.py`'s, and the vanished id sits in
+  the *middle* of the array there, which is what rules out a hydration that
+  stops at the gap; a shelf that empties entirely builds empty and is dropped
+  by the composer rather than rendered as a heading with nothing under it.
 - **It self-heals at the next generation**, because `curated_rows` holds one
   generation per user and the next nightly run replaces it wholesale. The
   window is one day.

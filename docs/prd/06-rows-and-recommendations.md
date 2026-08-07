@@ -143,18 +143,37 @@ slug-keyed rule would couple the composer to the catalog.
 |---|---|---|---|---|
 | **`SourceRow`** | `SOURCE` | Catalog and watch state in Postgres | Continue Watching, Next Up, Recently Added, genre shelves, collections | ~60 s |
 | **`SimilarityRow`** | `SIMILARITY` | Embedding / genome neighbours of a seed title | "Because you watched *Dune*", "More like this" | hours |
-| **`LLMRow`** | ⏳ **not built in M7 — M8 owns it** | A persisted `curated_rows` record | "Slow-burn sci-fi for a rainy night" | until regenerated |
+| **`LLMRow`** | ✅ **M8**, `services/rows/curated.py` | A persisted `curated_rows` record | "Slow-burn sci-fi for a rainy night" | 5 min — see below |
 
 `LLMRow.build()` only *hydrates* stored output. Generation happens in a
 background job — never in the request path.
 
-**`RowFamily` has two members in M7 and no `CURATED`.** M8 owns
-`curated_rows`, `LLMRow`, `CuratedProvider` and
-`POST /admin/rows/regenerate` as one family — hydrating a table whose
+> **"Until regenerated" was this table's TTL cell and it is corrected here: it
+> is the *artefact's* lifetime, not the cache's, and read as a TTL it inverts.**
+> The stored row really is immutable until a generation replaces it — but
+> `RowCache` holds the whole built row under `(user_id, slug)`, and a generation
+> of the same row count re-uses the same slugs, so a long TTL does not keep a
+> fresh row fresh: it keeps *last night's* row on the screen. Nothing
+> invalidates that entry, because the cache is in-process in the API and the
+> curation job runs under `usher work`; cross-process invalidation is M9's. So
+> the number is a staleness bound, and `POST /admin/rows/regenerate` is what
+> turns it into an operator watching a screen that has not changed. Five
+> minutes, matching `RecentlyAddedProvider`'s for the sibling reason: both rows'
+> content moves on an event the API process never observes.
+
+**`RowFamily` had two members in M7 and its third arrived with its emitter.**
+Boundary call 2 gave `curated_rows`, `LLMRow`, `CuratedProvider` and
+`POST /admin/rows/regenerate` to M8 as one family — hydrating a table whose
 generator does not exist would fix that table's shape before anything had
-tried to fill it. A "cap per family" over a family with no members is a branch
-nothing can reach, so the member arrives in the same diff as the provider that
-emits it.
+tried to fill it — and `CURATED` was deliberately not pre-declared, because a
+"cap per family" over a family with no members is a branch nothing can reach.
+It cost one line in the diff that added `LLMRow`.
+
+**What the third member made reachable, since that was the question the
+deferral was protecting: `_MAX_ROWS`, and not the cap.** Five `SOURCE`
+proposals have exercised the per-family cap since M7, and it has never cared
+how many families exist. The screen ceiling had not been reachable at all —
+see the composition section below.
 
 ## Dynamic composition
 
@@ -259,10 +278,14 @@ consecutive similarity rows; cap per family), builds the top N
 > constructor defaults rather than settings: the mechanism exists, but the
 > reason to move either is an operator looking at a screen, which is M9's admin
 > surface, and `Settings` is `extra="forbid"` so every field there owes a
-> reader *and* a reason. **With two families the longest screen reachable
-> today is nine rows** — one pinned plus four per family — and `_MAX_ROWS`
-> becomes reachable when M8 registers `CuratedProvider` and `RowFamily` grows
-> its third member.
+> reader *and* a reason. **With two families the longest screen reachable was
+> nine rows** — one pinned plus four per family — so `_MAX_ROWS` truncated
+> nothing at any input, and the only case that reached that slice injected a
+> smaller ceiling. ✅ **M8's `RowFamily.CURATED` is what made it reachable**:
+> thirteen candidates get past the cap and three are dropped. The case pins it
+> on what was **built** rather than on what came back, because `_order` bounds
+> the returned sequence by the same number — so an over-selecting composer
+> returns ten rows having hydrated thirteen, which no length assertion can see.
 >
 > Each provider declares a `slug_prefix` (`continue-watching`,
 > `because-you-watched`), and every row it proposes mints its slug from that

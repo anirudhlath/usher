@@ -84,13 +84,25 @@ class RowFamily(StrEnum):
     convention over slugs -- `because-you-watched-<seed>` is per-seed, so a
     slug-keyed rule couples the composer to the catalog.
 
-    **Two members in M7, not PRD 06's three.** Its family table lists
-    `SourceRow`, `SimilarityRow` and `LLMRow`; boundary call 2 gives the whole
-    `LLMRow`/`CuratedProvider`/`curated_rows` family to M8. `CURATED` is
-    deliberately not pre-declared: a cap on a family with no members is a
+    **Three members, and the third arrived with its emitter rather than ahead
+    of it.** PRD 06's family table lists `SourceRow`, `SimilarityRow` and
+    `LLMRow`; M7's boundary call 2 gave the whole
+    `LLMRow`/`CuratedProvider`/`curated_rows` family to M8, and `CURATED` was
+    deliberately **not** pre-declared -- a cap on a family with no members is a
     branch nothing can reach, so the first thing M8 would discover is whether
-    that branch was ever right. The member costs one line in the diff that
-    adds the provider emitting it.
+    that branch was ever right. It cost one line in the diff that added
+    `services/rows/curated.py:LLMRow`, which is the only thing that emits it.
+
+    **What it turned out to make reachable, because that is the question the
+    deferral was protecting.** Not the per-family cap: five `SOURCE` proposals
+    exercised that from M7 onwards, and the cap has never cared how many
+    families exist. It is `HomeService`'s `_MAX_ROWS`. With two families the
+    longest screen the composer could return was **nine** rows -- one pinned
+    plus four per family -- so the ceiling of ten truncated nothing at any
+    input; with three, thirteen candidates get past the cap and it truncates
+    three of them. `services/home.py` carries the same note beside the
+    constants, and `test_services_home.py::test_the_default_row_ceiling_is_
+    reachable_now_that_a_third_family_exists` is where the branch is pinned.
 
     Named `RowFamily` and not `RowKind`, and there is exactly one of it. The
     milestone plan used both names for this one concept -- `RowKind` in the
@@ -103,6 +115,7 @@ class RowFamily(StrEnum):
 
     SOURCE = "source"
     SIMILARITY = "similarity"
+    CURATED = "curated"
 
 
 class DisplayHint(StrEnum):

@@ -15,6 +15,7 @@ to "what does a fake row do", one file away from the one `tests/fakes/` already
 holds.
 """
 
+from collections import Counter
 from collections.abc import Sequence
 
 import pytest
@@ -318,20 +319,68 @@ async def test_every_provider_is_asked_exactly_once_per_screen(ctx: RowContext) 
 
 async def test_the_screen_is_never_longer_than_the_row_ceiling(ctx: RowContext) -> None:
     """`_MAX_ROWS` bounds what is built as well as what is returned: PRD 06's
-    "builds the top N", so no over-selection and no padding."""
-    service = HomeService(
-        providers=[
-            _stub(f"row-{n:02d}", score=0.9 - n / 100, family=RowFamily.SOURCE) for n in range(3)
-        ]
-        + [
+    "builds the top N", so no over-selection and no padding.
+
+    **The build count is the half with teeth, and it was missing until M8's
+    sweep measured it.** `_order` bounds the returned sequence by the same
+    number, so a `_select` that stopped truncating still returns four rows --
+    having hydrated six -- and this case's own docstring claimed the property
+    it did not check. The ceiling is *injected* here; the case below is the one
+    that reaches the shipped default, which no input could until `RowFamily`
+    had a third member.
+    """
+    providers = [
+        *(_stub(f"row-{n:02d}", score=0.9 - n / 100, family=RowFamily.SOURCE) for n in range(3)),
+        *(
             _stub(f"byw-{n:02d}", score=0.8 - n / 100, family=RowFamily.SIMILARITY)
             for n in range(3)
-        ],
-        max_rows=4,
-        max_per_family=4,
-    )
+        ),
+    ]
+    service = HomeService(providers=providers, max_rows=4, max_per_family=4)
 
     assert len(await service.compose(ctx)) == 4
+    assert sum(_builds(provider) for provider in providers) == 4
+
+
+async def test_the_default_row_ceiling_is_reachable_now_that_a_third_family_exists(
+    ctx: RowContext,
+) -> None:
+    """**The branch `RowFamily.CURATED` made reachable**, and the reason
+    `domain/rows.py` declined to pre-declare that member.
+
+    With two families the longest screen this composer could return was
+    **nine** rows -- one pinned plus `_MAX_PER_FAMILY` (4) from each of `SOURCE`
+    and `SIMILARITY` -- so the default `_MAX_ROWS = 10` truncated nothing at any
+    input, and `services/home.py` said so in its own docstring rather than
+    leaving it to be found. The case above reaches the slice only by *injecting*
+    `max_rows=4`. Three families put thirteen candidates past the cap and the
+    shipped ceiling starts doing work.
+
+    **Asserted on what was built, not only on what came back**, and that is the
+    whole of the teeth: `_order` bounds the *returned* sequence by the same
+    `_max_rows`, so deleting `[: self._max_rows]` from `_select` still returns
+    ten rows -- having hydrated thirteen. PRD 06 says "builds the top N", and
+    over-selection is invisible to a length assertion.
+    """
+    pinned = _stub("continue-watching", score=1.0, pinned=True)
+    capped = [
+        *(_stub(f"src-{n}", score=0.90 - n / 100) for n in range(4)),
+        *(_stub(f"curated-{n}", score=0.80 - n / 100, family=RowFamily.CURATED) for n in range(4)),
+        *(_stub(f"byw-{n}", score=0.70 - n / 100, family=RowFamily.SIMILARITY) for n in range(4)),
+    ]
+    providers = [pinned, *capped]
+
+    # The premises, read off the proposals rather than off the literals above:
+    # this case is about the *ceiling*, so the cap must not be what truncates.
+    families = Counter(row.family for provider in capped for row in provider.rows)
+    assert len(families) == 3, "the premise: three families, which is what gets past nine rows"
+    assert max(families.values()) <= 4, "the premise: no family is over the cap, so it drops none"
+    assert len(providers) > 10, "the premise: more candidates than the ceiling truncates"
+
+    screen = await HomeService(providers=providers).compose(ctx)
+
+    assert len(screen) == 10
+    assert sum(_builds(provider) for provider in providers) == 10
 
 
 def test_the_registry_holds_the_nine_providers_m7_ships_under_their_own_names() -> None:

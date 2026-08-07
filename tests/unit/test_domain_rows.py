@@ -150,17 +150,26 @@ def test_a_built_row_carries_its_own_ttl_so_a_cached_row_is_self_describing() ->
     assert BuiltRow.model_fields["ttl"].is_required()
 
 
-def test_the_row_family_vocabulary_has_no_curated_member_until_m8_builds_one() -> None:
-    """Boundary call 2 gives `curated_rows`, `LLMRow` and `CuratedProvider`
-    to M8 whole, so M7's family vocabulary is two members.
+def test_every_row_family_has_something_that_emits_it() -> None:
+    """PRD 06's three, and each of them arrived with its emitter.
 
-    Kills pre-declaring `CURATED`. A diversity rule that caps a family with
-    no members is a rule with no test -- the composer's "cap per family"
-    would carry a branch nothing can reach, and the first thing M8 would
-    discover is whether that branch was ever right. The member costs one
-    line in the diff that adds its provider.
+    `CURATED` was deliberately *not* pre-declared in M7 -- a diversity rule
+    capping a family with no members is a branch nothing can reach, so the
+    first thing M8 would have discovered is whether that branch was ever
+    right. It costs one line in the diff that adds `LLMRow` (M8 task 14), and
+    that diff is what this assertion moved in. **A member added ahead of its
+    emitter is what this case still kills**, in either direction: the set is
+    exact rather than a `<=`, so a fourth member fails here and a deleted
+    third one does too.
+
+    The realistic fourth is a family invented to express Continue Watching's
+    pin -- `ports/rows.py` argues that one down at length, because "always
+    ranked first" is a *positional* guarantee and a family is the key the
+    "cap per family" rule **counts**, so a one-member family for the pin puts
+    a position inside a rule about crowding. `ScoredRow.pinned` is where that
+    lives.
     """
-    assert {family.value for family in RowFamily} == {"source", "similarity"}
+    assert {family.value for family in RowFamily} == {"source", "similarity", "curated"}
 
 
 def test_a_built_row_names_its_family_and_there_is_only_one_spelling_of_it() -> None:
