@@ -26,6 +26,7 @@ from dataclasses import replace
 from usher.domain.enums import TitleKind
 from usher.domain.ids import new_id
 from usher.ports.bulk import (
+    GenomeTag,
     GenomeVector,
     IdCrosswalkPair,
     ImdbRating,
@@ -96,6 +97,10 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
         self._tmdb_ids: dict[tuple[int, TitleKind], TmdbId] = {}
         self._crosswalk: dict[str, IdCrosswalkPair] = {}
         self._genome: dict[uuid.UUID, tuple[tuple[float, ...], str]] = {}
+        # `tag_id -> (tag, genome_revision)`. Independent of `_genome`
+        # because the two tables are: nothing joins them, and the only
+        # relationship they have is the equality a reader compares.
+        self._genome_tags: dict[int, tuple[str, str]] = {}
         self.window_depth = 0
 
     def bulk_load_window(self) -> AbstractAsyncContextManager[None]:
@@ -310,6 +315,19 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
             self._genome[title_id] = (relevance, revision)
         return GenomeWriteResult(inserted=inserted, updated=updated, unmatched=unmatched)
 
+    async def replace_genome_tags(self, tags: Sequence[GenomeTag], *, revision: str) -> int:
+        # Before the clear, exactly as the real one refuses before its DELETE.
+        # This is the arm where that ordering is observable: the Postgres one
+        # wraps both statements in a SAVEPOINT, so the same mutation there
+        # rolls the delete back with the raise and stays green -- the finding
+        # `replace_for_user` already carries.
+        _refuse_partial_vocabulary(tags, revision)
+        # Assignment, not `update`: a replace leaves no row of the previous
+        # release behind, which is the one behaviour separating this method
+        # from `upsert_genome_vectors` above.
+        self._genome_tags = {tag.tag_id: (tag.tag, revision) for tag in tags}
+        return len(tags)
+
     async def genome_coverage(self) -> GenomeCoverage:
         revisions: dict[str, int] = {}
         for _, revision in self._genome.values():
@@ -343,6 +361,11 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
     def genome_keys(self) -> set[object]:
         return set(self._genome)
 
+    def genome_tags(self) -> tuple[tuple[int, str, str], ...]:
+        return tuple(
+            (tag_id, tag, revision) for tag_id, (tag, revision) in sorted(self._genome_tags.items())
+        )
+
     def mark_enriched(self, imdb_id: str) -> None:
         stored = self._titles.get(imdb_id)
         if stored is not None:
@@ -363,3 +386,28 @@ class FakeBulkCatalogRepository(BulkCatalogRepository):
     def name(self, imdb_id: str) -> str | None:
         stored = self._titles.get(imdb_id)
         return stored.facts.name if stored else None
+
+
+def _refuse_partial_vocabulary(tags: Sequence[GenomeTag], revision: str) -> None:
+    """The port's four `replace_genome_tags` refusals, modelled rather than
+    diverged -- kept identical to
+    `usher.db.repositories.bulk._refuse_partial_vocabulary`, which holds the
+    argument for each. The contract suite is what holds the two together.
+
+    Modelled rather than diverged because two of the four have no Postgres
+    constraint behind them at all: `ck_genome_tags_tag_id_in_vocabulary`
+    cannot see a *gap*, and an empty `tags` is a legal `DELETE` followed by a
+    legal zero-row `INSERT`. A fake that skipped them would let a caller-
+    assembly bug through every unit test in the milestone.
+    """
+    if not tags:
+        raise ValueError("a genome vocabulary of no tags is not a vocabulary")
+    if sorted(tag.tag_id for tag in tags) != list(range(1, len(tags) + 1)):
+        raise ValueError(
+            f"a genome vocabulary is tags 1...{len(tags)} and this one is not; "
+            "the vector is built by index and a gap renames every later lane"
+        )
+    if any(not tag.tag for tag in tags):
+        raise ValueError("a genome tag with no name is a lane that reads as labelled")
+    if not revision:
+        raise ValueError("a genome vocabulary must record the release it came from")

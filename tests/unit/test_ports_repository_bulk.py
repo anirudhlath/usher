@@ -31,6 +31,7 @@ def test_bulk_catalog_repository_surface() -> None:
             "upsert_crosswalk",
             "link_crosswalk",
             "upsert_genome_vectors",
+            "replace_genome_tags",
             "genome_coverage",
             "count_titles",
         }

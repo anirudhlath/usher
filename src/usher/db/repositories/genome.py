@@ -1,8 +1,19 @@
-"""Reads over `genome_scores`, the MovieLens tag-genome vectors.
+"""Reads over `genome_scores` and `genome_tags` — the MovieLens tag-genome
+vectors, and the vocabulary that names their lanes.
 
-Implements `GenomeRepository`. Read-only: the writer is
-`BulkCatalogRepository.upsert_genome_vectors`, because writing this table is
-a staged, `COPY`-scale, set-based join from `imdb_id` to `titles.id`.
+Implements `GenomeRepository`. Read-only: the writers are
+`BulkCatalogRepository.upsert_genome_vectors` and `.replace_genome_tags`,
+because writing the first is a staged, `COPY`-scale, set-based join from
+`imdb_id` to `titles.id` and the second belongs beside it, in the same
+bootstrap phase and the same transaction.
+
+**The vocabulary read is the whole table, deliberately, and the `WHERE` clause
+it does not have is the point.** `SELECT … WHERE genome_revision = :revision`
+answers zero rows for two states that call for different operator actions --
+nothing loaded, and the wrong release loaded -- and cannot name the release it
+found. Reading all 1,128 rows (~30 kB, one primary-key-ordered scan) is what
+lets `vocabulary` return `None` for the first and raise for the second with
+both tokens in the message.
 
 **Two rows are fetched by two equality predicates ORed together, not by
 `title_id IN (:left, :right)`, and that is deliberate.** A self-pair is a
@@ -46,6 +57,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.ports.bulk import GENOME_TAG_COUNT
+from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import GenomeRepository, GenomeVectorRow
 
 _COLUMNS = (
@@ -67,6 +79,14 @@ _GET_PAIR = text(
     "SELECT title_id, relevance, genome_revision FROM genome_scores "
     "WHERE title_id = CAST(:left AS uuid) OR title_id = CAST(:right AS uuid)"
 ).columns(*_COLUMNS)
+
+# `ORDER BY tag_id`, and it is not decoration: the answer is positional, so
+# the read order *is* the lane order. Postgres promises no order without it,
+# and a heap that happens to be in insertion order -- which every fixture and
+# every real load produces, because `replace_genome_tags` inserts ascending --
+# makes its absence invisible. `tests/contract/genome_repository_contract.py`
+# seeds descending for exactly that reason.
+_VOCABULARY = text("SELECT tag_id, tag, genome_revision FROM genome_tags ORDER BY tag_id")
 
 
 def _row(record: Any) -> GenomeVectorRow:
@@ -104,3 +124,46 @@ class PostgresGenomeRepository(GenomeRepository):
             # genome_scores GROUP BY 1` and fixes it with a re-import.
             return None
         return first, second
+
+    async def vocabulary(self, revision: str) -> tuple[str, ...] | None:
+        with self._session.no_autoflush:
+            result = await self._session.execute(_VOCABULARY)
+        rows = [
+            (int(record.tag_id), str(record.tag), str(record.genome_revision)) for record in result
+        ]
+        if not rows:
+            # Never loaded. A value rather than an error -- see the port for
+            # why this half is a `None` and the next one is not.
+            return None
+        stored = {row_revision for _, _, row_revision in rows}
+        if stored != {revision}:
+            # The whole reason this table carries a third column. Unlike
+            # `get_pair` above, the honest answer here is not "not comparable"
+            # -- it is that a wrong answer is available, plausible, and about
+            # to be rendered as prose. `PortDataMalformed` because retrying
+            # cannot help and `JobWorker` parks it; the fix is
+            # `usher bootstrap --phase movielens`, the same one the sibling
+            # condition takes. Both tokens in the message, because "the
+            # vocabulary is wrong" without naming what is stored is not
+            # something an operator can act on. A `stored` of more than one is
+            # rendered too: `replace_genome_tags` cannot produce it, so it
+            # means somebody wrote this table by hand.
+            raise PortDataMalformed(
+                f"the stored genome vocabulary was loaded from release "
+                f"{'/'.join(sorted(stored))} and cannot name the lanes of a vector from "
+                f"{revision}; re-run bootstrap --phase movielens",
+                detail=revision,
+            )
+        if [tag_id for tag_id, _, _ in rows] != list(range(1, len(rows) + 1)):
+            # Built by index, `GenomeVector`'s rule at the other end of the
+            # same pairing: a gap does not drop one name, it shifts every
+            # later one. `replace_genome_tags` refuses to write one and
+            # `pk_genome_tags` refuses a duplicate, so reaching this takes a
+            # hand-written `DELETE` -- which is exactly the operator action
+            # that would otherwise silently rename 1,127 lanes.
+            raise PortDataMalformed(
+                f"the stored genome vocabulary is not contiguous 1...{len(rows)}; a gap "
+                "moves every later lane's name",
+                detail=revision,
+            )
+        return tuple(tag for _, tag, _ in rows)

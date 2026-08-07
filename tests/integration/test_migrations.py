@@ -418,14 +418,17 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     landed on top -- the failure this case had on the first run after that,
     and a good illustration of why a step count is the wrong pin.
 
-    **Head is `m08a` and the `-1` half is re-pointed at its artefacts.** The
-    previous spelling asserted `ix_titles_popularity` was *present*, which held
-    because `ffc.downgrade()` recreates it and `-1`-from-`ffc` ran that
-    downgrade. `-1`-from-`m08a` runs `m08a.downgrade()` instead and stops at the
-    `ffc` state, where `ffc.upgrade()` has dropped the index -- so the
-    inherited assertion **fails, loudly and immediately**. Measured on
-    `pgvector/pgvector:pg17`: `alembic downgrade -1` from head leaves
-    `alembic_version = ffc` and zero rows in `pg_indexes` for that name.
+    **Head is `m08b` and the `-1` half is re-pointed at its artefact.** The
+    previous spelling asserted `pk_curated_rows`/`pk_llm_calls` were *absent*,
+    which held because `-1`-from-`m08a` ran `m08a.downgrade()` and dropped
+    both tables. `-1`-from-`m08b` runs `m08b.downgrade()` instead and stops at
+    the `m08a` state, where both tables are present -- so the inherited
+    assertion **fails, loudly and immediately**, which is the fifth landing in
+    a row to do so (`ffa`, `ffb`, `ffc`, `m08a`, `m08b`). The one before it
+    read `ix_titles_popularity` and broke for the mirror-image reason.
+
+    `m08b` creates exactly one table, so it needs exactly one assertion --
+    the "one per table" rule `m08a` needed for two.
 
     That is the general case rather than this migration's luck, and it is
     worth stating because the opposite was written here first and was wrong:
@@ -472,40 +475,31 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # job while it is false at the head's own state, which is precisely
         # what makes it fail the moment `-1` starts landing there. Group F
         # re-pointed it for `ffa`, `af64ba2` for `ffb`, M7 Task 36 for `ffc`,
-        # M8 Task 8 for `m08a`.
+        # M8 Task 8 for `m08a`, M8 Task 19 for `m08b`.
         # It is cheaper than a step count, which keeps passing for the wrong
         # reason instead of failing for the right one.
         #
-        # **The direction of the assertion does not decide this.** `m08a`
-        # creates tables so its artefacts are asserted *absent*; `ffc` dropped
+        # **The direction of the assertion does not decide this.** `m08b`
+        # creates a table so its artefact is asserted *absent*; `ffc` dropped
         # an index so its artefact was asserted *present*. Both spellings
         # break for the same reason when a head lands on them -- verified
         # against the real chain, see this test's docstring. You do not get to
         # pick the direction; the head's own `downgrade()` does.
         #
-        # `m08a.downgrade()` drops both of its tables, so after one step back
-        # neither table's primary key exists. **One assertion per table, and
-        # that is the count that matters**: a downgrade that drops
-        # `curated_rows` and forgets `llm_calls` passes a check that names
-        # only the first. `llm_calls` ships no index beyond its primary key,
-        # so `pk_llm_calls` is what stands for that table here.
+        # `m08b.downgrade()` drops its one table, so after one step back its
+        # primary key does not exist. **One assertion per table** is the rule
+        # `m08a` needed twice and this head needs once: a downgrade that drops
+        # one of two tables passes a check naming only the first.
+        # `genome_tags` ships no index beyond its primary key -- deliberately,
+        # `genome_scores`' precedent -- so `pk_genome_tags` is the whole of
+        # what stands for it here.
         #
-        # There is deliberately no third assertion on
-        # `ix_curated_rows_user_newest`. It would be **strictly redundant**:
-        # an index cannot outlive its table, so that name is present exactly
-        # when `pk_curated_rows` is, and no implementation fails one without
-        # failing the other. Correspondingly, deleting the explicit
-        # `op.drop_index` from `downgrade()` is an equivalent mutation --
-        # `drop_table` takes the index either way -- and that line's own
-        # comment says so rather than claiming this block covers it.
-        #
-        # The mutation this block does catch is a `downgrade()` body replaced
-        # by `pass`, which no other case in this suite can see -- the shared
+        # The mutation this block catches is a `downgrade()` body replaced by
+        # `pass`, which no other case in this suite can see -- the shared
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
         stepped_back = await _index_set(url)
-        assert "pk_curated_rows" not in stepped_back
-        assert "pk_llm_calls" not in stepped_back
+        assert "pk_genome_tags" not in stepped_back
 
         # Then down to the revision *below* `ff`, which is where M7 group E's
         # two index changes become observable -- `ffa` sits between head and
@@ -532,6 +526,21 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # used to make and it is still exercising `ffc`.
         assert "ix_titles_popularity" in stepped
         assert "pk_genome_scores" not in stepped
+        # `m08a`'s two, displaced from the `-1` half the moment `m08b` became
+        # head. One assertion per table, for the reason that block records:
+        # a `downgrade()` that drops `curated_rows` and forgets `llm_calls`
+        # passes a check naming only the first, and `llm_calls` carries no
+        # index beyond its primary key.
+        #
+        # There is deliberately no assertion on `ix_curated_rows_user_newest`.
+        # It would be **strictly redundant**: an index cannot outlive its
+        # table, so that name is present exactly when `pk_curated_rows` is.
+        # Correspondingly, deleting the explicit `op.drop_index` from `m08a`'s
+        # `downgrade()` is an equivalent mutation -- `drop_table` takes the
+        # index either way -- and that line's own comment says so rather than
+        # claiming this block covers it.
+        assert "pk_curated_rows" not in stepped
+        assert "pk_llm_calls" not in stepped
         assert "blend_fingerprint" not in await _column_set(url, "title_neighbors")
         assert "ix_watch_states_user_recent" not in stepped
         assert "ix_media_items_recently_added" not in stepped

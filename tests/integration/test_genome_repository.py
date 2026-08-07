@@ -12,6 +12,7 @@ join and belongs on that port.
 """
 
 import uuid
+from collections.abc import Sequence
 
 import pytest
 from sqlalchemy import text
@@ -62,6 +63,20 @@ class PostgresGenomeSeeder(GenomeSeeder):
             ),
             {"id": title_id, "relevance": _literal(relevance), "revision": revision},
         )
+
+    async def tags(self, tags: Sequence[tuple[int, str]], *, revision: str = RELEASE_A) -> None:
+        # A raw `INSERT` rather than `BulkCatalogRepository.replace_genome_tags`,
+        # for the reason the class docstring gives and one more that is
+        # specific to this table: that writer refuses a vocabulary with a gap,
+        # which is precisely what one contract case has to store.
+        for tag_id, tag in tags:
+            await self._session.execute(
+                text(
+                    "INSERT INTO genome_tags (tag_id, tag, genome_revision) "
+                    "VALUES (:tag_id, :tag, :revision)"
+                ),
+                {"tag_id": tag_id, "tag": tag, "revision": revision},
+            )
 
 
 class TestPostgresGenomeRepository(GenomeRepositoryContract):

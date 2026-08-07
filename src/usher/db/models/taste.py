@@ -1,17 +1,29 @@
 """Taste-side derived state: the MovieLens tag genome, and the per-user taste
 centroid.
 
-Both are *derived* — recomputable from inputs the catalog already holds — and
-both therefore carry provenance rather than an `updated_at` trigger. Group F
-landed `genome_scores`; Group G added `user_taste` to this module and to the
-same revision (`ffa`), which is what that migration's own docstring instructs.
+All three are *derived* — recomputable from inputs the catalog already holds —
+and all three therefore carry provenance rather than an `updated_at` trigger.
+M7 Group F landed `genome_scores`; its Group G added `user_taste` to this
+module and to the same revision (`ffa`), which is what that migration's own
+docstring instructs. **M8 Task 19 added `genome_tags` here** and to `m08b`.
+
+**`genome_tags` is in this module rather than in `db/models/curation.py`,
+which is where the M8 plan's file map put it.** The plan wrote it beside
+`curated_rows`/`llm_calls` because M8 is the milestone that wants the words;
+but this table is written by `bootstrap --phase movielens`, not by a
+generation, and the one invariant it has is that its `genome_revision` equals
+`genome_scores.genome_revision` — a column eleven lines down in this file.
+A vocabulary filed under curation would put the two halves of that comparison
+in two modules, and `curation.py`'s own docstring calls its pair "what a
+generation produced, and its cost", which a bootstrap artefact is not.
+Recorded in the M8 plan's amendment section.
 """
 
 import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import HALFVEC
-from sqlalchemy import DateTime, ForeignKey, Integer, Text, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -82,21 +94,20 @@ class GenomeScoreRow(Base):
       dead weight for years. Its job is to make the day that stops being true
       visible instead of silent, and 16,376 short strings is the price.
 
-    **The tag vocabulary itself is deliberately not stored, and the cost is
-    recorded here rather than discovered later.** Nothing in M7 reads a tag
-    *name*: cosine over two vectors needs the two vectors and the guarantee
-    that their positions mean the same thing, not the knowledge that position
-    431 is a word. `genome-tags.csv` is read by the importer to verify
-    contiguity and width, and thrown away. The real cost is M8's: **an LLM
-    prompt that wants to say "atmospheric, thought-provoking" needs the
-    words**, and a vector alone cannot produce them. So M8 must either
-    re-read `genome-tags.csv` (18,103 bytes out of an archive it would
-    otherwise not need) or add the table then — a 1,128-row table plus a
-    loader step in a phase that already reads the file, and one migration.
-    What makes that safe rather than a deferral-by-omission is this very
-    column: the vocabulary M8 loads must carry the same revision as the
-    vectors it explains, and there is already something to check it against.
-    ("Tiny" is not a reason to build the table now; `search_queries` is the
+    **The tag vocabulary was deliberately not stored in M7, and M8 Task 19
+    stored it — `GenomeTagRow` below.** M7's argument, kept because it is why
+    the table did not ship a milestone earlier: nothing in M7 reads a tag
+    *name*, since cosine over two vectors needs the two vectors and the
+    guarantee that their positions mean the same thing, not the knowledge that
+    position 431 is a word; `genome-tags.csv` was read by the importer to
+    verify contiguity and width, and thrown away. The cost landed exactly
+    where it was predicted to — **an LLM prompt that wants to say
+    "atmospheric, thought-provoking" needs the words** — and it was paid the
+    way this paragraph said it would be: a 1,128-row table plus a loader step
+    in a phase that already reads the file, and one migration (`m08b`).
+    **What made that safe rather than a deferral-by-omission is this very
+    column**, which is what `genome_tags.genome_revision` is compared against.
+    ("Tiny" was not a reason to build the table early; `search_queries` is the
     standing example of a table built ahead of its writer.)
 
     **No HNSW index, and this is a decision rather than an omission** — and
@@ -175,6 +186,89 @@ class GenomeScoreRow(Base):
     # *exactly*, so this table must add none and that test must not change.
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class GenomeTagRow(Base):
+    """What each of `genome_scores.relevance`'s 1,128 lanes means.
+
+    **Three columns, and the third is the whole reason the table is safe.**
+    `genome_scores` stores a `halfvec(1128)` whose positions are meaningful
+    only relative to a vocabulary; this is that vocabulary. Two releases'
+    vocabularies are the same type, the same width and, at 1,128 rows of
+    English words, indistinguishable by eye — so a vocabulary loaded from one
+    archive and a vector loaded from another produce labels that are wrong and
+    plausible, in prose, on a screen. `genome_revision` is what makes that a
+    comparison rather than a hope, and `GenomeRepository.vocabulary` refuses
+    across a mismatch. It is ADR-0020 again, and `GenomeScoreRow`'s own
+    `genome_revision` paragraph is where the shape is argued.
+
+    **`tag_id` is `Integer`, and the argument is not size — 1,128 rows is
+    2.2 kB either way.** It is which layer refuses an out-of-range value.
+    `.claude/rules/db-and-sql.md`'s standing trap is a column *narrower* than
+    the field feeding it: such a value is refused by asyncpg's own binary
+    encoder, client-side, as an unnamed `DataError` (SQLSTATE `22000`, the
+    measured `curated_rows."position"` instance), and through a `COPY` it is a
+    bare `builtins.OverflowError` with no SQLSTATE at all. Two decisions keep
+    this column out of that:
+
+    - **The ceiling is a batch precondition, not a field bound.**
+      `BulkCatalogRepository.replace_genome_tags` refuses a vocabulary that is
+      not exactly `1…n` before it writes anything, so the largest `tag_id`
+      that can reach the driver is the length of the sequence handed in. That
+      also catches the failure a per-row `le=` cannot see — a *gap*, which
+      renames every later lane.
+    - **`Integer` puts the remaining boundary out of reach.** Under
+      `SmallInteger` a caller reaches the encoder with a 32,768-element list;
+      under `Integer` it would need `2**31` elements. Everything below that is
+      refused by `ck_genome_tags_tag_id_in_vocabulary` — an `IntegrityError`
+      carrying a constraint name, which is the classifiable path
+      `is_row_refusal` and `constraint_name` were consolidated for. Measured
+      on `pgvector/pgvector:pg17`, 2026-08-07: at **32,768** the two types
+      diverge, `integer` answering `IntegrityError` SQLSTATE `23514` naming
+      the constraint and `smallint` answering `DBAPIError` SQLSTATE `22000`
+      naming nothing. `m08b`'s docstring holds the whole table.
+
+    **No index beyond the primary key.** `genome_scores`' and `llm_calls`'
+    precedent: the only read this table has is the whole of it, in `tag_id`
+    order, which the primary key already serves. An index nothing reads is
+    `ix_titles_popularity` again.
+
+    **No `computed_at`, unlike `genome_scores` one class up**, and the
+    asymmetry is real rather than an oversight. A genome vector's age is not
+    recoverable from `import_runs`, because a resumed import writes different
+    movies in different runs; this table is written by one statement pair in
+    one transaction, so its age *is* `import_runs` for `movielens.genome` —
+    the row an operator already reads with `usher bootstrap-status`. A fourth
+    column would be a second, drift-capable copy of that timestamp.
+    """
+
+    __tablename__ = "genome_tags"
+
+    # MovieLens' own lane index, never minted here -- `autoincrement=False` so
+    # a `tag_id` this project invented is not even expressible. The primary
+    # key *is* the natural key, exactly as `genome_scores.title_id` is: a
+    # surrogate id would add a column nothing reads while permitting two rows
+    # for one lane, which is a state no consumer could interpret.
+    tag_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    tag: Mapped[str] = mapped_column(Text, nullable=False)
+    genome_revision: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        # `1…GENOME_TAG_COUNT`, the same constant `genome_scores.relevance`
+        # declares its width with, so the two cannot drift. The lower bound is
+        # as load-bearing as the upper: `tag_id - 1` is a list index, and `0`
+        # would make lane -1 addressable.
+        CheckConstraint(
+            f"tag_id BETWEEN 1 AND {GENOME_TAG_COUNT}",
+            name="ck_genome_tags_tag_id_in_vocabulary",
+        ),
+        # An empty name is a lane that reads as labelled and says nothing --
+        # worse than a missing row, which the contiguity check would catch.
+        CheckConstraint("tag <> ''", name="ck_genome_tags_tag_not_empty"),
+        # An empty revision matches no `genome_scores` row, so every read of
+        # the vocabulary would refuse and the table would be silently inert.
+        CheckConstraint("genome_revision <> ''", name="ck_genome_tags_revision_not_empty"),
     )
 
 

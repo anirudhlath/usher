@@ -13,7 +13,7 @@ from typing import cast
 
 from pgvector.sqlalchemy import HALFVEC
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import Table
+from sqlalchemy import Integer, SmallInteger, Table
 
 from usher.db.base import Base
 from usher.db.models import LLMCallRow, MediaItemRow, SourceRow, TitleRow, UserRow, WatchStateRow
@@ -22,6 +22,7 @@ from usher.db.models.search import (
     TitleEmbeddingRow,
     TitleNeighborRow,
 )
+from usher.db.models.taste import GenomeTagRow
 from usher.db.models.title import DERIVED_COLUMNS
 from usher.domain.curation import LLMPurpose
 from usher.domain.enums import (
@@ -324,6 +325,42 @@ def test_the_embedding_column_is_nullable_and_the_neighbour_columns_are_not() ->
     assert embeddings.c.source_fingerprint.nullable is False
     for column in ("title_id", "neighbor_id", "score", "rank"):
         assert neighbours.c[column].nullable is False
+
+
+def test_the_genome_tag_id_column_is_wide_enough_that_a_constraint_refuses_it_first() -> None:
+    """`genome_tags.tag_id` is `Integer`, not `SmallInteger`, and the reason
+    is which layer refuses an out-of-range value rather than how many bytes a
+    1,128-row table costs.
+
+    `.claude/rules/db-and-sql.md` records the trap this is picked against: a
+    column narrower than the field feeding it is refused by **asyncpg's own
+    encoder**, client-side, as an unnamed `DataError` (SQLSTATE `22000`) --
+    `curated_rows."position"` at `2**31` is the measured instance. The only
+    values that reach this column are ones `replace_genome_tags` has already
+    checked are exactly `1…n`, so the largest is the length of the vocabulary
+    handed in. Under `SmallInteger` that boundary is **32,768**, which a
+    caller can reach with a list; under `Integer` it is `2**31`, which it
+    cannot. Everything below the boundary is refused by
+    `ck_genome_tags_tag_id_in_vocabulary` instead -- an `IntegrityError`
+    carrying the constraint's own name, which is the classifiable path.
+
+    So this case is not about the type. It is about the ordering of two
+    refusals, and it fails if a later reader "tidies" a lane index into the
+    narrowest type that holds 1,128.
+    """
+    tags = cast(Table, GenomeTagRow.__table__)
+    assert isinstance(tags.c.tag_id.type, Integer)
+    assert not isinstance(tags.c.tag_id.type, SmallInteger)
+    assert tags.c.tag_id.primary_key is True
+    # Not a sequence: `tag_id` is MovieLens' own lane index, never minted here.
+    assert tags.c.tag_id.autoincrement is False
+    assert {c.name for c in tags.columns} == {"tag_id", "tag", "genome_revision"}
+    assert {c.name for c in tags.constraints if c.name} == {
+        "pk_genome_tags",
+        "ck_genome_tags_tag_id_in_vocabulary",
+        "ck_genome_tags_tag_not_empty",
+        "ck_genome_tags_revision_not_empty",
+    }
 
 
 def test_the_embedding_width_is_declared_once() -> None:

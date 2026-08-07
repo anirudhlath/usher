@@ -1282,3 +1282,100 @@ subsumes the other** — the contract cannot see `503`, and the scan cannot see 
 router nobody wrote a case for — so the rule is: *when a structural guard is
 the whole argument for a claim, ask what the claim's own subject is named
 elsewhere in `src/`, and prefer a graph property wherever one is expressible.*
+
+**M8 Task 19's sweep: 41 mutations over the genome tag vocabulary — 36 killed,
+3 equivalent-mutant controls surviving as designed, 2 measured survivors
+reported rather than replaced.** 49 plant-runs to get there: **three mutations
+were mis-spelled**, one was scored `BROKEN-MUTATION` by the harness, and one
+was scored `KILLED` *wrongly* and corrected (see below). **The three-way split
+is the one that says something** — 38 behavioural mutations of which 36 died,
+against 3 the suite was designed not to catch. In
+place, `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept before every run,
+`compile()` for the dry run, `cp` backups keyed on the **full path**, the plant
+asserted present (`path.read_text() == mutated`) before any verdict, only
+`^FAILED` lines read as kills, and a signal handler so an interrupt could not
+leave the tree mutated. Baseline established green on a clean tree first:
+**2,817 unit / 4 skipped**, **898 integration / 8 skipped**, ruff, `ruff format
+--check`, mypy over 435 files, 8 import contracts. (The two cases the round
+added to close its own findings take the final numbers to **2,819 / 899**.)
+
+**The three controls, each against every gate step** — which is the check the
+`__all__` entry above exists to force, and all three pass all five:
+
+| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `__table_args__`'s two independent `CheckConstraint`s swapped | PASS | PASS | PASS | PASS | PASS |
+| `_vocabulary_line`'s empty-genome and mixed-release branches swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `_refuse_partial_vocabulary`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first two are facts about the *code* rather than about what the tools look
+at: `__table_args__` order has no semantics (Alembic's `compare_metadata`
+matches by name, and the case that reads them asserts a **set**), and
+`len(()) > 1` is false so the mixed-release arm can never answer the empty
+case. The docstring reword is the cheap one and was checked first against
+`grep -rn "getdoc\|__doc__\|ast.unparse\|getsource" tests/` — that scan covers
+`ports/embedding.py`, `ports/metadata.py`, `services/home.py`,
+`services/curation.py`, `services/reconcile.py`, `services/rows/` and
+`api/routers/rows.py`, and **not** `db/repositories/`.
+
+**Three mutations were mis-spelled. The first two manufactured a *survivor*,
+which is the direction this file already documents; the third manufactured a
+*kill*, which it does not, and that one is written up at the end.**
+
+- *"The precondition runs after the DELETE"* was first spelled as **adding** a
+  second `_refuse_partial_vocabulary` call inside the SAVEPOINT while the
+  original stayed — a duplicate, not a move, and equivalent by construction.
+  Respelled as a move it fails 3 cases. "A mutation must be the change the plan
+  names", verbatim.
+- *"The vocabulary is stamped with a freshly resolved revision"* survived
+  because every transport in `tests/unit/test_cli.py` answers **one** ETag, so
+  the mutant's wrong answer equals the right one — the `\r\n` finding's shape in
+  the revision domain. Closed by a case whose transport hands back a different
+  token each call and whose premise resolves once more to prove it, and the
+  mutation then fails on it.
+
+**The survivor that is real, measured and kept:** gating the vocabulary write
+on `run.rows_written` instead of on `run.status is COMPLETED` **survives all
+2,819 unit cases**, and it is *not* the plausible defect. `ImportRun.
+rows_written` is cumulative across resumes, so the M7-upgrade path this gate
+exists for — a completed checkpoint that yields no batch — still reads truthy
+and still writes the vocabulary. The two answers differ only for a completed
+run that has *never* written a vector, which is a catalog holding no genome
+movie at all, where a vocabulary explains nothing. The defect an implementer
+would actually write is a **per-run** tally, and that one fails
+`test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_vocabulary`.
+**The general form: before writing a survivor up as a coverage gap, check
+whether the mutant and the original differ on any state the system can be in —
+a counter that accumulates across runs is not the counter the gate was reaching
+for.**
+
+**And the second survivor is the one whose first measurement was wrong, which
+is the more useful half.** `except DBAPIError` in `replace_genome_tags`
+narrowed to `except IntegrityError` was first scored **KILLED**, naming two
+integration cases — and the spelling had not imported `IntegrityError`, so the
+`except` clause raised `NameError` at the moment it was evaluated. `compile()`
+does not see an undefined name, the suite ran, two cases failed, and the log
+read as a clean kill *of the mutation the plan named* rather than of a typo.
+Respelled with the import (and re-planted by hand, since the change is two
+anchors in one file), it **survives all 57 relevant integration cases and all
+2,819 unit cases** — which was the prediction, and which is the opposite of the
+`curated_rows."position"` finding one file over.
+
+That survival is the intended consequence of `m08b`'s column choice rather than
+a gap: with `tag_id` as `integer` behind a batch precondition, every
+*reachable* refusal on this table is a CHECK violation, i.e. an
+`IntegrityError`, so the wider `except` is defence in depth against the next
+column rather than the load-bearing clause. Reported with its measurement, not
+tidied to match.
+
+**The rule this adds, because the existing ones do not cover it.** This file
+already says a broken mutation must not be scored as a kill, and the harness
+already scores `ERROR collecting` and `SyntaxError` as `BROKEN-MUTATION` — but
+a `NameError` inside an `except` clause is none of those: it is raised at
+*handling* time, on the failure path, in exactly the cases the mutation is
+aimed at, so it produces a plausible kill naming plausible tests. **A mutation
+that changes an `except`, an `isinstance`, or any other name-resolving
+expression on a path only the failing cases reach has to be checked for the
+names it introduces** — the cheap check is that the mutated file's new
+identifiers are already imported, and the cheap tell is a kill whose failing
+cases are *exactly* the ones written for that clause.

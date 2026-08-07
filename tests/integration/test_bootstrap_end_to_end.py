@@ -14,21 +14,25 @@ from pathlib import Path
 import httpx
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.adapters.bulk.imdb import IMDbRatingDataset, IMDbTitleDataset
 from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
+from usher.db.repositories.genome import PostgresGenomeRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.domain.bootstrap import ImportRunStatus
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import (
     GENOME_TAG_COUNT,
+    GenomeTag,
     GenomeVector,
     IdCrosswalkPair,
     ImdbTitle,
     TmdbId,
 )
+from usher.ports.errors import PortDataMalformed, RepositoryConflict
 from usher.services.bootstrap import BootstrapService
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures" / "bulk"
@@ -330,6 +334,97 @@ async def test_the_genome_phase_joins_on_imdb_id_and_checkpoints_by_movie_run(
         )
     )
     assert [tuple(row) for row in stored] == [('"fixture"', "tt99000020")]
+
+
+async def test_the_tag_vocabulary_crosses_the_whole_phase_at_the_production_width(
+    session: AsyncSession, cache: Path
+) -> None:
+    """`genome-tags.csv` -> adapter -> `replace_genome_tags` -> 1,128 rows of
+    `genome_tags` -> `GenomeRepository.vocabulary`, at the width production
+    runs at.
+
+    **1,128 rather than a convenient three**, for the reason the fixture
+    comment above gives about vectors and one more that belongs to this table:
+    `ck_genome_tags_tag_id_in_vocabulary` bounds `tag_id` at exactly
+    `GENOME_TAG_COUNT`, so a narrow fixture exercises the column's range check
+    nowhere near its edge. The last lane is asserted by name for that reason.
+
+    The two halves are asserted together, which is the property the third
+    column exists for: the vocabulary reads back **only** when asked for the
+    revision the vectors carry.
+    """
+    catalog = await _seed_catalog(session, _genome_cache(cache))
+    async with httpx.AsyncClient(transport=_local(cache)) as client:
+        dataset = MovieLensGenomeDataset(client, cache)
+        revision = await dataset.revision()
+        vocabulary = await dataset.tag_vocabulary(revision)
+        written = await catalog.replace_genome_tags(vocabulary, revision=revision)
+
+    assert written == GENOME_TAG_COUNT
+    names = await PostgresGenomeRepository(session).vocabulary(revision)
+    assert names is not None
+    assert len(names) == GENOME_TAG_COUNT
+    assert names[0] == "synthetic tag 1"
+    assert names[-1] == f"synthetic tag {GENOME_TAG_COUNT}"
+
+    with pytest.raises(PortDataMalformed) as exc_info:
+        await PostgresGenomeRepository(session).vocabulary("a-different-release")
+    assert revision in str(exc_info.value)
+
+
+async def test_a_vocabulary_one_lane_wider_than_the_schema_is_refused_by_the_column(
+    session: AsyncSession, cache: Path
+) -> None:
+    """`ck_genome_tags_tag_id_in_vocabulary` is the ceiling on `tag_id`, and
+    this is the case that proves it is a *constraint* rather than an encoder
+    refusal.
+
+    A vocabulary of `GENOME_TAG_COUNT + 1` tags is contiguous `1…n`, so
+    `_refuse_partial_vocabulary` passes it, and it is the smallest input that
+    reaches the column's own bound. Measured here rather than argued: the
+    refusal arrives as a `RepositoryConflict` **naming the constraint**, which
+    is what `integer` buys over `smallint` -- under `smallint` the same shape
+    at 32,768 lanes is asyncpg's unnamed encoder `DataError` instead.
+    """
+    catalog = PostgresBulkCatalogRepository(session)
+    too_wide = tuple(
+        GenomeTag(tag_id=n, tag=f"synthetic tag {n}") for n in range(1, GENOME_TAG_COUNT + 2)
+    )
+
+    with pytest.raises(RepositoryConflict) as exc_info:
+        await catalog.replace_genome_tags(too_wide, revision='"fixture"')
+
+    assert exc_info.value.constraint == "ck_genome_tags_tag_id_in_vocabulary"
+    # The SAVEPOINT held: the session is still usable, which is what lets a
+    # caller record the failure it still has to report.
+    assert await catalog.count_titles() == 0
+
+
+async def test_a_failure_that_is_not_the_rows_propagates_untranslated(
+    session: AsyncSession,
+) -> None:
+    """`if not is_row_refusal(exc): raise` -- the half of the `except` that
+    every sibling repository has and that no case had exercised here.
+
+    A missing table is SQLSTATE `42P01`, which is neither class `22` nor class
+    `23`: it is the deployment being wrong, not the vocabulary, and a caller
+    that cannot tell it from a refused row retries the one thing a retry
+    cannot fix. Kills `raise RepositoryConflict(...)` unconditionally, which
+    is the shape an `except DBAPIError` invites.
+
+    The `DROP` is inside the test's own rolled-back transaction, so nothing
+    outlives it.
+    """
+    catalog = PostgresBulkCatalogRepository(session)
+    await session.execute(text("DROP TABLE genome_tags"))
+
+    with pytest.raises(DBAPIError) as exc_info:
+        await catalog.replace_genome_tags(
+            (GenomeTag(tag_id=1, tag="zeppelins"),), revision='"fixture"'
+        )
+
+    assert not isinstance(exc_info.value, RepositoryConflict)
+    assert exc_info.value.orig.__cause__.sqlstate == "42P01"  # type: ignore[union-attr]
 
 
 async def test_a_replayed_genome_phase_reports_updates_and_the_same_coverage(

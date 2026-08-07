@@ -8,13 +8,16 @@ wiring nothing checks.
 import argparse
 import asyncio
 import dataclasses
+import zipfile
 from pathlib import Path
 
 import httpx
 import pytest
 
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
+from tests.fakes.genome_repository import FakeGenomeRepository
 from tests.fakes.import_run_repository import FakeImportRunRepository
+from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.cli import (
     PHASES,
     SYNC_KINDS,
@@ -23,11 +26,14 @@ from usher.cli import (
     _movielens,
     _report_coverage,
     _run_lanes,
+    _vocabulary_line,
     build_parser,
     parse_args,
 )
 from usher.config import Settings
+from usher.domain.bootstrap import ImportRunStatus
 from usher.domain.enums import EnrichmentState, TitleKind
+from usher.ports.bulk import GENOME_TAG_COUNT, ImdbTitle
 from usher.ports.repository import GenomeCoverage
 from usher.ports.search import SearchFilters, SearchMode
 from usher.services.bootstrap import BootstrapService
@@ -426,7 +432,7 @@ async def test_the_genome_phase_refuses_an_empty_catalog_before_downloading(
     )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
-        await _movielens(settings, client, catalog, service)
+        await _movielens(settings, client, catalog, service, _no_commit)
 
     assert await catalog.count_titles() == 0
     assert await runs.list_runs() == []
@@ -437,6 +443,303 @@ async def test_the_genome_phase_refuses_an_empty_catalog_before_downloading(
 
 async def _no_commit() -> None:
     return None
+
+
+# One movie, a **full-width** vocabulary, and a links row joining it to the
+# catalog title seeded below. Every value invented; see `tests/unit/
+# test_adapters_bulk_movielens.py` for why the fixture is Python literals
+# rather than a committed archive.
+#
+# Full width rather than the three tags the adapter's own tests use, because
+# `_movielens` constructs `MovieLensGenomeDataset` with the production
+# `expected_tags` and a narrower vocabulary is refused before a score is read
+# -- which is the check that exists precisely so a release whose vocabulary
+# moved cannot be stored under `halfvec(1128)`. The first three names are
+# spelled out so the lane-order assertions below read as assertions rather
+# than as arithmetic.
+_TAG_NAMES = (
+    "zeppelins",
+    "atmospheric",
+    "melancholy",
+    *(f"invented tag {n}" for n in range(4, GENOME_TAG_COUNT + 1)),
+)
+_ARCHIVE_MEMBERS = {
+    "links.csv": "movieId,imdbId,tmdbId\n90000101,99000101,90000201",
+    "genome-tags.csv": "\n".join(
+        ["tagId,tag"] + [f"{n},{name}" for n, name in enumerate(_TAG_NAMES, start=1)]
+    ),
+    "genome-scores.csv": "\n".join(
+        ["movieId,tagId,relevance"]
+        + [f"90000101,{n},{n / 10000}" for n in range(1, GENOME_TAG_COUNT + 1)]
+    ),
+}
+_SEEDED_TITLE = ImdbTitle(
+    imdb_id="tt" + "99000101",
+    kind=TitleKind.MOVIE,
+    name="An Invented Feature",
+    original_name=None,
+    year=1994,
+    end_year=None,
+    runtime_minutes=100,
+    genres=("Drama",),
+)
+
+
+def _genome_archive(tmp_path: Path, **overrides: str) -> Path:
+    cache = tmp_path / "bulk"
+    cache.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(cache / "ml-latest.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, body in (_ARCHIVE_MEMBERS | overrides).items():
+            archive.writestr(f"ml-latest/{name}", body)
+    return cache
+
+
+def _local_archive(cache: Path) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = str(request.url).rsplit("/", 1)[-1]
+        (cache / f"{name}.revision").write_text('"fixture"')
+        return httpx.Response(
+            200, content=(cache / name).read_bytes(), headers={"etag": '"fixture"'}
+        )
+
+    return httpx.MockTransport(handler)
+
+
+def _genome_settings(cache: Path) -> Settings:
+    return Settings(
+        database_url="postgresql+asyncpg://u:p@localhost/db",
+        secret_key="0" * 32,
+        bulk_data_dir=cache,
+    )
+
+
+async def test_the_genome_phase_stores_the_tag_vocabulary_beside_the_vectors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The loader half of Task 19, driven through the phase rather than
+    through the repository, because "loaded by the existing MovieLens phase"
+    is the requirement and a repository case cannot see it.
+
+    The vocabulary carries **the same revision the vectors carry**, which is
+    what makes the two comparable at all. Against this fixture the two agree
+    by luck as well as by construction -- one ETag, never moving -- so the
+    case below is the one with teeth about *which* token was used, and this
+    one is its control.
+    """
+    cache = _genome_archive(tmp_path)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_SEEDED_TITLE])
+    service = BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
+
+    async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
+        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit)
+
+    stored = catalog.genome_tags()
+    assert len(stored) == GENOME_TAG_COUNT
+    assert stored[:3] == (
+        (1, "zeppelins", '"fixture"'),
+        (2, "atmospheric", '"fixture"'),
+        (3, "melancholy", '"fixture"'),
+    )
+    assert stored[-1] == (GENOME_TAG_COUNT, _TAG_NAMES[-1], '"fixture"')
+    vector_revisions = {revision for revision, _ in (await catalog.genome_coverage()).revisions}
+    assert vector_revisions == {'"fixture"'}
+    assert f"{GENOME_TAG_COUNT} tags" in capsys.readouterr().out
+
+
+async def test_the_vocabulary_is_stamped_with_the_token_the_vectors_were_stamped_with(
+    tmp_path: Path,
+) -> None:
+    """The reason `tag_vocabulary` takes a `revision` instead of resolving
+    one, arriving at the layer where the damage would be permanent.
+
+    An upstream that re-uploads between two `HEAD`s hands back two tokens for
+    one run. `BootstrapService.import_dataset` already takes the caller's own
+    resolved value for exactly that reason (its docstring calls out this
+    phase by name), and the vocabulary has to travel the same way -- otherwise
+    `genome_tags.genome_revision` says B while every vector beside it says A,
+    and `GenomeRepository.vocabulary` then refuses forever on a catalog where
+    nothing is actually wrong.
+
+    The fixture is the only one in this file whose ETag **moves**: every other
+    transport here answers one token, which makes "resolved once" and
+    "resolved twice" indistinguishable. Kills
+    `replace_genome_tags(..., revision=await dataset.revision())`.
+    """
+    cache = _genome_archive(tmp_path)
+    tokens = iter(['"release-a"', '"release-b"', '"release-c"'])
+    served: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = str(request.url).rsplit("/", 1)[-1]
+        token = next(tokens)
+        served.append(token)
+        (cache / f"{name}.revision").write_text(token)
+        return httpx.Response(200, content=(cache / name).read_bytes(), headers={"etag": token})
+
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_SEEDED_TITLE])
+    service = BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit)
+        # The premise, asserted against the transport rather than against the
+        # run: one more resolution really does hand back a different token, so
+        # an implementation that resolved a second time would have stamped
+        # something else. Without this the fixture is indistinguishable from
+        # every other one in this file.
+        again = await MovieLensGenomeDataset(client, cache).revision()
+
+    assert again != served[0]
+    vector_revisions = {revision for revision, _ in (await catalog.genome_coverage()).revisions}
+    tag_revisions = {revision for _, _, revision in catalog.genome_tags()}
+    assert tag_revisions == vector_revisions == {served[0]}
+
+
+async def test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_vocabulary(
+    tmp_path: Path,
+) -> None:
+    """**The upgrade path, and the one case that decides where this call
+    goes.** A catalog bootstrapped under M7 has a *completed*
+    `movielens.genome` checkpoint and no vocabulary at all, because `ffa`
+    deliberately did not store one. Re-running the phase resumes from that
+    cursor, yields no batch and writes no vector -- so an implementation that
+    loaded the vocabulary only when rows were written would leave exactly that
+    deployment without one, forever, with nothing to say so.
+
+    Modelled by running the phase twice against one catalog: the second run
+    resumes from the first's completed cursor, which is the state a re-run
+    against an unchanged archive really produces (`_movielens`' own docstring
+    records it as measured -- 16,376 runs skipped, nothing written).
+    """
+    cache = _genome_archive(tmp_path)
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    service = BootstrapService(runs, catalog, _no_commit)
+    settings = _genome_settings(cache)
+
+    async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
+        await _movielens(settings, client, catalog, service, _no_commit)
+        assert len(catalog.genome_tags()) == GENOME_TAG_COUNT
+        # An M7-era catalog has no vocabulary. Both stores are emptied rather
+        # than just the vocabulary, so the assertions below can distinguish
+        # "the second run wrote nothing" from "the second run rewrote
+        # everything" -- which the checkpoint alone cannot, since a run that
+        # replayed every batch reaches the same position.
+        catalog._genome_tags.clear()
+        catalog._genome.clear()
+        await _movielens(settings, client, catalog, service, _no_commit)
+
+    checkpoint = await runs.get("movielens.genome")
+    assert checkpoint is not None
+    assert checkpoint.position == 1
+    # The premise: the second run resumed from a completed cursor and yielded
+    # no batch, so nothing it wrote can have come from the vector path.
+    assert catalog.genome_keys() == set()
+    assert len(catalog.genome_tags()) == GENOME_TAG_COUNT
+
+
+async def test_an_import_that_failed_writes_no_vocabulary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A vocabulary explains the vectors, and a failed drain has not finished
+    writing them. The run that eventually completes writes it.
+
+    Kills an implementation that loads the vocabulary unconditionally after
+    `import_dataset` -- which does not raise, so "after" and "after a success"
+    look identical at the call site. The malformed member is `genome-scores`
+    rather than `genome-tags`, deliberately: the vocabulary itself parses
+    fine, so nothing but the run's status distinguishes the two.
+    """
+    cache = _genome_archive(
+        tmp_path, **{"genome-scores.csv": "movieId,tagId,relevance\n90000101,1,0.5"}
+    )
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_SEEDED_TITLE])
+    runs = FakeImportRunRepository()
+    service = BootstrapService(runs, catalog, _no_commit)
+
+    async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
+        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit)
+
+    stored_run = await runs.get("movielens.genome")
+    assert stored_run is not None and stored_run.status is ImportRunStatus.FAILED
+    assert catalog.genome_tags() == ()
+    assert "0 tags" in capsys.readouterr().out
+
+
+def _coverage(*revisions: tuple[str, int]) -> GenomeCoverage:
+    return GenomeCoverage(
+        with_vector=sum(count for _, count in revisions),
+        titles=100,
+        movies=100,
+        enriched=0,
+        enriched_with_vector=0,
+        revisions=revisions,
+    )
+
+
+async def test_the_status_report_says_when_the_vocabulary_names_the_stored_vectors() -> None:
+    """The ordinary answer, and the control the three refusal branches below
+    need: without it, `return "genome vocabulary: not loaded"` unconditionally
+    passes every one of them."""
+    genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-a"), 2: ("atmospheric", "etag-a")})
+
+    assert await _vocabulary_line(genome, _coverage(("etag-a", 5))) == "genome vocabulary: 2 tags"
+
+
+async def test_the_status_report_says_a_vocabulary_that_was_never_loaded_is_missing() -> None:
+    """Every catalog bootstrapped before `m08b` is in this state, so it has to
+    read as a thing to do rather than as a fault -- and the line names the
+    command that fixes it, which is PRD 08's rule for an operator command."""
+    line = await _vocabulary_line(FakeGenomeRepository(), _coverage(("etag-a", 5)))
+
+    assert "not loaded" in line
+    assert "--phase movielens" in line
+
+
+async def test_the_status_report_renders_a_mismatched_vocabulary_rather_than_raising() -> None:
+    """`PortDataMalformed` is a `UsherPortError` and `UsherPortError` is not
+    in `OPERATOR_ERRORS`, so letting it out of a status command answers "what
+    state is my genome in?" with a stack trace about the answer being bad.
+
+    Both release tokens have to survive into the line: "the vocabulary is
+    wrong" without naming what is stored is not something an operator can act
+    on. Kills a handler that prints a fixed sentence.
+    """
+    genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-b")})
+
+    line = await _vocabulary_line(genome, _coverage(("etag-a", 5)))
+
+    assert "etag-a" in line
+    assert "etag-b" in line
+
+
+async def test_the_status_report_declines_to_judge_a_vocabulary_against_mixed_vectors() -> None:
+    """With `genome_scores` holding two releases there is no single revision
+    to ask for, and asking for either would report the *vocabulary* as wrong
+    when what is wrong is the vectors -- which `_report_coverage`'s MIXED
+    RELEASES line already says, in the phase that produced them.
+
+    Kills `coverage.revisions[0][0]`, which is a perfectly good release token
+    and the wrong question.
+    """
+    genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-a")})
+
+    line = await _vocabulary_line(genome, _coverage(("etag-a", 5), ("etag-b", 2)))
+
+    assert "more than one release" in line
+
+
+async def test_the_status_report_says_nothing_is_named_when_there_are_no_vectors() -> None:
+    """A fresh database has no genome at all, and PRD 08 requires every
+    operator command to work against one. Kills an implementation that reports
+    a missing vocabulary as a problem on a catalog that has nothing for it to
+    explain."""
+    assert await _vocabulary_line(FakeGenomeRepository(), _coverage()) == (
+        "genome vocabulary: no vectors to name"
+    )
 
 
 def test_the_coverage_report_survives_an_enriched_tier_of_zero(
@@ -456,6 +759,7 @@ def test_the_coverage_report_survives_an_enriched_tier_of_zero(
             revisions=(("an-invented-etag", 16376),),
         ),
         unmatched=0,
+        tags=GENOME_TAG_COUNT,
     )
     printed = capsys.readouterr().out
     assert "1.29% of 1271138 titles" in printed
@@ -484,6 +788,7 @@ def test_the_coverage_report_names_every_release_when_there_is_more_than_one(
             revisions=(("an-invented-etag-a", 1), ("an-invented-etag-b", 2)),
         ),
         unmatched=4,
+        tags=GENOME_TAG_COUNT,
     )
     printed = capsys.readouterr().out
     assert "3 vectors stored (4 unmatched)" in printed

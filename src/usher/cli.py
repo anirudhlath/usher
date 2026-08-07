@@ -52,8 +52,10 @@ from usher.composition import (
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
+from usher.db.repositories.genome import PostgresGenomeRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.users import default_user, ensure_default_user
+from usher.domain.bootstrap import ImportRunStatus
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
@@ -62,7 +64,7 @@ from usher.ports.bulk import GenomeVector, ImdbTitle
 from usher.ports.errors import PortDataMalformed
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
-from usher.ports.repository import BulkCatalogRepository, GenomeCoverage
+from usher.ports.repository import BulkCatalogRepository, GenomeCoverage, GenomeRepository
 from usher.ports.rows import RowContext
 from usher.ports.search import SearchFilters, SearchMode
 from usher.ports.source import SourceAdapter
@@ -196,7 +198,7 @@ async def _bootstrap(settings: Settings, phase: str) -> None:
                 )
                 await service.link_crosswalk()
             if phase in ("movielens", "all"):
-                await _movielens(settings, client, catalog, service)
+                await _movielens(settings, client, catalog, service, session.commit)
             logger.info("catalog now holds {count} titles", count=await catalog.count_titles())
     finally:
         await client.aclose()
@@ -208,9 +210,10 @@ async def _movielens(
     client: httpx.AsyncClient,
     catalog: BulkCatalogRepository,
     service: BootstrapService,
+    commit: Callable[[], Awaitable[None]],
 ) -> None:
-    """The MovieLens tag genome, and the coverage report that is the actual
-    deliverable of this phase.
+    """The MovieLens tag genome, its tag vocabulary, and the coverage report
+    that is the actual deliverable of this phase.
 
     **The precondition is checked before the dataset is constructed, and the
     outcome it prevents is the worst one available here.** Run against an
@@ -256,6 +259,27 @@ async def _movielens(
     the writer is never called. That is correct and is the same shape
     `--phase imdb` already has; the insert-vs-update distinction lives in the
     repository and is covered there, not through a second CLI invocation.
+
+    **The tag vocabulary is written after the drain and only on a COMPLETED
+    run, and both halves are decisions.**
+
+    *After*, because before it would have to `ensure_local` outside
+    `import_dataset`'s `except UsherPortError`, and `UsherPortError` is not in
+    `OPERATOR_ERRORS` -- an unreachable `files.grouplens.org` would print a
+    stack instead of a sentence. Afterwards the archive is already local and
+    the only failures left are a parse and the database.
+
+    *Only on COMPLETED*, because a vocabulary is what explains the vectors and
+    a failed drain has not finished writing them. The run that eventually
+    completes writes it.
+
+    **This is also the upgrade path, and it is the reason "after" is not a
+    problem.** A catalog bootstrapped under M7 has a *completed*
+    `movielens.genome` checkpoint and no vocabulary at all: re-running the
+    phase resumes from that cursor, yields no batch, writes no vector -- and
+    still reaches this, because the run it returns is `COMPLETED`. A version
+    gated on rows having been written would leave exactly that deployment
+    without one, forever, with nothing to say so.
     """
     if await catalog.count_titles() == 0:
         print(
@@ -282,8 +306,18 @@ async def _movielens(
         return result.inserted + result.updated
 
     _GENOME_TALLY["unmatched"] = 0
-    await service.import_dataset(dataset, write, revision=revision)
-    _report_coverage(await catalog.genome_coverage(), _GENOME_TALLY["unmatched"])
+    run = await service.import_dataset(dataset, write, revision=revision)
+    tags = 0
+    if run.status is ImportRunStatus.COMPLETED:
+        # The same `revision` the vectors were stamped with, resolved once
+        # above -- which is the whole of what makes `genome_tags` and
+        # `genome_scores` comparable rather than merely both present.
+        vocabulary = await dataset.tag_vocabulary(revision)
+        tags = await catalog.replace_genome_tags(vocabulary, revision=revision)
+        # `import_dataset` commits its own last batch and then returns, so
+        # this write is alone in a fresh transaction and needs its own commit.
+        await commit()
+    _report_coverage(await catalog.genome_coverage(), _GENOME_TALLY["unmatched"], tags)
 
 
 # The `unmatched` count has nowhere else to go: `BootstrapService.import_dataset`
@@ -299,7 +333,7 @@ def _percent(part: int, whole: int) -> str:
     return "n/a (0 titles)" if whole == 0 else f"{100.0 * part / whole:.2f}%"
 
 
-def _report_coverage(coverage: GenomeCoverage, unmatched: int) -> None:
+def _report_coverage(coverage: GenomeCoverage, unmatched: int, tags: int) -> None:
     """Four fractions, the enriched-tier one last because it is the one that
     matters.
 
@@ -307,8 +341,17 @@ def _report_coverage(coverage: GenomeCoverage, unmatched: int) -> None:
     priority tier", and that figure has never had a denominator. Three of
     these are ceilings the *dataset* can reach; the fourth is what the join
     actually did against this operator's catalog.
+
+    `tags` is how many vocabulary rows this run wrote, `0` when the drain did
+    not complete and no vocabulary was loaded. Printed on the same line as the
+    vector count because the two are one artefact and a vocabulary that
+    silently did not land is the thing an operator most needs to see.
+    **Required rather than defaulted to `0`**, so a caller that forgets it is a
+    type error rather than a report that quietly says no vocabulary landed --
+    the `limit: int = 200` finding in `.claude/rules/testing-discipline.md`,
+    one signature over.
     """
-    print(f"movielens: {coverage.with_vector} vectors stored ({unmatched} unmatched)")
+    print(f"movielens: {coverage.with_vector} vectors stored ({unmatched} unmatched), {tags} tags")
     print(f"  {_percent(coverage.with_vector, coverage.titles)} of {coverage.titles} titles")
     print(f"  {_percent(coverage.with_vector, coverage.movies)} of {coverage.movies} movies")
     print(
@@ -325,6 +368,44 @@ def _report_coverage(coverage: GenomeCoverage, unmatched: int) -> None:
             print(f"    {name}: {count}")
 
 
+async def _vocabulary_line(genome: GenomeRepository, coverage: GenomeCoverage) -> str:
+    """One line saying whether the stored tag vocabulary can name the lanes of
+    the stored vectors.
+
+    **This is `GenomeRepository.vocabulary`'s operator surface**, and it is
+    here rather than in `_movielens` because `_movielens` would only be
+    reading back what it had just written. The condition worth reporting is
+    the one that appears *later*: an interrupted re-import against a new
+    upload, or an M7-era catalog whose vectors have no vocabulary at all.
+    It sits beside the `MIXED RELEASES` line `_report_coverage` prints for the
+    sibling condition on `genome_scores`.
+
+    Takes the port rather than a session, so the three branches are unit-
+    testable against `FakeGenomeRepository` -- `_status` itself opens an
+    engine and is not.
+
+    The refusal is *caught and printed*, not raised: `PortDataMalformed` is
+    not in `OPERATOR_ERRORS` (it is a `UsherPortError`), so letting it out of
+    a status command would answer "what state is my genome in?" with a stack
+    trace about the answer being bad. Task 18's `usher curate` makes the same
+    call for the same family.
+    """
+    if not coverage.revisions:
+        return "genome vocabulary: no vectors to name"
+    if len(coverage.revisions) > 1:
+        # `_report_coverage`'s MIXED RELEASES branch is about `genome_scores`
+        # and is not printed here; asking for one of several releases would
+        # report the vocabulary as wrong when what is wrong is the vectors.
+        return "genome vocabulary: not checked -- genome_scores holds more than one release"
+    try:
+        names = await genome.vocabulary(coverage.revisions[0][0])
+    except PortDataMalformed as exc:
+        return f"genome vocabulary: {exc}"
+    if names is None:
+        return "genome vocabulary: not loaded -- run bootstrap --phase movielens"
+    return f"genome vocabulary: {len(names)} tags"
+
+
 async def _status(settings: Settings) -> None:
     engine = build_engine(settings.database_url.get_secret_value())
     factory = build_session_factory(engine)
@@ -336,12 +417,14 @@ async def _status(settings: Settings) -> None:
             # A phase whose deliverable is coverage has to be visible in the
             # command an operator runs to see coverage.
             genome = await catalog.genome_coverage()
+            vocabulary = await _vocabulary_line(PostgresGenomeRepository(session), genome)
     finally:
         await engine.dispose()
     # Printed, not logged: this is a report an operator asked for, and routing
     # it through the JSON log sink would make it unreadable at a terminal.
     print(f"titles in catalog: {catalog_size}")
     print(f"genome vectors: {genome.with_vector}")
+    print(vocabulary)
     if not runs:
         print("no import has been run yet")
         return

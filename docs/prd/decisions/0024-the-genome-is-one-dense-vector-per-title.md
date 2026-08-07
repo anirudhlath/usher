@@ -1,6 +1,9 @@
 # ADR-0024 — The tag genome is one dense vector per title, not a tall relevance table
 
-**Status:** Accepted — corrects PRD 02's implied shape
+**Status:** Accepted — corrects PRD 02's implied shape. **Amended 2026-08-07
+by M8 Task 19:** the vector shape stands unchanged; the *vocabulary* half of
+the decision ("the tag vocabulary is not stored") was taken on stated terms
+that M8 has now met, and `genome_tags` ships in migration `m08b`.
 
 ## Context
 
@@ -35,10 +38,17 @@ computed_at     timestamptz   NOT NULL DEFAULT now()
 pattern is a *pair* lookup by `title_id`, not a KNN, and an HNSW index cannot
 serve a lookup by primary key.
 
-**The tag vocabulary is not stored.** Nothing in M7 reads a tag *name*: a
-cosine needs the two vectors and the guarantee that their positions mean the
-same thing. `genome-tags.csv` is read by the importer to verify contiguity and
-width, then thrown away.
+**The tag vocabulary is not stored *by this decision*.** Nothing in M7 reads a
+tag *name*: a cosine needs the two vectors and the guarantee that their
+positions mean the same thing. `genome-tags.csv` is read by the importer to
+verify contiguity and width, then thrown away.
+
+**Amended 2026-08-07 (M8 Task 19), on the terms this decision set out.**
+`genome_tags(tag_id, tag, genome_revision)` ships in migration `m08b`, loaded by the same `bootstrap --phase movielens`
+from the member it was already reading. Nothing about the *vector* shape
+changes; what changed is that a consumer of the names arrived, exactly as the
+"Also" section below predicted, and `genome_revision` is what the vocabulary's
+own copy of that column is compared against.
 
 ## Consequences
 
@@ -80,13 +90,17 @@ width, then thrown away.
 
 **Also:**
 
-- **M8 inherits the vocabulary, and the cost is recorded rather than
-  discovered.** An LLM prompt that wants to say *"atmospheric,
-  thought-provoking"* needs the words. Paying for it is a 1,128-row table plus
-  a loader step in a phase that already reads the file, and one migration —
-  and `genome_revision` is what makes it safe rather than a
-  deferral-by-omission: the vocabulary M8 loads must carry the same revision as
-  the vectors it explains, and there is already something to check it against.
+- **M8 inherited the vocabulary, and the cost was paid exactly as recorded.**
+  An LLM prompt that wants to say *"atmospheric, thought-provoking"* needs the
+  words. Paying for it was a 1,128-row table plus a loader step in a phase that
+  already reads the file, and one migration — and `genome_revision` is what
+  made it safe rather than a deferral-by-omission. **Shipped 2026-08-07 as
+  `genome_tags` / `m08b`**, with the vocabulary carrying the same revision as
+  the vectors it explains and `GenomeRepository.vocabulary` refusing across a
+  mismatch. The one thing this paragraph did not anticipate: the refusal is an
+  *error* rather than `get_pair`'s `None`, because a mislabelled lane is prose
+  on a screen rather than a wrong number — [02](../02-data-model.md) carries
+  that argument.
 
 **Rejected:**
 

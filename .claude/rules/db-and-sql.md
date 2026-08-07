@@ -53,8 +53,9 @@ group, and nothing in one says which milestone shipped it. `m` sorts after
 `f`, so every M8 revision sorts after every M7 one (verified by listing the
 directory) — which is the only thing the hex convention ever bought (Alembic
 orders by `down_revision` and never cared). `m08a` (`curated_rows` +
-`llm_calls`) is the first and `m08b` (the genome tag vocabulary) is planned;
-the rule for the next milestone is now mechanical rather than a decision:
+`llm_calls`) is the first and `m08b` (`genome_tags`, the genome tag
+vocabulary) shipped 2026-08-07; the rule for the next milestone is now
+mechanical rather than a decision:
 `m09a`, then `m10a`.
 
 **The zero-padding is the whole point and must not be "simplified" away.**
@@ -214,9 +215,14 @@ classified subclass), `exc.orig.__cause__` is
 onto `DataError`. **Most repositories in this package catch `IntegrityError`
 and only that**, which is correct for a table whose refusals are all
 constraints and wrong for any table with a bounded `NUMERIC` — the exception
-crosses the port boundary raw, which is the one thing ADR-0009 forbids. (Two
-now do not: `llm_call.py` from this finding, and `curation.py` from the
-`position` finding at the end of this file.)
+crosses the port boundary raw, which is the one thing ADR-0009 forbids.
+(**Three** now do not: `llm_call.py` from this finding, `curation.py` from the
+`position` finding further down this file, and `bulk.py`'s
+`replace_genome_tags` from the `genome_tags.tag_id` entry at the end of it.
+The third is the one where the wide `except` is **not** currently load-bearing
+and the write-up says so: narrowing it to `IntegrityError` survives the whole
+suite, because that table's column type was picked precisely so every reachable
+refusal is a CHECK violation.)
 `PostgresLLMCallRepository` catches `DBAPIError` and filters on the SQLSTATE
 *class* instead: `22` (data exception) and `23` (integrity constraint
 violation) are "this row is not storable as given"; everything else — a
@@ -465,6 +471,46 @@ and if the field is bounded on fewer sides than the column, that repository
 needs the SQLSTATE-class `except` rather than `IntegrityError`.** `ge=0` with
 no ceiling against `integer` is the common shape here — it is also
 `CuratedRow.position`'s sibling in every `Field(ge=0)` in `usher.domain`.
+
+**And the rule has a *third* repair, which is to pick the column so a
+constraint fires first -- measured on `genome_tags.tag_id` (`m08b`,
+2026-08-07).** The two entries above both end at "so that repository needs the
+SQLSTATE-class `except`", which is a *translation*. `genome_tags` is the other
+half: what reaches the driver at all is a choice, and both halves of that
+choice are about which layer answers.
+
+- **Bound the field where the batch is, not where the row is.**
+  `BulkCatalogRepository.replace_genome_tags` refuses a vocabulary that is not
+  exactly `1...n` before it writes, so the largest `tag_id` reaching asyncpg
+  is the length of the sequence handed in. A per-row `le=` could not have done
+  this: it cannot see a *gap*, which for a by-index artefact is the failure
+  that matters, and here the contiguity check is also the only thing bounding
+  the value at all.
+- **Then make the column wide enough that a constraint, not the encoder,
+  refuses the rest.** Measured on `pgvector/pgvector:pg17` through a
+  parameterised `INSERT` against a `CHECK (tag_id BETWEEN 1 AND 1128)`:
+
+| `tag_id` | `integer` + CHECK | `smallint` + CHECK |
+|---|---|---|
+| 1,128 | stored | stored |
+| 1,129 | `IntegrityError` `23514`, constraint named | `IntegrityError` `23514`, constraint named |
+| **32,768** | **`IntegrityError` `23514`, constraint named** | **`DBAPIError` `22000`, constraint `None`** |
+| `2**31` | `DBAPIError` `22000`, constraint `None` | `DBAPIError` `22000`, constraint `None` |
+
+The `smallint` row at 32,768 is the whole decision: a 32,768-element list is
+reachable and a `2**31`-element one is not, so `integer` moves every reachable
+refusal onto the named-constraint path. **`smallint` saves 2 bytes a row, and
+at 1,128 rows that is 2.2 kB** -- which is why "the narrowest type that holds
+the value" is the wrong instinct here.
+
+**And the `COPY` path loses the SQLSTATE entirely, measured in the same run.**
+Through `usher.db.staging.stage_records` into a staging table (unconstrained,
+as all of them are): `1129` and `32768` **stage successfully**, and `2**31`
+raises `builtins.OverflowError: value out of int32 range` -- not a
+`DBAPIError` at all, with no `sqlstate` anywhere on it, so `is_row_refusal()`
+cannot inspect it and no `except DBAPIError` catches it. `replace_genome_tags`
+therefore uses a plain executemany `INSERT`: 1,128 rows have nothing to gain
+from a `COPY` and that to lose.
 
 **One thing the primary key adds to the same enumeration:** a batch naming one
 row id twice is neither a CHECK nor a foreign key, and it is a reachable

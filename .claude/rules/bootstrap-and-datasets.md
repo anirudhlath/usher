@@ -32,6 +32,23 @@ the offending `movieId`**. What is deliberately *not* enforced is `tagId` orderi
 case that proves that shuffles a run and expects the right vector — so
 enforcing the observed order would make the by-index property unprovable. The
 run check is `len(run) == n and |{tagIds}| == n`.
+**`genome-tags.csv` is 1,128 rows and every one of them is usable, measured
+2026-08-07 through the shipped `CachedDatasetFile.member_lines`.** `tagId` is
+exactly `1...1128` and already ascending; every name is non-empty; **no name
+contains a comma**; all 1,128 are distinct; the longest is 65 characters; and
+the member is **CRLF**-terminated (8,359 compressed / 18,103 uncompressed
+bytes). Two of those matter to the parser. The CRLF is invisible because
+`member_lines` decodes through `io.TextIOWrapper` in universal-newline mode,
+so the `\r` is gone before `rstrip("\n")` runs -- **verified by reading, not
+assumed**, since a stray `\r` would land in every stored tag name. And the
+comma-free names are a property of *this snapshot*, not a promise, which is
+why the parse is `partition(",")` rather than the `csv` module: only the first
+comma separates. `partition` rather than `split(",", 1)` because a row with no
+comma at all has to be distinguishable, and `split` hands that back as a
+one-element list whose `[0]` parses as a perfectly good `tagId` -- the shipped
+`_tag_count` read exactly that field and was blind to it, which was harmless
+while the names were being thrown away and is not now that `m08b` stores them.
+
 **`ml-32m` has no genome and `ml-25m` may not be redistributed, so `ml-latest`
 is forced rather than preferred.** `ml-32m.zip` (05/2024) is the newest full
 release and dropped the genome entirely — four members only. `ml-25m` has one

@@ -9,7 +9,7 @@ from usher.db.models.people import CreditRow, PersonRow
 from usher.db.models.search import TitleEmbeddingRow, TitleNeighborRow
 from usher.db.models.source import MediaItemRow, SourceCredentialRow, SourceRow
 from usher.db.models.sync import RawPayloadRow, SyncRunRow
-from usher.db.models.taste import GenomeScoreRow
+from usher.db.models.taste import GenomeScoreRow, GenomeTagRow
 from usher.db.models.title import TitleRow
 from usher.db.models.watch import UserRow, WatchStateRow
 
@@ -19,6 +19,7 @@ __all__ = [
     "CuratedRowRow",
     "EpisodeRow",
     "GenomeScoreRow",
+    "GenomeTagRow",
     "IdCrosswalkRow",
     "ImportRunRow",
     "JobRow",

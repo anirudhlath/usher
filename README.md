@@ -139,7 +139,20 @@ uv run usher bootstrap-status              # progress per dataset, and catalog s
 empty catalog: the genome joins `titles` on `imdb_id`, so there is nothing to
 join to until the IMDb phase has run. It downloads `ml-latest.zip` and reads
 three of its seven members — the only archive that has a genome *and* a
-licence permitting redistribution, which is why the phase names it.
+licence permitting redistribution, which is why the phase names it. It stores
+one dense 1,128-lane vector per matched title **and** the 1,128 tag names that
+say what those lanes mean, both stamped with the archive revision they came
+from, so a vocabulary can never label a vector from a different release.
+
+A catalog bootstrapped before the vocabulary shipped just needs the phase
+re-run — it resumes from its completed checkpoint, writes no vector, and loads
+the words. `usher bootstrap-status` says which state a deployment is in:
+
+```text
+titles in catalog: 1271138
+genome vectors: 15565
+genome vocabulary: 1128 tags
+```
 
 **Sync a source** — walks a registered media server into the catalog
 (matching, ingest, availability sweep), then walks its watch state.

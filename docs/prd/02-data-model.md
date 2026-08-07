@@ -507,6 +507,7 @@ a failure that is silent under either one alone.
 | `user_taste` | ✅ One centroid per user: `(user_id PK, centroid halfvec(384), model_name, source_watermark, title_count, computed_at)`. `centroid` and `source_watermark` are both **nullable on purpose** — a household below five engaged titles gets a written refusal rather than a skipped row, and a household with no watch state at all has no watermark to record. `(model_name, source_watermark)` together are [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s fingerprint here |
 | `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, blend_fingerprint, computed_at)`. A **batch artefact**, rebuilt rather than repaired. M6 blended the two signals it had data for; M7 makes it three of the four [05](05-search-and-similarity.md) specifies and adds **`blend_fingerprint`** (migration `ffb`), so "was this row computed under the current blend?" stopped being undecidable. `computed_at` stays beside it for the half that is still undecidable per row — *some other title was embedded since* ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)) |
 | `genome_scores` | ✅ One title's MovieLens tag-genome vector: `(title_id, relevance halfvec(1128), genome_revision, computed_at)`. **One dense vector per title, not a tall `(title_id, tag_id, relevance)`** — see below |
+| `genome_tags` | ✅ What each of that vector's 1,128 lanes means: `(tag_id PK, tag, genome_revision)`. **1,128 rows, measured against the real `genome-tags.csv`.** Loaded by the same `bootstrap --phase movielens` that writes the vectors, from a member that phase already read for its width check, and stamped with the same revision — so `GenomeRepository.vocabulary(revision)` can refuse to name one release's lanes with another's. `tag_id` is `integer` rather than `smallint` so a too-wide vocabulary is refused by `ck_genome_tags_tag_id_in_vocabulary` rather than by asyncpg's unnamed encoder — see below. **No index beyond the primary key** and **no `computed_at`**: the only read is the whole table in lane order, and its age is `import_runs`. Migration `m08b` |
 | `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats. One row per *attempt*, so the availability sweep can say which run last finished cleanly |
 | `jobs` | Priority work queue ([03](03-sources-and-sync.md)). A completed job's row is deleted, so there is no `done` status and the table's size is the outstanding work, not the work ever done |
 | `raw_payloads` | JSONB cache of **provider** responses, so reprocessing never refetches. Its `fetched_at` column is also what enforces TMDb's ≤6-month cache term — see [ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md), which is why there is no separate `provider_cache_meta` table and why source payloads are not stored here |
@@ -576,16 +577,54 @@ other vector, so a title with no genome row would score as *maximally
 dissimilar* from everything. At the measured coverage that is the common case,
 not the edge.
 
-**The tag vocabulary itself is deliberately not stored, and the cost is
-recorded rather than discovered.** Nothing in M7 reads a tag *name*: cosine
-needs the two vectors and the guarantee that their positions mean the same
-thing. `genome-tags.csv` is read by the importer to verify contiguity and
-width, and thrown away. The cost lands on M8 — **an LLM prompt that wants to
-say "atmospheric, thought-provoking" needs the words** — and paying it is a
-1,128-row table plus a loader step in a phase that already reads the file, and
-one migration. What makes that safe rather than a deferral-by-omission is
-`genome_revision`: the vocabulary M8 loads must carry the same revision as the
-vectors it explains, and there is already something to check it against.
+**The tag vocabulary was not stored in M7, and M8 Task 19 stored it in
+`genome_tags`.** M7's argument is why it did not ship a milestone earlier:
+nothing in M7 reads a tag *name*, since cosine needs the two vectors and the
+guarantee that their positions mean the same thing, and `genome-tags.csv` was
+read by the importer to verify contiguity and width and thrown away. The cost
+landed on M8 exactly where it was predicted to — **an LLM prompt that wants to
+say "atmospheric, thought-provoking" needs the words** — and it was paid as
+predicted: a 1,128-row table plus a loader step in a phase that already reads
+the file, and one migration (`m08b`). What made that safe rather than a
+deferral-by-omission is `genome_revision`, which is what the vocabulary's own
+copy of that column is compared against.
+
+### `genome_tags` refuses a release it cannot explain, and the refusal is an error rather than a `None`
+
+`GenomeRepository.vocabulary(revision)` returns the tag names **in lane
+order** — `result[i]` names `relevance[i]` — and has three outcomes, which is
+one more than `get_pair` next to it:
+
+- **`None` when the table is empty.** Every catalog bootstrapped before `m08b`
+  is in that state, so it is a thing to do rather than a fault, and a caller
+  renders no tags — [08](08-operations.md)'s "a degraded subsystem narrows
+  functionality; it never fails a request local state can answer".
+- **`PortDataMalformed` when a vocabulary is stored under a different
+  release.** Here a wrong answer is *available* and plausible: 1,128 names of
+  the right shape, in the right order, for a different release, rendered as
+  prose. Retrying cannot help, so `JobWorker` parks it and the fix is an
+  operator's `usher bootstrap --phase movielens` — the same fix a mixed
+  `genome_scores` takes. The message names both releases.
+- The names, otherwise.
+
+**Why not `None` for both, as `get_pair` does?** Because `get_pair`'s two
+outcomes call for the same response — "no genome signal", which 98.7% of pairs
+already produce — and these two do not: one means *load the vocabulary* and
+the other means *re-import the whole genome*. Collapsing them would hide a
+corrupted table behind a state that is normal on every pre-`m08b` deployment.
+
+**`tag_id` is `integer` and its ceiling is a batch precondition rather than a
+column width.** `BulkCatalogRepository.replace_genome_tags` refuses a
+vocabulary that is not exactly `1…n` before it writes — which is also the only
+check that can see a *gap*, the failure that renames every later lane — so the
+largest `tag_id` reaching the driver is the length of the sequence handed in.
+Measured on `pgvector/pgvector:pg17`: under `smallint` a 32,768-element list
+is refused by asyncpg's own encoder as an **unnamed** `DBAPIError` (SQLSTATE
+`22000`), and under `integer` the same input is refused by
+`ck_genome_tags_tag_id_in_vocabulary` as an `IntegrityError` (`23514`)
+carrying the constraint's name. The write is a plain `INSERT` rather than the
+staging `COPY` for the same reason: through `COPY` an out-of-range integer is
+a bare `OverflowError` with no SQLSTATE at all.
 
 ### `curated_rows.card_title_ids` is an ordered array, and the missing foreign key is the price
 
@@ -657,6 +696,7 @@ Title      1─* MediaItem *─1 Source
 Title      1─* WatchState *─1 User
 Title      1─1 TitleEmbedding
 Title      1─1 GenomeVector  (sparse — 15,565 of 1,271,570; genome_scores)
+GenomeVector ·· GenomeTag    (1,128 lanes ↔ genome_tags; positional, no FK)
 User       1─1 UserTaste     (nullable centroid; user_taste)
 User       1─* CuratedRow    (curated_rows; replaced per generation, CASCADE)
 Title      *─* Title        (through title_neighbors, directed, precomputed)

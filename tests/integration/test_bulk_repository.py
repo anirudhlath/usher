@@ -112,6 +112,13 @@ class TestPostgresBulkCatalogRepositoryContract(BulkCatalogRepositoryContract):
         result = await repo._session.execute(text("SELECT title_id FROM genome_scores"))
         return {row[0] for row in result}
 
+    async def genome_tags_of(self, repo: BulkCatalogRepository) -> tuple[tuple[int, str, str], ...]:
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        result = await repo._session.execute(
+            text("SELECT tag_id, tag, genome_revision FROM genome_tags ORDER BY tag_id")
+        )
+        return tuple((int(row[0]), str(row[1]), str(row[2])) for row in result)
+
     async def enrich(self, repo: BulkCatalogRepository, imdb_id: str) -> None:
         assert isinstance(repo, PostgresBulkCatalogRepository)
         await repo._session.execute(
