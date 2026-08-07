@@ -202,6 +202,13 @@ class CurationReport:
     A CLI that recomputed the pool size would be computing a second pool, and
     one that summed `dropped` from the rows it was handed could not see the
     rows that are missing.
+
+    `dropped` is `CurationKept.dropped` unchanged, which `_tally` already
+    hands over read-only -- `frozen=True` does not reach through a `Mapping`
+    field, so the validator wraps it rather than leaving a caller able to edit
+    the only record of what a generation lost. Not re-wrapped here: this is
+    the one construction site, so a second proxy would copy an already-frozen
+    map and be a second place to keep the promise.
     """
 
     generation_id: uuid.UUID

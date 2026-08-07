@@ -829,3 +829,57 @@ alphabetical order happens to be recency order for those two. Respelled as
 literally the catalog read's order, it fails one case. Nearest relative is the
 existing "a mutation must be the change the plan names" entry; the difference
 is that this one produced a *plausible* survivor rather than a SQL error.
+
+**A rule can be written down and then not applied one function over, and the
+tally is the half everybody asserts.** Found 2026-08-06 reviewing M8 Task 13,
+one commit after `124bd2e` added the standing rule *"assert the diagnostics —
+the count, the reason, the number in the message"* to this very file.
+`test_a_rejection_counts_what_it_dropped_by_reason` asserts the **map**
+`CurationRejected.dropped`; nothing asserted the **sentence**
+`CurationRejected.error`, which is the artefact `llm_calls.error` actually
+stores and the only thing `_summary` exists to build. So `_summary` could
+`return ""` with all 60 of the module's cases green — and the failure is not a
+silent loss but an active misstatement, because the `or 'nothing dropped'`
+fallback beside it then renders *"no row survived validation of 1 returned
+(nothing dropped)"* onto a generation that dropped five things, in the one
+column the cost ledger exists to make legible. Two sibling mutations survived
+with it: the whole no-`rows`-key message replaced by `"bad"`, and
+`{len(raw_rows)}` replaced by `{len(raw_rows) + 7}`. **A tally and the string
+it is rendered into are two artefacts; asserting the first is not asserting
+the second.** Worth knowing in the other direction too: `_summary → ""` was
+already killed by *Task 12's* suite
+(`test_the_reason_a_generation_was_rejected_reaches_the_ledger`, which greps
+the ledger row for a reason label), so the module's own file had the gap and
+its consumer's did not — a survivor list is only true of the selection it was
+measured against, and "survives all 60 tests" and "survives the suite" are
+different claims.
+
+**A premise stated *after* the assertion it is a premise for cannot report,
+and a hard-coded literal is what usually shadows it.** Same review. The slug
+case ended with `assert sorted(unpadded) != unpadded, "the premise: the
+unpadded spelling sorts wrong"` — unreachable, because
+`assert slugs == [f"{SLUG_PREFIX}-{n:02d}" for n in range(1, 13)]` two lines
+above raises first on the same fixture change (`12` → `9`) the premise exists
+to catch. The repair is ordering plus a name: bind `count = 12`, state the
+premise from `count` **before** building the payload, and derive the three
+literals from it. Plant `count = 9` and the guard now fails on its own `E `
+line. Distinct from the M8 Task 9 and Task 11 entries above — that guard's
+defect was that no plant could falsify it; this one's is that a plant
+falsifies it *and something else answers first*.
+
+**`MappingProxyType` makes a frozen dataclass's `Mapping` field immutable and
+does not make the dataclass hashable.** Measured 2026-08-06, correcting a
+plausible review claim that one line bought both. `frozen=True` stops
+`outcome.dropped = {}` and does nothing about `outcome.dropped[reason] = 99`,
+which for `CurationKept`/`CurationRejected` is the edit that matters — that
+map is the input to two metrics and five span attributes, i.e. the only record
+of what a generation lost. Wrapping the comprehension in `_tally` fixes that
+(`TypeError: 'mappingproxy' object does not support item assignment`) and
+propagates cleanly to `CurationReport.dropped`, which is assigned it
+unchanged, with `mypy --strict` green on both sides. But `hash()` on the
+frozen instance still raises `TypeError: unhashable type: 'dict'`:
+`mappingproxy` delegates `__hash__` to the dict it wraps, which is `None`. **No
+spelling of a `Mapping` field is hashable**, so "frozen therefore hashable" is
+wrong for any dataclass with one — buying it means a
+`tuple[tuple[K, V], ...]` field every reader has to rebuild into a map. Wrap
+for the immutability, and do not claim the hash.

@@ -459,6 +459,36 @@ def test_the_shipped_minimum_is_five_cards() -> None:
     assert outcome.dropped[DropReason.ROW_TOO_SHORT] == 1
 
 
+def test_a_caller_that_names_no_minimum_gets_the_shipped_one() -> None:
+    """**The constant and the signature default are two facts, and only the
+    first was pinned.**
+
+    The case above passes `min_cards=DEFAULT_MIN_CARDS` explicitly and this
+    file's `validate()` helper always passes `2`, so `min_cards: int =
+    DEFAULT_MIN_CARDS` could be rewritten `= 1` with every other case green:
+    the wiring of the constant to the parameter is what nothing exercised. It
+    matters because omitting the kwarg is a real call -- `CurationService`
+    defaults the same parameter the same way, and a validator floor of 1 under
+    a prompt asking for five is a screen full of one-card shelves nobody
+    counted.
+
+    Called through `validate_curation` directly rather than through the
+    helper, because a helper that fills the argument in is precisely the thing
+    that hid this.
+    """
+    outcome = validate_curation(
+        a_response(a_row(11, 4, 27, 9, title="Four"), a_row(11, 4, 27, 9, 31, title="Five")),
+        handles=HANDLES,
+        user_id=USER,
+        generation_id=GENERATION,
+        model_name=MODEL,
+        generated_at=NOW,
+    )
+    assert isinstance(outcome, CurationKept), outcome
+    assert [row.title for row in outcome.rows] == ["Five"]
+    assert outcome.dropped[DropReason.ROW_TOO_SHORT] == 1
+
+
 # --------------------------------------------------------------------------
 # Rule 3 -- zero rows is a failure, and a caller cannot mistake it for one
 # --------------------------------------------------------------------------
@@ -470,7 +500,11 @@ def test_a_response_that_yields_no_row_is_a_failure_not_an_empty_success() -> No
     and nothing to show. `llm_calls.ok` is the only signal that separates this
     from a model with nothing to say."""
     outcome = rejected(a_response(a_row(999, 998, title="One"), a_row(997, title="Two")))
-    assert outcome.error
+    # Not `assert outcome.error`, which cannot fail: `CurationRejected`
+    # refuses a falsy error in `__post_init__`, so the only way to reach that
+    # assertion is with a truthy string. The number of rows the *model*
+    # returned is the one fact the tally below cannot carry.
+    assert "of 2 returned" in outcome.error
     assert outcome.dropped[DropReason.NOT_IN_POOL] == 3
     assert outcome.dropped[DropReason.ROW_TOO_SHORT] == 2
 
@@ -511,9 +545,14 @@ def test_a_rejection_has_no_rows_attribute_to_mistake_for_an_empty_one() -> None
     turns on `warn_unused_ignores`, so the day `CurationRejected` grows a
     `rows` attribute this line stops being an error, the ignore becomes unused,
     and the gate fails.
+
+    **One runtime assertion, not two.** `hasattr` is *defined* as "getattr did
+    not raise `AttributeError`", so an `assert not hasattr(outcome, "rows")`
+    above this block is the same assertion spelled twice -- and being first, it
+    is the only one that could ever report. Keeping the `pytest.raises` half
+    is what keeps the static assertion and the runtime one on the same line.
     """
     outcome = rejected(a_response())
-    assert not hasattr(outcome, "rows")
     with pytest.raises(AttributeError):
         _ = outcome.rows  # type: ignore[attr-defined]
 
@@ -549,23 +588,58 @@ def test_a_rejection_counts_what_it_dropped_by_reason() -> None:
     assert outcome.dropped[DropReason.UNPARSEABLE] == 1
 
 
+def test_the_rejection_message_names_the_counts_it_is_written_for() -> None:
+    """**The tally and the sentence are two artefacts, and only one of them is
+    written into `llm_calls.error`.**
+
+    The case above pins the map a metric reads; this one pins the string an
+    operator reads, and they were not the same assertion: `_summary` could
+    return `""` with the whole file green, which does not merely lose the
+    counts -- the `or 'nothing dropped'` fallback beside it then renders
+    *"no row survived validation of 1 returned (nothing dropped)"* onto a
+    generation that dropped five things. That is not a silent loss, it is an
+    active misstatement, in the one column the cost ledger exists to make
+    legible. `_summary` exists only to render this sentence, so a suite that
+    never reads the sentence does not test it at all.
+
+    The row here trips three of the five reasons at once, so the message has to
+    carry each label rather than whichever one happens to be first.
+    """
+    outcome = rejected(a_response(a_row(999, {"index": 11}, title="One")))
+    assert "of 1 returned" in outcome.error
+    assert "not_in_pool=1" in outcome.error
+    assert "unparseable=1" in outcome.error
+    assert "row_too_short=1" in outcome.error
+    # The fallback is for the one response that dropped nothing, and this is
+    # not it. See the `id="empty"` arm below, which is.
+    assert "nothing dropped" not in outcome.error
+
+
 # --------------------------------------------------------------------------
 # The response's own shape
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "payload",
+    ("payload", "expected"),
     [
-        pytest.param({}, id="missing"),
-        pytest.param({ROWS_KEY: None}, id="null"),
-        pytest.param({ROWS_KEY: {}}, id="object"),
-        pytest.param({ROWS_KEY: "11"}, id="string"),
-        pytest.param({ROWS_KEY: []}, id="empty"),
+        pytest.param({}, f"the response carries no {ROWS_KEY!r} list (NoneType)", id="missing"),
+        pytest.param(
+            {ROWS_KEY: None}, f"the response carries no {ROWS_KEY!r} list (NoneType)", id="null"
+        ),
+        pytest.param(
+            {ROWS_KEY: {}}, f"the response carries no {ROWS_KEY!r} list (dict)", id="object"
+        ),
+        pytest.param(
+            {ROWS_KEY: "11"}, f"the response carries no {ROWS_KEY!r} list (str)", id="string"
+        ),
+        pytest.param(
+            {ROWS_KEY: []}, "no row survived validation of 0 returned (nothing dropped)", id="empty"
+        ),
     ],
 )
 def test_a_response_without_a_list_of_rows_is_rejected_and_counts_nothing(
-    payload: dict[str, Any],
+    payload: dict[str, Any], expected: str
 ) -> None:
     """`id="string"` is the one that is not obvious: a `str` is a `Sequence`,
     so a validator that checked `isinstance(raw, Sequence)` would iterate
@@ -581,9 +655,25 @@ def test_a_response_without_a_list_of_rows_is_rejected_and_counts_nothing(
     operator a number nobody can act on -- which is this file's whole subject
     with the sign flipped. So: a response that carried no rows dropped
     nothing.
+
+    **The message is pinned whole, not merely asserted truthy** -- `assert
+    outcome.error` cannot fail, because `CurationRejected.__post_init__`
+    refuses a falsy one, so planting `error=""` fails at the *construction*
+    line rather than at the assertion written to catch it. Whole rather than
+    by fragment because this string is `llm_calls.error` verbatim: the type
+    name is the diagnosis (a `dict` says the schema moved; a `str` says the
+    provider serialised twice), and `(NoneType)` twice over is the missing key
+    and the null being the same finding.
+
+    `id="empty"` is the **one** response for which *"nothing dropped"* is
+    true, and it is the only arm that reaches the second rejection at all --
+    `[]` is a list, so it passes the shape check and fails rule 3 instead.
+    Every other generation that reaches that sentence dropped something, which
+    is what `test_the_rejection_message_names_the_counts_it_is_written_for`
+    holds the other end of.
     """
     outcome = rejected(payload)
-    assert outcome.error
+    assert outcome.error == expected
     assert set(outcome.dropped.values()) == {0}
 
 
@@ -718,11 +808,41 @@ def test_a_title_exactly_at_the_bound_is_kept() -> None:
 
 
 def test_a_reason_longer_than_the_bound_discards_the_row() -> None:
+    """**The row goes, not just the subtitle**, and this is the one bound where
+    the gentler answer was genuinely available: `CuratedRow.reason` is
+    `str | None`, so a validator could blank an over-long one and keep the two
+    real titles under it. It does not, because a blanked subtitle is a loss
+    with nothing to count it under -- the row survives, so `row_unusable`
+    would be false of it, and a sixth drop reason for "the model wrote too
+    much prose" has the identical next step as an over-long title, which is
+    the test the five-member vocabulary is built on.
+
+    The price is real and is the reason `MAX_REASON_CHARS` is 1000 against a
+    subtitle the shipped providers write in 30-90: a household loses a whole
+    shelf over prose, so the bound has to be one no reasonable answer reaches.
+    `test_a_reason_exactly_at_the_bound_is_kept` is the other side of it.
+    """
     outcome = kept(
         a_response(a_row(11, 4, reason="x" * (MAX_REASON_CHARS + 1)), a_row(11, 4, title="Real"))
     )
     assert [row.title for row in outcome.rows] == ["Real"]
     assert outcome.dropped[DropReason.ROW_UNUSABLE] == 1
+
+
+def test_a_reason_exactly_at_the_bound_is_kept() -> None:
+    """The twin of `test_a_title_exactly_at_the_bound_is_kept`, and it was
+    missing while its `+ 1` sibling above was not -- which left
+    `len(raw_reason.strip()) > MAX_REASON_CHARS` weakenable to `>=` with the
+    whole file green. Both bounds are **inclusive**, and a case on each side is
+    the only thing that stops either comparison drifting by one.
+
+    The drift is not symmetric in cost, either: `>=` discards a row -- a
+    heading and every title under it -- over prose that was inside the bound
+    the module documents.
+    """
+    outcome = kept(a_response(a_row(11, 4, reason="x" * MAX_REASON_CHARS)))
+    assert outcome.rows[0].reason == "x" * MAX_REASON_CHARS
+    assert outcome.dropped[DropReason.ROW_UNUSABLE] == 0
 
 
 def test_the_rejection_message_never_echoes_the_model_s_prose() -> None:
@@ -765,14 +885,25 @@ def test_the_model_s_row_order_survives_and_the_slugs_sort_in_it() -> None:
 
     The premise assertion is that the unpadded spelling really does sort wrong,
     so this case cannot pass because twelve rows happened to be nine.
+
+    **It is stated before the assertions it is a premise for, and the row count
+    is a name rather than three literals**, because as written the other way
+    round it could not fail: the hard-coded `f"{n:02d}"` comparison raised
+    first, and a premise that never reports is one a later reader trusts
+    without it ever having run. Plant `count = 9` and this line is what says
+    so.
     """
-    outcome = kept(a_response(*(a_row(11, 4, title=f"Row {n}") for n in range(12))), min_cards=1)
+    count = 12
+    unpadded = [f"{SLUG_PREFIX}-{n}" for n in range(1, count + 1)]
+    assert sorted(unpadded) != unpadded, (
+        "the premise: at this row count the unpadded spelling sorts wrong"
+    )
+
+    outcome = kept(a_response(*(a_row(11, 4, title=f"Row {n}") for n in range(count))), min_cards=1)
     slugs = [row.slug for row in outcome.rows]
-    assert [row.title for row in outcome.rows] == [f"Row {n}" for n in range(12)]
-    assert slugs == [f"{SLUG_PREFIX}-{n:02d}" for n in range(1, 13)]
+    assert [row.title for row in outcome.rows] == [f"Row {n}" for n in range(count)]
+    assert slugs == [f"{SLUG_PREFIX}-{n:02d}" for n in range(1, count + 1)]
     assert sorted(slugs) == slugs
-    unpadded = [f"{SLUG_PREFIX}-{n}" for n in range(1, 13)]
-    assert sorted(unpadded) != unpadded, "the premise: the unpadded spelling sorts wrong"
 
 
 @pytest.mark.parametrize("count", [9, 10, 11])
@@ -824,6 +955,32 @@ def test_every_reason_is_present_in_the_tally_even_at_zero() -> None:
     outcome = kept(a_response(a_row(11, 4)))
     assert set(outcome.dropped) == set(DropReason)
     assert set(outcome.dropped.values()) == {0}
+
+
+def test_the_tally_a_caller_is_handed_refuses_to_be_edited() -> None:
+    """**`frozen=True` stops `outcome.dropped = {}` and does nothing about
+    `outcome.dropped[reason] = 99`**, which is the edit that matters: this map
+    is what `CurationService` turns into two counters, five span attributes
+    and `CurationReport.dropped`, so it is the only record of what a
+    generation lost. A frozen wrapper around a plain `dict` advertises a
+    promise it does not keep.
+
+    Asserted on both arms of the union, because the rejected one is the arm an
+    operator reads when something has gone wrong. The `type: ignore` is the
+    static half, the same way it is on the `rows` case above: `strict = true`
+    turns on `warn_unused_ignores`, so a `dropped` widened to a
+    `MutableMapping` fails the gate rather than this case.
+    """
+    outcomes: list[CurationOutcome] = [
+        kept(a_response(a_row(11, 4, 999))),
+        rejected(a_response(a_row(999, 998))),
+    ]
+    for outcome in outcomes:
+        before = dict(outcome.dropped)
+        assert before[DropReason.NOT_IN_POOL] > 0, "the premise: there is a real count to overwrite"
+        with pytest.raises(TypeError):
+            outcome.dropped[DropReason.NOT_IN_POOL] = 99  # type: ignore[index]
+        assert dict(outcome.dropped) == before
 
 
 def test_the_five_reasons_are_counted_separately() -> None:

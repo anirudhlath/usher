@@ -129,6 +129,19 @@ not by the branches that produce them.
   providers' headings run ~10-40 characters (`More like <name>`) and their
   subtitles ~30-90, so these are an order of magnitude of headroom, and what
   matters is that they are finite.
+
+  **Both bounds discard the row, and the `reason` half of that needs its own
+  argument** because the obvious alternative -- drop the subtitle, keep the
+  row -- is available for a `reason` in a way it is not for a `title`:
+  `CuratedRow.reason` is `str | None`, so "no subtitle" is a state the domain
+  already models. It is still refused, because a dropped subtitle is a loss
+  with **nothing to count it under**: the row survives, so `row_unusable`
+  would be false, and a sixth reason fails the vocabulary's own test above
+  (an over-long reason and an over-long title have the identical next step).
+  The choice is a counted loss against a silent one and this module exists to
+  prefer the counted one. `_row` carries the rest of the argument, including
+  the price -- a 1001-character reason costs the household a heading and every
+  title under it.
 """
 
 import uuid
@@ -137,6 +150,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
 
 from usher.domain.curation import CuratedRow
@@ -264,7 +278,13 @@ def validate_curation(
     # The model's ordering is the product, so `position` indexes the list the
     # model returned and a discarded row leaves a gap rather than renumbering
     # the ones after it.
-    width = len(str(max(len(raw_rows), 1)))
+    #
+    # **No `max(len(raw_rows), 1)`**, which this line used to carry and which
+    # was a no-op wearing a guard's clothes: `len(str(max(n, 1)))` equals
+    # `len(str(n))` for every `n >= 0`, since `max(n, 1)` is `n` above zero and
+    # `len(str(0)) == len(str(1)) == 1`. Doubly so, because `width` is read
+    # only inside the loop below and an empty list never enters it.
+    width = len(str(len(raw_rows)))
     kept: list[CuratedRow] = []
     for position, entry in enumerate(raw_rows):
         row = _row(
@@ -321,11 +341,40 @@ def _row(
     raw_reason = entry.get(REASON_KEY)
     reason: str | None = None
     if raw_reason is not None:
-        # A blank reason is the schema's own optionality answered badly and
-        # becomes no subtitle; a *non-string* one is a schema violation, and
-        # blanking it silently would be the same class of defect this module
-        # exists for -- a violation that looks exactly like having nothing to
-        # say.
+        # **Two different failures, and both discard the row.** They are
+        # spelled as one condition and argued separately, because only the
+        # first argument is obvious:
+        #
+        # - A *non-string* reason is a schema violation. Blanking it silently
+        #   would be the same class of defect this module exists for -- a
+        #   violation that looks exactly like having nothing to say, which is
+        #   the 108/108 shape one rung over.
+        # - An *over-long* reason is a valid string that says too much, and
+        #   dropping just the subtitle is genuinely available here in a way it
+        #   is not for a title: `CuratedRow.reason` is `str | None`, so "no
+        #   subtitle" is a state the domain already models. It is refused
+        #   anyway, and the availability of the quiet answer is the argument
+        #   against it rather than for it -- a discarded subtitle has **no
+        #   reason to be counted under**. The row survives, so `row_unusable`
+        #   would be a lie; a sixth member for it would fail the vocabulary's
+        #   own test, since "the model wrote too much prose" has the identical
+        #   next step as an over-long title (fix the prompt or the schema) and
+        #   a metric dimension earns members by the fixes they distinguish.
+        #   So the choice is between a counted loss and a silent one, and this
+        #   module is *about* preferring the counted one.
+        #
+        #   The bound is what makes that cheap rather than harsh:
+        #   `MAX_REASON_CHARS` is 1000 against a shipped subtitle of ~30-90
+        #   and a prompt asking for one sentence, so a completion reaching
+        #   1001 characters is not a good row that ran a little over -- it is
+        #   a row whose model ignored the instruction, and the heading and the
+        #   card list beside it came out of the same completion. Discarding it
+        #   whole is the same judgement the title bound makes, which is also
+        #   why the reason is checked *here* rather than after the cards: a
+        #   row is refused on its own shape before its handles are read.
+        #
+        # A blank reason is neither of those -- it is the schema's own
+        # optionality answered badly, and becomes no subtitle.
         if not isinstance(raw_reason, str) or len(raw_reason.strip()) > MAX_REASON_CHARS:
             dropped[DropReason.ROW_UNUSABLE] += 1
             return None
@@ -338,6 +387,39 @@ def _row(
         dropped[DropReason.ROW_UNUSABLE] += 1
         return None
 
+    cards = _cards(raw_ids, by_handle=by_handle, dropped=dropped)
+    if len(cards) < min_cards:
+        dropped[DropReason.ROW_TOO_SHORT] += 1
+        return None
+
+    return CuratedRow(
+        id=new_id(),
+        user_id=user_id,
+        slug=f"{SLUG_PREFIX}-{position + 1:0{width}d}",
+        title=title,
+        reason=reason,
+        card_title_ids=tuple(cards),
+        position=position,
+        model_name=model_name,
+        generation_id=generation_id,
+        generated_at=generated_at,
+    )
+
+
+def _cards(
+    raw_ids: list[Any],
+    *,
+    by_handle: Mapping[str, uuid.UUID],
+    dropped: Counter[DropReason],
+) -> list[uuid.UUID]:
+    """The candidates one row cites, in the order the model cited them.
+
+    **Three of the five drop reasons are counted here and nowhere else**, and
+    all three count *cards* -- which is the whole reason this is separable from
+    `_row`, whose own two reasons count rows. A shortened list is a legitimate
+    answer: PRD 06's *"IDs not in the pool are dropped"* stops at the ids, and
+    whether what survives is enough is `_row`'s decision, not this one's.
+    """
     cards: list[uuid.UUID] = []
     seen: set[uuid.UUID] = set()
     for raw in raw_ids:
@@ -358,23 +440,7 @@ def _row(
             continue
         seen.add(title_id)
         cards.append(title_id)
-
-    if len(cards) < min_cards:
-        dropped[DropReason.ROW_TOO_SHORT] += 1
-        return None
-
-    return CuratedRow(
-        id=new_id(),
-        user_id=user_id,
-        slug=f"{SLUG_PREFIX}-{position + 1:0{width}d}",
-        title=title,
-        reason=reason,
-        card_title_ids=tuple(cards),
-        position=position,
-        model_name=model_name,
-        generation_id=generation_id,
-        generated_at=generated_at,
-    )
+    return cards
 
 
 def _handle(value: Any) -> str | None:
@@ -406,8 +472,28 @@ def _prose(value: Any, *, limit: int) -> str | None:
 
 def _tally(dropped: Counter[DropReason]) -> Mapping[DropReason, int]:
     """Every reason, zeros included -- a reason absent from the map is
-    indistinguishable from a reason nobody counts."""
-    return {reason: dropped[reason] for reason in DropReason}
+    indistinguishable from a reason nobody counts.
+
+    **`MappingProxyType`, because `frozen=True` does not reach through a
+    field.** Both outcomes are frozen dataclasses, which stops
+    `outcome.dropped = {}` and does nothing at all about
+    `outcome.dropped[reason] = 99` -- and this map is the input to two metrics
+    and to a span, i.e. the numbers an operator uses to decide whether the
+    validator is eating the output. A caller that could edit it could edit the
+    only record of what a generation lost. The proxy wraps a comprehension
+    with no other reference to it, so there is no second handle on the
+    underlying dict; the `Counter` this reads from stays private to
+    `validate_curation`.
+
+    It does **not** make either outcome hashable, and no spelling of a
+    `Mapping` field would: `hash()` on the frozen dataclass reaches the field
+    and `mappingproxy` delegates `__hash__` to the dict it wraps, which is
+    `None`. Recorded because `frozen=True` advertises hashability and this
+    type does not have it -- nothing in this project puts an outcome in a set,
+    and buying that would mean a `tuple[tuple[DropReason, int], ...]` field
+    that every reader would have to rebuild into a map.
+    """
+    return MappingProxyType({reason: dropped[reason] for reason in DropReason})
 
 
 def _summary(dropped: Counter[DropReason]) -> str:
