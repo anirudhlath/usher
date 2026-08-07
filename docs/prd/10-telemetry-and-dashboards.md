@@ -52,6 +52,9 @@ index.title                       ← M6, a child of job.index
 home.compose                      ← M7, one per GET /home or usher home
 └── row.build                        one per row actually built
 
+curation.generate                 ← M8, one per generation
+└── llm.complete                     the one completion it is allowed
+
 bootstrap.import
 ├── bootstrap.batch
 └── bootstrap.link_crosswalk
@@ -125,6 +128,8 @@ is maintained rather than aspirational.
 | `usher.search.results` | histogram | mode | ✅ M6 |
 | `usher.home.compose.duration` | histogram | — | ✅ M7 |
 | `usher.row.build.duration` | histogram | provider | ✅ M7 |
+| `usher.curation.rows` | counter | — | ✅ M8 |
+| `usher.curation.dropped` | counter | reason | ✅ M8 |
 | `usher.jobs.queued` | gauge | kind | ✅ M4 |
 | `usher.jobs.duration` | histogram | kind | ✅ M4 |
 | `usher.jobs.parked` | gauge | kind | ✅ M4 |
@@ -203,6 +208,33 @@ written down here for the reason the paragraph above gives — `continue-watchin
   therefore misses, and the hit rate is not recoverable from it —
   `usher.cache.hits`/`.misses` is M9's, and until then the cold/warm pair
   `usher home` prints is the only measurement of the row cache there is.
+
+**`usher.curation.rows` and `usher.curation.dropped` are the milestone's only
+two metrics, and neither is about money.** This document's own first principle
+puts LLM spend on Postgres — `llm_calls` is the record — so there is no
+`usher.llm.*` series at all. What these two answer is the question no
+`llm_calls` row can: **whether the validator is eating the output.** A call
+that returned 200 and produced nothing usable is a healthy call from the wire's
+side, and
+[ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s 108/108 run is what
+that looks like in production. Four things a dashboard query has to know:
+
+- **`reason`'s vocabulary is closed and is five values** — `not_in_pool`,
+  `unparseable`, `duplicate`, `row_unusable`, `row_too_short` (`DropReason`'s
+  own members, and ADR-0028 carries the argument for each). Closed because a
+  metric dimension built from free-form strings is a cardinality footgun, and
+  because the pair `not_in_pool`/`unparseable` produces the identical empty
+  screen with opposite fixes.
+- **Two of the five count rows and three count cards**, which is what the
+  `row_` prefix says out loud: summing across the label is meaningless.
+- **Every reason is exported on every generation, zeros included.** A reason
+  absent from the export is indistinguishable from a reason nobody counts,
+  which is this pair's own subject one level up.
+- **Counters, not histograms, and the pair is the point.** One generation per
+  household per night is far too sparse a population for a distribution to say
+  anything; what an operator reads is the ratio of the two. "How many rows did
+  *this* generation produce" is on `curation.generate`'s span, attached to the
+  generation that produced it.
 
 `usher.home.compose.duration` carries **no labels**, and that is a decision:
 the natural one would be the row count or the user, and the first is an

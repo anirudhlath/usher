@@ -734,6 +734,39 @@ Generation runs nightly and on demand:
    `curated-2`.
 4. **Persist** as `curated_rows`.
 
+✅ **All four steps are `usher.services.curation.CurationService` in M8, and
+five things about the assembled whole are sharper than the list above.**
+
+- **The prompt is code, and the two numbers in it that have to agree with
+  something else are rendered rather than written.** The pool's length is the
+  bound the validator checks, and `min_cards` is the floor it enforces — a
+  prompt asking for four cards under a validator demanding five drops every row
+  and reports `row_too_short`, a generation that failed because two numbers in
+  two files disagreed. Everything else in the prompt (the text, the 3–5 row
+  budget, the heading width) is a constant for
+  [08](08-operations.md)'s row-weights-are-code reason.
+- **Step 1's other half is a real read.** The prompt carries this household's
+  last 25 finished titles, most recent first, with a rewatch marked — the
+  engagement substitution this section already makes for the rating column the
+  schema does not have. A pool with no history behind it produces shelves about
+  the catalog rather than about the household.
+- **The `json_schema` sent with the request is an optimisation and never the
+  contract.** It states the handle bound a second time, where a provider that
+  honours guided decoding makes an out-of-pool handle harder to emit; the
+  validator checks it whatever the provider did.
+- **Failure is non-fatal to the screen and fatal to the job.** A failed
+  generation never reaches `replace_for_user`, so *"previous curated rows
+  persist"* below is a property of the control flow rather than of a
+  transaction — and the exception propagates, because `JobWorker` learns "park"
+  from `PortDataMalformed` and "back off" from everything else by catching it.
+  A generation that validated to **nothing** raises `PortDataMalformed`: the
+  three things that produce it are permanent properties of that request, so
+  five more completions reach the same answer at five times the price.
+- **`llm_calls` gets a row on every path that made a completion**, `ok = false`
+  included — and the one path that writes none is the one that made no
+  completion, because an empty candidate pool raises before the client is
+  touched and there is no honest `model` for a call nobody made.
+
 Failure is non-fatal: previous rows stay until successfully replaced. Cost is
 one modest completion per user per day.
 

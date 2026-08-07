@@ -801,3 +801,31 @@ the module's `__file__` resolves under the copy before every run**. The
 and unlike the shebang it keeps working when the next person reaches for
 `rsync`, a container mount, or a worktree. An in-place sweep gets the same
 assurance for free, which is a real argument for staying in place.
+
+**A plant that falsifies only half of a fixture's chain reads as a dead guard,
+and the harness cannot tell that from a guard with no defect behind it.** Found
+2026-08-06 in M8 Task 12, verifying four premise guards the standing rule
+requires each to be planted against. The guard is
+`assert ids != sorted(ids), "the premise: pool order is not id order"`, over a
+helper that seeds candidates with an *ascending* `vote_count` and then returns
+`list(reversed(seeded))` so the list it hands back is in pool order. The
+obvious plant — seed descending — leaves the helper's `reversed` in place, so
+the returned list is still not in id order, the guard still passes, and the
+case fails four assertions later on card ids. Scored `GUARD-DEAD` on the first
+run and it is not: the defect the guard names is *"pool order and id order
+agree"*, which in this fixture takes **both** substitutions at once. **The
+general form: a premise guard states a property of the fixture as the case
+sees it, so the plant has to be the property, not the first line that
+influences it — if a helper post-processes what it seeds, the plant is every
+step of that chain.** With both, all four guards failed on their own `E ` line.
+
+Same round, the mirror of it on the source side: **a mutation must reproduce
+the defect it names, and a mutation whose wrong answer accidentally equals the
+right one is not evidence.** "The prompt renders the watch history in the
+catalog read's order" spelled as `sorted(recent, key=…name)` **survived** —
+the two fixture names were `Watched Last Night` and `Watched Longer Ago`, and
+alphabetical order happens to be recency order for those two. Respelled as
+`sorted(recent, key=lambda one: list(catalog).index(one.title_id))`, which is
+literally the catalog read's order, it fails one case. Nearest relative is the
+existing "a mutation must be the change the plan names" entry; the difference
+is that this one produced a *plausible* survivor rather than a SQL error.
