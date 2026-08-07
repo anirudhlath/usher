@@ -115,6 +115,20 @@ docstring stated:
 same order of magnitude as its current 332 MB. Semantic search is a
 capability a household can decline without losing search.
 
+✅ **The argument was reused in M8 and it held, which is worth recording here
+because a precedent nobody cites is one nobody checked.**
+[ADR-0027](0027-the-llm-client-is-one-http-call.md) declined `litellm` on this
+ADR's shape — *"a runtime pulled unconditionally for a capability the
+deployment may never use"* — and the measurement came out the same way: **+146
+MB and 29 distributions against +0 and 0**, and among the 29 are
+`huggingface-hub`, `hf-xet`, `filelock`, `fsspec`, `tokenizers` and `tiktoken`,
+which is a model-download client and two tokenizer runtimes. That is
+*literally* the middle group this ADR refused `sentence-transformers` for,
+arriving through a different door for a feature that only needs a `POST`.
+**Two milestones, two dependencies, the same test.** The one place M8's answer
+differs is that it took **zero** rather than a smaller alternative: this ADR's
+capability genuinely needed a runtime and M8's needed an HTTP call.
+
 **Given up / Also — two supply-chain facts that belong in the open rather
 than in a comment.**
 

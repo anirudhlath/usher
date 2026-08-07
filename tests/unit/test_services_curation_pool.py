@@ -659,9 +659,9 @@ async def test_the_re_rank_orders_by_proximity_rather_than_by_a_threshold() -> N
 
 async def test_the_pool_is_capped_at_the_configured_size() -> None:
     """The cap is `USHER_CURATION_POOL_SIZE`, and it is the whole of the
-    prompt's token budget: ADR-0028 measured ~14.6 prompt tokens a candidate,
-    so a cap that stopped applying turns a 2,900-token prompt into whatever
-    the catalog is.
+    prompt's token budget: the shipped candidate line costs ~20.4 prompt
+    tokens, re-measured against the real prompt on 2026-08-07, so a cap that
+    stopped applying turns a 4,300-token prompt into whatever the catalog is.
 
     Asserted as an exact length *and* as which titles survive, because a cap
     applied before the ordering keeps the wrong ones.
@@ -912,9 +912,9 @@ def test_the_measured_two_hundred_is_declared_once_and_read_once() -> None:
     still disagree, so only that pair needs an assertion.
 
     The number is not decorative: ADR-0028's three handle arms all ran against
-    a 200-film pool at ~14.6 prompt tokens a candidate, so a default that
-    quietly became something else would make the recorded figure describe a
-    pool nobody sends.
+    a 200-film pool, and the shipped prompt costs ~20.4 tokens a candidate at
+    that size, so a default that quietly became something else would make
+    every recorded figure describe a pool nobody sends.
 
     Read off `model_fields` rather than off a constructed `Settings`, because
     constructing one reads the process environment and `.env`: a case that

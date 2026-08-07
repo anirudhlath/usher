@@ -9,7 +9,16 @@ Two consequences worth stating plainly:
 - **Matching becomes local.** Resolving an Emby item to a canonical title is a
   database lookup against 12.7M known titles, not a network round-trip.
 - **Recommendations have a real candidate pool.** Usher can suggest things you
-  *don't* own, because the catalog is far larger than the library.
+  *don't* own, because the catalog is far larger than the library. ✅ **Cashed
+  in M8** as `CandidatePoolService` over
+  `TitleRepository.list_unwatched_candidates`, and the promise is kept
+  *literally*: ownership is an `ORDER BY` key and never a filter, so the pool
+  spans the catalog rather than the library
+  ([06](06-rows-and-recommendations.md),
+  [ADR-0028](decisions/0028-the-pool-is-the-contract.md)). ⚠️ That is also the
+  one place the shipped prompt disagrees with the shipped SQL — it opens *"one
+  household's **own** library"* — which is recorded as a known limit in
+  [06](06-rows-and-recommendations.md) rather than settled here.
 
 All figures below were measured on 2026-07-28.
 

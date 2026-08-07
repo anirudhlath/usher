@@ -40,6 +40,36 @@ never returns one.
 a `set[str]` of the indices that were actually sent — and an index outside the
 pool's range is dropped and *counted*.
 
+🔴 **Amended 2026-08-07 by the live verification: rule 2 is stronger than this
+ADR claimed, and the original wording understated it in the direction that
+invites deletion.** Everything below in Evidence measures the coercion on the
+`json_object` arm — a provider that *ignored* the schema — which reads as a
+defence against a bad provider and makes guided decoding look like the safe
+case where the coercion is redundant. It is not. Read the two shipped modules
+together:
+
+- `curation._schema` declares `item_ids` items as `{"type": "integer",
+  "minimum": 1, "maximum": pool_size}` — the correct schema, because a handle
+  *is* a number and a numeric bound is the one thing guided decoding can
+  enforce during decoding (measured below).
+- `curation_validate` builds its lookup keyed on `str(index)`.
+
+So on the **happy path**, with `strict: true` honoured — the configuration
+this milestone was designed against and verified against — **every identifier
+arrives as a JSON `int` and the coercion runs on 100% of cards, on every
+generation.** Measured 2026-08-07: **405 identifiers over 20 generations
+across 5 pool shapes, every one an `int`, none out of pool.** Deleting
+`str(value).strip()` does not degrade a fallback path; it drops **every card
+of every generation** and `row_too_short` then eats every row behind them.
+
+**This is a documentation correction and not a code change.** The two modules
+are right as they stand, and the alternative — ask the schema for strings and
+key the map on `int` — moves the coercion rather than removing it, gives up
+`minimum`/`maximum`, and asks a model to quote a number. What was wrong was
+this ADR's account of *which* of the two statements of the bound is
+load-bearing on the ordinary path. It is the validator's, always, and never
+the schema's.
+
 **3. A generation that validates to zero rows is a failure**, recorded as
 `llm_calls.ok = false` with a reason, not a success that wrote nothing.
 
@@ -104,7 +134,10 @@ reason nobody counts, which is this ADR's own subject one level up.
 - **Three times the prompt budget back.** A 200-title pool addressed by UUID
   is 9,041 prompt tokens before the history or the instructions; by index it
   is 2,924. On a 16k-context model that is the difference between a pool that
-  fits and one that does not.
+  fits and one that does not. ⚠️ **Both figures are the *probe* prompt's, and
+  the shipped prompt is 47% larger** — see the correction under Evidence. The
+  ratio between the arms is what this bullet claims and it is unaffected; the
+  absolute number is not the one to quote for a budget.
 
 **Given up:**
 
@@ -164,6 +197,71 @@ handle column.
 identifiers from one model on one pool. The reason is that an index is
 bounds-checked and the other two are not.
 
+⚠️ **The three arms above were probes, not the shipped prompt, and the token
+column is 47% low for what actually ships.** Re-measured 2026-08-07 against the
+prompt `curation_prompt.build_prompt` renders, same model, same pool size:
+
+| | probe (2026-08-06) | shipped prompt (2026-08-07) |
+|---|---|---|
+| prompt tokens, pool 200, cold start | 2,924 | **4,304** |
+| prompt tokens, pool 200, 3 history lines | — | **4,359** (+47% on the probe) |
+| implied per candidate | 14.6 (a total ÷ a count) | — |
+| **marginal** per candidate, 8 → 200 | — | **20.40** |
+| **marginal** per candidate, 200 → 600 | — | **20.45** |
+| output tokens, median | 316 | **219.5** (192–277, −31%) |
+| latency, median | 1,995 ms | **1,420 ms** (1,230–1,787) |
+
+**The +40% per candidate is one rendering decision**: the shipped candidate
+line appends the title's genre list (`curation_prompt._genres`) and the probe's
+did not. **The marginal figure is the one to use** — 14.6 was a whole prompt
+divided by its candidate count, so it charged the instructions and the shape
+example to the candidates. The two marginal measurements agreeing to 0.05 of a
+token across a 75× range in pool size is what makes it a *rate* rather than a
+sample. History costs **~18 tokens a line** (three lines, 55 tokens), so a
+household that has genuinely finished 25 films pays ~460 for `HISTORY_SIZE`.
+
+**Output tokens and latency moved the other way and neither disturbs anything
+here.** Fewer output tokens for a longer prompt is what a more specific
+instruction block buys; the latency improvement is a busier probe host on the
+first evening as much as anything, and neither number was load-bearing for any
+decision in this ADR.
+
+✅ **Confirmations from the same run, one of them stronger than the claim it
+confirms.** All 2026-08-07, `gemma-4-26b-a4b`, 36 completions of a 45-completion
+bound:
+
+- **Integer handles: 0 out-of-pool over 405 ids, 20 generations, 5 pool
+  shapes.** 3.9× the denominator the 0.0% above was measured on. Still not a
+  guarantee, and still not the reason for rule 1.
+- **`strict: true` is honoured for the *numeric* bound and not only the
+  shape.** With `maximum: 5` declared against a prompt begging for numbers
+  1–200, **zero** integers above 5 appeared across 2,048 output tokens. That
+  is what makes stating the bound in the schema worth doing at all — and it
+  changes nothing about rule 2, because the bound the schema can enforce is
+  *range* and the thing the validator checks is *membership of what was sent*.
+- **The pool that cannot answer narrows rather than inventing, across four
+  hostile shapes** — pool 8, pool 5, 200 unknown titles, 200 bare-number
+  titles; 199 ids, 0 out of pool. The 2026-08-06 result below was one shape;
+  this is four, including two where the pool is smaller than one row.
+- 🔴 **An unsatisfiable *value* bound makes guided decoding loop to the
+  ceiling.** `maximum: 5` against a prompt asking for 1–200 produced
+  `1,2,3,4,3,1,2,3,4…` for the entire 2,048-token budget; `finish_reason ==
+  "length"` fired and the adapter's truncation guard refused it. **The first
+  live firing of that defence**, and its real justification is stronger than
+  the docstring's *"rows missing off the end"*: it is what stops a **degenerate
+  loop being read as a valid answer**. It also **vindicates `_schema`'s
+  deliberate omission of `minItems`** — with the card floor left as a
+  `description` hint, the pool-8 and pool-5 arms **narrowed** to 2–3 cards and
+  were discarded as `row_too_short`, which is counted and legible, rather than
+  looping at full price.
+- **Zero rows ⇒ `ok = false`, confirmed live**, with the reason, the tokens and
+  the cost recorded in full and `curated_rows` untouched. Rule 3 is now an
+  observed behaviour rather than only a designed one.
+- **`cost_usd` arithmetic holds end to end.** `0.00000000` against the local
+  model — the honest value; with prices 3/15 per Mtok configured,
+  `0.01658700`, which is exactly `Decimal((4359×3 + 234×15) / 1e6)`. The column
+  is `numeric` and `SUM()` agrees to 8 decimal places.
+
 **The pool that cannot answer the question.** Four rows demanded on Studio
 Ghibli, Kurosawa and the French New Wave, over a pool containing none of them:
 under `json_schema` the model **narrowed rather than invented** — 0 out-of-pool
@@ -206,18 +304,57 @@ total.** A frontier model will do better and a 3B model will do much worse.
 What transfers is the *ordering* of the three handle arms and the *shapes* of
 the two failures; the percentages do not.
 
-⚠️ **Pool size is untested at the boundary.** 200 was specified by
-[06](../06-rows-and-recommendations.md) and everything here used it. Whether
-the index scheme's accuracy degrades at 500, and where the prompt stops fitting
-a small context, are unmeasured — `USHER_CURATION_POOL_SIZE` exists so the
-question is answerable without a release, and the 400 that a too-large prompt
-produces parks with the token count in its message rather than retrying into
-the same wall.
+~~⚠️ **Pool size is untested at the boundary.**~~ 🔴 **Measured 2026-08-07, and
+the answer is that `USHER_CURATION_POOL_SIZE`'s `le=1000` is a bound the
+reference endpoint cannot serve.** This paragraph read *"whether the index
+scheme's accuracy degrades at 500, and where the prompt stops fitting a small
+context, are unmeasured"*. Against the local vLLM (`gemma-4-26b-a4b`,
+`max_model_len` 16,384) with the shipped defaults:
 
-⚠️ **Nothing here measures whether the rows are any *good*.** Validation
-guarantees that every card is a title the household could watch and that the
-row has enough of them. It cannot distinguish an insightful shelf from five
-titles that were adjacent in the prompt, and no assertion in this repository
-ever will. That is the honest limit of this milestone's guarantees, and it is
-why curated rows are additive: [08](../08-operations.md)'s *"Home composes
+| pool | result |
+|---|---|
+| 600 | **works** — 12,540 prompt tokens |
+| 700 | **HTTP 400** |
+| 1,000 | **HTTP 400** |
+
+**Accuracy did not degrade** — the 600 arm is inside the 0-out-of-405 result
+above. What fails is arithmetic: the constraint is
+`prompt_tokens + llm_max_output_tokens ≤ max_model_len`, and **nothing couples
+the two settings**, so raising `USHER_LLM_MAX_OUTPUT_TOKENS` silently lowers the
+workable pool with no warning anywhere. The **mechanism** is right and was
+verified end to end — the adapter's 4xx branch translated the 400 to
+`PortDataMalformed` and `JobWorker` parked immediately rather than spending four
+more completions on the same wall, which is trap 13 firing exactly as designed.
+The **bound** is the problem, and it is a promise this milestone's own reference
+endpoint cannot keep.
+
+🔶 **The ceiling is deliberately not lowered to 600.** 600 is *this* endpoint's
+answer, and [08](../08-operations.md)'s whole argument for the setting is that
+the right number is a deployment fact — a 200k-context hosted model has a very
+different one. What a fix would have to look like is a startup check that knows
+`max_model_len`, which no setting in this project carries; recorded as a known
+limit in [08](../08-operations.md) rather than solved here.
+
+🔴 **Nothing here measures whether the rows are any *good* — and 2026-08-07
+measured something adjacent, which came back badly.** Validation guarantees
+that every card is a title the household could watch and that the row has
+enough of them. It cannot distinguish an insightful shelf from five titles that
+were adjacent in the prompt, and no assertion in this repository ever will.
+What *was* counted, over 59 headings from 20 live generations: **52 of 59
+(88%) are genre labels**, which the prompt explicitly forbids (*"a mood, a
+period, a theme, a filmmaker — rather than by one genre"*); exactly **one**
+heading named a filmmaker; and three headings recur **verbatim across three
+separate generations each**. So on this model the curated shelf is
+substantively what `GenreAffinityProvider` already produces for free, from a
+`SELECT`, at no cost and no latency. That is the milestone's central product
+risk, it is recorded in [06](../06-rows-and-recommendations.md) rather than only
+here, and it does not disturb any decision in this ADR — every one of those 59
+headings sat over cards that were real, owned-or-reachable, and in the pool.
+It is why curated rows are additive: [08](../08-operations.md)'s *"Home composes
 without them"* is what makes a bad row a disappointment rather than a defect.
+
+⚠️ **One model, one evening.** A frontier model may well obey the
+group-by-something-other-than-genre instruction; the 88% is not a property of
+"an LLM" and must never be quoted as one. What transfers is that **the
+instruction is not self-enforcing and nothing in this system checks it**, which
+is a property of the design and not of the model.

@@ -862,6 +862,84 @@ one modest completion per user per day.
 The candidate pool being pre-filtered locally is what keeps this affordable —
 the model sees 200 titles it might plausibly recommend, not a catalog.
 
+### 🔴 What the live run found, and the limits it leaves
+
+Measured 2026-08-07 against a local vLLM serving **`gemma-4-26b-a4b`** over a
+real **1,271,138**-title catalog, bounded at 45 completions and spending 36.
+⚠️ **One model, one pool, one evening.** Every rate below is scoped to that and
+none is a property of "an LLM"; what transfers is the *ordering* of options and
+the *shapes* of failures, never the percentages. The machinery is recorded in
+[ADR-0028](decisions/0028-the-pool-is-the-contract.md); what follows is the
+half that is about the **product**, and it is here rather than in a task queue
+because a reader of this section is the person who needs it.
+
+🔴 **The central product risk: on this model the curated shelf is
+substantively what `GenreAffinityProvider` already gives away free.** Over 59
+headings from 20 generations:
+
+- **52 of 59 — 88% — are genre labels**, which the prompt *explicitly forbids*:
+  *"Group by something a person would recognise — a mood, a period, a theme, a
+  filmmaker — rather than by one genre."*
+- **One heading in 59 named a filmmaker**, which is the behaviour the
+  instruction was written to buy.
+- *"Animated Wonders for All Ages"*, *"Epic Sci-Fi Adventures"* and
+  *"Mind-Bending Sci-Fi & Thrillers"* each recur **verbatim across three
+  separate generations**.
+
+`GenreAffinityProvider` produces a genre shelf from a `SELECT`, for nothing, in
+milliseconds, and needs no key. So the question this section cannot currently
+answer is what the completion is *for* — and the honest statement of it is that
+**the prompt's grouping instruction is not self-enforcing and nothing in this
+system checks it.** That is a property of the design; the 88% is a property of
+one model. A frontier model may well obey it, and the way to find out is to
+run this measurement again against one rather than to assume. Not fixed here:
+curated rows are additive, [08](08-operations.md)'s *"Home composes without
+them"* holds, and a duplicated genre shelf is a disappointment rather than a
+defect.
+
+**Four limits the run named, each recorded rather than fixed:**
+
+- ⚠️ **The pool has no ownership *filter*, and the prompt says it does.**
+  `TitleRepository.list_unwatched_candidates` uses ownership as an `ORDER BY`
+  key only — deliberately, so *"the pool spans the whole catalog, not just the
+  library"* above stays true — while `curation_prompt.build_prompt` opens *"one
+  household's **own** film and television library."* On a household whose
+  unwatched-and-owned set is smaller than the pool size, the tail of the pool
+  is titles it does not own, under a sentence asserting it does. The two
+  sentences are each defensible and they disagree; which one gives way is a
+  product decision and is **filed as one**, not settled here.
+- ⚠️ **De-duplication is within a row only.** `curation_validate._cards`
+  collapses a repeat inside one row and counts it `duplicate`; a title
+  appearing on *two* shelves of the same generation is not counted at all. The
+  prompt's *"Do not use the same candidate in more than one row"* is the only
+  defence, and a prompt rule is not a guarantee — the same thing this section
+  says one level up about the grouping instruction.
+- ⚠️ **`min_cards = 5` means a small unwatched pool yields zero rows, every
+  time, at full price.** Rows carried 5–6 cards at pool 200 and **2–3 at pool 5
+  and pool 8**, so every row was discarded as `row_too_short` and the
+  generation was billed and produced nothing. That is
+  [ADR-0014](decisions/0014-absence-is-not-zero.md) working — a padded row
+  would be a fabricated recommendation — and it is also a household that pays a
+  completion a night for a permanently empty shelf, with nothing warning the
+  operator before the money.
+- ⚠️ **Four of the five `DropReason` members never fired in 20 generations**,
+  and under a provider honouring `strict: true` three of them are close to
+  unreachable: `unparseable` and `row_unusable` are shape failures guided
+  decoding prevents, and `not_in_pool` is a range violation it also prevents.
+  Only `row_too_short` fired. Worth knowing **before** an operator reads a
+  dashboard of permanent zeros and concludes the counter is broken — the
+  vocabulary is still right for the reason ADR-0028 gives (a reason absent from
+  a tally is indistinguishable from a reason nobody counts), and its zeros are
+  now expected rather than surprising.
+
+**What the run did not reach, named rather than implied.** `media_items` was 0,
+so ownership sorting and the other nine providers were never exercised against
+real data; `title_embeddings` was 0, so `CandidatePoolService._reranked`'s
+centroid re-rank **never executed**; end-to-end retrieval through
+`PostgresSearchIndex`, `JobKind.CURATE` via `usher work`, and
+`POST /admin/rows/regenerate` were all untested (only the `usher curate` path
+ran); and no hosted provider was touched at all.
+
 ## Caching
 
 | Layer | Lifetime |

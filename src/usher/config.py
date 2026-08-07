@@ -303,6 +303,24 @@ class Settings(BaseSettings):
     # end, so the adapter refuses `finish_reason == "length"` outright. Five
     # rows of eight cards with a reason each is ~500 tokens; 2048 is room to
     # be wrong without paying for a 32k answer nobody reads.
+    #
+    # ✅ **The guard fired live for the first time on 2026-08-07, and its real
+    # justification is stronger than the sentence above.** An unsatisfiable
+    # *value* bound -- `maximum: 5` in the schema against a prompt asking for
+    # numbers 1-200 -- made guided decoding **loop**: `1,2,3,4,3,1,2,3,4...`
+    # for the entire 2,048-token budget, `finish_reason == "length"`, and the
+    # adapter refused it. So the guard is not only about *"rows missing off
+    # the end"*; it is what stops a **degenerate loop being read as a valid
+    # answer**, which is the failure that would otherwise have arrived as a
+    # well-formed row of repeated handles. One model, one evening,
+    # `gemma-4-26b-a4b`.
+    #
+    # 🔶 **This setting and `curation_pool_size` below spend one budget and
+    # nothing couples them.** The endpoint's real constraint is
+    # `prompt_tokens + llm_max_output_tokens <= max_model_len`, so raising
+    # this silently lowers the workable pool -- and the failure is a 400 that
+    # parks the job rather than a warning at startup. Recorded rather than
+    # solved: see `curation_pool_size`'s measured ceiling below.
     llm_max_output_tokens: int = Field(default=2048, ge=256, le=32_768)
     # A generation is a background job with a whole backoff schedule behind
     # it, so a long timeout costs a worker pass rather than a request. 120 s
@@ -342,14 +360,37 @@ class Settings(BaseSettings):
     #
     # 200 is measured rather than round: ADR-0028's three handle arms all ran
     # against a 200-film pool, where the index spelling costs **2,924 prompt
-    # tokens** -- so a candidate is ~14.6 tokens, and the same pool addressed
-    # by UUID is 9,041, i.e. most of a 16k budget spent on identifiers.
+    # tokens** for the probe prompt, and the same pool addressed by UUID is
+    # 9,041 -- most of a 16k budget spent on identifiers.
     #
-    # `le=1000` is that arithmetic: ~14.6 tokens a candidate puts 1,000 at
-    # ~14.6k before the watch history or the instructions, which no 16k model
-    # can answer. A context-length 400 is a permanent failure for that prompt
-    # whose only fix is a smaller pool (trap 13), so the ceiling is a bound on
-    # a misconfiguration that parks a job rather than degrading it. `ge=1`
+    # ⚠️ **The per-candidate figure that arithmetic gave is wrong for the
+    # shipped prompt, re-measured 2026-08-07.** This comment read *"so a
+    # candidate is ~14.6 tokens"* -- a *total* divided by a count, from a probe
+    # prompt whose candidate line was name and year. Measured against the
+    # prompt that ships, at four pool sizes, the **marginal** cost is
+    # **20.40 tokens/candidate** (8 -> 200) and **20.45** (200 -> 600): +40%,
+    # and the difference is the genre list `curation_prompt._genres` renders.
+    # The whole prompt is 4,304 cold at pool 200 and 4,359 with three history
+    # lines, against the probe's 2,924.
+    #
+    # 🔴 **And `le=1000` is a bound this milestone's own reference endpoint
+    # cannot serve.** Measured 2026-08-07 against the local vLLM
+    # (`gemma-4-26b-a4b`, `max_model_len` 16,384) with the shipped defaults:
+    # **1,000 -> HTTP 400. 700 -> HTTP 400. 600 -> works**, at 12,540 prompt
+    # tokens. The constraint is not the context window alone, it is
+    # `prompt_tokens + llm_max_output_tokens <= max_model_len` -- and
+    # **nothing in this file couples the two**, so raising
+    # `USHER_LLM_MAX_OUTPUT_TOKENS` silently lowers the workable pool.
+    # `le=1000` is kept rather than lowered to 600, because 600 is *this*
+    # endpoint's answer and the whole argument above is that the right number
+    # is a deployment fact -- a 200k-context hosted model has a different one.
+    # What the ceiling is honestly a bound on is arithmetic no configuration
+    # can satisfy anywhere, and the mechanism below is what makes the rest
+    # survivable: a context-length 400 is a permanent failure for that prompt
+    # whose only fix is a smaller pool (trap 13), the adapter translates it to
+    # `PortDataMalformed`, and `JobWorker` parks immediately rather than
+    # spending four more completions on the same wall. Verified live: the
+    # 400 arrived, was translated, and parked. `ge=1`
     # rather than something friendlier because a pool of one is a legal,
     # useless configuration and this file does not invent product minima --
     # what a *row* needs is a card floor, which is the validator's

@@ -464,8 +464,16 @@ def build_pipeline(
         row_providers=row_providers(semantic=embedder is not None),
         taste=taste,
         # The pool is the whole of M8's retrieval half, and its size is the
-        # prompt's token budget -- ~14.6 prompt tokens a candidate, measured.
-        # This is `USHER_CURATION_POOL_SIZE`'s one reader.
+        # prompt's token budget -- **~20.4 prompt tokens a candidate**,
+        # measured 2026-08-07 against the *shipped* prompt at four pool sizes:
+        # the marginal cost is 20.40 tokens/candidate from 8 -> 200 and 20.45
+        # from 200 -> 600. This comment read *"~14.6, measured"* until then,
+        # which was ADR-0028's 2,924-token figure divided by 200 -- a *total*
+        # divided by a count, taken from a probe prompt that rendered a
+        # candidate as name and year. The shipped line adds the genre list
+        # (`curation_prompt._genres`), which is the whole +40%. One model, one
+        # tokenizer, one evening: `gemma-4-26b-a4b`. This is
+        # `USHER_CURATION_POOL_SIZE`'s one reader.
         pool=CandidatePoolService(
             titles=titles,
             embeddings=embeddings,

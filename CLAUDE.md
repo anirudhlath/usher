@@ -7,9 +7,9 @@
 LLM-curated recommendation rows. MIT licensed. Python 3.13 / FastAPI /
 PostgreSQL.
 
-**Status: M7 complete, verified and swept. M8 (LLM curation) in progress on
-`milestone/m8-curation`.** Seven milestones are built and verified, several of
-them against live third-party services rather than only against fakes:
+**Status: M8 complete, verified and swept, on `milestone/m8-curation`.** Eight
+milestones are built and verified, several of them against live third-party
+services rather than only against fakes:
 
 | | delivers | live-verified against |
 |---|---|---|
@@ -20,15 +20,27 @@ them against live third-party services rather than only against fakes:
 | **M5** | the push lane, supervised reconnect with a gap-closing delta, `GET /titles/{id}`, `GET /events` over SSE | Emby's `/embywebsocket` |
 | **M6** | `search_document` + GIN, trigram type-ahead, embeddings, `title_neighbors`, RRF fusion, the search CLI | a real 1,271,138-title catalog |
 | **M7** | the composed home screen — nine row providers, `HomeService`, `TasteService`, `DeriveService`, the tag genome, `GET /home` | a real 1,271,570-title catalog |
+| **M8** | LLM curation end to end — `OpenAICompatibleClient` (litellm declined), `curated_rows` + `llm_calls`, the candidate pool, `CurationService` and its validator, `CuratedProvider` as the tenth provider, `JobKind.CURATE`, `POST /admin/rows/regenerate`, `usher curate`, the genome tag vocabulary, query expansion | a local vLLM serving `gemma-4-26b-a4b` over a real 1,271,138-title catalog |
 
 Task breakdowns are in `docs/plans/`, one file per milestone.
 [PRD 09](docs/prd/09-roadmap.md) is what's next. **Do not invent commands for
 tooling that does not exist yet** — check the Commands section below first.
 
-**What each milestone deliberately did *not* build** — M7's nine boundary
-calls, M6's nine, M4's four, and the typo-tolerance gate that failed its own
-bar — is in `.claude/rules/milestone-boundary-calls.md`, which loads when you
-work under `docs/plans/` or on the roadmap.
+**What each milestone deliberately did *not* build** — M8's eight boundary
+calls, M7's nine, M6's nine, M4's four, and the typo-tolerance gate that failed
+its own bar — is in `.claude/rules/milestone-boundary-calls.md`, which loads
+when you work under `docs/plans/` or on the roadmap.
+
+⚠️ **M8's own subject document carries a finding worth knowing before you read
+anything else about curation.** Against `gemma-4-26b-a4b`, **88% of generated
+row headings (52 of 59) were the genre labels the prompt explicitly forbids**,
+and one heading in 59 named a filmmaker — so on that model a curated shelf is
+substantively what `GenreAffinityProvider` already produces from a `SELECT`.
+One model, one evening; what transfers is that **the prompt's grouping
+instruction is not self-enforcing and nothing in this system checks it.**
+Recorded as a known limit in [PRD 06](docs/prd/06-rows-and-recommendations.md),
+not fixed — curated rows are additive, so a dull row is a disappointment rather
+than a defect.
 
 ## Keep the PRD current
 
@@ -104,7 +116,7 @@ was learned separately in two or more subsystems.
 
 ## Verified facts worth not re-deriving
 
-Seven milestones of measurements, live-run findings, and traps — each with its
+Eight milestones of measurements, live-run findings, and traps — each with its
 date, its sample, and what it refuted. **They are filed by subsystem under
 `.claude/rules/` and load automatically when you work in the matching paths**,
 so a session pays only for what it touches.
@@ -117,6 +129,7 @@ so a session pays only for what it touches.
 | `tmdb-and-enrichment.md` | `adapters/tmdb/**`, `services/enrich.py` | the 712-request live run, the 4xx taxonomy, `append_to_response=season/N`, movie/TV divergence across three API layers |
 | `search-and-embeddings.md` | `adapters/search/**`, `adapters/embedding/**` | the typo-tolerance gate that failed, GIN vs GiST, RRF's five traps, `fastembed` vs `sentence-transformers`, `halfvec`, `hnsw.iterative_scan` |
 | `rows-and-genome.md` | `services/rows/**`, `home.py`, `taste.py` | the sequential build's two very different p95s, the genome's real coverage and its denominators |
+| `curation-and-llm.md` | `adapters/llm/**`, `services/curation*.py`, `query_expansion.py` | M8's live run — the 88% genre-heading finding, the real per-candidate token cost, the pool ceiling the reference endpoint cannot serve, why the coercion is the primary path, and query expansion measuring worse |
 | `bootstrap-and-datasets.md` | `adapters/bulk/**` | IMDb TSV parsing, MovieLens archive selection, Wikidata timing, the cache-key finding |
 | `api-telemetry-and-lanes.md` | `api/**`, `telemetry.py`, `composition.py` | SSE and `ASGITransport`, OTel provider caching, the instrumentor that produced no spans for three milestones, lane supervision and readiness |
 | `config-cli-and-deployment.md` | `config.py`, `cli.py`, `compose.yml`, `Dockerfile` | the settings failure that printed its own credential, `.env`'s two readers, `env_file:` vs `environment:`, image measurement, CI tag pinning |
@@ -126,9 +139,10 @@ so a session pays only for what it touches.
 To read one outside its trigger paths, just open the file.
 
 **Adding a finding:** append it to the subsystem file, not here. This index
-grows only when a new subsystem appears. A finding that genuinely applies
-everywhere goes in "Four rules about evidence" above — that list has earned
-four entries in seven milestones, so the bar is high.
+grows only when a new subsystem appears — `curation-and-llm.md` is the one M8
+added, and the first since M7 created the set. A finding that genuinely
+applies everywhere goes in "Four rules about evidence" above — that list has
+earned four entries in eight milestones, so the bar is high.
 
 ## Commands
 

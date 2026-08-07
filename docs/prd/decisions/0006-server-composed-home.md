@@ -80,9 +80,13 @@ database answers `200 {"rows": []}` rather than a 404, and deliberately without
 a padded generic row, which would look personalised on a household that has
 watched nothing.
 
-**Nine of ten providers**, and the tenth is named rather than missing:
-`CuratedProvider` and `curated_rows` are M8's whole family
-([09](../09-roadmap.md)'s M7 boundary call 2).
+✅ **All ten providers**, since M8 shipped `CuratedProvider` and `curated_rows`
+as one family ([09](../09-roadmap.md)'s M7 boundary call 2). *(This read
+"**Nine of ten providers**, and the tenth is named rather than missing" until
+2026-08-07 — a tenth copy of the count this ADR's own paragraph four above
+counts nine of, left standing inside the file that names the drift. Recorded
+rather than silently corrected, because a document that describes a failure and
+then commits it is the more useful evidence.)*
 
 **Two consequences this ADR did not anticipate, both recorded elsewhere and
 named here so the trail is complete:**

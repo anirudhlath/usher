@@ -18,7 +18,7 @@ direct Emby access, for both movies and television.
 | **M5 — Push and read-through** ✅ | WebSocket events with health grounded in a message ledger ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)), supervised reconnect with a gap-closing delta, demand promotion, `GET /titles/{id}`, SSE to clients over an `EventPublisher` port ([ADR-0019](decisions/0019-the-client-event-channel-is-a-port.md)), and two supervised lanes in the server process |
 | **M6 — Search** ✅ | **The `index` stage of [03](03-sources-and-sync.md)'s pipeline**; a weighted full-text document as a generated column, a typo-tolerant autocomplete path on its own port, optional embeddings with a fingerprint that makes staleness a query, RRF fusion reporting its own coverage, similarity, and a precomputed neighbour table. **Adds no HTTP route and no new client event, both deliberately** — see the boundary calls below. **[ADR-0002](decisions/0002-postgres-first-search.md)'s Meilisearch gate ran against a real 1,271,138-title catalog on 2026-08-03 and failed for short names and for latency**; the follow-up is the two-tier suggest, owned by M9 |
 | **M7 — Rows** ✅ | `Row`/`RowProvider` as ports and **nine registered providers**, `HomeService`'s propose→score→diversify→build, in-process row and screen caches, the taste centroid and genre affinity, `GET /home` and `usher home`, `row.invalidated`. **Plus the MovieLens tag-genome importer** — five documents specified it and nothing built it, and it is now the similarity blend's third live signal. Plus `Person`/`Credit`/`Collection` re-derived from `raw_payloads` with no second network call (`usher derive`), search weight class B filled, and two measurements the milestone owed: the sequential build's cost, and `titles.popularity`/genome coverage with their denominators |
-| **M8 — Curation** | LLM row generation, validation, persistence, regeneration job. **Inherits from M7:** `curated_rows`, `LLMRow`, `CuratedProvider`, `RowFamily.CURATED` and `POST /admin/rows/regenerate` as one family (call 2); M6's query expansion (its call 6) — ✅ **shipped by Task 20 and then measured**: against a local `gemma-4-26b-a4b` it moved MRR **0.733 → 0.373**, so it ships behind `USHER_QUERY_EXPANSION_ENABLED`, off by default and independent of `USHER_LLM_ENABLED` ([05](05-search-and-similarity.md)); and the genome's **tag vocabulary**, which M7 deliberately did not store — a prompt that wants to say "atmospheric, thought-provoking" needs the words, and `genome_revision` is what made loading them later safe. ✅ **Shipped by Task 19**: `genome_tags(tag_id, tag, genome_revision)`, migration `m08b`, 1,128 rows loaded by the same `bootstrap --phase movielens`, with `GenomeRepository.vocabulary(revision)` refusing a release mismatch ([02](02-data-model.md), [04](04-catalog-bootstrap.md), [ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md)) |
+| **M8 — Curation** ✅ | LLM row generation, validation, persistence, regeneration job — `OpenAICompatibleClient` over httpx ([ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md), litellm declined), `curated_rows` + `llm_calls` (migration `m08a`), `CandidatePoolService`, `CurationService`'s assemble→call→validate→persist with the validator as its own module, `RowFamily.CURATED` + `LLMRow` + `CuratedProvider` as **the tenth row provider**, `JobKind.CURATE` + handler, `POST /admin/rows/regenerate` (202), and `usher curate`. **Its eight boundary calls are below**, and 🔴 **the product finding is below them**: 88% of one live run's headings were the genre labels the prompt forbids. **Inherits from M7:** `curated_rows`, `LLMRow`, `CuratedProvider`, `RowFamily.CURATED` and `POST /admin/rows/regenerate` as one family (call 2); M6's query expansion (its call 6) — ✅ **shipped by Task 20 and then measured**: against a local `gemma-4-26b-a4b` it moved MRR **0.733 → 0.373**, so it ships behind `USHER_QUERY_EXPANSION_ENABLED`, off by default and independent of `USHER_LLM_ENABLED` ([05](05-search-and-similarity.md)); and the genome's **tag vocabulary**, which M7 deliberately did not store — a prompt that wants to say "atmospheric, thought-provoking" needs the words, and `genome_revision` is what made loading them later safe. ✅ **Shipped by Task 19**: `genome_tags(tag_id, tag, genome_revision)`, migration `m08b`, 1,128 rows loaded by the same `bootstrap --phase movielens`, with `GenomeRepository.vocabulary(revision)` refusing a release mismatch ([02](02-data-model.md), [04](04-catalog-bootstrap.md), [ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md)) |
 | **M9 — API surface** | Full HTTP surface, image proxy, playback resolution, **the playback ticket that succeeds [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)**, **outbound watch state (`PUT /watch/titles/{id}` and the source write-back retry job)**, **[07](07-client-api.md)'s RFC 9457 error envelope**, `GET /titles/{id}/similar` over M6's precomputed table, **the `search_queries` analytics table whole** ([10](10-telemetry-and-dashboards.md)), **the two-tier suggest [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges** (see below), attribution. **Inherits from M7:** artwork on `RowCard` with the `Image` table and `GET /images/{id}` (call 3); `title_search_names`' *people* half, with M6's condition **restated rather than renewed** (call 6); row provider enable/disable via the admin API (call 9); the RFC 9457 envelope `GET /home` deliberately ships without (call 1), plus `usher.http.server.duration`, `usher.cache.hits`/`.misses` and serve-stale-while-refreshing; `credits` as a key on `GET /titles/{id}`; and the three ranking terms M7 built data for and did not wire — taste-centroid proximity, watch state and recency ([05](05-search-and-similarity.md)) |
 | **M10 — Hardening** | Observability, failure modes, backup/restore, docs, public release |
 
@@ -478,6 +478,114 @@ of the whole enriched tier, and it is the blocker on call 6's other half; and
 shape of reason. Both are named in [03](03-sources-and-sync.md) rather than
 left implied by the deferrals they block, because that is the failure this
 roadmap has now recorded twice.
+
+**M8's boundary was ambiguous in eight places, and each was decided
+deliberately rather than drifted into.** The plan states each with its reason
+and this is the roadmap's copy, which is where a reader looking for *what a
+milestone declined* is told to look.
+
+1. **`LiteLLMClient` is not built.** The client is an OpenAI-compatible HTTP
+   client over the httpx stack this project already has. Three PRD sections
+   had named litellm since M1 — [01](01-architecture.md)'s ports and stack
+   tables, [06](06-rows-and-recommendations.md)'s step 2, and
+   [10](10-telemetry-and-dashboards.md)'s *"litellm reports per-call cost
+   natively"* — and all three are **corrected rather than implemented**.
+   Priced rather than argued: **+146 MB and 29 distributions against +0 and
+   0**, on a 356 MB image, and the 29 are a second async HTTP stack plus a
+   model-download client and two tokenizer runtimes — the exact shape
+   [ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)
+   refused for the embedder. **The deciding fact is not the size: `base_url`
+   already *is* the provider abstraction.** What litellm adds over it is
+   Anthropic's and Gemini's native wire formats, both reachable through
+   OpenRouter, which speaks this one.
+   [ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md).
+2. **Generation is a job, never on a request path**, and
+   `POST /admin/rows/regenerate` **enqueues and returns 202 with the job's
+   key**. [06](06-rows-and-recommendations.md) already required it; what the
+   boundary adds is *why the route is not synchronous*, and it is structural
+   rather than a latency preference: a synchronous route is the first request
+   in this project whose honest answer is *"the upstream is down"*, which
+   would force [07](07-client-api.md)'s RFC 9457 envelope a milestone early
+   against a deferral that has now survived three client-facing routes. Enqueued,
+   the only remaining failure is "the queue is unreachable", which is Postgres,
+   which is already a total outage.
+3. **The prompt addresses candidates by a small integer index, and the service
+   owns the index→UUID map.** Measured over one real 200-film pool: a UUID
+   handle costs **3.1× the prompt tokens and 3.2× the latency** of an integer
+   index and is the **least accurate of the three** spellings tried. The
+   argument is not the rate, which is one model on one evening — it is that an
+   index is **bounds-checked**, so an out-of-pool identifier is
+   *unrepresentable* rather than merely rejected, where a hallucinated UUID
+   denotes nothing and a hallucinated IMDb id may denote a real film the
+   household does not own.
+   [ADR-0028](decisions/0028-the-pool-is-the-contract.md).
+4. **Validation coerces before it compares, and counts its drop reasons
+   separately.** **108 of 108** identifiers came back as JSON integers where a
+   probe schema asked for strings, with a hallucination rate of **zero**; a
+   validator holding a `set[str]` drops every row, writes nothing, logs
+   nothing, and is indistinguishable from a model that had nothing to say.
+   **Shipped as five reasons rather than two** (two counting rows, three
+   counting cards), and 🔴 **the coercion turned out to be the *primary* path
+   rather than a fallback** — the shipped schema asks for `integer` and the
+   validator keys on `str(index)`, so it runs on 100% of cards on the happy
+   path. ADR-0028 carries both corrections.
+5. **The candidate pool degrades without an embedder, and the taste centroid
+   is an additional signal rather than the pool's spine.**
+   [06](06-rows-and-recommendations.md) said the pool is *"pre-filtered by
+   taste-centroid proximity"*, and `USHER_EMBEDDING_ENABLED` defaults to
+   `False` — so implementing that literally makes curation the feature that
+   never fires on the shipped configuration, **exactly the failure that
+   document already corrected once** for `GenreAffinityProvider`. The pool is
+   built from signals needing no model and the centroid **re-ranks**. This is
+   also what finally gives `TasteService.centroid` a caller in `src/`, the gap
+   M7 shipped and named.
+6. **`llm_calls` ships with a writer for every column, and
+   [02](02-data-model.md) gets the row it never had.**
+   [10](10-telemetry-and-dashboards.md) specified the table in a ten-column
+   SQL comment that PRD 02's supporting-tables list did not mention; both are
+   fixed. The `search_queries` discipline cuts *for* this table — M8 owns the
+   writer and the table together — and it binds every column: a column M8
+   could not fill did not ship. **There is no `user_id` on `llm_calls`**,
+   deliberately: it is a cost ledger, and spend is attributed to an outcome by
+   joining `curated_rows` on `generation_id`.
+7. **No `usher.llm.*` metric is added, because [10](10-telemetry-and-dashboards.md)
+   says spend is SQL.** Two metrics are added and neither is about money —
+   `usher.curation.rows` and `usher.curation.dropped` — because they answer the
+   question no `llm_calls` row can: *whether the validator is eating the
+   output*. A call that returned 200 and produced nothing usable is `ok = true`
+   from the wire's side.
+8. **Nothing schedules the nightly run, and the plan says so rather than
+   inventing a scheduler.** [06](06-rows-and-recommendations.md) says
+   generation *"runs nightly and on demand"*; there is no scheduler anywhere in
+   `src/` — `api/lanes.py` is one lane per source plus one worker — and every
+   other periodic thing here is an operator's cron entry, which
+   [10](10-telemetry-and-dashboards.md) already calls out for
+   `usher similar --rebuild`. `usher curate` is the command and the README
+   carries the cron line. Building a scheduler for one job would be a second
+   unplanned milestone inside this one, and [08](08-operations.md)'s
+   mechanism-before-the-setting rule forbids the alternative of a
+   `USHER_CURATION_SCHEDULE` with nothing reading it.
+
+**M8 is complete, and the thing it got wrong is not in the list above.** Every
+boundary call held. What the live verification found on 2026-08-07 — against a
+local `gemma-4-26b-a4b` over a real 1,271,138-title catalog, 36 completions of
+a 45-completion bound — is that the **product** claim underneath the milestone
+is the weak one: **52 of 59 generated headings (88%) were genre labels**, which
+the prompt explicitly forbids, and one heading in 59 named a filmmaker. On that
+model the curated shelf is substantively what `GenreAffinityProvider` already
+produces from a `SELECT`, for free. ⚠️ One model, one evening, and the
+percentage transfers to nothing; **what transfers is that the prompt's grouping
+instruction is not self-enforcing and nothing in this system checks it**, which
+is a property of the design. Recorded in
+[06](06-rows-and-recommendations.md) as a known limit rather than fixed, because
+curated rows are additive and [08](08-operations.md)'s *"Home composes without
+them"* is what makes a dull row a disappointment rather than a defect. Three
+further limits are recorded there with it — the pool's missing ownership
+*filter* against a prompt that says *"own library"*, cross-row de-duplication
+resting on a prompt rule, and `min_cards = 5` giving a small unwatched pool zero
+rows at full price — and 🔴 `USHER_CURATION_POOL_SIZE`'s `le=1000` is a bound
+the reference endpoint cannot serve (measured: 600 works, 700 and 1,000 both
+return HTTP 400), because nothing couples it to `USHER_LLM_MAX_OUTPUT_TOKENS`.
 
 ### The follow-up the gate obliges: a two-tier suggest, owned by M9
 

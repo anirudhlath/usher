@@ -951,10 +951,11 @@ async def test_the_watch_history_reaches_the_prompt_most_recent_first() -> None:
 
 
 async def test_the_history_is_bounded_and_the_pool_is_the_pools_own_bound() -> None:
-    """The prompt's token budget is ~14.6 tokens a candidate, measured, and a
-    household with ten thousand finished films would otherwise send all of
-    them. The pool has `USHER_CURATION_POOL_SIZE`; the history's bound is this
-    module's, because nothing else knows the prompt."""
+    """The prompt's token budget is ~20.4 tokens a candidate and ~18 a history
+    line, both measured against the shipped prompt, and a household with ten
+    thousand finished films would otherwise send all of them. The pool has
+    `USHER_CURATION_POOL_SIZE`; the history's bound is this module's, because
+    nothing else knows the prompt."""
     household = _Household()
     await _candidates(household)
     for index in range(HISTORY_SIZE + 5):

@@ -189,6 +189,16 @@ _rows_dropped = _meter.create_counter(
 #: the heading width: it is the `limit` of a port read, and the read is what
 #: this layer owns. `curation_prompt` never sees it -- it renders whatever
 #: history it is handed.
+#:
+#: **What it costs, measured 2026-08-07 against the shipped prompt:** three
+#: history lines add **55 prompt tokens** over a cold start (4,304 -> 4,359 at
+#: pool 200), so a line is ~18 tokens and a household that has actually
+#: finished 25 films pays **~460**. That is ~10% on top of a 200-candidate
+#: pool's ~4,080 and it is the number to spend first if a prompt ever has to
+#: shrink -- a candidate costs ~20.4 and buys a title the model may recommend,
+#: a history line costs ~18 and buys context it may not use. One model, one
+#: tokenizer, one evening (`gemma-4-26b-a4b`); what transfers is the ratio,
+#: not the tokens.
 HISTORY_SIZE = 25
 
 
@@ -560,12 +570,32 @@ def _schema(pool_size: int, *, min_cards: int) -> dict[str, Any]:
 
     **An optimisation, never the contract.** `response_format: {"type":
     "json_schema", ..., "strict": true}` is a guarantee about *shape* from one
-    provider version; every failure ADR-0028 is about is one of *denotation*,
-    and the same endpoint without guided decoding returned the correct
-    identifiers as JSON integers where this schema asks for them. So the bound
-    below is stated twice on purpose -- here, where a provider that honours it
-    makes an out-of-pool handle harder to emit, and in `validate_curation`,
-    where it is checked whatever the provider did.
+    provider version; every failure ADR-0028 is about is one of *denotation*.
+    So the bound below is stated twice on purpose -- here, where a provider
+    that honours it makes an out-of-pool handle harder to emit, and in
+    `validate_curation`, where it is checked whatever the provider did.
+
+    **`item_ids` items are `integer`, and that is what makes
+    `validate_curation`'s coercion the primary path rather than a fallback.**
+    Corrected 2026-08-07. `curation_validate` keys its map on `str(index)`, so
+    a provider honouring `strict: true` hands back JSON `int`s and `_handle`'s
+    `int` branch runs on **100% of cards on every generation** -- not only on
+    the `json_object` arm ADR-0028's 108/108 run measured. Verified live over
+    405 identifiers in 20 generations: all `int`, none out of pool. Deleting
+    the coercion drops every card of every generation against this schema.
+    The types are deliberately *not* aligned by asking for strings instead:
+    that moves the coercion rather than removing it, gives up `minimum` /
+    `maximum` -- which guided decoding was measured to enforce -- and asks a
+    model to quote a number.
+
+    ✅ **`strict: true` was measured to hold the *numeric* bound, not only the
+    shape** (2026-08-07): with `maximum: 5` against a prompt begging for 1-200,
+    **zero** integers above 5 appeared in 2,048 output tokens. What the model
+    did instead is the argument for the `description` hint below -- it looped
+    `1,2,3,4,3,1,2,3,4...` to the ceiling, `finish_reason == "length"`, and the
+    adapter's truncation guard refused it. An unsatisfiable *value* bound
+    produces a degenerate loop, so a bound stated here must be one the pool can
+    actually satisfy.
 
     Written against the validator's own four exported key constants: a schema
     saying `ids` and a reader saying `item_ids` is a generation that drops 100%
@@ -604,6 +634,17 @@ def _schema(pool_size: int, *, min_cards: int) -> dict[str, Any]:
                             # behaviour of the hostile pool was that it
                             # narrowed. The floor is `min_cards`, enforced
                             # where a short row can be discarded whole.
+                            #
+                            # ✅ **Vindicated live, 2026-08-07, by the failure
+                            # of its opposite.** An unsatisfiable *value*
+                            # bound in this same subschema made the model loop
+                            # to the token ceiling. With the floor left as
+                            # this description, the two starved arms -- pool 8
+                            # and pool 5 -- **narrowed** instead, returning
+                            # rows of 2-3 cards that `row_too_short`
+                            # discarded whole. Narrowing is legible and
+                            # counted; a loop is a full-price non-answer that
+                            # only the truncation guard catches.
                             "description": (
                                 f"candidate numbers, at least {min_cards} of them, none repeated"
                             ),

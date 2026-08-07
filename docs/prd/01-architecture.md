@@ -16,7 +16,8 @@ services for a household-scale deployment.
 │                                                           │
 │  api/         routers · dependencies · DTOs               │
 │  services/    catalog · ingest · match · enrich ·         │
-│               search · rows · watchstate · bootstrap      │
+│               search · rows · curation · watchstate ·     │
+│               bootstrap                                   │
 │  domain/      Pydantic models — the canonical language    │
 │  ports/       SourceAdapter · MetadataProvider ·          │
 │               SearchIndex · Embedder · LLMClient ·        │
@@ -95,7 +96,20 @@ These are the invariants that keep Emby out of everything:
    independently of internal models.
 
 Import discipline is enforced in CI (`import-linter` contracts), because
-layering rules that are only documented become suggestions.
+layering rules that are only documented become suggestions. **Eight contracts
+as of M8, and the eighth is a rule the first seven structurally could not
+reach.** Contracts two and three are sourced at `domain`/`ports`/`services`,
+so the indirect chain that catches a *core* module reaching `usher.composition`
+does not exist for a router — and `usher.api` is itself a composition root, so
+it is allowed to reach `db/` and `adapters/` directly. A router doing
+`from usher.composition import build_curation_service` therefore passed all
+seven, ruff, mypy and both suites; planted and measured. The eighth forbids
+`usher.api.routers` from **naming** `usher.composition`, `usher.services.
+curation` or `usher.ports.llm`, and it needs `allow_indirect_imports = true` to
+say only that: every router imports `usher.api.deps`, which imports the wiring
+on purpose. A router may *reach* the wiring through a dependency and may not
+*name* it — which is what makes [07](07-client-api.md)'s *"the route holds no
+`LLMClient`"* a property of the build rather than of a review.
 
 ## Ports are ABCs, not Protocols
 
@@ -164,8 +178,8 @@ Other ports follow the same pattern:
 | `Embedder` | `FastEmbedEmbedder` — **optional**, behind an extra and off by default; a deployment without it still has full-text and trigram, the tier serving 1.27M titles ([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)) |
 | `LLMClient` | `OpenAICompatibleClient` — **one `POST /v1/chat/completions` over the httpx stack already here, and `litellm` is not taken.** Priced rather than assumed: +146 MB and 29 distributions against +0 and 0, and the 29 are a second async HTTP stack plus two tokenizer runtimes. The provider abstraction is `USHER_LLM_BASE_URL` [ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md) |
 | `TitleRepository` | `PostgresTitleRepository` ([ADR-0009](decisions/0009-repositories-are-ports.md)) |
-| `Row` | `BaseRow` in `services/rows/base.py` and its nine concrete rows — **the base class is in `services/` and the ABC is in `ports/`**, because `hydrate()` reads two repositories off the context and a port with a dependency is not a port ([06](06-rows-and-recommendations.md)) |
-| `RowProvider` | `ContinueWatchingProvider`, `NextUpProvider`, `RecentlyAddedProvider`, `RediscoverProvider`, `BecauseYouWatchedProvider`, `FranchiseProvider`, `GenreAffinityProvider`, `SeasonalProvider`, `PeopleProvider` — nine, registered as `services/rows/__init__.py`'s `ROW_PROVIDERS`. ⏳ `CuratedProvider` is the tenth and **M8 owns it whole**, with `curated_rows` and `LLMRow` ([09](09-roadmap.md)'s M7 boundary call 2) |
+| `Row` | `BaseRow` in `services/rows/base.py` and its **ten** concrete rows — **the base class is in `services/` and the ABC is in `ports/`**, because `hydrate()` reads two repositories off the context and a port with a dependency is not a port ([06](06-rows-and-recommendations.md)) |
+| `RowProvider` | `ContinueWatchingProvider`, `NextUpProvider`, `RecentlyAddedProvider`, `RediscoverProvider`, `BecauseYouWatchedProvider`, `FranchiseProvider`, `GenreAffinityProvider`, `SeasonalProvider`, `PeopleProvider`, ✅ `CuratedProvider` — **ten**, registered as `services/rows/__init__.py`'s `ROW_PROVIDERS`. The tenth shipped in M8 with `curated_rows`, `LLMRow` and `RowFamily.CURATED` as one family ([09](09-roadmap.md)'s M7 boundary call 2), and it is the only one that hydrates an artefact a *model* wrote — it reads `curated_rows` through a port on the context and never holds an `LLMClient` |
 
 **`adapters/search/` vs `db/repositories/`.** Both ultimately talk to the
 same PostgreSQL instance, which invites conflating them — they are not the
@@ -191,17 +205,21 @@ usher/
 │   ├── prd/                    ← this
 │   └── specs/                  ← reviewed design specs
 ├── src/usher/
-│   ├── api/         routers/ (health, titles, events, home, sources),
+│   ├── api/         routers/ (health, titles, events, home, rows, sources),
 │   │                deps.py, dto/ (… home.py), lanes.py
-│   ├── domain/      title.py, person.py, source.py, watch.py, rows.py
+│   ├── domain/      title.py, person.py, source.py, watch.py, rows.py,
+│   │                curation.py
 │   ├── ports/       *.py  (ABCs only)
 │   ├── adapters/    emby/, tmdb/, bulk/ (… movielens.py), search/,
-│   │                embedding/, llm/
+│   │                embedding/, llm/ (openai_compatible.py)
 │   ├── services/    rows/ (base.py, cache.py, one module per provider),
 │   │                home.py, taste.py, derive.py, similar.py, search.py,
-│   │                matching.py, ingest.py, enrich.py, push.py, jobs.py
+│   │                matching.py, ingest.py, enrich.py, push.py, jobs.py,
+│   │                curation.py, curation_pool.py, curation_prompt.py,
+│   │                curation_validate.py, query_expansion.py
 │   ├── jobs/        queue.py, scheduler.py, tasks/
-│   ├── db/          models/ (… people.py, collection.py, taste.py),
+│   ├── db/          models/ (… people.py, collection.py, taste.py,
+│   │                curation.py),
 │   │                repositories/ (implement ports/), migrations/
 │   └── config.py
 ├── tests/           unit/, integration/, fixtures/, fakes/ (port doubles
@@ -213,9 +231,10 @@ usher/
 Files stay small and single-purpose. A growing file is a signal that a concept
 wants extracting, not that it needs sections.
 
-⏳ **Two entries in that tree, and in the diagram at the top of this file, do
+⏳ **One entry in that tree, and in the diagram at the top of this file, does
 not exist as written** — recorded rather than quietly redrawn, because the
-tree is what a new reader navigates by.
+tree is what a new reader navigates by. (It read *"Two entries"* until M8; the
+second was `adapters/llm/`, struck through below because M8 built it.)
 
 - **There is no `jobs/` package.** The priority queue landed as
   `ports/jobs.py` + `db/repositories/jobs.py` (a repository, per
@@ -300,15 +319,20 @@ the one loop a reader would expect to find in it is how somebody adds
 `asyncio.gather` in good faith. `HomeService` builds the selected rows in a
 `for`, on the request's own session, and 1 is the *correct* number rather than
 an unraised limit: `AsyncSession` is explicitly not safe for concurrent use, so
-nine coroutines awaiting on one session interleave on one connection — a
+ten coroutines awaiting on one session interleave on one connection — a
 corruption that usually works, failing as an intermittent `InvalidRequestError`
-under load. The two escapes are worse at this scale (a session per row is nine
+under load. The two escapes are worse at this scale (a session per row is ten
 connections for one home screen; a semaphore has no lane to belong to, which is
 this very table's gap). There is **no setting**, because
 [08](08-operations.md) already retracted "concurrency per lane" on the
 principle that a setting cannot be added ahead of the mechanism it would bound,
 and the mechanism here is a `for`. Measured rather than assumed: p50 23.9 ms,
-p95 35.9 ms cold over nine providers on a real 1,271,570-title catalog.
+p95 35.9 ms cold over nine providers on a real 1,271,570-title catalog — ⚠️
+**M7's registry and M7's household, not re-run for the tenth**; M8 added
+`CuratedProvider`, whose propose is one indexed read of `curated_rows` and
+whose build hydrates stored ids, so it is the *cheapest* of the ten and the
+measurement is expected to move by less than its own noise. Expected, not
+measured, and marked so.
 [ADR-0025](decisions/0025-rows-build-sequentially.md).
 
 The row that is worth revisiting rather than merely correcting is the

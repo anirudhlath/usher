@@ -165,6 +165,39 @@ dependency would mostly have been bought for: `response_format:
 {"type": "json_schema", "json_schema": {..., "strict": true}}` returned
 schema-conformant JSON in 314 ms.
 
+✅ **Confirmed under load on 2026-08-07, and two of the confirmations are
+stronger than what was claimed here.** Same endpoint, 36 completions over a
+real 1,271,138-title catalog:
+
+- **`strict: true` holds the *numeric* bound and not only the shape.** With
+  `maximum: 5` declared against a prompt begging for numbers 1–200, **zero**
+  integers above 5 appeared across 2,048 output tokens. The 314 ms probe
+  established shape conformance; this establishes that the constraint solver is
+  real, which is what makes stating a bound in the schema worth the bytes.
+- 🔴 **The 4xx branch fired live for the first time, and it fired on the case
+  the taxonomy was designed for.** `USHER_CURATION_POOL_SIZE` at 700 and at
+  1,000 both produced **HTTP 400** from the reference endpoint (600 works, at
+  12,540 prompt tokens); the adapter translated each to `PortDataMalformed` and
+  `JobWorker` **parked immediately** rather than spending four more completions
+  reaching the identical answer. That is M4's TMDb lesson — *a 4xx that is not
+  a 429 is permanent* — holding against a second upstream, which is the
+  strongest available evidence for *"the error taxonomy is ours"* above. See
+  [ADR-0028](0028-the-pool-is-the-contract.md) for why the *bound* is
+  nonetheless a promise the reference endpoint cannot keep.
+- **The computed cost is exact.** `cost_usd` is `0.00000000` against the local
+  model — the honest value — and with prices 3/15 per Mtok configured it is
+  `0.01658700`, exactly `Decimal((4359×3 + 234×15) / 1e6)`, on a `numeric`
+  column whose `SUM()` agrees to 8 decimal places. So *"cost is computed, not
+  read"* is verified end to end, and the price table this decision declined to
+  bundle is genuinely the only thing the two settings replace.
+- **An unsatisfiable *value* bound makes guided decoding loop to the ceiling**
+  — `1,2,3,4,3,1,2,3,4…` for the full 2,048-token budget, `finish_reason ==
+  "length"`, refused by the adapter's truncation guard. **The first live firing
+  of that guard**, and it is the reason the guard is not merely tidiness: it is
+  what stops a degenerate loop being read as a valid answer.
+
+⚠️ **All four are still one endpoint.** The Uncertainty below is unchanged.
+
 ## Uncertainty
 
 ⚠️ **The price table is now an operator's problem, and it will go stale

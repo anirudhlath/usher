@@ -6,7 +6,7 @@ Three layers, split by what changes and when:
 
 | Layer | Holds | Changes |
 |---|---|---|
-| **Environment** | `DATABASE_URL`, port, log level, embedding model, `USHER_SECRET_KEY`, TMDb key | Deploy time |
+| **Environment** | `DATABASE_URL`, port, log level, embedding model, `USHER_SECRET_KEY`, TMDb key, ✅ the LLM endpoint, model and key (M8) | Deploy time |
 | **Config file** (TOML) | Rate limits, TTLs, enrichment tier, image cache ladder | Restart |
 | **Database** | Sources, users, ⏳ row provider enable/disable (**M9** — see below) | Runtime, via admin API |
 
@@ -33,10 +33,19 @@ its own line because it looks like the "row weights" case below and is not:
 the pool is assembled, sent and discarded, so there is no half-computed
 artefact, and what the number is really about is the *context window of
 whatever model `USHER_LLM_BASE_URL` names* — a deployment fact, measured at
-~14.6 prompt tokens a candidate
+**~20.4 prompt tokens a candidate**
 ([ADR-0028](decisions/0028-the-pool-is-the-contract.md)), which an operator
-must be able to change without editing code. Its sibling is
-`USHER_LLM_MAX_OUTPUT_TOKENS`, not the row scores. **M7 added none**, and
+must be able to change without editing code. **Its sibling is
+`USHER_LLM_MAX_OUTPUT_TOKENS`, not the row scores — and 🔶 nothing couples
+them, which is a live gap.** The endpoint's constraint is
+`prompt_tokens + llm_max_output_tokens ≤ max_model_len`, so raising the output
+ceiling silently lowers the workable pool, and the failure arrives as a parked
+job rather than as a startup refusal. That is the one place this document's own
+`_query_expansion_needs_a_client` shape — refuse an impossible *state* at
+startup — is **not** applied, because `max_model_len` is a property of the
+endpoint that no setting in this file knows. ⚠️ `le=1000` is a ceiling the
+reference endpoint cannot serve: measured 2026-08-07, pool 1,000 and 700 both
+return HTTP 400 and 600 works at 12,540 prompt tokens. **M7 added none**, and
 that is recorded so the count reads as a current statement rather than as a
 tally somebody stopped keeping: every M7 constant that could have been a
 setting is deliberately code — the similarity weights and pool sizes
@@ -80,11 +89,12 @@ The bottom row claims it is available *"runtime, via admin API"*, and the admin
 API is M9's; M6 added no route and M7 added exactly one, `GET /home`. So the
 mechanism is missing on the same principle the concurrency bullet states:
 
-> A `row_providers` table with nine rows all reading `enabled = true` is
+> A `row_providers` table with ten rows all reading `enabled = true` is
 > indistinguishable from no table, right up until an operator finds it and
 > expects toggling it to do something. **Providers are enabled by registration
-> in code in M7** — `services/rows/__init__.py`'s `ROW_PROVIDERS` is the
-> composition point — and the runtime control lands with the admin API that can
+> in code** — `services/rows/__init__.py`'s `ROW_PROVIDERS` is the
+> composition point, nine entries in M7 and **ten since M8 registered
+> `CuratedProvider`** — and the runtime control lands with the admin API that can
 > write it. **M9**, and [09](09-roadmap.md)'s M7 boundary call 9.
 
 This is the same argument [10](10-telemetry-and-dashboards.md) makes about
@@ -208,9 +218,17 @@ Rules:
   minted per request — the session token is cached in memory for the adapter's
   lifetime and re-minted only on a 401 ([03](03-sources-and-sync.md)), so
   there is no rotation and the grant outlives the response that carried it.
-- At the config layer, `database_url`, `secret_key`, and `tmdb_api_key` are
-  held as `pydantic.SecretStr` and unwrapped only at the point of use, so the
-  rules above are enforced by the type system, not just convention.
+- At the config layer, `database_url`, `secret_key`, `tmdb_api_key` and — ✅
+  since M8 — `llm_api_key` are held as `pydantic.SecretStr` and unwrapped only
+  at the point of use, so the rules above are enforced by the type system, not
+  just convention. **`llm_api_key` is the first credential this project hands
+  to a third party it did not choose**: `USHER_LLM_BASE_URL` is a setting, so
+  the upstream is whatever an operator points it at. It travels in an
+  `Authorization: Bearer` header and never in a URL — `HTTPXClientInstrumentor`
+  records the full URL as a span attribute, which is the same reason
+  `TmdbClient` prefers a bearer token — and no exception message in
+  `adapters/llm/` carries a URL or a request body, because the request body
+  here *is* the prompt and the prompt carries the household's watch history.
 - **"Never logged" has to cover libraries Usher hands a credential to, not
   just Usher's own log lines.** From M5 the source token is also the query
   string of a `websockets` URL, and that client debug-logs its own request
@@ -236,7 +254,8 @@ local state can answer.**
 | Push socket drops | Backoff reconnect; delta reconcile on reconnect; after N failures mark `supports_push = false` and lean on the nightly walk. **The failure counter resets on delivery, not on connection** — a proxy that upgrades and then buffers connects perfectly every time, so a counter reset by connecting never reaches the ceiling and this row silently never fires ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). |
 | TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs; every other subsystem is unaffected. |
 | TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades. |
-| LLM call fails | Previous curated rows persist. Home composes without them. |
+| LLM call fails | Previous curated rows persist. Home composes without them. ✅ M8: the failure is fatal to the *job* and never to the screen — a failed generation never reaches `replace_for_user`, so this row is a property of the control flow rather than of a transaction. **A 4xx that is not 429 parks the job** rather than retrying into the same answer, and a generation that validated to zero rows is one of them. |
+| LLM call fails during a **search** (query expansion) | ✅ M8: the search runs on the query the user typed and `expanded_query` is absent. **The attempt is still billed** — one `llm_calls` row per attempted call — so the warning arrives after the money. Off by default ([05](05-search-and-similarity.md)), which is why this is a narrower row than the one above. |
 | Embedder unavailable | Semantic search falls back to full-text, flagged in the response. |
 | Meilisearch down (if enabled) | Fall back to the Postgres index. It is never the only index. |
 | Postgres down | Total outage. The one hard dependency, deliberately. |
@@ -444,7 +463,7 @@ unreachable.
 
 | Rebuildable from importers | Precious |
 |---|---|
-| Catalog, embeddings, search index, neighbour tables, cached images, curated rows | **Watch state**, users, source config, manual unmatched resolutions |
+| Catalog, embeddings, search index, neighbour tables, cached images, curated rows | **Watch state**, users, source config, manual unmatched resolutions, ✅ **`llm_calls`** (M8 — see below; it is rebuildable from nothing) |
 
 The precious set is a handful of small tables. A documented `pg_dump` of those
 turns disaster recovery into a short restore plus a background rebuild, instead
@@ -468,6 +487,23 @@ recreation depends on a third party still serving a file. It is not in the
 precious column either, because a dump of it is a redistribution of MovieLens
 data — permitted by `ml-latest`'s licence ([04](04-catalog-bootstrap.md)) and
 still not something this project's own rule 1 does.
+
+🔴 **M8 added three tables and one of them is the first thing in this project
+that is not rebuildable from anything, at any price.**
+
+| Table | Rebuildable? | From what, at what cost |
+|---|---|---|
+| `curated_rows` | **yes, and cheaply — but not to the same rows** | `usher curate`, one completion per household. Already covered by the left column above. ⚠️ It is the **first table in this project whose contents no re-run reproduces**: `title_neighbors` can be diffed against a fresh computation and `search_document` has a case asserting the stored value equals a freshly computed one; a curated row has no oracle and is not even deterministic at `temperature > 0`. So "rebuildable" here means *a screen appears*, not *the screen comes back* |
+| `genome_tags` | **yes, but only from upstream** | the same `ml-latest.zip` and the same `bootstrap --phase movielens` as `genome_scores`, with the same caveat and the same third party. The two are written by one phase and share a `genome_revision`, so they are restored together or not at all — a vocabulary from one release over vectors from another mislabels 1,128 lanes, which is why `GenomeRepository.vocabulary` refuses a mismatch rather than answering `None` |
+| **`llm_calls`** | **NO. From nothing.** | It is a **spend ledger**, and the only record that money was spent. It cannot be recomputed from the catalog, from `curated_rows` (which is replaced nightly, so last month's generations have no surviving rows), or from the provider — no OpenAI-compatible endpoint offers a per-key call history this project could read, and the price applied is a *setting at the time of the call* that a later price change would silently rewrite. Losing it loses the answer to "what did this cost", permanently |
+
+**So the precious column has a fourth member as of M8: `llm_calls`.** It is
+small — one row per generation per household per night, plus one per expanded
+search — and it is append-only, which makes it the cheapest thing in the
+precious set to back up and the most complete loss if nobody does. The
+left-hand column's *"curated rows"* entry stays where it is and is correct;
+the ledger beside it is not the same kind of object and was previously in
+neither column.
 
 ⚠️ **`user_taste` is the one M7 table with no writer on the request path, and
 that is a property of M7 rather than of backup.** `RowContext.taste` was

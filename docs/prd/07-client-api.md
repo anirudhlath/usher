@@ -50,10 +50,13 @@ be added if a client turns out to need flexible field selection.
 > not instead of it.
 >
 > **No cursor**, which is what that ADR specifies and what the table above
-> already shows: `/browse` carries one and `/home` does not. Nine of PRD
-> [06](06-rows-and-recommendations.md)'s ten providers are behind it;
-> `CuratedProvider` and `curated_rows` are M8's whole family
-> ([09](09-roadmap.md)'s M7 boundary call 2).
+> already shows: `/browse` carries one and `/home` does not. ✅ **All ten** of
+> PRD [06](06-rows-and-recommendations.md)'s providers are behind it since M8
+> registered `CuratedProvider` — this read *"Nine of … ten"* while
+> `CuratedProvider` and `curated_rows` were still M8's whole family
+> ([09](09-roadmap.md)'s M7 boundary call 2). The route did not change: a
+> curated row arrives in the same envelope as the other nine, which is what
+> shipping the family whole was for.
 >
 > **A card carries no artwork**, absent rather than null, for the reason
 > `GET /titles/{id}` carries no `images` key: there is no `Image` table and no
@@ -103,7 +106,12 @@ be added if a client turns out to need flexible field selection.
 > never silently substituted*, and `usher search` prints it. A route that
 > dropped the field would make an expansion invisible to exactly the surface
 > most people search from — the same class of defect `requested_mode` beside
-> `mode` exists to prevent one field over.
+> `mode` exists to prevent one field over. ⚠️ **And on the shipped default the
+> field is always absent**: `USHER_QUERY_EXPANSION_ENABLED` is `false` even
+> where `USHER_LLM_ENABLED` is true, because expansion measured *worse*
+> ([05](05-search-and-similarity.md), MRR 0.733 → 0.373). A populated field
+> means a completion was bought; an absent one means nothing about spend,
+> which is why the route reports it rather than inferring it.
 
 ### Resources
 
@@ -206,7 +214,9 @@ be added if a client turns out to need flexible field selection.
 > [03](03-sources-and-sync.md)'s "configure a normal user" is guidance an
 > operator can only follow if they can see which they did.
 >
-> **Built in M3: four of the five rows above.** `GET`/`POST`/`DELETE
+> **Built in M3: four of the six rows above** — four of *five* when this was
+> written, and the sixth is `POST /admin/rows/regenerate`, added to the table
+> by M8 and built by it (below). `GET`/`POST`/`DELETE
 > /admin/sources` and `GET /admin/sources/{id}/status` are live
 > (`usher.api.routers.sources`). `POST /admin/sources/{id}/sync` is not —
 > **and the reason recorded here was wrong by M4 and is corrected**: it said
@@ -287,6 +297,15 @@ be added if a client turns out to need flexible field selection.
 > [10](10-telemetry-and-dashboards.md)'s
 > `usher.jobs.queued{kind="curate"}` never returning to zero, which is the
 > series `JobQueue.depth()` promises a key per kind in order to carry.
+>
+> ⚠️ **Untested against a live model, and named rather than implied.** M8's
+> live verification drove `CurationService` through `usher curate` only. Neither
+> this route nor `JobKind.CURATE` under `usher work` was exercised against the
+> real endpoint, so the *enqueue → claim → generate → 202* path is covered by
+> the suite and by nothing else. The two halves it does not prove are the ones
+> a route adds: that the enqueued key round-trips through a worker in another
+> process, and that a `PortUnavailable` from the queue really does become an
+> ordinary 500 rather than being caught somewhere on the way.
 
 ### Meta
 

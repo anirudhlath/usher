@@ -10,8 +10,8 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 ## Status
 
 Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
-adapter), M4 (ingest pipeline), M5 (push and read-through), M6 (search) and
-M7 (rows and recommendations) are complete — see
+adapter), M4 (ingest pipeline), M5 (push and read-through), M6 (search),
+M7 (rows and recommendations) and M8 (LLM curation) are complete — see
 [`docs/plans/`](docs/plans/) for the task breakdowns and
 [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's next.
 
@@ -27,11 +27,28 @@ suggest) has an owner in M9
 **M7 composes a home screen**: nine row providers, scored and diversified
 server-side, plus the taste centroid, the MovieLens tag genome as a third
 similarity signal, and `Person`/`Credit`/`Collection` re-derived from the
-payload cache with no second network call.
+payload cache with no second network call. **M8 adds the tenth provider** —
+`CuratedProvider`, hydrating rows a language model chose from a candidate pool
+this server built, validated against that pool before anything reaches a
+screen.
 
-**The HTTP surface is deliberately small, and M7 is the first milestone since
+**M8's live verification refuted two things this project had written down, and
+both are recorded rather than quietly fixed.** Query expansion — named in the
+PRD as the cheaper, better-evidenced lever for mood queries since M1 — measured
+*worse* (MRR 0.733 → 0.373), so it ships behind its own setting, off by
+default. And **88% of the row headings one live run generated (52 of 59) were
+the genre labels the prompt explicitly forbids**, which means that on the model
+tested, a curated shelf is substantively what the free genre-affinity row
+already produces. One model, one evening — but the design consequence is
+general: **the prompt's grouping instruction is not self-enforcing and nothing
+in the system checks it.** Curated rows are additive, so the home screen is
+correct without them.
+
+**The HTTP surface is deliberately small, and M8 is the second milestone since
 M5 to grow it**: `/health`, `/health/ready`, `/titles/{id}`, **`/home`**,
-`/events` (SSE) and the `/admin/sources` routes. `GET /home` returns the whole
+`/events` (SSE), **`POST /admin/rows/regenerate`** (M8 — enqueues a curation
+job and answers 202, never a synchronous generate) and the `/admin/sources`
+routes. `GET /home` returns the whole
 screen in one response — **no cursor**, which is what
 [ADR-0006](docs/prd/decisions/0006-server-composed-home.md) specifies, and no
 error envelope, because every input is local state and there is no upstream
@@ -386,8 +403,18 @@ tokens: 4812 in, 391 out   cost: $0.00042100   latency: 2314 ms   model: served/
 shipped `USHER_CURATION_POOL_SIZE` default of 200 and a scripted completion
 standing in for a model's. Only the usage line is that fixture's verbatim —
 **the two rows, the eleven cards, the `not_in_pool 1` and the model name are
-invented**, so read the shape and not the numbers. M8's live verification is
-where the real ones land.
+invented**, so read the shape and not the numbers.
+
+**The real ones, from the live verification on 2026-08-07** against a local
+vLLM serving `gemma-4-26b-a4b` over a real 1,271,138-title catalog: a pool-200
+prompt is **4,304 tokens cold** and **4,359** with three lines of watch history
+(**~20.4 tokens a candidate**, ~18 a history line), output runs **192–277**
+tokens (median 219.5), latency **1,230–1,787 ms** (median 1,420), and over 20
+generations **not one of 405 identifiers fell outside the pool**. Only
+`row_too_short` ever fired of the five drop reasons — the other four are close
+to unreachable when the endpoint honours the JSON schema, so a report of
+zeros like the one above is the system working. ⚠️ One model, one evening;
+none of those numbers is a property of "an LLM".
 
 It takes no arguments at all. The household is the singleton default user
 that stands in for authentication until M9, so a `--user` flag would be an id
@@ -439,6 +466,54 @@ An endpoint that is down, rate-limiting or refusing the key is a fourth
 sentence and not a stack, but it comes from the CLI-wide boundary above rather
 than from this command, so it names the endpoint instead of the screen —
 **and it is still billed**, exactly like the other two that reach the model.
+
+### Configuring the model, and running it nightly
+
+Every one of these is in `.env.example` with its own reason. `USHER_LLM_ENABLED`
+is `false` by default, so none of the rest does anything until it is `true`.
+
+```bash
+USHER_LLM_ENABLED=true
+USHER_LLM_BASE_URL=http://localhost:8000/v1    # any OpenAI-compatible endpoint
+USHER_LLM_MODEL=gpt-4o-mini                    # recorded on every llm_calls row
+USHER_LLM_API_KEY=...                          # omit for a local endpoint
+USHER_LLM_MAX_OUTPUT_TOKENS=2048               # a correctness ceiling, not a cost one
+USHER_LLM_TIMEOUT_SECONDS=120
+USHER_LLM_PRICE_IN_PER_MTOK=0                  # dollars per million tokens
+USHER_LLM_PRICE_OUT_PER_MTOK=0                 # 0 is honest for a local model
+USHER_CURATION_POOL_SIZE=200                   # candidates in one prompt
+```
+
+**The two price settings are the ones that silently do the wrong thing.** No
+OpenAI-compatible endpoint reports cost — `usage` carries token counts and
+nothing else — so `cost_usd` is computed from these two and written onto the
+row, which means a later price change cannot rewrite history and an unset price
+gives you a cost dashboard reading zero. The mitigation is that `tokens_in` and
+`tokens_out` are recorded exactly, so spend is recomputable from `llm_calls`
+after the fact.
+
+⚠️ **`USHER_CURATION_POOL_SIZE` and `USHER_LLM_MAX_OUTPUT_TOKENS` spend one
+budget and nothing couples them.** The endpoint's constraint is
+`prompt_tokens + max_output_tokens ≤ its context window`, so raising the
+output ceiling lowers the pool you can actually send — and the failure is an
+HTTP 400 that **parks** the job rather than a warning at startup. Measured
+against a 16k-context model at the shipped defaults: **600 candidates works,
+700 and 1,000 both fail.** The setting's ceiling of 1,000 is a bound on
+arithmetic no endpoint can satisfy, not a promise that your endpoint will serve
+it.
+
+**Nothing schedules the nightly generation.** There is no scheduler in Usher —
+deliberately, the same call `usher similar --rebuild` gets — so it is a cron
+entry:
+
+```cron
+# One curation generation a night, after the queue has drained.
+30 4 * * *  cd /srv/usher && /usr/local/bin/usher curate >> /var/log/usher-curate.log 2>&1
+```
+
+Run it in a process that has the settings above. A generation costs one
+completion per household; `llm_calls` is what it cost and `curated_rows` is
+what you got.
 
 **Nothing runs the rebuild for you**, and that is stated rather than implied.
 A title's neighbours go stale when *some other* title gets an embedding, which

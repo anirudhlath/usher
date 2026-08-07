@@ -236,6 +236,20 @@ that looks like in production. Four things a dashboard query has to know:
 - **Every reason is exported on every generation, zeros included.** A reason
   absent from the export is indistinguishable from a reason nobody counts,
   which is this pair's own subject one level up.
+
+  ⚠️ **Expect most of those zeros to be permanent, and know it before reading
+  the panel.** Measured over 20 live generations on 2026-08-07
+  ([06](06-rows-and-recommendations.md)): **four of the five members never
+  fired**, and only `row_too_short` did. Under a provider honouring
+  `strict: true` three of the four are close to *unreachable* by construction —
+  `unparseable` and `row_unusable` are shape failures guided decoding prevents,
+  and `not_in_pool` is a range violation the schema's `minimum`/`maximum`
+  prevents (0 out of pool over 405 identifiers, and 0 integers above a declared
+  `maximum` over 2,048 output tokens). A dashboard of flat zeros here is the
+  system working, not a broken counter — and it is exactly why they are still
+  exported: the day a `base_url` change puts a provider that ignores the schema
+  behind this port, `unparseable` going from a permanent 0 to a spike is the
+  *only* signal that anything changed, because the call still returns 200.
 - **Counters, not histograms, and the pair is the point.** One generation per
   household per night is far too sparse a population for a distribution to say
   anything; what an operator reads is the ratio of the two. "How many rows did
@@ -426,7 +440,17 @@ expansion is one, **shipped in M8 and writing `NULL` here on every row**
 ([05](05-search-and-similarity.md)), so on a deployment that both curates and
 searches those rows are the majority of the table, which is why the index that
 eventually serves this join is partial on
-`generation_id IS NOT NULL`. **No foreign key**, in either direction: a
+`generation_id IS NOT NULL`. ⚠️ **That majority is a property of a
+configuration almost nobody will be in, corrected 2026-08-07.** Query expansion
+ships behind its own switch, `USHER_QUERY_EXPANSION_ENABLED`, default `false`
+*even where `USHER_LLM_ENABLED` is true*, because the retrieval measurement in
+[05](05-search-and-similarity.md) put its effect the wrong way round. So on the
+shipped default this table is **100% `curation`**, every `generation_id` is
+non-NULL, and the partial index degenerates to a full one. The partial spelling
+is still the right one — it costs nothing on that population and is what stops
+the index inverting on the day an operator opts in — but the sentence above
+argued for it from a majority the default does not produce, and the honest
+argument is that it is correct under both. **No foreign key**, in either direction: a
 generation is three to five `curated_rows` rows, so that column is not unique
 and must not become so; and any foreign key would make a ledger row deletable
 by a cascade from the thing whose cost it records, when a curated row is
@@ -570,6 +594,21 @@ by table with a disk-exhaustion projection.
 Data freshness is backed by real data as of M2: `import_runs.heartbeat_at`
 (updated every committed batch) and `finished_at` (set on completion or
 failure) are its source, one row per bulk dataset.
+
+✅ **Half of the LLM half is backed by real data as of M8, and the split is
+worth stating because these two panels sit in one sentence above.** *Spend by
+model and purpose*, *tokens in/out* and **cost per curated row** are
+`llm_calls` and `llm_calls ⋈ curated_rows USING (generation_id)`, both of which
+exist and were verified live on 2026-08-07: `cost_usd` is `0.00000000` against
+a local model — the honest value — and `0.01658700` with prices 3/15 per Mtok
+configured, exactly `Decimal((4359×3 + 234×15) / 1e6)`, with the column
+`numeric` and `SUM()` agreeing to 8 decimal places. **Cost per play attributed
+to an LLM row is still unbacked** and stays ⏳ M9: it needs `search_queries`'
+`played`, which needs a client. So the panel that answers *"did this cost
+anything"* is live and the one that answers *"was it worth it"* is not — which
+is the same asymmetry [06](06-rows-and-recommendations.md) records at the
+product level, where 88% of one live run's headings were the genre labels the
+prompt forbids and nothing in this stack could have told an operator so.
 
 ## Where the stack lives
 

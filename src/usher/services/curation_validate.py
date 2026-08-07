@@ -33,6 +33,34 @@ wrong JSON type**, `json types seen = {'int': 108}`. `id in set[str]` -- the
 obvious spelling -- dropped **108 of 108**; `str(id).strip() in set[str]`
 dropped **0 of 108**. Not one id was invented.
 
+🔴 **And that is the weaker half of the claim. Corrected 2026-08-07: the
+coercion is not a defence against a provider that *ignores* the schema. It is
+the primary path, on every generation, on the endpoint this milestone was
+designed against.** The paragraph above is a measurement of the `json_object`
+arm and reads as though guided decoding were the safe case. Read the two
+shipped modules together instead:
+
+- `curation._schema` declares `item_ids` items as `{"type": "integer",
+  "minimum": 1, "maximum": pool_size}`. That is the correct schema -- a handle
+  *is* a number, and the bound is what a provider honouring `strict: true` can
+  enforce during decoding.
+- `by_handle` below is keyed by `str(index)`.
+
+So when `strict: true` **is** honoured -- the happy path, the one measured
+working -- every identifier arrives as a **JSON `int`** and `_handle` runs its
+`int` branch on **100% of cards, every time**. Deleting `str(value).strip()`
+does not degrade a fallback; it drops **every card of every generation**
+against the shipped schema, and `row_too_short` eats every row behind them.
+Verified 2026-08-07 across 20 live generations: 405 identifiers, all of them
+`int`, none out of pool.
+
+**Why the modules are still right and only this text was wrong.** The
+alternative -- ask the schema for strings and key the map on `int` -- moves the
+coercion rather than removing it, gives up `minimum`/`maximum` (a numeric bound
+guided decoding *does* enforce, measured), and asks a model to quote a number.
+The bound stated twice is ADR-0028's design; what this paragraph got wrong was
+which of the two statements is load-bearing on the ordinary path.
+
 What that ships as is the reason rule 3 exists: a generation that called the
 model, got a good answer, wrote an `llm_calls` row reading `ok = true` with real
 tokens and a real cost, and left the household with no rows -- byte-for-byte
@@ -41,7 +69,9 @@ degradation table reads *"previous curated rows persist"*.
 
 **So `_handle` accepts exactly two JSON types and refuses the rest**:
 
-- `11` -> `"11"`. The finding above, and the only reason this module exists.
+- `11` -> `"11"`. The finding above, and the only reason this module exists --
+  and, per the correction, **the branch every card takes on the happy path**,
+  because the shipped schema asks for an integer.
 - `" 11 "` -> `"11"`. Models pad.
 - `True` -> **refused.** `isinstance(True, int)` is `True` in Python, so an
   `int` branch written without this refusal coerces it to `"True"` -- and a
