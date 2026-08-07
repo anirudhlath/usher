@@ -984,10 +984,12 @@ async def test_curate_against_an_empty_database_says_so_and_buys_nothing(
     An empty catalog produces an empty candidate pool, and
     `CurationService.generate` refuses it *before the client is touched* --
     which is the whole of why this case can exist in a suite that opens no
-    socket. Three things are asserted and the last two are the ones with
+    socket. Four things are asserted and the last three are the ones with
     teeth:
 
     - the operator gets a sentence rather than sixty frames;
+    - **the sentence names nothing an operator cannot look up**, which until
+      2026-08-07 it did -- see the comment on that assertion;
     - **nothing was attempted**, so `complete_json` was never called. A
       generation for a household with nothing to recommend is a charge with a
       guaranteed empty answer;
@@ -1005,6 +1007,16 @@ async def test_curate_against_an_empty_database_says_so_and_buys_nothing(
     # The fact none of the raised messages carries and every operator asks
     # first, on the run where the screen looks unchanged.
     assert "previous rows still stand" in message, message
+    # **The sentence's only concrete token was the household's uuid until
+    # 2026-08-07**, carried as the raise's `detail`. `build_parser` refuses a
+    # `--user` flag on the grounds that a household id is "an id an operator has
+    # no way to look up on a deployment that has exactly one", so the command
+    # was printing the one token its own parser argues nobody can read.
+    # `test_the_empty_pool_message_carries_no_household_id` pins the raise; this
+    # asserts the *rendered* sentence, which is the surface that argument is
+    # about -- and it matches a uuid shape rather than this run's id because the
+    # user row is flushed and never committed, so there is no id to read back.
+    assert re.search(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", message) is None, message
     assert scripted_llm.calls == [], "an empty catalog bought a completion"
     assert scripted_llm.closed == 1, "the command did not release the client it built"
     async with _session_for(cli_settings) as session:

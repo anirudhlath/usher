@@ -327,11 +327,24 @@ class CurationService:
                 # attempted here for the ledger to hold a row about. Malformed
                 # rather than unavailable: an empty catalog is an operator's
                 # problem and does not improve on a backoff schedule.
+                #
+                # **No `detail`, and it carried `str(user_id)` until
+                # 2026-08-07.** `PortDataMalformed.detail` promises *"enough to
+                # find the offending record"*, and an empty pool has no record
+                # -- what it carried was a fourth copy of an id every reader of
+                # this raise already holds. `Job.key` **is** `str(user_id)` for
+                # `JobKind.CURATE` (`handlers._user_id` reads the argument back
+                # off it), so a parked job row named the household twice, and
+                # the span above carries `usher.user_id` either way. The one
+                # reader it was not redundant for is `usher curate`, which
+                # renders this raise as its entire message -- and `build_parser`
+                # refuses a `--user` flag on the grounds that a household id is
+                # *"an id an operator has no way to look up on a deployment
+                # that has exactly one"*. So the id was the sentence's only
+                # concrete token and the command's own stated reasoning says an
+                # operator cannot read it.
                 span.set_attribute("usher.failed", True)
-                raise PortDataMalformed(
-                    "the candidate pool is empty; there is nothing to curate",
-                    detail=str(user_id),
-                )
+                raise PortDataMalformed("the candidate pool is empty; there is nothing to curate")
             # **1-based, and this map is the whole security boundary.** The
             # validator does no arithmetic on it, so which handles were sent is
             # a fact this service owns -- and `enumerate(..., start=1)` is the

@@ -915,6 +915,37 @@ async def test_an_empty_pool_never_reaches_the_model() -> None:
     assert household.rows.calls == 0
 
 
+async def test_the_empty_pool_message_carries_no_household_id() -> None:
+    """**`usher curate` renders this raise as its whole message**, so whatever
+    `detail` holds is what an operator reads at a terminal.
+
+    It held `str(user_id)` until 2026-08-07, and `build_parser` refuses a
+    `--user` flag in the same breath -- *"an id an operator has no way to look
+    up on a deployment that has exactly one"*. That made the id the sentence's
+    only concrete token, on the argument that it is unreadable.
+
+    **Nothing else lost information**, which is why this is a deletion rather
+    than a trade: `Job.key` *is* `str(user_id)` for `JobKind.CURATE`
+    (`handlers._user_id` reads the argument back off it), so a parked job row
+    still names the household, and
+    `test_a_failed_generation_says_so_on_its_span`'s `empty_pool` arm runs
+    through the same span that carries `usher.user_id`.
+
+    Asserting `detail is None` as well as the rendered text, because
+    `PortDataMalformed.__init__` interpolates `detail` into the message: a
+    `detail` naming something *other* than this household would pass the
+    substring check and still put an unlookupable token on the screen.
+    """
+    household = _Household()
+    client = FakeLLMClient.returning(_payload(_row("Impossible", _five())))
+
+    with pytest.raises(PortDataMalformed) as raised:
+        await household.service(client).generate(USER)
+
+    assert str(USER) not in str(raised.value), str(raised.value)
+    assert raised.value.detail is None, raised.value.detail
+
+
 async def test_the_watch_history_reaches_the_prompt_most_recent_first() -> None:
     """PRD 06 step 1's other half: a pool with no history behind it produces
     shelves about the catalog rather than about the household.

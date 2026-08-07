@@ -365,14 +365,45 @@ blind to every adapter in the project — fixed 2026-08-07 by widening
 `OPERATOR_ERRORS`, and the interesting half is the six families that stayed
 out.** Verified 2026-08-07 by `issubclass(family, cli.OPERATOR_ERRORS)` →
 `False` for `UsherPortError` and **all nine** of its subclasses.
-`OpenAICompatibleClient` translates every transport failure into
-`PortUnavailable`/`PortAuthFailed`/`PortRateLimited` *before* it crosses the
-port boundary — which is what the taxonomy is for — so the family the tuple
-named was unreachable from that adapter, and `usher curate` against an
-unreachable `USHER_LLM_BASE_URL` printed a **stack** ending in
+`OpenAICompatibleClient` translates everything it catches into the taxonomy
+*before* it crosses the port boundary — which is what the taxonomy is for — so
+the family the tuple named was unreachable from that adapter, and `usher curate`
+against an unreachable `USHER_LLM_BASE_URL` printed a **stack** ending in
 `PortUnavailable: POST /chat/completions failed: ConnectError`, having already
 committed the `llm_calls` row. Billed *and* handed a stack; ADR-0026's own
 motivating defect in a family the ADR did not name.
+
+**That translation is two mechanisms and not one, and this file named the wrong
+one until 2026-08-07.** It said `OpenAICompatibleClient` *"translates every
+**transport** failure into `PortUnavailable`/`PortAuthFailed`/
+`PortRateLimited`"* — right about which three families the widening needed,
+wrong about where they come from, and silent about a fourth. `_send`'s `except
+_UNTRANSLATED_FAILURES` is the **transport** mechanism and it raises
+`PortUnavailable` **and nothing else**; `PortAuthFailed` and `PortRateLimited`
+are decided by **status code** in `_decode`, and so is the family that was
+missing. Measured 2026-08-07 by driving `complete_json` over
+`httpx.MockTransport`, no socket opened:
+
+| where | what happened | family |
+|---|---|---|
+| `_send` | any transport failure — `ConnectError`, `ConnectTimeout`, `ReadTimeout`, `RemoteProtocolError`, `TooManyRedirects`, `InvalidURL`, `CookieConflict`, or the bare `RuntimeError` a closed `AsyncClient` raises | `PortUnavailable` |
+| `_decode` | HTTP 429 | `PortRateLimited` |
+| `_decode` | HTTP 401, 403 | `PortAuthFailed` |
+| `_decode` | **any other 4xx except 408** — measured on 400, 402, 404, 409, 422, 499 | **`PortDataMalformed`** |
+| `_decode` | HTTP 408, and every 5xx | `PortUnavailable` |
+| `_decode`, `_content`, `_parse` | a 200 whose body is not the promised shape — not JSON, a JSON list, no `choices`, `finish_reason == "length"`, content that will not parse | `PortDataMalformed` |
+
+**The omitted row is the one that behaves differently at the boundary**, which
+is what makes the omission worse than an abbreviation: `PortDataMalformed` is
+deliberately *not* in `OPERATOR_ERRORS`, so of the four families this adapter
+can raise it is the only one that still reaches `main` carrying a stack. And it
+is not a corner — the 4xx-other row is where a schema the provider will not
+accept, a model name it does not serve and an over-length prompt all land.
+`curation-and-llm.md` measured the last of those as a plain HTTP 400 at pool
+700 on a 16k-context model, i.e. on a setting PRD 08 invites an operator to
+raise. What keeps `usher curate` itself off a stack there is its own `except
+PortDataMalformed`, not the tuple — the distinction the last bullet below is
+about.
 
 - **Task 18 declined it and Task 18's review reopened it.** The refusal was
   *"widening a settled ADR wants evidence per family"* — a good bar, and the

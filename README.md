@@ -443,9 +443,16 @@ them is a stack:
   to build. Unlike `GET /home` (a shorter screen) and `usher work` (five
   other job kinds), this command has exactly one job, so it says so rather
   than exiting 0 having done nothing.
-- **An empty candidate pool** — an empty catalog, or a household that has
-  watched everything. Nothing is attempted and **nothing is billed**: this is
-  the one path in the whole milestone that writes no `llm_calls` row.
+- **An empty candidate pool** — which in practice means an empty catalog.
+  ⚠️ *"A household that has watched everything"* is the other reading and it is
+  a far smaller door than it sounds: the pool is
+  `SELECT … FROM titles WHERE NOT watched`, with no enrichment, ownership or
+  availability filter, so "everything" is every row in `titles` — after
+  `usher bootstrap --phase all`, 1.27M of them. Measured 2026-08-07 against a
+  migrated but empty database: `usher curate` refuses; insert **one** unwatched
+  title and the same command reaches the model instead. Nothing is attempted
+  and **nothing is billed**: this is the one path in the whole milestone that
+  writes no `llm_calls` row.
 - **A generation that validated to nothing** — the call worked, the money is
   spent, and the message is the tally (`not_in_pool=5, row_too_short=1`).
   Numbers and label names only; nothing the model wrote reaches the screen.
@@ -514,6 +521,21 @@ entry:
 Run it in a process that has the settings above. A generation costs one
 completion per household; `llm_calls` is what it cost and `curated_rows` is
 what you got.
+
+⚠️ **A night that produced no rows exits 1, so cron will mail you about it**,
+and that is deliberate rather than overlooked. Measured 2026-08-07 against a
+migrated but empty database: `home`, `bootstrap-status`, `sync-status`, `derive`
+and `index` all exit **0**, and `curate` exits **1**. The five that exit 0 are
+*reporting* commands in their bare form — `derive` and `index` say so in their
+own docstrings, "the bare form only reads" — and a report of nothing is still a
+report. `curate`'s bare form is the one that writes, and a write command that
+wrote nothing has not succeeded: exiting 0 would tell this cron entry that
+curation is running on a deployment whose catalog was never bootstrapped, which
+is by far the likeliest way to reach an empty pool (see above). If you would
+rather hear only about the failures you intend to act on, that belongs in the
+cron entry — append `|| true`, or filter the log — rather than in the command,
+since the exit code is the only thing a generation that did not happen has to
+say for itself.
 
 **Nothing runs the rebuild for you**, and that is stated rather than implied.
 A title's neighbours go stale when *some other* title gets an embedding, which

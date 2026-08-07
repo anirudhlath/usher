@@ -1384,9 +1384,12 @@ prd-maintenance rule fixed at M5, still green with three new ADRs and seven touc
 The gate recorded "`titles.popularity` is NULL on all 1,271,138 rows — **nothing in `src/` writes it
 but TMDb enrichment**", and `adapters/search/postgres.py:752` now ships that sentence. **The second
 clause is REFUTED, measured.** `PostgresBulkCatalogRepository.link_crosswalk`
-(`db/repositories/bulk.py:495`) writes `popularity = COALESCE(m.popularity, t.popularity)` from
-`tmdb_ids`, reached by `usher bootstrap --phase crosswalk|all` (`cli.py:147` →
-`services/bootstrap.py:295`), and `ports/repository.py:318` documents that write explicitly.
+(`db/repositories/bulk.py`) writes `popularity = COALESCE(m.popularity, t.popularity)` from
+`tmdb_ids`, reached by `usher bootstrap --phase crosswalk|all` (`cli._bootstrap`'s `crosswalk` arm →
+`BootstrapService.link_crosswalk`), and `BulkCatalogRepository.link_crosswalk`'s docstring documents
+that write explicitly. *(Symbols rather than line numbers, corrected 2026-08-07 — all four citations
+in this paragraph were line numbers and all four had drifted; `cli.py:147` had left `_bootstrap`
+entirely and landed inside `OPERATOR_ERRORS`.)*
 Reproduced against a real `pgvector/pgvector:pg17` with the shipped statement run verbatim: a
 **skeleton** title went `popularity IS NULL → popularity = 0`. The gate saw 100% NULL because its
 catalog was `title.basics` + `title.ratings` only — **the IMDb phase, not `--phase all`.** M2's own

@@ -79,10 +79,17 @@ Every configuration measured, same 2,993 cases:
   **"Nothing in `src/` writes that column but TMDb enrichment" was part of this
   finding and is REFUTED — corrected 2026-08-03 by M6's Task 28.**
   `PostgresBulkCatalogRepository.link_crosswalk`
-  (`db/repositories/bulk.py:495`) writes
+  (`db/repositories/bulk.py`) writes
   `popularity = COALESCE(m.popularity, t.popularity)` from `tmdb_ids`, reached
-  by `usher bootstrap --phase crosswalk|all` (`cli.py:147`), and
-  `ports/repository.py:318` documents that write. Reproduced against real
+  by `usher bootstrap --phase crosswalk|all` (`cli._bootstrap`'s `crosswalk`
+  arm → `BootstrapService.link_crosswalk`), and
+  `BulkCatalogRepository.link_crosswalk`'s docstring documents that write.
+  **Symbols rather than line numbers, since 2026-08-07**: all four citations
+  here were line numbers, all four had drifted, and `cli.py:147` had drifted
+  clean out of `_bootstrap` into the middle of `OPERATOR_ERRORS` — a review
+  that checked it in the meantime found it *"still lands inside `_bootstrap`,
+  so it is not wrong"* and left it, which is the reading a line number invites.
+  Reproduced against real
   Postgres with the shipped statement run verbatim: a **skeleton** title went
   `popularity IS NULL → popularity = 0`. The gate's catalog was 100% NULL
   because it was bootstrapped `title.basics` + `title.ratings` only — **the

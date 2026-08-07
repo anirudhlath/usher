@@ -61,7 +61,9 @@ result below. What fails is arithmetic: the real constraint is
 `prompt_tokens + llm_max_output_tokens ≤ max_model_len`, and **nothing couples
 the two settings**, so raising `USHER_LLM_MAX_OUTPUT_TOKENS` silently lowers
 the workable pool with no warning anywhere. **The mechanism is right and was
-verified end to end** — the adapter's 4xx-that-is-not-429 branch translated the
+verified end to end** — `_decode`'s 4xx branch (every 4xx **except 401, 403,
+408 and 429**, which are three other families; the table in
+`config-cli-and-deployment.md` measures all six rows) translated the
 400 to `PortDataMalformed` and `JobWorker` parked immediately rather than
 spending four more completions on the same wall, which is M8 plan trap 13
 firing exactly as designed. The **bound** is the problem. It is deliberately
