@@ -1090,3 +1090,25 @@ found mid-round (the `\r\n` one above and the `time.time` one) were respectively
 closed and reclassified with evidence. The three `.pyc`-collision defences were
 in force throughout: both curation test files run in **0.26 s** together, well
 inside the one-second mtime resolution that entry is about.
+
+**A sweep mutates the whole working tree, so a second agent working anywhere in
+the repo can invalidate it — disjoint file sets are not enough.** Found
+2026-08-06, dispatching M8 Tasks 7 and 8 concurrently. Their file sets did not
+overlap, which is the test that usually settles this, and it is the wrong test:
+Task 7 was running in-place mutation sweeps while Task 8 ran the suite. A sweep
+is only sound if the *only* difference between the green run and the red run is
+the plant, and a concurrent agent's uncommitted edit anywhere the suite imports
+breaks that premise in both directions — a survivor that was really killed by
+somebody else's half-finished edit, or a kill credited to a plant that a
+neighbouring change actually caused. Neither is visible in the output; both read
+as a clean result. No damage that time (the sweeps were ~4 s and the restores
+md5-verified), which is the point: the failure is silent and the near miss is
+the only warning you get.
+
+**The rule this generalises to.** Serialise anything that mutates the tree —
+one implementer at a time, whatever files they claim. Reviewers are free to run
+concurrently *if* they read a frozen copy: `git archive <sha> | tar -x -C /tmp/…`,
+never `cp -a` (see the venv-shebang entry above). This is a stricter reading of
+the "never dispatch multiple implementation subagents in parallel" rule than
+conflict-avoidance implies — the conflict is not in the filesystem, it is in
+the measurement.
