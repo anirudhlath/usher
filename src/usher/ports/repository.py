@@ -3217,17 +3217,15 @@ class LLMCallRepository(ABC):
         and points there.
 
         **Without translation it arrives at a service as a bare
-        `sqlalchemy.exc.DBAPIError`.** Measured, and stated in the negative
-        because both obvious guesses are wrong: it is **not** an
-        `IntegrityError` and **not** a `DataError` either, so an
-        implementation reaching for either catches nothing and the exception
-        goes straight through -- a raw SQLAlchemy type at a service, which is
-        the one thing ADR-0009 says must never happen.
-        `usher.db.repositories._errors.refuses_the_row` is the shared filter
-        and it discriminates on SQLSTATE *class* rather than on exception
-        class. `CuratedRowRepository.replace_for_user` needs the same one:
-        `curated_rows."position"` is `integer` against a `ge=0` field with no
-        ceiling, which is the identical shape on a different type.
+        `sqlalchemy.exc.DBAPIError`** -- measured, and neither of the two
+        exceptions an implementer reaches for: not `sqlalchemy.exc.
+        IntegrityError`, and not `sqlalchemy.exc.DataError` either, so an
+        `except` naming either catches nothing and a raw SQLAlchemy type
+        reaches a service, which ADR-0009 forbids.
+        `usher.db.repositories._errors.ROW_REFUSED_SQLSTATE_CLASSES` holds the
+        one copy of that measurement, the identical shape on
+        `curated_rows."position"`, and the bound on the claim; `is_row_refusal`
+        is the shared filter both repositories use.
 
         A conflict leaves the session usable for the caller's other pending
         work, which matters more here than on any sibling port: the caller is

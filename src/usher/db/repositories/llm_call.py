@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.base import enum_column
 from usher.db.models.curation import COST_PRECISION, COST_SCALE
-from usher.db.repositories._errors import constraint_name, refuses_the_row
+from usher.db.repositories._errors import constraint_name, is_row_refusal
 from usher.domain.curation import LLMCall, LLMPurpose
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import LLMCallRepository
@@ -75,31 +75,20 @@ _INSERT_CALL = text(
     bindparam("generation_id", type_=PGUUID(as_uuid=True)),
 )
 
-# **SQLSTATE class, not exception class, and that is a measured decision
-# rather than a defensive one.** Most sibling repositories in this package
-# catch `IntegrityError`, which is right for a table whose only refusals are
-# constraints. This table has one more: `cost_usd` is `NUMERIC(12, 8)`, so a
-# call above `$9,999.99999999` raises `numeric field overflow` -- reachable
-# from a *validly constructed* `LLMCall`, since the model bounds that field
-# with `ge=0` and no ceiling, and the exact misconfiguration precision 12 was
-# chosen to catch (a price scaled *up* by a million on the way in;
+# **`cost_usd` is this table's reason for catching `DBAPIError` and filtering
+# on SQLSTATE class rather than catching `IntegrityError` like most of its
+# siblings.** The column is `NUMERIC(12, 8)`, so a call above
+# `$9,999.99999999` raises `numeric field overflow` -- reachable from a
+# *validly constructed* `LLMCall`, since the model bounds that field with
+# `ge=0` and no ceiling, and the exact misconfiguration precision 12 was chosen
+# to catch (a price scaled *up* by a million on the way in;
 # `db/models/curation.py`'s module docstring holds the one copy of that
 # argument and of the two limitations it does not cover).
 #
-# Measured on `pgvector/pgvector:pg17`: that arrives as a bare
-# `sqlalchemy.exc.DBAPIError` -- **not** an `IntegrityError` and **not** a
-# `DataError` either, because SQLAlchemy's asyncpg dialect does not classify
-# `asyncpg.exceptions.NumericValueOutOfRangeError` into a subclass at all. So
-# neither of the two obvious `except` clauses catches it and a raw SQLAlchemy
-# exception crosses the port boundary, which is the one thing ADR-0009 says
-# must never happen.
-#
-# **The predicate itself moved to `_errors.py` when Task 9 found the same
-# shape on `curated_rows."position"`** -- an `integer` column fed by a field
-# bounded below and not above, refused *client-side* by asyncpg's encoder,
-# same bare `DBAPIError`. Two tables reaching for one measurement is what that
-# module exists for; the argument above is why *this* table needs it, and
-# `ROW_IS_REFUSED` carries the argument for the two classes.
+# What that exception actually *is*, and why neither obvious `except` clause
+# catches it, is measured once in `_errors.ROW_REFUSED_SQLSTATE_CLASSES` --
+# together with `curated_rows."position"`, the same shape on an `integer`,
+# which is what moved the predicate out of this module and into that one.
 
 
 class PostgresLLMCallRepository(LLMCallRepository):
@@ -120,7 +109,7 @@ class PostgresLLMCallRepository(LLMCallRepository):
                 async with self._session.begin_nested():
                     await self._session.execute(_INSERT_CALL, _parameters(call))
         except DBAPIError as exc:
-            if not refuses_the_row(exc):
+            if not is_row_refusal(exc):
                 # A dropped connection or a statement timeout is not this
                 # row being wrong, and a caller that cannot tell those apart
                 # would retry the one thing a retry cannot fix.

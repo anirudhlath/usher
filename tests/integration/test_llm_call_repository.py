@@ -92,19 +92,16 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
         the primary key alone would not have justified it, since a fresh
         UUIDv7 makes a duplicate nearly unreachable.
 
-        **And the exception it must catch is not the obvious one.** Measured
-        on `pgvector/pgvector:pg17`: this arrives as a bare `sqlalchemy.exc.
-        DBAPIError`, **not** an `IntegrityError` and **not** even a
-        `DataError` -- SQLAlchemy's asyncpg dialect does not classify
-        `asyncpg.exceptions.NumericValueOutOfRangeError` (SQLSTATE `22003`)
-        into either. An implementation catching `IntegrityError` alone -- which
-        is what most sibling repositories in this package catch, and what this
-        one caught before the measurement -- lets a raw SQLAlchemy exception
-        cross the port boundary, the one thing ADR-0009 says must never happen,
-        since the only way a caller could handle it is to import sqlalchemy
-        itself. `PostgresCuratedRowRepository` has since been measured to need
-        the same widening for `curated_rows."position"`, so the shared filter
-        lives in `usher.db.repositories._errors`.
+        **And the exception it must catch is not the obvious one** -- which is
+        the whole reason this case is worth its round trip.
+        `usher.db.repositories._errors.ROW_REFUSED_SQLSTATE_CLASSES` holds the
+        measurement and the two exception types it is *not*; what matters here
+        is that an implementation catching `IntegrityError` alone, which is
+        what most sibling repositories catch and what this one caught before
+        the measurement, lets a raw SQLAlchemy exception cross the port
+        boundary. The only way a caller could then handle it is to import
+        sqlalchemy itself, which is the one thing ADR-0009 says must never
+        happen.
 
         There is no constraint to name, so `constraint` is `None`: this is the
         column's declared precision refusing a value, not a named constraint
@@ -213,24 +210,43 @@ class TestPostgresLLMCallRepository(LLMCallRepositoryContract):
         SQLSTATE filter load-bearing rather than decorative.
 
         The wrong implementation this kills: an `except DBAPIError` that
-        translates **everything** into `RepositoryConflict`. Catching the
-        whole class is what `test_a_cost_the_column_cannot_hold_is_a_port_
-        error` forces -- `numeric field overflow` is not an `IntegrityError`
-        and not a `DataError` -- and the naive way to satisfy that case is to
-        translate the lot. Then a dropped connection, a statement timeout or a
-        schema that is not there arrives at `CurationService` as "this row is
-        not storable", which is the one failure kind a caller must be able to
-        tell apart: a row that is wrong is a bug in the generation, and a
-        transport that is gone is something a retry fixes. A redundant-looking
-        predicate is a coverage question, not a style question.
+        translates **everything** into `RepositoryConflict`. Catching the whole
+        class is what `test_a_cost_the_column_cannot_hold_is_a_port_error`
+        forces, and the naive way to satisfy that case is to translate the lot.
+        Then a dropped connection, a statement timeout or a schema that is not
+        there arrives at `CurationService` as "this row is not storable", which
+        is the one failure kind a caller must be able to tell apart: a row that
+        is wrong is a bug in the generation, and a transport that is gone is
+        something a retry fixes. A redundant-looking predicate is a coverage
+        question, not a style question.
 
         SQLSTATE `42P01` (undefined table) is class 42, so it is outside the
-        `22`/`23` classes that mean "this row is not storable as given", and
-        it is deterministic where a timeout would not be. The rename is
-        blunt on purpose: what is being exercised is the *class* of failure,
-        not a plausible operational story, and it is reverted before the
-        assertions so the ledger can be read back. The whole transaction is
-        rolled back afterwards regardless.
+        `22`/`23` classes `ROW_REFUSED_SQLSTATE_CLASSES` names, and it is
+        deterministic where a timeout would not be. The rename is blunt on
+        purpose: what is exercised is the *class* of failure, not a plausible
+        operational story.
+
+        **What the rename costs, stated because a test that mutates shared
+        state owes it.** `postgres_url` is session-scoped and the schema is
+        built once; this is the only case in the suite that changes it.
+        Measured: `ALTER TABLE ... RENAME` takes an `AccessExclusiveLock` on
+        `llm_calls` and holds it for the rest of the transaction, and a
+        concurrent `SELECT count(*)` from a second session blocks until it
+        times out. Two consequences:
+
+        - **Safety comes from DDL being transactional in PostgreSQL, not from
+          the `finally`.** The explicit rename back exists so the assertions
+          below can read the table; the reason a crash between the two cannot
+          leave the schema renamed is that the enclosing per-test transaction
+          is rolled back and the DDL goes with it. That is the load-bearing
+          fact and it was previously only implied.
+        - **This case is the exception to `tests/integration/conftest.py`'s
+          xdist note**, which grounds its claim on isolation never coming from
+          resetting something shared. That holds for every other test here and
+          not for this one: run in parallel against one container, a worker
+          touching `llm_calls` while this lock is held would block rather than
+          fail, which is slow and confusing rather than wrong. Worth knowing
+          before anyone adopts `pytest-xdist`.
 
         **The failure is captured by hand rather than with
         `pytest.raises(DBAPIError)`, and that is the whole difference between

@@ -598,3 +598,17 @@ printed in the same output. Caught only because the harness prints the failing
 case names beside the verdict; a harness that printed the verdict alone would
 have reported eight mutations as unobserved. Harnesses in this repository must
 not pass `-q`.
+
+**`git checkout <path>` reverts uncommitted work, not just the plant — and the
+existing rule against it did not cover the case that bit.** The entry above
+forbids it *in a sweep harness*, where the `cp` backup is what recovers a
+SIGTERM. Found 2026-08-06 in M8 Task 10 review: the same command run by hand,
+to undo a **one-line plant made outside the harness** during a before/after
+demonstration, silently discarded twenty lines of uncommitted documentation
+edits in the same file. The plant itself reverted correctly, the gate stayed
+green, `git status` simply stopped listing the file, and the loss was found
+only because the next grep looked for a symbol that should have been there.
+**The general form: any plant, however small and however far from a harness,
+gets a `cp` backup, and the restore is verified by reading the file back
+rather than by the suite going green** — a suite that was green before the
+plant is green again after a revert that took the edits with it.

@@ -27,7 +27,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.db.repositories._errors import constraint_name, refuses_the_row
+from usher.db.repositories._errors import constraint_name, is_row_refusal
 from usher.domain.curation import CuratedRow
 from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import CuratedRowRepository
@@ -185,7 +185,7 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
                     if records:
                         await self._session.execute(_INSERT_ROW, records)
         except DBAPIError as exc:
-            if not refuses_the_row(exc):
+            if not is_row_refusal(exc):
                 # A dropped connection or a statement timeout is not this
                 # generation being wrong, and a caller that cannot tell those
                 # apart retries the one thing a retry cannot fix.
@@ -207,7 +207,7 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
             # cause `asyncpg.exceptions.DataError`, SQLSTATE `22000`, measured.
             # `except IntegrityError` does not catch it, so a raw SQLAlchemy
             # exception crossed this port boundary until the `except` widened.
-            # `refuses_the_row` is the shared predicate and `_errors.py` holds
+            # `is_row_refusal` is the shared predicate and `_errors.py` holds
             # both measurements; `llm_calls.cost_usd` is the sibling, found
             # first and server-side rather than client-side.
             #

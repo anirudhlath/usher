@@ -79,7 +79,7 @@ class RepositoryConflict(UsherPortError):
     so a large enough call is `numeric field overflow` server-side; and
     `curated_rows."position"` is `integer` against `Field(ge=0)`, so `2**31`
     is refused client-side by asyncpg's own encoder. Neither is an
-    `IntegrityError`; `usher.db.repositories._errors.refuses_the_row` is what
+    `IntegrityError`; `usher.db.repositories._errors.is_row_refusal` is what
     both implementations filter on.
 
     **The reuse is deliberate and this paragraph is the record of it, because

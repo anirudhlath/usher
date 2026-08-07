@@ -15,17 +15,30 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 #: obvious `except` clauses catches them and a raw SQLAlchemy exception crosses
 #: the port boundary -- the one thing ADR-0009 says must never happen.
 #:
+#: **This comment is the one copy of that measurement**, and the consolidation
+#: is itself a finding. The narrative was shipped at near-full length in seven
+#: places -- two of them sixty-seven lines apart in *this* file -- and that is
+#: precisely the mechanism that produced the defect it describes: one copy, on
+#: the port, drifted to `sqlalchemy.exc.DataError` while six identical copies
+#: stayed right, and the port is the surface the next three tasks read.
+#: Everything that catches with this keeps its own table's fact beside its own
+#: `except` and points here for the mechanism.
+#:
 #: Measured twice on `pgvector/pgvector:pg17`, in M8, on two tables and from
 #: two directions, which is why this lives here rather than beside either:
 #:
 #: - `llm_calls.cost_usd` is `NUMERIC(12, 8)`, so a call above
 #:   `$9,999.99999999` raises `numeric field overflow` server-side --
 #:   `sqlalchemy.exc.DBAPIError`, cause `asyncpg.exceptions.
-#:   NumericValueOutOfRangeError`, SQLSTATE `22003`.
+#:   NumericValueOutOfRangeError`, SQLSTATE `22003`. It is **not**
+#:   `sqlalchemy.exc.DataError`, which is the other guess and is a `DBAPIError`
+#:   *subclass*, so an `except` naming it catches nothing here.
 #: - `curated_rows."position"` is `integer`, and `2**31` is refused
 #:   **client-side** by asyncpg's own binary encoder before a byte is sent --
-#:   `sqlalchemy.exc.DBAPIError`, cause `asyncpg.exceptions.DataError`,
-#:   SQLSTATE `22000`.
+#:   `sqlalchemy.exc.DBAPIError`, cause `asyncpg.exceptions.DataError`, SQLSTATE
+#:   `22000`. Note that is the *driver's* class of that name and not
+#:   SQLAlchemy's; the two are unrelated types and both appear in this comment,
+#:   so both are module-qualified here and everywhere they are named.
 #:
 #: Both are reachable from a *validly constructed* domain model: `LLMCall.
 #: cost_usd` and `CuratedRow.position` are both bounded below and not above.
@@ -39,12 +52,23 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 #: apart from one. `22` (data exception) and `23` (integrity constraint
 #: violation) are the two classes that mean the row; everything else
 #: propagates untranslated.
-ROW_IS_REFUSED = frozenset({"22", "23"})
+#:
+#: **Bounded, because "class 22 means the row" is not true of class 22 in
+#: general.** It also carries statement-level faults -- `22012`
+#: division_by_zero, `2201B` invalid_regular_expression, `22P02` on a literal
+#: cast -- which are bugs in the *statement* rather than in the row a caller
+#: handed in. The claim holds for **a parameterised statement with no
+#: server-side expressions**, which is every caller today: both are a bare
+#: `INSERT` of bound values, so the only thing class 22 can be about is a bound
+#: value. A repository whose statement computes something would report its own
+#: bug to the caller as a refused row, and needs a narrower predicate than this
+#: one rather than a wider `except`.
+ROW_REFUSED_SQLSTATE_CLASSES = frozenset({"22", "23"})
 
 
-def refuses_the_row(exc: DBAPIError) -> bool:
+def is_row_refusal(exc: DBAPIError) -> bool:
     """Whether the backing store refused *this row* rather than the connection
-    or the statement -- see `ROW_IS_REFUSED` for the measurements behind the
+    or the statement -- see `ROW_REFUSED_SQLSTATE_CLASSES` for the measurements behind the
     two SQLSTATE classes.
 
     `IntegrityError` is honoured directly as well as by its SQLSTATE, and that
@@ -57,7 +81,7 @@ def refuses_the_row(exc: DBAPIError) -> bool:
     if isinstance(exc, IntegrityError):
         return True
     sqlstate = getattr(getattr(exc.orig, "__cause__", None), "sqlstate", None)
-    return isinstance(sqlstate, str) and sqlstate[:2] in ROW_IS_REFUSED
+    return isinstance(sqlstate, str) and sqlstate[:2] in ROW_REFUSED_SQLSTATE_CLASSES
 
 
 def constraint_name(exc: DBAPIError) -> str | None:
@@ -84,14 +108,12 @@ def constraint_name(exc: DBAPIError) -> str | None:
 
     **Typed `DBAPIError` rather than `IntegrityError`, widened by M8 Task
     10.** `IntegrityError` is a subclass, so every existing caller is
-    unaffected; what the wider type admits is the one refusal on `llm_calls`
-    that is *not* an integrity violation. `cost_usd` is `NUMERIC(12, 8)` and a
-    call above `$9,999.99999999` raises `numeric field overflow`, which
-    SQLAlchemy's asyncpg dialect leaves as a bare `DBAPIError` (measured --
-    not an `IntegrityError`, and not a `DataError` either). The chain this
-    reads is the same one either way and it correctly answers `None` there,
-    since a declared precision refusing a value is not a named constraint
-    firing. Narrowing this back to `IntegrityError` would force a second copy
-    of the accessor, which is the thing this module exists to prevent.
+    unaffected; what the wider type admits is a refusal that is not an
+    integrity violation at all -- `ROW_REFUSED_SQLSTATE_CLASSES` above holds
+    the two measured shapes and is the only copy of them. The chain this reads
+    is the same one either way, and it correctly answers `None` for both, since
+    a column refusing a *value* is not a named constraint firing. Narrowing
+    this back would force a second copy of the accessor, which is what this
+    module exists to prevent.
     """
     return getattr(getattr(exc.orig, "__cause__", None), "constraint_name", None)

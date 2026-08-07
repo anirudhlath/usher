@@ -445,7 +445,7 @@ catch either, so the raw SQLAlchemy exception crossed that port boundary too
 until the `except` widened; the mutation back to `IntegrityError` fails exactly
 the one case that constructs such a row.
 
-So `refuses_the_row()` and `ROW_IS_REFUSED` now live in
+So `is_row_refusal()` and `ROW_REFUSED_SQLSTATE_CLASSES` now live in
 `db/repositories/_errors.py` beside `constraint_name()`, which is the module
 whose whole reason is that two copies of a measured accessor are two chances to
 lose one. **The rule to apply when writing the next repository: compare each

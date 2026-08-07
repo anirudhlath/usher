@@ -7,16 +7,13 @@ by exactly the failures, which are the rows an operator most wants to see --
 and `ok` is the discriminator rather than "the HTTP call returned 200".
 
 **A write is observed through an abstract `LLMCallLedger`, not through a read
-method, and that is a decision rather than a convenience.** `llm_calls` has no
-reader in `src/` and every reader PRD 10 names is a Grafana panel M10 builds;
-`m08a` shipped the table with its primary key and no other index *on the
-strength of that*, with the two future indexes written out as copy-pasteable
-`CREATE INDEX` statements. A `list_since()` added here would be a method with
-no caller -- `ix_titles_popularity` was an index nothing read and
-`PushHealth.record_reconnect` was a method nothing called, and the second made
-PRD 10's reconnect metric a permanent flat zero. So the suite reads the table
-out of band, exactly as `CuratedRowSeeder` writes it out of band, and for the
-mirrored reason: the port cannot express the observation the cases need.
+method.** The port has none by design and `LLMCallRepository`'s own docstring
+carries that argument in full -- `m08a` shipped the table with its primary key
+and no other index on the strength of it. What follows from it *here* is the
+shape of this suite: it reads the table out of band, exactly as
+`CuratedRowSeeder` writes it out of band, and for the mirrored reason -- the
+port cannot express the observation the cases need, and adding a method so
+that it could would be adding the very surface the port declined.
 
 Its `ABC` shape is ADR-0001's argument applied to a test double -- a
 `Protocol` would let one arm drift out of the suite silently.
@@ -211,8 +208,17 @@ class LLMCallRepositoryContract:
         await repository.record(call)
 
         stored = await ledger.get(call.id)
-        assert stored == call
-        assert stored is not None
+        # **Narrowest first, named columns next, whole-model compare last, and
+        # the order is the whole difference between eleven live assertions and
+        # eleven dead ones.** `LLMCall.__eq__` is total, so a leading
+        # `stored == call` fails first for *any* difference -- `stored is None`
+        # included -- and every line under it is unreachable. This suite
+        # shipped that way: 24 lines across three cases that no defect could
+        # ever reach, `generation_id` among them, which this case's docstring
+        # calls the one that costs the most. Each of these now fails on its own
+        # column name, and the `== call` at the end keeps its job, which is to
+        # catch a column nobody thought to name.
+        assert stored is not None, "the call was recorded and then could not be read back"
         assert stored.at == AT
         assert stored.model == MODEL
         assert stored.purpose is LLMPurpose.CURATION
@@ -223,6 +229,7 @@ class LLMCallRepositoryContract:
         assert stored.ok is True
         assert stored.error is None
         assert stored.generation_id == generation
+        assert stored == call
         assert await ledger.count() == 1
 
     async def test_a_call_that_failed_is_a_row_with_its_error(
@@ -256,13 +263,15 @@ class LLMCallRepositoryContract:
         await repository.record(call)
 
         stored = await ledger.get(call.id)
-        assert stored == call
-        assert stored is not None
+        # Narrowest first, whole-model compare last -- see the case above for
+        # why the reverse makes every line between them unreachable.
+        assert stored is not None, "the failed call was not recorded at all"
         assert stored.ok is False
         assert stored.error == "the pool validator kept none of the four proposed rows"
         assert stored.cost_usd == COST
         assert stored.tokens_in == TOKENS_IN
         assert stored.generation_id == generation
+        assert stored == call
         assert await ledger.count() == 1, "the failed call is not in the ledger at all"
 
     async def test_a_failure_does_not_displace_the_success_before_it(
@@ -291,9 +300,17 @@ class LLMCallRepositoryContract:
         await repository.record(worked)
         await repository.record(failed)
 
-        assert await ledger.count() == 2
+        # **The two reads come first and the count last, which is the
+        # ordering this case's third paragraph depends on.** Both wrong
+        # implementations it names leave a count of one, so a leading
+        # `count() == 2` fails before either read runs -- the case would be
+        # red and the lines that say *which* row survived would never
+        # execute. Measured by planting a `record()` that returns without
+        # appending. The count still earns its place last, where it is the
+        # only assertion that can see a third row written by mistake.
         assert await ledger.get(worked.id) == worked
         assert await ledger.get(failed.id) == failed
+        assert await ledger.count() == 2
 
     async def test_two_calls_for_one_generation_are_two_rows(
         self, repository: LLMCallRepository, ledger: LLMCallLedger
@@ -327,14 +344,19 @@ class LLMCallRepositoryContract:
         assert first.generation_id == second.generation_id, (
             "the fixture must make the two rows share a generation, or this case is its sibling"
         )
-        assert first.id != second.id
+        assert first.id != second.id, (
+            "the fixture must give the two rows distinct ids, or `get` cannot tell them apart"
+        )
 
         await repository.record(first)
         await repository.record(second)
 
-        assert await ledger.count() == 2
+        # Reads first, count last, for the reason spelled out in the sibling
+        # case above: a store keyed on `generation_id` leaves one row, so a
+        # leading count would fail before the reads that say which one.
         assert await ledger.get(first.id) == first
         assert await ledger.get(second.id) == second
+        assert await ledger.count() == 2
 
     async def test_a_call_belonging_to_no_generation_is_recorded(
         self, repository: LLMCallRepository, ledger: LLMCallLedger
@@ -359,10 +381,10 @@ class LLMCallRepositoryContract:
         await repository.record(call)
 
         stored = await ledger.get(call.id)
-        assert stored == call
-        assert stored is not None
+        assert stored is not None, "the query-expansion call was not recorded at all"
         assert stored.generation_id is None
         assert stored.purpose is LLMPurpose.QUERY_EXPANSION
+        assert stored == call
         assert await ledger.count() == 1
 
     @pytest.mark.parametrize("cost", MEASURED_COSTS, ids=str)
@@ -397,7 +419,7 @@ class LLMCallRepositoryContract:
         await repository.record(call)
 
         stored = await ledger.get(call.id)
-        assert stored is not None
+        assert stored is not None, "the call was recorded and then could not be read back"
         assert stored.cost_usd == cost
 
     async def test_recording_one_call_twice_is_a_conflict_rather_than_an_update(

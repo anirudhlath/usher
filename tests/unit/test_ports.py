@@ -292,39 +292,31 @@ def test_suggest_index_has_no_write_method() -> None:
 
 
 def test_the_cost_ledger_has_no_read_method() -> None:
-    """**The structural half of Task 10's central decision**, and
-    `test_suggest_index_has_no_write_method`'s argument arriving at a
-    repository port.
+    """**The structural half of `LLMCallRepository`'s central decision**, whose
+    argument lives on that port: `llm_calls` has no reader in `src/`, `m08a`
+    shipped it with its primary key and no other index on the strength of
+    that, and a read here would be the third surface this project has built
+    for a consumer that does not exist.
 
-    `llm_calls` has no reader in `src/` and every reader PRD 10 names is a
-    Grafana panel M10 builds. `m08a` shipped the table with its primary key
-    and **no other index** on the strength of that, writing the two future
-    indexes out as copy-pasteable `CREATE INDEX` statements beside the query
-    each serves. A read method added here would be a surface with no caller,
-    and this repository has shipped that twice: `ix_titles_popularity` was an
-    index nothing read, and `PushHealth.record_reconnect` was a method nothing
-    called, which made PRD 10's reconnect metric a permanent flat zero.
-
-    So this is not a style assertion. Adding `list_since` *and* the index it
-    needs, in the milestone that adds the panel reading them, is a decision;
-    adding it without deleting this case is a failing test.
+    Not `test_suggest_index_has_no_write_method`'s shape, despite the
+    similarity — `SuggestIndex` is deliberately *not* in the parametrisation
+    above, so for that port the dedicated case is the only thing asserting a
+    surface at all. Here the parametrised entry already pins the exact set, so
+    what this adds is a name and a reason: a set that moves says only that
+    something changed, and this says which direction was the decision. Adding
+    `list_since` *and* the index it needs, in the milestone that adds the
+    panel reading them, is a decision; adding it without deleting this case is
+    a failing test.
     """
     assert LLMCallRepository.__abstractmethods__ == frozenset({"record"})
 
 
 def test_the_cost_ledger_takes_the_domain_model_rather_than_its_parts() -> None:
-    """The signature is the answer to "what happens when the constructor
-    raises inside an exception handler", and it is load-bearing enough to pin.
-
-    `record()` is called on the failure path, from inside an `except` block,
-    and the row it writes there is the one the ledger exists for. A
-    parts-shaped signature would rebuild the same `LLMCall` one frame deeper
-    and raise the same `ValidationError` inside a repository, where the caller
-    cannot see it -- unless it coerced, and inventing the operator-facing
-    string that says what went wrong is a decision only the layer that knows
-    can make. Eleven adjacent parameters, three of them integers and two of
-    them UUIDs, is also eleven chances to fill the wrong slot and still store
-    a well-formed row.
+    """`LLMCallRepository.record`'s signature is the answer to "what happens
+    when the constructor raises inside an exception handler", and the port's
+    docstring is where that argument is made. Pinned here because a signature
+    is the part of it a later change can undo without reading a word of the
+    reasoning.
 
     Asserted on the annotation rather than on the parameter count, because a
     parts-shaped `record(**fields: Any)` has one parameter too.

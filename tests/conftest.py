@@ -12,6 +12,27 @@ from opentelemetry.metrics._internal import _ProxyMeter
 
 from usher.config import Settings, get_settings
 
+# **`tests/contract/*_contract.py` does not match `python_files`, so nothing
+# rewrites its assertions unless this line does.** Every shared contract suite
+# in this repository lives in a module pytest never collects -- the subclasses
+# under `tests/unit/` and `tests/integration/` are what get collected, and the
+# suite itself is only ever *imported* by them. Assertion rewriting happens at
+# import time and only for modules pytest collects or is told about, so without
+# this every `assert` in ~20 contract suites reports a bare `AssertionError`
+# with no values.
+#
+# Measured on one failure while reviewing M8 Task 10: `assert stored == call`
+# inside `llm_call_repository_contract.py` printed `AssertionError` and nothing
+# else, while the identical comparison written in an integration file printed
+# the full pydantic diff. That is also *why* two dead assertions in that suite
+# were expensive to find -- a bare `AssertionError` at a line number says
+# nothing about which of eleven columns moved.
+#
+# Must run before the first import of anything under `tests.contract`. This is
+# the rootdir conftest, which pytest imports before collecting anything, so it
+# does.
+pytest.register_assert_rewrite("tests.contract")
+
 
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
