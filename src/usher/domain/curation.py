@@ -101,6 +101,26 @@ class CuratedRow(DomainModel):
     # `m8a` sorting after `m10a`, one subsystem over: an identifier minted by
     # counting and compared as a string sorts wrong at its first two-digit
     # value, so it is padded where it is minted.
+    #
+    # **The width is a property of the generation, so a curated slug is unique
+    # within one generation and is not a stable name across them** -- nine rows
+    # mint `curated-1` and ten mint `curated-01`, so the first shelf changes key
+    # the night the model returns one more row. Two things follow, and the
+    # second is the load-bearing one because it is a premise held somewhere
+    # else:
+    #
+    # - `RowCache`'s `(user_id, slug)` entry for the old width is not
+    #   overwritten, it is *orphaned* -- a guaranteed miss and a rebuild, which
+    #   is the correct answer arrived at by accident, and the dead entry is
+    #   reclaimed by its own TTL like every other.
+    # - **It is only harmless because `CuratedRowRepository.replace_for_user`
+    #   is delete-then-insert.** An upsert keyed on `(user_id, slug)` would
+    #   leave a nine-row generation's `curated-1` … `curated-9` sitting beside
+    #   a ten-row one's `curated-01` … `curated-10`, and the household would
+    #   get nineteen shelves, nine of them last night's, with nothing in the
+    #   schema refusing it. The write path's ordering is what keeps a slug from
+    #   ever having to be stable, and Task 15's `CuratedProvider` reads rows
+    #   under that guarantee without restating it.
     slug: str = Field(min_length=1)
     title: str = Field(min_length=1)
     # `None` is reachable here and is not reachable from any M7 provider --

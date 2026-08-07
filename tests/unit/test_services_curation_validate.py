@@ -814,8 +814,9 @@ def test_a_reason_longer_than_the_bound_discards_the_row() -> None:
     real titles under it. It does not, because a blanked subtitle is a loss
     with nothing to count it under -- the row survives, so `row_unusable`
     would be false of it, and a sixth drop reason for "the model wrote too
-    much prose" has the identical next step as an over-long title, which is
-    the test the five-member vocabulary is built on.
+    much prose" carries the identical diagnosis, the identical fix and the
+    identical unit as an over-long title, which is the test the five-member
+    vocabulary is built on.
 
     The price is real and is the reason `MAX_REASON_CHARS` is 1000 against a
     subtitle the shipped providers write in 30-90: a household loses a whole
@@ -986,10 +987,12 @@ def test_the_tally_a_caller_is_handed_refuses_to_be_edited() -> None:
 def test_the_five_reasons_are_counted_separately() -> None:
     """One counter is the mutation ADR-0028 names first: `not_in_pool` and
     `unparseable` *"produce the same empty screen and have opposite fixes"*.
-    The three that were added to them earn their place the same way -- a
-    duplicate names a real candidate twice, an unusable row was never readable,
-    and a short row is the pool failing to answer the question. Each is a
-    different sentence in an operator's report and a different next step."""
+    The three that were added to them earn their place on the weaker and
+    honest claim -- a different *diagnosis*, not a different lever. A duplicate
+    names a real candidate twice, an unusable row was never readable, and a
+    short row is the pool failing to answer the question: three different
+    sentences in an operator's report, two of which send that operator to the
+    same place as a member of the original pair."""
     outcome = kept(
         a_response(
             a_row(999, 11, 4, 11, None, title="Mixed"),

@@ -78,39 +78,49 @@ writes into `llm_calls.error`.
 ## The drop vocabulary, and why it is five and not two
 
 ADR-0028 named two, `not_in_pool` and `unparseable`, *"because those two
-produce the same empty screen and have opposite fixes"*. That test -- **a
-different operator story with a different next step** -- is what the other
-three pass:
+produce the same empty screen and have opposite fixes"*. **The other three do
+not each buy a new fix, and saying they do would be the inflation a closed
+vocabulary exists to resist.** Two of them share a lever with a member of the
+original pair: `duplicate` and `not_in_pool` both send an operator to the
+prompt or the temperature, `row_unusable` and `unparseable` both to the schema
+or `response_format`. What each buys is a **different diagnosis** -- what the
+number *means*, and so what an operator concludes from it -- and a counter
+whose value means two different things is one nobody can act on.
 
 - **`not_in_pool`** counts a **card**: a well-formed handle naming nothing that
   was sent. *The model is inventing* -- look at the prompt, the temperature,
   the pool.
 - **`unparseable`** counts a **card**: a value that could not be a handle at
   all. *The shape is wrong* -- look at `response_format` and the schema. This
-  and the one above produce the identical empty screen and have opposite fixes,
-  which is ADR-0028's own argument for splitting them.
+  and the one above produce the identical empty screen and have genuinely
+  opposite fixes, which is ADR-0028's own argument for splitting them and the
+  only one of these splits the 108/108 run is evidence for.
 - **`duplicate`** counts a **card**: a candidate this row already used. *The
-  model repeats itself* -- prompt or temperature, and nothing at all is wrong
-  with the pool. Folded into either of the two above it would report a fix
-  that is not the fix.
+  model repeats itself*, and nothing at all is wrong with the pool. The same
+  lever as `not_in_pool` -- and folded into it, it would report **invention
+  where none occurred**, which is the right fix pulled for a reason that is
+  false.
 - **`row_unusable`** counts a **row**: not an object, no title, a non-string
-  title or reason, or prose past the bound. *The row's shape is wrong.*
+  title or reason, or prose past the bound. *The row's shape is wrong.* The
+  same lever as `unparseable`, one unit up, and the unit is the difference.
 - **`row_too_short`** counts a **row**: fewer than `min_cards` cards survived.
   *The pool could not answer the question* -- or the cards are being eaten,
   and the three card counts beside this one are what tell those apart. This is
   the second-order effect of the other three and is the number an operator
   reads first.
 
-Two of them count **rows** and three count **cards**, which is why the row ones
+**The load-bearing half of the widening is the unit split, not the count.** Two
+of them count **rows** and three count **cards**, which is why the row ones
 carry the prefix: summing across the whole map is meaningless and the names say
 so. The map always carries **all five keys**, zeros included -- a reason absent
 from a tally is indistinguishable from a reason nobody counts, which is this
 module's own subject one level up.
 
 `row_unusable` deliberately folds "unreadable" and "too long" together. They
-have the same next step (the row's shape is wrong, fix the schema or the
-prompt), and a metric dimension earns members by the fixes they distinguish,
-not by the branches that produce them.
+share a diagnosis *and* a lever *and* a unit -- the row's shape is wrong, fix
+the schema or the prompt -- and a metric dimension earns members by the
+diagnoses they distinguish, not by the branches that produce them. That is the
+test the five above pass and a sixth for "too long" would fail.
 
 ## Two things this module deliberately does not do
 
@@ -136,8 +146,9 @@ not by the branches that produce them.
   `CuratedRow.reason` is `str | None`, so "no subtitle" is a state the domain
   already models. It is still refused, because a dropped subtitle is a loss
   with **nothing to count it under**: the row survives, so `row_unusable`
-  would be false, and a sixth reason fails the vocabulary's own test above
-  (an over-long reason and an over-long title have the identical next step).
+  would be false, and a sixth reason fails the vocabulary's own test above (an
+  over-long reason and an over-long title have the identical diagnosis, the
+  identical fix and the identical unit).
   The choice is a counted loss against a silent one and this module exists to
   prefer the counted one. `_row` carries the rest of the argument, including
   the price -- a 1001-character reason costs the household a heading and every
@@ -357,9 +368,10 @@ def _row(
         #   against it rather than for it -- a discarded subtitle has **no
         #   reason to be counted under**. The row survives, so `row_unusable`
         #   would be a lie; a sixth member for it would fail the vocabulary's
-        #   own test, since "the model wrote too much prose" has the identical
-        #   next step as an over-long title (fix the prompt or the schema) and
-        #   a metric dimension earns members by the fixes they distinguish.
+        #   own test, since "the model wrote too much prose" carries the
+        #   identical diagnosis to an over-long title, the identical fix (the
+        #   prompt or the schema) and the identical unit, and a metric
+        #   dimension earns members by the diagnoses they distinguish.
         #   So the choice is between a counted loss and a silent one, and this
         #   module is *about* preferring the counted one.
         #

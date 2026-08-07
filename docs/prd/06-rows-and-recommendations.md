@@ -720,7 +720,10 @@ Generation runs nightly and on demand:
      on a television.
    - **The reason label is five, not two** — `duplicate`, `row_unusable` and
      `row_too_short` join the original pair, each because it names a different
-     next step. ADR-0028 carries the amendment and the argument.
+     *diagnosis*, not because it names a different fix: two of them share a
+     lever with a member of the pair, and the load-bearing half of the
+     widening is that two of the five count **rows** and three count **cards**.
+     ADR-0028 carries the amendment and the argument.
    - **Zero rows is unrepresentable as a success**, not merely checked for: the
      return type is a union whose success arm cannot be built with an empty
      `rows` and whose failure arm has no `rows` attribute at all.
