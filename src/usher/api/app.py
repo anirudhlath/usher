@@ -10,7 +10,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from usher.api.errors import validation_error_without_the_request_body
 from usher.api.lanes import LaneSupervisor
-from usher.api.routers import events, health, home, sources, titles
+from usher.api.routers import events, health, home, rows, sources, titles
 from usher.composition import (
     DefaultUserId,
     embedder,
@@ -163,6 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(events.router)
     app.include_router(health.router)
     app.include_router(home.router)
+    app.include_router(rows.router)
     app.include_router(sources.router)
     app.include_router(titles.router)
     return app

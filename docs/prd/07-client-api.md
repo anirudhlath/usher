@@ -178,7 +178,7 @@ be added if a client turns out to need flexible field selection.
 | `GET /admin/sources/{id}/status` | Connection, push availability, last sync |
 | `POST /admin/sources/{id}/sync` | Trigger reconcile |
 | `GET /admin/unmatched` · `POST /admin/unmatched/{id}/resolve` | Review queue |
-| `POST /admin/rows/regenerate` | Force LLM curation |
+| `POST /admin/rows/regenerate` | Enqueue LLM curation for this household — 202, never a synchronous generate |
 | `GET /admin/bootstrap/status` · `POST /admin/bootstrap/{phase}` | Dataset import |
 
 > **Settled in M3.** `SourceAdapter.verify()` returns a `SourceStatus`
@@ -217,6 +217,56 @@ be added if a client turns out to need flexible field selection.
 > `404` is reserved for a source id that does not exist.
 > `POST` accepts a username and password and returns neither — see
 > [08](08-operations.md).
+
+> **Built in M8: `POST /admin/rows/regenerate`.** ✅ Shipped ahead of the admin
+> rows still outstanding above it by [09](09-roadmap.md)'s M7 boundary call 2,
+> which gave it to M8 together with `curated_rows`, `LLMRow` and
+> `CuratedProvider` as one family — hydrating a table whose generator does not
+> exist would have fixed that table's shape before anything had filled it, and
+> the route is the other end of the same artefact. It answers
+> **202 with the enqueued job's key** — `{"kind": "curate", "key": "<user id>"}`
+> — and never generates inside the request.
+> [06](06-rows-and-recommendations.md) states that as a constraint on the
+> artefact (*"`LLMRow.build()` only hydrates stored output. Generation happens
+> in a background job — never in the request path"*); this route is the enqueue
+> site that makes it one, and it holds no `LLMClient` and no `CurationService`,
+> asserted on its own imports rather than on its behaviour.
+>
+> **What "accepted" means, stated here because the response body is the only
+> place an operator learns it.** The two fields are the queue's own identity —
+> `(kind, key)` is unique — and together they promise that this household's
+> `curate` row is on the queue at `DEMAND`. They do **not** promise a
+> completion will be bought. Measured against real PostgreSQL and recorded on
+> `usher.domain.jobs.JobKind.CURATE`: a repeat at the same priority writes
+> **zero** rows and is coalesced, which is
+> [06](06-rows-and-recommendations.md)'s *"one modest completion per user per
+> day"* working; a repeat arriving while the generation is `running` is folded
+> into the run already in flight and deleted with it by `complete()`, so the
+> *requested* generation never happens; and a **parked** job is not un-parked
+> or promoted by asking again, at any priority ([08](08-operations.md)). The
+> 202 is identical in all three cases, deliberately — `enqueue` returns 1 for a
+> job it created *and* for one it merely promoted, so a status code varying on
+> that number would be varying on something that means neither thing. `status`,
+> `priority` and the row count are all absent from the body for the same
+> reason: each would be describing the request and calling it the queue.
+>
+> **`USHER_LLM_ENABLED=false` still answers 202, and the route reads no setting
+> at all.** A deployment with the LLM disabled registers no `curate` handler,
+> so the job is enqueued and stays `pending` — the same shape `JobKind.INDEX`
+> has under a missing embedder and `JobKind.DERIVE` under a missing metadata
+> provider: the enqueue is unconditional and the *claim* is conditional, so
+> work waits for a process that can run it rather than being refused by one
+> that cannot. That setting is a fact about **one process**; a server started
+> without a key beside a `usher work` started with one is an ordinary
+> deployment — [08](08-operations.md) describes exactly that split,
+> `USHER_WORKER_ENABLED=false` on the server and a second container running
+> `usher work` — and a route consulting the setting would refuse exactly that
+> shape on evidence it does not have. The cost is real and is not hidden: an
+> operator who disabled the LLM everywhere gets an accepted request nothing
+> will claim. It is **one row, not a leak** — `(kind, key)` is unique — and it
+> is visible as [10](10-telemetry-and-dashboards.md)'s
+> `usher.jobs.queued{kind="curate"}` never returning to zero, which is the
+> series `JobQueue.depth()` promises a key per kind in order to carry.
 
 ### Meta
 
@@ -324,6 +374,23 @@ subsystem narrows functionality, it never fails a request local state can answer
 > deferral has survived both on evidence rather than on inertia; the first
 > route whose honest answer is a domain-level failure is still M9's
 > `POST /titles/{id}/play`.
+>
+> **Still deferred after M8, and its route needs a longer argument than M5's
+> and M7's rather than the same one.** Those two turn on holding no
+> `SourceAdapter`, which is a claim about *reads* — `GET /titles/{id}` already
+> writes, and so does `POST /admin/sources`, so "it writes" was never what the
+> envelope hung on. What is new is that `POST /admin/rows/regenerate` writes to
+> a subsystem that can be down while the process is up: the job queue, which is
+> PostgreSQL, and an outage of that is already reported as a 503 by
+> `GET /health/ready` for the whole process — so answering 503 *here* would say
+> "this endpoint is degraded, retry it" about a deployment in which every
+> endpoint is down, and would need the `code` vocabulary a milestone early to
+> say which. The handler therefore catches nothing: a `PortUnavailable` from
+> the queue propagates and becomes an ordinary 500. **A test asserts the
+> translation is absent rather than merely unused**, because "it did not answer
+> 503" is also what a route that swallowed everything would produce — the same
+> reason `TitleReadService`'s missing `SourceAdapter` is asserted on its
+> imports. The deferral has now survived a third milestone.
 
 ## Streaming updates (SSE)
 

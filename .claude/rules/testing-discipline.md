@@ -1236,3 +1236,24 @@ uses) reports the docstring and would be "fixed" by deleting the argument. Scan
 `ast.unparse` of a docstring-stripped tree instead: identifiers and **string
 annotations** survive it — which is the half that matters, since a string
 annotation is the one form needing no import — and only prose is dropped.
+
+**And the inverse of that, found 2026-08-07 in M8 Task 17 as a near miss:
+prose in a `src/` docstring can *satisfy* a textual scan on behalf of a reader
+that does not exist.** `tests/unit/test_config.py::test_every_setting_is_read_by_something`
+proves no `Settings` field is a knob with no effect by joining every
+`src/usher/**/*.py` except `config.py` and asserting `f".{name}"` appears — so
+a route docstring that wrote `settings.llm_enabled` while arguing *why it
+deliberately does not read it* would have kept that field's check green if
+`composition.py`'s one real reader were ever deleted. Caught before it landed
+and the docstring now spells the field without the dot, with a sentence saying
+why. **Two facts, both measured rather than reasoned.** Re-running the scan
+against an `ast.Attribute` walk instead of a substring search over the same
+tree: **zero of 56 fields currently rest on prose**, so nothing is masked
+today. And the substring itself is loose in a second way — `f".{name}"` for
+`port` matches every `usher.ports` in the tree, so that field's check would
+pass with `cli.py`'s `settings.port` deleted. Both are cheap to close (walk
+`ast.Attribute`), and both are recorded rather than fixed here because the
+check is not this task's and neither is currently wrong. **The general form,
+which is the reusable half: a guard that scans source *text* has two failure
+modes and this repository had only written down the first — prose that trips
+it, and prose that answers it.**

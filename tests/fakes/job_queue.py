@@ -1,7 +1,14 @@
 """In-memory `JobQueue`.
 
-**Where this is more forgiving than Postgres, on purpose.** Six places, and
+**Where this is more forgiving than Postgres, on purpose.** Seven places, and
 the first is not a nuance -- it is the whole point of the port:
+
+(**Seven, corrected 2026-08-07.** This header said six from `69e0ae3`, which
+shipped six bullets; `ac447e5` added the seventh -- the no-op re-enqueue count
+-- and left the number behind. Three other files already call that one "the
+fake's seventh" by name: `src/usher/ports/search.py`,
+`tests/integration/test_index_backfill.py`, and
+`.claude/rules/testing-discipline.md`. This file was the outlier.)
 
 - **Nothing here can express `SELECT ... FOR UPDATE SKIP LOCKED`.** This is
   one dict behind one event loop; there is no second session, no row lock,
