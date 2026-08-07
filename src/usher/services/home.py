@@ -32,17 +32,29 @@ empty, `[S, S, S]` returned, nothing raised and nothing logged.
 **A consequence of the two numbers, and M8 is where it stopped being
 hypothetical.** With `_MAX_PER_FAMILY = 4` and *two* families the longest
 screen this composer could return was **nine** rows -- one pinned plus four
-`SOURCE` plus four `SIMILARITY` -- so `_MAX_ROWS` truncated nothing at any
-input, and the only case reaching that slice injected a smaller `max_rows`.
-`RowFamily` grew `CURATED` alongside the `LLMRow` that emits it (M8 task 14),
-thirteen candidates now get past the cap, and the ceiling does the work its
-name claims. `test_the_default_row_ceiling_is_reachable_now_that_a_third_
-family_exists` pins it, on what was **built** rather than on what came back:
-`_order` bounds the returned sequence by the same number, so deleting
+`SOURCE` plus four `SIMILARITY` -- and the registry could only reach **eight**
+of those, because `BecauseYouWatchedProvider` is the only `SIMILARITY` emitter
+and its `_MAX_SEEDS` is 3. Both are under `_MAX_ROWS`, so it truncated nothing
+at any input, and the only case reaching that slice injected a smaller
+`max_rows`. `RowFamily` grew `CURATED` alongside the `LLMRow` that emits it
+(M8 task 14), thirteen candidates now get past the cap, and the ceiling does
+the work its name claims. `test_the_default_row_ceiling_is_reachable_now_that_
+a_third_family_exists` pins it, on what was **built** rather than on what came
+back: `_order` bounds the returned sequence by the same number, so deleting
 `_select`'s slice still returns ten rows -- having hydrated thirteen. The
 ceiling stayed 10 rather than 9 for exactly this reason: a bound that happened
 to equal the day's arithmetic would silently stop bounding anything the day a
 family was added.
+
+**And the "one pinned" term in that arithmetic is the registry's property, not
+this module's.** `_select` sets every pinned candidate aside *before* the cap
+with no bound of its own -- deliberately, since a positional guarantee a
+crowded family could take away is not one -- so nine is an upper bound only
+while `ContinueWatchingProvider` is the sole pinning provider and proposes one
+row. Nothing said so until M8:
+`tests/unit/test_rows_invariants.py::test_continue_watching_is_the_only_
+provider_that_pins_and_it_pins_one_row` is the assertion, and it is what keeps
+the paragraph above from going quiet the day a second provider pins.
 
 **The build loop is a `for`, and that is a decision rather than an accident.**
 `AsyncSession` is not safe for concurrent use, so `asyncio.gather` over

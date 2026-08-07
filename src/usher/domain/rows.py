@@ -94,15 +94,25 @@ class RowFamily(StrEnum):
     `services/rows/curated.py:LLMRow`, which is the only thing that emits it.
 
     **What it turned out to make reachable, because that is the question the
-    deferral was protecting.** Not the per-family cap: five `SOURCE` proposals
-    exercised that from M7 onwards, and the cap has never cared how many
-    families exist. It is `HomeService`'s `_MAX_ROWS`. With two families the
-    longest screen the composer could return was **nine** rows -- one pinned
-    plus four per family -- so the ceiling of ten truncated nothing at any
-    input; with three, thirteen candidates get past the cap and it truncates
-    three of them. `services/home.py` carries the same note beside the
-    constants, and `test_services_home.py::test_the_default_row_ceiling_is_
-    reachable_now_that_a_third_family_exists` is where the branch is pinned.
+    deferral was protecting.** Not the per-family cap: the two cases that
+    exercise it -- `test_services_home.py::test_no_family_exceeds_its_cap_even_
+    when_it_proposes_the_top_scores` and `::test_a_proposal_the_cap_declined_is_
+    selected_zero_rather_than_absent` -- have each proposed **eight
+    `SIMILARITY`** rows since M7, and the cap has never cared how many families
+    exist. It is `HomeService`'s `_MAX_ROWS`. With two families the longest
+    screen the composer could return was **nine** rows -- one pinned plus four
+    per family -- and the *registry* could only reach **eight** of those,
+    because `BecauseYouWatchedProvider` is the only `SIMILARITY` emitter and
+    its `_MAX_SEEDS` is 3; both are under the ceiling of ten, so it truncated
+    nothing at any input. With three families, thirteen candidates get past the
+    cap and it truncates three of them. That "one pinned" term is a property of
+    the *registry* and not of the composer -- `_select` sets every pinned
+    candidate aside before the cap with no bound of its own -- and
+    `test_rows_invariants.py::test_continue_watching_is_the_only_provider_that_
+    pins_and_it_pins_one_row` is what holds it. `services/home.py` carries the
+    same note in its **module docstring**, and `test_services_home.py::test_the_
+    default_row_ceiling_is_reachable_now_that_a_third_family_exists` is where
+    the branch is pinned.
 
     Named `RowFamily` and not `RowKind`, and there is exactly one of it. The
     milestone plan used both names for this one concept -- `RowKind` in the

@@ -191,10 +191,12 @@ async def test_a_shelf_whose_every_title_vanished_builds_empty_rather_than_raisi
     "this row was never proposed" are a quiet catalog and a dead provider, and
     `HomeService` has to tell them apart.
 
-    `== row.empty()` rather than only `cards == ()`, so the case also pins that
-    the losing shelf is the *same value* as the empty one -- a `build` that
-    quietly changed the heading or the TTL on its way to nothing would pass the
-    weaker assertion.
+    `== row.empty()` rather than only `cards == ()`, and the weaker assertion is
+    *not* kept alongside it: `Row.empty()` constructs `cards=()`, so
+    `built.cards == ()` is implied by the line below it and cannot fail on its
+    own. The stronger form also pins that the losing shelf is the *same value*
+    as the empty one -- a `build` that quietly changed the heading or the TTL on
+    its way to nothing would pass the weaker assertion.
     """
     library = Library()
     await _four(library)
@@ -202,7 +204,6 @@ async def test_a_shelf_whose_every_title_vanished_builds_empty_rather_than_raisi
 
     built = await row.build(library.context())
 
-    assert built.cards == ()
     assert built == row.empty()
 
 

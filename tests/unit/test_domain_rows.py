@@ -150,17 +150,24 @@ def test_a_built_row_carries_its_own_ttl_so_a_cached_row_is_self_describing() ->
     assert BuiltRow.model_fields["ttl"].is_required()
 
 
-def test_every_row_family_has_something_that_emits_it() -> None:
-    """PRD 06's three, and each of them arrived with its emitter.
+def test_the_row_family_vocabulary_is_prd_06s_three_and_no_others() -> None:
+    """PRD 06's family table, as a set rather than a `<=`: a fourth member
+    fails here and a deleted third one does too.
+
+    **Named for what it asserts.** It was
+    `test_every_row_family_has_something_that_emits_it` through M8 task 14,
+    and nothing in this body links a family to a class that emits it -- this
+    module imports only `usher.domain`, which imports nothing, so the emitters
+    are not reachable from here at all. The assertion that name promised is
+    `test_rows_invariants.py::test_every_row_family_is_emitted_by_a_registered_
+    provider`, which became possible only when M8 task 15 registered
+    `CuratedProvider`; the two are different checks and both are worth having.
 
     `CURATED` was deliberately *not* pre-declared in M7 -- a diversity rule
     capping a family with no members is a branch nothing can reach, so the
     first thing M8 would have discovered is whether that branch was ever
     right. It costs one line in the diff that adds `LLMRow` (M8 task 14), and
-    that diff is what this assertion moved in. **A member added ahead of its
-    emitter is what this case still kills**, in either direction: the set is
-    exact rather than a `<=`, so a fourth member fails here and a deleted
-    third one does too.
+    that diff is what this assertion moved in.
 
     The realistic fourth is a family invented to express Continue Watching's
     pin -- `ports/rows.py` argues that one down at length, because "always

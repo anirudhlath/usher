@@ -151,7 +151,7 @@ slug-keyed rule would couple the composer to the catalog.
 |---|---|---|---|---|
 | **`SourceRow`** | `SOURCE` | Catalog and watch state in Postgres | Continue Watching, Next Up, Recently Added, genre shelves, collections | ~60 s |
 | **`SimilarityRow`** | `SIMILARITY` | Embedding / genome neighbours of a seed title | "Because you watched *Dune*", "More like this" | hours |
-| **`LLMRow`** | ✅ **M8**, `services/rows/curated.py` | A persisted `curated_rows` record | "Slow-burn sci-fi for a rainy night" | 5 min — see below |
+| **`LLMRow`** | `CURATED` | A persisted `curated_rows` record | "Slow-burn sci-fi for a rainy night" | 5 min — see below |
 
 `LLMRow.build()` only *hydrates* stored output. Generation happens in a
 background job — never in the request path.
@@ -175,13 +175,17 @@ Boundary call 2 gave `curated_rows`, `LLMRow`, `CuratedProvider` and
 generator does not exist would fix that table's shape before anything had
 tried to fill it — and `CURATED` was deliberately not pre-declared, because a
 "cap per family" over a family with no members is a branch nothing can reach.
-It cost one line in the diff that added `LLMRow`.
+It cost one line in the diff that added `LLMRow` — ✅ **M8**,
+`services/rows/curated.py`, which is the only thing that emits `CURATED`.
 
 **What the third member made reachable, since that was the question the
-deferral was protecting: `_MAX_ROWS`, and not the cap.** Five `SOURCE`
-proposals have exercised the per-family cap since M7, and it has never cared
-how many families exist. The screen ceiling had not been reachable at all —
-see the composition section below.
+deferral was protecting: `_MAX_ROWS`, and not the cap.** The two cases that
+exercise the cap — `tests/unit/test_services_home.py`'s
+`test_no_family_exceeds_its_cap_even_when_it_proposes_the_top_scores` and
+`test_a_proposal_the_cap_declined_is_selected_zero_rather_than_absent` — have
+each proposed **eight `SIMILARITY`** rows since M7, and the cap has never
+cared how many families exist. The screen ceiling had not been reachable at
+all — see the composition section below.
 
 ## Dynamic composition
 
@@ -286,10 +290,17 @@ consecutive similarity rows; cap per family), builds the top N
 > constructor defaults rather than settings: the mechanism exists, but the
 > reason to move either is an operator looking at a screen, which is M9's admin
 > surface, and `Settings` is `extra="forbid"` so every field there owes a
-> reader *and* a reason. **With two families the longest screen reachable was
-> nine rows** — one pinned plus four per family — so `_MAX_ROWS` truncated
-> nothing at any input, and the only case that reached that slice injected a
-> smaller ceiling. ✅ **M8's `RowFamily.CURATED` is what made it reachable**:
+> reader *and* a reason. **With two families the longest screen the composer
+> could return was nine rows** — one pinned plus four per family — and the
+> *registry* could only reach eight of those, because
+> `BecauseYouWatchedProvider` is the only `SIMILARITY` emitter and its
+> `_MAX_SEEDS` is 3. Both are under `_MAX_ROWS`, which is the point: it
+> truncated nothing at any input, and the only case that reached that slice
+> injected a smaller ceiling. The "one pinned" term is a property of the
+> registry rather than of the composer — `_select` sets every pinned candidate
+> aside *before* the cap, with no bound of its own — and
+> `tests/unit/test_rows_invariants.py::test_continue_watching_is_the_only_provider_that_pins_and_it_pins_one_row`
+> is what holds it. ✅ **M8's `RowFamily.CURATED` is what made it reachable**:
 > thirteen candidates get past the cap and three are dropped. The case pins it
 > on what was **built** rather than on what came back, because `_order` bounds
 > the returned sequence by the same number — so an over-selecting composer

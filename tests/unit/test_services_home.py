@@ -26,7 +26,7 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.rows import BuiltRow, RowCard, RowFamily
 from usher.ports.rows import RowContext, ScoredRow
-from usher.services.home import HomeService
+from usher.services.home import _MAX_PER_FAMILY, HomeService
 
 
 @pytest.fixture
@@ -350,11 +350,18 @@ async def test_the_default_row_ceiling_is_reachable_now_that_a_third_family_exis
 
     With two families the longest screen this composer could return was
     **nine** rows -- one pinned plus `_MAX_PER_FAMILY` (4) from each of `SOURCE`
-    and `SIMILARITY` -- so the default `_MAX_ROWS = 10` truncated nothing at any
-    input, and `services/home.py` said so in its own docstring rather than
-    leaving it to be found. The case above reaches the slice only by *injecting*
-    `max_rows=4`. Three families put thirteen candidates past the cap and the
-    shipped ceiling starts doing work.
+    and `SIMILARITY` -- and the *registry* could only reach eight of those,
+    since `BecauseYouWatchedProvider` is the only `SIMILARITY` emitter and its
+    `_MAX_SEEDS` is 3. Both are under the default `_MAX_ROWS = 10`, so it
+    truncated nothing at any input, and `services/home.py` said so in its own
+    docstring rather than leaving it to be found. The case above reaches the
+    slice only by *injecting* `max_rows=4`. Three families put thirteen
+    candidates past the cap and the shipped ceiling starts doing work.
+
+    The "one pinned" term is a registry property rather than a composer one --
+    `_select` sets pinned candidates aside before the cap with no bound of its
+    own -- and `test_rows_invariants.py::test_continue_watching_is_the_only_
+    provider_that_pins_and_it_pins_one_row` is where that is asserted.
 
     **Asserted on what was built, not only on what came back**, and that is the
     whole of the teeth: `_order` bounds the *returned* sequence by the same
@@ -374,7 +381,14 @@ async def test_the_default_row_ceiling_is_reachable_now_that_a_third_family_exis
     # this case is about the *ceiling*, so the cap must not be what truncates.
     families = Counter(row.family for provider in capped for row in provider.rows)
     assert len(families) == 3, "the premise: three families, which is what gets past nine rows"
-    assert max(families.values()) <= 4, "the premise: no family is over the cap, so it drops none"
+    # `_MAX_PER_FAMILY` rather than the literal 4: a table that repeats a value
+    # is a table that can drift from it, and this guard is about the cap.
+    # Measured -- planting `_MAX_PER_FAMILY = 3`, the literal spelling still
+    # passes here and the case fails below on `len(screen) == 10`, which is
+    # about the *ceiling*, so a premise about the cap reports the wrong one.
+    assert max(families.values()) <= _MAX_PER_FAMILY, (
+        "the premise: no family is over the cap, so it drops none"
+    )
     assert len(providers) > 10, "the premise: more candidates than the ceiling truncates"
 
     screen = await HomeService(providers=providers).compose(ctx)

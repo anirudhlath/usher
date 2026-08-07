@@ -23,11 +23,15 @@ and that `HomeService` drops rows that build empty. Those are named here as
 handoffs and are not implemented.
 """
 
+import ast
+import pathlib
 from datetime import UTC, datetime
 
 import pytest
 
+import usher.services.rows
 from tests.unit.rows import NOW, Library, days_ago
+from usher.domain.rows import RowFamily
 from usher.ports.rows import RowProvider
 from usher.services.rows import BASE_SCORES, ROW_PROVIDERS, row_providers
 from usher.services.rows.continue_watching import CONTINUE_WATCHING_SCORE
@@ -137,6 +141,95 @@ async def test_every_proposed_row_carries_its_providers_slug_prefix() -> None:
             )
 
     assert observed >= 4, f"the sweep saw {observed} proposals, so it proves nothing"
+
+
+async def test_every_row_family_is_emitted_by_a_registered_provider() -> None:
+    """**A family with no emitter is a branch nothing can reach, and this is
+    the only place that can see one.**
+
+    `RowFamily` lives in `usher.domain`, which imports nothing, so
+    `test_domain_rows.py`'s set equality over the enum passes whether or not
+    anything anywhere emits a member -- it pins the *vocabulary*. What it
+    cannot pin is the property M7's boundary call 2 was actually protecting:
+    the per-family cap counts by family, so a member declared ahead of its
+    emitter gives that rule an arm no input takes, and `CURATED` was left out
+    of the enum for a whole milestone rather than shipped as one.
+
+    **This case became possible only when M8 task 15 registered
+    `CuratedProvider`**, which is why it is new rather than old. It is the
+    assertion `test_every_row_family_has_something_that_emits_it` was named
+    for and never made.
+
+    Exact rather than `>=` in both directions: a fourth member with nothing
+    behind it fails here, and so does deleting the only emitter of a member
+    the enum still declares.
+
+    The household is arranged so all three genuinely fire, and the count is
+    asserted for the reason every sweep in this file states one -- a sweep
+    whose providers all proposed nothing would report an empty set and read
+    like a family that went missing.
+    """
+    library = await _every_family_fires()
+
+    observed = {
+        proposal.row.family
+        for provider in ROW_PROVIDERS
+        for proposal in await provider.propose(library.context())
+    }
+
+    assert observed == set(RowFamily)
+
+
+async def test_continue_watching_is_the_only_provider_that_pins_and_it_pins_one_row() -> None:
+    """**The unstated premise under `_MAX_ROWS`' arithmetic**, which four
+    places now restate as the argument for a coverage decision.
+
+    `HomeService._select` sets every pinned candidate aside *before* the cap
+    and gives them no bound of their own -- deliberately, because a positional
+    guarantee a crowded family could take away is not one. So "one pinned plus
+    four per family" is nine only while exactly one provider pins and it
+    proposes exactly one row, and that is a property of the **registry** that
+    nothing asserted: a second pinning provider would silently falsify
+    `domain/rows.py`, `services/home.py`, `test_services_home.py` and PRD 06
+    at once, and every one of those four would still read as an argument.
+
+    Two halves, because neither is sufficient. The behavioural half sees what
+    a real registry proposes for a real household -- and a provider that pins
+    but does not fire against this fixture is invisible to it. The structural
+    half is an AST scan for a `pinned=` argument that is not literally
+    `False`, over every module in the package, so a new pinning provider fails
+    here the day it is written rather than the day a fixture happens to make
+    it propose.
+
+    Not a duplicate of `test_no_provider_but_continue_watching_can_reach_the_
+    top_score`: that one is about the *score* ladder agreeing with the pin.
+    This one is about the pin being singular, which the ladder cannot say.
+    """
+    library = await _every_family_fires()
+
+    pinning = [
+        _named(provider)
+        for provider in ROW_PROVIDERS
+        for proposal in await provider.propose(library.context())
+        if proposal.pinned
+    ]
+
+    assert pinning == ["ContinueWatchingProvider"], (
+        "the pin is not singular, so `_select`'s unbounded pinned slice is unbounded in fact"
+    )
+
+    package = pathlib.Path(usher.services.rows.__file__).parent
+    declared = {
+        path.stem
+        for path in sorted(package.glob("*.py"))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.keyword)
+        and node.arg == "pinned"
+        and not (isinstance(node.value, ast.Constant) and node.value.value is False)
+    }
+    assert declared == {"continue_watching"}, (
+        f"modules passing a truthy `pinned=`: {sorted(declared)}"
+    )
 
 
 def test_the_registry_is_the_same_set_however_the_deployment_is_wired() -> None:
@@ -459,4 +552,42 @@ async def _populated() -> Library:
         )
     series_id = await library.series("An Owned Series")
     await library.episode(series_id, season=1, number=1)
+    return library
+
+
+async def _every_family_fires() -> Library:
+    """A household that makes all three `RowFamily` members reachable at once.
+
+    One resume (`SOURCE`, and the only pinned proposal in the registry), one
+    finished title with stored neighbours (`SIMILARITY` -- a seed with no
+    neighbour list is skipped, so finishing something is not enough), and one
+    stored generation (`CURATED`).
+
+    **The generation is the part a household cannot accumulate**, which is why
+    `test_every_proposed_row_carries_its_providers_slug_prefix` says it cannot
+    check `CuratedProvider`: a `curated_rows` record is something a nightly job
+    leaves behind, so it is seeded here through the port rather than watched
+    into existence.
+    """
+    from usher.ports.repository import ScoredNeighbor
+
+    library = Library()
+    resumed = await library.title("Something Started")
+    await library.in_progress(resumed, at=days_ago(2))
+
+    seed = await library.title("Something Finished")
+    await library.finished(seed, at=days_ago(3))
+    neighbours = [await library.title(f"Something Like It {index}") for index in range(3)]
+    await library.neighbors.replace(
+        [seed],
+        [
+            ScoredNeighbor(
+                title_id=seed, neighbor_title_id=other, score=0.9 - rank / 100, rank=rank
+            )
+            for rank, other in enumerate(neighbours)
+        ],
+        blend_fingerprint=_FP,
+    )
+
+    await library.curated(neighbours, position=0)
     return library
