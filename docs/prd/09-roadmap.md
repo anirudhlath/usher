@@ -711,6 +711,84 @@ shareable artifact opaque rather than removing the grant. Listed here and not
 only in the ADR that defers it: an obligation recorded only where it was
 postponed is one nobody plans.
 
+## Carried debt — found by a milestone, owned by none
+
+By the same rule as the paragraph above. Each of these was **measured** during a
+milestone that did not own it, recorded where it was found (a rules file, a PRD
+section, a module docstring), and left without a milestone. Recorded here so the
+roadmap says who owes them, because a finding filed only next to the code it
+concerns is one nobody schedules. Every entry names its evidence; none is a
+suspicion.
+
+- **45 columns leak a raw driver exception across the port boundary** — found by
+  M8, measured live against Postgres 17.10 / asyncpg 0.31.0 with every mechanism
+  driven through the real repository method. 67 bounded columns: 17 provably
+  safe, 5 already translated (both M8 tables), **45 exposed**. The reason this is
+  not a small fix: **31 of the 45 are written through `stage_records`'
+  `copy_records_to_table` on the raw asyncpg connection**, outside SQLAlchemy's
+  error translation entirely, where an out-of-range `int` raises
+  `builtins.OverflowError` — no SQLSTATE, not a `DBAPIError`, and
+  `is_row_refusal()` cannot even inspect it. **No widening of `except
+  IntegrityError` can reach them.** `_errors.py`'s scope claim (class 22 + class
+  23 covers "not storable as given") is true for SQLAlchemy-executed statements
+  and does not model the COPY path. Needs a scoped decision before an owner —
+  the cheapest candidate measured is declaring staging columns wide (`bigint`,
+  `text`) so refusal moves to the `INSERT … SELECT` where the existing net
+  catches it, evidenced by `id_crosswalk.imdb_id` (staging `text`) surfacing as
+  a wrapped `DBAPIError` while `media_items.container` (staging `varchar(32)`)
+  does not. Separately: `Title.popularity: float | None = Field(ge=0)` accepts
+  **infinity** — `float('inf') >= 0` is `True`, Postgres 17's unbounded `NUMERIC`
+  stores it, verified round-trip, reachable via `json.loads('1e400')` from a TMDb
+  payload. `community_rating` is safe only by accident of its `le=10`.
+- **`PortRateLimited.retry_after` reaches no consumer** — an M4 gap found by M8.
+  Seven raise sites across five modules produce it; `git grep retry_after src/`
+  finds **zero** consumers. `JobWorker._fail` passes only `retryable=True`, and
+  the backoff is computed from attempt count alone, so a 429 telling us exactly
+  when to return is answered with a jittered guess and the hint survives only as
+  prose in `jobs.last_error`. Affects every job kind. **M9-sized** — it needs a
+  `run_after` argument on `JobQueue.fail` and a change to `_FAIL`'s `CASE`, which
+  is a port every kind shares.
+- **`test_sse_end_to_end.py::test_opening_a_stub_promotes_it…` is flaky, and the
+  root cause may be a product bug rather than a test bug** — fires in roughly 6
+  of 14 full runs under load, at commits with none of M8's work. **The enrich
+  handler publishes its SSE frame *inside* the job's transaction, before
+  `JobWorker` calls `complete()` and commits**, so the test's post-frame read
+  races the commit. Read as a test bug it is a racy assertion; read as a product
+  bug, **a client is told an event landed before the transaction that produced it
+  committed**, and a rollback would mean the client was told about something that
+  never happened. Nobody has evaluated the second reading. **M9** — it is on the
+  route surface M9 builds.
+- **Query expansion is shipped off after measuring worse** — M8's live
+  verification measured MRR 0.733 → 0.373 and recall@10 0.800 → 0.533, with a
+  label-free control (query-to-query cosine 0.5417 → 0.5975 mean, 0.6328 →
+  0.7784 max) confirming the rewrites collapse toward the corpus centroid.
+  ⚠️ One model, one 150-document corpus, five queries. The code ships behind
+  `USHER_QUERY_EXPANSION_ENABLED` (default `false`) and PRD
+  [05](05-search-and-similarity.md) carries the measurement against the claim.
+  **Post-v1 unless M9's `search_queries` supplies a real evaluation set** —
+  which is the thing that would actually settle it, and is the reason not to
+  re-litigate it on five queries.
+- **Expansion is billed on searches the semantic lane cannot serve** — the guard
+  is `embedder is None`, not "anything is embedded". Measured: with
+  `USHER_EMBEDDING_ENABLED=true` and `title_embeddings` empty, `usher search`
+  bought a completion, printed the rewrite, returned `semantic_coverage=0.000`,
+  and *then* said no title had an embedding — **the warning arrives after the
+  money**, on every fused search of a not-yet-backfilled deployment. The honest
+  predicate ("does any title in the *filtered* population have a vector") is
+  unanswerable before the vector that does the filtering exists, and the cheap
+  global stand-in is a weaker guard costing a port method, an implementation, a
+  fake, a contract case and a read on every fused search. Mitigated but not
+  closed by the new default: it now takes two opt-ins rather than one. **Goes
+  with whoever takes the entry above.**
+- **The candidate pool has no ownership *filter*, only an `ORDER BY` key** —
+  while the curation prompt asserts *"one household's **own** library"*.
+  Reachable on any library with fewer than `USHER_CURATION_POOL_SIZE` unwatched
+  owned titles. Interacts with `min_cards = 5`: M8 measured rows carrying 5–6
+  cards at pool 200 and 2–3 at pool 5–8, so a household with a small unwatched
+  pool gets **zero rows every time, at full price** — and filtering on ownership
+  makes small pools more common. A product decision (filter, or correct the
+  prompt's claim), not a defect to patch. **M9**, with the other row work.
+
 ## Post-v1 candidates
 
 Not committed; recorded so the design keeps room for them.
