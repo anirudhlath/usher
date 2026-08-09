@@ -3,7 +3,7 @@ paths:
   - "src/usher/adapters/search/**"
   - "src/usher/adapters/embedding/**"
   - "src/usher/services/search.py"
-  - "src/usher/services/similarity.py"
+  - "src/usher/services/similar.py"
 ---
 
 # Search, trigram, RRF and embeddings
@@ -477,9 +477,7 @@ the typed query when nothing was expanded would instead put a line on every
 search of every default deployment and mean nothing -- which is the mutation
 the CLI case kills.
 
-**Nothing runs `usher similar --rebuild` for you**, and that is the one
-freshness gap in the milestone, written down as a gap rather than dressed up:
-a title's neighbours go stale when *some other* title gets an embedding,
-which no per-row predicate can decide. `title_neighbors` carries a
-whole-artefact `computed_at` instead of a fingerprint, and refreshing it is
-an operator's command or a cron entry run after `usher index --backfill`.
+The `usher similar --rebuild` freshness gap itself is stated in `CLAUDE.md`
+(always loaded); the one detail not there: `title_neighbors` carries a
+whole-artefact `computed_at` rather than a per-pair fingerprint, which is
+exactly why no per-row predicate can detect the staleness.

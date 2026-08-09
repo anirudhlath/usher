@@ -267,6 +267,12 @@ a *constrained* table, so one bad row aborts its batch. Reach the driver with
 `(await (await session.connection()).get_raw_connection()).driver_connection`.
 This project's staging tables are deliberately unconstrained, which moves
 that failure one statement later — see the staging note below.
+
+**`PostgresImportRunRepository.save()` (`usher/db/repositories/import_run.py`)
+must roll back on a caught `IntegrityError`, not just translate it** — without
+it, a poisoned session's *next* statement raises `PendingRollbackError`
+instead of running. Full evidence and the follow-on `BootstrapService`
+checkpoint bug it exposed: `bootstrap-and-datasets.md`.
 **`ON CONFLICT DO UPDATE` cannot read a CTE, and that is what makes M4's
 watch-state merge two statements.** Verified 2026-07-31 against
 `pgvector/pgvector:pg17`. Three findings, in the order they bite:

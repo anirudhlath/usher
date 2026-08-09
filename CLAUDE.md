@@ -75,6 +75,11 @@ load automatically when working in `docs/`.
   with a wrong-typed or out-of-range field that pydantic still serializes
   without complaint. `.evolve(**changes)` re-validates from scratch and is
   the only sanctioned write path.
+- **No `Mapping` field is hashable — "frozen therefore hashable" is false.**
+  `MappingProxyType` makes a frozen model's `Mapping` field immutable
+  (`TypeError: 'mappingproxy' object does not support item assignment`) but
+  `mappingproxy` delegates `__hash__` to the dict it wraps, which is `None`.
+  Wrap for the immutability; do not claim the hash.
 - **Ship importers, never data.** No third-party metadata may be committed or
   included in a release artifact — IMDb and TMDb both prohibit redistribution.
   Users run importers and hold their own API keys. Attribution strings stay in
@@ -82,6 +87,17 @@ load automatically when working in `docs/`.
 - **Use `uv`** for all Python work: `uv sync`, `uv run <cmd>`, `uv add <pkg>`.
   Never pip/conda, never activate a venv.
 - **TDD.** Failing test first, then implementation.
+- **A mutation sweep mutates the working tree in place, so nothing else may use
+  that tree while it runs.** Serialise anything that mutates the tree — one
+  implementer at a time; disjoint file sets are not enough. Reading a source
+  file mid-sweep gives you whatever mutation is currently applied, so read it
+  with `git show HEAD:<path>`; a reviewer needing concurrency takes a
+  `git archive <sha> | tar -x` copy, never `cp -a`.
+- **`git checkout <path>` discards uncommitted work, not just the plant.**
+  Never use it — nor `git stash` or `git reset` — to undo anything. Every plant
+  gets a `cp` backup, and the restore is verified by reading the file back, not
+  by the suite going green: a suite green before the plant is green again after
+  a revert that took twenty unrelated lines with it (M8 Task 10).
 - **Secrets in `Settings` are `pydantic.SecretStr`**, never plain `str` —
   `database_url`, `secret_key`, `tmdb_api_key`, `llm_api_key`. Unwrap with
   `.get_secret_value()` only at the point of use (e.g. handing a DSN to
@@ -90,7 +106,7 @@ load automatically when working in `docs/`.
   message. This is how `docs/prd/08-operations.md`'s "credentials are never
   logged" rule is enforced rather than merely asserted.
 
-### Four rules about evidence, which is what this repository keeps getting wrong
+### Five rules about evidence, which is what this repository keeps getting wrong
 
 These are stated here rather than in a subsystem file because every one of them
 was learned separately in two or more subsystems.
@@ -113,6 +129,11 @@ was learned separately in two or more subsystems.
 - **A concurrency claim needs observed overlap, not a count.** "Exactly one of
   two claimers got the job" is also what a serialised pair produces. Record the
   wall-clock interval each side occupied and assert they genuinely intersect.
+- **A defect has a careless spelling and a careful one, and a linter catches
+  only the careless one.** When a plant dies on a linter, spell it again
+  without the lint error before writing anything down: a router reaching the
+  LLM through the composition root died on ruff `I001` only with the import
+  outside its isort position, and passed all five gate steps with it inside.
 
 ## Verified facts worth not re-deriving
 
@@ -123,7 +144,9 @@ so a session pays only for what it touches.
 
 | file | loads when working on | holds |
 |---|---|---|
-| `testing-discipline.md` | `tests/**` | the four mutation sweeps and their survivors, the network guard, concurrency-test shapes, fake divergences, the no-third-party-data controls |
+| `testing-discipline.md` | `tests/**` | test-design findings — assertions that cannot fail, premise guards, ordering premises, the shape a concurrency test needs |
+| `mutation-sweeps.md` | `docs/plans/**` | sweep harness mechanics — the three `.pyc` defences, `compile()` rather than `ast.parse`, SIGTERM skipping the `finally` — and every per-task sweep ledger with its survivors |
+| `fixtures-and-fakes.md` | `tests/fixtures/**`, `tests/fakes/**`, `tests/contract/**` | the network guard, the four no-third-party-data controls, shape-recorded/value-synthetic fixtures, every recorded divergence between a fake and its Postgres arm |
 | `db-and-sql.md` | `src/usher/db/**` | `ON CONFLICT` traps, `now()` vs `clock_timestamp()`, triggers that own a column, staging-table locks, generated columns, the migration id convention, `test_migrations.py`'s two halves |
 | `emby-push-and-ingest.md` | `adapters/emby/**`, the pipeline services | M3/M4/M5's live runs against a real Emby 4.9.5.0 — the wrong write-back route, `UserData` divergence, the websocket's real cadence, the match ladder's measured yield |
 | `tmdb-and-enrichment.md` | `adapters/tmdb/**`, `services/enrich.py` | the 712-request live run, the 4xx taxonomy, `append_to_response=season/N`, movie/TV divergence across three API layers |
@@ -139,10 +162,16 @@ so a session pays only for what it touches.
 To read one outside its trigger paths, just open the file.
 
 **Adding a finding:** append it to the subsystem file, not here. This index
-grows only when a new subsystem appears — `curation-and-llm.md` is the one M8
-added, and the first since M7 created the set. A finding that genuinely
-applies everywhere goes in "Four rules about evidence" above — that list has
-earned four entries in eight milestones, so the bar is high.
+grows when a new subsystem appears — `curation-and-llm.md` is the one M8
+added — or when a file outgrows its trigger, which is why `mutation-sweeps.md`
+and `fixtures-and-fakes.md` exist. `testing-discipline.md` had reached 1,728
+lines behind `tests/**`, a trigger that fires for almost every task in a
+TDD repo, so the file that loaded most often was also the largest one: the
+sweep ledgers and the fixture material moved to triggers that fire when they
+are actually wanted. **Measure which paths a rules file really loads on before
+assuming a split saved anything.** A finding that genuinely
+applies everywhere goes in "Five rules about evidence" above — that list has
+earned five entries in eight milestones, so the bar is high.
 
 ## Commands
 

@@ -320,3 +320,11 @@ request a *fresh* bucket — N in-flight requests get N × 30 rps, a rate
 limiter that limits nothing. It belongs on `app.state` at lifespan, and
 nothing in PRD 07's surface calls enrichment directly (M5's demand
 promotion enqueues a job; `usher work` runs it).
+
+**`status.HTTP_422_UNPROCESSABLE_ENTITY` is deprecated behind a Starlette 1.3
+module `__getattr__`, so it warns once per *request*, not once per import.**
+Use `HTTP_422_UNPROCESSABLE_CONTENT`; both are 422. This suite deliberately
+runs with no expected warnings, for the reason the `testcontainers` shim was
+replaced (see `fixtures-and-fakes.md`): a suite with one permanent warning is a
+suite where the next real
+one is invisible.
