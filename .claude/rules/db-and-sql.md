@@ -525,3 +525,19 @@ caller-assembly mistake. It answers `RepositoryConflict(constraint=
 "pk_curated_rows")` with the session still usable, because the SAVEPOINT does
 not care which kind of refusal it rolled back. Enumerations of "what raises
 here" written by constraint *kind* keep missing a kind; write them by outcome.
+
+**`env.py`'s `fileConfig` silenced every logger `alembic.ini` does not name,
+and `disable_existing_loggers` defaults to True.** Measured 2026-08-10:
+`alembic.ini`'s `[loggers]` lists root, sqlalchemy and alembic, so every other
+logger in the process came back with `.disabled = True` — permanently, since
+nothing in `logging` clears that flag on reconfigure. Harmless in the shape a
+container runs (`alembic upgrade head && exec python -m usher`: its own
+process, gone before the app starts) and not harmless in any process that
+migrates in-process, which is how the test suite lost every `httpx` record
+after `tests/integration` ran. Now passes `disable_existing_loggers=False`,
+pinned by `tests/unit/test_db_migrations_env.py` — structurally, because the
+call runs at import under a live alembic context and calling `fileConfig`
+against the real ini from a unit test would reconfigure logging for every case
+after it, which is the defect rather than a way to observe it. Full evidence
+and the companion repair in `configure_logging`:
+`.claude/rules/api-telemetry-and-lanes.md`.

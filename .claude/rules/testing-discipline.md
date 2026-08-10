@@ -843,3 +843,22 @@ fail **that case alone**, on `assert 1 == 0`. Two shapes:
   makes the structural half of this argument about a *read* one branch over —
   it was there to copy and nobody had.
 
+
+**A suite run one directory at a time is not the suite, and global state is
+what the difference is made of.** Found 2026-08-10. CI runs `uv run pytest`
+whole; the habit in this repository is `uv run pytest tests/unit` while
+iterating, and a defect lived exactly in the gap: `tests/integration` migrates
+in-process, alembic's `fileConfig` disabled the `httpx` logger for the rest of
+the process (`api-telemetry-and-lanes.md` has the mechanism), and a unit case
+three directories later could no longer see a record it asserts must arrive.
+`tests/unit` alone: green. `tests/contract tests/integration
+tests/unit/test_telemetry.py`: red. Nothing about the failing case, its file or
+its own directory was wrong.
+
+Two things worth carrying. **The bisect that matters is over directory *order*,
+not over cases** — the cheap first move is to run the suspect file after each
+other top-level directory in turn, which located this in two runs. And
+**pinning it needs a case that does not depend on the ordering that revealed
+it**: the regression here disables the logger itself and so fails on
+`pytest tests/unit/test_telemetry.py` alone, because a case that only fails in
+a particular whole-suite order is a case the next person deletes as flaky.

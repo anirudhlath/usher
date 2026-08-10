@@ -328,3 +328,35 @@ runs with no expected warnings, for the reason the `testcontainers` shim was
 replaced (see `fixtures-and-fakes.md`): a suite with one permanent warning is a
 suite where the next real
 one is invisible.
+
+**`configure_logging` reclaims logging from libraries that took it, and it was
+not reclaiming `.disabled` — so one `fileConfig` call muted a logger for the
+rest of the process.** Found 2026-08-10 from CI, and the shape of the failure
+is the finding: `uv run pytest tests/unit` was green, `uv run pytest` was not.
+`logging.config.fileConfig`/`dictConfig` default `disable_existing_loggers` to
+**True** and set `.disabled` on every logger their own config does not name;
+`db/migrations/env.py` calls `fileConfig` against an `alembic.ini` naming only
+root, sqlalchemy and alembic, and the integration suite migrates in-process. So
+by the time the unit suite ran, `httpx` was disabled, and
+`test_httpxs_per_request_info_line_does_not_reach_the_sink` failed on its
+second arm — the WARNING that must still *arrive*.
+
+The repair is one line in the reclaim loop beside the existing
+`handlers = []` / `propagate = True`, and the reason it belongs there rather
+than in `env.py` alone is where `logging` checks the flag: **`Logger.handle`
+tests `.disabled` below both the level check and the handler walk**, so nothing
+this function can do to sinks, levels or handlers reaches a disabled logger.
+The loop already existed to take logging back from a library that grabbed it
+(uvicorn's own handlers); a disabled logger defeats that as completely as a
+stray handler does. `env.py` now also passes `disable_existing_loggers=False`
+(`db-and-sql.md`) — that stops the damage, this repairs it whoever caused it,
+and neither subsumes the other, because any dependency may call `dictConfig`.
+
+Two smaller things measured on the way. The reclaim loop iterated
+`logging.root.manager.loggerDict` directly while calling `logging.getLogger`
+inside it, and `getLogger` on a `PlaceHolder` entry can insert parent
+placeholders — a mutation during iteration; it now snapshots the keys, which
+costs nothing. And the defect was invisible to every assertion in the suite but
+one: **an intercepted-record path is asserted almost entirely by what must not
+arrive**, so the single case requiring a stdlib record to arrive is what caught
+a total mute. Both arms, or a "nothing reached the sink" fix passes.

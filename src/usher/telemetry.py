@@ -119,9 +119,23 @@ def configure_logging(settings: Settings) -> None:
     # propagate=True is what makes redirecting the root logger below
     # actually catch everything, instead of records printing twice: once
     # from a library's own handler, once forwarded through root.
-    for name in logging.root.manager.loggerDict:
-        logging.getLogger(name).handlers = []
-        logging.getLogger(name).propagate = True
+    #
+    # `.disabled` belongs to the same reclaim and was missing until 2026-08-10:
+    # `logging.config.fileConfig`/`dictConfig` default `disable_existing_loggers`
+    # to True and set it on every logger their own config does not name, and
+    # `Logger.handle` checks it *below* both the level check and the handler
+    # walk -- so a logger left disabled is unreachable no matter what this
+    # function does to handlers, levels or sinks. Reached here through
+    # `db/migrations/env.py`'s `fileConfig` call (alembic.ini names only root,
+    # sqlalchemy and alembic), which is why the whole test suite could not see
+    # an httpx WARNING after it migrated in-process. Snapshot the keys: a
+    # `getLogger` on a `PlaceHolder` entry can insert parent placeholders, and
+    # that would be a mutation during iteration.
+    for name in list(logging.root.manager.loggerDict):
+        stdlib_logger = logging.getLogger(name)
+        stdlib_logger.handlers = []
+        stdlib_logger.propagate = True
+        stdlib_logger.disabled = False
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
 
     # **`httpx` logs one INFO line per request, and the redirect above is what
