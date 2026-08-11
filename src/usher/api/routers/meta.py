@@ -22,7 +22,21 @@ Legal under all nine `lint-imports` contracts: the layering contract's layers
 are `api -> services -> ports -> domain` and do not name `adapters`; the
 contract forbidding a concrete adapter from escaping its package only names
 `usher.adapters.emby`, `.search`, `.embedding` and `.llm` -- none of which
-`usher.adapters.bulk` or `usher.adapters.tmdb` are.
+`usher.adapters.bulk` or `usher.adapters.tmdb` are. It is also the first
+import of a *non-swappable* adapter module directly from `usher.api`:
+`.bulk` and `.tmdb` are named in none of the three per-implementation-swap
+contracts, unlike the four above. That is a fact about which contracts exist
+today, not a claim that this route was designed against that gap.
+
+**The scan (`tests/unit/test_api_meta.py`) only sees a module-level
+`*_ATTRIBUTION` assignment, not `BulkDataset.attribution` itself.**
+`ports/bulk.py`'s own docstring names a case that shape cannot reach -- a
+dataset with no attribution requirement returning a computed string -- and
+the same file records why that gap is left open rather than closed: seeing
+the property would mean instantiating every `BulkDataset` subclass, and some
+want an `httpx.AsyncClient`.
+`test_every_bulkdataset_attribution_property_is_a_bare_scanned_constant` is
+the canary that keeps the gap from being silent.
 
 **No `SessionDep`.** This route reads four module constants and returns them;
 it cannot 503 and it cannot leak a host, as a property of the dependency
@@ -38,6 +52,17 @@ another, not about this router, but picking one arbitrarily rather than
 importing both keeps the served list at four entries instead of a fifth
 duplicate. The two constants' equality is asserted directly in the test file
 so a future edit to either cannot drift unnoticed.
+
+**Response order is pinned, not incidental.** `_ATTRIBUTIONS` is declared in
+PRD 04's licensing table's own row order (IMDb, TMDb, Wikidata, MovieLens),
+and `test_attribution_answers_in_a_pinned_order` asserts the served list
+against that exact order -- a licensing surface's response bytes should be
+deterministic rather than left to depend on how a tuple happened to be
+typed. `test_every_attribution_constant_in_the_adapters_is_served`'s
+scanned-vs-served comparison stays a *set* comparison deliberately: the
+scan's own order is the sorted file-path order `Path.rglob` returns, which
+has no relationship to this declaration and asserting list equality there
+would pin an accident instead of a contract.
 """
 
 from fastapi import APIRouter
@@ -53,8 +78,8 @@ router = APIRouter(tags=["meta"])
 _ATTRIBUTIONS: tuple[AttributionEntry, ...] = (
     AttributionEntry(source="IMDb", text=IMDB_ATTRIBUTION),
     AttributionEntry(source="TMDb", text=TMDB_ATTRIBUTION),
-    AttributionEntry(source="MovieLens", text=MOVIELENS_ATTRIBUTION),
     AttributionEntry(source="Wikidata", text=WIKIDATA_ATTRIBUTION),
+    AttributionEntry(source="MovieLens", text=MOVIELENS_ATTRIBUTION),
 )
 
 
