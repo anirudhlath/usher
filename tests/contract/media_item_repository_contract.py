@@ -886,6 +886,82 @@ class MediaItemRepositoryContract:
             ("stale", False),
         ]
 
+    async def test_list_for_episode_puts_the_freshest_available_copy_first(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """The second key, on its own rows -- `list_for_title`'s sibling case,
+        one statement over. Two *available* copies is the ordinary shape for
+        an episode too (a 4K and an HD file of one episode file), and the
+        case above cannot see `last_seen_at DESC` at all, because its two
+        rows already differ on `available`. Stored oldest-first, so
+        insertion order and the answer disagree.
+        """
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    "old",
+                    title_id=title_id,
+                    episode_id=episode_id,
+                    last_seen_at=EARLIER,
+                )
+            ]
+        )
+        await repository.upsert_many(
+            [item(source_id, "new", title_id=title_id, episode_id=episode_id)]
+        )
+        listed = await repository.list_for_episode(episode_id)
+        assert [row.external_id for row in listed] == ["new", "old"]
+
+    async def test_list_for_episode_breaks_ties_on_id(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """Same non-HOT-update mechanism as `list_for_title`'s sibling case --
+        see that case's docstring for the full reasoning. `copy-a` is
+        re-upserted last and its `last_seen_at` has to *change* (dropped here,
+        so it defaults back to `RUN_AT` off `EARLIER`), which moves it in
+        `ix_media_items_sweep`'s key and forces a new index entry; without
+        that, Postgres keeps the original one and the read stays in insertion
+        order, where a missing `id` tiebreak is unobservable either way.
+
+        Unobservable for the fake regardless, for the same reason
+        `list_for_title`'s case names: that fake mints ids in insertion order
+        and its dict preserves that order across an update, so its id order
+        and its storage order are the same sequence and no seeding can
+        separate them. Only the Postgres run can fail this.
+        """
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    "copy-a",
+                    title_id=title_id,
+                    episode_id=episode_id,
+                    last_seen_at=EARLIER,
+                )
+            ]
+        )
+        await repository.upsert_many(
+            [item(source_id, "copy-b", title_id=title_id, episode_id=episode_id)]
+        )
+        await repository.upsert_many(
+            [item(source_id, "copy-c", title_id=title_id, episode_id=episode_id)]
+        )
+        await repository.upsert_many(
+            [item(source_id, "copy-a", title_id=title_id, episode_id=episode_id)]
+        )
+        listed = await repository.list_for_episode(episode_id)
+        assert len(listed) == 3
+        assert [row.id for row in listed] == sorted(row.id for row in listed)
+
     async def test_list_for_episode_answers_empty_for_an_episode_on_no_source(
         self, repository: MediaItemRepository
     ) -> None:
