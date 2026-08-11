@@ -160,29 +160,33 @@ Tier 1 is the default and is sufficient for any realistic home library plus a
 generous recommendation pool. One request per title thanks to
 `append_to_response`.
 
-**"One request per title" holds for a movie and does not for a series**, and
-the table above predates that distinction. A series costs one request plus
-one per season, because TMDb's series detail lists its seasons and carries no
-episodes ([03](03-sources-and-sync.md)). Measured live 2026-08-01: the sampled
+**"One request per title" holds for a series too now, and it did not until
+M9.** A series used to cost one request plus one per season, because TMDb's
+series detail lists its seasons and carries no episodes
+([03](03-sources-and-sync.md)). Measured live 2026-08-01: the sampled
 long-running series cost ten requests each, and 30 series carried 320 seasons
-between them — **median 9**. So the series half of a full pass is 32,409 ×
+between them — **median 9**. So the series half of a full pass *was* 32,409 ×
 (1 + 9) ≈ **324k requests**.
 
-**`append_to_response=season/N` collapses that back to one** — 32,409, i.e.
-**~10x** — verified, including the 20-item ceiling that bounds it at 14
-seasons alongside the six namespaces already appended (a series with more
-seasons than that needs a second request; a small tail), and including that a
-season the series does not have is silently omitted rather than erroring.
-Recorded here, not yet taken; it is a change to the adapter's `fetch` and to
-[03](03-sources-and-sync.md)'s request table, and belongs in its own change.
+**`append_to_response=season/N` collapses that back to one** — **~32k against
+~324k, i.e. ~10x** — verified, including the 20-item ceiling that bounds it at
+14 seasons alongside the six namespaces already appended (a series with more
+seasons than that needs a second request; a small tail, which is why the
+figure is ~32k rather than 32,409 exactly), and including that a season the
+series does not have is silently omitted rather than erroring. **Taken**: the
+adapter's `fetch` issues the blind `season/0…season/13` window, reconciles it
+against the `seasons[]` summary the same response carries, and follows up only
+for listed numbers that window missed.
 
 Two honest caveats on the 324k, because it is a planning figure and not a
 measurement. The median comes from **30 series that skew popular**, and
-popular series have more seasons than a library's median does, so this is an
-upper bound. And an earlier draft of this paragraph said "~190k → ~35k, ~5x":
-`~190k` was the tier-1 *title* count from the table above, borrowed one
-section over and read as a series *request* count. `CLAUDE.md` records the
-correction. 32,409 × 10 is 324k; ~190k would require a median of ~4.9.
+popular series have more seasons than a library's median does, so **~324k is
+an upper bound on that measurement rather than a prediction** of what the
+`1+N` shape would have cost a real catalog. And an earlier draft of this
+paragraph said "~190k → ~35k, ~5x": `~190k` was the tier-1 *title* count from
+the table above, borrowed one section over and read as a series *request*
+count. `CLAUDE.md` records the correction. 32,409 × 10 is 324k; ~190k would
+require a median of ~4.9.
 
 TMDb disabled its old hard rate limit in 2019; current guidance is a ceiling
 "somewhere in the 40 requests per second range". Usher self-limits to ~25 rps
