@@ -2062,3 +2062,93 @@ ProviderCdnImageFetcher` planted in `adapters/http.py` **in its isort
 position** (so the careful spelling of the defect is what was measured, not the
 careless one `ruff check` catches as `F401`) reports **8 kept, 1 broken**,
 naming the new module; restored, 9 kept, 0 broken, `md5sum`-verified.
+
+**M9 Task D7's sweep: 15 plants over `WatchWriteService` and the watch router.
+Three-way split — 12 KILLED, 1 SURVIVED and measured equivalent, 2 controls
+SURVIVED every gate step separately. 0 BAD-ANCHOR, 0 BROKEN-MUTATION,
+0 DID-NOT-RUN, 0 HUNG.** Run twice, 2026-08-11: once before merging
+`milestone/m9-api-surface` and once after, with identical verdicts. In place
+over `src/usher/services/watch_write.py` and `src/usher/api/routers/watch.py`,
+plant list and expected verdicts written down first, every plant asserted
+present by an exact anchor count (`count(old) == 1`, so a silent no-op edit is
+BAD-ANCHOR rather than a kill it did not earn), every mutation dry-run through
+`compile()`, `PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under
+**both** `src/` and `tests/`, and every restore verified by `md5sum` against a
+pre-plant digest of both files.
+
+**The harness carries a 300 s per-plant timeout and reports `HUNG` as its own
+verdict**, added deliberately rather than defensively: a `subprocess.run` with
+no timeout turns a mutation that deadlocks into a run that never returns, and
+the shape of that mistake in this milestone was a *hang written up as a kill*.
+A hang is neither — it is a plant whose evidence never arrived.
+
+**Selection:** `tests/unit/test_services_watch_write.py`,
+`tests/unit/test_api_watch.py` and `tests/integration/test_watch_routes.py` —
+47 cases, 8–17 s a run, green before and after. Scoped rather than whole-suite
+for the reason B2's entry gives, and `git grep` confirms nothing outside these
+three imports `usher.services.watch_write`.
+
+The four the plan names, each killed by the cases written for it: publishing
+before the local write commits fails **3** (the unit ordering journal, the API
+commit-order case, and the integration probe that reads `watch_states` from a
+second connection *inside* `publish`); the invalidate/publish moved outside the
+changed-row guard fails **4**; the `/played` path zeroing the position instead
+of keeping it fails **5**; the title branch reading the episode statement fails
+**10**. The other eight: `_changed` widened to compare `last_played_at` fails 1;
+`JobPriority.VISIBLE` → `BACKFILL` fails 2; the enqueue moved *under* the
+changed-row guard fails 1; one `row.invalidated` frame instead of one per slug
+fails 4; the frame carrying no target id fails 2; the title existence read
+deleted fails 2 (including the integration case that would otherwise be a
+foreign-key 500 rather than a 404); the episode existence read deleted fails 1;
+`DELETE /played` marking played fails 2.
+
+**The plan's own headline mutation is not spellable in this task's files, and
+substituting one quietly would have been the interesting failure.** *"Dropping
+`episode_id IS NULL` from the copy read"* lives in
+`db/repositories/media_item.py`, which is D2's and pinned there — this service
+can only choose *which* port method to call. So it was planted two ways: as the
+service calling `list_for_episode(title_id)` (10 kills, above), and — to check
+the headline unit case really has the teeth the plan claims — as the **fake's**
+`list_for_title` losing its `entry.episode_id is None` conjunct. Under that
+plant `test_a_title_write_enqueues_one_job_per_source_copy_and_not_one_per_
+episode_file` fails with **21 keys against the expected 1**, which is the
+20,001-row read arriving as an assertion. `cp`-backed-up, `md5sum`-verified on
+restore, re-measured after the merge.
+
+**The one survivor is an equivalent mutant, measured rather than assumed, and
+it demoted a case's claim.** `dict.fromkeys(copy.external_id for copy in
+copies)` replaced by a plain list comprehension **survived all 47 cases**,
+because both arms of `JobQueue.enqueue` already deduplicate on `(kind, key)`
+(Postgres with `SELECT DISTINCT ON`, the fake with a dict) and every request in
+this batch carries the same priority, so "highest priority wins" cannot
+separate them either. The mutant and the original differ on no state the system
+can be in. The case that read as covering it was named *"the write-back keys
+are deduplicated within one press"*; it is now
+`test_two_copies_sharing_an_external_id_become_one_write_back`, saying in its
+own docstring that it pins the outcome and cannot pin who produced it, and
+`_enqueue_write_back`'s docstring records the measurement so the `dict.fromkeys`
+is not read as load-bearing — or deleted in the belief that a case would notice.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| `WatchWriteService.__init__`'s `self._queue` / `self._events` writes swapped | PASS | PASS | PASS | PASS (9 kept, 0 broken) | PASS (47) |
+| one sentence of `_publish_watch_state`'s docstring reworded | PASS | PASS | PASS | PASS (9 kept, 0 broken) | PASS (47) |
+
+Both are spelled against this task's *own* code rather than against something
+adjacent to it, which is the other way a control goes wrong. The first is a
+fact about the code: two disjoint attributes on a freshly constructed object,
+neither right-hand side reading the other, nothing running between them. The
+second was checked first against the docstring scans this file records — they
+cover `ports/`, `services/rows/`, `adapters/images/` and several `api/`
+modules, and **none reads `services/watch_write.py`**; `tests/unit/test_api_
+problem_vocabulary.py` does AST-harvest `src/usher/api/`, which is why the
+docstring control was placed in the service rather than in the router. The one
+scan this task itself adds
+(`test_the_watch_router_and_its_service_hold_no_source_adapter`) parses both
+modules and compares `ast.unparse` of a **docstring-stripped** tree, precisely
+so two modules whose subject is the port they do not hold can say so.
+
+Gate green before and after on the fully restored tree (`md5sum`-verified
+byte-identical to the pre-sweep digest): **3488 unit passed / 4 skipped** and
+**1067 integration passed / 22 skipped**, `ruff check`, `ruff format --check`,
+`mypy` over 535 files, `lint-imports` 9 kept / 0 broken.
