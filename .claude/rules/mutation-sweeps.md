@@ -168,9 +168,12 @@ this one produces a complete, plausible, wrong one. Nearest relative is the
 collecting — it collected an error.
 
 Three defences, and the third is what makes the other two checkable: delete
-every `__pycache__` under `src/` before each run, set
+every `__pycache__` under `src/` **and `tests/`** before each run (the `tests/`
+half was missing here until 2026-08-11 — see the entry at the end of this file,
+where a plant in a test file was scored against another plant's bytecode), set
 `PYTHONDONTWRITEBYTECODE=1` in the subprocess environment so none is written
-back, and carry an **equivalent-mutant control** — one mutation that must
+back — that one is the load-bearing defence, measured — and carry an
+**equivalent-mutant control** — one mutation that must
 SURVIVE (reordering `__all__`'s members will do). A sweep reporting every
 mutation killed cannot distinguish a suite with teeth from a harness that
 scores every run as a kill, and the control is the only thing that tells them
@@ -945,3 +948,76 @@ entry was written; re-measured here per gate step rather than re-argued.
 Gate green before and after, on the fully restored tree: `ruff check`,
 `ruff format --check`, `mypy` over 471 files, `lint-imports` 9 kept / 0
 broken, and the whole-suite baseline unchanged at **2,995 unit / 4 skipped**.
+
+**The `.pyc` collision has a spelling that is reproducible by construction
+rather than by luck, it hits plants in `tests/` as readily as plants in `src/`,
+and it can score a mutant SURVIVED.** Found 2026-08-11 on M9 Task D1's review
+follow-up, planting against a newly-widened padding sweep. Three plants, run
+three times in a row by the same harness with **no defences at all**, gave
+three different sets of answers:
+
+| attempt | T1 `range(1, 200)`, truth `64` | T2 `range(1, 900)`, truth `292` | T3 one-byte reframe in `src`, truth `201` |
+|---|---|---|---|
+| 1 | `64` ✓ | **`64`** — T1's bytecode | `201` ✓ |
+| 2 | **no failure at all** | `292` ✓ | `201` ✓ |
+| 3 | **no failure at all** | `292` ✓ | **`293`** — T2's test bytecode under T3's source plant |
+
+Three things here that the long entry above does not have.
+
+**One: same-length is a property of the plant class, not a coincidence.** That
+entry's two mutants each removed exactly 114 bytes, which reads as bad luck and
+invites a reader to treat the trap as rare. `_PADDING_SWEEP = range(1, 200)`,
+`… range(1, 600)` and `… range(1, 900)` are **30 characters each** — every
+substitution of one numeric literal for another of the same digit count is
+byte-identical in length, so it defeats the size half of CPython's
+`(int(source_mtime), source_size)` check *by construction*. Anyone sweeping
+numeric literals — a TTL, a limit, a batch size, a range bound — hits this on
+every plant, not occasionally.
+
+**Two: a stale run can report a mutant as a survivor, which is the more
+dangerous direction and is not in the record.** Attempts 2 and 3 scored T1 as
+passing. The entry above describes two mutants both scoring KILLED against the
+same case — bad, but it leaves you with a kill you over-trust. A false
+*survivor* is what makes a reviewer write "no case covers this" and then add a
+redundant test, weaken an assertion, or delete a guard as untested. Attempt 3's
+T3 is the same failure crossing file boundaries: a plant in
+`src/usher/services/playback_ticket.py` was scored by a run executing a *test*
+file's stale bytecode, so the number it reported belonged to a different plant
+in a different file.
+
+**Three: the recipe's sweep is scoped to `src/`, and a plant in a test file
+puts its `.pyc` in `tests/**/__pycache__`.** The harness that produced the
+table above was this project's own sweep script, which sweeps `__pycache__`
+under `src/` only — the recipe as written. Widen it to `src/` **and** `tests/`.
+
+**What is load-bearing, measured rather than assumed — and this refutes the
+first write-up of this finding, including the version in commit `c1fe176`'s
+message.** That write-up named the `src/`-only sweep as the cause and
+`-p no:cacheprovider` as part of the fix. Both claims were reasoning, not
+measurement. Re-run over four regimes, three attempts each, nine plant-runs per
+regime, against the reproduction above:
+
+| regime | result |
+|---|---|
+| no defences | unstable — the table above |
+| `PYTHONDONTWRITEBYTECODE=1` alone | 9/9 correct |
+| `+ __pycache__` swept under `src/` (the recorded recipe) | 9/9 correct |
+| `+ __pycache__` swept under `src/` and `tests/` | 9/9 correct |
+| `+ -p no:cacheprovider` | 9/9 correct |
+
+**The environment variable alone closed it**, because nothing is written during
+the sweep and so nothing can collide within it. `-p no:cacheprovider` is
+therefore **not** justified as a defence and is not being added to the recipe —
+it disables `.pytest_cache` (last-failed node ids), not the assertion-rewritten
+bytecode, which pytest already declines to write when `sys.dont_write_bytecode`
+is set. Sweeping `tests/` is still worth doing and the reason is *argued, not
+measured*: the env var stops new `.pyc` files appearing, but CPython still
+*reads* a valid pre-existing one, and a sweep begun after an ordinary
+`uv run pytest` starts with exactly that on disk. Cheap belt, real brace.
+
+The wider rule the first write-up got right: **an ad-hoc plant round gets the
+same defences as a scripted one.** The contaminated result came from a
+hand-rolled three-plant loop written inline to check a review fix, not from the
+sweep harness — a "quick check" of whether an assertion can fail is a mutation
+sweep with the ceremony removed, and it is exactly where a wrong number reads
+as a clean kill.
