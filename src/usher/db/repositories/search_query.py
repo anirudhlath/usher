@@ -1,5 +1,5 @@
-"""`search_queries` -- one row per answered search, updated at most once by
-attribution.
+"""`search_queries` -- one row per answered search, then attributed by up to
+two later calls: a click and, separately, a play of the same title.
 
 Implements `SearchQueryRepository` (`usher.ports.repository`). Two
 statements, both wrapped in the same SAVEPOINT-backed refusal translation
@@ -60,17 +60,38 @@ _INSERT_QUERY = text(
     bindparam("mode", type_=enum_column(SearchMode, length=16)),
 )
 
-# **`clicked_title_id IS NULL` in the `WHERE` is "first write wins"**, not
-# merely a scope: a row that already carries a click is left untouched by a
-# second call, so a redelivered or duplicated attribution cannot replace a
-# real click with a later, less-informative one. Zero rows affected is a
-# silent no-op either way -- no row named that `id`, or a row already
-# attributed -- because nothing distinguishes the two to a caller and PRD 08's
-# redelivery rule already asks for the second to be harmless.
+# **Two columns, two different conditions, deliberately not one shared
+# guard.** A single `WHERE clicked_title_id IS NULL` was the first cut of
+# this statement and it was wrong: F3's own funnel calls `record_outcome`
+# *twice* on the same row at two different times --
+# `GET /titles/{id}?search_id=…` attributes the click, and
+# `POST /titles/{id}/play` reports the play, naming the same title -- and a
+# guard keyed on `clicked_title_id` alone silently drops the second call,
+# which is the only call in the whole funnel that could ever set `played`.
+# Reviewed and corrected before this shipped; see the port docstring for the
+# full argument and `tests/contract/search_query_repository_contract.py`'s
+# module docstring for the three cases that pin it.
+#
+# `clicked_title_id = COALESCE(clicked_title_id, :clicked_title_id)` is first
+# write wins **on that column specifically**: once a click is attributed, a
+# later, genuinely different click (someone else's redelivered event, or a
+# stale retry naming the wrong result) must not steal credit from the result
+# the household actually opened.
+#
+# `played = played OR :played` is monotonic and moves only toward `True`: a
+# call that has not itself observed a play carries `played=False`, and there
+# is no route in F3's design that means "actually, undo the play" -- so a
+# later `False` is stale information about a fact the row already has,
+# never a correction to write over it.
+#
+# Zero rows affected is still a silent no-op either way -- no row named that
+# `id`, or a row whose columns already hold at least as much as this call
+# would write -- because nothing distinguishes those two to a caller.
 _RECORD_OUTCOME = text(
     "UPDATE search_queries "
-    "SET clicked_title_id = :clicked_title_id, played = :played "
-    "WHERE id = :id AND clicked_title_id IS NULL"
+    "SET clicked_title_id = COALESCE(clicked_title_id, :clicked_title_id), "
+    "    played = played OR :played "
+    "WHERE id = :id"
 ).bindparams(
     bindparam("id", type_=PGUUID(as_uuid=True)),
     bindparam("clicked_title_id", type_=PGUUID(as_uuid=True)),

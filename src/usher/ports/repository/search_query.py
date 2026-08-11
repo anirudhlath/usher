@@ -170,23 +170,58 @@ class SearchQueryRepository(ABC):
         """Attribute a search to what happened next -- **F3's write**,
         covering `clicked_title_id` and `played`.
 
-        Updates the row `record()` wrote, keyed by its `id`. **First write
-        wins.** A row that already carries a non-`NULL` `clicked_title_id` is
-        left exactly as it was -- a redelivered or duplicated attribution
-        cannot replace a real click with a later, less-informative one. This
-        is also why the table needs no `updated_at` column and no trigger: a
-        row receives at most one insert and at most one outcome update over
-        its whole life, which is `llm_calls`' shape rather than
-        `watch_states`' (a row updated many times as watching continues).
+        Updates the row `record()` wrote, keyed by its `id`. **Two columns,
+        two different conditions, deliberately not one shared guard** -- an
+        earlier version of this method keyed the whole write off
+        `clicked_title_id IS NULL`, which is wrong and was corrected in
+        review before it shipped: F3's own funnel calls this method *twice*
+        on the same row, at two different times --
+        `GET /titles/{id}?search_id=…` attributes the click, and
+        `POST /titles/{id}/play` reports the play, naming the same title --
+        and a guard shared between the columns cannot tell that legitimate
+        second call apart from a redelivered duplicate of the first, so it
+        silently dropped the one fact PRD 10:572-573 says this table exists
+        to answer: *did they play anything*.
 
-        A `query_id` naming no row, and a `query_id` naming a row already
-        attributed, are both silent no-ops -- there is no signal a caller
-        could act on differently between "nothing to attribute" and "already
-        attributed", and PRD 08's redelivery rule already asks for the second
-        to be harmless.
+        - **`clicked_title_id` is first write wins.** A row that already
+          carries a non-`NULL` value is left exactly as it was on that
+          column -- a later, genuinely *different* click (someone else's
+          redelivered event, or a stale retry naming the wrong result) must
+          not steal credit from the result the household actually opened.
+        - **`played` is monotonic and moves only toward `True`
+          (`played = played OR :played`).** There is no route in F3's design
+          that means "actually, undo the play", so a call carrying
+          `played=False` after an earlier `played=True` is stale information
+          about a fact the row already has, never a correction to write over
+          it.
+
+        Both conditions are evaluated in the same statement and neither
+        blocks the other -- the click-then-play sequence above lands
+        `clicked_title_id` once (on the first call) and `played` once (on
+        the second), which is exactly the shape that needs two independent
+        conditions rather than one.
+
+        **This is still why the table needs no `updated_at` column and no
+        trigger.** A row receives at most one insert and at most *two*
+        outcome updates over its whole life -- bounded by F3's two writers,
+        never by a redelivery count -- which is a fixed, small ceiling
+        rather than `watch_states`' shape (a row updated indefinitely often
+        as watching continues).
+
+        A `query_id` naming no row is a silent no-op -- there is no signal a
+        caller could act on differently between "nothing to attribute" and a
+        stale or duplicate client callback, and both conditions above are
+        already idempotent under a genuine redelivery of the identical call:
+        the same `clicked_title_id` and the same `played` value reaching
+        either condition again changes nothing.
 
         **Raises `RepositoryConflict`** for a `clicked_title_id` naming no
         title (`fk_search_queries_clicked_title_id_titles`) -- a stale or
         forged id reaching this from a client is a caller-assembly mistake,
-        not a storage failure a caller could usefully retry.
+        not a storage failure a caller could usefully retry. Reachable only
+        when the value is actually written: `COALESCE` means a row already
+        carrying a click never re-evaluates the parameter this call passed,
+        so a played-only second call naming the same, already-valid title
+        cannot trip this -- which is the ordinary case, since F3's play
+        route always names the title being played.
         """
