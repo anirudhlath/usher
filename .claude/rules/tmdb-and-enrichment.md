@@ -476,3 +476,178 @@ namespace-only capture is "exactly the shape `raw_payloads` holds".
 path too, so the fixtures have never recorded a stored payload's shape and
 were never meant to. A wrong reason in a docstring outlives the decision it
 justifies, which is why this is written down rather than quietly fixed.
+
+## The priority tier priced, 2026-08-11 (M9 S2) — 539 requests, and the tier is not a fixed population
+
+**The number S3 is to be authorised against: `130,806 × 0.0963 s` = 3.50 h of
+wall clock on one `usher work` process, 95% CI [3.41, 3.59] h**, plus ~1.0 GiB
+into `raw_payloads` and **261,612 follow-up jobs** nobody has priced. Sample:
+**500 titles, a systematic 1-in-261 walk of the tier, 0.38% of it**, drained
+through the shipped `usher work` on 2026-08-11 **21:44:00Z → 21:44:48Z**. The
+bar — nine predictions and what would count as failure rather than refutation
+— was written to [`/tmp/m9-enrich/BAR.md`](/tmp/m9-enrich/BAR.md) **before the
+first request**, and the driver (`/tmp/m9-exec/S2/run.py`, with an
+`httpx.AsyncClient.send` probe at `/tmp/m9-exec/S2/sitecustomize.py`) ran
+outside the working tree reading the operator's own `.env`. Status
+distribution over the priced sample: **499 × 200, 1 × 404**. No 429, no 5xx,
+no transport error, no `Retry-After` anywhere; none was provoked and the
+absence is not offered as evidence. Whole-task budget across three segments:
+**539 requests**, key idle from **21:47:54Z**.
+
+**Refuted, and it is the finding rather than a caveat: enrichment moves the
+predicate the walk selects on, and 85.1% of the tier leaves the tier by being
+enriched.** `vote_count` is in `EnrichService._ENRICHABLE`, the bulk loader
+writes **IMDb `numVotes`** into that column and enrichment overwrites it with
+**TMDb's `vote_count`** — two different electorates. Measured over all 537
+titles this task enriched: **80 still carry `>= 100` (14.9%)**, median TMDb
+vote count **16** against a median IMDb `numVotes` of **581** on the
+unenriched tier, and the tier's own count fell **130,806 → 130,349** as a
+direct arithmetic consequence of enriching 537 of it. Four things follow.
+
+- **The keyset walk is safe and the reason is worth stating rather than
+  assuming.** A row can only leave the tier by being enriched, which happens
+  only after it was enqueued, which happens only after the cursor passed it —
+  so no title is skipped and the walk still terminates. An `OFFSET` walk over
+  the same shrinking population would skip rows silently, which is a second,
+  independent argument for the keyset cursor.
+- **`130,806` is a snapshot with a timestamp, not a property of the catalog.**
+  It is the right fetch count for S3 only because the enqueue pass completes
+  before the drain begins. Interleaving them would fetch fewer titles and
+  nothing would say so.
+- **A number re-derived from the predicate after S3 will not reproduce.** The
+  group S preamble's tier statistics (161,789 tier movies; genome 11.87%; at
+  least one MovieLens tag 34.47%) were taken *before* any enrichment and are
+  correct as of then. Re-running those queries after S3 answers about a
+  population roughly a seventh the size. ADR-0002's suggest benchmark
+  (`vote_count >= 500`, 81,054 names) is drawn from the same column and has
+  the same exposure.
+- **`field_provenance` already records it and no predicate reads it.** An
+  enriched row carries `"vote_count": "tmdb"`, so the information is not lost
+  — it simply is not where the tier is expressed. Recorded rather than fixed:
+  changing the column's meaning, splitting it, or moving the tier onto
+  `field_provenance` are all schema-or-semantics decisions and this task has
+  no mandate for one.
+
+**Refuted: "161,789 movies at 30 rps, ≈1.5 h".** Wrong in three independent
+places at once, all flattering. The population is **130,806** and not 161,789
+(30,983 tier movies carry no `tmdb_id`, and `_ref_for` parks each on its first
+attempt). The rate is **not** the token bucket: `JobWorker._run_once` is a
+strictly sequential `for job in claimed:` and the bucket lives on one client
+per process, so one worker runs at `1/latency`. Measured, one worker achieved
+**10.38 rps** against a bucket set to 30 — the bucket idled at 35% of its
+allowance, exactly as T2 found from the series side. And the time is **3.5 h**,
+not 1.5 h. PRD 04's Phase-3 table carried the same shape (`~189k titles @ ~25
+rps, 1.5–2.5 h`) and is corrected in this commit.
+
+**The two halves of the per-title cycle, measured by two independent
+instruments that agree to 0.5%:**
+
+| | median | p95 | mean |
+|---|---|---|---|
+| HTTP request alone (probe, 500 requests) | 0.0580 s | 0.1049 s | 0.0637 s |
+| whole job cycle (probe, inter-request starts) | 0.0896 s | 0.1411 s | 0.0963 s |
+| whole job cycle (`raw_payloads.fetched_at` deltas, 499 rows) | 0.0892 s | 0.1389 s | 0.0963 s |
+
+**HTTP is 65% of the cycle**; the other 35% is a title read, a
+`raw_payloads` read, a JSONB insert, a title update, the two-request follow-up
+enqueue, the job delete and a commit. **Use the mean and not the median to
+extrapolate a total** — the distribution is right-tailed (max 0.56 s) and
+`Σ` wants the mean; the median gives 3.26 h and is the wrong statistic for
+the question, which is why both are here.
+
+**Refuted, and it was this run's own prediction rather than the
+repository's — three ways.** The bar predicted a median of 0.12 s in a
+0.09–0.18 s band and a p95 of 0.35 s in a 0.20–0.80 s band: measured
+**0.0896 s** (just below the band) and **0.1411 s** (far below it). It also
+predicted that the 20 oldest tier movies would be *cheaper* per title than a
+representative sample, on the argument that a 1919 film's payload is smaller.
+It is: 8,603 JSON characters against 18,726. And they were **slower** —
+median 0.113 s against 0.0892 s — because twenty jobs is all warm-up. The
+first twenty gaps of the 500-title segment have a median of 0.1033 s against
+0.0894 s for the remaining 479, which is the same effect measured where it can
+be separated. **A twenty-title segment cannot price anything; it can only
+price its own cold start.**
+
+**Refuted before the run, and it is why the sample is not a prefix: `ORDER BY
+id` over this catalog is chronological.** `titles.id` is a UUIDv7 minted in
+IMDb `tconst` order, so the first 500 rows of the tier have a **median year of
+1919** and a median `vote_count` of 367, against **2006** and 581 for the tier
+as a whole. The systematic 1-in-261 sample used instead lands at mean year
+1996.3 / median 2005 / median votes 614.5 against the tier's 1996.9 / 2006 /
+581. **A prefix of a walk is a sample of the walk only if the ordering key is
+independent of the thing being measured, and a UUIDv7 primary key on a
+bulk-loaded catalog never is.**
+
+**Confirmed, and it is what makes the extrapolation defensible: per-title cost
+is flat across the tier.** Because the sample is id-ordered it is also
+chronological, so the run's own quintiles are eras. Cost does not trend:
+
+| quintile | mean year | mean payload chars | cycle median | HTTP median |
+|---|---|---|---|---|
+| 1 | 1957.3 | 16,435 | 0.0905 s | 0.0578 s |
+| 2 | 1986.4 | 20,274 | 0.0962 s | 0.0564 s |
+| 3 | 2004.1 | 16,449 | 0.0902 s | 0.0597 s |
+| 4 | 2016.3 | 21,466 | 0.0865 s | 0.0575 s |
+| 5 | 2018.0 | 19,007 | 0.0858 s | 0.0579 s |
+
+A 31% swing in payload size moves the cycle by less than 12%, and in the
+direction warm-up predicts rather than the direction payload size does. So
+`130,806 × mean` is a linear extrapolation over a population measured not to
+be heterogeneous in the cost dimension — which is a stronger claim than the
+0.38% denominator alone supports and is the reason it is stated.
+
+**The costs the plan does not price, all measured here.**
+
+- **Two follow-up jobs per enriched title, always.** `EnrichService` enqueues
+  an `INDEX` and a `DERIVE` at `BACKFILL` on every success — 537 enrichments
+  produced exactly 537 of each. The full run therefore writes **261,612**
+  further jobs on top of its 130,806. `DERIVE` drains on the same worker (it
+  needs the provider, not the network — zero requests observed). `INDEX` does
+  **not**: `composition.embedder` returns `(None, no-op)` unless
+  `USHER_EMBEDDING_ENABLED` is on, which is off by default, so on the shipped
+  defaults the run leaves **130,806 index jobs pending forever** and
+  `title_embeddings` stays empty. Whoever runs S3 has to decide that
+  deliberately; it is not a detail of a later task.
+- **~1.0 GiB, confirmed within 2%.** Mean stored payload **6,914 bytes**
+  (JSONB, TOAST-compressed, from 18,726 JSON characters), and
+  `pg_total_relation_size('raw_payloads')` is **1.186×** the sum of the
+  payload column. `6,914 × 1.186 × 130,806` = **1.07 GB / 1,023 MiB**.
+- **The enqueue half is free: 5,000 jobs in 5 pages in 0.60 s**, interpreter
+  start included, so the whole tier is ~16 s. `_PAGE` plans as an **Index Scan
+  using pk_titles** with a filter — 36 ms for a 1,000-row page, 11,223 rows
+  removed by filter, no `Seq Scan` and no `Sort`.
+- **Parked: 1 in 500.** `TMDb has no entity at this reference (/movie/…)`, a
+  404, parked at `attempts = 1` — the `PortDataMalformed` taxonomy firing on
+  the path it was written for. Scaled honestly that is a Wilson 95% interval
+  of **46 to 1,470 parked jobs** over the tier, which is an interval a single
+  observation cannot narrow and must not be quoted as "about 260".
+
+**Confirmed: a movie costs exactly one request, and it was checked rather than
+assumed.** `TmdbMetadataProvider.fetch` issues one GET and the
+`_compose_seasons` branch is `TitleKind.SERIES`-only, and 500 enrich jobs
+produced exactly 500 requests with no retry anywhere.
+
+**Confirmed: a re-run inside the freshness window costs zero requests — on the
+second attempt at the test, because the first was invalid and the reason is
+the vote-count finding again.** Re-running the committed script's `--limit 20`
+and draining it made **19 requests**, which reads as a refutation and is not
+one: enrichment had moved the predicate, so "the first twenty tier movies by
+id" was a *different* twenty. Re-enqueued by explicit id against titles that
+already held a `raw_payloads` row, the same drain made **0** requests — and
+the probe's `.installed` marker was checked first, because a probe that did
+not install and a probe that measured zero produce the identical empty file.
+**A cache test has to name the rows it expects to hit, never re-derive them
+from a predicate the system under test is allowed to move.**
+
+**Still unverified after this run, named rather than implied:** a real 429 and
+whether one carries `Retry-After`; TMDb's behaviour under sustained
+concurrency (this was one sequential worker, as every run from this repository
+has been); the season-omission branch (this segment was movies only, so it adds
+nothing to the 626-listed-seasons count above); and what `N` concurrent
+`usher work` processes actually achieve. On that last one the arithmetic and
+the two traps are recorded rather than measured: reaching 30 rps needs **N = 3**
+at the measured 10.38 rps each, `USHER_TMDB_REQUESTS_PER_SECOND` must then be
+set to `30/N` **per process** because the bucket is per client, and
+`JobWorker.startup()`'s default `older_than_seconds = 0.0` requeues
+*everything* running — so restarting one worker mid-run steals the others'
+live claims.

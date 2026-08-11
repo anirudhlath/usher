@@ -557,6 +557,61 @@ class Settings(BaseSettings):
     # tolerance for a slow client rather than a delivery guarantee.
     sse_queue_size: int = Field(default=64, ge=1, le=10_000)
 
+    # The image proxy (PRD 07's `GET /images/{id}`, M9). Four settings, and
+    # **the ladder is deliberately not one of them**
+    # ([ADR-0032](../../docs/prd/decisions/0032-the-image-proxy-clamps-to-a-ladder.md)):
+    # `IMAGE_LADDER` is a tuple in `usher.ports.images`, because the four
+    # widths are what the *cache* is bounded by and a knob nothing reads is
+    # dead config wearing a control's name. PRD 08's Configuration table said
+    # otherwise until 2026-08-11 and is corrected.
+    #
+    # Same reasoning as every block above for why these four are environment
+    # settings: PRD 08's TOML config layer does not exist yet. All four are
+    # read by `composition.image_proxy`.
+    #
+    # Where the bytes live. The dev default sits beside `bulk_data_dir`'s
+    # `data/bulk` and inside `.gitignore`'s `data/`; the container's is
+    # `/data/images`, which `compose.yml` bind-mounts and which is therefore
+    # the one image setting `environment:` owns rather than the operator --
+    # a bind-mount path is a topology fact, and a relative path inside a
+    # container whose `WORKDIR` is `/app` would put the cache in the image.
+    image_cache_dir: Path = Path("data/images")
+    # The most one CDN answer may be, enforced **while it streams** rather
+    # than against a `Content-Length` the sender controls. 5 MiB is above
+    # every byte this proxy can legitimately receive and still bounds a lying
+    # upstream: ADR-0032 measured the largest artwork anywhere in its samples
+    # at 4,731,805 bytes, and that is an `original`, which the ladder cannot
+    # express and the fetcher never requests -- the largest *rung* measured is
+    # a 563 KB median poster at `w1280`. `ge=1` rather than a friendlier floor
+    # for the reason `curation_pool_size` has one: a one-byte ceiling is a
+    # legal, useless configuration and this file does not invent product
+    # minima.
+    image_max_bytes: int = Field(default=5 * 1024 * 1024, ge=1)
+    # How long one CDN fetch may take. An order of magnitude below
+    # `llm_timeout_seconds`' 120 and it is the *lane* that decides it, not the
+    # upstream: a curation completion is a worker job whose long timeout costs
+    # a worker pass, and this is a request with a person waiting at the other
+    # end of it. A cold image that has not arrived in ten seconds is better
+    # reported than waited for, because the client will ask again.
+    image_fetch_timeout_seconds: float = Field(default=10.0, gt=0)
+    # The provider's image host, `{base}` in the ladder's `{base}{rung}{path}`.
+    #
+    # **A configured constant rather than a `/configuration` call**, and the
+    # cost being avoided is on the request path: resolving `secure_base_url`
+    # per cold image is a second network round trip, against an authenticated
+    # endpoint, for a value that changes approximately never. The default was
+    # read live from that endpoint on 2026-08-11 (`secure_base_url`). A
+    # setting rather than a module constant for the reason `tmdb_base_url` is
+    # one: a household behind a restrictive network puts a caching proxy in
+    # front of it.
+    #
+    # **The literal lives here and nowhere else.** `ProviderCdnImageFetcher`
+    # takes the base URL as a required argument rather than defaulting to a
+    # constant of its own, so there is one definition of the measured host and
+    # `.env.example` documents it — `config.py` imports nothing from `usher`
+    # and this setting is not the thing to change that for.
+    image_cdn_base_url: str = Field(default="https://image.tmdb.org/t/p/", min_length=1)
+
     otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     service_name: str = Field(default="usher", alias="OTEL_SERVICE_NAME")
 

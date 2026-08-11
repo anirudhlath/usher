@@ -395,7 +395,12 @@ else** — no user, no grant, no offset — which is why it is unsigned, and **n
 port ever takes one**; repositories take typed keyset values. A cursor that
 does not match the query it is replayed against is a `400 invalid_cursor`. See
 [ADR-0034](decisions/0034-the-cursor-carries-a-position.md), which also carries
-the `(key IS NOT NULL, key, id)` predicate every paged route spells.
+the **three-arm** keyset predicate every paged route spells. Read it there
+rather than reconstructing it: the ADR originally specified a row comparison
+over `(key IS NOT NULL, key, id)`, and B6 measured that this is wrong for a
+nullable key — a row comparison evaluates to **NULL, not false**, when the
+first differing pair involves one, so resuming from an unkeyed row silently
+drops the whole unkeyed tail with every page still full.
 
 ### Errors
 
@@ -417,34 +422,72 @@ subsystem narrows functionality, it never fails a request local state can answer
 
 **Built in M9, in two passes — the *shape* first, the vocabulary second.** The
 envelope was deferred four times (M3, M5, M7, M8) and each deferral turned on the
-same structural fact: no shipped route had a failure the envelope was *for*. M5's
-`GET /events` has no status code left once it has answered `200
-text/event-stream`; M7's `GET /home` holds no `SourceAdapter`; M8's
-`POST /admin/rows/regenerate` enqueues and returns 202. All three arguments still
-stand. What changed is that M9 stopped waiting for the failure that forces the
-envelope and shipped the envelope for the failures that already exist.
+same structural fact: no shipped route had a failure the envelope was *for*. What
+changed is that `POST /titles/{id}/play` holds a `SourceAdapter` and produced a
+real `503 source_unavailable`, so the vocabulary is designed against a failure
+that happened rather than one that was guessed at. **Two of the four deferrals are
+discharged and two are preserved as standing rules** —
+[ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
+answers each by name and keeps its reason.
 
-The split is not tidiness. Six drafters designing the `code` vocabulary alongside
-their own routes proposed **seventeen members against a budget of four, under two
+The split was not tidiness. Six drafters designing the `code` vocabulary alongside
+their own routes proposed **seventeen members against a benchmark of four, under two
 mutually exclusive conventions for the same status** — which is precisely what
-this section declined to guess at four times. So:
+this section declined to guess at four times.
 
-| pass | what it is | where |
+#### The vocabulary
+
+**Seven members, closed by
+[ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md).**
+That record carries the table, the four rules that decide membership, and the
+members it refused; `tests/unit/test_api_problem_vocabulary.py` parses the table
+and compares it to `ProblemCode` in both directions, so **a route that needs a
+code the design did not give it amends the decision record in the same commit** or
+the suite is red.
+
+| code | status | when |
 |---|---|---|
-| shape | the six members, `application/problem+json`, the two exception handlers, the `type` derivation, the exemptions | `src/usher/api/dto/problem.py`, `src/usher/api/errors.py` |
-| vocabulary | every `code` the surface emits, frozen | ADR-0030 |
+| `not_found` | 404 | the addressed resource does not exist, on any route — and on any unrouted path |
+| `validation_failed` | 422 | the request did not pass validation; the rejected fields ride in `errors`, never their values |
+| `method_not_allowed` | 405 | raised by the router before any handler, so every route answers it |
+| `invalid_cursor` | 400 | an opaque cursor that does not match the query it is replayed against ([ADR-0034](decisions/0034-the-cursor-carries-a-position.md)) |
+| `source_unavailable` | 503 | at least one source could not be reached and nothing playable was found on the ones that answered — retryable |
+| `not_playable` | 409 | every source holding a copy answered and none offers a way to play it |
+| `ticket_invalid` | 404 | a playback ticket that is expired or forged — one answer for both, deliberately ([ADR-0029](decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)) |
 
-`ProblemCode` today is `not_found`, `validation_failed`, `method_not_allowed` and
-`invalid_cursor` — what the shipped surface emits, plus the cursor codec's — and
-**the names are provisional.** Whether a 404 is generic (`not_found`) or
-per-resource (`title_not_found`) is ADR-0030's call, settled once rather than once
-per route.
+**404 is generic and there is no per-resource variant.** No `title_not_found`, no
+`episode_not_found`, no `image_not_found`: `instance` already carries the path, a
+per-resource member grows the vocabulary linearly with the resource count, and
+every one of them is handled identically by a client. The one case that could have
+justified a second 404 — a title the household owns with no playable copy — is
+separated by **status** (`409 not_playable`) rather than by code. `ticket_invalid`
+is not an exception to this: it is not a statement about a resource but an opaque
+codec refusing its own input, the same shape as `invalid_cursor` one status over.
 
-Four properties of the shape, each of which is a rule rather than a detail:
+#### Stability
+
+- **`code` is the machine-readable contract, and the status for a given code never
+  changes.** A code meaning 404 on one route and 409 on another would be two codes
+  wearing one name.
+- **The set is closed at any instant and may grow additively within a major
+  version**, so a client's `switch` on `code` needs a default arm — and that arm
+  keys off `status`, which is what the previous rule makes safe. Growth is governed
+  by [DTOs are versioned independently](#dtos-are-versioned-independently) rather
+  than by a second rule here.
+- **`title` and `detail` are prose and nothing may parse them.** Both may be
+  reworded in any release. `detail` interpolates nothing a client submitted.
+
+#### The shape
+
+Four properties, each of which is a rule rather than a detail:
 
 - **`type` is derived from `code` by one function** —
   `https://usher.dev/errors/<code-in-kebab-case>` — never hand-written per member,
-  so a code and its type cannot drift apart.
+  so a code and its type cannot drift apart. RFC 9457 says a `type` URI SHOULD
+  dereference to human-readable documentation; **this project does not control
+  `usher.dev`**, so the URI is an identifier deliberately never dereferenced. That
+  is a fact about the world rather than about the code, and no domain is
+  registered to make a document true.
 - **`status` is written once.** The handler builds the document and then builds
   the response *from* `document.status`, so the body and the status line cannot
   disagree.
@@ -470,19 +513,33 @@ read as one somebody forgot:
   status code and never parse the body, and the body they do not parse says which
   check failed, which a `code` would not.
 - **`GET /events`** keeps its in-stream vocabulary (`resync_required`) for the
-  reason M5 recorded: RFC 9457 formats a response body, and after `200
+  reason M5 recorded, which ADR-0030 **preserves as a standing rule** rather than
+  discharging: RFC 9457 formats a response body, and after `200
   text/event-stream` there is no status code left to carry one. Its 422 for a
   malformed `?titles=` is decided before the stream starts and *is* a problem
   document.
 
 Both exemptions are about what a **handler** answers. A 405 is raised by the
 router before any handler runs, so every route — exempt or not — answers a problem
-document for one.
+document for one. The exemption set is closed over `create_app()`'s own route
+table, so a route added later that quietly joins it fails rather than passing
+silently.
 
 A status with no member in the vocabulary is **left in FastAPI's default shape**
-rather than given an invented code. That is the two-pass split enforced in the
-handler: growing the vocabulary is ADR-0030's job, and a handler that guessed
-would reintroduce exactly the sprawl the split exists to prevent.
+rather than given an invented code, and `_CODE_FOR_STATUS` covers only the three
+statuses raised by machinery Usher does not control (404 and 405 from Starlette's
+router, 422 from FastAPI). Every status Usher's own code raises names its code at
+the raise site. The consequence is named rather than hidden: a route raising a
+bare `HTTPException` for an unmapped status silently opts out of the envelope, and
+what closes that is the per-route "declares its problem responses" check, not a
+wider translation table. See ADR-0030 ruling 4.
+
+**The queue-outage rule stands, and it binds every future route that writes.**
+`POST /admin/rows/regenerate` answers an ordinary 500 when the job queue is
+unreachable, because a 503 there would say *"this endpoint is degraded, retry
+it"* about a deployment in which every endpoint is down. The vocabulary
+therefore holds no `queue_unavailable` and no `database_unavailable` of any
+spelling, and no `internal_error` either — nothing emits one.
 
 ## Streaming updates (SSE)
 

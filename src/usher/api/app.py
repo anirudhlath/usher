@@ -26,7 +26,7 @@ from usher.composition import (
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.services.events import InMemoryEventBus
-from usher.services.rows.cache import RowCache
+from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.telemetry import configure_telemetry, register_push_gauges, register_sse_gauge
 
 
@@ -71,6 +71,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             embedder=model,
             client=client,
             rows=row_cache,
+            refreshes=row_refreshes,
         )
         app.state.lanes = lanes
         # PRD 10's `usher.source.push.connected` / `.reconnects`. Registered
@@ -158,6 +159,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # this same object, which is why it is built before `lanes` reads it.
     row_cache = RowCache(clock=lambda: datetime.now(UTC))
     app.state.row_cache = row_cache
+    # PRD 06's "served stale while refreshing": the handover between a request
+    # that found a screen inside its grace window and the one lane that
+    # replaces it. Here rather than in the lifespan on exactly the terms above
+    # -- it is a bounded dict-and-deque, not a resource with a lifetime -- and
+    # **one per app, never per request**, since a request-scoped queue would
+    # deduplicate nothing and be drained by nobody. Built before `lanes` for
+    # the same reason `row_cache` is: the lifespan closes over both.
+    row_refreshes = RefreshQueue()
+    app.state.row_refreshes = row_refreshes
     # Replaces FastAPI's default 422 body, which echoes the submitted
     # request -- and `POST /admin/sources` submits a source credential. See
     # usher.api.errors; this is a security control, not a response-shape

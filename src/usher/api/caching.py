@@ -53,15 +53,35 @@ deterministic, which is the whole reason a tag derived from bytes exists at
 all: the bytes hashed are the *same* bytes returned as the body, computed once
 and reused, never serialised a second time to check it.
 
-**What a 304 means for an entry `services/rows/cache.py`'s serve-stale (A6)
-may be serving rather than rebuilding.** This helper is orthogonal to
-freshness: it hashes whatever the handler handed it, stale or fresh, so a
-repeat request against a stale-but-served screen still answers 304 correctly
-as long as the served bytes have not changed -- there is no second notion of
-"fresh enough to 304" here, only "identical to what was last sent". If A6's
-background refresh changes what gets served, the next request's ETag changes
-with it, exactly as a mutated household's does today. A6 is free to disagree
-with this deliberately; it should not disagree by accident.
+**What a 304 means for an entry `services/rows/cache.py`'s serve-stale is
+serving rather than rebuilding. Agreed, deliberately, and now pinned.** This
+helper is orthogonal to freshness: it hashes whatever the handler handed it,
+stale or fresh, so a repeat request against a stale-but-served screen still
+answers 304 correctly as long as the served bytes have not changed -- there is
+no second notion of "fresh enough to 304" here, only "identical to what was
+last sent". When the background refresh lands, the next request's ETag changes
+with it, exactly as a mutated household's does today.
+
+Three consequences of that agreement, stated here because a reader arrives at
+this file with the freshness question and not with the cache's:
+
+- **The `freshness` label on `usher.cache.hits` does not reach the wire, and
+  must not.** A stale serve is counted `freshness="stale"` (PRD 10) because a
+  dashboard needs to see what the feature trades away; a *client* is owed only
+  "is what you hold still what I would send you", and the answer is yes. A
+  `Cache-Control` or an `ETag` that varied with staleness would tell every
+  client to re-fetch bytes identical to the ones it already has.
+- **`max-age` stays `_SCREEN_TTL`, not `_SCREEN_TTL + SCREEN_STALE_GRACE`.**
+  The grace window is a server-side licence to serve an entry while replacing
+  it, not a promise to a client that the screen is good for 90 s. Widening the
+  header to cover it would push the staleness into caches this server cannot
+  invalidate, where no refresh lane can reach it.
+- **A 304 is therefore reachable for up to `TTL + grace` after a compose, and
+  past that boundary the same conditional request answers 200** -- because the
+  entry is a hard miss, the handler recomposes, and the bytes move if anything
+  in the household did. `tests/unit/test_api_caching.py` carries both sides:
+  `test_a_conditional_get_against_a_stale_but_served_screen_is_a_304` and its
+  control one boundary over.
 """
 
 import hashlib

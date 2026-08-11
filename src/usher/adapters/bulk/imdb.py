@@ -1,6 +1,6 @@
-"""IMDb non-commercial datasets -> `ImdbTitle` / `ImdbRating`.
+"""IMDb non-commercial datasets -> `ImdbTitle` / `ImdbRating` / `ImdbAka`.
 
-Four TSV quirks, and exactly how each is handled:
+Five TSV quirks, and exactly how each is handled:
 
 1. **`\\N` means NULL.** Not an empty string, not a literal backslash-N in the
    data. `_optional` maps it to `None`; every numeric field goes through it
@@ -22,17 +22,38 @@ Four TSV quirks, and exactly how each is handled:
 4. **`isAdult` is `0`/`1`, and `titleType` needs filtering.** Adult titles are
    dropped outright (PRD 04). Only the four `titleType` values that map onto
    `TitleKind` survive; see `_RETAINED_TYPES`.
+5. **A tab-delimited column may itself be multi-valued, and the inner
+   separator is `\\x02`.** `title.basics`' `genres` uses a comma;
+   `title.akas`' `types` and `attributes` use the ASCII STX character.
+   Measured on the pinned `title.akas.tsv.gz`: **429 of 58,906,368 rows carry
+   a two-valued `types`** (`imdbDisplay\\x02dvd` is the commonest, 207 rows).
+   Nothing here parses either column, but a reader that assumed the
+   separator was a tab would call those 429 rows nine-column and malformed,
+   which is why `title.akas.slice.tsv` carries one.
 
-`title.principals`, `title.crew`, `title.akas`, `name.basics`, and
-`title.episode` are **not** imported here. PRD 04's Phase 0 text names
-cast/crew and akas, but `Person`, `Credit`, and `Episode` have no domain
-models or tables yet -- there is literally nowhere to put those rows. They
-land with the milestone that adds those entities; see PRD 04's corrected
-Phase 0 note.
+**`title.akas` IS imported here as of M9, and this paragraph used to say the
+opposite.** It read *"there is literally nowhere to put those rows"*, and
+that was true until `m09a` created `title_search_names` with a `region` and
+a `language` column. `parse_akas_row` is what changed it.
+
+`title.principals`, `name.basics`, `title.crew` and `title.episode` are
+still **not** imported here, and the first two are refused on a measurement
+rather than on a missing table. M9 T3 loaded them against a real
+1,271,138-title catalog and measured the `people` + `credits` design at
+**2,701,697,024 B (2.702 GB) against a 2.0 GB ceiling** -- 2.395 GB even
+stripped to five columns and three indexes -- so the entity design was
+refused and **no `people` or `credits` row is bulk-loaded from IMDb at all**
+(`.claude/rules/bootstrap-and-datasets.md`). `title.crew` and
+`title.episode` keep the status this paragraph originally described: no
+table, nowhere to put them. See PRD 04's Phase 0 note.
 
 Measured 2026-07-30: `title.basics.tsv.gz` is 214.4 MiB and
-`title.ratings.tsv.gz` is 8.2 MiB, so this milestone downloads ~223 MiB, not
+`title.ratings.tsv.gz` is 8.2 MiB, so M2's bootstrap downloads ~223 MiB, not
 PRD 04's 1.83 GiB (which is the total across all seven IMDb files).
+`title.akas.tsv.gz` adds **510,168,971 B (486.5 MiB)**, measured at the
+pinned snapshot `"19810e3eb2b0f1fa774bf4e4af94d7c6-61"` on 2026-08-11 --
+more than double what the two shipped files cost together. Nothing in
+`usher.cli` constructs `IMDbAkaDataset` yet, so no operator pays that today.
 """
 
 from abc import abstractmethod
@@ -42,8 +63,9 @@ from pathlib import Path
 import httpx
 
 from usher.adapters.bulk.download import CachedDatasetFile
+from usher.db.models.search import SEARCH_NAME_MAX_CHARS
 from usher.domain.enums import TitleKind
-from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, ImdbRating, ImdbTitle
+from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, ImdbAka, ImdbRating, ImdbTitle
 from usher.ports.errors import PortDataMalformed
 
 IMDB_BASE_URL = "https://datasets.imdbws.com/"
@@ -66,6 +88,29 @@ _RETAINED_TYPES: dict[str, TitleKind] = {
 
 _BASICS_COLUMNS = 9
 _RATINGS_COLUMNS = 3
+# Taken from the real header at the pinned snapshot
+# `"19810e3eb2b0f1fa774bf4e4af94d7c6-61"` (2026-08-11), never from IMDb's
+# published schema: `titleId ordering title region language types attributes
+# isOriginalTitle`. Measured over all 58,906,368 data rows of that file, zero
+# split to any other count -- so a wrong count is a real signal here rather
+# than noise to be tolerated. Re-confirmed on `title.principals` and
+# `name.basics` in the same pass, which is why the same claim is made for all
+# three in `.claude/rules/bootstrap-and-datasets.md`.
+_AKAS_COLUMNS = 8
+
+# The btree bound `ck_title_search_names_name_within_btree_bound` enforces,
+# imported rather than re-spelled. Two copies of a number that must agree is
+# how they stop agreeing, and this one has to be *the same* 512 the CHECK
+# carries or the filter below is decoration.
+#
+# `usher.adapters` importing `usher.db` is unusual and it is deliberate: the
+# `db is driven, not driving` contract lists `usher.domain`, `usher.ports` and
+# `usher.services` as its sources, so an adapter is outside it, and
+# `adapters/search/postgres.py` already reaches into `usher.db` for
+# `constraint_name`. The alternative -- widening `usher.ports.bulk` with a
+# search-table bound that has nothing to do with bulk loading -- puts the
+# number in a worse place to keep it in a tidier one.
+AKAS_NAME_MAX_CHARS = SEARCH_NAME_MAX_CHARS
 
 
 def _optional(value: str) -> str | None:
@@ -89,6 +134,24 @@ def _optional_int(value: str, *, imdb_id: str, column: str) -> int | None:
             "IMDb row has a non-integer value where an integer is required",
             detail=f"{imdb_id}.{column}",
         ) from exc
+
+
+def _required_int(value: str, *, imdb_id: str, column: str) -> int:
+    r"""`_optional_int`, for a column whose absence is itself a format change.
+
+    Same `\N`-then-`int()` path, so a numeric column that stopped being
+    numeric is still a hard failure naming the row and the column -- and a
+    `\N` where the dump has never had one is the same kind of news. Used for
+    `title.akas`' `ordering`, which is present and integral on all 58,906,368
+    rows of the pinned snapshot (min 1, max 300) and is the only per-title
+    tiebreak a deduplicating writer has.
+    """
+    number = _optional_int(value, imdb_id=imdb_id, column=column)
+    if number is None:
+        raise PortDataMalformed(
+            f"IMDb row has no {column}, which is required", detail=f"{imdb_id}.{column}"
+        )
+    return number
 
 
 def parse_basics_row(line: str) -> ImdbTitle | None:
@@ -163,6 +226,99 @@ def parse_ratings_row(line: str) -> ImdbRating | None:
         )
     count = _optional_int(votes, imdb_id=imdb_id, column="numVotes")
     return ImdbRating(imdb_id=imdb_id, community_rating=rating, vote_count=count or 0)
+
+
+def parse_akas_row(line: str) -> ImdbAka | None:
+    r"""One `title.akas.tsv.gz` line, or `None` if the row is filtered out.
+
+    **The retention policy, stated in full, with what each clause was measured
+    to cost.** Every figure below is against the pinned snapshot
+    `"19810e3eb2b0f1fa774bf4e4af94d7c6-61"` (58,906,368 data rows, 2026-08-11),
+    joined where a join is needed to a 1,272,367-title catalog built from the
+    `title.basics` this host had cached -- a *different* upstream snapshot,
+    `"128751cb2f3132bd73bdf08c7f4def5d-27"`, because IMDb does not regenerate
+    the seven files together and reporting them as one would be the error T3
+    already recorded.
+
+    **Retained:** every row whose `title` can actually be stored.
+
+    **Filtered (returns `None`), and only these three:**
+
+    1. **The header line.**
+    2. **A row IMDb itself flags `isOriginalTitle = 1`.** That is IMDb's claim
+       that the row *is* the title's original title, not an alias of it, and
+       `SearchNameKind` has deliberately no `primary` member -- a canonical
+       name is served by `ix_titles_name_lower_prefix` on `titles`, so storing
+       one here is the one-row-per-title duplication M6's boundary call 3
+       refused the table for. **12,703,704 of 58,906,368 rows (21.6%)** carry
+       the flag, **not one of them carries a `region`** (0 of 12,703,704), and
+       `types` reads exactly `original` on all of them. Against the catalog,
+       1,272,135 of the 7,541,357 retained rows are flagged and **1,272,111
+       (99.998%) casefold-equal the title's own `name` or `original_name`**;
+       dropping every flagged row costs **7 aliases out of 1,663,330** after
+       deduplication, because 17 of the 24 disagreeing rows repeat a name a
+       non-flagged row already carries. The hazard this clause could have had
+       -- a title whose `original_name` is NULL, leaving the flagged aka as
+       the only carrier -- is empirically zero: **0 of the 1,272,367 catalog
+       titles have no `originalTitle`.**
+    3. **A row whose `title` cannot be stored**: empty or `\N` (0 of
+       58,906,368, so unreachable in this snapshot, and here because
+       `ck_title_search_names_name_not_empty` is `name <> ''` and a
+       placeholder would be *searchable*), or longer than
+       `AKAS_NAME_MAX_CHARS` (**33 rows, longest 831**, none of them in
+       today's catalog). The length clause is not tidiness: the writer's
+       contract refuses an over-long name for the **whole call**, so one such
+       row would take a ten-thousand-row batch with it, and the catalog grows
+       while the refusal stays per-call.
+
+    **Nothing is filtered on `region`, `language`, `types` or `attributes`**,
+    and that is a decision rather than an omission. Bar (B) passed **4.8x
+    under on rows and 3.2x under on bytes**, so a recall-costing filter buys
+    headroom nobody needs. `types` has 23 distinct values here and IMDb's own
+    documentation says new ones may be added without warning, so a retain-list
+    silently drops the next category and a drop-list silently admits it.
+    `region` has 251 values whose seven largest are 5.4-5.8M rows each --
+    there is no small set to keep. And `attributes` is 185 free-text values
+    (`transliterated title`, `alternative spelling`, ...) with no vocabulary
+    to filter against at all.
+
+    **What this parser cannot do, and does not pretend to.** The rule that an
+    alias equal to the title's own `name` or `original_name` is not an alias
+    needs the stored `Title`, and a parser has no catalog. Clause 2 is a cheap
+    prefix of it, never a substitute: of the 6,269,222 retained rows that
+    survive clause 2, **4,426,783 (70.6%) still casefold-equal the title's own
+    name** and only the writer can see that.
+
+    **Malformed (raises `PortDataMalformed`):** a wrong column count, or an
+    `ordering` that is absent or non-integral. The error carries the row id
+    and the column, never the line -- an alias line runs to 831 characters.
+    """
+    fields = line.split("\t")
+    if len(fields) != _AKAS_COLUMNS:
+        raise PortDataMalformed(
+            f"IMDb title.akas row has {len(fields)} columns, expected {_AKAS_COLUMNS}",
+            detail=fields[0] if fields else "<empty line>",
+        )
+    imdb_id, ordering, title, region, language, _types, _attributes, is_original = fields
+    if imdb_id == "titleId":  # the header line
+        return None
+    if is_original == "1":
+        # Spelled the way `parse_basics_row` spells `isAdult == "1"`, and for
+        # the same reason: the measured vocabulary of this column is exactly
+        # `0` and `1` with no `\N` over all 58,906,368 rows, and the flag is
+        # advisory -- the writer's casefold comparison against the stored
+        # title is the filter that has to be right.
+        return None
+    name = _optional(title)
+    if name is None or len(name) > AKAS_NAME_MAX_CHARS:
+        return None
+    return ImdbAka(
+        imdb_id=imdb_id,
+        ordering=_required_int(ordering, imdb_id=imdb_id, column="ordering"),
+        name=name,
+        region=_optional(region),
+        language=_optional(language),
+    )
 
 
 class _ImdbDataset[RowT](BulkDataset[RowT]):
@@ -282,3 +438,35 @@ class IMDbRatingDataset(_ImdbDataset[ImdbRating]):
 
     def parse(self, line: str) -> ImdbRating | None:
         return parse_ratings_row(line)
+
+
+class IMDbAkaDataset(_ImdbDataset[ImdbAka]):
+    """`title.akas.tsv.gz`, on the same machinery as the other two.
+
+    **The plan's own risk about a heavily-filtered file yielding a row-less
+    batch is inverted by the measurement, so nothing here changes
+    `_ImdbDataset`.** That risk was written for three files at once; of the
+    one that survives, `title.akas` keeps **78.4%** of its lines
+    (58,906,368 read, 12,703,704 flagged rows dropped), which makes it by far
+    the *least* filtered dataset this class has ever streamed --
+    `title.basics` keeps 1,271,138 of 12,678,891, i.e. **10.0%**, and has
+    shipped that way since M2. A trailing run of filtered lines costs a
+    re-read on resume and never a lost row, because `position` counts lines
+    consumed rather than rows kept and every write downstream is an upsert.
+
+    Scale, since this is 4.6x `title.basics`' line count: `BulkCursor.
+    position` stays a plain integer line number, bounded by 58,906,369 here,
+    which round-trips through `ImportRun.position`'s `Integer` with three
+    orders of magnitude to spare.
+    """
+
+    @property
+    def filename(self) -> str:
+        return "title.akas.tsv.gz"
+
+    @property
+    def name(self) -> str:
+        return "imdb.title.akas"
+
+    def parse(self, line: str) -> ImdbAka | None:
+        return parse_akas_row(line)

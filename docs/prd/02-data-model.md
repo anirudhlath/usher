@@ -89,7 +89,7 @@ class Title(BaseModel):
     content_rating: str | None
 
     community_rating: float | None       # provider aggregate, TMDb 0-10 scale
-    vote_count: int | None
+    vote_count: int | None               # IMDb numVotes until enriched, TMDb's after
     popularity: float | None
 
     collection_id: UUID | None

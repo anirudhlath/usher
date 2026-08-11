@@ -164,3 +164,41 @@ build_pipeline` builds one per unit of work), and it re-reads on a disagreeing
 existing cases hold one service across a merge and require the second read to
 see it, and **both failed against the first draft of the memo**, which is how
 the watermark check got written.
+**Two stale serves cannot overlap in wall clock, and that is the feature
+rather than a gap in the test.** Found 2026-08-11 building M9's serve-stale
+path against the acceptance criterion "two concurrent requests over one stale
+key schedule exactly one refresh, and the case proves the two genuinely
+overlapped". They cannot: a stale serve returns out of a dict with no `await`
+in it, so `asyncio.gather` over two of them produces the **disjoint** windows
+this file already records as the trap one entry up, and a case asserting they
+intersect would be asserting that serve-stale is broken. The pair that has
+teeth is a **read against the in-flight refresh** — recorded intersecting in
+`tests/unit/test_api_lanes.py`, with the lane parked inside `build` — because
+the mutation it rules out is a queue that clears its dedup mark at `take()`
+rather than at `done()`, which reopens the stampede for exactly the length of
+a refresh and which no count can see. Corollary worth carrying: **when a
+"these overlapped" assertion is impossible because the fast path never
+suspends, the honest move is to name the other side of the real race, not to
+weaken the claim to a count.**
+**A screen refresh reuses every row whose own TTL is still running, so a
+seconds-old screen can carry a five-minute-old shelf.** Found the same day by
+writing the integration case for "the refresh reads state committed after the
+screen was cached" and watching it come back unchanged: `_SCREEN_TTL` is 30 s
+and `recently-added`'s is 5 minutes, so `HomeService.rebuild` re-proposes,
+re-selects and re-orders while `_build` answers out of the row half. That is
+PRD 06's second layer working — rebuilding every row on every 30 s screen
+expiry is the cost it exists to avoid — and it is why the row half has **no
+grace window of its own**: the refresh unit is a *screen*, one entry per
+household bounded by the `users` table, and a per-row grace with no per-row
+refresh behind it would serve stale rows that nothing ever replaces, over a
+key space that is `because-you-watched-<seed>`. Both halves are pinned
+(`test_a_screen_refresh_reuses_a_row_whose_own_ttl_has_not_moved` and its
+neighbour, which expires the row entry alongside the screen).
+**A stale-serve grace window must be gated on there being a refresher, and the
+gate is one line.** `HomeService`'s `_stale_grace` is zero when `refresh is
+None`, so a composer with nowhere to send the key — `usher home`, whose process
+ends when the command does — serves nothing stale at all. Without it the
+milestone's obvious spelling, "pass a no-op refresher from the CLI", opens the
+window with nothing behind it: a 31-second-old screen is served and never
+replaced, silently, which is strictly worse than the miss it avoided. The plan
+asked for the no-op; the gate is what makes it wrong to give one.

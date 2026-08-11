@@ -638,3 +638,87 @@ before choosing: `raiseload=True` was set temporarily and the **full** unit and
 integration suites run green, then reverted. **The deferral loops over
 `DERIVED_COLUMNS` rather than naming the two columns**, so a future derived
 column that nobody defers fails the case that exists for it.
+
+## The keyset over a nullable column, 2026-08-11 (M9 B6)
+
+**A row comparison is NULL rather than false, so the textbook keyset predicate
+silently drops the whole unkeyed tail — and every page it served looked full.**
+Measured on `pgvector/pgvector:pg17`, a five-row table of which three have a
+NULL key, resuming from the first of those (`id = 1`):
+
+| spelling | rows returned |
+|---|---|
+| `((k IS NOT NULL), k, id) > ((:ak IS NOT NULL), :ak, :aid)` | `(5, id=4)`, `(7, id=5)` — **both keyed rows, neither remaining unkeyed one** |
+| the three-arm predicate below | `(NULL, id=2)`, `(NULL, id=3)` |
+
+Postgres evaluates `ROW(a,b,c) > ROW(d,e,f)` element-wise and answers **unknown**
+when the first differing pair involves a NULL — and unknown is not true, so the
+`WHERE` rejects the row. The damage is the quietest kind: the client gets full
+pages, in order, ending early.
+
+This is not an edge case on this schema. `titles.year`, `titles.popularity` and
+`titles.vote_count` are all nullable, and `popularity` was measured NULL on
+**all 1,271,138 rows** of a bootstrap-only catalog, so on a fresh install the
+unkeyed group is most of the table. ADR-0034 shipped the row-comparison
+spelling as the milestone-wide instruction for three groups writing keyset SQL
+independently; it is corrected there with this table, and the correction
+includes the leading term's direction — `(key IS NOT NULL)` **ascending** puts
+NULLs *first*, which contradicted the ADR's own "NULL sorts last" sentence one
+line above it.
+
+The spelling that works, and it is `IS NOT DISTINCT FROM` written out:
+
+```sql
+ORDER BY (key IS NOT NULL) DESC, key <ASC|DESC>, id ASC
+
+-- resuming from a keyed position
+WHERE key IS NULL OR key <cmp> :after_key
+   OR (key = :after_key AND id > :after_id)
+-- resuming from an unkeyed position: only the rest of that group can follow
+WHERE key IS NULL AND id > :after_id
+```
+
+Two branches in Python rather than one expression in SQL is a legitimate
+rendering: the branch is on whether `:after_key` is NULL, which the caller knows
+before it builds the statement. `db/repositories/title.py`'s `_browse_after` is
+the worked example.
+
+**And `nulls_last(...)` is written out as `key.is_not(None).desc()` on this
+read**, deliberately, even though the two compile to the same order: the keyset
+predicate has to agree with the `ORDER BY` term for term, and two spellings of
+one rule is how they stop agreeing. Planting `.desc()` → `.asc()` fails **12**
+cases; deleting the `key.is_(None)` disjunct from the predicate fails 7.
+
+**Offset paging duplicates under a concurrent insert, measured rather than
+asserted.** PRD 07 has claimed this since M1 and nothing tested it, because
+testing it needs a repository exposing a wire-paged read and none existed until
+`TitleRepository.browse`. Five rows, page size three, one row committed between
+the two requests that sorts *into the page already served*: `OFFSET 3` serves
+`Charlie` twice and the keyset serves the pre-insert population once.
+`tests/integration/test_title_repository.py::
+test_offset_duplicates_a_row_a_concurrent_insert_pushed_down_and_the_keyset_does_not`,
+and it asserts the premise that the insert really did land behind the cursor —
+a row inserted *after* it is an ordinary page-2 row under both spellings.
+**One correction to the claim while verifying it: an insert duplicates and does
+not drop.** The population grew by one, so the window that slid by one still
+reaches the last row. A row *never* served needs a concurrent delete, which is
+a different write; PRD 07 says "produces duplicates", which is what this
+measures, and neither document now claims the other half.
+
+**A facet counted over its own predicate is the aggregate defect that looks
+correct on every request that does not use it.** `browse_facets` computes each
+facet over the filtered population **minus that facet's own predicate**, which
+is what makes the counts navigable — folded back, the genre facet answers "how
+many Horror films are Horror", i.e. the size of the page already on screen.
+Both halves need a case: *dropping its own* (`genre="Horror"` must not change
+the genre map) and *keeping the others* (the genre map must still honour `year`
+and `owned`). Measured, the two folds fail 2 and 3 cases respectively and
+nothing else in the file notices.
+
+`unnest` goes in a **subquery** rather than beside the `GROUP BY`: a
+set-returning function is legal in a target list and a `GROUP BY` over its
+output needs somewhere to name it. `select(func.unnest(TitleRow.genres)
+.label("genre")).where(...).subquery()` infers its own `FROM titles`, so no
+lateral join is needed. A title whose `genres` is `'{}'` unnests to no rows and
+is in no bucket, which is the same statement the `years` read makes with
+`IS NOT NULL`.

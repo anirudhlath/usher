@@ -112,6 +112,15 @@ and three harness findings, one of which defeats the plan's own trap rule.**
   backup is what recovered it — `git checkout --` would have been M5 group F's
   disaster again. A sweep harness needs a signal handler, or the operator needs
   to check `git status` after every interruption.
+  **Recurred 2026-08-11 in M9 A6**, on a sweep whose harness had the `cp`
+  backup and still lost work, because the tree was *uncommitted*: source files
+  were edited while a plant was live, the SIGTERM skipped the `finally`, and
+  the restore would have written back a copy predating those edits. The cheap
+  defence is not a signal handler — it is to **commit before sweeping and
+  re-run against a committed tree, so `git status` is the verification** and
+  every plant, live or leaked, shows up as a modified file that `git diff`
+  explains. A `cp` backup recovers the file the harness took; only a commit
+  recovers the file you changed underneath it.
 - **A mutation must be the change the plan names, not a change that happens to
   break the statement.** "`updated_at = now()` dropped from the `DO UPDATE`
   clause" spelled as a *replacement* with an assignment already in that clause
@@ -1563,6 +1572,497 @@ Gate green before and after on the fully restored tree (`md5sum`-verified
 byte-identical to the pre-sweep digest): whole suite **4141 unit+integration
 passed / 12 skipped**, `ruff check`, `ruff format --check`, `mypy` over 491
 files, `lint-imports` 9 kept / 0 broken.
+**M9 Task B6's sweep: 16 plants over `TitleRepository.browse`/`browse_facets` —
+14 targets all killed, 2 equivalent-mutant controls surviving all five gate
+steps, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in
+place with the plant list and its **expected verdict** written down first,
+`PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under `src/` **and**
+`tests/` before every run, `compile()` as the dry run, the plant asserted
+*present* by reading the file back before the run that judges it, and every
+restore verified by `md5sum` against a pre-plant digest of all four touched
+files.
+
+**Selection:** `tests/unit/test_title_repository_contract.py` and
+`tests/integration/test_title_repository.py` — 168 cases together, 0.3 s and
+~11 s a run. Scoped rather than whole-suite because nothing outside these files
+imports `browse` yet (grepped, not assumed; B7 is the route that will change
+that), and because the flaky `test_sse_end_to_end` case recorded above is in
+`tests/integration` and would give every plant a false-kill rate.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| the offset arm of the concurrency case resumes from a position instead | KILLED | 1 — the OFFSET case itself |
+| pg keyset loses the NULLs-sort-last disjunct | KILLED | 7 |
+| fake keyset loses the same | KILLED | 7 |
+| pg keyset drops its unkeyed-boundary branch (the row-comparison defect) | KILLED | 9 |
+| pg keyset tail relaxed `>` → `>=` | KILLED | 11 |
+| fake keyset tail relaxed | KILLED | 10 |
+| pg `ORDER BY` loses the `id` tail | KILLED | 3 |
+| pg `ORDER BY` takes Postgres's `DESC` NULLS FIRST default | KILLED | 12 |
+| pg genre facet folds its own predicate back in | KILLED | 2 |
+| pg year facet folds its own predicate back in | KILLED | 3 |
+| pg a requested facet with no rows is absent rather than zero | KILLED | 2 |
+| pg ownership loses `episode_id IS NULL` | KILLED | 1 |
+| pg ownership loses `available` | KILLED | 1 |
+| an unsupported sort falls back to `id` instead of raising | KILLED | 1 |
+
+**The one mis-spelled plant is the finding, and it is a fact about the port
+rather than about the suite.** *"The fake resumes by `OFFSET`"* was first
+spelled as: find `after.id`'s index in the freshly-ordered list, skip that
+many. It **survived all 74 unit cases**, correctly — that is not an offset
+implementation, it is the keyset spelled by index, and it answers identically
+because it resolves a *position* against the live population. **A port that
+takes `after: BrowseCursorPosition` cannot express the defect PRD 07 refuses**:
+an offset is a count of rows the client has already been served, and no
+argument in the signature carries one. So the fake arm has nothing to plant,
+and the comparison has to be — and is — a raw `LIMIT/OFFSET` statement in the
+integration file, run against the same table with the same `ORDER BY`. Its own
+teeth were then measured the other way round, by planting `OFFSET :offset` →
+`OFFSET 0` (the duplicate disappears; the case fails).
+**The general form: when a plant survives, check whether the mutant is the
+defect the plan named before writing the survivor up — a defect the type
+signature makes unreachable is a design result, not a coverage gap.**
+
+The two controls, measured against every gate step separately, because "the
+gate holds it" and "the suite holds it" are different claims:
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| `_browse_filters`' `genre` and `year` blocks swapped | PASS | PASS | PASS | PASS | PASS (168) |
+| one sentence of `_browse_after`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (168) |
+
+The first is a fact about the *code* rather than about what the tools look at:
+both blocks append to the same list from two independent parameters, neither
+reads the other, and the list is splatted into `.where(...)`, whose conjuncts
+have no ordering semantics — the planner reorders them regardless. The
+docstring reword was checked first against the docstring-scan grep this file
+records: the fourteen test files it finds scan `ports/`, `services/` and
+`api/`, and `test_ports_repository_package.py`'s scan is over
+`usher.ports.repository` and checks a docstring's **presence**, so **none of
+them reads `db/repositories/title.py`'s prose**.
+
+Gate green before and after on the fully restored tree: **3,184 unit / 4
+skipped**, **1,003 integration / 8 skipped**, ruff, `ruff format --check`, mypy
+over 489 files, `lint-imports` 9 kept / 0 broken, PRD link check `OK`.
+
+**And one harness note that cost a crashed run and a hand restore.** The
+"assert the plant landed" check was spelled `path.read_text().count(new) == 1`,
+which is wrong whenever the replacement is a *prefix* of text elsewhere in the
+file — deleting a branch left `    later` as the replacement, and
+`        later,` eight lines down contains it. The harness raised **after
+writing the plant and before restoring**, leaving the tree mutated; the `cp`
+backup is what recovered it, exactly as the SIGTERM entry above predicts.
+Spell the landing check as `old not in landed and new in landed`, which is what
+the check actually means and is immune to the substring.
+## M9 Task A6 — serve stale while refreshing
+
+**16 mutations planted, 14 killed, 1 equivalent mutant, 1 control surviving
+as designed.** Selection: `test_services_home_stale.py`,
+`test_services_rows_cache.py`, `test_telemetry_cache.py`, `test_api_lanes.py`,
+`test_api_home.py`, `test_services_home.py`, plus
+`test_rows_refresh.py`/`test_health.py` for the two that touch readiness.
+
+| mutation | verdict | the case that names it |
+|---|---|---|
+| `RefreshQueue.schedule`'s `user.id in self._pending` guard deleted | KILLED | `test_two_reads_over_one_stale_key_schedule_one_refresh` |
+| the pending mark cleared at `take()` instead of `done()` | KILLED | `test_the_key_stays_pending_until_the_refresh_says_it_is_done` |
+| the grace folded into `put_screen`'s stored `expires_at` | KILLED | `test_a_stale_screen_is_served_without_waiting_for_the_refresh` |
+| **stale value returned *and* the entry popped** | KILLED (see below) | `test_two_reads_over_one_stale_key_schedule_one_refresh` |
+| the `TTL + grace` boundary `<` → `<=` | KILLED | `test_past_the_grace_window_the_entry_is_a_hard_miss_and_is_never_served` |
+| a full queue evicts-and-retries instead of dropping | KILLED | `test_a_full_queue_drops_the_key_and_the_request_still_does_not_wait` |
+| a stale serve labelled `freshness="fresh"` | KILLED | `test_a_stale_serve_is_a_hit_labelled_stale` |
+| the schedule replaced by `await self.rebuild(ctx)` | KILLED | `test_a_stale_screen_is_served_without_waiting_for_the_refresh` |
+| the grace applied whether or not a refresher was injected | KILLED | `test_a_composer_with_no_refresher_never_serves_stale` |
+| `rebuild` routed back through `compose_report` | KILLED | `test_rebuild_ignores_the_cached_screen_and_replaces_it` |
+| **`refreshes.done()` moved out of the `finally`** | KILLED (see below) | `test_a_refresh_that_raises_leaves_the_stale_screen_and_names_the_lane` |
+| the lane's `logger.exception` deleted | KILLED | the same case |
+| the refresh lane joined to `running_sources()` | KILLED | `test_the_refresh_lane_is_not_a_source_lane` |
+| the refresh lane never started | KILLED | `test_a_stale_key_is_refreshed_on_the_lanes_own_unit_of_work` |
+| `refreshes.done()` *dedented* to after the whole `try/except` | **EQUIVALENT** | — |
+| CONTROL: `register_queue_gauges`/`register_search_gauges` swapped | SURVIVED | — |
+
+**Three of those rows are the finding, and all three are about the plant
+rather than about the code.**
+
+**A mutation whose failure mode is a hang scores as a false KILLED the moment
+anybody force-kills the run.** "Stale value returned *and* the entry popped"
+survived all of `test_services_home_stale.py` on the first pass — every
+assertion there still held, because the *first* read is served correctly and
+the damage is that the *next* one is cold — and then **hung**
+`test_api_lanes.py`, where the second read fell through to a real rebuild and
+parked on the gate the in-flight refresh was holding. Killing that pytest gave
+the harness a non-zero return code, which it scored `KILLED []` — a verdict
+with no `FAILED` line under it, and the empty list is the tell. Two repairs,
+both needed: the case now asserts the second read is **served the same stale
+screen and re-proposes nothing**, which kills it in milliseconds on an
+assertion; and the lane case's second read is driven by hand
+(`coro.send(None)`), so a read that becomes a rebuild fails instead of parking.
+**A `KILLED` with an empty failure list is not a kill — re-run it.**
+
+**`continue`, `break` and `return` do not skip a `finally`, so there is
+exactly one spelling of "the cleanup is not guaranteed".** Two plants against
+`refreshes.done()` scored SURVIVED before the third was right: adding a second
+call inside the `try` (additive — the `finally` still ran), and adding one
+followed by `continue` (the `finally` runs on `continue`, which is the whole
+property). Only deleting the `finally` clause *and* putting the call on the
+success path reproduces the defect, and that spelling dies on the crash case
+at once. **Before recording a `finally` as unpinned, check that the plant can
+actually skip it.**
+
+**And the *careless* spelling of that same mutation is a genuine equivalent
+mutant, which is worth keeping rather than deleting.** `refreshes.done()`
+dedented to sit after the whole `try/except` still runs on the raising path,
+because the `except Exception` swallows and control falls through — so it
+differs from the shipped code only on `CancelledError`, i.e. during shutdown,
+when nothing will read the queue again. Recorded, not fixed. Same treatment
+M4 gave `_ENQUEUE`'s `GREATEST` and M5 gave `_write_push_available`'s guard.
+
+Gate green before and after on the fully restored tree: `ruff check`,
+`ruff format --check`, `mypy` over 485 files, `lint-imports` 9 kept / 0 broken,
+**3,102 unit / 4 skipped** and **974 integration / 8 skipped**.
+
+### A6, second round — the ETag interaction A4 could not see
+
+Five more plants after `GET /home` grew a conditional GET in the same
+milestone, scored against `tests/unit/test_api_caching.py` alone:
+
+| mutation | verdict | cases |
+|---|---|---|
+| the stale serve schedules nothing | KILLED | 1 |
+| the grace window deleted (`_stale_grace` always zero) | KILLED | 2 |
+| the grace window unbounded (`if grace:` for the `TTL + grace` test) | KILLED | 3 |
+| the ETag hard-coded — A4's own defect, re-checked | KILLED | 3 |
+| stale value served **and** the entry popped | **SURVIVED** | — |
+
+The survivor is the one worth recording, because it corrects a sentence that
+was written into the case's docstring before it was measured. A path that
+serves the stale entry and then drops it damages the **next** read, and this
+file's third request is past the grace window and rebuilding anyway — so the
+304 case cannot see it, and claiming it could would have been a stale
+explanation of why a case works. It dies in
+`test_services_home_stale.py::test_two_reads_over_one_stale_key_schedule_one_refresh`
+instead, and both docstrings now say which file catches it.
+
+**M9 Task T5's sweep: 16 plants over `adapters/bulk/imdb.py`'s `title.akas`
+parser — 13 targets all killed, 3 equivalent-mutant controls surviving all
+five gate steps, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run
+2026-08-11 in place with the plant list and its **expected verdict** written
+down first, `PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under `src/`
+**and** `tests/` before every run, `compile()` as the dry run, the landing
+check spelled `old not in landed and new in landed` (the substring-immune form
+B6's entry above arrived at), and every restore verified by `md5sum` against a
+pre-plant digest.
+
+**Selection:** `test_adapters_bulk_imdb_akas.py`, `test_adapters_bulk_imdb.py`,
+`test_ports_bulk.py`, `test_no_third_party_data.py` and `test_api_meta.py` —
+91 cases, ~2.5 s a run. Scoped rather than whole-suite because nothing outside
+this task's own files imports `parse_akas_row` or `IMDbAkaDataset` (grepped,
+not assumed: `usher.cli` constructs the title and rating datasets only, and T8
+is the change that will alter that), and because the intermittent
+`test_sse_end_to_end` case recorded above lives in `tests/integration` and
+would give every plant a false-kill rate. The last two files are in the
+selection because this task commits a **fixture**, and the guard that reads it
+is the one that would notice a real IMDb row arriving with it.
+
+**Thirteen of thirteen killed is a weak-looking split and this entry says why,
+as B2's does: the plants and the cases were written by the same author in the
+same session.** What makes it evidence anyway is the two plants whose expected
+verdict was written down *because the case did not exist yet* — T7 and T11 —
+and one of the two produced the finding below.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 `_AKAS_COLUMNS` 8 -> 9 | KILLED | 15 |
+| T2 the header guard reads `tconst` | KILLED | 8 |
+| T3 the `isOriginalTitle` drop deleted | KILLED | 4 |
+| T4 the `isOriginalTitle` sense inverted | KILLED | 13 |
+| T5 the length bound relaxed `>` -> `>=` | KILLED | 1 |
+| T6 the length clause deleted | KILLED | 1 |
+| T7 `AKAS_NAME_MAX_CHARS = SEARCH_NAME_MAX_CHARS` -> `= 512` | KILLED | 1, and only the structural one |
+| T8 `region`/`language` read each other's column | KILLED | 1 |
+| T9 `_required_int`'s refusal -> `return 0` | KILLED | 1 |
+| T10 `_optional` not applied to the title | KILLED | 4 |
+| T11 the column-count error's `detail` becomes the whole line | KILLED | 2 |
+| T12 the dataset's `import_runs` key | KILLED | 1 |
+| T13 the dataset's filename | KILLED | 4 |
+
+**T7 is the one worth carrying, and it is the `__all__`-control family
+inverted: a mutation that is behaviourally identical *today* and is exactly
+the defect the constant exists to prevent.** `AKAS_NAME_MAX_CHARS` is bound to
+`SEARCH_NAME_MAX_CHARS`, imported from `usher.db.models.search`, because the
+parser's length filter is only worth anything if it is the *same* 512 the
+table's `ck_title_search_names_name_within_btree_bound` is spelled with.
+Re-spelling it as a literal passes every behavioural assertion in the
+selection — the two numbers are equal, so every filtered and every kept row is
+the same row — and the damage is entirely in the future: the day the CHECK
+moves, the parser keeps filtering at the old bound and starts handing the
+writer rows the database refuses, silently, in the direction that fails a
+whole batch. **Only reading the binding can tell the two apart**, so the case
+that kills it parses the module and asserts the assignment's value node is an
+`ast.Name` reading `SEARCH_NAME_MAX_CHARS`, alongside the ordinary equality
+assertion which cannot fail. Same family as
+`test_the_curated_module_holds_no_llm_client_and_cannot_complete_anything` and
+as A2's `status_code=document.status` plant, which also failed **exactly one
+case, the structural one**. The general form: *when a constant's whole purpose
+is that it is the same object as another one, equality is not the assertion —
+the binding is.*
+
+**T4's blast radius is 13 and T3's is 4, for the same clause, which is the
+other thing worth noting.** Deleting the `isOriginalTitle` drop lets two extra
+rows through and fails the four cases that count or order the slice's kept
+rows. *Inverting* it keeps only those two and drops everything else, so it
+also takes every case that reads a specific alias out of the fixture — a
+reminder that a survivor count is a property of which direction the mutation
+went, not of the clause.
+
+The three controls, each against every gate step separately:
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `ImdbAka(...)`'s `region=`/`language=` keyword arguments' written order swapped | PASS | PASS | PASS | PASS | PASS (91) |
+| C2 one sentence of `parse_akas_row`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (91) |
+| C3 `_BASICS_COLUMNS`/`_RATINGS_COLUMNS` definition order swapped | PASS | PASS | PASS | PASS | PASS (91) |
+
+C1 and C3 are facts about the *code* rather than about what the tools look at:
+keyword arguments are evaluated in written order and both expressions are
+side-effect-free `_optional` calls on two distinct locals, so neither can
+observe the other; and two adjacent module-level integer assignments reference
+neither each other nor anything between them, in a module with no import-time
+side effect. C3 is an ordering control that is **not** an `__all__` reorder,
+which `RUF022` would have rejected — the reason that was checked rather than
+assumed is the entry near the top of this file. C2 was checked first against
+the docstring-scan grep: the files it finds scan `ports/embedding.py`,
+`ports/metadata.py`, `ports/repository`, `services/`, `api/` and
+`adapters/search/prefix.py`, and **none of them reads `adapters/bulk/`**; the
+one scan this task adds parses `adapters/bulk/imdb.py` for module-level
+`ast.Assign` nodes, which a function's docstring is not.
+
+Gate green before and after on the fully restored tree (`md5sum`-verified
+byte-identical to the pre-sweep digest).
+
+## M9 Task V1 — the problem-code vocabulary, and a harness that invalidated its own controls
+
+**10 plants over the vocabulary's closure — 10 killed, 2 equivalent-mutant
+controls surviving all five gate steps, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0
+DID-NOT-RUN.** Run 2026-08-11 in place over `src/usher/api/dto/problem.py`,
+`src/usher/api/errors.py`, `src/usher/api/routers/playback.py`,
+`src/usher/api/routers/health.py`, `src/usher/api/dto/health.py` and ADR-0030
+itself, with the expected verdict written down first, `PYTHONDONTWRITEBYTECODE=1`
+and a `__pycache__` sweep under **both** `src/` and `tests/` in force, every
+plant asserted present by an exact anchor count (`count(anchor) == 1`) and every
+restore verified by `md5sum` against a pre-plant digest.
+
+🔴 **The harness lived in the working tree, and that made every gate-step
+control read FAIL.** `.plants.py` at the repo root plus a `.plant-backups/`
+directory holding `.py` copies of the mutated files are **inside** what
+`uv run ruff check .` and `uv run ruff format --check .` walk — ruff does not
+skip a dotfile with a `.py` extension, and it certainly does not skip a
+dot-*directory* full of them. The first run of both controls reported
+`ruff check FAIL` / `ruff format --check FAIL` with `mypy`, `lint-imports` and
+`pytest` passing, and the write-up that was one keystroke from being committed
+said *"both controls fail the two ruff steps"* — a statement about the harness
+rendered as a statement about the code. Moving the harness to `/tmp` with an
+absolute `ROOT` and re-running gave PASS on all five for both.
+
+**This is a new spelling of a family this file already holds and none of the
+existing entries covers it.** The recorded members are all *a run that ran
+against the wrong code* (the `.pyc` collision, the `cp -a` venv shebang,
+`sitecustomize` off `PYTHONPATH`). This one is **a gate step that ran against
+the right code and extra files** — the tool did exactly what it was asked, over
+a corpus the sweep created. Two things follow, and the second is the
+generalisation:
+
+- **A control has to be measured against the gate, and the gate is
+  whole-repository.** `pytest` takes a selection and the four static steps take
+  `.`, so a harness that is invisible to a scoped pytest run is fully visible to
+  `ruff check .` and `mypy src tests`. **Put the harness outside the tree**, or
+  measure the four static steps on a clean tree first and subtract — the first
+  is cheaper and cannot drift.
+- **The tell is that every control fails the same steps and no plant does.** A
+  suite of controls that were chosen precisely because nothing can observe them
+  does not suddenly acquire a common failure mode; when one appears, suspect the
+  corpus before suspecting the controls.
+
+**The plant the plan named lands on the premise, and the careful spelling of the
+same defect is what lands on the assertion.** V1's acceptance names
+*"`/health/ready` answering a problem document → the exemption case fails on its
+own assertion line, not on a neighbouring one"*. Spelled the loud way — the
+handler raising `ProblemException(503)` — the case fails on
+`assert body["status"] == "degraded"` (`assert 503 == 'degraded'`), because a
+problem document has an integer `status`. That is a real detection and it is not
+the absence assertion. Spelled the careful way — `ReadinessResponse` growing
+`type` and `code` fields while keeping `status` and `checks`, i.e. the change
+somebody makes "for consistency" — it fails on `assert "type" not in body`,
+exactly as required. **Both were run. The general form: when an acceptance
+criterion asks for a plant to fail a *named* assertion, the plant that does so is
+usually the one that preserves everything the case checks first — a loud plant
+trips the premise and reports a kill the criterion was not asking about.**
+
+| plant | verdict | dies on |
+|---|---|---|
+| a — `routers/playback.py` names `ProblemCode.TITLE_NOT_FOUND` | KILLED | ``emits codes the vocabulary does not hold: ['title_not_found']`` |
+| c — `RATE_LIMITED` added to the enum, not to the ADR | KILLED | ``members ADR-0030 does not declare: ['rate_limited']`` |
+| f — a `rate_limited` row added to the ADR, not to the enum | KILLED | ``declares codes `ProblemCode` does not have: ['rate_limited']`` |
+| d — `title_not_found` added to **both** (the careless per-resource 404) | KILLED | ``per-resource 404 codes: ['title_not_found']`` |
+| e — `no_such_title` added to **both** (the careful one) | KILLED | ``404 codes naming a collection the path already names: {'no_such_title': ['title']}`` |
+| g — `NOT_PLAYABLE` raised with 404 as well as 409 | KILLED | ``raised with a status ADR-0030 does not give it: {('not_playable', 404): 409}`` |
+| h — `_CODE_FOR_STATUS` learns `503` | KILLED | ``_CODE_FOR_STATUS covers [404, 405, 422, 503]`` |
+| i — `TICKET_INVALID = "invalid_ticket"` | KILLED | ``TICKET_INVALID puts 'invalid_ticket' on the wire`` |
+| j — `/home` joins `PROBLEM_EXEMPTIONS` | KILLED | ``{'/events', '/health/ready', '/home'} == {'/events', '/health/ready'}`` |
+| b2 — `ReadinessResponse` grows `type`/`code` | KILLED | ``assert 'type' not in {…}`` |
+
+**d and e are the pair that matters and they were run against the same three
+cases.** `d` dies on the `_not_found`-suffix case; `e` **passes** it and dies
+only on the collection-noun case, which is the measurement behind the claim that
+the two together hold both spellings. Verified by node id: under `e`, only
+`test_no_404_code_names_a_collection_the_route_table_already_names` failed out of
+the file's eight.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| `_CODE_FOR_STATUS`'s `404` and `405` entries swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,244 / 4 skipped) |
+| `PROBLEM_EXEMPTIONS`' two entries swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,244 / 4 skipped) |
+
+Both are facts about the *code* rather than about what the tools look at: each
+is a dict literal with two distinct, independent keys, read only by key lookup
+(`_CODE_FOR_STATUS.get(status)`) or as a set (`frozenset(PROBLEM_EXEMPTIONS)`),
+and neither entry's value references the other. Neither is an `__all__` reorder,
+which is the control `ruff`'s `RUF022` rejects — checked rather than assumed,
+after the A1 entry above recorded an import reorder being rejected for the same
+family of reason.
+
+**And the `-q`/`-qq` trap fired again, in its cheapest form.** `uv run pytest
+tests/unit | grep -E "passed|failed"` printed nothing: `pyproject.toml`'s
+`addopts` already carries `-q`, so the extra one made it `-qq` and suppressed
+the summary line on a green run. Costless here because it was an interactive
+baseline rather than a harness verdict — recorded because the harness rule
+("pass no verbosity flag at all") is usually stated about harnesses and the
+habit is formed at the shell.
+
+## M9 Task C4 — the image proxy's two ports and their adapters (2026-08-11)
+
+**35 plants over `ports/images.py`, `adapters/images/provider.py`,
+`adapters/images/disk.py`, `services/images.py` and two fakes — 32 behavioural
+targets of which 31 were killed on the first pass and **1 was a real survivor
+since closed**, plus 3 equivalent-mutant controls surviving all five gate
+steps. 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN, 0 HUNG.** Run in place
+with the plant list and its **expected verdict** written down first,
+`PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under **both** `src/` and
+`tests/` before every run, `compile()` rather than `ast.parse` as the dry run,
+every plant asserted present by an exact anchor count (`count(old) == 1`), and
+every restore verified by `md5sum` against a pre-plant digest.
+
+**Selection**, stated because a survivor list is only true of the selection it
+was measured against: `tests/unit/test_adapters_images.py`,
+`test_services_images.py`, `test_config.py`, `test_ports.py` and
+`test_deployment_config.py` — 310 cases, ~1 s a run, green before and after.
+Scoped rather than whole-suite for two reasons, both checked rather than
+assumed: `grep -rln "ports.images\|adapters.images\|services.images"` finds
+nothing outside this task's own files plus `config.py` and `composition.py`,
+neither of which any other case drives through the new factory; and
+`tests/integration/test_sse_end_to_end.py` is intermittent on this tree and
+predates M9, so **a sweep scored on "did the run fail" cannot include it** —
+every plant inherits the flake's failure rate as a false kill.
+
+🔴 **31 of 32 killed on the first pass is the weakest-looking split in this
+file and the entry has to say why: the plants and the cases were written by the
+same author in the same session against the same 400 lines.** That is the
+condition under which a sweep measures its author's consistency rather than the
+suite's reach. What makes it evidence anyway is the one plant whose verdict was
+written down as **`?`** rather than as a prediction, and it is the whole yield.
+
+**The survivor: `await asyncio.to_thread(path.read_bytes)` spelled
+`path.read_bytes()`.** It survived all 310 cases, and it is **not** an
+equivalent mutant — this store is read from an ASGI request handler, so a
+synchronous read of up to `USHER_IMAGE_MAX_BYTES` stalls the event loop and one
+slow disk becomes everybody's slow disk. **No behavioural assertion anywhere in
+this repository can see it**: the value returned is byte-identical and the only
+difference is which thread was blocked while it was produced. Telling the two
+apart behaviourally needs a loop-latency harness this project does not have and
+should not grow for one module. Closed **structurally** instead, by
+`test_no_filesystem_call_in_the_disk_store_blocks_the_event_loop`, which parses
+the module and asserts that every member of a closed set of blocking
+filesystem operations appears as an attribute *reference* handed to
+`asyncio.to_thread` and never as a call — with a premise guard that the scan
+found any blocking operation at all, because a scan that globs nothing passes
+exactly like a scan that passes. Re-planted, that mutation and a second
+spelling of it (`scratch.replace(final)`) each fail **that case alone**.
+
+**The general form, which is new to this file: when a defect's only symptom is
+*which thread ran*, a behavioural suite is not merely missing a case — it has
+no expressible one, and the honest repair is a structural assertion rather than
+a timing test.** Nearest relative is
+`test_the_curated_module_holds_no_llm_client_and_cannot_complete_anything`,
+which makes the same move for a defect whose symptom is *which object was
+held*; the difference is that there a behavioural case is possible and merely
+weak, and here there is none.
+
+**A second result worth carrying, about a bound chosen well by accident.**
+`test_a_body_past_the_ceiling_is_refused_while_it_streams` asserts
+`sum(delivered) <= 20` over a source generator yielding four 10-byte chunks
+against a ceiling of 10 — the number is what makes it a *streaming* assertion
+rather than an "eventually refused" one. Two independent plants land on it:
+buffering the whole body first, and `seen += len(chunk)` moved *after* the
+check (an off-by-one that lets 20 bytes through a 10-byte ceiling). Both die on
+that arithmetic and neither would die on a `pytest.raises` alone. **When a
+ceiling is enforced during a stream, the assertion is how much arrived before
+the refusal, not that a refusal happened.**
+
+**And one plant that changed the code before the sweep ran, which the plant
+list found rather than the run.** `ImageCacheKey.digest()` separates its two
+terms with a NUL. Writing down "the separator dropped" and asking which case
+would catch it found only
+`test_the_cache_path_is_a_hash_and_two_levels_deep`, which recomputes the
+digest literally — a real kill, and a kill by *mirroring the implementation*.
+`test_the_two_terms_of_the_digest_cannot_run_into_each_other` states the
+property instead (`("tmdb", "/a.jpg")` and `("tmdb/", "a.jpg")` concatenate
+identically, with that stated as its own premise), so it keeps saying something
+if the digest is ever spelled another way. Both now fail on the plant.
+
+The other thirty targets and what each cost, grouped: the clamp returned
+unclamped fails 6 and the clamp made strict fails 4 (both through the
+*fetcher's* recorded width, so the ladder guard is what makes an unclamped
+width loud rather than a CDN 400); the default rung fails 1; the non-positive
+guard fails 1; **the service never asking the store fails exactly the case the
+plan names**; the key's `provider` term fails 2 and its separator 2; the shard
+depth fails 1 and the rung in the filename 3; the in-place write fails 14, the
+scratch cleanup 4, the `fsync` 1, the sibling sweep 1 (and *widening* it to
+unlink the entry just written fails 14); `get` trying one extension fails 1;
+the byte ceiling made `>=` fails 1, deleted 2, and respelled as a
+`Content-Length` check 1; collapsing the 4xx/429 split fails 6; the media-type
+refusal moved past the body fails 3 and removed entirely 5; parameters not
+stripped fails 2; the off-ladder guard fails 8 on each arm independently; the
+`w` prefix fails 4; a defaulted `Content-Type` fails 2; a missing row treated
+as present fails 1; and the fake store writing before it consumes fails 9.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| `ProviderCdnImageFetcher.__init__`'s `_base_url`/`_max_bytes` writes swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,362 / 4 skipped) |
+| one sentence of `services/images.py`'s module docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (3,362 / 4 skipped) |
+| `IMAGE_LADDER` and `DEFAULT_IMAGE_WIDTH` defined in the other order | PASS | PASS | PASS | PASS (9/0) | PASS (3,362 / 4 skipped) |
+
+The first and third are facts about the *code* rather than about what the tools
+look at: two disjoint attribute writes on a freshly constructed object, neither
+right-hand side reading the other and nothing running between them; and two
+module-level assignments referencing neither each other nor anything between
+them, in a module with no import-time side effect. **The third is an ordering
+control that is deliberately not an `__all__` reorder** — `RUF022` would have
+rejected that, which this file records as the reason such a control
+demonstrates nothing about the gate. The docstring reword was checked first
+against `grep -rn "getdoc\|__doc__\|ast.unparse\|getsource" tests/`: the scans
+it finds cover `ports/`, `services/rows/`, `api/` and — new in this task —
+`adapters/images/`, and **none of them reads `services/images.py`**, which is
+why the docstring control was put there rather than in `disk.py`, whose prose
+*is* scanned by `test_nothing_in_the_package_logs`.
+
+**The ninth import contract was verified in both directions rather than
+assumed**, because adding a module to a `forbidden` list is exactly the edit
+that reads as bookkeeping: `from usher.adapters.images.provider import
+ProviderCdnImageFetcher` planted in `adapters/http.py` **in its isort
+position** (so the careful spelling of the defect is what was measured, not the
+careless one `ruff check` catches as `F401`) reports **8 kept, 1 broken**,
+naming the new module; restored, 9 kept, 0 broken, `md5sum`-verified.
+
 
 ## M9 Task C3 — images re-derived from `raw_payloads` (2026-08-11)
 

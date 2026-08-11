@@ -4,9 +4,13 @@ Read [`../README.md`](../README.md) first: it states the licensing rule, the
 reserved identifier bands, and the fact that these files previously carried
 real IMDb rows under a note claiming they did not.
 
-**Every value in these four files is invented.** No id, title, year, runtime,
-rating or vote count here describes a real work. What is preserved is the
-*format* — and each row exists to pin one thing about it.
+**Every value in these five files is invented.** No id, title, alias, year,
+runtime, rating or vote count here describes a real work. What is preserved is
+the *format* — and each row exists to pin one thing about it.
+
+*(It said "four" until M9 added `title.akas.slice.tsv`. The count is in this
+sentence rather than left implicit precisely so that adding a file has to
+touch it.)*
 
 ## `title.basics.slice.tsv`
 
@@ -53,6 +57,46 @@ exercised. Ratings are on IMDb's own 0–10 scale because
 `Title.community_rating` is `Field(ge=0, le=10)` and the schema mirrors that
 as a CHECK — the scale is the contract, the numbers are invented.
 
+## `title.akas.slice.tsv`
+
+Ten lines: a header and nine data rows, six of which survive the filter. No
+trailing newline, matching `title.basics.slice.tsv` and the shape the adapter
+reads. Eight columns — `titleId ordering title region language types
+attributes isOriginalTitle` — which is the header the real file carries at the
+pinned snapshot `"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`, not IMDb's published
+schema.
+
+| Line | Row | Pins |
+|---|---|---|
+| 0 | header | `parse_akas_row` returns `None` for it rather than raising |
+| 1 | `tt99000020`, `isOriginalTitle=1` | dropped — IMDb's own claim that the row *is* the original title, and `SearchNameKind` has no `primary` member |
+| 2 | a French alias | `region`/`language` are both kept |
+| 3 | `"A Quoted Synthetic Alias"` | **the same reason this project does not use `csv`**, re-confirmed on this file — see below |
+| 4 | a `\N` title | dropped — `ck_title_search_names_name_not_empty` is `name <> ''` |
+| 5 | `tt99000030`, `isOriginalTitle=1` | dropped, as line 1 |
+| 6 | a Brazilian alias (`BR`/`pt`) | with line 7, the whole argument for `region` and `language` existing as columns |
+| 7 | a French alias (`FR`/`fr`) | two aliases of one title that are only distinguishable by those two columns |
+| 8 | a `working` title | no row is filtered on its `types` |
+| 9 | a two-valued `types`, `imdbDisplay`+`festival` | **the inner separator is `\x02`, not a tab** — a parser that assumed otherwise would call this row nine-column and malformed |
+
+**The quoted row is load-bearing here for the same reason it is in
+`title.basics.slice.tsv`, and the real file makes the case more strongly than
+that one does.** Measured over all 58,906,368 data rows of the pinned
+`title.akas.tsv.gz`: **39,880 titles contain a literal `"` and 6,344 of them
+open with one**, so a `csv.reader` with its default `QUOTE_MINIMAL` would
+silently rewrite 6,344 alias names. The invented row keeps that exact shape —
+opening *and* closing quote — because a title with only *interior* quotes
+survives both parsers and pins nothing.
+
+**Line 9's `\x02` is a real control character in the file, deliberately.**
+`types` and `attributes` are multi-valued inside one tab-delimited column and
+ASCII STX is what separates them; 429 of the 58,906,368 real rows carry a
+two-valued `types`. A fixture that spelled the separator as a comma or a space
+would agree with the parser while disagreeing with IMDb.
+
+Neither `types` nor `attributes` is parsed into anything — they exist in the
+slice to hold the column count honest and to document the separator.
+
 ## `movie_ids.slice.jsonl` / `tv_series_ids.slice.jsonl`
 
 TMDb's *public daily id export* format: one JSON object per line, no wrapping
@@ -74,6 +118,7 @@ To change one, edit it and run
 
 ```bash
 uv run pytest tests/unit/test_adapters_bulk_imdb.py \
+              tests/unit/test_adapters_bulk_imdb_akas.py \
               tests/unit/test_adapters_bulk_tmdb_ids.py \
               tests/integration/test_bootstrap_end_to_end.py
 ```

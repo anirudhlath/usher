@@ -659,3 +659,72 @@ def test_query_expansion_without_an_llm_is_refused_rather_than_silently_ignored(
 
     monkeypatch.setenv("USHER_LLM_ENABLED", "true")
     assert Settings().query_expansion_enabled is True
+
+
+def test_the_image_proxy_settings_have_the_measured_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Four fields pinned together, and two of them are *measurements* rather
+    than choices — which is why an edit to either has to be visible somewhere.
+
+    `image_cdn_base_url` was read live from the provider's `/configuration`
+    endpoint on 2026-08-11 (`secure_base_url`), and **every byte figure in
+    ADR-0032 is a measurement against this host** — a default pointing anywhere
+    else makes that whole document a claim about a server nobody tested. It is
+    also the *only* definition of the host: `ProviderCdnImageFetcher` takes
+    `base_url` as a required argument rather than carrying one of its own, so
+    there is nothing here for a second copy to disagree with.
+
+    `image_max_bytes` at 5 MiB is above every byte this proxy can legitimately
+    receive: the largest artwork ADR-0032 measured anywhere is 4,731,805 bytes,
+    and that is an `original`, which the ladder cannot express and the fetcher
+    never requests. The largest *rung* measured is a 563 KB median poster at
+    `w1280`, so the ceiling is roughly 9x the biggest ordinary answer — loose
+    enough never to refuse a real image and tight enough to bound a lying
+    upstream.
+
+    `image_cache_dir` sits beside `bulk_data_dir`'s `data/bulk`, inside
+    `.gitignore`'s `data/`. `image_fetch_timeout_seconds` is an order of
+    magnitude below `llm_timeout_seconds`' 120 because the *lane* decides it:
+    that one is a worker job and this is a request.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    settings = Settings()
+
+    assert settings.image_cache_dir == Path("data/images")
+    assert settings.image_max_bytes == 5 * 1024 * 1024
+    assert settings.image_fetch_timeout_seconds == 10.0
+    assert settings.image_cdn_base_url == "https://image.tmdb.org/t/p/"
+    assert settings.image_fetch_timeout_seconds < settings.llm_timeout_seconds
+
+
+def test_the_image_ladder_is_not_a_setting() -> None:
+    """ADR-0032: the four widths are a tuple in `usher.ports.images`, because
+    they are what bounds the cache and are reviewable in `src/` rather than
+    per deployment.
+
+    PRD 08's Configuration table listed an "image cache ladder" as a TOML-layer
+    concern until 2026-08-11, and there is no TOML layer — so this is the
+    dead-config rule applied to a knob rather than to a typo. The assertion is
+    over the whole field set rather than over one guessed name, because
+    `USHER_IMAGE_WIDTHS`, `USHER_IMAGE_LADDER` and `USHER_IMAGE_SIZES` are three
+    spellings of the same mistake.
+    """
+    from usher.ports.images import IMAGE_LADDER
+
+    ladder_shaped = sorted(
+        name
+        for name in Settings.model_fields
+        if name.startswith("image_") and name not in _IMAGE_SETTINGS
+    )
+
+    assert ladder_shaped == []
+    assert IMAGE_LADDER == (154, 342, 780, 1280)
+
+
+#: The four the image proxy ships, named so the case above fails on a fifth
+#: rather than on a list somebody remembered to update.
+_IMAGE_SETTINGS = frozenset(
+    {"image_cache_dir", "image_max_bytes", "image_fetch_timeout_seconds", "image_cdn_base_url"}
+)

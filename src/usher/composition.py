@@ -58,6 +58,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
+from usher.adapters.images import DiskImageBlobStore, ProviderCdnImageFetcher
 from usher.adapters.llm import OpenAICompatibleClient
 from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestIndex
 from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
@@ -84,9 +85,11 @@ from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
 from usher.domain.jobs import JobKind
 from usher.domain.source import Source
+from usher.domain.watch import User
 from usher.ports.credentials import CredentialStore
 from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher, NullEventPublisher
+from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
 from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
@@ -109,7 +112,7 @@ from usher.ports.repository import (
     TitleRepository,
     WatchStateRepository,
 )
-from usher.ports.rows import RowProvider
+from usher.ports.rows import RowContext, RowProvider
 from usher.ports.source import SourceAdapter, SourceAdapterFactory
 from usher.services.curation import CurationService
 from usher.services.curation_pool import CandidatePoolService
@@ -124,6 +127,7 @@ from usher.services.handlers import (
     match_handler,
     watch_history_handler,
 )
+from usher.services.images import ImageProxyService
 from usher.services.index import IndexService
 from usher.services.ingest import IngestService
 from usher.services.jobs import JobWorker
@@ -960,6 +964,63 @@ async def llm_client(
     return built, built.aclose
 
 
+def image_proxy(
+    settings: Settings,
+) -> tuple[ImageFetcher, ImageBlobStore, Callable[[], Awaitable[None]]]:
+    """The image proxy's two process-scoped halves, and the callable that
+    closes the fetcher's transport.
+
+    **Deliberately not the `(None, no-op)` shape `llm_client`, `embedder` and
+    `metadata_provider` share, and the difference is the point.** Those three
+    answer `None` because a deployment without a model, an embedder or a TMDb
+    key is *narrowed* rather than broken. There is no switch here and nothing
+    to be missing: the proxy needs no credential (ADR-0032 — the CDN is
+    unauthenticated), takes no dependency this project did not already have,
+    and its only inputs are a directory and a URL that both have defaults. A
+    nullable return would be a degradation nothing can cause.
+
+    **One `httpx.AsyncClient` per process**, for `metadata_provider`'s reason
+    one layer over: a client per request is a connection pool per request, and
+    the pool is the entire benefit of keeping one. Its timeout is
+    `image_fetch_timeout_seconds` — an order of magnitude below the LLM's,
+    because this one is on a request path.
+
+    **No throttle, unlike `TmdbClient`.** The image CDN publishes no rate limit
+    and is not the API the ~40 rps ceiling is about; a token bucket here would
+    be a limiter invented against a number nobody has measured. The real bound
+    is the cache: after the first request per `(image, rung)` there is no
+    outbound traffic at all.
+
+    The store is returned rather than built per request because
+    `DiskImageBlobStore` holds a `Path` and nothing else — but it is returned
+    *here*, beside the fetcher, so a deployment cannot end up with a cache
+    directory the fetcher's byte ceiling was never told about.
+    """
+    client = httpx.AsyncClient(timeout=settings.image_fetch_timeout_seconds)
+    fetcher = ProviderCdnImageFetcher(
+        client,
+        base_url=settings.image_cdn_base_url,
+        max_bytes=settings.image_max_bytes,
+    )
+    return fetcher, DiskImageBlobStore(settings.image_cache_dir), client.aclose
+
+
+def build_image_proxy_service(
+    images: ImageRepository, fetcher: ImageFetcher, store: ImageBlobStore
+) -> ImageProxyService:
+    """One request's `ImageRepository` plus the process's fetcher and store.
+
+    **The same asymmetry `build_index_service` and `build_curation_service`
+    have**, and it is why this takes an `ImageRepository` rather than a
+    `Pipeline`: the repository is session-scoped and the other two are not.
+    It takes the repository directly rather than the pipeline because
+    `GET /images/{id}` is a *read* of one row and needs none of the other
+    twenty-odd fields — a route that was handed the whole pipeline could reach
+    the job queue from a request path, and this one has no business doing so.
+    """
+    return ImageProxyService(images=images, fetcher=fetcher, store=store)
+
+
 def _load_embedder(settings: Settings) -> Embedder:
     """The one line that touches `fastembed`, isolated so a test can replace it.
 
@@ -972,6 +1033,39 @@ def _load_embedder(settings: Settings) -> Embedder:
     from usher.adapters.embedding.fastembed import FastEmbedEmbedder
 
     return FastEmbedEmbedder(settings.embedding_model, batch_size=settings.embedding_batch_size)
+
+
+def build_row_context(pipeline: Pipeline, user: User) -> RowContext:
+    """The fourteen values a row may reach, over one unit of work.
+
+    `api/deps.py` assembles the same context from request-scoped dependencies
+    and `usher home` from a command's one session; this is the third caller --
+    the `rows.refresh` lane, which has neither a request nor a command and only
+    a `Pipeline`. It lives here rather than in `api/lanes.py` because that
+    module deliberately holds no session and imports no SQLAlchemy, and
+    assembling a bag of repositories is wiring.
+
+    **`affinities` is the plain deferred read, not the route's per-request
+    memo.** One refresh composes once and `GenreAffinityProvider` awaits it at
+    most once, so `api/deps.py:_Affinities`' memo would be a memo with one
+    reader -- and the reason the field is a callable at all survives intact: a
+    provider that never fires never pays the three statements behind it. Same
+    shape `usher home` uses, one file over.
+    """
+    return RowContext(
+        user=user,
+        now=lambda: datetime.now(UTC),
+        titles=pipeline.titles,
+        media_items=pipeline.media_items,
+        watch_states=pipeline.watch_states,
+        episodes=pipeline.episodes,
+        neighbors=pipeline.neighbors,
+        people=pipeline.people,
+        credits=pipeline.credits,
+        collections=pipeline.collections,
+        affinities=lambda: pipeline.taste.genre_affinity(user.id),
+        curated=pipeline.curated_rows,
+    )
 
 
 def unit_of_work(
@@ -1182,6 +1276,7 @@ __all__ = [
     "build_index_service",
     "build_pipeline",
     "build_push_applier",
+    "build_row_context",
     "build_worker",
     "embedder",
     "llm_client",

@@ -1214,9 +1214,12 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
 
     **`--repeat` measures N *cold* compositions**, clearing the cache before
     each. A repeat that measured cache hits would report a number near zero and
-    mean nothing. The warm read is timed once, separately, and labelled -- and
-    it is the only measurement of the cache this milestone has, because
-    `usher.cache.hits`/`.misses` is M9's.
+    mean nothing. The warm read is timed once, separately, and labelled.
+
+    **The two numbers still mean what they meant before M9 added serve-stale**,
+    and that is a property of the composer this command builds rather than of
+    the arithmetic below: it passes no refresher, so its screen cache is
+    fresh-or-miss exactly as it was in M7. See the call site.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
@@ -1258,7 +1261,20 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
             curated=pipeline.curated_rows,
         )
         cache = RowCache(clock=lambda: datetime.now(UTC))
-        service = HomeService(pipeline.row_providers, cache=cache, max_rows=limit)
+        # **No refresher, and the `None` is the decision rather than an
+        # omission.** `HomeService` gates its stale-serve grace window on
+        # having one, so this composer is M7's fresh-or-miss cache exactly as
+        # before -- which is what keeps the cold/warm pair below meaning what
+        # it has always meant.
+        #
+        # A refresher here would have nothing to run it: the process ends when
+        # the command does, so a scheduled refresh is a task cancelled
+        # mid-flight, and `GET /home`'s lane lives in a server this command is
+        # not. A *no-op* refresher would be worse than none -- it would open
+        # the grace window with nothing behind it, so a screen 31 s old would
+        # be served stale and never replaced, which is the one state PRD 06's
+        # sentence must not produce.
+        service = HomeService(pipeline.row_providers, cache=cache, refresh=None, max_rows=limit)
 
         # Collected rather than overwritten so the last one is reachable
         # without an `Optional` no input can reach -- `parse_args` refuses

@@ -169,3 +169,24 @@ shipped docstring, `_SCANNED_ROOTS` narrowed to `("src",)`, the repo-wide
 walk emptied, and each of the three matchers made to match nothing.
 `tests/fixtures/README.md` holds the bands and the allocation table.
 
+**A NULL cannot poison a comparison in Python, so a fake cannot host the
+quietest half of a keyset defect — it hosts a loud one instead.** Recorded
+2026-08-11 as `FakeTitleRepository`'s eighth divergence (M9 B6). The shipped
+hazard is `((k IS NOT NULL), k, id) > (...)` answering **NULL** for an unkeyed
+boundary, which Postgres treats as "no" and which silently drops the rest of
+the unkeyed group while every page served looks full. The literal Python
+transcription of the same mistake is `None > None`, which raises `TypeError` in
+the first case that reaches it. Same defect, opposite failure mode: the fake
+arm turns a silent wrong answer into a crash. So the paired case is a *quiet*
+regression on the Postgres arm and a *loud* one here, and only the integration
+run reproduces what a client would actually see. Related, in the same read: an
+`OFFSET` defect is not expressible against this fake at all — the port takes a
+typed position, not a count — which is a property of the port's design and is
+recorded with the sweep in `mutation-sweeps.md` rather than as a coverage gap.
+
+The `episode_id IS NULL` half of browse's `owned` filter, by contrast, **is**
+expressible here and is the first ownership bound this fake can tell apart:
+`available_copies` stores `None` for a title-level copy and an episode id for
+an episode one. `media_items.available` is still not modelled, so the retracted
+distractor stays load-bearing only in the integration run — the same asymmetry
+`list_unwatched_candidates` already records.
