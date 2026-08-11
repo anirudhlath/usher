@@ -2100,3 +2100,100 @@ job `running` until the next `startup()`. Pre-existing, affects every kind, belo
 assertion pinning today's residual window (**which G2 flips** — planted, it fails on its own message
 with `[('derive','pending'),('enrich','running'),('index','pending')]`), and a **bounded** poll in
 place of the load-dependent immediate read.
+### ✅ M9 Task G3 — the pool's ownership claim: measured, and the prompt is what gave way (2026-08-11)
+
+**Carried debt from PRD 09, filed by M8's live run as a product decision and settled here.**
+`TitleRepository.list_unwatched_candidates` uses ownership as an `ORDER BY` key and never as a
+filter; `curation_prompt.build_prompt` opened *"one household's **own** film and television
+library."* Both sentences were defensible. **Arm 2 ships — the prompt is corrected — and the pool is
+untouched.**
+
+**The decision rule was written down before the sweep ran**, and one of its two falsifiers was the
+plan's own recommendation: arm 1 would ship if a filtered pool were `>= min_cards` at every `U > 0`,
+or if the unfiltered pool's owned fraction collapsed even at `U = 200`. Neither held.
+
+**Evidence (a) — deterministic, model-free, through the real Postgres repository.** Own
+`pgvector/pgvector:pg17` container, schema from the real Alembic chain, 1,000-title catalog, no watch
+history, `limit = 200`, `U` unwatched-and-owned titles seeded with `random.Random(20260811)`. The
+filtered arm is the identical statement with `owned` moved from the `ORDER BY` into the `WHERE`.
+
+| `U` | pool as shipped | of which owned | pool filtered | filtered fills a row |
+|---|---|---|---|---|
+| 0 | 200 | 0 — 0.0% | **0** | **no** |
+| 3 | 200 | 3 — 1.5% | **3** | **no** |
+| 5 | 200 | 5 — 2.5% | 5 | yes |
+| 8 | 200 | 8 — 4.0% | 8 | yes |
+| 20 | 200 | 20 — 10.0% | 20 | yes |
+| 200 | 200 | 200 — 100.0% | 200 | yes |
+
+🔴 **The refutation that decided it is stronger than the rule asked for: the filter can add
+nothing.** `owned DESC` is the *first* sort key, so the owned titles are a prefix — the owned column
+is exactly `min(U, 200)` at every row, the shipped read already returns every unwatched-owned title
+the household has, and at `U = 200` the two arms return the identical set. Filtering is purely
+subtractive; below `DEFAULT_MIN_CARDS = 5` it deletes the generation. The unreachable band is wider
+than the arithmetic — M8 measured **2–3 cards at pool 5 and pool 8**, all `row_too_short` — so `U = 5`
+and `U = 8` clear the bar on paper and produced nothing live.
+
+🔴 **Evidence (b) overturned half the plan's own recommendation.** The plan recommended *arm 2 plus a
+per-candidate ownership marker*. Priced the way the 4,304 was priced — `usage.prompt_tokens`,
+`max_tokens=1`, **4 completions**, `gemma-4-26b-a4b` over the local vLLM, pool 200 from the IMDb
+dumps: shipped **4,251** (the 2026-08-07 anchor of 4,304, within 1.2%), corrected sentence **+26
+tokens once**, *"owned"*/*"not owned"* markers **+2.900 tokens a candidate**, *"in the
+library"*/*"not in the library"* **+4.900**. The bar — 2.0 tokens a candidate, ~10% of the 20.40 the
+candidate line already costs — was declared before the measurement and the cheapest wording missed it
+by 45%. **No marker ships.** At pool 600, this endpoint's measured ceiling, the terse marker would
+leave 56 tokens under `max_model_len` and the verbose one would be over it.
+
+**Evidence (c), stated rather than guessed:** M8 recorded `media_items = 0`, so no real ownership
+distribution has ever been observed here. The call is the arm *insensitive* to that — being wrong
+about the distribution costs a longer tail, not an empty shelf — and the amendment names M9's live
+Emby run as what could reverse it.
+
+**A third design was declined for the reason it was attractive.** The owned prefix means one sentence
+(*"candidates 1–N are in the library"*) would carry the same information for ~15 tokens. It was
+invented *after* the numbers came in, and it couples the prompt to the repository's sort order.
+Named in ADR-0028 as an option a later task may take with its own pre-declared rule.
+
+**Where it landed.** One sentence of `curation_prompt.build_prompt`; ADR-0028 gains a dated amendment
+in place (no new id, nothing renumbered); PRD 06's *Assemble context* step, its *"ranking keys"*
+bullet and its first live-run limit; PRD 09's carried-debt bullet (the `min_cards` half is explicitly
+left open for its own task); `list_unwatched_candidates`' *"Membership is unwatched, and nothing
+else"* paragraph; `composition.py`'s *"~20.4 prompt tokens a candidate"* comment, which is the place
+that invites the marker question; and `.claude/rules/curation-and-llm.md`.
+
+**And a third entry for a list in the prompt's own test file.** Its docstring named the opening line
+as the archetype of framing prose deliberately left unpinned, beside `_COLD_START` (a *branch*) and
+the `reason` bound. It was neither: it was a claim about pool *membership*, so a `WHERE` clause would
+have had to honour it. **The test is not how a prompt sentence reads — it is whether any query,
+constant or validator in the system would have to be true for it to be.**
+
+**Mutation sweep — 6 plants over `services/curation_prompt.py`: 4 targets killed, 2
+equivalent-mutant controls surviving as designed, 0 unintended survivors, 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place against the whole `tests/unit` selection
+and **re-run unchanged after merging `milestone/m9-api-surface`**, which grew that selection from
+3,041 cases to 3,081 — a survivor is only a survivor of the selection it ran against, and 44 test
+files arrived between the two runs. Same six verdicts, same single case killing all four targets,
+same restored digest. The plant list and its expected verdict were written down first, with the
+three `.pyc` defences in force (`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept before every run,
+an equivalent-mutant control), and every restore verified by `md5sum` against a pre-plant digest.
+**A prompt sweep's yield is near 100% because nothing observes a prompt unless a case opts in by
+name**, so the rendered artefact was enumerated before the control flow: the four targets are the
+pre-2026-08-11 opening restored, the corrective clause merely *deleted* (the false claim gone but
+the pool's real span unstated), the clause *inverted* back into an ownership claim, and the opening
+line deleted outright. **Each kills exactly one case and it is the same one for all four** —
+`test_the_opening_line_does_not_claim_the_household_owns_every_candidate` — which is the
+measurement behind the two-assertion shape: T2 is invisible to the negative half and T1/T3 are
+invisible to a negative that only reads line 1.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| `MIN_ROWS`/`MAX_ROWS` definition order swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `build_prompt`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first is a fact about the *code* rather than about what the tools look at: two module-level
+`int` assignments that reference neither each other nor anything between them, in a module with no
+import-time side effect — and it is an ordering control that is **not** an `__all__` reorder, which
+`ruff`'s `RUF022` would have rejected. The docstring reword was checked first against the
+docstring-scan grep: twelve test files scan source, and the only one touching this module
+(`test_one_whitespace_collapse_defends_both_prompts`) walks `ast.FunctionDef` and compares
+`node.body[-1]`, so a docstring at `body[0]` is outside it.

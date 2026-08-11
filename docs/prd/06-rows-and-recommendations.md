@@ -735,6 +735,20 @@ Generation runs nightly and on demand:
    proximity where a centroid exists. The pool spans the whole catalog, not
    just the library, so suggestions can include things to seek out.
 
+   ✅ **Settled 2026-08-11: this sentence won a two-year-old disagreement with
+   the prompt, and the prompt was corrected to match it.** `build_prompt`
+   opened *"one household's **own** film and television library"*, a claim only
+   an ownership filter could honour. Measured through the real Postgres
+   repository: a household owning 20 unwatched titles gets a pool of 200 that
+   is **10.0%** owned, one owning none gets a pool that is **0%** owned — and
+   the filter would have added nothing, because `owned DESC` is the first sort
+   key so the pool already contains **every** unwatched-owned title the
+   household has. Its only effect is to delete the tail, and below `min_cards`
+   to delete the generation. Evidence, the arm not taken and the ownership
+   marker priced and declined are in
+   [ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s 2026-08-11
+   amendment.
+
    ⏳ **"with ratings" is the fourth site in this document where a rating this
    schema does not have was assumed**, after `RowCard`, `RediscoverProvider`
    and the centroid — and the substitution the Taste section already writes
@@ -760,7 +774,11 @@ Generation runs nightly and on demand:
      `episodes.title_id` so a watched episode takes its series with it, and
      expressed *inside* the statement rather than subtracted after a `LIMIT`.
      Ownership and popularity are **ranking keys**, which is what keeps
-     *"the pool spans the whole catalog"* true. The order is `owned DESC,
+     *"the pool spans the whole catalog"* true — and which M9 Task G3
+     re-confirmed on 2026-08-11 rather than reversing, with the measurement
+     that `owned DESC` being the *first* key makes the owned titles a prefix,
+     so no ownership filter could ever add a candidate this read does not
+     already return. The order is `owned DESC,
      carries an affinity genre DESC, vote_count DESC NULLS LAST, id` — and
      the `id` tail decides **membership** rather than only order, because the
      `LIMIT` falls inside a tie: losing it makes two reads of one unchanged
@@ -924,17 +942,33 @@ curated rows are additive, [08](08-operations.md)'s *"Home composes without
 them"* holds, and a duplicated genre shelf is a disappointment rather than a
 defect.
 
-**Four limits the run named, each recorded rather than fixed:**
+**Four limits the run named, recorded rather than fixed — the first has since
+been settled, on 2026-08-11, and its bullet says how:**
 
-- ⚠️ **The pool has no ownership *filter*, and the prompt says it does.**
-  `TitleRepository.list_unwatched_candidates` uses ownership as an `ORDER BY`
-  key only — deliberately, so *"the pool spans the whole catalog, not just the
-  library"* above stays true — while `curation_prompt.build_prompt` opens *"one
-  household's **own** film and television library."* On a household whose
-  unwatched-and-owned set is smaller than the pool size, the tail of the pool
-  is titles it does not own, under a sentence asserting it does. The two
-  sentences are each defensible and they disagree; which one gives way is a
-  product decision and is **filed as one**, not settled here.
+- ✅ **The pool had no ownership *filter* and the prompt said it did — settled
+  2026-08-11 by correcting the prompt.** `TitleRepository.list_unwatched_candidates`
+  uses ownership as an `ORDER BY` key only — deliberately, so *"the pool spans
+  the whole catalog, not just the library"* above stays true — while
+  `curation_prompt.build_prompt` opened *"one household's **own** film and
+  television library."* On a household whose unwatched-and-owned set is smaller
+  than the pool size, the tail of the pool was titles it does not own, under a
+  sentence asserting it does. Both sentences were defensible and the fork was
+  filed as a product decision rather than a defect; **M9 Task G3 measured it
+  and the pool won.** A pool-composition sweep through the real Postgres
+  repository (1,000-title catalog, `limit = 200`) found the owned fraction
+  running 0.0% → 1.5% → 2.5% → 4.0% → 10.0% → 100.0% as the household's
+  unwatched-owned set grows 0 → 3 → 5 → 8 → 20 → 200 — **and found that the
+  filter could add nothing**, because `owned DESC` is the first sort key so the
+  pool already carries every unwatched-owned title there is. Filtering is
+  purely subtractive, and at 3 owned titles it leaves a pool that cannot fill
+  one row. The prompt now says some candidates are in the library and some are
+  not, for **+26 prompt tokens once**; a per-candidate ownership marker was
+  priced at **2.9–4.9 tokens a candidate** against a bar of 2.0 declared before
+  the measurement, and **is not rendered** — `RowCard.owned` and
+  [05](05-search-and-similarity.md)'s *"clearly marked"* are the client's half.
+  Full evidence, the arm not taken, and what would reverse the call are in
+  [ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s 2026-08-11
+  amendment.
 - ⚠️ **De-duplication is within a row only.** `curation_validate._cards`
   collapses a repeat inside one row and counts it `duplicate`; a title
   appearing on *two* shelves of the same generation is not counted at all. The

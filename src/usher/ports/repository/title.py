@@ -307,6 +307,40 @@ class TitleRepository(ABC):
         popularity floor is a constant nobody measured that would empty the
         pool on a catalog with no vote counts.
 
+        ✅ **Contested and confirmed 2026-08-11, and the prompt is what moved.**
+        `curation_prompt.build_prompt` opened *"one household's **own** film
+        and television library"*, which is a claim only an ownership *filter*
+        here could honour; PRD 09 filed the disagreement as a product decision
+        and M9 Task G3 settled it. Measured through this port's Postgres
+        implementation over a 1,000-title catalog at `limit = 200`, for a
+        household owning `U` unwatched titles:
+
+        | `U` | pool, as shipped | of which owned | pool, filtered |
+        |---|---|---|---|
+        | 0 | 200 | 0 (0.0%) | **0** |
+        | 3 | 200 | 3 (1.5%) | **3** |
+        | 5 | 200 | 5 (2.5%) | 5 |
+        | 8 | 200 | 8 (4.0%) | 8 |
+        | 20 | 200 | 20 (10.0%) | 20 |
+        | 200 | 200 | 200 (100.0%) | 200 |
+
+        **The filter can add nothing.** `owned DESC` is the first sort key, so
+        the owned titles are a *prefix* of the answer -- the owned column above
+        is `min(U, limit)` at every row, which is to say this read already
+        returns every unwatched-owned title the household has, and a filter
+        would only delete the tail. Its whole effect is subtractive, and below
+        `curation_validate.DEFAULT_MIN_CARDS = 5` it deletes the generation:
+        at `U = 3` a filtered pool cannot fill one row, and M8's live run
+        measured rows of **2-3 cards at pool 5 and pool 8** (all discarded as
+        `row_too_short`), so the unreachable band is wider than the arithmetic
+        alone says. Full evidence and the arm not taken are in
+        [ADR-0028](../../../docs/prd/decisions/0028-the-pool-is-the-contract.md)'s
+        2026-08-11 amendment.
+
+        The cost of not filtering is stated rather than hidden: the sort is
+        over the whole catalog, where a filter would narrow it to the owned
+        library -- see the paragraph on the ranking projection below.
+
         **Ordered `owned DESC, carries an affinity genre DESC, vote_count
         DESC NULLS LAST, id`**, which is M8 boundary call 5's own enumeration
         of the signals that need no model -- *"unwatched, owned or popular,
