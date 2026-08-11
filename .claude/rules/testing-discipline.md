@@ -928,3 +928,44 @@ str(new_title_id) not in response.text` is satisfied by a renamed DTO field, by
 a provider that would never have shown that title, and by a body that is empty
 for an unrelated reason. The control is the same fixture, the same client and
 the same title one boundary later, asserting the id *is* present.
+
+## `pytest.raises(Child)` is satisfied by a child of anything, so a subclass relationship is only pinned by an `isinstance` on the parent
+
+**Found 2026-08-11 in M9 Task C4's follow-up sweep, and it is the kind of gap
+that reads as covered.**
+
+`MediaTypeNotServable` subclasses `PortDataMalformed` for one reason: **nothing
+forks.** Every existing `except PortDataMalformed` keeps working and only the
+consumer that wants the distinction has to learn a second name. That is the
+entire value of the design — and `pytest.raises(MediaTypeNotServable)` says
+nothing about it. `raises` checks that the raised object is an instance of the
+class it was given; it is indifferent to what that class inherits from, so a
+`MediaTypeNotServable` re-parented to `UsherPortError`, to `Exception`, or to
+nothing in the taxonomy at all passes every such case unchanged.
+
+Measured. The plant `class MediaTypeNotServable(UsherPortError)` fails **one**
+assertion in the whole suite, and it is
+`assert isinstance(caught.value, PortDataMalformed)`. Everything else — three
+`pytest.raises(MediaTypeNotServable)` cases across the fetcher and both blob
+store arms, the contract suite, the `.media_type` assertion — stays green while
+every downstream `except` in `services/` and `api/` has silently stopped
+catching it.
+
+**The rule: when a new exception type's purpose is its ancestry, assert the
+ancestry.** `pytest.raises(Child)` states "the narrow thing was raised";
+`isinstance(caught.value, Parent)` states "and the broad handlers still see
+it". They are two different claims and the second is usually the one the design
+was for. The same case should assert the *negative* on its sibling — that the
+type an unrelated fault raises is **not** the child — or "everything is
+catchable as the parent" is trivially satisfied by never having narrowed
+anything.
+
+🔴 **And the first spelling of that plant was a `NameError`, not a kill.**
+`ports/images.py` imports only `PortDataMalformed`, so
+`class MediaTypeNotServable(UsherPortError)` alone fails at import and the run
+reports *errors at collection* — which scores as BROKEN-MUTATION and says
+nothing about the suite. Re-spelled with the import widened **and** the
+`detail=` argument dropped (it goes with the base that took it), it passes
+`ruff check` and reaches the suite. Second instance in that one task of
+`CLAUDE.md`'s careless/careful rule, and the first outside the import graph:
+**the careless spelling of "change a base class" is one that will not import.**

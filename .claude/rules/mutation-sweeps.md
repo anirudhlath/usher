@@ -2123,3 +2123,38 @@ is the only thing that kills the fourth row, and it needs its own premise
 (`assert DECLINED_MEDIA_TYPES`) because an empty set is disjoint from
 everything — the same guard the AST scan in this task's first round needed for
 the same reason, one data structure over.
+
+### C4 follow-up 2 — the servability predicate (2026-08-11)
+
+**6 plants over `ports/images.py`'s `is_servable_path`: 5 targets killed, 1
+control surviving, 0 unexpected.** Same harness, 325-case selection.
+
+`is_servable_path` is the read surface's filter — C7 drops `images` rows the
+proxy can never serve rather than annotating them — and it is a *prediction*
+from a filename standing in for `extension_for`'s authority over a real
+`Content-Type`. Worth an entry because **two of the five plants are the two
+obvious wrong spellings of a suffix test, and only one case kills each**:
+
+| plant | verdict | fails |
+|---|---|---|
+| every path is servable | KILLED | 3 |
+| `endswith` becomes a substring `in` | KILLED | **1** |
+| the path is not lower-cased first | KILLED | **1** |
+| the suffix set emptied | KILLED | 4 |
+| the suffix set names `.jpg`, a type the proxy does serve | KILLED | 7 |
+| *control:* one sentence of the predicate's docstring reworded | SURVIVED | — |
+
+Rows two and three die only on the two adversarial parameters — `/svg-poster.jpg`
+and `/.svg.jpg` for the substring spelling, `/A-LOGO.SVG` for the case
+spelling — and on nothing else in 325 cases. **A predicate over somebody else's
+string needs its negative parameters chosen against the wrong implementations,
+not against "an ordinary path".** A parameter list of `.jpg`, `.png`, `.webp`
+and `.svg` is a complete-looking table that both mutants survive.
+
+The fifth row failing 7 is the pairing case doing its job in the loud
+direction: `.jpg` in the suffix set makes `test_an_unservable_suffix_really_is_
+a_type_the_fetcher_declines` demand that `extension_for("image/jpeg")` refuse,
+which it does not. The *quiet* direction — a suffix with no matching declined
+media type — is what row four covers through the coverage assertion, and that
+assertion needs its own premise for the reason every set-based guard in this
+file does: an empty set is disjoint from, and a subset of, everything.

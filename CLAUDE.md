@@ -154,6 +154,7 @@ so a session pays only for what it touches.
 | `rows-and-genome.md` | `services/rows/**`, `home.py`, `taste.py` | the sequential build's two very different p95s, the genome's real coverage and its denominators |
 | `curation-and-llm.md` | `adapters/llm/**`, `services/curation*.py`, `query_expansion.py` | M8's live run — the 88% genre-heading finding, the real per-candidate token cost, the pool ceiling the reference endpoint cannot serve, why the coercion is the primary path, and query expansion measuring worse |
 | `bootstrap-and-datasets.md` | `adapters/bulk/**` | IMDb TSV parsing, MovieLens archive selection, Wikidata timing, the cache-key finding |
+| `ports-and-error-taxonomy.md` | `src/usher/ports/**`, `src/usher/adapters/**` | what a failure is *called* — a refusal and a fault sharing one type, when a subclass beats a new member, the frequency question to ask before reusing one, and the two-constants-must-move-together shape |
 | `api-telemetry-and-lanes.md` | `api/**`, `telemetry.py`, `composition.py` | SSE and `ASGITransport`, OTel provider caching, the instrumentor that produced no spans for three milestones, lane supervision and readiness |
 | `config-cli-and-deployment.md` | `config.py`, `cli.py`, `compose.yml`, `Dockerfile` | the settings failure that printed its own credential, `.env`'s two readers, `env_file:` vs `environment:`, image measurement, CI tag pinning |
 | `milestone-boundary-calls.md` | `docs/plans/**` | what each milestone deliberately did not build |
