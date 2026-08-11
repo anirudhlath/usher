@@ -884,3 +884,47 @@ reordering, a mapping or an involution — a swap, a negation, a transpose, a
 two-element rotation — whether the expected value is distinguishable from the
 value the inverse operation produces, and if it is not, seed the smallest case
 that is. For a permutation that is a 3-cycle; two elements will never do it.
+
+**A case's premise is a claim about a collaborator, so another task can make it
+false — and the case then fails on a true statement about the system.** Found
+2026-08-11 when M9's A4 (a conditional GET on `GET /home`) and A6 (serve-stale
+on the screen cache) met on the milestone branch, each green in its own
+worktree. A4's `test_a_changed_screen_changes_the_etag` advanced an injected
+clock **31 s** against a 30 s `_SCREEN_TTL` and said so in its docstring: *"the
+second answers from a fresh compose rather than from the 30 s screen cache"*.
+A6 gave expired entries a 60 s grace during which they are *served* while a
+refresh is scheduled, so at 31 s the second request answered the first screen's
+bytes, the new title was absent, and the ETag was **correctly** identical. The
+failure message read *"the screen changed and the ETag did not"* and every word
+of it was wrong: the screen had not changed, and the ETag was right.
+
+Three things worth carrying, and the third is the general one.
+
+- **The repair is the premise, not the assertion.** Stepping past
+  `_SCREEN_TTL + SCREEN_STALE_GRACE` restores the state the case always needed
+  and used to get from the TTL alone. Loosening the assertion, or pinning the
+  ETag differently, would have preserved a green case over a premise nobody
+  believed.
+- **A docstring explaining why a case works is a load-bearing claim about
+  another module, and it goes stale silently.** A4's sentence was true when
+  written and false one merge later, with nothing in the tooling able to
+  notice. When a case's setup encodes a *number* from another module, import
+  the constant — A4 already did this for `max-age` (`_SCREEN_TTL`, not `30`)
+  and not for the clock advance, which is exactly where it broke.
+- **The interaction deserves its own case, on the side that is now intended
+  behaviour.** "A read inside the grace window serves the previous bytes and
+  therefore the same ETag" was the thing the red was reporting, and nothing
+  pinned it; without it the next person to see that failure has no way to tell
+  the feature from the bug. Its third assertion is the one with teeth — that
+  the stale read *scheduled a refresh* — because a `HomeService` that opened
+  the window and scheduled nothing passes every other assertion in the file
+  and is serve-stale-forever. **When a cross-task interaction produces a red,
+  ask which of the two behaviours is now correct and write the case that says
+  so, rather than only repairing the case that broke.**
+
+And a smaller one from the same repair: **a negative assertion over a rendered
+body needs a control that the value can appear there at all.** `assert
+str(new_title_id) not in response.text` is satisfied by a renamed DTO field, by
+a provider that would never have shown that title, and by a body that is empty
+for an unrelated reason. The control is the same fixture, the same client and
+the same title one boundary later, asserting the id *is* present.
