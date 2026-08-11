@@ -1,7 +1,9 @@
 """Exception handlers that hold across every route, present and future.
 
-One handler lives here, and it is a security control rather than a
-formatting choice.
+Two handlers live here. The first is a security control rather than a
+formatting choice, and the second wraps PRD 07's RFC 9457 envelope around
+it -- *around*, not over: the envelope composes with the stripping, and
+nothing below may undo it.
 
 **A 422 may not echo the request body.** FastAPI's default
 `request_validation_exception_handler` answers with
@@ -32,23 +34,113 @@ credential on the one route that does.
 
 `loc`, `msg`, `type`, and `ctx` all survive, so a client still learns which
 field was wrong and why. `ctx` carries the *constraint* (`{"min_length":
-1}`), never the value.
+1}`), never the value. In the envelope they ride as RFC 9457's `errors`
+extension member, and `detail` is a **fixed sentence** that interpolates
+nothing a client submitted -- the moment `detail` renders a value, this
+module's whole reason for existing is undone one field to the left.
+
+**The envelope is adopted by a route in one line.** `raise
+ProblemException(status_code=…, code=ProblemCode.…, detail="…")` names its
+own code; an ordinary `HTTPException` -- including the 404 and 405 Starlette
+raises from the router itself, before any handler runs -- is translated
+through `_CODE_FOR_STATUS`. A status with no member in that table is handed
+to FastAPI's own handler untranslated rather than given an invented code:
+the vocabulary is ADR-0030's to grow, and a handler that guessed would be
+the seventeen-code sprawl the two-pass split exists to prevent.
 """
 
-from fastapi import Request
+from collections.abc import Mapping
+from typing import Any, Final
+
+from fastapi import HTTPException, Request
 from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemCode, ProblemResponse
 
 # The key pydantic puts the offending value under. Named once so the
 # stripping below reads as what it is.
 _ECHOED_INPUT = "input"
 
+# Never a submitted value, and never a count either -- "3 fields were
+# rejected" is one refactor away from "3 fields were rejected: password, …".
+# The field names live in `errors`, which has been through the strip above.
+_VALIDATION_DETAIL: Final = (
+    "The request did not pass validation. See the errors member for the fields that were rejected."
+)
+
+# The whole vocabulary the shipped surface needs, and deliberately no more.
+# `ProblemCode.INVALID_CURSOR` is absent because no *status* implies it --
+# the cursor codec raises `ProblemException` and names it directly, which is
+# the mechanism every later route with a code of its own uses.
+_CODE_FOR_STATUS: Final[Mapping[int, ProblemCode]] = {
+    404: ProblemCode.NOT_FOUND,
+    405: ProblemCode.METHOD_NOT_ALLOWED,
+    422: ProblemCode.VALIDATION_FAILED,
+}
+
+
+class ProblemException(HTTPException):
+    """An `HTTPException` that names its own `ProblemCode`.
+
+    Subclassing rather than replacing is what makes this one line for a
+    route to adopt and what keeps the failure mode graceful: if the handler
+    below is ever unregistered, these still answer the right *status* through
+    FastAPI's default handler instead of becoming a 500.
+    """
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        code: ProblemCode,
+        detail: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=detail, headers=headers)
+        self.code = code
+
+
+def problem_response(
+    request: Request,
+    *,
+    status: int,
+    code: ProblemCode,
+    detail: str,
+    errors: list[dict[str, Any]] | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> JSONResponse:
+    """Build the document and the response it travels in, from one status.
+
+    `status_code=document.status` rather than `status_code=status` is the
+    point of this function existing at all: written twice, the two can be
+    changed apart, and every case that asserts they agree would keep passing
+    for as long as nobody did. `instance` is likewise computed here, once,
+    from `request.url.path` -- **never `request.url`**, which carries the
+    query string and would leak a rejected `?q=` back to its sender.
+    """
+    document = ProblemResponse.of(
+        status=status,
+        code=code,
+        detail=detail,
+        instance=request.url.path,
+        errors=errors,
+    )
+    return JSONResponse(
+        status_code=document.status,
+        content=document.model_dump(mode="json", exclude_none=True),
+        media_type=PROBLEM_MEDIA_TYPE,
+        headers=headers,
+    )
+
 
 async def validation_error_without_the_request_body(
     request: Request, exc: Exception
 ) -> JSONResponse:
-    """FastAPI's default 422, with every `input` removed.
+    """A 422 problem document, with every `input` removed.
 
     Typed `exc: Exception` because that is the signature Starlette's
     `add_exception_handler` accepts; it is only ever registered for
@@ -60,6 +152,45 @@ async def validation_error_without_the_request_body(
     stripped = [
         {key: value for key, value in error.items() if key != _ECHOED_INPUT} for error in errors
     ]
-    # Status code and envelope match FastAPI's own handler exactly -- this
-    # replaces what is in the body, not the contract around it.
-    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(stripped)})
+    return problem_response(
+        request,
+        status=422,
+        code=ProblemCode.VALIDATION_FAILED,
+        detail=_VALIDATION_DETAIL,
+        # Encoded before it goes in, exactly as FastAPI's own handler does:
+        # a `ctx` can hold a `ValueError` or a `Decimal`, neither of which
+        # `json.dumps` will take.
+        errors=jsonable_encoder(stripped),
+    )
+
+
+async def http_error_as_a_problem_document(request: Request, exc: Exception) -> Response:
+    """Every `HTTPException` as an RFC 9457 document, where there is a code.
+
+    Registered for **Starlette's** `HTTPException` rather than FastAPI's, so
+    it covers the two the router raises before any of Usher's code runs -- an
+    unrouted 404 and a 405 -- as well as the ones handlers raise. Without
+    that, a client would meet two different 404 shapes depending on whether
+    the path matched a route.
+
+    `exc.headers` is carried through: a 405 without its `Allow` header is a
+    protocol violation, and Starlette puts the allowed methods there.
+    """
+    if not isinstance(exc, StarletteHTTPException):
+        # Same obligation as the handler above: an error path must not raise
+        # a second exception, which turns the original failure into a 500
+        # *and* loses it. This is the 500 without the lost traceback.
+        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+    code = exc.code if isinstance(exc, ProblemException) else _CODE_FOR_STATUS.get(exc.status_code)
+    if code is None:
+        # No member for this status, and inventing one here is precisely
+        # what group V's ADR-0030 exists to stop. FastAPI's default shape,
+        # unchanged, until the vocabulary grows a name for it.
+        return await http_exception_handler(request, exc)
+    return problem_response(
+        request,
+        status=exc.status_code,
+        code=code,
+        detail=str(exc.detail),
+        headers=exc.headers,
+    )

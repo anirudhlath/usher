@@ -7,8 +7,12 @@ from datetime import UTC, datetime
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from usher.api.errors import validation_error_without_the_request_body
+from usher.api.errors import (
+    http_error_as_a_problem_document,
+    validation_error_without_the_request_body,
+)
 from usher.api.lanes import LaneSupervisor
 from usher.api.routers import events, health, home, rows, sources, titles
 from usher.composition import (
@@ -158,8 +162,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # request -- and `POST /admin/sources` submits a source credential. See
     # usher.api.errors; this is a security control, not a response-shape
     # preference, and it is registered here so it covers every route rather
-    # than only the one that made it necessary.
+    # than only the one that made it necessary. PRD 07's RFC 9457 envelope
+    # now wraps it, and composes rather than replaces: the stripped error
+    # list rides as an extension member and `detail` is a fixed sentence.
     app.add_exception_handler(RequestValidationError, validation_error_without_the_request_body)
+    # **Starlette's** `HTTPException`, not FastAPI's subclass, so the two the
+    # router raises before any handler runs -- an unrouted 404 and a 405 --
+    # answer the same envelope as the ones handlers raise. Registered on the
+    # app for the reason above: a route added later inherits the shape
+    # instead of having to remember it.
+    app.add_exception_handler(StarletteHTTPException, http_error_as_a_problem_document)
     app.include_router(events.router)
     app.include_router(health.router)
     app.include_router(home.router)

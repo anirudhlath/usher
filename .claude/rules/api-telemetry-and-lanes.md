@@ -360,3 +360,35 @@ costs nothing. And the defect was invisible to every assertion in the suite but
 one: **an intercepted-record path is asserted almost entirely by what must not
 arrive**, so the single case requiring a stdlib record to arrive is what caught
 a total mute. Both arms, or a "nothing reached the sink" fix passes.
+
+**`app.routes` on FastAPI 0.140 does not contain the app's routes, and a walk
+over it reads as a passing sweep.** Measured 2026-08-11 building A2's "every
+route answers a problem document" case. `include_router` appends **one opaque
+`fastapi.routing._IncludedRouter`** per router rather than flattening its
+routes into the app, so `[r for r in create_app().routes if isinstance(r,
+APIRoute)]` finds **zero** of Usher's fourteen routes — and four of FastAPI's
+own (`/openapi.json`, `/docs`, `/docs/oauth2-redirect`, `/redoc`), which are
+plain Starlette `Route`s and are not even `APIRoute`s, so the same walk
+filtered on `APIRoute` returns an empty list that a `for` loop iterates
+happily. Descend through `route.original_router.routes` recursively, and carry
+a premise guard that the descent found a known path: this is the "a run that
+did not run is not a pass" family arriving in a route walk, and it is the shape
+every "every route declares X" scan in this milestone is built on. Note also
+that `/admin/sources` is **two** `APIRoute` objects (one per method), so any
+per-path assertion has to group by `route.path` first — and Starlette's 405
+carries the `Allow` header of the *first* partial match only, so
+`PUT /admin/sources` answers `Allow: POST` rather than `GET, POST`.
+
+**RFC 9457's `instance` is the request path, so a 422 for a malformed *path
+parameter* does echo the value it rejected, and there is no spelling that
+avoids it.** Found 2026-08-11 landing the envelope: `GET /titles/not-a-uuid`
+now answers `"instance": "/titles/not-a-uuid"`, which failed M5's
+`test_a_malformed_id_is_a_422_that_does_not_echo_it` on its blanket
+`"not-a-uuid" not in response.text`. The credential rule is untouched and the
+distinction is worth stating precisely, because the next reader will reach for
+the blanket assertion again: PRD 08 is about what a client **submitted as
+data** — a body or a query string — and both are still absent, `instance` being
+`request.url.path` and **never** `request.url`. No credential is ever in a path
+in this API; `?q=` is a query and is dropped. The narrowed case asserts over
+pydantic's `input` (the field that carried whole request bodies) rather than
+over the whole response text.

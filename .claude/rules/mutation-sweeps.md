@@ -765,3 +765,60 @@ them, in opposite directions, and that is the whole yield of the sweep.**
   docstring-scan grep this file records — the ten test files it finds scan
   `ports/embedding.py`, `ports/metadata.py`, `services/` and `api/`, and **none
   of them scans `ports/repository`**.
+
+**M9 Task A2's sweep: 10 plants over the RFC 9457 envelope — 8 targets of
+which 7 were killed on the first pass and 1 was a real coverage gap since
+closed, plus 2 equivalent-mutant controls surviving as designed. 0 BAD-ANCHOR,
+0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place over
+`src/usher/api/errors.py`, `src/usher/api/dto/problem.py` and
+`src/usher/api/app.py`, against the **whole `tests/unit` selection** (3,008
+cases, ~21 s a run), with the plant list and its expected verdict written down
+first, the three `.pyc` defences in force, and every restore verified by
+`md5sum` against a pre-plant digest. The three-way split is the one that says
+something: "9 killed" would hide the gap the round was for.
+
+**The plan named three sweep targets and the one it listed first is the one
+that survived**, which is the yield. *"The `input` key stripped from only the
+first error rather than all of them"* — spelled
+`if key != _ECHOED_INPUT or index > 0` over `enumerate(errors)` — **survived
+all 3,008 unit cases**, because **every rejected request anywhere in this
+repository produced exactly one validation error**, so a per-item strip and a
+first-item strip were the same program. It is not an equivalent mutant and the
+damage is the exact leak `api/errors.py` exists to stop: a `missing` error's
+`input` is the whole unparsed body, so a `POST /admin/sources` missing three
+fields carries the plaintext password three times and the mutant removes one
+copy. Closed by
+`test_every_error_is_stripped_and_not_only_the_first`, which submits a body
+producing three `missing` errors and asserts `len(errors) >= 2` as its own
+premise; re-planted, the mutation fails **that case alone**. **The general
+form: a per-item transformation is unobservable against a suite whose every
+fixture has one item — before calling a loop covered, ask what the largest N
+any case has ever exercised is.** Nearest relative is *"has any fixture,
+anywhere, ever set this to the other value?"* in `testing-discipline.md`,
+arriving at a collection size instead of a boolean.
+
+The other seven targets and what each cost: `instance` spelled
+`str(request.url)` fails 12; the `HTTPException` handler never registered fails
+10; the problem media type dropped fails 10; `type` derived without the kebab
+substitution fails 3; an unmapped status given `not_found` instead of being
+delegated to FastAPI's handler fails 2; the exemption set built from a literal
+rather than derived from the reasons map fails 1; and
+`status_code=status` in place of `status_code=document.status` fails
+**exactly one case, the structural one** — which is the measurement behind the
+claim that the two spellings are behaviourally identical today and that only an
+`ast` assertion can hold them apart.
+
+| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `ProblemResponse.of`'s `detail=` / `instance=` keyword arguments swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `api/errors.py`'s module docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first is a fact about the *code* rather than about what the tools look at:
+keyword arguments are evaluated in written order and both expressions are
+side-effect-free reads (a parameter, and `request.url.path` on a Starlette
+`Request` that caches its `URL`). The docstring reword was checked first
+against the docstring-scan grep this file records — the eleven test files it
+finds scan `ports/`, `services/` and `api/routers/rows.py`, and **none of them
+scans `api/errors.py` or `api/dto/`**; the one scan A2 itself adds reads
+`inspect.getsource(problem_response)`, a single function, not the module
+docstring.
