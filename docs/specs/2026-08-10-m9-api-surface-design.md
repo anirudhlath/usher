@@ -44,7 +44,33 @@ the milestone.
 |---|---|---|
 | owns | `api/**`, route DTOs, the error envelope, the ticket | `adapters/bulk/**`, `adapters/tmdb/**`, `services/bootstrap.py`, `services/similar.py` |
 | delivers | PRD 07's four endpoint tables | richer documents, cheaper crawls, a similarity signal that might clear its floor |
-| gated on | nothing | one measurement (below) before its largest item is built |
+| gated on | nothing | **`m09a`**, plus one measurement before its largest item is built |
+
+**Track 2 is not independent of Track 1, and an earlier draft of this table said
+it was.** Integration tests run `alembic upgrade head`, and Track 2's IMDb
+provenance work needs schema, so the whole IMDb sub-chain sits downstream of
+Track 1's migration task. The tracks are file-disjoint, not dependency-disjoint.
+
+**Two orderings corrected before any implementer sees them:**
+
+- **`m09b` is freed and reassigned.** It was reserved for a contingent
+  `blend_fingerprint` bump — but `blend_fingerprint()` is computed in code from
+  `_WEIGHTS`/`_NEIGHBORS_PER_TITLE`/`_CANDIDATE_POOL` (`services/similar.py`),
+  the column landed in migration `ffb`, and `title_neighbors` is empty. **A
+  weight change writes no DDL.** The reservation would have collided head-on
+  with Track 2's IMDb provenance schema, since with `m09b` held both would have
+  minted off `m09a` and produced **two heads** — breaking the migration task's
+  own acceptance. `m09b` now carries the IMDb provenance schema; `m09c` stays
+  spare and must be requested.
+- **"The gate must run after the IMDb credit backfill" is unfounded and is
+  deleted.** `db/repositories/search.py`'s `_POPULATION` is
+  `t.enrichment_state <> 'skeleton'`, so skeletons are never embedded — and the
+  titles IMDb bulk *uniquely* covers are exactly the ~1.14M still `skeleton`.
+  The backfill therefore cannot stale a single embedding, and honouring the
+  constraint would serialise the gate behind the entire IMDb chain for no
+  measurement benefit. **This is the largest single shortening of the critical
+  path.** The backfill still reports its invalidation count; it will be zero,
+  and that is the finding.
 
 ## Scope
 
@@ -280,13 +306,18 @@ chain is **enrich → re-index → rebuild → read the ratio**. A standalone SQ
 over tag membership would *not* produce a comparable number and must not be
 reported as one.
 
-**The bar:**
+**The bar — one threshold, revised 2026-08-11 before any run.** The first
+version had three bands and was structurally broken: the middle band said
+"build" while building needs a `title_tags` table, an importer for
+`ml-latest/tags.csv` (**21,274,899 rows / 85 MB, never read by this project**),
+a `NeighborCandidate` field, widened statements, both fakes and the contract
+suite — so the **top band was cheaper than the middle one**, and the predicted
+result (~5%) lands exactly on a boundary with no tie-break.
 
 | pair rate | verdict |
 |---|---|
-| **≥ 10%** | the term can carry a real weight; proceed to vectorisation design |
-| **5 – 10%** | build only at a weight below 0.25, and say the floor is unmet |
-| **< 5%** | **do not build** — it is the genome's defect a second time, and the deliverable is the recorded refusal in ADR-0035 |
+| **≥ 10%** | **Build in M9.** The signal clears the floor the 0.25 weight assumes; the build is the full workstream above plus a `usher similar --rebuild`. |
+| **< 10%** | **Do not build in M9.** ADR-0035 records the number and the decision — 5–10% names a scoped follow-up with the number attached, below 5% is a recorded refusal. Same deliverable; only its content differs. **No code is touched on this arm.** |
 
 **An open question to resolve at measurement time rather than by assumption:**
 M7 measured a pair rate, which requires a populated `title_embeddings`; M8's
