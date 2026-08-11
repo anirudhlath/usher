@@ -52,6 +52,10 @@ index.title                       ← M6, a child of job.index
 home.compose                      ← M7, one per GET /home or usher home
 └── row.build                        one per row actually built
 
+rows.refresh                      ← M9, the serve-stale lane's root span,
+└── row.build                        Linked (never parented) to the request
+                                     that served the stale screen
+
 job.curate                        ← M8, a worker's root span like the three
 └── curation.generate                above it; one per generation
     └── llm.complete                 the one completion it is allowed
@@ -72,7 +76,9 @@ so this is asserted as parentage rather than existence
 A worker's `job.*` span is the deliberate exception: a **root with a `Link`**
 back to the enqueueing span, because the request that enqueued it has
 usually already returned and a child span of a finished parent misstates
-causality.
+causality. **M9's `rows.refresh` is the second, on identical terms** — [06](06-rows-and-recommendations.md)'s
+serve-stale lane builds a screen out of band, having been handed the key by a
+request that has already answered.
 
 **`index.fulltext` was in this tree until M6 and is deliberately gone, rather
 than unimplemented.** The search document is a `GENERATED ALWAYS AS (…)
@@ -111,8 +117,16 @@ reader would assume:
   version of the permanently empty panel this file's preamble argues against.
 - **A cached row produces no `row.build` span**, for the same reason it records
   no histogram point: the cache returns before the span opens. So the number of
-  `row.build` children of a `home.compose` is the number of *misses*, and a
-  warm request is a lone parent with none.
+  `row.build` children of a `home.compose` is the number of *misses on that
+  composition*, and a warm request is a lone parent with none. ⚠️ **It is not
+  the number of misses in the deployment, and M9 is where that stopped being
+  the same sentence.** A `rows.refresh` builds outside any request, so its
+  `row.build` spans have **no `home.compose` parent at all** — the refresh
+  opens none, deliberately, rather than minting a second `home.compose` nobody
+  asked for or nesting under a request that has returned. So "misses" is a
+  group-by over both roots, and the refresh's cost stays visible where it
+  always was: as `usher.row.build.duration` points, carrying the same
+  `provider` label, with no parent composition.
 
 Spans carry `title_id`, `source`, and `trigger` (`demand` vs `background`) as
 attributes, so "why did the title I just opened take 45 seconds" is one query.
@@ -150,7 +164,8 @@ is maintained rather than aspirational.
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
 | `usher.embedding.duration` | histogram | — | ✅ M6 |
-| `usher.cache.hits` / `.misses` | counter | cache | ✅ M9 |
+| `usher.cache.hits` | counter | cache, freshness | ✅ M9 |
+| `usher.cache.misses` | counter | cache | ✅ M9 |
 | `usher.search.embeddings.stale` | gauge | — | ✅ M6 |
 | `usher.search.embeddings.refused` | gauge | — | ✅ M6 |
 | `usher.similarity.neighbors.stale` | gauge | — | ✅ M7 |
@@ -235,11 +250,23 @@ written down here for the reason the paragraph above gives — `continue-watchin
   of *building* a row and not the cost of serving one. The population is
   therefore misses, and the hit rate is not recoverable from it —
   `usher.cache.hits`/`.misses` is what answers that instead (M9), recorded
-  where the read happens (`RowCache.get_row`/`get_screen`), labelled
+  where the read happens (`RowCache.read_screen`/`get_row`), labelled
   `cache` = `row` / `screen` and, by rule rather than a closed list, whatever
   value the next cache appends in the commit that ships it. An entry found
   expired counts as a **miss**, not a hit — it is a rebuild, the same
   population the histogram above measures.
+- **The exception is a *served-stale* read, which is a hit carrying
+  `freshness="stale"`, and the pair of decisions is worth spelling out
+  because [06](06-rows-and-recommendations.md)'s serve-stale trade is only
+  legible here.** A **hit**, because the request was answered out of the cache
+  and paid no rebuild — counting it a miss would make the hit rate report a
+  compose that did not happen, on the very series a reader takes as "requests
+  that avoided one". **Not a plain hit**, because a plain hit hides the thing
+  being traded: the household is looking at a screen older than its TTL, and no
+  other series would say so. `freshness` (`fresh` | `stale`) is on the **hits**
+  counter only — a miss served nothing, so it has no freshness to report — which
+  keeps the pair at four series and makes "what fraction of served screens were
+  stale" a group-by rather than an inference.
 
 **`usher.curation.rows` and `usher.curation.dropped` are the milestone's only
 two metrics, and neither is about money.** This document's own first principle
@@ -649,7 +676,12 @@ correction above the metric table), the latter by `usher.cache.hits`/
 conversion needs `search_queries`' outcome columns (M9, owned elsewhere). And
 one caveat travels with the home panels — the build histogram's population is
 cache *misses* only, so a p50 that rises after a deploy may be a colder cache
-rather than a slower provider.
+rather than a slower provider. **Two M9 additions change how these panels
+read.** The hit rate splits on `freshness`, so "served, but stale" is its own
+number rather than folded into the good one; and the build histogram now
+includes rows built by the `rows.refresh` lane, which have no `home.compose`
+parent — so the histogram's population is *all* builds while the span drill-down
+under a request shows only that request's.
 
 ### 5 — Cost & Compliance
 

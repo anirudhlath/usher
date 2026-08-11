@@ -27,7 +27,7 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.rows import BuiltRow, DisplayHint, RowCard, RowFamily
 from usher.ports.rows import RowContext, ScoredRow
 from usher.services.home import HomeService
-from usher.services.rows.cache import RowCache
+from usher.services.rows.cache import Freshness, RowCache
 
 _TTL = dt.timedelta(seconds=30)
 _START = dt.datetime(2026, 8, 4, 12, 0, tzinfo=dt.UTC)
@@ -190,6 +190,109 @@ def test_an_entry_exactly_at_its_expiry_is_expired(
     hits = _cache_points(meter_reader, "usher.cache.hits")
     assert {attrs["cache"] for attrs, _ in misses} == {"screen", "row"}
     assert hits == []
+
+
+def test_a_stale_serve_is_a_hit_labelled_stale(
+    clock: _Clock, meter_reader: InMemoryMetricReader
+) -> None:
+    """**The label a served-stale read gets, and the argument for it.**
+
+    A **hit**, because the request was served out of the cache and paid no
+    rebuild: counting it a miss would make `usher.cache.hits` say a compose
+    happened when none did, on the series a dashboard reads as "requests that
+    avoided a compose". But *not a plain hit*, because a plain hit hides
+    exactly what serve-stale trades away -- the household is looking at data
+    older than the TTL, and nothing else in PRD 10 would say so.
+
+    `freshness` is on the hits counter only. A miss served nothing, so it has
+    no freshness to report, and the pair stays at four series.
+
+    The wrong implementations this rules out: a stale serve counted as a miss
+    (which is also what the whole feature *not working* looks like), and a
+    stale serve counted under the same series as a fresh one.
+    """
+    cache, user = RowCache(clock=clock), uuid.uuid4()
+    cache.put_screen(user, _screen("old"), ttl=_TTL)
+
+    clock.advance(_TTL)
+    assert cache.read_screen(user, grace=dt.timedelta(seconds=60)).freshness is Freshness.STALE
+
+    hits = _cache_points(meter_reader, "usher.cache.hits")
+    assert [(attrs.get("cache"), attrs.get("freshness"), value) for attrs, value in hits] == [
+        ("screen", "stale", 1.0)
+    ]
+    assert _cache_points(meter_reader, "usher.cache.misses") == []
+
+
+def test_the_screen_read_has_three_states_and_the_grace_is_the_callers(
+    clock: _Clock,
+) -> None:
+    """Fresh, stale-inside-`grace`, absent -- and **the grace is a parameter,
+    not a property of the dict.**
+
+    The only reader entitled to a stale answer is one that can arrange for the
+    entry to be replaced, which is what makes `HomeService`'s "no refresher,
+    no grace" gate expressible at all. A cache that decided for itself would
+    hand `usher home` a screen it has nothing to refresh with, and that is a
+    stale screen served forever -- worse than the miss it avoided, and silent.
+    """
+    cache, user = RowCache(clock=clock), uuid.uuid4()
+    grace = dt.timedelta(seconds=60)
+
+    assert cache.read_screen(user, grace=grace).freshness is Freshness.ABSENT
+
+    cache.put_screen(user, _screen("fresh"), ttl=_TTL)
+    assert cache.read_screen(user, grace=grace).freshness is Freshness.FRESH
+
+    clock.advance(_TTL)
+    stale = cache.read_screen(user, grace=grace)
+    assert stale.freshness is Freshness.STALE
+    assert stale.screen == _screen("fresh"), "a stale read still hands back the value"
+    assert cache.read_screen(user).freshness is Freshness.ABSENT, (
+        "and with no grace the same entry is a plain miss"
+    )
+
+
+def test_an_entry_exactly_at_the_end_of_its_grace_is_a_hard_miss(clock: _Clock) -> None:
+    """**Stepped exactly onto the second boundary, not past it.**
+
+    `TTL + grace` is the instant a stale entry stops being servable, and `>=`
+    against `>` there is the same one-keystroke mutation M5's sweep recorded
+    surviving on `stale_after`: invisible to every case that steps past. Past
+    it the entry is *removed*, not merely refused -- the screen half is
+    bounded only by the `users` table, so an entry nobody will ever be served
+    again is dead weight per household.
+    """
+    cache, user = RowCache(clock=clock), uuid.uuid4()
+    grace = dt.timedelta(seconds=60)
+    cache.put_screen(user, _screen("old"), ttl=_TTL)
+
+    clock.advance(_TTL + grace - dt.timedelta(seconds=1))
+    assert cache.read_screen(user, grace=grace).freshness is Freshness.STALE
+
+    clock.advance(dt.timedelta(seconds=1))
+    assert cache.read_screen(user, grace=grace).freshness is Freshness.ABSENT
+    assert cache.size == 0, "and it was removed rather than left to accumulate"
+
+
+def test_the_grace_is_read_at_the_read_and_not_baked_in_at_the_write(
+    clock: _Clock,
+) -> None:
+    """A grace applied at `put_screen` -- folded into the stored
+    `expires_at` -- reads identically at every assertion above and is a
+    different feature: the entry would then be *fresh* for `TTL + grace`, so
+    nothing would ever be stale, no refresh would ever be scheduled, and the
+    screen a household sees would simply live 90 s instead of 30.
+
+    What distinguishes the two is a reader with **no** grace looking at the
+    same entry a second before the TTL expires and a second after.
+    """
+    cache, user = RowCache(clock=clock), uuid.uuid4()
+    cache.put_screen(user, _screen("old"), ttl=_TTL)
+
+    clock.advance(_TTL)
+
+    assert cache.get_screen(user) is None, "the stored expiry is the TTL, with no grace in it"
 
 
 def test_a_live_entry_is_served_without_recomputing(clock: _Clock) -> None:

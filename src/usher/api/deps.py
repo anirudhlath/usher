@@ -69,7 +69,7 @@ from usher.services.matching import MatchService
 from usher.services.playback import PlaybackService
 from usher.services.playback_ticket import build_ticket_cipher, mint
 from usher.services.reconcile import ReconcileService
-from usher.services.rows.cache import RowCache
+from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.services.sources import SourceService
 from usher.services.taste import TasteService
 from usher.services.titles import TitleReadService
@@ -740,7 +740,28 @@ def get_row_cache(request: Request) -> RowCache:
     return cache
 
 
-def get_home_service(cache: Annotated[RowCache, Depends(get_row_cache)]) -> HomeService:
+def get_refresh_queue(request: Request) -> RefreshQueue:
+    """The process's one stale-key queue, off `app.state`.
+
+    Same lifetime and same defensive shape as `get_row_cache` above, and for a
+    sharper version of the same reason: a request-scoped queue would
+    deduplicate nothing (every request its own `pending` set) and would be
+    drained by nobody, so serve-stale would degrade to serving stale forever
+    -- silently, since the request still gets a screen.
+    """
+    queue = getattr(request.app.state, "row_refreshes", None)
+    if not isinstance(queue, RefreshQueue):
+        raise RuntimeError(
+            "app.state.row_refreshes is not set -- this app was not built by "
+            "create_app, or its lifespan has not run."
+        )
+    return queue
+
+
+def get_home_service(
+    cache: Annotated[RowCache, Depends(get_row_cache)],
+    refreshes: Annotated[RefreshQueue, Depends(get_refresh_queue)],
+) -> HomeService:
     """The composer, over the registry `services/rows/__init__.py` owns.
 
     The provider list is **not** assembled here: a list a composition root
@@ -750,8 +771,16 @@ def get_home_service(cache: Annotated[RowCache, Depends(get_row_cache)]) -> Home
 
     **And no embedder**, on the terms `get_taste_service` states: every
     similarity input this route reads is a precomputed artefact.
+
+    **`refresh=queue.schedule` is what opens the grace window.** `HomeService`
+    serves stale only when it has somewhere to hand the key, so this one
+    argument is the difference between PRD 06's "served stale while
+    refreshing" and "served stale". A bound method rather than a lambda so the
+    thing being injected has a name, a docstring and a `__qualname__` a
+    traceback can print -- and it is *synchronous*, which is the whole of "the
+    screen never waits on it": there is nothing here for a handler to await.
     """
-    return HomeService(cache=cache)
+    return HomeService(cache=cache, refresh=refreshes.schedule)
 
 
 HomeServiceDep = Annotated[HomeService, Depends(get_home_service)]

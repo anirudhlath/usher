@@ -83,6 +83,7 @@ from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
 from usher.domain.jobs import JobKind
 from usher.domain.source import Source
+from usher.domain.watch import User
 from usher.ports.credentials import CredentialStore
 from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher, NullEventPublisher
@@ -107,7 +108,7 @@ from usher.ports.repository import (
     TitleRepository,
     WatchStateRepository,
 )
-from usher.ports.rows import RowProvider
+from usher.ports.rows import RowContext, RowProvider
 from usher.ports.source import SourceAdapter, SourceAdapterFactory
 from usher.services.curation import CurationService
 from usher.services.curation_pool import CandidatePoolService
@@ -963,6 +964,39 @@ def _load_embedder(settings: Settings) -> Embedder:
     return FastEmbedEmbedder(settings.embedding_model, batch_size=settings.embedding_batch_size)
 
 
+def build_row_context(pipeline: Pipeline, user: User) -> RowContext:
+    """The fourteen values a row may reach, over one unit of work.
+
+    `api/deps.py` assembles the same context from request-scoped dependencies
+    and `usher home` from a command's one session; this is the third caller --
+    the `rows.refresh` lane, which has neither a request nor a command and only
+    a `Pipeline`. It lives here rather than in `api/lanes.py` because that
+    module deliberately holds no session and imports no SQLAlchemy, and
+    assembling a bag of repositories is wiring.
+
+    **`affinities` is the plain deferred read, not the route's per-request
+    memo.** One refresh composes once and `GenreAffinityProvider` awaits it at
+    most once, so `api/deps.py:_Affinities`' memo would be a memo with one
+    reader -- and the reason the field is a callable at all survives intact: a
+    provider that never fires never pays the three statements behind it. Same
+    shape `usher home` uses, one file over.
+    """
+    return RowContext(
+        user=user,
+        now=lambda: datetime.now(UTC),
+        titles=pipeline.titles,
+        media_items=pipeline.media_items,
+        watch_states=pipeline.watch_states,
+        episodes=pipeline.episodes,
+        neighbors=pipeline.neighbors,
+        people=pipeline.people,
+        credits=pipeline.credits,
+        collections=pipeline.collections,
+        affinities=lambda: pipeline.taste.genre_affinity(user.id),
+        curated=pipeline.curated_rows,
+    )
+
+
 def unit_of_work(
     sessions: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -1171,6 +1205,7 @@ __all__ = [
     "build_index_service",
     "build_pipeline",
     "build_push_applier",
+    "build_row_context",
     "build_worker",
     "embedder",
     "llm_client",

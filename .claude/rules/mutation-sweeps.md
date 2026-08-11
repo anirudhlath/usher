@@ -1645,3 +1645,69 @@ writing the plant and before restoring**, leaving the tree mutated; the `cp`
 backup is what recovered it, exactly as the SIGTERM entry above predicts.
 Spell the landing check as `old not in landed and new in landed`, which is what
 the check actually means and is immune to the substring.
+## M9 Task A6 — serve stale while refreshing
+
+**16 mutations planted, 14 killed, 1 equivalent mutant, 1 control surviving
+as designed.** Selection: `test_services_home_stale.py`,
+`test_services_rows_cache.py`, `test_telemetry_cache.py`, `test_api_lanes.py`,
+`test_api_home.py`, `test_services_home.py`, plus
+`test_rows_refresh.py`/`test_health.py` for the two that touch readiness.
+
+| mutation | verdict | the case that names it |
+|---|---|---|
+| `RefreshQueue.schedule`'s `user.id in self._pending` guard deleted | KILLED | `test_two_reads_over_one_stale_key_schedule_one_refresh` |
+| the pending mark cleared at `take()` instead of `done()` | KILLED | `test_the_key_stays_pending_until_the_refresh_says_it_is_done` |
+| the grace folded into `put_screen`'s stored `expires_at` | KILLED | `test_a_stale_screen_is_served_without_waiting_for_the_refresh` |
+| **stale value returned *and* the entry popped** | KILLED (see below) | `test_two_reads_over_one_stale_key_schedule_one_refresh` |
+| the `TTL + grace` boundary `<` → `<=` | KILLED | `test_past_the_grace_window_the_entry_is_a_hard_miss_and_is_never_served` |
+| a full queue evicts-and-retries instead of dropping | KILLED | `test_a_full_queue_drops_the_key_and_the_request_still_does_not_wait` |
+| a stale serve labelled `freshness="fresh"` | KILLED | `test_a_stale_serve_is_a_hit_labelled_stale` |
+| the schedule replaced by `await self.rebuild(ctx)` | KILLED | `test_a_stale_screen_is_served_without_waiting_for_the_refresh` |
+| the grace applied whether or not a refresher was injected | KILLED | `test_a_composer_with_no_refresher_never_serves_stale` |
+| `rebuild` routed back through `compose_report` | KILLED | `test_rebuild_ignores_the_cached_screen_and_replaces_it` |
+| **`refreshes.done()` moved out of the `finally`** | KILLED (see below) | `test_a_refresh_that_raises_leaves_the_stale_screen_and_names_the_lane` |
+| the lane's `logger.exception` deleted | KILLED | the same case |
+| the refresh lane joined to `running_sources()` | KILLED | `test_the_refresh_lane_is_not_a_source_lane` |
+| the refresh lane never started | KILLED | `test_a_stale_key_is_refreshed_on_the_lanes_own_unit_of_work` |
+| `refreshes.done()` *dedented* to after the whole `try/except` | **EQUIVALENT** | — |
+| CONTROL: `register_queue_gauges`/`register_search_gauges` swapped | SURVIVED | — |
+
+**Three of those rows are the finding, and all three are about the plant
+rather than about the code.**
+
+**A mutation whose failure mode is a hang scores as a false KILLED the moment
+anybody force-kills the run.** "Stale value returned *and* the entry popped"
+survived all of `test_services_home_stale.py` on the first pass — every
+assertion there still held, because the *first* read is served correctly and
+the damage is that the *next* one is cold — and then **hung**
+`test_api_lanes.py`, where the second read fell through to a real rebuild and
+parked on the gate the in-flight refresh was holding. Killing that pytest gave
+the harness a non-zero return code, which it scored `KILLED []` — a verdict
+with no `FAILED` line under it, and the empty list is the tell. Two repairs,
+both needed: the case now asserts the second read is **served the same stale
+screen and re-proposes nothing**, which kills it in milliseconds on an
+assertion; and the lane case's second read is driven by hand
+(`coro.send(None)`), so a read that becomes a rebuild fails instead of parking.
+**A `KILLED` with an empty failure list is not a kill — re-run it.**
+
+**`continue`, `break` and `return` do not skip a `finally`, so there is
+exactly one spelling of "the cleanup is not guaranteed".** Two plants against
+`refreshes.done()` scored SURVIVED before the third was right: adding a second
+call inside the `try` (additive — the `finally` still ran), and adding one
+followed by `continue` (the `finally` runs on `continue`, which is the whole
+property). Only deleting the `finally` clause *and* putting the call on the
+success path reproduces the defect, and that spelling dies on the crash case
+at once. **Before recording a `finally` as unpinned, check that the plant can
+actually skip it.**
+
+**And the *careless* spelling of that same mutation is a genuine equivalent
+mutant, which is worth keeping rather than deleting.** `refreshes.done()`
+dedented to sit after the whole `try/except` still runs on the raising path,
+because the `except Exception` swallows and control falls through — so it
+differs from the shipped code only on `CancelledError`, i.e. during shutdown,
+when nothing will read the queue again. Recorded, not fixed. Same treatment
+M4 gave `_ENQUEUE`'s `GREATEST` and M5 gave `_write_push_available`'s guard.
+
+Gate green before and after on the fully restored tree: `ruff check`,
+`ruff format --check`, `mypy` over 485 files, `lint-imports` 9 kept / 0 broken,
+**3,102 unit / 4 skipped** and **974 integration / 8 skipped**.
