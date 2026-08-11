@@ -39,11 +39,14 @@ from usher.ports.errors import (
     UsherPortError,
 )
 from usher.ports.images import (
+    DECLINED_MEDIA_TYPES,
     IMAGE_LADDER,
+    SUPPORTED_MEDIA_TYPES,
     FetchedImage,
     ImageBlobStore,
     ImageCacheKey,
     ImageFetcher,
+    MediaTypeNotServable,
     StoredImage,
 )
 
@@ -371,6 +374,12 @@ def test_the_fetcher_cannot_be_given_a_credential_at_all() -> None:
             lambda _r: httpx.Response(200, content=b"x", headers={"content-type": "text/html"}),
             id="unsupported-media-type",
         ),
+        pytest.param(
+            lambda _r: httpx.Response(
+                200, content=b"<svg/>", headers={"content-type": "image/svg+xml"}
+            ),
+            id="declined-media-type",
+        ),
     ],
 )
 async def test_no_failure_message_names_the_url_the_path_or_the_host(
@@ -539,18 +548,80 @@ async def test_a_media_type_the_cache_cannot_name_is_refused_before_the_body_is_
     assert delivered == [], "the body was read before the media type was refused"
 
 
-async def test_an_svg_is_refused_and_the_refusal_is_the_decision() -> None:
-    """Not an omission. The provider rasterises SVG logos at every sized rung
-    and this proxy never requests `original`, so an SVG here means something
-    other than the measured CDN answered — and serving active content from an
-    internet-facing origin under a year-long `max-age` is not a thing to do by
-    accident."""
+async def test_an_svg_logo_is_declined_quietly_rather_than_reported_as_a_fault() -> None:
+    """The refusal is the decision, and 🔴 **the reason this case gave until
+    2026-08-11 was measurably wrong.**
+
+    It said the provider rasterises SVG logos at every sized rung, so an SVG
+    arriving here means something other than the measured CDN answered.
+    Measured against three real `.svg` logos across 51 popular and top-rated
+    titles: `w154`, `w342`, `w500` and `original` all answer HTTP 200
+    `image/svg+xml`, and `w342` returns **10,216 bytes of raw SVG XML, byte for
+    byte the size of `original`**. The CDN ignores the ladder entirely for this
+    type — which makes the refusal *stronger*: the clamp is the whole mechanism
+    of ADR-0032 and it has no effect here, so four rungs would cache four
+    identical copies and the "four entries an image" bound is not a bound. That,
+    plus active content on an internet-facing origin under a year-long
+    `max-age`, on a proxy with no decoder that could sanitise it.
+
+    **So the assertion this case is really about is the type, not the raise.**
+    Roughly one title in seventeen has an SVG logo, so this fires on ordinary
+    catalog data; refused as a bare `PortDataMalformed` it would be spelled
+    identically to a captive portal answering HTML, which is a genuine upstream
+    fault. `MediaTypeNotServable` is what lets C5 answer one as an absence and
+    the other as a fault, and it subclasses the old type so nothing that
+    catches `PortDataMalformed` had to change.
+
+    The body is a plausible size rather than `b"<svg/>"` so that "refused
+    without reading it" stays a claim about the header.
+    """
+    delivered: list[int] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"content-type": "image/svg+xml"}, content=_counted(delivered)
+        )
+
+    with pytest.raises(MediaTypeNotServable) as caught:
+        await _drain(_fetcher(handler))
+
+    assert caught.value.media_type == "image/svg+xml"
+    assert delivered == [], "the SVG body was downloaded before it was declined"
+    # The demotion is only worth anything if it is *distinguishable*, so both
+    # halves are asserted: still catchable as before, and still a narrower thing
+    # than the captive-portal case above.
+    assert isinstance(caught.value, PortDataMalformed)
+
+
+async def test_an_answer_that_is_not_artwork_is_not_demoted_to_a_declined_type() -> None:
+    """The premise the case above rests on, asserted where it can fail.
+
+    `MediaTypeNotServable` means "the provider served real artwork and this
+    proxy will not carry it". A `text/html` login page is not that, and a
+    fetcher that answered both the same way would let C5 report a captive portal
+    as an ordinary missing logo — silence on the one failure an operator has to
+    act on, at the rate the *other* one occurs.
+    """
     handler = lambda _r: httpx.Response(  # noqa: E731
-        200, content=b"<svg/>", headers={"content-type": "image/svg+xml"}
+        200, content=b"<html>", headers={"content-type": "text/html"}
     )
 
-    with pytest.raises(PortDataMalformed):
+    with pytest.raises(PortDataMalformed) as caught:
         await _drain(_fetcher(handler))
+
+    assert not isinstance(caught.value, MediaTypeNotServable)
+
+
+def test_every_declined_media_type_is_one_the_supported_map_does_not_hold() -> None:
+    """The two sets cannot overlap, or `extension_for` would name a file for a
+    type it also declines and which arm ran would depend on dict order.
+
+    Asserted over the sets rather than over today's one member, so a second
+    declined type — an `image/avif` the ladder turns out not to bound, say —
+    cannot be added to both.
+    """
+    assert DECLINED_MEDIA_TYPES
+    assert DECLINED_MEDIA_TYPES.isdisjoint(SUPPORTED_MEDIA_TYPES)
 
 
 # -- the disk store's own properties ----------------------------------------

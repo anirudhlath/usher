@@ -28,7 +28,12 @@ from collections.abc import AsyncIterator
 import pytest
 
 from usher.ports.errors import PortDataMalformed
-from usher.ports.images import FetchedImage, ImageBlobStore, ImageCacheKey
+from usher.ports.images import (
+    FetchedImage,
+    ImageBlobStore,
+    ImageCacheKey,
+    MediaTypeNotServable,
+)
 
 _KEY = ImageCacheKey(provider="tmdb", provider_path="/quiet-vacuum.jpg", width=342)
 
@@ -149,6 +154,25 @@ class ImageBlobStoreContract(ABC):
 
         with pytest.raises(PortDataMalformed):
             await store.put(_KEY, _fetched(b"<html>", content_type="text/html"))
+
+        assert await store.get(_KEY) is None
+
+    async def test_a_declined_artwork_type_is_refused_as_its_own_kind(self) -> None:
+        """The SVG arm, and it is here rather than only at the fetcher because
+        this layer is the one that has to name a file.
+
+        Measured 2026-08-11: the CDN answers `image/svg+xml` at **every** rung,
+        `w342` byte for byte the size of `original` — so the clamp does not bound
+        this type and four rungs would cache four copies of one file. Roughly one
+        title in seventeen has such a logo, which is why it is
+        `MediaTypeNotServable` rather than a bare `PortDataMalformed`: the
+        commonest refusal this proxy makes must not be spelled like its most
+        alarming one.
+        """
+        store = self.store()
+
+        with pytest.raises(MediaTypeNotServable):
+            await store.put(_KEY, _fetched(b"<svg/>", content_type="image/svg+xml"))
 
         assert await store.get(_KEY) is None
 

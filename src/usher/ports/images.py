@@ -54,6 +54,7 @@ from dataclasses import dataclass
 from usher.ports.errors import PortDataMalformed
 
 __all__ = [
+    "DECLINED_MEDIA_TYPES",
     "DEFAULT_IMAGE_WIDTH",
     "IMAGE_LADDER",
     "SUPPORTED_MEDIA_TYPES",
@@ -61,6 +62,7 @@ __all__ = [
     "ImageBlobStore",
     "ImageCacheKey",
     "ImageFetcher",
+    "MediaTypeNotServable",
     "StoredImage",
     "clamp_to_ladder",
     "extension_for",
@@ -90,17 +92,52 @@ DEFAULT_IMAGE_WIDTH = 342
 #: `Accept` successor is built and is here so that successor is not a change to
 #: the store.
 #:
-#: **`image/svg+xml` is absent on purpose.** The provider publishes SVG logos
-#: and rasterises them at every sized rung, and this proxy never requests
-#: `original` — so an SVG arriving here means something other than the measured
-#: CDN answered. Serving active content from an internet-facing origin under a
-#: year-long `max-age` is not a thing to do by accident, and the refusal is
-#: loud where a passthrough would be silent.
+#: **`image/svg+xml` is absent on purpose** — see `DECLINED_MEDIA_TYPES`, which
+#: is where the reason lives, because it is a different reason from "this is not
+#: an image at all".
 SUPPORTED_MEDIA_TYPES: Mapping[str, str] = {
     "image/jpeg": "jpg",
     "image/png": "png",
     "image/webp": "webp",
 }
+
+#: Media types the provider really serves for artwork, at a rung, on ordinary
+#: catalog data — and that this proxy declines anyway.
+#:
+#: 🔴 **The reason this file gave until 2026-08-11 was measurably wrong, and the
+#: correction makes the refusal stronger rather than weaker.** It said the
+#: provider rasterises SVG logos at every sized rung and this proxy never
+#: requests `original`, *"so an SVG arriving here means something other than the
+#: measured CDN answered"*. Measured against three real `.svg` logos found
+#: across 51 popular and top-rated titles: `w154`, `w342`, `w500` and `original`
+#: all return **HTTP 200 `image/svg+xml`**, and a `GET` at `w342` returns
+#: **10,216 bytes of raw SVG XML, byte for byte the size of `original`**. The
+#: CDN does not rasterise and does not refuse — it **ignores the ladder
+#: entirely** for this type.
+#:
+#: Which is the real argument, and it is this ADR's own mechanism failing to
+#: bite:
+#:
+#: - **Nothing this proxy does can bound an SVG.** The clamp is the whole of
+#:   ADR-0032 and it has no effect here; four rungs would cache four identical
+#:   copies of one file, so the "four entries an image" bound is not a bound.
+#: - **It is active content served from an internet-facing origin under a
+#:   year-long `max-age`.** SVG may carry script. The three files checked
+#:   carried none, which is a fact about three files and not about the format —
+#:   and the no-decoder decision means this proxy cannot sanitise it either,
+#:   because it stores bytes verbatim and has nothing that can parse them.
+#:
+#: **And it is ordinary, not anomalous** — roughly one title in seventeen in
+#: that sample — which is why it has its own error type below. A refusal that
+#: fires on one request in seventeen must be a quiet, expected outcome; the
+#: first spelling of this made it indistinguishable from a captive portal
+#: answering HTML, and *that* would have read as an alarm on real catalog data.
+#:
+#: **A real SVG at a rung is therefore not a reason to reopen ADR-0032.** The
+#: reopening trigger is a household needing those logos *rendered*, whose answer
+#: is a rasteriser — the decoder arm 1 of that ADR's bar priced and arm 2
+#: declined.
+DECLINED_MEDIA_TYPES: frozenset[str] = frozenset({"image/svg+xml"})
 
 
 def clamp_to_ladder(width: int | None) -> int:
@@ -134,19 +171,61 @@ def clamp_to_ladder(width: int | None) -> int:
     return IMAGE_LADDER[-1]
 
 
+class MediaTypeNotServable(PortDataMalformed):
+    """The provider answered correctly and this proxy will not serve it.
+
+    **A subclass rather than a new member of `usher.ports.errors`, and both
+    halves of that are deliberate.** A `PortDataMalformed` is what every
+    existing `except` in `services/` and `api/` already catches, so nothing
+    forks and no caller has to learn a second name to keep working — the
+    widening `RepositoryConflict` records is the precedent for not splitting a
+    member that callers respond to identically. What the subclass buys is the
+    one caller that *should* respond differently: `GET /images/{id}` can answer
+    a declined logo as an ordinary absence, where a captive portal answering
+    HTML under a 200 is an upstream fault worth surfacing as one.
+
+    **The distinction is a measurement, not a taxonomy exercise.** Roughly one
+    title in seventeen has an SVG logo, so without this the commonest refusal
+    this proxy makes is spelled the same as its rarest and most alarming one.
+
+    Lives here rather than in `ports/errors.py` for `FilterNotSupported`'s
+    reason: it is a property of one port's contract, and a service catching
+    `UsherPortError` catches it either way.
+
+    **It carries no URL and no body** — the media type is the whole of it — for
+    the reason `adapters/images/provider.py`'s docstring gives.
+    """
+
+    def __init__(self, media_type: str) -> None:
+        super().__init__(
+            f"this proxy does not serve {media_type!r}",
+            detail="a provider-served artwork type the width ladder cannot bound",
+        )
+        self.media_type = media_type
+
+
 def extension_for(media_type: str) -> str:
-    """The file extension an entry of this media type is stored under, or
-    `PortDataMalformed` for one this proxy will not cache.
+    """The file extension an entry of this media type is stored under.
+
+    Two refusals rather than one, because they are two different events:
+
+    - a type in `DECLINED_MEDIA_TYPES` — the provider served real artwork and
+      this proxy will not carry it — is `MediaTypeNotServable`, which is
+      ordinary and expected;
+    - anything else is `PortDataMalformed`, which means the answer was not
+      artwork at all.
 
     One definition read from both sides: the fetcher calls it to refuse an
-    unsupported answer *before* reading a body, and the store calls it to name
-    a file. Parameters are stripped and the type is lower-cased first, because
-    `Content-Type: image/jpeg; charset=binary` is a real header and a map
-    lookup on the raw value would refuse it.
+    unsupported answer *before* reading a body, and the store calls it to name a
+    file. Parameters are stripped and the type is lower-cased first, because
+    `Content-Type: image/jpeg; charset=binary` is a real header and a map lookup
+    on the raw value would refuse it.
     """
     normalised = media_type.split(";", 1)[0].strip().lower()
     extension = SUPPORTED_MEDIA_TYPES.get(normalised)
     if extension is None:
+        if normalised in DECLINED_MEDIA_TYPES:
+            raise MediaTypeNotServable(normalised)
         raise PortDataMalformed(
             f"an image proxy will not cache {normalised!r}",
             detail=f"expected one of {', '.join(sorted(SUPPORTED_MEDIA_TYPES))}",
@@ -231,8 +310,12 @@ class ImageFetcher(ABC):
 
     Errors are `usher.ports.errors`, split the way `adapters/http.py`'s ladder
     splits them: `PortUnavailable` for a 429, a 5xx, a timeout or an
-    unreachable host; `PortDataMalformed` for any other 4xx, for a media type
-    the cache will not name, and for a body past the configured ceiling.
+    unreachable host; `PortDataMalformed` for any other 4xx, for an answer that
+    is not artwork at all, and for a body past the configured ceiling; and
+    `MediaTypeNotServable` — a *subclass* of the last, so nothing has to catch
+    it — for artwork the provider really serves and this proxy declines. The
+    third is the one a caller may reasonably treat as an ordinary absence, and
+    it is the one that fires on ordinary catalog data.
     """
 
     @abstractmethod
@@ -294,6 +377,11 @@ class ImageBlobStore(ABC):
         Returns the bytes rather than making the caller read them back, so a
         cold request costs one write and no read.
 
-        A media type outside `SUPPORTED_MEDIA_TYPES` is `PortDataMalformed` and
-        writes nothing.
+        A media type outside `SUPPORTED_MEDIA_TYPES` is refused and writes
+        nothing — `MediaTypeNotServable` for one the provider really serves
+        (an SVG logo), `PortDataMalformed` for anything else. **Refused here as
+        well as at the fetcher, and that is not belt and braces**: this is the
+        layer that has to name a file, so a store which took whatever it was
+        handed would be one fetcher's forgotten check away from an entry it
+        cannot serve back with the right header.
         """

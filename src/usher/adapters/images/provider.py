@@ -92,6 +92,15 @@ class ProviderCdnImageFetcher(ImageFetcher):
                 # the body is read: `extension_for` is the one definition of
                 # what this proxy will cache, and an early refusal is a
                 # connection closed rather than a download paid for.
+                #
+                # **The commonest thing this line refuses is an SVG logo, and
+                # that is ordinary rather than exceptional** -- roughly one
+                # title in seventeen has one, measured. It leaves here as
+                # `MediaTypeNotServable`, which is a `PortDataMalformed` so no
+                # caller has to change, and is distinguishable so the route can
+                # answer it as an absence instead of as an upstream fault.
+                # Refusing at the header is what makes it cheap: the 10 KB of
+                # SVG the CDN would have sent is never read.
                 extension_for(media_type)
                 yield FetchedImage(
                     content_type=media_type,

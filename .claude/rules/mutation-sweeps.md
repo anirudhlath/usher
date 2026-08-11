@@ -2062,3 +2062,64 @@ ProviderCdnImageFetcher` planted in `adapters/http.py` **in its isort
 position** (so the careful spelling of the defect is what was measured, not the
 careless one `ruff check` catches as `F401`) reports **8 kept, 1 broken**,
 naming the new module; restored, 9 kept, 0 broken, `md5sum`-verified.
+
+### C4 follow-up — the SVG demotion (2026-08-11)
+
+**6 further plants over `ports/images.py` after C1 measured the SVG refusal's
+premise and found it wrong: 5 targets, 5 killed, 1 control surviving; 1
+BROKEN-MUTATION that was the careless spelling and was re-measured carefully.**
+Same harness, same 316-case selection.
+
+**The correction itself is worth the entry.** C4 refused `image/svg+xml`
+saying the CDN rasterises SVG logos at every sized rung, *"so an SVG arriving
+here means something other than the measured CDN answered"*. Measured against
+three real `.svg` logos across 51 titles: every rung returns HTTP 200
+`image/svg+xml`, and `w342` is **10,216 bytes of raw SVG XML, byte for byte the
+size of `original`** — the CDN ignores the ladder entirely for this type. The
+decision was right and its stated reason was false, which is the pairing this
+file exists to make visible: **a refusal justified by "this cannot happen" is
+one measurement away from being a refusal that fires constantly, and the code
+that carries it will not notice the difference.** Roughly one title in
+seventeen has an SVG logo.
+
+**The consequence was a classification defect, not a prose defect.**
+`extension_for` raised a bare `PortDataMalformed` for an SVG — the same type it
+raises for a captive portal answering an HTML login page under a 200. So the
+commonest refusal this proxy makes was spelled identically to its rarest and
+most alarming one, and any route mapping `PortDataMalformed` to an
+upstream-fault status would have reported one request in seventeen as an
+incident. Closed with `MediaTypeNotServable`, a **subclass** of
+`PortDataMalformed` so every existing `except` is unchanged and only the caller
+that wants the distinction has to know it exists — `FilterNotSupported`'s
+"lives with its port, catchable as `UsherPortError`" shape, plus
+`RepositoryConflict`'s argument for widening a member rather than forking every
+handler.
+
+| plant | verdict | fails |
+|---|---|---|
+| the declined branch deleted, so an SVG is spelled like a captive portal | KILLED | 3 |
+| `DECLINED_MEDIA_TYPES` emptied | KILLED | 4 |
+| `MediaTypeNotServable` no longer a `PortDataMalformed` | KILLED (careful spelling) | 1 |
+| `image/jpeg` added to the declined set | KILLED | 1 |
+| the refusal loses the media type it names | KILLED | 1 |
+| *control:* one sentence of the declined-set comment reworded | SURVIVED | — |
+
+🔴 **The third row is the second instance in this task of the careless/careful
+rule, and the first spelling produced a BROKEN-MUTATION rather than a kill.**
+`class MediaTypeNotServable(UsherPortError)` alone is a `NameError` at import —
+`ports/images.py` imports only `PortDataMalformed` — so the run reported *3
+errors* at collection, which scores as "the mutation did not compile" and says
+nothing about the suite. Re-spelled with the import widened **and** the
+`detail=` argument dropped (the base's second parameter goes with it), it
+passes `ruff check` and fails **exactly one case**:
+`test_an_svg_logo_is_declined_quietly_rather_than_reported_as_a_fault`'s
+`isinstance(caught.value, PortDataMalformed)` arm. **A subclass relationship is
+only pinned by an `isinstance` assertion on the parent — `pytest.raises(Child)`
+is satisfied by a child of anything** — and that arm exists precisely because
+the whole value of the demotion is that it did *not* fork any caller.
+
+The disjointness case (`DECLINED_MEDIA_TYPES.isdisjoint(SUPPORTED_MEDIA_TYPES)`)
+is the only thing that kills the fourth row, and it needs its own premise
+(`assert DECLINED_MEDIA_TYPES`) because an empty set is disjoint from
+everything — the same guard the AST scan in this task's first round needed for
+the same reason, one data structure over.
