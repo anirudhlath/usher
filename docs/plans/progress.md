@@ -2154,7 +2154,10 @@ Emby run as what could reverse it.
 invented *after* the numbers came in, and it couples the prompt to the repository's sort order.
 Named in ADR-0028 as an option a later task may take with its own pre-declared rule.
 
-**Where it landed.** One sentence of `curation_prompt.build_prompt`; ADR-0028 gains a dated amendment
+**Where it landed.** The opening line of `curation_prompt.build_prompt` — **one sentence replaced by
+two**, and stating it as "one sentence changed" understates the diff: the false claim is deleted and
+an explicit not-all-owned clause is added beside it, which is the whole of what the +26 tokens buy.
+Nothing else in the prompt moves. ADR-0028 gains a dated amendment
 in place (no new id, nothing renumbered); PRD 06's *Assemble context* step, its *"ranking keys"*
 bullet and its first live-run limit; PRD 09's carried-debt bullet (the `min_cards` half is explicitly
 left open for its own task); `list_unwatched_candidates`' *"Membership is unwatched, and nothing
@@ -2167,33 +2170,7 @@ the `reason` bound. It was neither: it was a claim about pool *membership*, so a
 have had to honour it. **The test is not how a prompt sentence reads — it is whether any query,
 constant or validator in the system would have to be true for it to be.**
 
-**Mutation sweep — 6 plants over `services/curation_prompt.py`: 4 targets killed, 2
-equivalent-mutant controls surviving as designed, 0 unintended survivors, 0 BAD-ANCHOR, 0
-BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place against the whole `tests/unit` selection
-and **re-run unchanged after merging `milestone/m9-api-surface`**, which grew that selection from
-3,041 cases to 3,081 — a survivor is only a survivor of the selection it ran against, and 44 test
-files arrived between the two runs. Same six verdicts, same single case killing all four targets,
-same restored digest. The plant list and its expected verdict were written down first, with the
-three `.pyc` defences in force (`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept before every run,
-an equivalent-mutant control), and every restore verified by `md5sum` against a pre-plant digest.
-**A prompt sweep's yield is near 100% because nothing observes a prompt unless a case opts in by
-name**, so the rendered artefact was enumerated before the control flow: the four targets are the
-pre-2026-08-11 opening restored, the corrective clause merely *deleted* (the false claim gone but
-the pool's real span unstated), the clause *inverted* back into an ownership claim, and the opening
-line deleted outright. **Each kills exactly one case and it is the same one for all four** —
-`test_the_opening_line_does_not_claim_the_household_owns_every_candidate` — which is the
-measurement behind the two-assertion shape: T2 is invisible to the negative half and T1/T3 are
-invisible to a negative that only reads line 1.
-
-| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
-|---|---|---|---|---|---|
-| `MIN_ROWS`/`MAX_ROWS` definition order swapped | PASS | PASS | PASS | PASS | PASS |
-| one sentence of `build_prompt`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
-
-The first is a fact about the *code* rather than about what the tools look at: two module-level
-`int` assignments that reference neither each other nor anything between them, in a module with no
-import-time side effect — and it is an ordering control that is **not** an `__all__` reorder, which
-`ruff`'s `RUF022` would have rejected. The docstring reword was checked first against the
-docstring-scan grep: twelve test files scan source, and the only one touching this module
-(`test_one_whitespace_collapse_defends_both_prompts`) walks `ast.FunctionDef` and compares
-`node.body[-1]`, so a docstring at `body[0]` is outside it.
+**Mutation sweep — 6 plants over `services/curation_prompt.py`, 4 targets killed and 2
+equivalent-mutant controls surviving all five gate steps: the ledger is in
+`.claude/rules/mutation-sweeps.md`,** which `CLAUDE.md` names as the home for *"every
+per-task sweep ledger with its survivors"*.

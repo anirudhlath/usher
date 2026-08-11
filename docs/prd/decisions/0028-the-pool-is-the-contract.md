@@ -195,8 +195,11 @@ would be ~14,280, which with `llm_max_output_tokens = 2048` leaves **56 tokens**
 under `max_model_len` — while the verbose marker's ~15,480 puts it **over**, so
 a working configuration would start answering HTTP 400. *(Derived from this
 ADR's measured 12,540 and the rates above, not separately measured.)* The
-correction ships alone, at +26 tokens once, and the client affordance for the
-other half already exists: `RowCard.owned` defaults `False` and
+correction ships alone, at +26 tokens once. **It is one sentence replaced by
+two, not one sentence edited** — the false claim is deleted and an explicit
+not-all-owned clause is added beside it, which is what the 26 tokens are; the
+rest of the prompt is untouched. The client affordance for the other half
+already exists: `RowCard.owned` defaults `False` and
 [05](../05-search-and-similarity.md) requires unowned results be *"clearly
 marked"*.
 
