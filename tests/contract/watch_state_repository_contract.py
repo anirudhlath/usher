@@ -585,12 +585,28 @@ class WatchStateRepositoryContract:
         The plausible-looking wrong implementation this kills is
         `play_count = 1` unconditionally, which the case above cannot see
         because both spellings agree starting from zero.
+
+        This is also the only case that writes to a row a *source* created
+        and then re-checks what a client write did to it: the row exists
+        because of `merge_from_source` (`origin=source`), so `set_from_client`
+        here always lands on the `DO UPDATE` branch, never the `INSERT` one.
+        `assert result.origin is API` is what a dropped `origin = 'api'` in
+        that branch's `SET` clause fails -- every other case that reads
+        `.origin` reads a row the `INSERT` path created, where the literal is
+        never in question. And `last_played_at` must move off the merge's own
+        `LAST_PLAYED` -- a stale value dated 2026-07-20 that a `CASE WHEN
+        excluded.played THEN now() ELSE watch_states.last_played_at END`
+        arm reading `ELSE` would leave standing, which the fixture's own
+        `LAST_PLAYED` constant is far enough in the past to make loud.
         """
         await repository.merge_from_source(
             [merge(user_id, title_id, played=True, play_count=7, last_played_at=LAST_PLAYED)]
         )
         result = await repository.set_from_client(write(user_id, title_id, played=True))
         assert result.play_count == 7
+        assert result.origin is WatchStateOrigin.API, "the DO UPDATE branch must set it too"
+        assert result.last_played_at is not None
+        assert result.last_played_at != LAST_PLAYED, "the client's own press re-stamps it"
 
     async def test_unmarking_played_leaves_history_alone_but_still_writes_the_position(
         self, repository: WatchStateRepository, user_id: uuid.UUID, title_id: uuid.UUID
@@ -601,10 +617,16 @@ class WatchStateRepositoryContract:
         must not do at the database what `EmbyAdapter.push_watch_state`
         already refuses to do at the source -- and `position_seconds` is
         still written unconditionally, so unmarking played is not a
-        licence to leave it stale either. Three separate assertions,
-        because a suite checking only one of the three would have ratified
-        a bug in either of the others -- this module's own docstring
-        records that lesson once already, one column over.
+        licence to leave it stale either. Four separate assertions, because
+        a suite checking only some of them would have ratified a bug in any
+        of the others -- this module's own docstring records that lesson
+        once already, one column over. `result.played is False` is the one
+        that matters most and is the easiest to leave out: this is the only
+        case in the suite that flips `played` True -> False through the
+        `DO UPDATE` branch and then reads `.played` back, so a dropped
+        `played = excluded.played` in that branch's `SET` clause -- which
+        leaves a title the client explicitly un-marked reading as watched --
+        fails nothing else here.
         """
         await repository.set_from_client(
             write(user_id, title_id, played=True, position_seconds=100)
@@ -618,6 +640,7 @@ class WatchStateRepositoryContract:
             write(user_id, title_id, played=False, position_seconds=55)
         )
 
+        assert result.played is False, "the DO UPDATE branch must still write the flag"
         assert result.play_count == 1, "unmarking played does not reset play history"
         assert result.last_played_at == seeded.last_played_at, "and leaves the date alone too"
         assert result.position_seconds == 55, "the position is still written, never cleared"

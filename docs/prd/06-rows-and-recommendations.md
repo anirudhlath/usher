@@ -799,7 +799,8 @@ Generation runs nightly and on demand:
      vector, a NULL one, or one of another model's width — keeps its exact
      index. That is stronger than "unembedded candidates are not dropped" and
      is chosen for the reason M7 quoted the genome's *candidate-pair* rate
-     (1.81%) rather than its coverage: an artefact whose shape depends on how
+     (1.81%, over 5,020 owned seeds — the population is part of that number)
+     rather than its coverage: an artefact whose shape depends on how
      far `usher index --backfill` has drained is one that changes for reasons
      the household cannot see. The pool is a function of the household, not
      of the embedder.
