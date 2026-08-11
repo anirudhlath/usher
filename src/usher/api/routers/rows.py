@@ -95,8 +95,8 @@ indistinguishable from one reporting zero.
 ## There is no 503 here to give a `code` to
 
 PRD 07's RFC 9457 envelope has one worked example, `503 source_unavailable`,
-and the deferral has survived `GET /titles/{id}` and `GET /home` because
-neither holds a `SourceAdapter` and so neither can reach an upstream at all.
+and it survived `GET /titles/{id}` and `GET /home` because neither holds a
+`SourceAdapter` and so neither can reach an upstream at all.
 **That is a claim about reads, and it does not transfer here unchanged** --
 not because this route writes (`GET /titles/{id}` writes too, once, on
 purpose) but because what it writes to is a subsystem that can be down while
@@ -107,6 +107,15 @@ which every endpoint is down. The handler therefore catches nothing -- a
 `PortUnavailable` propagates and becomes an ordinary 500 -- and
 `tests/unit/test_api_rows.py::test_an_unreachable_queue_is_not_translated_into_a_503`
 is what keeps the `except` from being added back.
+
+**The envelope has since landed and this argument is unchanged**, which is
+the point of stating it structurally rather than as a wait. ADR-0030
+**preserves** it as a standing rule: the vocabulary holds no
+`queue_unavailable` and no `database_unavailable` of any spelling, and this
+paragraph is the reason recorded there. The 500 is also a 500 by rule rather
+than by omission -- ADR-0030 refuses an `internal_error` member because
+nothing emits one, measured rather than inferred from the case above, which
+asserts a status code and nothing about the body.
 
 ## Two things this route deliberately does not do
 
