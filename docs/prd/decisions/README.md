@@ -36,6 +36,7 @@ otherwise be lost and re-litigated in six months.
 | [0026](0026-the-cli-boundary-names-families.md) | The CLI's error boundary names families, and `Exception` is not one of them | Accepted — extends PRD 08; amended 2026-08-07 |
 | [0027](0027-the-llm-client-is-one-http-call.md) | The `LLMClient` is one HTTP call, and `litellm` is not taken | Accepted — corrects PRD 01, 06 and 10 |
 | [0028](0028-the-pool-is-the-contract.md) | The pool is the contract: candidates are indices, and the validator does not trust the schema | Accepted — settles PRD 06's validation step |
+| [0029](0029-the-playback-ticket-changes-the-artifact-not-the-grant.md) | The playback ticket changes the artifact, not the grant | Accepted — the M9 successor ADR-0012 named |
 
 Format: context → decision → consequences → evidence. Short is fine.
 

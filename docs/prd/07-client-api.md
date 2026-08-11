@@ -632,6 +632,35 @@ by hand in the Home Assistant card moves here, where it is testable.
 > [03](03-sources-and-sync.md) for the cache and ADR-0012 for the risks
 > accepted with it.
 
+> **Settled in M9 — the playback ticket.** ADR-0012's successor is decided and
+> its cipher is built:
+> [ADR-0029](decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md).
+> A **ticket** is a Fernet token over an HKDF-SHA256 subkey of
+> `USHER_SECRET_KEY`, domain-separated from the source-credential subkey with
+> `info=b"usher.playback-ticket.v1"`, carrying the source URL as its
+> plaintext. `POST /titles/{id}/play` hands the client a ticket instead of the
+> source URL and `GET /stream/{ticket}` redeems one into a `302` — so Usher
+> still never proxies bytes, and the block quote above's JSON example shows the
+> pre-ticket shape until the route lands.
+>
+> **Encrypted rather than merely signed**, because the payload *is* the URL
+> carrying `api_key`: a signed-but-readable token would publish the credential
+> it exists to hide. **Stateless** — there is no ticket table, so no revocation
+> before expiry; rotating `USHER_SECRET_KEY` is the coarse revocation that
+> exists. **Expired and forged are deliberately indistinguishable**, and
+> redemption raises nothing rather than building an error message a URL could
+> leak into.
+>
+> **What it changes is the artifact, not the grant.** The `302`'s `Location` is
+> the real URL, so the token still reaches the client that follows it; what
+> stops being a working credential is what the client stores, renders, caches
+> or pastes. The reduction is **weakest for the `deep_link` target**, which
+> hands the ticket to a third-party player that follows the redirect and then
+> holds the real URL exactly as it does today. There is deliberately no
+> `USHER_PLAYBACK_TICKET_TTL_SECONDS` — the TTL is a named constant at the one
+> place that mints, because nobody has yet measured how long a client sits
+> between receiving a target and following it.
+
 ## Authentication seam
 
 v1 has no authentication. Every route depends on `current_user`, which returns
