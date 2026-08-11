@@ -13,8 +13,16 @@ and dropped by `--phase drop`.
     uv run python scripts/measure_imdb_people.py --phase head
     uv run python scripts/measure_imdb_people.py --phase counts
     uv run python scripts/measure_imdb_people.py --phase relations
+    uv run python scripts/measure_imdb_people.py --phase names
+    uv run python scripts/measure_imdb_people.py --phase titles   # needs alembic head
     uv run python scripts/measure_imdb_people.py --phase blast
     uv run python scripts/measure_imdb_people.py --phase drop
+
+**Every number in the write-up comes out of one of these phases.** Nothing was
+measured at a `psql` prompt and transcribed: a figure with no phase behind it
+is indistinguishable from a figure somebody computed in their head, which is
+exactly the review finding that added `--phase titles` and the trimmed-table
+arm of `--phase relations`.
 
 **The snapshot is pinned, and that is not optional.**
 `CachedDatasetFile.ensure_local` short-circuits on the *upstream* ETag rather
@@ -322,6 +330,7 @@ def _count_akas(
     header = next(rows)
     print(f"title.akas header: {len(header)} columns {header}")
     total = bad_columns = retained = empty_name = over_bound = written = 0
+    restates_canonical = 0
     titles_hit: set[str] = set()
     with (out_dir / "akas.tsv").open("w", encoding="utf-8") as sink:
         for fields in rows:
@@ -343,6 +352,8 @@ def _count_akas(
             title_id, primary_name, original_name = found
             folded = name.casefold()
             canonical = folded in (primary_name.casefold(), original_name.casefold())
+            if canonical:
+                restates_canonical += 1
             titles_hit.add(tconst)
             written += 1
             sink.write(
@@ -363,6 +374,10 @@ def _count_akas(
     print(f"  of those, an empty name:           {empty_name}")
     print(f"  of those, over {SEARCH_NAME_MAX_CHARS} characters:      {over_bound}")
     print(f"  written for the load:              {written}")
+    print(f"  of those, casefold-equal to titles.name/original_name: {restates_canonical}")
+    print(
+        f"  of those, a genuinely different string:                {written - restates_canonical}"
+    )
     print(f"  distinct titleId retained:         {len(titles_hit)} of {len(catalog)}")
 
 
@@ -493,6 +508,71 @@ _EXTRA_INDEX = (
     "CREATE INDEX ix_t3_credits_imdb_natural_key ON t3_credits (title_id, person_id, kind)"
 )
 
+# The trimmed variant, and the reason it is measured rather than reasoned
+# about. If (A) fails, the first question anybody asks is "did it fail only
+# because `character` and `job` are fat, in which case the entity design was
+# salvageable?" -- so the answer has to be a size on disk, not arithmetic on
+# the full table's number. `t3_credits_trimmed` is the same 12.6M rows reduced
+# to the five columns a credit cannot do without, carrying only its primary key
+# and the two foreign-key indexes: no `character`, no `job`, no `department`,
+# no `tmdb_credit_id`, no `created_at`, no partial unique index. Nothing about
+# a `people`/`credits` design can be smaller than this and still be one.
+_TRIMMED_DDL = (
+    "DROP TABLE IF EXISTS t3_credits_trimmed CASCADE",
+    """
+    CREATE TABLE t3_credits_trimmed AS
+    SELECT id, person_id, title_id, kind, billing_order FROM t3_credits
+    """,
+    "ALTER TABLE t3_credits_trimmed ADD CONSTRAINT pk_t3_credits_trimmed PRIMARY KEY (id)",
+    "CREATE INDEX ix_t3_credits_trimmed_person_id ON t3_credits_trimmed (person_id)",
+    "CREATE INDEX ix_t3_credits_trimmed_title_id ON t3_credits_trimmed (title_id)",
+)
+
+# The two text columns the trimmed variant sheds, weighed on the server rather
+# than guessed from an average row width.
+_TEXT_BYTES = """
+SELECT coalesce(sum(octet_length(character)), 0) AS character_bytes,
+       count(character) AS character_rows,
+       coalesce(sum(octet_length(job)), 0) AS job_bytes,
+       count(job) AS job_rows
+FROM t3_credits
+"""
+
+_TRIMMED_SIZES = """
+SELECT (SELECT count(*) FROM t3_credits_trimmed) AS rows,
+       pg_table_size('t3_credits_trimmed') AS heap,
+       pg_total_relation_size('t3_credits_trimmed') AS total,
+       pg_total_relation_size('t3_people') AS people_total
+"""
+
+
+async def _report_trimmed(engine: AsyncEngine, entity_full: int) -> None:
+    """(A) re-measured against the smallest credits row that is still a credit."""
+    async with engine.begin() as conn:
+        for statement in _TRIMMED_DDL:
+            await conn.execute(text(statement))
+    async with engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
+        await conn.execute(text("VACUUM ANALYZE t3_credits_trimmed"))
+    async with engine.connect() as conn:
+        rows, heap, total, people_total = (await conn.execute(text(_TRIMMED_SIZES))).one()
+        char_bytes, char_rows, job_bytes, job_rows = (await conn.execute(text(_TEXT_BYTES))).one()
+    print(f"\nt3_credits_trimmed (id, person_id, title_id, kind, billing_order): {rows} rows")
+    print(f"  heap + toast            {heap:>14} ({heap / 1024**2:.1f} MiB)")
+    print(f"  total incl. indexes     {total:>14} ({total / 1024**2:.1f} MiB)")
+    minimal = total + people_total
+    print(
+        f"\n(A) MINIMAL people + trimmed credits: {minimal} "
+        f"({minimal / 1000**3:.3f} GB / {minimal / 1024**3:.3f} GiB)"
+    )
+    print(
+        f"    against the full-column (A) of    {entity_full}, a saving of {entity_full - minimal}"
+    )
+    print(
+        f"    text shed to get there: character {char_bytes} B over {char_rows} rows, "
+        f"job {job_bytes} B over {job_rows} rows, total {char_bytes + job_bytes} B"
+    )
+
 
 async def phase_relations(scratch_url: str, out_dir: Path) -> None:
     engine = build_engine(scratch_url)
@@ -532,7 +612,11 @@ async def phase_relations(scratch_url: str, out_dir: Path) -> None:
             await conn.execution_options(isolation_level="AUTOCOMMIT")
             for table in ("t3_people", "t3_credits", "t3_aliases", "t3_akas_raw"):
                 await conn.execute(text(f"VACUUM ANALYZE {table}"))
-        await _report_sizes(engine)
+        entity_full = await _report_sizes(engine)
+        # Before `_EXTRA_INDEX`, so that neither the trimmed table nor the two
+        # text-column sums can be read against a `t3_credits` that has grown an
+        # index the shipped design does not carry.
+        await _report_trimmed(engine, entity_full)
         async with engine.begin() as conn:
             await conn.execute(text(_EXTRA_INDEX))
         async with engine.connect() as conn:
@@ -581,8 +665,24 @@ FROM pg_stat_user_indexes WHERE relname = ANY(:names) ORDER BY relname, indexrel
 
 _TABLES = ["t3_people", "t3_credits", "t3_aliases"]
 
+# (B)'s denominators, taken in SQL rather than by eye. `t3_akas_raw` is every
+# retained akas row as the parser wrote it; `t3_aliases` is what survives the
+# canonical-name filter and the `(title_id, casefold(name))` dedupe.
+_ALIAS_BREAKDOWN = """
+SELECT (SELECT count(*) FROM t3_akas_raw)                              AS retained,
+       (SELECT count(*) FROM t3_akas_raw WHERE canonical)              AS restates_canonical,
+       (SELECT count(*) FROM t3_akas_raw WHERE NOT canonical)          AS non_canonical,
+       (SELECT count(*) FROM (SELECT DISTINCT title_id, folded
+                              FROM t3_akas_raw WHERE NOT canonical) d) AS deduplicated,
+       (SELECT count(DISTINCT title_id) FROM t3_aliases)               AS titles_with_an_alias,
+       (SELECT count(*) FROM t3_aliases WHERE region IS NOT NULL)      AS with_region,
+       (SELECT count(*) FROM t3_aliases WHERE language IS NOT NULL)    AS with_language
+"""
 
-async def _report_sizes(engine: AsyncEngine) -> None:
+
+async def _report_sizes(engine: AsyncEngine) -> int:
+    """Print (A) and (B), and hand (A)'s full-column figure back for the
+    trimmed variant to be compared against in the same run."""
     async with engine.connect() as conn:
         counts = {name: rows for name, rows in (await conn.execute(text(_ROW_COUNTS))).all()}
         sizes = {
@@ -602,8 +702,26 @@ async def _report_sizes(engine: AsyncEngine) -> None:
                 print(f"    {indexrelname:<40} {size:>12} ({size / 1024**2:.1f} MiB)")
     entity = sizes["t3_people"][1] + sizes["t3_credits"][1]
     alias = sizes["t3_aliases"][1]
-    print(f"\n(A) people + credits, total relation size: {entity} ({entity / 1024**3:.3f} GiB)")
-    print(f"(B) aliases, total relation size:          {alias} ({alias / 1024**3:.3f} GiB)")
+    print(
+        f"\n(A) people + credits, total relation size: {entity} "
+        f"({entity / 1000**3:.3f} GB / {entity / 1024**3:.3f} GiB)"
+    )
+    print(
+        f"(B) aliases, total relation size:          {alias} "
+        f"({alias / 1000**3:.3f} GB / {alias / 1024**3:.3f} GiB)"
+    )
+    async with engine.connect() as conn:
+        row = (await conn.execute(text(_ALIAS_BREAKDOWN))).one()
+    print(
+        f"    retained akas rows                      {row.retained}\n"
+        f"    of those, restating the canonical name  {row.restates_canonical}\n"
+        f"    genuinely different strings             {row.non_canonical}\n"
+        f"    after (title_id, casefold) dedupe       {row.deduplicated}\n"
+        f"    distinct titles gaining >=1 alias       {row.titles_with_an_alias}\n"
+        f"    survivors carrying a region             {row.with_region}\n"
+        f"    survivors carrying a language           {row.with_language}"
+    )
+    return int(entity)
 
 
 # --------------------------------------------------------------------------
@@ -695,6 +813,162 @@ GROUP BY title_id
 """
 
 
+# --------------------------------------------------------------------------
+# phase titles -- what filling `credit_names` costs the `titles` relation
+# --------------------------------------------------------------------------
+#
+# This phase exists because the cost is not the names. `search_document` is a
+# STORED generated column with `usher_array_text(credit_names)` at weight B, so
+# writing the column rewrites the document and the GIN index over it, and an
+# `UPDATE` of 1.19M rows leaves a dead tuple beside every live one. None of
+# that is visible in `sum(octet_length(...))` of the names, so it is measured
+# on a real copy of the catalog at the `m09a` schema: baseline, post-`UPDATE`,
+# and post-`VACUUM FULL`, which are three genuinely different numbers an
+# operator sees at three different moments.
+#
+# `LIKE titles INCLUDING ALL` is what makes the copy faithful -- it brings the
+# generated expression, every CHECK and all eleven indexes -- and it is also
+# why the scratch database must be at `alembic upgrade head` before this runs.
+
+# Every column of `titles` except the generated one, which Postgres computes
+# and refuses to be given. Read from the catalogue rather than hardcoded: a
+# hardcoded list silently drops a column a later migration adds, and the copy
+# would still succeed.
+_TITLE_COLUMNS = """
+SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum)
+FROM pg_attribute
+WHERE attrelid = 'titles'::regclass AND attnum > 0
+  AND NOT attisdropped AND attgenerated = ''
+"""
+
+_TITLE_SIZES = """
+SELECT pg_table_size('t3_titles') AS heap,
+       pg_total_relation_size('t3_titles') AS total,
+       pg_relation_size('t3_titles_search_document_idx') AS gin
+"""
+
+_TITLE_OVERLAP = """
+SELECT (SELECT count(*) FROM t3_titles) AS titles,
+       (SELECT count(*) FROM t3_titles WHERE cardinality(credit_names) > 0) AS with_names,
+       (SELECT count(*) FROM t3_titles WHERE enrichment_state <> 'skeleton') AS embedded,
+       (SELECT count(*) FROM t3_titles WHERE vote_count >= 100) AS tier,
+       (SELECT count(*) FROM t3_titles
+        WHERE vote_count >= 100 AND cardinality(credit_names) > 0) AS tier_with_names,
+       (SELECT count(*) FROM t3_titles WHERE vote_count >= 100 AND kind = 'movie') AS movie_tier,
+       (SELECT count(*) FROM t3_titles WHERE vote_count >= 100 AND kind = 'movie'
+          AND cardinality(credit_names) > 0) AS movie_tier_with_names
+"""
+
+_FILL_CREDIT_NAMES = """
+UPDATE t3_titles t SET credit_names = c.names
+FROM t3_credit_names c
+WHERE c.title_id = t.id AND t.credit_names IS DISTINCT FROM c.names
+"""
+
+
+async def _title_sizes(engine: AsyncEngine, label: str) -> tuple[int, int, int]:
+    async with engine.connect() as conn:
+        heap, total, gin = (await conn.execute(text(_TITLE_SIZES))).one()
+    print(f"  {label:<24} heap {heap:>13}  total {total:>13}  gin {gin:>12}")
+    return int(heap), int(total), int(gin)
+
+
+async def phase_titles(catalog_url: str, scratch_url: str, out_dir: Path) -> None:
+    scratch = build_engine(scratch_url)
+    catalog = build_engine(catalog_url)
+    dump = out_dir / "titles.tsv"
+    try:
+        async with scratch.connect() as conn:
+            if not (
+                await conn.execute(text("SELECT to_regclass('public.titles') IS NOT NULL"))
+            ).scalar_one():
+                raise SystemExit(
+                    "the scratch database has no `titles` -- run `alembic upgrade head` "
+                    "against USHER_T3_SCRATCH_URL first; this phase copies the real catalog "
+                    "into `t3_titles` via LIKE titles INCLUDING ALL"
+                )
+            if not (
+                await conn.execute(text("SELECT to_regclass('public.t3_credit_names') IS NOT NULL"))
+            ).scalar_one():
+                raise SystemExit("no t3_credit_names -- run --phase names first")
+            columns = (await conn.execute(text(_TITLE_COLUMNS))).scalar_one()
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        async with catalog.connect() as conn:
+            raw = await conn.get_raw_connection()
+            driver: Any = raw.driver_connection
+            # S608 is suppressed on the next line only. `columns` is not user
+            # input: it is `string_agg(quote_ident(attname))` straight out of
+            # `pg_attribute` for one hardcoded relation, so Postgres quoted
+            # every identifier in it. A bind parameter cannot carry a select
+            # list, so there is no non-interpolated spelling of this.
+            await driver.copy_from_query(
+                f"SELECT {columns} FROM titles",  # noqa: S608
+                output=str(dump),
+                format="text",
+            )
+        async with scratch.begin() as conn:
+            await conn.execute(text("DROP TABLE IF EXISTS t3_titles"))
+            await conn.execute(text("CREATE TABLE t3_titles (LIKE titles INCLUDING ALL)"))
+        async with scratch.begin() as conn:
+            raw = await conn.get_raw_connection()
+            driver = raw.driver_connection
+            await driver.copy_to_table(
+                "t3_titles",
+                source=str(dump),
+                columns=[c.strip().strip('"') for c in columns.split(",")],
+                format="text",
+            )
+        async with scratch.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text("VACUUM ANALYZE t3_titles"))
+
+        print("\nt3_titles -- a real catalog copy at the m09a schema:")
+        base_heap, base_total, base_gin = await _title_sizes(scratch, "baseline (empty)")
+
+        async with scratch.begin() as conn:
+            filled = (await conn.execute(text(_FILL_CREDIT_NAMES))).rowcount
+        print(f"  UPDATE touched {filled} rows")
+        up_heap, up_total, up_gin = await _title_sizes(scratch, "after UPDATE (bloated)")
+
+        async with scratch.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text("VACUUM FULL ANALYZE t3_titles"))
+        fin_heap, fin_total, fin_gin = await _title_sizes(scratch, "after VACUUM FULL")
+
+        # `VACUUM FULL` rebuilds every index by sort while the baseline's were
+        # built incrementally by `COPY`, so the nine btrees can come back
+        # *smaller* than they started. That is a confound in the total, not a
+        # saving the fill produced, which is why it is broken out by name.
+        others = (fin_total - fin_heap - fin_gin) - (base_total - base_heap - base_gin)
+        print(
+            f"\n  settled growth   total {fin_total - base_total:>+13}"
+            f"  ({100 * (fin_total - base_total) / base_total:+.1f}%)"
+            f"\n                   heap  {fin_heap - base_heap:>+13}"
+            f"  ({100 * (fin_heap - base_heap) / base_heap:+.1f}%)"
+            f"\n                   gin   {fin_gin - base_gin:>+13}"
+            f"  ({fin_gin / base_gin:.2f}x)"
+            f"\n                   other indexes, net {others:>+13}"
+            f"\n  transient peak   total {up_total - base_total:>+13}"
+            f"  (heap {up_heap - base_heap:+}, gin {up_gin - base_gin:+})"
+        )
+        async with scratch.connect() as conn:
+            row = (await conn.execute(text(_TITLE_OVERLAP))).one()
+        print(
+            f"\n  titles                                    {row.titles}\n"
+            f"  gaining a non-empty credit_names          {row.with_names}\n"
+            f"  in the embedded population (non-skeleton) {row.embedded}\n"
+            f"  with vote_count >= 100                    {row.tier}\n"
+            f"    of those, gaining a credit_names        {row.tier_with_names}\n"
+            f"  movies with vote_count >= 100             {row.movie_tier}\n"
+            f"    of those, gaining a credit_names        {row.movie_tier_with_names}"
+        )
+    finally:
+        await scratch.dispose()
+        await catalog.dispose()
+        dump.unlink(missing_ok=True)
+
+
 async def phase_names(scratch_url: str) -> None:
     engine = build_engine(scratch_url)
     try:
@@ -719,7 +993,8 @@ async def phase_drop(scratch_url: str) -> None:
             await conn.execute(
                 text(
                     "DROP TABLE IF EXISTS t3_principals, t3_names, t3_akas_raw, t3_credits, "
-                    "t3_people, t3_aliases, t3_credit_names, t3_titles CASCADE"
+                    "t3_credits_trimmed, t3_people, t3_aliases, t3_credit_names, "
+                    "t3_titles CASCADE"
                 )
             )
         print("scratch tables dropped")
@@ -731,7 +1006,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="see the module docstring")
     parser.add_argument(
         "--phase",
-        choices=("head", "counts", "relations", "names", "blast", "drop"),
+        choices=("head", "counts", "relations", "names", "titles", "blast", "drop"),
         required=True,
     )
     parser.add_argument("--pin", type=Path, default=Path("/tmp/m9-t3/pin.json"))  # noqa: S108
@@ -748,6 +1023,8 @@ def main() -> None:
         asyncio.run(phase_relations(scratch_url, args.out))
     elif args.phase == "names":
         asyncio.run(phase_names(scratch_url))
+    elif args.phase == "titles":
+        asyncio.run(phase_titles(catalog_url, scratch_url, args.out))
     elif args.phase == "blast":
         asyncio.run(phase_blast(catalog_url, scratch_url))
     else:
