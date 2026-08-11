@@ -881,6 +881,133 @@ default no-extra venv, refutes that: the failure predates M9 and is not
 load-dependent. Recorded here rather than in a chat transcript, which is what
 made it findable the first time.
 
+**M9 Task B2's sweep: 12 plants over `adapters/search/prefix.py` — 10 targets
+all killed, 2 equivalent-mutant controls surviving all five gate steps,
+0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place with
+the plant list and its **expected verdict** written down first, the three
+`.pyc` defences in force, `compile()` rather than `ast.parse` as the dry run,
+and every restore verified by `md5sum` against a pre-plant digest. **Ten of ten
+killed is the weakest-looking split in this file and the entry has to say why:
+the plants and the cases were written by the same author in the same session
+against the same 40 lines of SQL, which is the condition under which a sweep
+measures its author's consistency rather than the suite's reach.** What makes
+it evidence anyway is the round *before* the run — see the two gaps below,
+which the plant list found and no run against the suite as it then stood could
+have. And the runs then repaid that by **falsifying half the reasoning behind
+one of the two repairs**, which is the part a ledger exists for.
+
+Selection: `tests/integration/test_adapters_search_prefix.py`,
+`tests/integration/test_adapters_search_postgres.py` and
+`tests/unit/test_suggest_index_contract.py` — 56 passed / 2 skipped, 19–29 s a
+run. **Not the whole suite, and the reason is a mechanic worth carrying: this
+tree has a flaky integration case** (the `test_sse_end_to_end` failure recorded
+immediately above, observed here failing **7 of 8** `pytest tests/integration`
+runs and 1 of 2 whole-suite runs, green every time it ran alone). **A sweep
+scored on "did the run fail" cannot run against a
+suite containing a flaky case** — every plant inherits the flake's failure rate
+as a false kill, and a survivor that flaked is silently upgraded to a kill.
+Either narrow the selection to files the flake is not in, as here, or deselect
+the case by node id and say so.
+
+**The two gaps were found by writing the expected verdict down, before any
+plant ran, and each was confirmed afterwards by reconstructing the case as it
+first stood and watching the mutation survive it.** This is the yield, and the
+half that is not a run result is the half that found them:
+
+- **`_LIKE_SPECIALS`' ordering claim was unpinned, and the repair works for a
+  reason the prediction got wrong.** The escape list doubles the backslash
+  *first*, and the comment says why — reversed, the escapes introduced for `%`
+  and `_` are themselves escaped on the next pass and `%` becomes a wildcard
+  again. Working out which case would kill a reordering found that **none
+  would**: with only `Vane Alpha` and `Harbour Lights` seeded, `suggest("%")`,
+  `suggest("_")` and `suggest("\")` all return `[]` under both spellings.
+  Confirmed rather than assumed — the case as first written was reconstructed
+  and the reordering **survived** it. Two repairs went in together, and
+  measuring them apart afterwards is what corrects the prediction:
+
+  | configuration | verdict | fails on |
+  |---|---|---|
+  | the reorder against the shipped four-arm case | KILLED | a `== []` arm |
+  | reorder, `100% Vane` arm removed, `\Vane` row kept | **KILLED** | a `== []` arm |
+  | reorder, `\Vane` row removed, `100% Vane` arm kept | KILLED | the `100%` arm |
+  | reorder, both repairs removed (the case as first written) | **SURVIVED** | — |
+
+  The predicted killer — a prefix holding a metacharacter *and* a backslash,
+  spelled `100%` — does kill it, on its own. **But so does the `\Vane` fixture
+  row, which was added for the backslash arm and has nothing to do with escape
+  ordering**: under the reversed list `suggest("%")` builds `\\%%`, which is a
+  literal backslash followed by wildcards, so it now *matches* `\Vane` and the
+  `== []` arm bites. **A fixture row added to give one arm something to find
+  changes what every other arm in the same case can see** — here in the
+  helpful direction, silently, which is why the entry says which arm fires
+  rather than which arm was designed to. The usual version of this shape in
+  this file is a fixture that makes an assertion vacuous; this is the same
+  coupling running the other way, and it is equally invisible without a plant.
+- **The two-tier ordering fixture agreed with `ORDER BY id` by accident.** With
+  the high-vote row seeded second, deleting the `vote_count DESC NULLS LAST`
+  key left the answer unchanged, because UUIDv7 makes insertion order and id
+  order one sequence — the *exact* trap `CLAUDE.md` names, arrived at through a
+  second column rather than through the obvious one. Fixed by seeding the
+  low-vote row first, which is a one-line change and the difference between a
+  case that tests three sort keys and a case that tests two. Confirmed the same
+  way: the key deleted *and* the original seeding order restored **survives all
+  56 cases**, so the repair is what kills it and not something else in the
+  file. This one the prediction got exactly right, which is why the entry above
+  it is worth as much space as it takes.
+
+The ten targets and what each cost: the outer `ORDER BY` deleted from the
+`LIMIT` fails 3 (an unordered cap is the 66.2% → 48.5% → 2.6% defect one tier
+over); the column not lower-cased fails 9, including the `EXPLAIN` case; the
+prefix not lower-cased fails 1; the `title_search_names` arm dropped from the
+union fails 2; `UNION` → `UNION ALL` fails 1; no escaping at all fails 1; the
+escape list reordered fails 1; the empty-prefix guard deleted fails 1; and the
+`vote_count` key and popularity's `NULLS LAST` each fail exactly the one
+ordering case built for them.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| the two `UNION` arms of `_PREFIX` swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `_pattern`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first is a fact about the *code* rather than about what the tools look at,
+and it is a **SQL-text** control rather than a Python one, which is a shape this
+file did not previously hold. Its equivalence has three legs, and the third is
+the one that makes it airtight rather than merely plausible: `UNION` is
+commutative and set-valued; both arms are side-effect-free reads of different
+tables; and the arms sit inside a CTE whose result the outer `ORDER BY` and
+`LIMIT` are applied to **after** it materialises, so there is no path by which
+arm order could reach the returned row order even if the set operation leaked
+one. Independently re-derived by review rather than taken from the sweep alone.
+Neither control is spellable as an argument reorder — the A5 entry above is the
+reason that was checked rather than assumed. The docstring reword
+was checked first against the docstring-scan grep this file records: **none of
+the scanning test files reads `adapters/search/`**, and the one scan B2 itself
+adds parses the module for `ast.Import`/`ast.ImportFrom` nodes, not prose.
+
+**Separately, the four premise guards were each planted against and each failed
+on its own `E ` line** — `message in output` is not the check, because pytest
+prints the failing assertion's surrounding source and a guard's text turns up
+in the traceback of a case that failed elsewhere. **One of the four was dead
+when written and the repair is the finding.** `assert seeded == sorted(seeded)`
+over a list of freshly-minted UUIDv7s reads as a premise guard and is a claim
+about `new_id()`'s monotonicity, which no fixture edit can falsify: the obvious
+defect it appears to guard — seeding popularity descending, so the wanted rows
+become the ones a truncating scan reaches first — leaves it passing while the
+case's real assertion fails. Replaced by a guard derived from the fixture's own
+popularity mapping (`assert set(wanted).isdisjoint(seeded[:3])`), which that
+plant does kill. **A premise guard written against a literal slice guards the
+literal; write it against the same data the expectation is computed from, then
+plant the fixture change and watch it fire.**
+
+**And one plan-drift correction, recorded because the next reader of the
+`EXPLAIN` case will otherwise re-derive it:** the M9 plan's B2 acceptance names
+the tier-1 index `ix_titles_name_prefix`, and `m09a` ships
+`ix_titles_name_lower_prefix`. The case asserts the shipped name. The
+near-miss it asserts *against*, `ix_titles_name_lower_year`, differs from the
+real one by a single token in `_SUSPENDABLE_INDEXES`, so a plan-shaped
+half-memory of either name is one search-and-replace away from a green suite
+over the wrong index.
+
 **M9 Task E1's sweep: 4 plants over `RowProviderSettingsRepository` and its two
 implementations — 4 killed, 1 equivalent-mutant control surviving as designed,
 0 unintended survivors, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run
