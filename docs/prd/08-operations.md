@@ -7,7 +7,7 @@ Three layers, split by what changes and when:
 | Layer | Holds | Changes |
 |---|---|---|
 | **Environment** | `DATABASE_URL`, port, log level, embedding model, `USHER_SECRET_KEY`, TMDb key, ✅ the LLM endpoint, model and key (M8) | Deploy time |
-| **Config file** (TOML) | Rate limits, TTLs, enrichment tier, image cache ladder | Restart |
+| **Config file** (TOML) | Rate limits, TTLs, enrichment tier. 🔴 **Not the image cache ladder** — it said so until 2026-08-11 and the ladder is a code constant ([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)): mechanism before setting, and a knob nothing reads is dead config wearing a control's name | Restart |
 | **Database** | Sources, users, ⏳ row provider enable/disable (**M9** — see below) | Runtime, via admin API |
 
 Sources live in the database because they are added through the admin API. A
