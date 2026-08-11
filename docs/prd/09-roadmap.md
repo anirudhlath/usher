@@ -739,12 +739,15 @@ paragraph above needs to find out what happened to it.
   not the one anyone quoted.** [05](05-search-and-similarity.md)'s *"~7%"* was
   roughly right about the ≥100-vote priority tier (**7.61%** measured) and
   wrong about everything else: **1.22%** of all titles, **10.68%** of a real
-  household's owned library. The figure that decides whether the term does
-  anything is the **candidate-pair** rate — both sides of a pair need a vector
-  — measured at **1.81%**, never squared. That is **below the 10% floor the
-  weight assumes**, so the term ships at 0.25 with the pool-vs-revert choice
-  deferred to M9 and the reason recorded rather than the number quietly
-  absorbed.
+  household's **5,020**-title owned library. The figure that decides whether
+  the term does anything is the **candidate-pair** rate — both sides of a pair
+  need a vector — measured at **1.81%** over those same 5,020 seeds, never
+  squared. That is **below the 10% floor the weight assumes**, so the term
+  ships at 0.25 with the pool-vs-revert choice deferred to M9 and the reason
+  recorded rather than the number quietly absorbed. **The seed count travels
+  with the rate**, because 1.81% is a floor over one household's owned,
+  name-shaped titles and is not a baseline any differently-selected population
+  can be compared against.
 - **And "one weighted term in `SimilarityService`'s existing signal list" was
   wrong in the two ways above**, which is why the cost line is corrected in
   place rather than quoted approvingly.
@@ -795,15 +798,29 @@ suspicion.
   `run_after` argument on `JobQueue.fail` and a change to `_FAIL`'s `CASE`, which
   is a port every kind shares.
 - **`test_sse_end_to_end.py::test_opening_a_stub_promotes_it…` is flaky, and the
-  root cause may be a product bug rather than a test bug** — fires in roughly 6
-  of 14 full runs under load, at commits with none of M8's work. **The enrich
-  handler publishes its SSE frame *inside* the job's transaction, before
-  `JobWorker` calls `complete()` and commits**, so the test's post-frame read
-  races the commit. Read as a test bug it is a racy assertion; read as a product
-  bug, **a client is told an event landed before the transaction that produced it
-  committed**, and a rollback would mean the client was told about something that
-  never happened. Nobody has evaluated the second reading. **M9** — it is on the
-  route surface M9 builds.
+  second reading has now been evaluated and is largely refuted** — measured by
+  M9 (G1) on 2026-08-11 and recorded in
+  [ADR-0033](decisions/0033-an-event-is-a-statement-about-committed-state.md).
+  **All five `events.publish` sites in `src/` publish after their own subject
+  has committed**, each driven against a committing session with a second
+  connection reading the subject at the instant of the publish, so *"a client is
+  told an event landed before the transaction that produced it committed"* is
+  false of the event's subject at every site. The literal claim survives and is
+  smaller: the open transaction at the instant of an `enrich` frame is
+  `JobWorker`'s, and it holds only **the two `BACKFILL` enqueues
+  (`enrich.py:270–277`) and the `DELETE` that completes the job** — measured, as
+  `[('enrich','running')]` at the publish becoming
+  `[('derive','pending'),('index','pending')]` after `complete()` + `_commit()`.
+  A rollback there costs those two enqueues plus **one duplicate
+  `title.updated`** on the `requeue_running` re-run; the title itself committed
+  at `enrich.py:208` and is never at risk. The test's own failure is that
+  residual window observed — `assert '745' is None` is **not** an uncommitted
+  row being read (Postgres shows no such thing; `xmin` names the writer of the
+  version the reader *can* see, and at failure it is the claim's committed
+  `status='running'`), and it reproduces **5 of 5** with a delay planted between
+  the handler returning and `complete()`, against 6 of 13 unplanted under load.
+  **M9** — the ordering is made structural by M9's G2 as an ordering property,
+  not a durability one, and it needs no outbox table.
 - **Query expansion is shipped off after measuring worse** — M8's live
   verification measured MRR 0.733 → 0.373 and recall@10 0.800 → 0.533, with a
   label-free control (query-to-query cosine 0.5417 → 0.5975 mean, 0.6328 →

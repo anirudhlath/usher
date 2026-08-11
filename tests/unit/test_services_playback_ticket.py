@@ -14,6 +14,7 @@ and `test_redeem_answers_none_rather_than_raising`'s `non-ascii` arm.
 
 import ast
 import base64
+import collections
 import inspect
 import pathlib
 import string
@@ -40,6 +41,13 @@ _URL = (
 _SECRET = SecretStr("0123456789abcdef0123456789abcdef")
 
 _MINTED_AT = datetime(2026, 8, 11, 20, 30, 0, tzinfo=UTC)
+
+# The plaintext lengths the padding tallies in this module's docstring, in
+# ADR-0029's Evidence section and in
+# `test_a_ticket_is_a_legal_path_segment_but_quote_safe_empty_is_not_a_no_op`
+# are all computed over. Named once so the prose and the loop cannot drift --
+# which is exactly how they drifted the first time.
+_PADDING_SWEEP = range(1, 600)
 
 _MODULE = pathlib.Path(inspect.getfile(playback_ticket))
 
@@ -350,31 +358,48 @@ def test_a_ticket_is_a_legal_path_segment_but_quote_safe_empty_is_not_a_no_op() 
     sample is a 184-character URL minting a 332-character token for which
     `quote(token, safe="") == token`; that reproduces exactly, and it holds
     only for the 176--191 band, whose 249-byte token happens to encode with
-    **no** padding at all. Over plaintext lengths 1--599: 192 mint an unpadded
-    token, 200 mint one `=` and 207 mint two, so `quote(token, safe="")` is a
-    no-op for **32%** of lengths and re-encodes `=` to `%3D` for the rest. A
-    realistic Emby URL straddles the boundary -- the same URL on a host one
-    character shorter is 175 characters and mints a padded token.
+    **no** padding at all. A realistic Emby URL straddles the boundary -- the
+    same URL on a host one character shorter is 175 characters and mints a
+    padded token.
 
     What is true at every length is the claim that actually matters: `=` is an
     RFC 3986 sub-delim and therefore a legal `pchar`, so a ticket needs no
     encoding step to sit in `GET /stream/{ticket}`. It is `quote`'s
     conservative default that is not a no-op, not the URI grammar.
+
+    **The three tallies are asserted, not narrated, and that is a review
+    finding rather than a preference.** This case shipped with the prose citing
+    a 1--599 sweep as its evidence and a loop that ran `range(1, 200)` -- a
+    third of it, tallying 64/64/71, with `padded > 0` as the only check. The
+    property was true and the numbers were right, but nothing in the suite
+    computed them, so a change that moved the distribution in the untested
+    200--599 band would have left this green while contradicting the sentence
+    beside it. The loop is now the range the numbers come from and the counts
+    are assertions; 599 mints cost **6.4 ms**, which is what makes the choice
+    between narrating and enforcing an easy one.
     """
     cipher = playback_ticket.build_ticket_cipher(_SECRET)
     alphabet = set(string.ascii_letters + string.digits + "-_=")
 
-    padded = 0
-    for length in range(1, 200):
+    padding = collections.Counter[int]()
+    for length in _PADDING_SWEEP:
         ticket = playback_ticket.mint(cipher, "u" * length, minted_at=_MINTED_AT)
 
         assert set(ticket) <= alphabet, f"a ticket for {length} characters left the alphabet"
-        assert quote(ticket, safe="=") == ticket
-        padded += "=" in ticket
+        assert quote(ticket, safe="=") == ticket, f"safe='=' re-encoded a {length}-character ticket"
+        padding[ticket.count("=")] += 1
 
-    # The premise: the sweep really did cross a padding band, so the assertion
-    # above is about `=` being present rather than about it never occurring.
-    assert padded > 0, "no ticket in the sweep carried base64 padding"
+    # The distribution the module docstring and ADR-0029 both cite, computed
+    # over exactly the range they name. Every length lands in one of the three
+    # bands, so the tallies sum to the sweep and none of them can be zero.
+    assert padding[0] == 192, f"unpadded tally moved: {padding[0]}"
+    assert padding[1] == 200, f"one-`=` tally moved: {padding[1]}"
+    assert padding[2] == 207, f"two-`=` tally moved: {padding[2]}"
+    assert sum(padding.values()) == len(_PADDING_SWEEP)
+
+    # ... and therefore the headline claim, derived rather than restated: the
+    # spelling D3 must not use holds for under a third of lengths.
+    assert padding[0] / len(_PADDING_SWEEP) == pytest.approx(0.32, abs=0.005)
 
     plan_sample = "u" * 184
     plan_ticket = playback_ticket.mint(cipher, plan_sample, minted_at=_MINTED_AT)
