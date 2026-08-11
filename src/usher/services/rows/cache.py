@@ -14,9 +14,12 @@ than discovered later:
   own TTL expires. **Bounded, not broken** -- 30 s -- and it is the reason a
   cross-process cache and the cross-process `EventPublisher` are the same
   change. Both are named rather than built.
-- Cache effectiveness is **not observable in M7**: `usher.cache.hits`/`.misses`
-  is M9's (PRD 10). `usher home` printing a cold and a warm compose side by side
-  is the only measurement of this object the milestone has.
+- Cache effectiveness is **now observable**: `usher.cache.hits`/`.misses`
+  (PRD 10), labelled `cache` = `row` / `screen`, recorded where the read
+  happens -- `get_row`/`get_screen` -- so every future *reader* is counted
+  rather than every future caller remembering to. An entry found expired
+  counts as a **miss**, not a hit: it is a rebuild, the same population
+  `usher.row.build.duration` measures.
 
 **Serve-stale-while-refreshing is deliberately not implemented here**, and PRD
 06's sentence is corrected rather than half-satisfied. A refresh task needs a
@@ -64,9 +67,25 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from opentelemetry import metrics
 from pydantic import AwareDatetime
 
 from usher.domain.rows import BuiltRow
+
+_meter = metrics.get_meter("usher.cache")
+# PRD 10's names, byte for byte -- `usher.cache.hit`/`.miss` (singular) and
+# `usher.row.cache.hits` are the near misses this pair invites, by analogy
+# with `usher.row.build.duration` one module over. **`cache`'s vocabulary is
+# `row` and `screen` today, and a new cache appends its value in the commit
+# that ships it** -- stated as a rule rather than a closed list because
+# group C's image proxy is the third and writes its own.
+_cache_hits = _meter.create_counter(
+    "usher.cache.hits", description="Row/screen cache reads that found a live entry"
+)
+_cache_misses = _meter.create_counter(
+    "usher.cache.misses",
+    description="Row/screen cache reads that found nothing or an expired entry",
+)
 
 # One household's row cache is `_MAX_ENTRIES` slugs. Ten providers propose
 # roughly a dozen rows a screen, so this is ~80 screens' worth of distinct
@@ -118,7 +137,13 @@ class RowCache:
             # dict is a row of dead weight per user, and the `users` table is
             # the only thing bounding this half.
             self._screens.pop(user_id, None)
+            # An expired entry is a miss, not a hit -- it is a rebuild, the
+            # same population `usher.row.build.duration` measures. Recorded
+            # here rather than on `put_screen`, because the write that
+            # repairs a miss is not a second event.
+            _cache_misses.add(1, {"cache": "screen"})
             return None
+        _cache_hits.add(1, {"cache": "screen"})
         return entry.value
 
     def put_screen(
@@ -131,7 +156,9 @@ class RowCache:
         entry = self._rows.get(key)
         if entry is None or self._expired(entry):
             self._rows.pop(key, None)
+            _cache_misses.add(1, {"cache": "row"})
             return None
+        _cache_hits.add(1, {"cache": "row"})
         return entry.value
 
     def put_row(self, user_id: uuid.UUID, slug: str, row: BuiltRow, *, ttl: timedelta) -> None:
@@ -179,8 +206,8 @@ class RowCache:
         structure maintained on every read for a dict whose entries all die
         within hours anyway. Evicting the *newest* would be worse than a
         ceiling -- a cache that never serves what it was just asked to store,
-        bounded and useless, with no symptom `usher.cache.hits` could show
-        because that metric is M9's.
+        bounded and useless, its `usher.cache.hits` sunk near zero with no
+        error anywhere else to say why.
         """
         if len(self._rows) <= self._max_entries:
             return
