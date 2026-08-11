@@ -101,7 +101,13 @@ src = ["src", "tests"]
 # other groups transcribe verbatim; ruff 0.16+ formats/lints Markdown-embedded
 # code by default, so without this exclude `ruff format .` silently rewrites
 # plan prose out from under whoever runs it.
-extend-exclude = ["docs"]
+#
+# `.claude/` is here for the same reason and was missing until M9 measured it:
+# every file under `.claude/rules/` is prose carrying code fences, and one of
+# them had its fence rewritten by `ruff format --check` the first time it ran.
+# The rules files are evidence — a fence reshaped to satisfy a formatter is a
+# quotation that no longer matches what was measured.
+extend-exclude = ["docs", ".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]
