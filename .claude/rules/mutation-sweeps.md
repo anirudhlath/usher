@@ -1265,3 +1265,74 @@ Equivalent because the two are disjoint attributes on a freshly constructed
 object, neither right-hand side reads the other, and nothing runs between
 them — the same shape as the `__all__` reorder and the `SET`-list swap above,
 one layer in. Reported rather than treated as a survivor.
+
+**M9 Task A4's sweep: 4 plants over `usher.api.caching` — 3 killed, 1 real
+survivor since closed, 1 equivalent-mutant control surviving all five gate
+steps.** Run 2026-08-11 in place over the module's ~30-line
+`conditional_response`/`_if_none_match_hits` pair, against the scoped
+selection `tests/unit/test_api_caching.py tests/unit/test_api_home.py`
+(27 cases, ~1 s a run), the three `.pyc` defences in force throughout, every
+restore verified by `md5sum` against a pre-plant digest. The three-way split
+is the one that says something: "3 killed" alone would hide the plan's own
+named target this round exists to check.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| `Cache-Control` sense `private` → `public` | KILLED | 2 |
+| `If-None-Match` comparison made case/quote-insensitive and weak-tag-tolerant | KILLED | 1 — the weak-validator case |
+| the two header-dict writes (`ETag`, `Cache-Control`) swapped | equivalent, all 5 gate steps PASS | — |
+| the ETag hashed over `repr(body)` instead of the serialised payload | **SURVIVED, then closed** | 0, then 1 |
+
+**The plan named this fourth target and predicted it would "fail the
+changed-screen case", and that prediction was wrong — measured, not
+argued.** `repr()` of a pydantic model varies with content exactly as its
+JSON serialisation does, so a case asserting only "identical content gives
+an identical ETag, different content gives a different one" cannot
+distinguish a hash of the served bytes from a hash of any other
+content-sensitive representation — both pass every one of that case's
+assertions. Confirmed directly: `repr(HomeResponse(rows=()))` is equal
+across two freshly built empty instances, and unequal the moment a row is
+added, on the same terms `model_dump_json()` is. The `changed_screen` case
+in this file and the plan's own prediction both reasoned from "does it
+change with content", which is the wrong question — the real hazard named in
+the module's docstring is "is it computed from the *same bytes* actually
+sent", which only a case that holds content-sensitivity constant while
+varying the *representation* can see.
+
+Closed by
+`test_the_etag_reflects_the_served_bytes_and_not_a_separate_representation`,
+which patches `HomeResponse.model_dump_json` to answer one fixed string
+regardless of the DTO's real field values, then requests `/home` against two
+structurally different households (one empty, one with a title). The served
+bytes are therefore identical by construction while `repr(body)` is not; an
+ETag correctly derived from the served bytes must be identical across both
+requests, and the repr-mutant fails exactly that assertion. Re-planted after
+the case landed, the mutation fails **only this case**, out of 27.
+
+**The general form: "same input same output, different input different
+output" is not a test that a value is derived from a *specific* artefact —
+it is satisfied by any function that is merely sensitive to the same thing
+the real one is sensitive to.** To pin the artefact itself, hold the
+content-sensitive signal constant (by patching the one true source of the
+served bytes) while varying something a wrong implementation would still
+read, and assert the values that should now be forced equal actually are.
+Nearest relative is the `_ledger_row`/`_settle` "two predicates, one
+selectivity" family in `testing-discipline.md`, arriving at a hash function
+instead of a `WHERE` clause.
+
+The equivalent-mutant control, measured against every gate step separately:
+
+| control | `pytest` (scoped selection) | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `headers = {...}`'s `ETag` and `Cache-Control` entries swapped | PASS (27) | PASS | PASS | PASS | PASS (9 kept) |
+
+Equivalent because the two are independent keys of a dict literal built once
+and read only by value (`headers["ETag"]`/`headers["Cache-Control"]` never
+appear — the whole dict is handed to `Response(headers=...)`), and Starlette
+serialises a header mapping without regard to insertion order; no case in
+this repository, or plausibly any HTTP client, inspects header *order*.
+
+Gate green before and after on the fully restored tree (`md5sum`-verified
+byte-identical to the pre-sweep digest): whole suite **4141 unit+integration
+passed / 12 skipped**, `ruff check`, `ruff format --check`, `mypy` over 491
+files, `lint-imports` 9 kept / 0 broken.
