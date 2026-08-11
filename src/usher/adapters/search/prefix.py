@@ -67,11 +67,18 @@ _LIKE_SPECIALS = (_LIKE_ESCAPE, "%", "_")
 #
 # **The union reads `titles` and `title_search_names` as one set, so a
 # director's name reaches their films from the first keystroke.** That is the
-# second of the two things PRD 05 says the narrow table exists for, and it is
-# why the arm stays even though `m09a` ships that table empty with no writer in
-# `src/`: a tier that has to be re-plumbed the day a loader lands is a tier
-# whose union was never measured. **B3 is the task authorised to narrow this**,
-# on a measurement rather than on a reading of the SQL.
+# second of the two things PRD 05 says the narrow table exists for, and the arm
+# was built while `m09a` still shipped that table with no writer in `src/` at
+# all: a tier that has to be re-plumbed the day a loader lands is a tier whose
+# union was never measured.
+#
+# **The `person` half has a writer now** -- `CreditRepository.replace_for_titles`
+# writes it from the same mapping it writes `titles.credit_names` from, so on a
+# derived catalog this arm answers over real rows rather than over an empty
+# relation. The `alias` half is still owed, and a catalog derived before that
+# writer landed holds nothing here until `usher derive` re-runs. **B3 is the
+# task authorised to narrow this**, on a measurement rather than on a reading
+# of the SQL.
 #
 # `UNION`, not `UNION ALL`: a film whose canonical name and whose alias both
 # start with the typed prefix is one row of the box. The arms project one

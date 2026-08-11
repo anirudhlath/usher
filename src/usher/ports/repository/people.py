@@ -227,6 +227,12 @@ class CreditRepository(ABC):
     """Persistence for `credits` -- the join that makes "more from this
     director" a lookup.
 
+    **And for the two denormalisations of it that no generated column can
+    reach**: `titles.credit_names`, which is weight class B's input, and the
+    `person` rows of `title_search_names`, which are the two-tier suggest's.
+    Both are written by `replace_for_titles` and by nothing else, which is the
+    whole of what keeps three copies of one fact honest.
+
     **The write is a replace, not an upsert, and that is the port's central
     decision.** A title's credit set changes upstream: a name is corrected, a
     role is removed, a mis-attributed actor is deleted. An upsert can express
@@ -247,7 +253,8 @@ class CreditRepository(ABC):
         credit_names: Mapping[uuid.UUID, Sequence[str]],
     ) -> int:
         """Replace every stored credit for `title_ids` with `credits`, and
-        write `titles.credit_names` for the same scope in the same call.
+        write `titles.credit_names` **and the credited-person half of
+        `title_search_names`** for the same scope in the same call.
 
         **`credit_names` is not a second write and may not become one.** It is
         weight class B's input -- `credits` projected to names and truncated
@@ -268,6 +275,60 @@ class CreditRepository(ABC):
         Order within each sequence is the ranking and is preserved. It is
         top-billed first, which is what makes the class-B lexemes the ones a
         viewer would search for.
+
+        **`title_search_names` is the third destination and the third spelling
+        of the same fact, written from the same mapping in the same
+        transaction.** The array feeds weight class B, which is full-text; the
+        table feeds the two-tier suggest, which is a `LIKE 'pre%'` btree probe
+        that full text cannot serve. Splitting this write off into a second
+        call, a second job or a backfill is what makes them diverge, and the
+        symptom is the array's own, one surface over: a *suggest* hit on a name
+        `credits` no longer holds.
+
+        Exactly which columns, because the table has two writers:
+
+        - `title_id`, `name` and `kind` are written. `kind` is
+          `SearchNameKind.PERSON` on every row this call produces -- the member
+          minted for it -- and `SearchNameKind.ALIAS` belongs to the IMDb
+          `title.akas` loader.
+        - **`region` and `language` are NULL on every row this call
+          produces**, and that is a statement rather than an omission: a
+          credited person's name is not specific to a locale, and NULL means
+          "not specific to a region", which is a different fact from any code.
+          The alias half is what fills them, and without them a French and a
+          Brazilian alias for one film would be indistinguishable rows.
+        - `id` is a fresh UUIDv7 per name, minted in the order the mapping
+          gave. The table carries **no rank column** -- an alias is a set --
+          so the id is the only thing recording that the names are
+          top-billed-first, and an implementation that mints them in any other
+          order silently reorders the ranking.
+
+        **The delete is scoped by `title_ids` *and* by `kind`.** The second
+        half is not tidiness: the alias loader writes the same table, and a
+        delete on `title_id` alone makes the two writers mutually destructive
+        -- whichever runs second erases the other's rows, with nothing raised
+        and nothing logged.
+
+        A name is stored once per title however many times it is credited: one
+        person credited as both cast and crew is one searchable row and two
+        entries in the array, which is the one place the two spellings
+        deliberately differ. A name the table's own CHECKs refuse -- empty, or
+        longer than `SEARCH_NAME_MAX_CHARS` -- raises `RepositoryConflict` for
+        the whole call, so neither spelling is written; the array has no such
+        bound and would have taken it.
+
+        **A catalog derived before this write existed holds no search names
+        until `usher derive` re-runs over it.** Nothing backfills them, and a
+        backfill is precisely the second writer this shape exists to avoid. So
+        a measurement taken over this table on an inherited database is a
+        measurement of an empty relation, which reads as a very fast index.
+
+        **The bound on what this writes, stated rather than measured:** ten
+        billed cast plus every stored crew name is order 10 rows a title, so a
+        *fully enriched* 1.27M-title catalog would be order 10**7 rows here.
+        The one measured deployment's enriched tier is single-digit thousands
+        of titles, which is four orders of magnitude below that -- so this is
+        the shape of the growth rather than a scale anything has run.
 
         **`title_ids` is passed separately from the rows and that is not
         redundancy** -- `TitleNeighborRepository.replace`'s argument, arriving

@@ -17,10 +17,15 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.contract.credit_repository_contract import CreditRepositoryContract, credit
+from tests.contract.credit_repository_contract import (
+    CreditRepositoryContract,
+    SearchNameProbe,
+    credit,
+)
 from tests.contract.person_repository_contract import person
 from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
 from usher.db.repositories.title import PostgresTitleRepository
+from usher.domain.enums import SearchNameKind
 from usher.domain.ids import new_id
 from usher.ports.errors import RepositoryConflict
 
@@ -30,6 +35,66 @@ _PEOPLE = {
     "third_person": 93_000_072,
     "other_person": 93_000_073,
 }
+
+# **`ORDER BY id`, because `m09a` gives this table no rank column and that is
+# deliberate** -- an alias is a set, not a ranking. The credited-person half
+# does have an order (`credit_names`', top-billed first) and the only thing
+# carrying it is the UUIDv7 primary key: `PostgresCreditRepository` mints one
+# per name, in one pass, in the sequence the caller gave. So this read is the
+# ordering assertion's whole mechanism and it is spelled here rather than
+# inside a helper.
+_READ_SEARCH_NAMES = """
+SELECT name FROM title_search_names
+WHERE title_id = CAST(:title_id AS uuid) AND kind = :kind
+ORDER BY id
+"""
+
+_SEED_ALIAS = """
+INSERT INTO title_search_names (id, title_id, name, kind, region, language)
+VALUES (CAST(:id AS uuid), CAST(:title_id AS uuid), :name, :kind, :region, :language)
+"""
+
+
+class _PostgresSearchNames(SearchNameProbe):
+    """The real table, read and seeded directly.
+
+    Directly rather than through a port because there is no port over this
+    table on the write side's own layer: `CreditRepository` writes it and
+    `SuggestIndex` reads it, and a read added to the former for a test's
+    benefit is the liability `PersonRepository`'s docstring names.
+
+    `seed_alias` carries a **region and a language**, which is the half of the
+    row this writer never fills -- so the case using it also demonstrates that
+    the two writers' rows are distinguishable by more than `kind`.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def _read(self, title_id: uuid.UUID, kind: SearchNameKind) -> tuple[str, ...]:
+        rows = await self._session.execute(
+            text(_READ_SEARCH_NAMES), {"title_id": title_id, "kind": kind.value}
+        )
+        return tuple(rows.scalars().all())
+
+    async def person_names(self, title_id: uuid.UUID) -> tuple[str, ...]:
+        return await self._read(title_id, SearchNameKind.PERSON)
+
+    async def alias_names(self, title_id: uuid.UUID) -> tuple[str, ...]:
+        return await self._read(title_id, SearchNameKind.ALIAS)
+
+    async def seed_alias(self, title_id: uuid.UUID, name: str) -> None:
+        await self._session.execute(
+            text(_SEED_ALIAS),
+            {
+                "id": new_id(),
+                "title_id": title_id,
+                "name": name,
+                "kind": SearchNameKind.ALIAS.value,
+                "region": "FR",
+                "language": "fr",
+            },
+        )
 
 
 async def _title(session: AsyncSession) -> uuid.UUID:
@@ -54,6 +119,12 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
         # The same session, so this reads the rows `replace_for_titles` wrote
         # in the transaction this test owns.
         return PostgresTitleRepository(session)
+
+    @pytest.fixture
+    def search_names(self, session: AsyncSession) -> SearchNameProbe:
+        # The same session again, so this reads the rows `replace_for_titles`
+        # wrote inside the transaction this test owns.
+        return _PostgresSearchNames(session)
 
     @pytest_asyncio.fixture
     async def _seeded_people(self, session: AsyncSession) -> dict[str, uuid.UUID]:
@@ -178,3 +249,72 @@ class TestPostgresCreditRepository(CreditRepositoryContract):
             [title_id], [credit(title_id, lead_person, billing_order=0)], credit_names={}
         )
         assert written == 1
+
+    async def test_a_credited_person_name_carries_no_region_and_no_language(
+        self,
+        repository: PostgresCreditRepository,
+        session: AsyncSession,
+        title_id: uuid.UUID,
+        lead_person: uuid.UUID,
+    ) -> None:
+        """Postgres-only: the fake has no such columns to leave NULL.
+
+        A credited person's name has no locale -- the same person is credited
+        under the same string in every region -- so `region` and `language` are
+        NULL on every row this writer produces, and the port docstring says so.
+        They exist for group T's `title.akas` half, where without them a French
+        and a Brazilian alias for one film are indistinguishable rows.
+
+        The wrong implementation this kills is a writer that fills them with
+        something plausible-looking -- `'en'` from the enrichment locale, say.
+        A NULL means *"not specific to a region"*, which is a different fact
+        from any code, and once written a code cannot be told from one IMDb
+        supplied.
+        """
+        await repository.replace_for_titles(
+            [title_id],
+            [credit(title_id, lead_person)],
+            credit_names={title_id: ["Vera Lund"]},
+        )
+
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT name, kind, region, language FROM title_search_names "
+                    "WHERE title_id = CAST(:title_id AS uuid)"
+                ),
+                {"title_id": title_id},
+            )
+        ).all()
+
+        assert [(one.name, one.kind, one.region, one.language) for one in rows] == [
+            ("Vera Lund", "person", None, None)
+        ]
+
+    async def test_a_search_name_longer_than_the_btree_bound_is_a_port_error(
+        self,
+        repository: PostgresCreditRepository,
+        title_id: uuid.UUID,
+        lead_person: uuid.UUID,
+    ) -> None:
+        """`ck_title_search_names_name_within_btree_bound`, which is a **named**
+        CHECK precisely so this refusal is classifiable.
+
+        `titles.credit_names` is a `text[]` and holds any string at all, so the
+        bound is the one place the two spellings of this fact can disagree --
+        and they disagree by *raising*, inside the SAVEPOINT, so neither is
+        written. Postgres-only: the fake has no CHECK constraints, and the
+        array has no bound to violate.
+
+        Constructed through the mapping rather than through `Credit`, because
+        the mapping is where an over-long name can actually arrive: it is a
+        `Mapping[UUID, Sequence[str]]` and nothing validates the strings.
+        """
+        with pytest.raises(RepositoryConflict) as raised:
+            await repository.replace_for_titles(
+                [title_id],
+                [credit(title_id, lead_person)],
+                credit_names={title_id: ["V" * 513]},
+            )
+
+        assert raised.value.constraint == "ck_title_search_names_name_within_btree_bound"
