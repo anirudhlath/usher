@@ -19,8 +19,10 @@ what `replace_for_user` *means*, so a second generation has to arrive from
 outside it or the newest-generation read is untestable.
 """
 
+import json
 import uuid
 from collections.abc import Sequence
+from typing import Any
 
 import pytest
 from sqlalchemy import bindparam, text
@@ -29,11 +31,12 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.contract.curated_row_repository_contract import (
+    LAST_NIGHT,
     CuratedRowRepositoryContract,
     CuratedRowSeeder,
     curated_row,
 )
-from usher.db.repositories.curation import PostgresCuratedRowRepository
+from usher.db.repositories.curation import _LIST_FOR_USER, PostgresCuratedRowRepository
 from usher.domain.curation import CuratedRow
 from usher.domain.ids import new_id
 from usher.ports.errors import RepositoryConflict
@@ -90,6 +93,20 @@ class PostgresCuratedRowSeeder(CuratedRowSeeder):
         return int(found.scalar_one())
 
 
+def _relations_scanned(node: dict[str, Any]) -> list[str]:
+    """Every relation the plan tree touches, one entry per scan node.
+
+    Recursive over `Plans`, which is where Postgres nests an `InitPlan` and a
+    `SubPlan` as well as ordinary children -- so a table probed once by an
+    uncorrelated subquery and once by the outer scan appears twice, which is
+    the whole measurement.
+    """
+    found = [node["Relation Name"]] if "Relation Name" in node else []
+    for child in node.get("Plans", []):
+        found.extend(_relations_scanned(child))
+    return found
+
+
 class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
     @pytest.fixture
     def repository(self, session: AsyncSession) -> PostgresCuratedRowRepository:
@@ -100,6 +117,64 @@ class TestPostgresCuratedRowRepository(CuratedRowRepositoryContract):
         # The same session, so the seeded generation and the written one are
         # in the transaction this test owns.
         return PostgresCuratedRowSeeder(session)
+
+    async def test_the_newest_generation_costs_one_pass_over_the_table(
+        self,
+        repository: PostgresCuratedRowRepository,
+        seeder: PostgresCuratedRowSeeder,
+        session: AsyncSession,
+        user_id: uuid.UUID,
+    ) -> None:
+        """**One read of one household's shelves should be one look at the
+        table, and the correlated-subquery spelling is two.**
+
+        `list_for_user` runs on every home build, and the statement it shipped
+        asked `curated_rows` for the newest `generation_id` and then asked
+        `curated_rows` again for the rows carrying it. The second probe is the
+        one that does not have an index to sit on: `ix_curated_rows_user_newest`
+        is `(user_id, generated_at DESC)` and the outer scan's second predicate
+        is `generation_id`, which the index does not carry, so it is a filter
+        over everything the household has ever been given.
+
+        Asserted on the plan rather than on the text, because the claim is
+        about what Postgres does: a rewrite that merely moved the subquery into
+        a CTE reads differently and probes the same table twice, and a `WITH …
+        AS MATERIALIZED` would too.
+
+        Two generations are seeded so the read has something to choose
+        between -- with one generation stored, a wrong statement and a right
+        one plan the same and answer the same. What the *choice* must be is
+        `test_only_the_newest_generation_reaches_the_screen`'s, on both arms;
+        this case asserts the cost of making it, and re-reads through the port
+        afterwards so a plan measured against a statement nobody executes
+        cannot pass.
+        """
+        # One `generation_id` per generation, not per row: a generation is what
+        # `replace_for_user` writes in one call, and a comprehension minting one
+        # each would seed four generations of one row and make the read's answer
+        # a single shelf -- which is a different fixture asserting a different
+        # thing.
+        last_night, tonight = new_id(), new_id()
+        stale = [
+            curated_row(user_id, position=index, generation_id=last_night, generated_at=LAST_NIGHT)
+            for index in range(2)
+        ]
+        await seeder.generation(stale)
+        fresh = [curated_row(user_id, position=index, generation_id=tonight) for index in range(2)]
+        await seeder.generation(fresh)
+
+        explained = await session.execute(
+            text("EXPLAIN (FORMAT JSON) " + _LIST_FOR_USER), {"user_id": user_id}
+        )
+        raw = explained.scalar_one()
+        plan = json.loads(raw) if isinstance(raw, str) else raw
+        scanned = _relations_scanned(plan[0]["Plan"])
+
+        assert scanned, f"the plan named no relation at all, so nothing was measured: {plan}"
+        assert scanned.count("curated_rows") == 1, (
+            f"the read probes curated_rows more than once per home build: {scanned}"
+        )
+        assert await repository.list_for_user(user_id) == fresh
 
     async def test_a_generation_for_a_household_that_does_not_exist_is_a_port_error(
         self, repository: PostgresCuratedRowRepository

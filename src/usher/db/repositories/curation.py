@@ -21,15 +21,13 @@ correlation on timestamps.
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import DateTime, bindparam, text
+from sqlalchemy import DateTime, RowMapping, bindparam, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.db.repositories._errors import constraint_name, is_row_refusal
+from usher.db.repositories._errors import refusals_as_conflict
 from usher.domain.curation import CuratedRow
-from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import CuratedRowRepository
 
 # **Scoped to `user_id`, never to the rows being written.** A generation that
@@ -117,17 +115,57 @@ _INSERT_ROW = text(
 # order total so two reads agree; it is a tiebreak and never the key --
 # a UUIDv7 primary key agrees with insertion order, so an `ORDER BY id` alone
 # is right on any fixture seeded in order and wrong on a shuffled generation.
+#
+# **One pass, and it used to be two.** The obvious spelling of "the rows
+# carrying the newest generation" is a self-subquery -- `AND generation_id =
+# (SELECT ... ORDER BY generated_at DESC LIMIT 1)` -- which asks `curated_rows`
+# for the id and then asks `curated_rows` again for the rows, on every home
+# build. The second ask is the one with no index behind it:
+# `ix_curated_rows_user_newest` is `(user_id, generated_at DESC)` and the outer
+# predicate is `generation_id`, which the index does not carry, so it is a
+# filter over everything the household has ever been given. A window over the
+# same single scan answers with the same rows in the same order;
+# `test_the_newest_generation_costs_one_pass_over_the_table` asserts it on the
+# plan, because a spelling that merely moved the subquery into a CTE reads
+# differently and still probes twice.
+#
+# `first_value` rather than `rank() = 1` or a `DISTINCT ON` join: the default
+# frame of a window carrying an `ORDER BY` starts at UNBOUNDED PRECEDING, so
+# `first_value` is the partition's first row whatever the frame's end does,
+# and that is precisely the `LIMIT 1` this replaces.
+#
+# **Both predicates are kept and neither is redundant**, which is a coverage
+# question rather than a style one: `PARTITION BY user_id` decides *whose*
+# newest generation each row is measured against, and `WHERE user_id` decides
+# whose rows come back at all. Deleting the second passed all fourteen cases
+# when the statement was a subquery, because a `generation_id` is minted per
+# generation and every fixture gave each household a fresh one -- and the state
+# where it does not (one nightly run, one id, `replace_for_user` per household)
+# is reachable through this port with no seeder and puts one household's
+# shelves on another's screen. `test_two_households_curated_in_one_run_do_not_
+# share_a_screen` is the case that pins it, on both arms.
 _LIST_FOR_USER = """
-SELECT * FROM curated_rows
-WHERE user_id = CAST(:user_id AS uuid)
-  AND generation_id = (
-      SELECT generation_id FROM curated_rows
-      WHERE user_id = CAST(:user_id AS uuid)
-      ORDER BY generated_at DESC, generation_id DESC
-      LIMIT 1
-  )
+SELECT * FROM (
+    SELECT curated_rows.*,
+           first_value(generation_id) OVER (
+               PARTITION BY user_id
+               ORDER BY generated_at DESC, generation_id DESC
+           ) AS newest_generation_id
+    FROM curated_rows
+    WHERE user_id = CAST(:user_id AS uuid)
+) AS ranked
+WHERE generation_id = newest_generation_id
 ORDER BY "position", id
 """
+
+#: The one name in a `list_for_user` row that is the *statement's* and not the
+#: table's, removed by `del` before the model sees it -- so a rewrite that stops
+#: producing it raises here rather than passing an unexpected key to an
+#: `extra="forbid"` model two lines later. Removing this one label by name is
+#: not the filtered spelling the comment above rejects: every *column*
+#: `curated_rows` gains still reaches `model_validate` and still raises there,
+#: which is the whole of what the `SELECT *` buys.
+_WINDOW_LABEL = "newest_generation_id"
 
 
 class PostgresCuratedRowRepository(CuratedRowRepository):
@@ -166,60 +204,42 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
             }
             for row in rows
         ]
-        try:
-            with self._session.no_autoflush:
-                async with self._session.begin_nested():
-                    # Delete first, and inside the same SAVEPOINT as the
-                    # insert. Both halves matter and for different reasons:
-                    # the *order* is what makes a redelivered generation
-                    # answer instead of meeting `pk_curated_rows` on the very
-                    # rows it is about to remove (PRD 08's redelivery rule --
-                    # `JobWorker.startup()` requeues everything left
-                    # `running`), and the *SAVEPOINT* is what makes a
-                    # generation that fails part-way leave the previous screen
-                    # whole rather than an empty one. Without it the delete
-                    # has already landed in the caller's transaction, and a
-                    # service that catches the conflict and commits its ledger
-                    # entry commits the empty screen with it.
-                    await self._session.execute(text(_DELETE_ROWS), {"user_id": user_id})
-                    if records:
-                        await self._session.execute(_INSERT_ROW, records)
-        except DBAPIError as exc:
-            if not is_row_refusal(exc):
-                # A dropped connection or a statement timeout is not this
-                # generation being wrong, and a caller that cannot tell those
-                # apart retries the one thing a retry cannot fix.
-                raise
-            # **Any constraint on `curated_rows`, and one refusal that is not a
-            # constraint at all.** A `user_id` naming no household
-            # (`fk_curated_rows_user_id_users`); an empty or NULL-carrying card
-            # array, a negative position, an empty slug/title/model name (the
-            # six CHECKs); and a batch carrying one row id twice
-            # (`pk_curated_rows`), which is neither a CHECK nor a foreign key
-            # and is a reachable caller-assembly mistake -- the enumeration
-            # said "a CHECK or a foreign key" and was wrong by one whole class
-            # of constraint.
-            #
-            # The one that is not a constraint is `"position"`: it is
-            # `integer`, `CuratedRow.position` is `Field(ge=0)` with no
-            # ceiling, and `2**31` is refused by asyncpg's own binary encoder
-            # **before a byte is sent** -- a bare `sqlalchemy.exc.DBAPIError`,
-            # cause `asyncpg.exceptions.DataError`, SQLSTATE `22000`, measured.
-            # `except IntegrityError` does not catch it, so a raw SQLAlchemy
-            # exception crossed this port boundary until the `except` widened.
-            # `is_row_refusal` is the shared predicate and `_errors.py` holds
-            # both measurements; `llm_calls.cost_usd` is the sibling, found
-            # first and server-side rather than client-side.
-            #
-            # Translated so nothing above imports sqlalchemy.exc, and raised
-            # out of a SAVEPOINT so the caller keeps a usable session for the
-            # ledger entry it still has to write.
-            raise RepositoryConflict(
-                "a curated generation violates the screen's own bounds",
-                # `None` for the encoder's refusal, which is a column's width
-                # rejecting a value rather than a named constraint firing.
-                constraint=constraint_name(exc),
-            ) from exc
+        # **What this table can refuse: any constraint on `curated_rows`, and
+        # one refusal that is not a constraint at all.** A `user_id` naming no
+        # household (`fk_curated_rows_user_id_users`); an empty or NULL-carrying
+        # card array, a negative position, an empty slug/title/model name (the
+        # six CHECKs); and a batch carrying one row id twice
+        # (`pk_curated_rows`), which is neither a CHECK nor a foreign key and is
+        # a reachable caller-assembly mistake -- the enumeration said "a CHECK
+        # or a foreign key" and was wrong by one whole class of constraint.
+        #
+        # The one that is not a constraint is `"position"`: it is `integer`,
+        # `CuratedRow.position` is `Field(ge=0)` with no ceiling, and `2**31` is
+        # refused by asyncpg's own binary encoder **before a byte is sent** -- a
+        # bare `sqlalchemy.exc.DBAPIError`, cause `asyncpg.exceptions.DataError`,
+        # SQLSTATE `22000`, measured. `except IntegrityError` does not catch it,
+        # so a raw SQLAlchemy exception crossed this port boundary until the
+        # translation widened. `_errors.py` holds both measurements and the one
+        # copy of the machinery; `llm_calls.cost_usd` is the sibling, found
+        # first and server-side rather than client-side. `constraint` comes back
+        # `None` for the encoder's refusal, which is a column's width rejecting
+        # a value rather than a named constraint firing.
+        async with refusals_as_conflict(
+            self._session, "a curated generation violates the screen's own bounds"
+        ):
+            # Delete first, and inside the same SAVEPOINT as the insert. Both
+            # halves matter and for different reasons: the *order* is what makes
+            # a redelivered generation answer instead of meeting
+            # `pk_curated_rows` on the very rows it is about to remove (PRD 08's
+            # redelivery rule -- `JobWorker.startup()` requeues everything left
+            # `running`), and the *SAVEPOINT* is what makes a generation that
+            # fails part-way leave the previous screen whole rather than an
+            # empty one. Without it the delete has already landed in the
+            # caller's transaction, and a service that catches the conflict and
+            # commits its ledger entry commits the empty screen with it.
+            await self._session.execute(text(_DELETE_ROWS), {"user_id": user_id})
+            if records:
+                await self._session.execute(_INSERT_ROW, records)
         return len(records)
 
     async def list_for_user(self, user_id: uuid.UUID) -> list[CuratedRow]:
@@ -229,7 +249,22 @@ class PostgresCuratedRowRepository(CuratedRowRepository):
                 .mappings()
                 .all()
             )
-        return [CuratedRow.model_validate(dict(row)) for row in rows]
+        return [_to_domain(row) for row in rows]
+
+
+def _to_domain(row: RowMapping) -> CuratedRow:
+    """One stored shelf, with the window label the statement carries removed.
+
+    `del` rather than a filter, and it is the difference between this and the
+    `row._mapping[name]` spelling `_LIST_FOR_USER`'s comment rejects: this
+    removes one name the *statement* added and refuses to run if the statement
+    stops adding it, where a filter removes whatever the model does not happen
+    to declare -- including a column somebody added to `curated_rows` and to
+    nothing else, which is the drift the `SELECT *` exists to make loud.
+    """
+    fields = dict(row)
+    del fields[_WINDOW_LABEL]
+    return CuratedRow.model_validate(fields)
 
 
 def _refuse_disagreement(user_id: uuid.UUID, rows: Sequence[CuratedRow]) -> None:

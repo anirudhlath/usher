@@ -66,10 +66,9 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, text
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.db.repositories._errors import constraint_name, is_row_refusal
+from usher.db.repositories._errors import refusals_as_conflict
 from usher.db.staging import stage_records
 from usher.domain.ids import new_id
 from usher.ports.bulk import (
@@ -81,7 +80,6 @@ from usher.ports.bulk import (
     ImdbTitle,
     TmdbId,
 )
-from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import (
     BulkCatalogRepository,
     BulkWriteResult,
@@ -423,55 +421,44 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         records = [
             {"tag_id": tag.tag_id, "tag": tag.tag, "genome_revision": revision} for tag in tags
         ]
-        try:
-            with self._session.no_autoflush:
-                async with self._session.begin_nested():
-                    # DELETE then INSERT, never `ON CONFLICT DO UPDATE`, and
-                    # this is the one behaviour separating this method from
-                    # `upsert_genome_vectors` above. An upsert over a release
-                    # with fewer tags leaves the previous one's tail behind,
-                    # still carrying the previous revision, and the result is
-                    # indistinguishable from a complete vocabulary that
-                    # happens to be mixed. A vector table is legitimately
-                    # half-migrated; a vocabulary is not.
-                    #
-                    # **No `stage_records`, deliberately.** 1,128 rows do not
-                    # need a `COPY`, and the `COPY` path is where an
-                    # out-of-range integer raises a bare
-                    # `builtins.OverflowError` with no SQLSTATE for
-                    # `is_row_refusal` to inspect -- see
-                    # `db/repositories/_errors.py`.
-                    await self._session.execute(text("DELETE FROM genome_tags"))
-                    await self._session.execute(_INSERT_GENOME_TAG, records)
-        except DBAPIError as exc:
-            if not is_row_refusal(exc):
-                # A dropped connection or a statement timeout is not this
-                # vocabulary being wrong, and a caller that cannot tell those
-                # apart retries the one thing a retry cannot fix.
-                raise
-            # The three CHECKs, and `pk_genome_tags` for a duplicate lane that
-            # `_refuse_partial_vocabulary` has already ruled out.
+        # What this table can refuse: the three CHECKs, and `pk_genome_tags` for
+        # a duplicate lane that `_refuse_partial_vocabulary` has already ruled
+        # out.
+        #
+        # `ck_genome_tags_tag_id_in_vocabulary` is the one that matters: it is
+        # what refuses a vocabulary longer than the 1,128 lanes
+        # `genome_scores.relevance` declares, and it does so as an
+        # `IntegrityError` carrying its own name rather than as asyncpg's
+        # unnamed encoder `DataError`, which is why the column is `integer`
+        # rather than `smallint`.
+        #
+        # **`is_row_refusal` is therefore wider than anything reachable here
+        # today, measured rather than assumed**: when this method carried its
+        # own `except`, narrowing it to `IntegrityError` survived all 2,819 unit
+        # and all 57 relevant integration cases, because every refusal this
+        # table can produce behind that precondition *is* a CHECK violation.
+        # The measurement is why the wide predicate needs a defence and not an
+        # argument for narrowing the shared one, which now answers for three
+        # tables: the `curated_rows."position"` and `llm_calls.cost_usd`
+        # findings in `_errors.py` are both a column that refuses a *value*,
+        # and neither is an `IntegrityError`.
+        async with refusals_as_conflict(
+            self._session, "a genome tag vocabulary violates the column's own bounds"
+        ):
+            # DELETE then INSERT, never `ON CONFLICT DO UPDATE`, and this is the
+            # one behaviour separating this method from `upsert_genome_vectors`
+            # above. An upsert over a release with fewer tags leaves the
+            # previous one's tail behind, still carrying the previous revision,
+            # and the result is indistinguishable from a complete vocabulary
+            # that happens to be mixed. A vector table is legitimately
+            # half-migrated; a vocabulary is not.
             #
-            # `ck_genome_tags_tag_id_in_vocabulary` is the one that matters:
-            # it is what refuses a vocabulary longer than the 1,128 lanes
-            # `genome_scores.relevance` declares, and it does so as an
-            # `IntegrityError` carrying its own name rather than as asyncpg's
-            # unnamed encoder `DataError`, which is why the column is
-            # `integer` rather than `smallint`.
-            #
-            # **`DBAPIError` is therefore wider than anything reachable here
-            # today, measured rather than assumed**: narrowing it to
-            # `IntegrityError` survives all 2,819 unit and all 57 relevant
-            # integration cases, because every refusal this table can produce
-            # behind that precondition *is* a CHECK violation. It stays wide
-            # for the next column added here, which need not be -- the
-            # `curated_rows."position"` and `llm_calls.cost_usd` findings in
-            # `_errors.py` are both a column that refuses a *value*, and
-            # neither is an `IntegrityError`.
-            raise RepositoryConflict(
-                "a genome tag vocabulary violates the column's own bounds",
-                constraint=constraint_name(exc),
-            ) from exc
+            # **No `stage_records`, deliberately.** 1,128 rows do not need a
+            # `COPY`, and the `COPY` path is where an out-of-range integer
+            # raises a bare `builtins.OverflowError` with no SQLSTATE for
+            # `is_row_refusal` to inspect -- see `db/repositories/_errors.py`.
+            await self._session.execute(text("DELETE FROM genome_tags"))
+            await self._session.execute(_INSERT_GENOME_TAG, records)
         return len(records)
 
     async def genome_coverage(self) -> GenomeCoverage:

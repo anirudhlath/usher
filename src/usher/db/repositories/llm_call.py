@@ -18,14 +18,12 @@ timestamps.
 
 from sqlalchemy import DateTime, Numeric, bindparam, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from usher.db.base import enum_column
 from usher.db.models.curation import COST_PRECISION, COST_SCALE
-from usher.db.repositories._errors import constraint_name, is_row_refusal
+from usher.db.repositories._errors import refusals_as_conflict
 from usher.domain.curation import LLMCall, LLMPurpose
-from usher.ports.errors import RepositoryConflict
 from usher.ports.repository import LLMCallRepository
 
 # **Eleven columns named explicitly, never `INSERT INTO llm_calls VALUES
@@ -97,30 +95,21 @@ class PostgresLLMCallRepository(LLMCallRepository):
         self._session = session
 
     async def record(self, call: LLMCall) -> None:
-        try:
-            with self._session.no_autoflush:
-                # **The SAVEPOINT, and it buys more here than on any sibling.**
-                # `record()` is called from inside an exception handler that
-                # is typically still holding curated rows it has to commit, so
-                # a refused ledger row that aborted the caller's transaction
-                # would turn a failed *call* into a lost *generation* -- and
-                # the next statement on that session would raise
-                # `PendingRollbackError` with the failure attributed to
-                # whatever ran next.
-                async with self._session.begin_nested():
-                    await self._session.execute(_INSERT_CALL, _parameters(call))
-        except DBAPIError as exc:
-            if not is_row_refusal(exc):
-                # A dropped connection or a statement timeout is not this
-                # row being wrong, and a caller that cannot tell those apart
-                # would retry the one thing a retry cannot fix.
-                raise
-            raise RepositoryConflict(
-                "an llm call violates the ledger's own bounds",
-                # `None` for the overflow, which is a declared precision
-                # refusing a value rather than a named constraint firing.
-                constraint=constraint_name(exc),
-            ) from exc
+        # **The SAVEPOINT `refusals_as_conflict` opens buys more here than on
+        # any sibling.** `record()` is called from inside an exception handler
+        # that is typically still holding curated rows it has to commit, so a
+        # refused ledger row that aborted the caller's transaction would turn a
+        # failed *call* into a lost *generation* -- and the next statement on
+        # that session would raise `PendingRollbackError` with the failure
+        # attributed to whatever ran next.
+        #
+        # `constraint` comes back `None` for the `cost_usd` overflow, which is a
+        # declared precision refusing a value rather than a named constraint
+        # firing.
+        async with refusals_as_conflict(
+            self._session, "an llm call violates the ledger's own bounds"
+        ):
+            await self._session.execute(_INSERT_CALL, _parameters(call))
 
 
 def _parameters(call: LLMCall) -> dict[str, object]:

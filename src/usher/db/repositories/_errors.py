@@ -4,9 +4,19 @@ One copy, shared by every repository that catches `IntegrityError`. Its
 content is two verified observations -- where asyncpg actually puts a
 constraint name, and which SQLSTATE classes mean "this row is not storable as
 given" -- and two copies of either is two chances to lose it.
+
+`refusals_as_conflict` at the foot of the file is the same argument applied to
+the *shape* those two observations are always used in, rather than to the
+observations themselves.
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from usher.ports.errors import RepositoryConflict
 
 #: **SQLSTATE class, not exception class.** Most repositories in this package
 #: catch `IntegrityError`, which is right for a table whose only refusals are
@@ -117,3 +127,52 @@ def constraint_name(exc: DBAPIError) -> str | None:
     module exists to prevent.
     """
     return getattr(getattr(exc.orig, "__cause__", None), "constraint_name", None)
+
+
+@asynccontextmanager
+async def refusals_as_conflict(session: AsyncSession, message: str) -> AsyncIterator[None]:
+    """Runs a repository's own statements so that a refused *row* reaches the
+    caller as a `RepositoryConflict` and nothing else is disturbed.
+
+    Four decisions, each of which was previously spelled out once per caller:
+
+    - **`no_autoflush` outside the SAVEPOINT.** A shared `AsyncSession` can be
+      carrying some *other* call's pending, invalid row, and `execute()`
+      flushes before it runs -- so without this, a failure that is not this
+      call's own is reported to this caller as its own row being refused.
+    - **`begin_nested()`, never `session.rollback()`.** Postgres aborts the
+      whole transaction on any statement error until a ROLLBACK, and a full
+      rollback here would discard whatever else the caller had pending --
+      exactly the ownership every repository's docstring rules out. A SAVEPOINT
+      confines the unwind to these statements, and the caller keeps a usable
+      session for the work it still has to do (`CurationService` catches this
+      and still writes the ledger entry that paid for the generation).
+    - **`is_row_refusal`, not `except IntegrityError` and not a bare `except
+      DBAPIError`.** The first misses a column refusing a *value* -- neither
+      measured shape is an `IntegrityError` -- and the second reports a dropped
+      connection, a statement timeout or a missing table as the row being
+      wrong, which is the one distinction a caller must be able to make: a bad
+      row is a bug in what was assembled, and a transport that is gone is what
+      a retry fixes.
+    - **The message stays the caller's.** Three tables refuse a row for three
+      different reasons and say three different things to a service; what they
+      share is the machinery, not the sentence.
+
+    **Factored out of the three call sites M8 added, and deliberately not
+    applied to the ~18 older ones** in this package, which are the pre-existing
+    `except IntegrityError` house style. Converting one of those changes what
+    it catches -- `is_row_refusal` is wider -- so it is a decision per table
+    (has this table a column narrower than the field feeding it?) rather than a
+    refactor, and it belongs with whoever makes it.
+    """
+    try:
+        with session.no_autoflush:
+            async with session.begin_nested():
+                yield
+    except DBAPIError as exc:
+        if not is_row_refusal(exc):
+            raise
+        # Translated so nothing above this layer imports `sqlalchemy.exc`, and
+        # raised outside the SAVEPOINT's own scope, so the rollback has already
+        # happened by the time the caller sees this.
+        raise RepositoryConflict(message, constraint=constraint_name(exc)) from exc
