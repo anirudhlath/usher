@@ -39,6 +39,7 @@ otherwise be lost and re-litigated in six months.
 | [0029](0029-the-playback-ticket-changes-the-artifact-not-the-grant.md) | The playback ticket changes the artifact, not the grant | Accepted — the M9 successor ADR-0012 named |
 | [0032](0032-the-image-proxy-clamps-to-a-ladder.md) | The image proxy clamps to a ladder of provider rungs, and no decoder is taken | Accepted — corrects PRD 02, 07 and 08 |
 | [0033](0033-an-event-is-a-statement-about-committed-state.md) | An event is a statement about committed state — an ordering rule, not a durability one | Accepted — corrects PRD 09's carried-debt entry |
+| [0034](0034-the-cursor-carries-a-position.md) | The cursor carries a sort position and nothing else, and no port takes one | Accepted — settles PRD 07's `### Pagination` |
 
 Format: context → decision → consequences → evidence. Short is fine.
 
