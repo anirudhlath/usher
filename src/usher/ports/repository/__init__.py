@@ -25,6 +25,7 @@ from usher.ports.repository._results import (
 )
 from usher.ports.repository.bulk import (
     BulkCatalogRepository,
+    CreditNamesFillResult,
     CrosswalkLinkResult,
     GenomeCoverage,
     GenomeWriteResult,
@@ -115,6 +116,7 @@ __all__ = [
     "BulkWriteResult",
     "CachedPayload",
     "CollectionRepository",
+    "CreditNamesFillResult",
     "CreditRepository",
     "CreditedPerson",
     "CrosswalkLinkResult",

@@ -36,6 +36,7 @@ from usher.ports.bulk import (
     GenomeTag,
     GenomeVector,
     IdCrosswalkPair,
+    ImdbCreditNames,
     ImdbRating,
     ImdbTitle,
     TmdbId,
@@ -43,6 +44,7 @@ from usher.ports.bulk import (
 from usher.ports.repository import (
     BulkCatalogRepository,
     BulkWriteResult,
+    CreditNamesFillResult,
     GenomeWriteResult,
 )
 
@@ -105,6 +107,17 @@ def _genome(movie_id: int, imdb_id: str, lead: float) -> GenomeVector:
         tmdb_id=None,
         relevance=(lead,) + (0.0,) * (GENOME_TAG_COUNT - 1),
     )
+
+
+def _credit_names(imdb_id: str, *names: str) -> ImdbCreditNames:
+    """One title's resolved credit names, in rank order.
+
+    The record `IMDbCreditNamesDataset` emits: already joined against
+    `name.basics`, already deduplicated, and never empty — a title whose
+    principals all dangle yields no record rather than an empty one, so the
+    writer has no way to *blank* an array another source filled.
+    """
+    return ImdbCreditNames(imdb_id=imdb_id, names=names)
 
 
 def _vocabulary(*names: str) -> tuple[GenomeTag, ...]:
@@ -884,6 +897,195 @@ class BulkCatalogRepositoryContract:
         coverage = await repo.genome_coverage()
 
         assert dict(coverage.revisions) == {GENOME_RELEASE_A: 1, GENOME_RELEASE_B: 1}
+
+    # --- titles.credit_names, filled from IMDb with no people and no credits
+
+    async def test_a_skeleton_title_gains_the_names_imdb_credits_it_with(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """The deliverable. `credit_names` is `search_document`'s weight class
+        B and is empty for every title TMDb enrichment has not reached --
+        **0 of 1,271,138 on the measured catalog**, because `DeriveService` is
+        the only writer and it walks `raw_payloads`.
+
+        The premise is asserted rather than assumed: the title has to be
+        empty *first*, or a fill that did nothing reads exactly like this.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+        assert await self.credit_names_of(repo, SHAWSHANK.imdb_id) == (), (
+            "the premise: a bulk-loaded title carries no credit names"
+        )
+
+        result = await repo.fill_credit_names([_credit_names(SHAWSHANK.imdb_id, "Andy", "Red")])
+
+        assert (result.filled, result.unmatched, result.deferred) == (1, 0, 0)
+        assert await self.credit_names_of(repo, SHAWSHANK.imdb_id) == ("Andy", "Red")
+
+    async def test_an_imdb_fill_never_overwrites_the_names_the_tmdb_path_derived(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """**Two writers, one column, and TMDb wins every title it has
+        touched.** `CreditRepository.replace_for_titles` writes
+        `credit_names` from the TMDb-derived `credits`, in the same statement
+        and the same transaction as the table itself, and its docstring says
+        why: *"the array and the table are two spellings of one fact ... the
+        symptom is a full-text hit on a name `credits` no longer holds."*
+
+        This port cannot join that transaction -- it writes no `credits` row
+        at all -- so it must not touch a title that path owns. The predicate
+        is `enrichment_state = 'skeleton'`, which is exactly the complement of
+        `db/repositories/search.py:180`'s embedded population, and it is
+        stronger than a `credit_names = '{}'` guard: a title TMDb enriched and
+        derived *no cast for* stays TMDb's, empty, rather than being quietly
+        filled from a source its `credits` rows disagree with.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+        await self.derive_credit_names(repo, SHAWSHANK.imdb_id, ("Tim", "Morgan"))
+        assert await self.credit_names_of(repo, SHAWSHANK.imdb_id) == ("Tim", "Morgan"), (
+            "the premise: the TMDb-derived names were really there first"
+        )
+
+        result = await repo.fill_credit_names([_credit_names(SHAWSHANK.imdb_id, "Andy", "Red")])
+
+        assert (result.filled, result.unmatched, result.deferred) == (0, 0, 1)
+        assert await self.credit_names_of(repo, SHAWSHANK.imdb_id) == ("Tim", "Morgan")
+
+    async def test_a_title_imdb_filled_is_still_the_tmdb_paths_to_take_over(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """The mirror, and it is the half a one-directional case misses:
+        precedence has to be *monotonic*, not merely first-write-wins.
+
+        A skeleton IMDb filled is later enriched and derived; TMDb's names
+        replace IMDb's, and every subsequent IMDb pass defers rather than
+        flapping the column back. Both premises are asserted -- that IMDb's
+        names were really there, and that the derivation really replaced
+        them -- because "nothing changed" would satisfy the final assertion
+        on its own.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+        await repo.fill_credit_names([_credit_names(SHAWSHANK.imdb_id, "Andy", "Red")])
+        assert await self.credit_names_of(repo, SHAWSHANK.imdb_id) == ("Andy", "Red"), (
+            "the premise: IMDb's names were really there first"
+        )
+
+        await self.derive_credit_names(repo, SHAWSHANK.imdb_id, ("Tim", "Morgan"))
+        assert await self.credit_names_of(repo, SHAWSHANK.imdb_id) == ("Tim", "Morgan"), (
+            "the premise: the TMDb derivation really did take the column over"
+        )
+
+        result = await repo.fill_credit_names([_credit_names(SHAWSHANK.imdb_id, "Andy", "Red")])
+
+        assert (result.filled, result.deferred) == (0, 1)
+        assert await self.credit_names_of(repo, SHAWSHANK.imdb_id) == ("Tim", "Morgan")
+
+    async def test_a_replayed_fill_writes_nothing_and_reports_nothing_filled(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """`titles` carries two GIN indexes and a stored generated column, so
+        a dead row version per title per pass is not free -- and the whole
+        catalog is 1.19M rows. Same `IS DISTINCT FROM` guard, and the same
+        reason, as `upsert_titles` and `apply_ratings` one method up.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+        first = await repo.fill_credit_names([_credit_names(SHAWSHANK.imdb_id, "Andy", "Red")])
+        assert first.filled == 1, "the premise: the first pass really wrote"
+
+        again = await repo.fill_credit_names([_credit_names(SHAWSHANK.imdb_id, "Andy", "Red")])
+
+        assert (again.filled, again.unmatched, again.deferred) == (0, 0, 0)
+
+    async def test_a_batch_naming_one_title_twice_keeps_the_first_rather_than_failing(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """One statement may not hit the same conflict target twice, and an
+        `UPDATE ... FROM` with two matching staged rows picks whichever the
+        planner reached first. `IMDbCreditNamesDataset` groups by `tconst` and
+        never emits a title twice, so this is a guard on the *port*, not a
+        modelled property of its caller -- and first-seen is chosen because it
+        is what `upsert_titles` already does.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+
+        result = await repo.fill_credit_names(
+            [
+                _credit_names(SHAWSHANK.imdb_id, "Andy", "Red"),
+                _credit_names(SHAWSHANK.imdb_id, "Somebody Else"),
+            ]
+        )
+
+        assert result.filled == 1
+        assert await self.credit_names_of(repo, SHAWSHANK.imdb_id) == ("Andy", "Red")
+
+    async def test_a_title_the_catalog_does_not_hold_is_counted_not_written(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """`title.principals` covers **11,491,032 titles** and the retained
+        catalog holds 1.27M of them, so a staged row matching nothing is the
+        overwhelming majority case rather than an anomaly. Counted, the way
+        `GenomeWriteResult.unmatched` and `CrosswalkLinkResult.unmatched` are:
+        a join that matched almost nothing must not look identical to one that
+        matched everything.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+
+        result = await repo.fill_credit_names(
+            [
+                _credit_names(SHAWSHANK.imdb_id, "Andy"),
+                _credit_names("tt99000900", "Nobody At All"),
+            ]
+        )
+
+        assert (result.filled, result.unmatched, result.deferred) == (1, 1, 0)
+
+    async def test_an_empty_credit_names_batch_writes_nothing_and_does_not_raise(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        assert await repo.fill_credit_names([]) == CreditNamesFillResult(
+            filled=0, unmatched=0, deferred=0
+        )
+
+    async def test_the_names_keep_the_ranking_they_arrived_in(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """**The order is the ranking**, top-billed first, which is what makes
+        the class-B lexemes the ones a viewer would search for. An array
+        rebuilt in any other order reads identically to every assertion that
+        checks membership, so this case carries the premise that the ranking
+        disagrees with both orders a careless implementation would produce:
+        alphabetical, and reversed.
+        """
+        ranked = ("Zoe Synthetic", "Ada Synthetic", "Mel Synthetic")
+        assert list(ranked) != sorted(ranked), "the premise: rank order is not name order"
+        assert list(ranked) != sorted(ranked, reverse=True), "nor its reverse"
+
+        await repo.upsert_titles([SHAWSHANK])
+        await repo.fill_credit_names([ImdbCreditNames(imdb_id=SHAWSHANK.imdb_id, names=ranked)])
+
+        assert await self.credit_names_of(repo, SHAWSHANK.imdb_id) == ranked
+
+    async def credit_names_of(
+        self, repo: BulkCatalogRepository, imdb_id: str
+    ) -> tuple[str, ...] | None:
+        """How this implementation reads back `titles.credit_names`. Same
+        not-on-the-port reasoning as `popularity_of`: nothing in production
+        reads it through *this* port -- `TitleRepository.credit_names_for` is
+        what `services/index.py:116` calls."""
+        raise NotImplementedError
+
+    async def derive_credit_names(
+        self, repo: BulkCatalogRepository, imdb_id: str, names: tuple[str, ...]
+    ) -> None:
+        """Leave a title in the state `DeriveService` leaves it in: off the
+        skeleton tier, with `credit_names` derived from TMDb's `credits`.
+
+        A hook rather than a call to `CreditRepository.replace_for_titles`,
+        for the reason `genome_tags_of` gives one method down: that is a
+        *different port*, and making these cases pass or fail on a second
+        implementation's correctness would test the wrong thing. What the two
+        arms must agree on is the precedence rule, and the rule is stated in
+        terms of the state that path leaves behind."""
+        raise NotImplementedError
 
     async def title_id_of(self, repo: BulkCatalogRepository, imdb_id: str) -> uuid.UUID | None:
         """The `titles.id` an IMDb id resolved to. A test affordance, not a

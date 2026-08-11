@@ -414,6 +414,8 @@ def test_no_dataset_row_is_committed_anywhere() -> None:
     [
         "tests/fixtures/bulk/title.basics.slice.tsv",
         "tests/fixtures/bulk/title.ratings.slice.tsv",
+        "tests/fixtures/bulk/name.basics.slice.tsv",
+        "tests/fixtures/bulk/title.principals.slice.tsv",
         "tests/fixtures/bulk/movie_ids.slice.jsonl",
         "tests/fixtures/bulk/tv_series_ids.slice.jsonl",
         "tests/fixtures/emby/movie_item.json",

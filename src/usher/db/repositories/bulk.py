@@ -52,13 +52,25 @@ at 4.06x on this module's own `INSERT ... SELECT` shape, and accepted.
 
 `titles.credit_names` joins that list for a different reason: it is an
 ordinary column, so naming it in an `INSERT` here would be accepted rather
-than rejected -- and would write an array disagreeing with `credits`. The
-only correct writer is the statement that also writes that table
-(`DeriveService`). Its `server_default` of `'{}'` is what lets every
-statement here go on omitting it, and the omission is load-bearing rather
-than tidy: `usher_array_text` is STRICT, so a NULL in that column nulls the
-whole `search_document` and the title leaves every full-text index in
-silence.
+than rejected -- and would write an array disagreeing with `credits`. Its
+`server_default` of `'{}'` is what lets every `INSERT` here go on omitting
+it, and the omission is load-bearing rather than tidy: `usher_array_text`
+is STRICT, so a NULL in that column nulls the whole `search_document` and
+the title leaves every full-text index in silence.
+
+**This paragraph used to end "the only correct writer is the statement that
+also writes that table (`DeriveService`)", and M9's T6 made that false.**
+There are now two writers and they partition the catalog rather than
+sharing it. `CreditRepository.replace_for_titles` writes the column beside
+`credits` in one statement, for every title TMDb enrichment has reached;
+`fill_credit_names` below writes it for every title that is still
+`enrichment_state = 'skeleton'`, from IMDb's `title.principals` joined to
+`name.basics`, with **no `people` row and no `credits` row** -- T3 measured
+that entity design at 2.702 GB against a 2.0 GB ceiling and it was refused.
+The predicate is what keeps the old sentence's *invariant* true even though
+its claim is not: a skeleton has no `raw_payloads`, so it has no `credits`
+for an array to disagree with. Still true, and now for two writers rather
+than one: no `INSERT` in this module names the column.
 """
 
 from collections.abc import AsyncIterator, Sequence
@@ -76,6 +88,7 @@ from usher.ports.bulk import (
     GenomeTag,
     GenomeVector,
     IdCrosswalkPair,
+    ImdbCreditNames,
     ImdbRating,
     ImdbTitle,
     TmdbId,
@@ -83,6 +96,7 @@ from usher.ports.bulk import (
 from usher.ports.repository import (
     BulkCatalogRepository,
     BulkWriteResult,
+    CreditNamesFillResult,
     CrosswalkLinkResult,
     GenomeCoverage,
     GenomeWriteResult,
@@ -619,6 +633,84 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
               AND (t.community_rating, t.vote_count)
                   IS DISTINCT FROM (s.community_rating, s.vote_count)
         """)
+
+    async def fill_credit_names(self, rows: Sequence[ImdbCreditNames]) -> CreditNamesFillResult:
+        if not rows:
+            return CreditNamesFillResult(filled=0, unmatched=0, deferred=0)
+        await self._stage(
+            """
+            CREATE TEMP TABLE stg_credit_names (
+                imdb_id text, names text[], ordinal integer
+            ) ON COMMIT DROP
+            """,
+            "stg_credit_names",
+            ("imdb_id", "names", "ordinal"),
+            # `ordinal` is the row's position in the batch, and it exists
+            # solely to give `DISTINCT ON` a deterministic winner --
+            # `upsert_titles` gets one from the UUIDv7 it mints per staged
+            # row, and this statement mints nothing. Ascending, so first-seen
+            # wins, which is the rule that method already establishes.
+            #
+            # `list(row.names)`: asyncpg's array encoder wants a list, and
+            # `text[]` always reads back as one.
+            [(row.imdb_id, list(row.names), index) for index, row in enumerate(rows)],
+        )
+        # **`enrichment_state = 'skeleton'` is the precedence predicate, and
+        # it is chosen rather than `credit_names = '{}'`.** Three properties
+        # follow from it, and the third is why it is not merely a cheaper
+        # spelling of the same thing:
+        #
+        # 1. It is exactly the complement of
+        #    `db/repositories/search.py:180`'s `_POPULATION`
+        #    (`t.enrichment_state <> 'skeleton'`), so **this write cannot
+        #    stale a single embedding** -- not as a measurement that came out
+        #    at zero, but by construction. `title_embeddings` holds no row
+        #    for a title this statement can touch.
+        # 2. `credits` is written only by `DeriveService`, which walks
+        #    `raw_payloads`, which only an enriched title has -- so a title
+        #    this statement writes has no `credits` rows for its array to
+        #    disagree with. That is what keeps
+        #    `CreditRepository.replace_for_titles`' invariant intact across a
+        #    second writer it knows nothing about.
+        # 3. A title TMDb enriched and derived **no cast for** has an empty
+        #    `credit_names` that is still TMDb's answer. A `credit_names =
+        #    '{}'` guard would overwrite it from a source whose `credits`
+        #    rows say otherwise; this one does not.
+        #
+        # The `IS DISTINCT FROM` guard makes a replay write nothing at all:
+        # `titles` carries two GIN indexes and a stored generated column, so
+        # a dead row version per title per pass is not free at 1.19M rows.
+        # `credit_names` is NOT NULL, so `<>` would agree today -- it is
+        # spelled this way because it is the same guard `upsert_titles` uses
+        # and because the column's nullability is not this statement's to
+        # depend on.
+        result = await self._session.execute(
+            text("""
+                WITH deduped AS (
+                    SELECT DISTINCT ON (imdb_id) imdb_id, names
+                    FROM stg_credit_names ORDER BY imdb_id, ordinal
+                ), matched AS (
+                    SELECT d.imdb_id, d.names, t.id AS title_id,
+                           t.enrichment_state = 'skeleton' AS ours
+                    FROM deduped d JOIN titles t ON t.imdb_id = d.imdb_id
+                ), updated AS (
+                    UPDATE titles t SET credit_names = m.names
+                    FROM matched m
+                    WHERE t.id = m.title_id
+                      AND m.ours
+                      AND t.credit_names IS DISTINCT FROM m.names
+                    RETURNING 1
+                )
+                SELECT (SELECT count(*) FROM updated) AS filled,
+                       (SELECT count(*) FROM deduped) - (SELECT count(*) FROM matched)
+                           AS unmatched,
+                       (SELECT count(*) FROM matched WHERE NOT ours) AS deferred
+            """)
+        )
+        filled, unmatched, deferred = result.one()
+        return CreditNamesFillResult(
+            filled=int(filled), unmatched=int(unmatched), deferred=int(deferred)
+        )
 
     async def upsert_tmdb_ids(self, rows: Sequence[TmdbId]) -> int:
         if not rows:

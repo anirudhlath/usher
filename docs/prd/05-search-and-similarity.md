@@ -84,6 +84,35 @@ from `titles.credit_names` — which is **not** a `Title` field: it is `credits`
 projected to names and truncated to a ranking constant, so a domain model
 carrying it would be a cast list that is not the cast.
 
+**M9 stopped B being an enriched-tier column, and the paragraphs above are
+written as though it still is.** Under M7 alone, `credit_names` is non-empty
+only where `DeriveService` has run, which is the TMDb-enriched tier —
+measured at **0 of 1,271,138** rows on a bootstrap-only catalog, i.e. weight
+class B was reserved, filled, and in practice still empty for everybody who
+had not run a crawl. M9 fills it from IMDb's `title.principals` × `name.basics`
+for every title the crawl has not reached: **1,192,217 of 1,271,138 (93.8%)**,
+mean **9.11** names, 158,479,368 B of text. Two writers, one predicate —
+`enrichment_state = 'skeleton'` decides which owns a title — so `credit_names`
+still never disagrees with `credits`, because a title with any `credits` row
+is by construction not a skeleton.
+
+**What that costs, measured on a real 1,271,138-row `titles` rather than
+estimated.** The relation goes **872,759,296 B → 1,496,825,856 B after
+`VACUUM FULL` (+624,066,560 B, +71.5%)** — 3.9 bytes stored per byte of name —
+of which `ix_titles_search_document` is **4.54×** (40,304,640 → 182,951,936 B),
+which is the class-B lexemes arriving. **The transient is the number to budget
+against [08](08-operations.md)'s 8–12 GB, not the settled one**: before any
+vacuum the same table is 2,240,970,752 B, because one `UPDATE` over 1.19M rows
+leaves a dead tuple per live one.
+
+**And it is an ordering constraint on the roadmap rather than a free win.**
+The embedded population is `enrichment_state <> 'skeleton'`, so filling B on a
+bootstrap-only catalog invalidates **no** embedding — by construction, since
+that is the exact complement of the predicate the fill writes under. Run it
+*after* a priority tier is enriched and it invalidates nearly all of one:
+**203,969 of the 204,335 titles with ≥100 votes (99.82%)** would gain a
+`credit_names`. Backfill it before the crawl, not after.
+
 **Measured class weights**, pg17.10, one term in three classes scored with
 `ts_rank(…, websearch_to_tsquery('english', …))`: name **0.991** (A),
 `credit_names` **0.396** (B), overview **0.198** (C) — `ts_rank`'s default

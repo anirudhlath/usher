@@ -1,0 +1,6 @@
+nconst	primaryName	birthYear	deathYear	primaryProfession	knownForTitles
+nm99000010	Ada Synthetic	1970	\N	actress,producer	tt99000020
+nm99000020	"Bo Synthetic"	\N	\N	actor	tt99000020
+nm99000030	Cyd Synthetic	1955	2011	director,writer	tt99000020,tt99000030
+nm99000040	\N	\N	\N	actor	tt99000020
+nm99000050	Dee Synthetic	\N	\N	composer	tt99000030

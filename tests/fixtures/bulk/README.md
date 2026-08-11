@@ -4,13 +4,15 @@ Read [`../README.md`](../README.md) first: it states the licensing rule, the
 reserved identifier bands, and the fact that these files previously carried
 real IMDb rows under a note claiming they did not.
 
-**Every value in these five files is invented.** No id, title, alias, year,
-runtime, rating or vote count here describes a real work. What is preserved is
-the *format* — and each row exists to pin one thing about it.
+**Every value in these seven files is invented.** No id, title, alias, name,
+year, runtime, rating or vote count here describes a real work or a real
+person. What is preserved is the *format* — and each row exists to pin one
+thing about it.
 
-*(It said "four" until M9 added `title.akas.slice.tsv`. The count is in this
-sentence rather than left implicit precisely so that adding a file has to
-touch it.)*
+*(It said "four" until M9 added `title.akas.slice.tsv`, and "five" until the
+same milestone added `name.basics.slice.tsv` and
+`title.principals.slice.tsv`. The count is in this sentence rather than left
+implicit precisely so that adding a file has to touch it.)*
 
 ## `title.basics.slice.tsv`
 
@@ -97,6 +99,46 @@ would agree with the parser while disagreeing with IMDb.
 Neither `types` nor `attributes` is parsed into anything — they exist in the
 slice to hold the column count honest and to document the separator.
 
+## `name.basics.slice.tsv` / `title.principals.slice.tsv`
+
+The two halves of one join, and they are only meaningful together:
+`title.principals` says which `nconst` is credited on which `tconst`, and only
+`name.basics` says what an `nconst` is called. `IMDbCreditNamesDataset` reads
+both and emits one ordered, deduplicated name list per title, which is what
+fills `titles.credit_names`. Six columns each, taken from the real headers at
+the pinned snapshot — `nconst primaryName birthYear deathYear
+primaryProfession knownForTitles` and `tconst ordering nconst category job
+characters`. No trailing newline on either.
+
+`name.basics.slice.tsv` — header plus five people:
+
+| Line | Row | Pins |
+|---|---|---|
+| 0 | header | `parse_names_row` returns `None` for it rather than raising |
+| 1 | an ordinary person | the ordinary path |
+| 2 | `"Bo Synthetic"` | **the csv trap again, on a third file** — 138 real names carry a `"` and 7 open with one |
+| 3 | a person credited twice on one title | with principals lines 3–4, the deduplication |
+| 4 | a `\N` `primaryName` | dropped — 89 such rows in the real file, and the empty string would be a *searchable* empty lexeme |
+| 5 | an ordinary person | the second title's only resolvable credit |
+
+`title.principals.slice.tsv` — header plus nine credits over three titles:
+
+| Line | Row | Pins |
+|---|---|---|
+| 0 | header | filtered, not parsed |
+| 1–2 | `tt99000020` orderings 1–2 | the ordinary path, and the ranking |
+| 3–4 | one person, director then writer | one name, not two |
+| 5 | a person whose `primaryName` is `\N` | unresolvable, so dropped |
+| 6–7 | `tt99000030` ordering **2 then 1** | **deliberately out of order, and the real file is not** — it is the only way to observe that the parser sorts on `ordering` |
+| 8 | an `nconst` in no `name.basics` row | a dangling credit; 3,734 such ids in the real pair, because the seven dumps are not one snapshot |
+| 9 | `tt99000040`, its only credit dangling | a title that yields **no record at all** rather than an empty one — an empty `names` would blank a `credit_names` another source filled |
+
+**Line 6–7's disorder is the one place these slices deliberately disagree with
+the real file**, which ascends within every one of its 11,491,032 titles. A
+sort that is unobservable against production data is a sort no production
+fixture can pin, so the fixture supplies the disagreement and the case asserts
+that premise before asserting the order.
+
 ## `movie_ids.slice.jsonl` / `tv_series_ids.slice.jsonl`
 
 TMDb's *public daily id export* format: one JSON object per line, no wrapping
@@ -119,6 +161,7 @@ To change one, edit it and run
 ```bash
 uv run pytest tests/unit/test_adapters_bulk_imdb.py \
               tests/unit/test_adapters_bulk_imdb_akas.py \
+              tests/unit/test_adapters_bulk_imdb_credit_names.py \
               tests/unit/test_adapters_bulk_tmdb_ids.py \
               tests/integration/test_bootstrap_end_to_end.py
 ```

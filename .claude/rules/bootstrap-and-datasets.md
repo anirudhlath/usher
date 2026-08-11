@@ -333,6 +333,64 @@ recorded, because under that contention they would measure the host. If a
 timing baseline for these three files is ever wanted it needs a quiet box and
 a separate run.
 
+**`name.basics` and `title.principals` at the parser level, measured over the
+whole pinned files rather than over the catalog-retained slice — 2026-08-11
+(M9 T6).** T3's figures above are all *retained* ones; these are what a parser
+sees, since it has no catalog. Headers are exactly `nconst primaryName
+birthYear deathYear primaryProfession knownForTitles` (6 columns,
+15,563,615 data rows, `"a3b9681921c92e5917182d1ecc05bd2d-37"`) and `tconst
+ordering nconst category job characters` (6 columns, 101,151,422 data rows,
+`"08ce60665889cb40c7371e1eab44a1f2-93"`), and **zero rows in either split to
+any other count**.
+
+- **89 rows of `name.basics` carry no `primaryName`.** The longest name is
+  **105** characters and **none exceeds 512**, so a length filter mirroring
+  `title.akas`' would reject nothing — which is why the credit-names parser
+  has none: `titles.credit_names` is an unbounded `text[]` with no CHECK to
+  mirror, and a bound would be a number the module invented.
+- **138 names contain a literal `"` and 7 open with one** — the csv trap
+  confirmed on a fourth file, and the seven are people whose names would be
+  rewritten on every title they are credited on.
+- **`name.basics` is sorted lexicographically by the `nconst` string, not
+  numerically: 738,680 descents in the integer sequence.** An eight-digit id
+  sharing a seven-digit id's first seven characters sorts before it. **This is
+  a correctness trap for the obvious in-memory index** — a sorted array plus
+  `bisect` answers `None` for millions of real people, and each miss is a
+  title quietly losing a name. Same family as the migration-id padding trap in
+  `db-and-sql.md`.
+- **`ordering` is present and integral on every principals row**, min 1, max
+  75, and **ascends within every one of the 11,491,032 titles**. So a sort on
+  it is unobservable against production data and only a deliberately
+  disordered fixture can pin it.
+- **13 categories**, `actor` 23,895,326 down to `archive_sound` 13,782. None
+  is filtered: IMDb has already applied its own editorial selection at a
+  **mean of 8.8 rows per title**, and the two that read like noise
+  (`archive_footage`, `archive_sound`) are 0.65% of the file.
+- **9,404,442 rows repeat a person already credited on the same title** — a
+  director who also wrote it. Deduplication is not defensive; it is 9.3% of
+  the file.
+- **3,734 distinct `nconst` over 7,701 rows dangle**, i.e. are named by
+  `title.principals` and absent from `name.basics`. T3 measured 969 against a
+  different pin over the retained slice; the number moves with the pin because
+  **the seven dumps are not one snapshot**, which is the point. **156 titles
+  have every principal dangling** and must yield no record at all — an empty
+  name list would *blank* a `credit_names` another source filled.
+
+**The whole `nconst -> primaryName` map fits in 345 MiB and 19.5 s, and that
+is the price of doing this join with no `people` table.** Measured on the
+pinned file: 211,630,156 B of name text + 87,819,488 B of address table +
+62,254,108 B of offsets = **361,703,752 B**, against a peak RSS of **361.3
+MB**; the `title.principals` pass over it is a further **157 s**. Structure is
+one `bytearray` of names end to end, an `array("i")` of offsets, and a
+direct-address table keyed on the integer inside the `nconst` — chunked at
+65,536 entries. **The chunking is not a micro-optimisation:** a single flat
+array is sized by the largest id, and this project's own reserved synthetic
+band (`nm99\d{6}`) starts at 99,000,000, so a *two-person test index*
+allocated **396 MB** and the parser test file took **28.9 s**. Chunked, the
+same file takes **0.27 s**. A fixture id nine orders of magnitude from the
+real id space is a realistic input here precisely because the licensing guard
+mandates one.
+
 **A TMDb `credits.cast[]`, `credits.crew[]` or `created_by[]` entry carries no
 IMDb `nconst`, so people cannot be merged across TMDb and IMDb without a
 second request each.** Read, not inferred, from four places that agree: the

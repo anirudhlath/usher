@@ -857,9 +857,29 @@ payloads, titles carrying credits, people and collections; `usher derive
 --backfill` re-derives inline rather than enqueueing, because a derivation is
 a local read and a queue in front of it buys latency and a second failure
 mode. It also maintains `titles.credit_names`, weight class B's denormalised
-input, in the same call and the same transaction that writes `credits` — one
-writer, so the two
-cannot disagree ([05](05-search-and-similarity.md)).
+input, in the same call and the same transaction that writes `credits`, so
+the two cannot disagree ([05](05-search-and-similarity.md)).
+
+✅ **`credit_names` has a second source as of M9, and the two partition the
+catalog rather than sharing it.** IMDb's `title.principals` joined to
+`name.basics` fills the column for every title this crawl has *not* reached,
+with **no API call at all** — 1,192,217 of 1,271,138 titles (93.8%) gain a
+mean of 9.11 names. The rule is one predicate: `BulkCatalogRepository
+.fill_credit_names` writes only where `enrichment_state = 'skeleton'`, so a
+title TMDb has enriched is TMDb's, permanently and in both directions — a
+skeleton IMDb filled is overwritten by the derivation that later reaches it,
+and never flapped back. That is what keeps the paragraph above true across a
+second writer that holds no `credits` row: a skeleton has no `raw_payloads`,
+so it has no `credits` for its array to disagree with.
+
+**No `people` and no `credits` row is bulk-loaded from IMDb**, and that is a
+measurement rather than a preference. The entity design measured **2.702 GB
+against a 2.0 GB ceiling** (2.395 GB stripped to five columns), `credits`
+cannot be deduplicated on an IMDb load at all — its only unique key is
+`tmdb_credit_id`, NULL on every such row — and TMDb's credits carry no
+`nconst`, so people cannot be merged across the two sources on an id at all.
+The name *text* is the part of a person weight class B indexes, so the names
+are written and the entities are not.
 
 ⏳ **`alternative_titles` is not derived, because it is not in the cache**, and
 this is named here rather than left implied by the deferral it blocks.

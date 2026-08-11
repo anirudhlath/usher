@@ -126,6 +126,34 @@ class TestPostgresBulkCatalogRepositoryContract(BulkCatalogRepositoryContract):
             {"imdb_id": imdb_id},
         )
 
+    async def credit_names_of(
+        self, repo: BulkCatalogRepository, imdb_id: str
+    ) -> tuple[str, ...] | None:
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        result = await repo._session.execute(
+            text("SELECT credit_names FROM titles WHERE imdb_id = :imdb_id"),
+            {"imdb_id": imdb_id},
+        )
+        value = result.scalar_one_or_none()
+        return None if value is None else tuple(value)
+
+    async def derive_credit_names(
+        self, repo: BulkCatalogRepository, imdb_id: str, names: tuple[str, ...]
+    ) -> None:
+        # Exactly what `DeriveService` leaves behind — `credit_names` written
+        # beside a title that is off the skeleton tier — spelled as SQL rather
+        # than by calling `PostgresCreditRepository.replace_for_titles`, which
+        # would need `people` and `credits` rows this task deliberately never
+        # writes.
+        assert isinstance(repo, PostgresBulkCatalogRepository)
+        await repo._session.execute(
+            text(
+                "UPDATE titles SET enrichment_state = 'enriched', credit_names = :names "
+                "WHERE imdb_id = :imdb_id"
+            ),
+            {"imdb_id": imdb_id, "names": list(names)},
+        )
+
     async def indexes_intact(self, repo: BulkCatalogRepository) -> bool:
         assert isinstance(repo, PostgresBulkCatalogRepository)
         return await _index_names(repo._session) >= _SUSPENDED
