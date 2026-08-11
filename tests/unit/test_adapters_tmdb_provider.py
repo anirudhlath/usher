@@ -72,17 +72,53 @@ def _season_detail(number: int) -> dict[str, Any]:
 
     Everything else stays as the one committed `season.json` spells it,
     whatever the number is -- so this response disagrees with the summary's
-    `name`, `air_date`, `poster_path` and `vote_average` for every number but
-    1. That is a deliberate affordance rather than fidelity: on faithful data
-    the block and the summary agree on every shared key, so merging the block
-    *over* the summary and the summary *over* the block produce the identical
-    dict and the direction of the merge is unobservable. This is the only
-    thing in the suite that can see it.
+    `name`, `overview`, `air_date`, `poster_path` and `vote_average` for every
+    number but 1. That is a deliberate affordance rather than fidelity, it is
+    the only thing in the suite that can see the *direction* of the merge, and
+    `_assert_the_merge_direction_is_observable` is what stops it being an
+    unstated coincidence.
     """
     season = load_tmdb_fixture("season")
     season["season_number"] = number
     season["id"] = _SEASON_TMDB_ID + number
     return season
+
+
+# Every key a season block and its `seasons[]` summary both carry *and* that
+# the two fixtures deliberately disagree on. `id` and `season_number` are
+# excluded because the fake makes those two agree on purpose -- `id` because
+# the live run measured the season route's own id byte-identical to the
+# summary's.
+_MERGE_DIRECTION_PROBES = ("air_date", "name", "overview", "poster_path", "vote_average")
+
+
+def _assert_the_merge_direction_is_observable() -> None:
+    """The premise every merge-direction assertion here rests on.
+
+    **On faithful data a block and its summary agree on every shared key**, so
+    block-over-summary and summary-over-block produce the identical dict and
+    no assertion anywhere can tell them apart. The only thing that makes the
+    direction visible is that `season.json` keeps its own prose whatever the
+    season number, so it disagrees with the Specials summary in `series.json`.
+
+    That disagreement is a property of two fixtures, and until 2026-08-11
+    nothing asserted it. Demonstrated by execution: with an inverted merge
+    planted, editing *only* `series.json`'s season-0 entry to agree with
+    `season.json` -- a plausible "make the fixtures internally consistent"
+    cleanup, no code change at all -- took this file from one red to **32
+    green**. So a tidy-up nobody would review as a test change silently
+    disarmed the only guard between a correct merge and a `seasons[]` written
+    wrong on every enriched series in the catalog, across the ~130,806 detail
+    fetches the enrichment crawl makes.
+    """
+    summary = load_tmdb_fixture("series")["seasons"][0]
+    block = _season_detail(0)
+    agreeing = [one for one in _MERGE_DIRECTION_PROBES if summary[one] == block[one]]
+    assert agreeing == [], (
+        "the premise: `series.json`'s season-0 summary must disagree with `season.json` on "
+        f"every one of {_MERGE_DIRECTION_PROBES}, or the merge direction is unobservable and "
+        f"the cases reading it cannot fail. Agreeing now: {agreeing}"
+    )
 
 
 class _Server:
@@ -299,8 +335,11 @@ async def test_the_composed_payload_equals_what_the_per_season_path_produced() -
 
     Each server serves exactly one of the two transports, so the equality is
     between two genuinely different request shapes rather than between one
-    request shape and itself.
+    request shape and itself. And the merge direction it pins is only visible
+    while the two fixtures disagree, which is asserted rather than assumed --
+    see `_assert_the_merge_direction_is_observable`.
     """
+    _assert_the_merge_direction_is_observable()
     per_season = _Server()
     per_season.serves_appended_seasons = False
     expected = await _per_season_composition(per_season, _SERIES_REF)
@@ -320,6 +359,40 @@ async def test_the_composed_payload_equals_what_the_per_season_path_produced() -
     assert [one for one in payload if one.startswith("season/")] == [], (
         "a surviving `season/N` key stores every episode twice in `raw_payloads`"
     )
+
+
+async def test_a_season_block_is_merged_over_its_summary_and_never_under_it() -> None:
+    """The direction, asserted on the payload directly rather than only as a
+    side effect of the identity case's `==`.
+
+    The season's own response is the authoritative one and the `1+N` spelling
+    took it with `dict.update`. Reversing that writes the summary's thinner
+    copy back over it, and every enriched season and episode row in the
+    catalog then carries the wrong `name`, `overview`, `air_date` and
+    `air_date`-derived ordering with **no error anywhere** -- the failure
+    ADR-0016's cached payloads make invisible until a derivation months later
+    reads them.
+
+    Two cases assert this now rather than one, and deliberately: the identity
+    case is the contract, and this one survives the identity case being
+    deleted, narrowed, or quietly disarmed by a fixture edit.
+    """
+    _assert_the_merge_direction_is_observable()
+    server = _Server()
+    provider, http = _provider(server)
+    async with http:
+        payload = await provider.fetch(_SERIES_REF)
+    specials = payload["seasons"][0]
+    block = _season_detail(0)
+    summary = load_tmdb_fixture("series")["seasons"][0]
+    assert [specials[one] for one in _MERGE_DIRECTION_PROBES] == [
+        block[one] for one in _MERGE_DIRECTION_PROBES
+    ]
+    # Lossless the other way too: a key only the summary carries survives, and
+    # `id` -- the one field the appended block omits -- comes from it.
+    assert "episode_count" not in block, "the premise: only the summary carries it"
+    assert specials["episode_count"] == summary["episode_count"]
+    assert specials["id"] == summary["id"]
 
 
 def test_the_blind_window_is_what_the_twenty_item_ceiling_leaves() -> None:
