@@ -27,10 +27,15 @@ insert, never an upsert, and a service could otherwise violate that through
 every unit test in the milestone and only discover it against a real primary
 key.
 
-**"First write wins" is modelled exactly too**, because it is this port's
-central behavioural promise rather than a storage detail -- a fake that
-overwrote a second `record_outcome` call would pass every other case in the
-contract and hide the one thing PRD 08's redelivery rule needs.
+**`record_outcome`'s two conditions are modelled exactly too, and separately**
+-- `clicked_title_id` first-write-wins, `played` monotonic-or -- because
+together they are this port's one piece of real behaviour rather than a
+storage detail. A fake that shared one guard between them (the shape a review
+caught before it shipped: `db/repositories/search_query.py`'s module
+docstring has the corrected argument) would pass every other case in the
+contract and hide the defect that guard produces -- F3's own funnel calls
+this twice on one row, a click and then a play, and the second call must
+still land.
 """
 
 import uuid
@@ -66,9 +71,16 @@ class FakeSearchQueryRepository(SearchQueryRepository):
             # No row named this id -- a silent no-op, matching the real
             # statement's zero-rows-affected `UPDATE`.
             return
-        already_clicked, _ = self.outcomes[query_id]
-        if already_clicked is not None:
-            # First write wins: a query already attributed is left exactly as
-            # it was.
-            return
-        self.outcomes[query_id] = (clicked_title_id, played)
+        already_clicked, already_played = self.outcomes[query_id]
+        # First write wins on `clicked_title_id` alone: a later, genuinely
+        # different click must not steal credit from the result the
+        # household actually opened. `already_clicked` is never overwritten
+        # once set.
+        winning_click = already_clicked if already_clicked is not None else clicked_title_id
+        # Monotonic on `played` alone, and independent of the guard above --
+        # this is the whole fix. A call that only means to report a play
+        # (the same title, `played=True`, arriving after the click that
+        # already attributed this row) must still land, and once `played`
+        # is `True` a later `False` is stale information rather than a
+        # correction to write over it.
+        self.outcomes[query_id] = (winning_click, already_played or played)

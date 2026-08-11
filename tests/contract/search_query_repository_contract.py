@@ -12,11 +12,24 @@ for the identical reason.
 **Every case names the wrong implementation it rules out.** A test whose
 docstring cannot name what it kills is a test that kills nothing.
 
-**"First write wins" is this port's one piece of real behaviour**, so it gets
-two cases from two directions rather than one: that an outcome is written at
-all, and that a second one cannot displace the first. Everything else here is
-storage -- did the row land, did it land once, did it land with every column
-distinct from every other.
+**`record_outcome`'s two columns are two different facts under two different
+conditions, and conflating them into one guard is a real defect a review
+caught by reading rather than by running anything -- see the module docstring
+on the port for the corrected argument.** `clicked_title_id` is genuine
+attribution: first write wins, because a later, different click must not
+steal credit from the result the household actually opened.  `played` is
+whether *anything* happened after that click, and F3's own funnel
+(`GET /titles/{id}?search_id=…` for the click, `POST /titles/{id}/play` for
+the play, at two different times) means the ordinary path is **a second call
+on the same row that only means to flip `played`** -- not a duplicate
+delivery of the first call, and not a second, different click. A guard keyed
+on `clicked_title_id IS NULL` cannot tell that call apart from either of
+those and silently drops it, which is the shape this suite now has three
+cases for rather than one: a later click does not steal an earlier one's
+attribution; a later play reaches a row a click already attributed; and
+`played` never reverts once it is true. Everything else here is storage --
+did the row land, did it land once, did it land with every column distinct
+from every other.
 
 Subclass and provide `repository`, `ledger`, `user_id` (naming a household
 that actually exists, for an implementation with a foreign key) and
@@ -226,14 +239,19 @@ class SearchQueryRepositoryContract:
         assert stored.clicked_title_id == title_id
         assert stored.played is True
 
-    async def test_a_second_attribution_does_not_replace_the_first(
+    async def test_a_later_click_does_not_steal_an_earlier_titles_attribution(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
     ) -> None:
-        """**First write wins.** The wrong implementation this kills: an
-        unconditional `UPDATE` with no guard, which lets a redelivered or
-        duplicated attribution overwrite a real click with a later, less
-        informative one -- exactly the state PRD 08's redelivery rule asks
-        this port to be safe under.
+        """**First write wins, on `clicked_title_id` specifically.** The
+        wrong implementation this kills: an unconditional `UPDATE` with no
+        guard on that column, which lets a second, genuinely different click
+        -- someone else's redelivered event, or a stale retry naming the
+        wrong result -- overwrite a real attribution with a less informative
+        one.
+
+        `played` is held constant (`False` on both calls) so this case is
+        about `clicked_title_id` alone; the sibling cases below are what
+        pins `played`'s own, different condition.
         """
         record = search_query_record(user_id=user_id)
         await repository.record(record)
@@ -245,12 +263,61 @@ class SearchQueryRepositoryContract:
         )
 
         await repository.record_outcome(record.id, clicked_title_id=first_title, played=False)
-        await repository.record_outcome(record.id, clicked_title_id=second_title, played=True)
+        await repository.record_outcome(record.id, clicked_title_id=second_title, played=False)
 
         stored = await ledger.get(record.id)
         assert stored is not None
         assert stored.clicked_title_id == first_title
-        assert stored.played is False
+
+    async def test_a_later_play_reaches_a_query_already_attributed_to_a_click(
+        self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
+    ) -> None:
+        """**The funnel `record_outcome` exists to serve, and the one a
+        shared `clicked_title_id IS NULL` guard silently drops.** F3's two
+        writers fire at two different times on the *same* row: viewing a
+        result from a search (`GET /titles/{id}?search_id=…`) attributes the
+        click, and playing it (`POST /titles/{id}/play`) is a later, separate
+        call naming the same title. The wrong implementation this kills: a
+        guard that keys the whole `UPDATE` off `clicked_title_id IS NULL`,
+        which treats this second call as if it were a duplicate delivery of
+        the first and silently drops the one fact PRD 10:572-573 says this
+        table exists to answer -- *did they play anything*.
+        """
+        record = search_query_record(user_id=user_id)
+        await repository.record(record)
+        title_id = await self.add_title()
+
+        await repository.record_outcome(record.id, clicked_title_id=title_id, played=False)
+        await repository.record_outcome(record.id, clicked_title_id=title_id, played=True)
+
+        stored = await ledger.get(record.id)
+        assert stored is not None
+        assert stored.clicked_title_id == title_id
+        assert stored.played is True
+
+    async def test_played_does_not_revert_to_false_once_true(
+        self, repository: SearchQueryRepository, ledger: SearchQueryLedger, user_id: uuid.UUID
+    ) -> None:
+        """`played`'s own condition is monotonic -- it only ever moves toward
+        `True` -- and that is a decision this case pins rather than leaves
+        implicit. The wrong implementation this kills: writing `played` from
+        the call's own value unconditionally (`SET played = :played`), which
+        would let a later call that has not itself observed a play erase the
+        evidence that one already happened -- there is no route in F3's
+        design that means "actually, undo the play", so a call carrying
+        `played=False` after `played=True` is stale information, not a
+        correction.
+        """
+        record = search_query_record(user_id=user_id)
+        await repository.record(record)
+        title_id = await self.add_title()
+
+        await repository.record_outcome(record.id, clicked_title_id=title_id, played=True)
+        await repository.record_outcome(record.id, clicked_title_id=title_id, played=False)
+
+        stored = await ledger.get(record.id)
+        assert stored is not None
+        assert stored.played is True
 
     async def test_attributing_a_query_that_was_never_recorded_is_a_silent_no_op(
         self, repository: SearchQueryRepository, ledger: SearchQueryLedger
