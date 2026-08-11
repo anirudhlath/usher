@@ -18,13 +18,14 @@ established.
 """
 
 import asyncio
+import dataclasses
 import io
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from loguru import logger
@@ -43,6 +44,7 @@ from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
+from tests.fakes.row_provider import FakeRow, FakeRowProvider
 from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
@@ -53,18 +55,22 @@ from tests.fakes.title_match_repository import FakeTitleMatchRepository
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
+from tests.unit.rows import Library
 from usher.api.lanes import LaneSupervisor
 from usher.composition import Pipeline
 from usher.config import Settings
-from usher.domain.enums import SourceKind
+from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import Job, JobKind, JobPriority, JobStatus
+from usher.domain.rows import BuiltRow, RowCard
 from usher.domain.source import Source
+from usher.domain.watch import User
 from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
 from usher.ports.jobs import JobRequest
 from usher.ports.llm import LLMClient
 from usher.ports.repository import MediaItemRepository
+from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.ports.source import (
     SourceAdapter,
     SourceAdapterFactory,
@@ -74,10 +80,12 @@ from usher.ports.source import (
     SourceItemKind,
 )
 from usher.services.curation_pool import CandidatePoolService
+from usher.services.home import SCREEN_STALE_GRACE, HomeService
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
 from usher.services.rows import ROW_PROVIDERS
+from usher.services.rows.cache import Freshness, RefreshQueue, RowCache
 from usher.services.search import SearchService
 from usher.services.similar import SimilarityService
 from usher.services.taste import TasteService
@@ -206,9 +214,17 @@ class _Fakes:
     adapters: _Adapters
     events: FakeEventPublisher
     commits: list[float]
+    # When each unit of work was opened. The `rows.refresh` lane's whole
+    # premise is that it runs on a session it opened itself rather than on a
+    # request's, and a count of opens is what a fake can honestly carry --
+    # `tests/integration/test_rows_refresh.py` is where the *session* claim is
+    # made against real ones.
+    units_of_work: list[float]
 
 
-def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
+def _pipeline(
+    fakes: _Fakes, settings: Settings, providers: Sequence[RowProvider] = ROW_PROVIDERS
+) -> Pipeline:
     titles = FakeTitleRepository()
     matching = FakeTitleMatchRepository(titles)
     embeddings = FakeTitleEmbeddingRepository()
@@ -287,7 +303,11 @@ def _pipeline(fakes: _Fakes, settings: Settings) -> Pipeline:
             result_limit=settings.search_result_limit,
         ),
         similar=SimilarityService(embeddings, neighbors, titles, commit),
-        row_providers=ROW_PROVIDERS,
+        # The real registry unless a case says otherwise. The `rows.refresh`
+        # lane composes a whole screen, so its cases substitute a fake
+        # provider they can gate and count -- running ten real providers
+        # against these fakes would make the case about the providers.
+        row_providers=tuple(providers),
         # Over the port double rather than `cast(Any, None)`, and no longer
         # only on the terms `search` above states: the worker lane *writes*
         # this one whenever it holds an `LLMClient`, because
@@ -321,6 +341,9 @@ def _supervisor(
     worker_idle_seconds: float = 5.0,
     embedder: Embedder | None = None,
     client: LLMClient | None = None,
+    rows: RowCache | None = None,
+    refreshes: RefreshQueue | None = None,
+    providers: Sequence[RowProvider] = ROW_PROVIDERS,
     **overrides: object,
 ) -> LaneSupervisor:
     settings = Settings(
@@ -335,7 +358,8 @@ def _supervisor(
         # has (`async with sessions()`), so `_settle`'s ten turns are
         # exercising something rather than being decorative.
         await asyncio.sleep(0)
-        yield _pipeline(fakes, settings)
+        fakes.units_of_work.append(time.perf_counter())
+        yield _pipeline(fakes, settings, providers)
 
     return LaneSupervisor(
         settings,
@@ -344,6 +368,8 @@ def _supervisor(
         user_id=_user_id,
         embedder=embedder,
         client=client,
+        rows=rows,
+        refreshes=refreshes,
         idle_seconds=worker_idle_seconds,
     )
 
@@ -362,6 +388,7 @@ def fakes() -> _Fakes:
         adapters=_Adapters(),
         events=FakeEventPublisher(),
         commits=[],
+        units_of_work=[],
     )
 
 
@@ -915,3 +942,288 @@ async def test_a_worker_lane_with_an_llm_client_claims_curate_work(fakes: _Fakes
     for kinds in fakes.queue.claimed_kinds:
         assert JobKind.CURATE in kinds
         assert JobKind.INDEX not in kinds
+
+
+# -- the rows.refresh lane ----------------------------------------------
+#
+# PRD 06's "served stale while refreshing". The two claims that need care are
+# **the request never waits** -- settled against `HomeService` in
+# `tests/unit/test_services_home_stale.py`, where the coroutine is driven by
+# hand -- and **exactly one refresh per key while one is in flight**, which is
+# a concurrency claim and therefore needs observed overlap. What overlaps is
+# *not* two requests: a stale serve never suspends, which is the whole feature,
+# so two of them cannot intersect in wall-clock and a case that asserted they
+# did would be asserting the feature is broken. The intersection with teeth is
+# **a request against the running refresh**, and that is the pair the case
+# below records.
+
+
+class _GatedRow(FakeRow):
+    """A row whose build parks until a case opens the gate, recording the
+    wall-clock window it spent inside `build`.
+
+    Real time in a real `await`, for the reason `_SlowAdapter` above states: a
+    fake that never truly suspends makes every concurrency window disjoint,
+    and "these did not overlap" is then satisfied by the concurrency the case
+    is trying to forbid.
+    """
+
+    def __init__(self, slug: str, *, cards: Sequence[RowCard] = ()) -> None:
+        super().__init__(slug, cards=cards)
+        self.gate = asyncio.Event()
+        # Set on the way *in*, so a case can wait for the refresh to really be
+        # in flight rather than sleeping and hoping. Waiting on the window --
+        # which is recorded in the `finally` -- would mean waiting for the
+        # thing the case exists to overlap with to be over.
+        self.entered = asyncio.Event()
+        self.windows: list[tuple[float, float]] = []
+        self.failure: Exception | None = None
+
+    async def build(self, ctx: RowContext) -> BuiltRow:
+        started = time.perf_counter()
+        self.entered.set()
+        try:
+            await self.gate.wait()
+            if self.failure is not None:
+                raise self.failure
+            return await super().build(ctx)
+        finally:
+            self.windows.append((started, time.perf_counter()))
+
+
+def _row_card(name: str) -> RowCard:
+    return RowCard(
+        title_id=new_id(),
+        kind=TitleKind.MOVIE,
+        name=name,
+        enrichment_state=EnrichmentState.SKELETON,
+    )
+
+
+def _gated_provider(slug: str = "recently-added") -> tuple[FakeRowProvider, _GatedRow]:
+    row = _GatedRow(slug, cards=(_row_card(slug),))
+    return FakeRowProvider(proposals=(ScoredRow(row=row, score=0.9),), slug_prefix=slug), row
+
+
+def _overlap(left: tuple[float, float], right: tuple[float, float]) -> float:
+    """Seconds the two windows share. Zero when they merely touch."""
+    return max(0.0, min(left[1], right[1]) - max(left[0], right[0]))
+
+
+_HOUSEHOLD = User(id=USER_ID, name="default", is_default=True)
+
+
+def _stale(cache: RowCache, screen: tuple[BuiltRow, ...]) -> None:
+    """Plant a screen that is already expired and still inside its grace.
+
+    A negative TTL rather than a stepped clock, because this file's caches run
+    on the wall clock the server runs on -- the same shape
+    `tests/integration/test_rows_refresh.py` plants with, and the arithmetic
+    behind it is pinned in `tests/unit/test_services_home_stale.py`.
+    """
+    cache.put_screen(_HOUSEHOLD.id, screen, ttl=-timedelta(seconds=1))
+
+
+def _context(user: User) -> RowContext:
+    """A row context for that household.
+
+    The stale-serve path reads none of its repositories -- `HomeService`
+    answers out of the cache before the first `propose` -- so the only field
+    that matters here is `user`, which is the cache key and the value the
+    queue hands to the lane.
+    """
+    return dataclasses.replace(Library().context(), user=user)
+
+
+async def test_a_stale_key_is_refreshed_on_the_lanes_own_unit_of_work(
+    fakes: _Fakes,
+) -> None:
+    """The lane drains the queue, rebuilds the screen and replaces the stale
+    entry -- and it opens a unit of work of its own to do it.
+
+    A refresh sharing the request's session passes almost every test that does
+    not look for it, because the request's session usually still works for a
+    moment after the handler returns. Here the assertion is that the lane
+    opened one at all; `tests/integration/test_rows_refresh.py` is where it is
+    made against real sessions, in both directions.
+    """
+    cache = RowCache(clock=lambda: datetime.now(UTC))
+    queue = RefreshQueue()
+    provider, row = _gated_provider()
+    row.gate.set()
+    _stale(cache, ())
+    supervisor = _supervisor(
+        fakes,
+        rows=cache,
+        refreshes=queue,
+        providers=[provider],
+        # Off so `units_of_work` counts refreshes and nothing else -- the
+        # worker lane opens one per pass and the refresher one per interval.
+        push_enabled=False,
+        worker_enabled=False,
+    )
+    await supervisor.start()
+    try:
+        await _settle()
+        assert fakes.units_of_work == [], "an idle refresh lane opens no session at all"
+        queue.schedule(_HOUSEHOLD)
+        await _drain(lambda: queue.pending == frozenset())
+    finally:
+        await supervisor.stop()
+
+    assert len(fakes.units_of_work) == 1, "the refresh opened its own unit of work"
+    read = cache.read_screen(_HOUSEHOLD.id)
+    assert read.freshness is Freshness.FRESH
+    assert read.screen is not None
+    assert [one.slug for one in read.screen] == ["recently-added"]
+
+
+async def test_a_read_during_an_in_flight_refresh_schedules_nothing_and_they_overlap(
+    fakes: _Fakes,
+) -> None:
+    """**The concurrency claim, with observed overlap rather than a count.**
+
+    "Exactly one refresh for one key" is also what a serialised pair produces,
+    so the case records the wall-clock interval the refresh occupied and the
+    interval a second read occupied, and asserts they genuinely intersect
+    before asserting there was one build.
+
+    The pair is a *read against the refresh* rather than two reads, and that
+    is not a weakening. A stale serve never suspends -- driven by hand in
+    `tests/unit/test_services_home_stale.py` -- so two of them are disjoint by
+    construction and `asyncio.gather` over them would produce exactly the
+    disjoint windows `.claude/rules/rows-and-genome.md` records as the trap.
+    What the dedup has to survive is a request arriving *while the refresh
+    runs*, which is the window a queue that cleared its key at `take()` leaves
+    open: that spelling schedules a second full compose over the same
+    household, and it is invisible to any case that only counts.
+    """
+    cache = RowCache(clock=lambda: datetime.now(UTC))
+    queue = RefreshQueue()
+    provider, row = _gated_provider()
+    _stale(cache, ())
+    service = HomeService(providers=[provider], cache=cache, refresh=queue.schedule)
+    supervisor = _supervisor(
+        fakes,
+        rows=cache,
+        refreshes=queue,
+        providers=[provider],
+        push_enabled=False,
+        worker_enabled=False,
+    )
+    await supervisor.start()
+    try:
+        first = await service.compose(_context(_HOUSEHOLD))
+        assert first == (), "the first read was served the stale screen"
+        assert queue.depth == 1, "and handed the key over"
+        # Wait for the lane to be *inside* the build, not merely to have taken
+        # the key: the window this case intersects against is the refresh's,
+        # and a key off the queue is not yet a refresh in flight.
+        await _drain(row.entered.is_set)
+
+        started = time.perf_counter()
+        served = await service.compose(_context(_HOUSEHOLD))
+        read_window = (started, time.perf_counter())
+
+        assert queue.depth == 0, "a key already being refreshed must not be queued again"
+        assert queue.dropped == 0, "and it was deduplicated, not dropped"
+        assert served == (), "the household was served the stale screen it had"
+
+        row.gate.set()
+        await _drain(lambda: queue.pending == frozenset())
+    finally:
+        row.gate.set()
+        await supervisor.stop()
+
+    assert len(row.windows) == 1, "one build, over one key"
+    assert _overlap(row.windows[0], read_window) > 0.0, (
+        f"the read {read_window} and the refresh {row.windows[0]} did not overlap, "
+        "so 'one refresh' is what a serialised pair would also produce"
+    )
+
+
+async def test_a_refresh_that_raises_leaves_the_stale_screen_and_names_the_lane(
+    fakes: _Fakes,
+) -> None:
+    """A crashed refresh must cost the refresh and nothing else.
+
+    Three things, and the third is the one a `while True` gets wrong: the
+    stale entry survives so the next request is still served, the key is
+    released so the household is not locked out of refreshes for the life of
+    the process, and the failure is logged **with the lane's name**. Without
+    the last, a lane that died leaves an unretrieved task exception CPython
+    reports at GC time, to stderr, with no source in it -- the shape `_guard`
+    exists for, arriving through a loop instead of through a task.
+    """
+    cache = RowCache(clock=lambda: datetime.now(UTC))
+    queue = RefreshQueue()
+    provider, row = _gated_provider()
+    row.failure = ZeroDivisionError("a bug in a provider")
+    row.gate.set()
+    _stale(cache, ())
+    supervisor = _supervisor(
+        fakes,
+        rows=cache,
+        refreshes=queue,
+        providers=[provider],
+        push_enabled=False,
+        worker_enabled=False,
+    )
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="TRACE", serialize=True)
+    try:
+        queue.schedule(_HOUSEHOLD)
+        await supervisor.start()
+        await _drain(lambda: queue.pending == frozenset())
+        assert supervisor.rows_refreshing(), "one bad refresh must not end the lane"
+    finally:
+        logger.remove(sink)
+        await supervisor.stop()
+
+    failure = [line for line in lines if "rows.refresh" in line]
+    assert failure, lines
+    assert "ZeroDivisionError" in failure[0]
+    stale = cache.read_screen(_HOUSEHOLD.id, grace=SCREEN_STALE_GRACE)
+    assert stale.freshness is Freshness.STALE, "the stale entry must still be servable"
+
+
+async def test_the_refresh_lane_is_not_a_source_lane(fakes: _Fakes) -> None:
+    """**A third lane kind must not change what `running_sources()` means.**
+
+    That list is what `/health/ready` reports as `lanes.push`, and it is also
+    the mutation surface for "readiness gates on the lanes": a refresh lane
+    that joined it would put a screen refresh into a load balancer's decision.
+    `tests/integration/test_health.py` is where the status code half is
+    settled, against a reachable database; this is the supervisor's own half.
+    """
+    cache = RowCache(clock=lambda: datetime.now(UTC))
+    supervisor = _supervisor(
+        fakes, rows=cache, refreshes=RefreshQueue(), push_enabled=False, worker_enabled=False
+    )
+    await supervisor.start()
+    await _settle()
+    try:
+        assert supervisor.rows_refreshing() is True
+        assert supervisor.running_sources() == []
+        assert supervisor.crashed_sources() == []
+        assert supervisor.worker_running() is False
+    finally:
+        await supervisor.stop()
+    assert supervisor.rows_refreshing() is False, "stop() takes the refresh lane with it"
+
+
+async def test_no_cache_means_no_refresh_lane(fakes: _Fakes) -> None:
+    """The control for the case above, and the reason the lane is gated on
+    being handed the pair rather than on a setting.
+
+    `usher work` builds a supervisor that serves no screens, so it holds
+    neither cache nor queue and must start no refresh lane -- a lane polling a
+    queue nothing can ever fill is a task and a log line with no reader.
+    """
+    supervisor = _supervisor(fakes)
+    await supervisor.start()
+    await _settle()
+    try:
+        assert supervisor.rows_refreshing() is False
+    finally:
+        await supervisor.stop()

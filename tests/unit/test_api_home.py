@@ -40,7 +40,7 @@ from usher.ports.repository import (
 from usher.ports.rows import RowContext
 from usher.services.home import HomeService
 from usher.services.rows import ROW_PROVIDERS
-from usher.services.rows.cache import RowCache
+from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.services.taste import TasteService
 
 EXTERNAL_ID = "emby-item-9f31a2"
@@ -614,8 +614,15 @@ def test_the_route_resolves_the_cache_the_app_actually_built() -> None:
     """`get_row_cache` off `app.state`, not a fresh one per request -- a
     request-scoped cache caches nothing, exactly as a request-scoped bus fans
     out to nobody. Asserted through the real `create_app` because the override
-    in every other case here would hide it."""
+    in every other case here would hide it.
+
+    **And the same for the stale-key queue**, where the consequence is sharper:
+    a request-scoped `RefreshQueue` deduplicates nothing and is drained by
+    nobody, so PRD 06's "served stale while refreshing" would degrade to
+    "served stale" -- silently, because the request still gets a screen.
+    """
     app = _app(Library().context())
 
     assert isinstance(app.state.row_cache, RowCache)
-    assert get_home_service(app.state.row_cache) is not None
+    assert isinstance(app.state.row_refreshes, RefreshQueue)
+    assert get_home_service(app.state.row_cache, app.state.row_refreshes) is not None

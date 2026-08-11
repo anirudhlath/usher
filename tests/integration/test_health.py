@@ -90,6 +90,38 @@ async def test_a_process_with_no_lanes_running_is_still_ready(client: AsyncClien
     assert body["lanes"] == {"push": [], "worker": False}
 
 
+async def test_a_third_lane_kind_changes_neither_the_status_code_nor_the_report(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    """**M9 adds a `rows.refresh` lane, and readiness must not notice.**
+
+    The lane is running in this very process -- it is gated on `create_app`
+    building a cache and a queue, not on a setting, so it is up even with
+    `push_enabled=False, worker_enabled=False`. Two mutations are available
+    the moment a third kind exists, and both die here and nowhere else:
+    reporting it inside `ReadinessChecks`, where `all(checks.model_dump()
+    .values())` picks it up automatically and a screen refresh starts deciding
+    whether a load balancer sends traffic; and folding it into
+    `running_sources()`, which is what `lanes.push` is and which would then
+    name something that is not a source.
+
+    It has to be here rather than in `tests/unit/test_api_health.py` for the
+    reason `test_a_process_with_no_lanes_running_is_still_ready` states: that
+    file's app points at an unreachable database and is already 503, so both
+    mutations survive every case in it.
+    """
+    assert app.state.lanes.rows_refreshing() is True, (
+        "the lane is not running, so this case would pass against anything"
+    )
+
+    response = await client.get("/health/ready")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["lanes"] == {"push": [], "worker": False}
+
+
 async def test_openapi_schema_is_served(client: AsyncClient) -> None:
     response = await client.get("/openapi.json")
     assert response.status_code == 200

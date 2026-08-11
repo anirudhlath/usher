@@ -971,8 +971,8 @@ ran); and no hosted provider was touched at all.
 
 | Layer | Lifetime |
 |---|---|
-| Built rows | ✅ Per-row TTL, in-process — 60 s (Continue Watching, Next Up) to 12 h (Seasonal), each row's own |
-| Composed home screen | ✅ 30 s per user, in-process |
+| Built rows | ✅ Per-row TTL, in-process — 60 s (Continue Watching, Next Up) to 12 h (Seasonal), each row's own. **No stale-serve grace**, and see below for why |
+| Composed home screen | ✅ 30 s per user, in-process, **plus a 60 s stale-serve grace — M9** (`SCREEN_STALE_GRACE`). Between 30 s and 90 s the cached screen is still served and a refresh is scheduled; past 90 s it is a hard miss and the request rebuilds |
 | **Neighbour tables** | ⚠️ **Not rebuilt on anything.** This row was false in M6 and is false now; what changed is that half of it is finally *observable* — see below |
 | Curated rows | ✅ **M8** — 5 min per built row, in-process, on `CuratedProvider`'s rows out of `curated_rows`. Not "until regenerated": the artefact is immutable until a generation replaces it, and this number is how long a household keeps seeing last night's shelf after tonight's replaced it, because the job runs in another process |
 | Taste centroid | ⏳ **Recomputed when the household's `max(watch_states.updated_at)` moves** — a fingerprint, not an event |
@@ -989,18 +989,46 @@ never blocks on a slow row.
 > **invalidation does not cross processes**, which is the same change as the
 > cross-process `EventPublisher` and is named with it rather than built.
 >
-> **"Served stale while refreshing" is not implemented in M7 and is M9's.** A
-> background refresh needs a session it did not get from a request: the
-> request's own is committed and closed by `get_session`, and sharing it with a
-> task is the `AsyncSession` concurrency hazard [09](09-roadmap.md)'s boundary
-> call 8 refuses one layer up — with the same "usually works" signature. Its
-> own session is a connection outside the request pool's accounting, per stale
-> key, on demand; and `api/lanes.py`'s supervisor is one lane per *source*,
-> enumerable and bounded, where this would be one task per stale key. The
-> payoff is one request per TTL per user, because every other request in the
-> window is already a hit. It lands with `usher.cache.hits`/`.misses`, because
-> a refresh path with no hit/miss metric is a mechanism nobody can see working.
-> **M7 caches and expires.**
+> **"Served stale while refreshing" is built in M9, in neither of the two
+> shapes M7 named as wrong.** Not one task per stale key — unbounded, and in no
+> concurrency table — and not `api/lanes.py`'s per-source granularity, which is
+> bounded on the wrong axis. It is **one `rows.refresh` lane draining one
+> bounded deduplicating queue of stale keys, each refresh on a session of its
+> own through `composition.unit_of_work`, drop-on-full**. M7's reason for
+> deferring stands and is what shapes it: the request's session is committed
+> and closed by `get_session` when the handler returns, and sharing it with a
+> task is the `AsyncSession` concurrency hazard
+> [ADR-0025](decisions/0025-rows-build-sequentially.md) refuses one layer up,
+> with the same "usually works" signature. The queue therefore carries a frozen
+> `User` and nothing request-scoped. Its bound is `REFRESH_QUEUE_SIZE` = 32 keys
+> with one consumer, quoted in [01](01-architecture.md)'s concurrency table.
+>
+> **Three properties, each of which is a different way to get this wrong.**
+> *The screen never waits on it* — the handover is a **synchronous** callable,
+> so there is nothing for a request to await and the spelling that breaks it
+> does not type-check. *The refresh is bounded* — full means **dropped**, never
+> blocked, which is safe because an entry past `TTL + grace` is a hard miss and
+> the next request rebuilds, i.e. exactly what M7 already paid on every expiry.
+> *How stale is too stale* is `SCREEN_STALE_GRACE`, 60 s, in the table above.
+>
+> **The grace window is gated on there being a refresher.** A composer handed
+> none — `usher home`, whose process ends when the command does — serves nothing
+> stale at all, because a stale screen with nothing behind it to replace it is
+> strictly worse than the miss it avoided and is silent.
+>
+> **A stale serve counts as a `usher.cache.hits` point carrying
+> `freshness="stale"`.** A hit because the request paid no rebuild; labelled
+> because a plain hit hides the one thing the feature trades away. See
+> [10](10-telemetry-and-dashboards.md).
+>
+> **Row TTLs are unaffected, and the consequence is worth stating.** A screen
+> refresh re-proposes, re-selects and re-orders while *reusing* every row whose
+> own TTL is still running, so a screen seconds old can carry a five-minute-old
+> `recently-added` shelf. That is the second layer doing its job — rebuilding
+> every row on every 30 s screen expiry is the cost it exists to avoid — and it
+> is why the row half has no grace of its own: the refresh unit is a screen, and
+> a per-row grace with no per-row refresh behind it would serve stale rows that
+> nothing ever replaces.
 >
 > **Invalidation is driven by the push lane and by demand reads, never by the
 > nightly walk** — the same scale argument [07](07-client-api.md) makes for
