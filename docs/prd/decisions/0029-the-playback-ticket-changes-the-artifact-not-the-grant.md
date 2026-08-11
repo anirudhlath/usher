@@ -137,7 +137,11 @@ token `quote(ticket, safe="") == ticket`.
 measurement that refuted the prediction this ADR was written from. Over
 plaintext lengths 1–599: **192 mint an unpadded token, 200 mint one `=`, 207
 mint two**, so `quote(ticket, safe="")` is a no-op for **32%** of lengths and
-re-encodes `=` to `%3D` for the other 68%. The 176–191 band the 184-character
+re-encodes `=` to `%3D` for the other 68%. Those three tallies are asserted
+over that exact range by
+`test_a_ticket_is_a_legal_path_segment_but_quote_safe_empty_is_not_a_no_op`
+rather than recorded as a one-off — they shipped as narration beside a loop
+that ran a third of the range, and a review caught it. The 176–191 band the 184-character
 sample lands in is one of the unpadded ones; the *same URL on a host one
 character shorter* is 175 characters and mints a padded 312-character token for
 which the no-op fails. What is true at every length is the claim that matters:
