@@ -105,7 +105,32 @@ has a consumer inside the process.
 `min_cards` is the one number that crosses all three and may not differ
 between them -- a prompt asking for four cards under a validator demanding five
 drops every row and reports `row_too_short` -- so it is one parameter, threaded
-from here into `build_prompt`, `_schema` and `validate_curation`.
+from here into `build_prompt`, `_schema` and `validate_curation`. Proposed for
+deletion in review 2026-08-10 and declined; the argument is recorded beside
+`DEFAULT_MIN_CARDS`, which is the paragraph that invites it.
+
+**`_schema` is the one pure function still in this module, and that is a known
+seam in the wrong place rather than an oversight.** It builds an artefact whose
+only real consumer is a provider's guided decoder -- outside the process,
+exactly like the prompt -- so by this module's own argument it belongs beside
+`build_prompt`, where a case could reach it without a household, four fakes, a
+pool service, a taste service and a scripted client. Reviewed 2026-08-10 and
+**not moved**, for two measured reasons rather than for taste:
+
+- **Moving the four wire-key constants with it is a circular import.**
+  `curation_prompt` imports `MAX_REASON_CHARS` from `curation_validate`
+  deliberately (a reason over it costs the whole row, so the writer takes the
+  reader's bound rather than restating it), and `validate_curation` reads
+  `ROWS_KEY`, `TITLE_KEY`, `REASON_KEY` and `ITEM_IDS_KEY` in its own body --
+  so the two modules would import each other. The keys stay declared in the
+  reader, which is the authority on what it reads, and the writer imports them.
+- **`curation._schema` is named by module path in ADR-0028, in
+  `.claude/rules/curation-and-llm.md`, in two `docs/plans/` files and in two
+  test docstrings.** Moving the function without amending all six leaves the
+  stale "verified" fact `prd-maintenance.md` calls worse than none, and the
+  amendment is a wider commit than the seam is worth on a branch that is ready
+  to merge. Recorded here so the next reader inherits the reasoning rather than
+  the question.
 """
 
 import time
@@ -113,7 +138,6 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 from loguru import logger
@@ -121,7 +145,7 @@ from opentelemetry import metrics, trace
 from opentelemetry.trace import Span
 from pydantic import AwareDatetime
 
-from usher.domain.curation import CuratedRow, LLMCall, LLMPurpose
+from usher.domain.curation import CuratedRow, LLMPurpose
 from usher.domain.ids import new_id
 from usher.ports.errors import PortDataMalformed, UsherPortError
 from usher.ports.llm import LLMClient, LLMUsage
@@ -145,6 +169,7 @@ from usher.services.curation_validate import (
     DropReason,
     validate_curation,
 )
+from usher.services.llm_ledger import LLMLedger
 
 _tracer = trace.get_tracer("usher.curation")
 _meter = metrics.get_meter("usher.curation")
@@ -176,6 +201,13 @@ _rows_kept = _meter.create_counter(
 _rows_dropped = _meter.create_counter(
     "usher.curation.dropped", unit="1", description="Curated rows and cards dropped, by reason"
 )
+
+#: What tells a row-unit `DropReason` from a card-unit one, and the reason
+#: `_measure` publishes two roll-ups rather than one. **Derived from the label
+#: rather than held as a second list**, so a sixth reason cannot be added to
+#: the vocabulary and forgotten here -- the comment above already says the
+#: prefix is what carries the unit, and this is that sentence made executable.
+_ROW_UNIT_PREFIX = "row_"
 
 #: How many finished titles the prompt describes. **Deliberately not
 #: `WatchStateRepository.list_recent`'s own default of 20**, for two reasons
@@ -271,33 +303,42 @@ class CurationService:
         self._titles = titles
         self._client = client
         self._rows = rows
-        self._ledger = ledger
-        # `services/` may depend only on `domain/` and `ports/` (ADR-0009) and
-        # a session is neither. One commit per generation, after both writes:
-        # PRD 10's dashboard 5 is `llm_calls JOIN curated_rows USING
-        # (generation_id)`, so a commit between them is a window in which a
-        # screen exists with no cost attributed to it.
-        self._commit = commit
-        # **The model this deployment *asked* for**, which is the only honest
+        # **The ledger rule lives in `services/llm_ledger.py`, not here.** It
+        # used to be spelled three times in this class, which made it a
+        # convention rather than a structure and made deleting one of the three
+        # commits invisible; collapsing those three into a `_settle` fixed that
+        # *within* this service and left the count at two across the codebase,
+        # because `QueryExpansionService` carried a verbatim copy. `LLMLedger`
+        # is the same argument applied once more, and
+        # `tests/unit/test_services_llm_ledger.py` pins that neither service
+        # mints a row of its own.
+        #
+        # `commit` is a callable and not a session because `services/` may
+        # depend only on `domain/` and `ports/` (ADR-0009). One commit per
+        # generation, after both writes: PRD 10's dashboard 5 is `llm_calls
+        # JOIN curated_rows USING (generation_id)`, so a commit between them is
+        # a window in which a screen exists with no cost attributed to it.
+        #
+        # `model` is the model this deployment *asked* for -- the only honest
         # value for `llm_calls.model` when no response came back to read one
-        # from. `LLMUsage.model` -- what actually answered -- wins whenever
-        # there is one. Required rather than defaulted: it is
-        # `settings.llm_model`, the same string the client was built with, and
-        # a default here would be a second value that silently disagrees.
-        self._model = model
-        self._min_cards = min_cards
-        self._now = now
-        # Injected because the latency of a *failed* call is the number this
-        # ledger cannot get from an `LLMUsage` that was never returned, and a
-        # 120-second timeout is the most expensive thing this service can do.
-        # **Not for the reason `OpenAICompatibleClient` injects its own**, which
-        # this comment used to claim: `_ledger_row` prefers `usage.latency_ms`
-        # whenever a usage came back, so the adapter's clock is what PRD 10
-        # plots on every *successful* generation and this one is reached only
-        # on the arm where there is no usage at all. Two different halves of
-        # one column, and each needs its own case
+        # from; `LLMUsage.model`, what actually answered, wins whenever there
+        # is one. `clock` is reached only on the arm where there is no usage at
+        # all, because the ledger prefers `usage.latency_ms` whenever a usage
+        # came back, so the adapter's clock is what PRD 10 plots on every
+        # *successful* generation and this one is the failed-call fallback.
+        # Two different halves of one column, each with its own case
         # (`test_the_latency_is_the_whole_send_and_not_what_was_left_after_it`
         # for the adapter's).
+        self._spend = LLMLedger(
+            ledger=ledger,
+            commit=commit,
+            model=model,
+            purpose=LLMPurpose.CURATION,
+            now=now,
+            clock=clock,
+        )
+        self._min_cards = min_cards
+        self._now = now
         self._clock = clock
 
     async def generate(self, user_id: uuid.UUID) -> CurationReport:
@@ -411,6 +452,25 @@ class CurationService:
                 )
                 raise PortDataMalformed(outcome.error)
 
+            # **The one exception to this module's "record on every path that
+            # attempted a completion", named rather than left to be
+            # discovered.** `replace_for_user` runs *before* `_settle` so that
+            # one commit covers both writes and PRD 10's `llm_calls JOIN
+            # curated_rows USING (generation_id)` never sees a screen with no
+            # cost attributed to it -- and the price of that ordering is that a
+            # rows-write failure here loses the ledger row for a completion
+            # that was already billed.
+            #
+            # Left as-is deliberately, because the exception is close to
+            # unreachable and reordering would not buy what it looks like it
+            # buys. `curated_rows` carries no unique constraint, slugs are
+            # positional (`curated-01`...) so two rows cannot collide, and every
+            # CHECK on the table is already satisfied by `CuratedRow`'s own
+            # validators -- so `RepositoryConflict` has no reachable cause from
+            # a validly constructed row. What remains is a dropped connection
+            # or a statement timeout, and those stop `_settle` committing too:
+            # the ledger lives in the same database as the rows it is the
+            # record of, which PRD 08 already declares a total outage.
             await self._rows.replace_for_user(user_id, outcome.rows)
             await self._settle(generation_id, started, usage=usage, error=None)
             return CurationReport(
@@ -461,106 +521,28 @@ class CurationService:
         usage: LLMUsage | None,
         error: str | None,
     ) -> None:
-        """Close out one attempted completion: write its `llm_calls` row, then
-        commit.
+        """Close out one attempted completion, through the one ledger.
 
         **One function because it is one rule.** *Record on every path that
         attempted a call, and commit what you recorded* holds on all three of
-        `generate`'s exits, and it used to be spelled three times -- which made
-        the rule a convention rather than a structure, and made deleting one of
-        the three commits invisible. It is the *rejected* arm that cannot
-        afford that: the call worked, the money is spent, `replace_for_user`
-        is never reached, and this row is the only record the spend happened at
-        all -- so an uncommitted one is rolled back by `JobWorker`'s own
-        failed-job transaction and the ledger loses exactly the failure
+        `generate`'s exits. It used to be spelled three times here -- which
+        made the rule a convention rather than a structure, and made deleting
+        one of the three commits invisible -- and then twice across the
+        codebase, because `QueryExpansionService` carried a verbatim copy. It
+        is the *rejected* arm that cannot afford either: the call worked, the
+        money is spent, `replace_for_user` is never reached, and that row is
+        the only record the spend happened at all, so an uncommitted one is
+        rolled back by `JobWorker`'s own failed-job transaction and the ledger
+        loses exactly the failure
         [ADR-0028](../../../docs/prd/decisions/0028-the-pool-is-the-contract.md)'s
-        rule 3 exists to make visible. Same `_row` -> `_row` + `_cards` split
-        `curation_validate` made, for the same reason.
+        rule 3 exists to make visible.
 
-        **The clock is read here**, so `elapsed_ms` is a delta from `started`
-        on every path and no caller can hand over an absolute reading. It is
-        the *fallback* latency -- `_ledger_row` prefers whatever the adapter
-        measured whenever an `LLMUsage` came back -- and the path with no usage
-        is the one it exists for, where a 120-second timeout has no other
-        record.
-
-        Not the commit boundary for `curated_rows`: the success path calls
-        `replace_for_user` **before** this, so one commit covers both writes
-        and PRD 10's `llm_calls JOIN curated_rows USING (generation_id)` never
-        sees a screen with no cost attributed to it.
+        Kept as a one-line method rather than inlined at the three call sites
+        for the same reason it was collapsed in the first place: three spellings
+        of `self._spend.settle(...)` is three chances for one to drift in its
+        arguments, and `generation_id` is the argument that would drift.
         """
-        await self._record(
-            self._ledger_row(
-                generation_id,
-                usage=usage,
-                elapsed_ms=_ms(self._clock() - started),
-                error=error,
-            )
-        )
-        await self._commit()
-
-    def _ledger_row(
-        self,
-        generation_id: uuid.UUID,
-        *,
-        usage: LLMUsage | None,
-        elapsed_ms: int,
-        error: str | None,
-    ) -> LLMCall:
-        """One `llm_calls` row.
-
-        **`ok` is derived from `error` rather than passed beside it.** The two
-        must agree -- `LLMCall._ok_and_error_must_agree` and
-        `ck_llm_calls_ok_error_agree` both refuse a disagreement -- so a
-        signature taking both would be one that can be handed a contradiction,
-        on the path least able to afford a `ValidationError`.
-
-        `usage is None` is the upstream-failure path and nothing else: there is
-        no answer to bill, so the tokens are zero, the cost is zero, the model
-        is the one this deployment asked for, and the latency is what this
-        service measured, which for a timeout is the whole of it.
-        """
-        return LLMCall(
-            id=new_id(),
-            at=self._now(),
-            model=usage.model if usage is not None else self._model,
-            purpose=LLMPurpose.CURATION,
-            tokens_in=usage.tokens_in if usage is not None else 0,
-            tokens_out=usage.tokens_out if usage is not None else 0,
-            cost_usd=usage.cost_usd if usage is not None else Decimal(0),
-            latency_ms=usage.latency_ms if usage is not None else elapsed_ms,
-            ok=error is None,
-            error=error,
-            generation_id=generation_id,
-        )
-
-    async def _record(self, call: LLMCall) -> None:
-        """Append to the ledger, and **never change the outcome of the
-        generation by doing so.**
-
-        The reachable failure is a `cost_usd` the column cannot hold, which
-        `PostgresLLMCallRepository` translates to `RepositoryConflict` behind a
-        SAVEPOINT so the caller keeps a usable session. Swallowed rather than
-        raised for three reasons that point the same way: the completion is
-        already paid for, the cause is a configured price rather than anything
-        a retry changes, and raising here would either cost the household the
-        screen it just earned or replace the upstream failure `JobWorker` needs
-        to classify with a repository error it would classify differently.
-
-        `UsherPortError` and not `Exception`: a `ValidationError` from
-        `LLMCall` or a `TypeError` in this module is a bug, and a bug in a
-        service is not an upstream failure.
-        """
-        try:
-            await self._ledger.record(call)
-        except UsherPortError as exc:
-            logger.error(
-                "the cost ledger refused a {purpose} row for generation {generation}; "
-                "spend for this call is unrecorded: {error}",
-                purpose=call.purpose.value,
-                generation=call.generation_id,
-                error=str(exc) or type(exc).__name__,
-            )
+        await self._spend.settle(started, usage=usage, error=error, generation_id=generation_id)
 
     # ----------------------------------------------------------- telemetry
 
@@ -571,18 +553,35 @@ class CurationService:
         run this pair exists for is the one that dropped everything, and a
         service that measured only successes would leave the panel empty
         exactly when an operator goes looking.
+
+        **Two roll-ups, not one, and that is the whole of this method's own
+        rule.** Two of the five `DropReason` members count *rows* and three
+        count *cards*; `curation_validate`'s module docstring, ADR-0028 and
+        `_rows_dropped`'s own comment all say that summing across the whole
+        label is meaningless -- and this method used to publish exactly that
+        sum as `usher.curation.dropped`. A generation losing three cards out of
+        a row it kept and two rows entire reported `5`, a number that is
+        neither five cards nor five rows and answers no question an operator
+        has. The split is derived from the `row_` prefix rather than from a
+        second list, so a sixth reason cannot be added to one and forgotten in
+        the other.
         """
         kept = len(outcome.rows) if isinstance(outcome, CurationKept) else 0
         _rows_kept.add(kept)
         span.set_attribute("usher.curation.rows", kept)
-        total = 0
+        rows_lost = 0
+        cards_lost = 0
         for reason, count in outcome.dropped.items():
             # Zeros included. `add(0)` creates the series, and a reason absent
             # from the export is indistinguishable from a reason nobody counts.
             _rows_dropped.add(count, {"reason": reason.value})
             span.set_attribute(f"usher.curation.dropped.{reason.value}", count)
-            total += count
-        span.set_attribute("usher.curation.dropped", total)
+            if reason.value.startswith(_ROW_UNIT_PREFIX):
+                rows_lost += count
+            else:
+                cards_lost += count
+        span.set_attribute("usher.curation.dropped_rows", rows_lost)
+        span.set_attribute("usher.curation.dropped_cards", cards_lost)
 
 
 def _schema(pool_size: int, *, min_cards: int) -> dict[str, Any]:
@@ -674,11 +673,6 @@ def _schema(pool_size: int, *, min_cards: int) -> dict[str, Any]:
             }
         },
     }
-
-
-def _ms(seconds: float) -> int:
-    """`latency_ms`, which is `ge=0` on the model and `>= 0` in the column."""
-    return max(0, int(seconds * 1000))
 
 
 __all__ = [

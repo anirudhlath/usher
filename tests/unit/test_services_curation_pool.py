@@ -73,7 +73,7 @@ from usher.domain.taste import Centroid
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.ports.repository import TitleRepository
-from usher.services.curation_pool import DEFAULT_POOL_SIZE, CandidatePoolService
+from usher.services.curation_pool import CandidatePoolService
 from usher.services.taste import TasteService
 
 NOW = datetime(2026, 8, 6, 3, 0, tzinfo=UTC)
@@ -90,6 +90,19 @@ _DIMENSION = 384
 # configuration 2 -- so a case that wants one has to seed at least this many
 # engaged, embedded titles and a case that wants none must stay under it.
 _MIN_TITLES = 5
+
+#: The `size` every case that is not about the cap is built with.
+#:
+#: **Deliberately not 200**, and that is the point of the number rather than an
+#: accident of it. `curation_pool.DEFAULT_POOL_SIZE` was the production default
+#: written down twice and is deleted (see
+#: `test_the_measured_two_hundred_is_declared_once_and_read_once`), so a
+#: fixture that restated `200` would put the copy straight back -- in the one
+#: file whose own docstring names this fixture as a place the number had
+#: already leaked to. What a case that is not about the cap needs is "larger
+#: than anything seeded here", which is what this says and what 200 only
+#: happened to be. The two cases that *are* about the cap pass their own.
+_UNCAPPED = 50
 
 
 def _pole(lane: int) -> list[float]:
@@ -234,7 +247,7 @@ class _Household:
         self.titles.watch_states.append(FakeWatchRow(user_id, title.id, None, True))
 
     def service(
-        self, *, embedder: FakeEmbedder | None, size: int = DEFAULT_POOL_SIZE
+        self, *, embedder: FakeEmbedder | None, size: int = _UNCAPPED
     ) -> CandidatePoolService:
         return CandidatePoolService(
             titles=self.titles,
@@ -654,6 +667,65 @@ async def test_the_re_rank_orders_by_proximity_rather_than_by_a_threshold() -> N
     assert candidates == [nearest.id, middle.id, farthest.id]
 
 
+async def test_the_re_rank_writes_the_ranked_members_into_the_positions_it_read_them_from() -> None:
+    """**Every other re-rank case in this file asserts a permutation that is
+    its own inverse, and that makes the two halves of the write unobservable.**
+
+    `_reranked` walks `pool` in order to collect the positions the comparable
+    members occupy, sorts a copy of that list by proximity, and writes the
+    *sorted* members into the *ascending* positions. Swap the two lists over --
+    write the ascending members into the sorted positions -- and the answer is
+    the inverse permutation, which for a swap of two candidates is the same
+    list. Measured 2026-08-10: with the pairing reversed, all 20 cases in this
+    file passed, because `[bottom, middle, top]` and `[nearest, middle,
+    farthest]` are each a transposition and a transposition is an involution.
+
+    So the fixture's angles are chosen to make the answer a **3-cycle**: the
+    base order is `top, middle, bottom` and the centroid orders them `middle,
+    bottom, top`, whose inverse is `bottom, top, middle`. That premise is
+    asserted rather than described, because it is the whole reason this case
+    exists and a later fixture edit that flattened it back to a swap would
+    leave the case passing and observing nothing.
+
+    Same family as the entries in `.claude/rules/testing-discipline.md` about a
+    fixture whose shape is the identity element of the operation under test --
+    a clock starting at zero, an insertion order that is already the sort
+    order. Here the identity element is the *shape of the permutation* rather
+    than a value in it.
+    """
+    household = await _household_with_a_centroid()
+    _, quarter = planted_pair(math.pi / 4, dimension=_DIMENSION)
+    _, eighth = planted_pair(math.pi / 8, dimension=_DIMENSION)
+    # Base order is votes-descending, and the centroid rotates it by one:
+    # the *middle* of the base order is nearest, and the top of it is farthest.
+    top = await household.title("Top, And Farthest", vote_count=900, owned=True, vector=_pole(1))
+    middle = await household.title("Middle, And Nearest", vote_count=500, owned=True, vector=eighth)
+    bottom = await household.title("Bottom, And Second", vote_count=100, owned=True, vector=quarter)
+    centroid = await _centroid_of(household)
+    assert centroid is not None, "the premise: this household has a centroid"
+    similarities = [
+        _cos(centroid.vector, vector)
+        for vector in await _stored_vectors(household, middle, bottom, top)
+    ]
+    assert similarities[0] > similarities[1] > similarities[2], (
+        "the premise: the centroid orders them middle, bottom, top"
+    )
+
+    base = [top.id, middle.id, bottom.id]
+    expected = [middle.id, bottom.id, top.id]
+    permutation = [base.index(one) for one in expected]
+    inverse = [permutation.index(index) for index in range(len(base))]
+    assert [base[index] for index in inverse] != expected, (
+        "the premise: the expected order must not be its own inverse, or this "
+        "case cannot tell the write positions from the read positions"
+    )
+
+    pool = await household.service(embedder=FakeEmbedder()).for_user(USER)
+    candidates = [one.id for one in pool if one.id in set(base)]
+
+    assert candidates == expected
+
+
 # --- the pool's own properties, in every configuration --------------------
 
 
@@ -950,9 +1022,21 @@ def test_the_measured_two_hundred_is_declared_once_and_read_once() -> None:
     default on the port or on either implementation, which is
     `DERIVED_COLUMNS`' and `_PROVIDER_ID_CONSTRAINTS`' shape: one definition,
     no copies. Asserting that N literals are equal is a check that runs
-    *after* the drift; deleting them makes the drift unspellable. What is left
-    is two -- the constant and the setting's default -- and only that pair can
-    still disagree, so only that pair needs an assertion.
+    *after* the drift; deleting them makes the drift unspellable.
+
+    **And then the same argument was applied to the pair that was left**, on
+    2026-08-10. `curation_pool.DEFAULT_POOL_SIZE` was a constant equal to
+    `Settings.curation_pool_size`'s default -- exactly what `HISTORY_SIZE`'s
+    own comment one module over refuses, *"a constant equal to a default is a
+    constant no case can prove is read"*. Nothing in `src/` read it:
+    `composition.build_pipeline` passes the setting on the only construction
+    path there is, so the constant's only readers were this file's fixture and
+    the two assertions above, which is a copy kept alive by the check written
+    to watch it. `size` is a required argument now and `Settings` is the single
+    definition, so the drift this case used to check for is unspellable rather
+    than merely observed. **Not by importing `usher.config` into `services/`**,
+    which ADR-0009 forbids and which would be a different fix to a different
+    problem -- by removing the duplicate.
 
     The number is not decorative: ADR-0028's three handle arms all ran against
     a 200-film pool, and the shipped prompt costs ~20.4 tokens a candidate at
@@ -966,9 +1050,12 @@ def test_the_measured_two_hundred_is_declared_once_and_read_once() -> None:
     default is 200".
     """
     limit = inspect.signature(TitleRepository.list_unwatched_candidates).parameters["limit"]
+    size = inspect.signature(CandidatePoolService).parameters["size"]
 
-    assert DEFAULT_POOL_SIZE == 200
-    assert Settings.model_fields["curation_pool_size"].default == DEFAULT_POOL_SIZE
+    assert Settings.model_fields["curation_pool_size"].default == 200
+    assert size.default is inspect.Parameter.empty, (
+        "the pool size is the setting's, so this service may not carry a second default"
+    )
     assert limit.default is inspect.Parameter.empty, (
         "the port must not carry a curation-policy default"
     )

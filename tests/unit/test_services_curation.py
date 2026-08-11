@@ -1334,11 +1334,57 @@ async def test_the_span_carries_what_an_operator_groups_by(
     assert span.attributes is not None
     assert span.attributes["usher.curation.pool"] == len(pool)
     assert span.attributes["usher.curation.rows"] == 1
-    assert span.attributes["usher.curation.dropped"] == 1
     assert span.attributes[f"usher.curation.dropped.{DropReason.NOT_IN_POOL.value}"] == 1
     body = " ".join(str(value) for value in span.attributes.values())
     assert "Quiet Thrillers" not in body
     assert pool[0].name not in body
+
+
+async def test_the_span_totals_dropped_rows_and_dropped_cards_separately(
+    span_exporter: InMemorySpanExporter,
+) -> None:
+    """Two of the five `DropReason` members count **rows** and three count
+    **cards**, and this module says so three times -- `curation_validate`'s
+    module docstring, ADR-0028, and the `_rows_dropped` counter's own comment
+    (*"summing across the label is meaningless; the `row_` prefix says so"*).
+
+    The span published one `usher.curation.dropped` scalar that added them
+    anyway, and **the case above could not see it**: its fixture drops exactly
+    one card, so a sum of one unit is indistinguishable from a correct total of
+    either. Same shape as the `NULLS LAST`/`available` findings in
+    `.claude/rules/testing-discipline.md` -- a fixture holding one kind of
+    thing cannot tell a mixed total apart from a pure one.
+
+    This fixture drops one of *each* unit, which is the only arrangement where
+    the distinction is observable.
+    """
+    household = _Household()
+    pool = await _candidates(household)
+    client = FakeLLMClient.returning(
+        _payload(
+            # Survives at exactly `min_cards` after one card is refused, so it
+            # contributes a *card* drop and no row drop.
+            _row("Kept After A Refusal", [*_five(), len(pool) + 1]),
+            # Two cards against a floor of five: a *row* drop, and its cards
+            # are not counted individually.
+            _row("Too Short To Keep", [1, 2]),
+        )
+    )
+
+    await household.service(client).generate(USER)
+
+    span = next(
+        one for one in span_exporter.get_finished_spans() if one.name == "curation.generate"
+    )
+    assert span.attributes is not None
+    # The premise: this generation really did lose one of each unit, so a
+    # single combined scalar would read 2 and agree with neither.
+    assert span.attributes[f"usher.curation.dropped.{DropReason.NOT_IN_POOL.value}"] == 1
+    assert span.attributes[f"usher.curation.dropped.{DropReason.ROW_TOO_SHORT.value}"] == 1
+
+    assert span.attributes["usher.curation.dropped_cards"] == 1
+    assert span.attributes["usher.curation.dropped_rows"] == 1
+    assert "usher.curation.dropped" not in span.attributes
 
 
 @pytest.mark.parametrize(

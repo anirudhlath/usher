@@ -36,7 +36,10 @@ two-port read behind the history, `HISTORY_SIZE` as the `limit` of that read,
 guarantee that no identifier survives the whole assembly.
 """
 
+import ast
+import inspect
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -408,3 +411,49 @@ def test_the_prompt_shows_the_example_object_the_schema_asks_for() -> None:
         index for index, line in enumerate(lines) if line.startswith(f"{len(pool)}. ")
     ]
     assert last_candidate and max(last_candidate) < shapes[0], "context first, rules last"
+
+
+# --- the collapse, which defends two prompts --------------------------------
+
+
+def test_one_whitespace_collapse_defends_both_prompts() -> None:
+    """The structural half of *"every run of whitespace collapsed to one
+    space"*, and the reason it is structural.
+
+    `curation_prompt` and `query_expansion` are the two modules in this project
+    that render third-party text into a prompt -- a media server's or TMDb's
+    `titles.name` here, a viewer's typed query there -- and both shipped the
+    same body under two names (`_one_line`, `_sanitise`), each carrying its own
+    copy of the same measured argument.
+
+    **Two copies of a defence is the defence's own failure mode**, not a
+    tidiness complaint. The measurement in
+    `.claude/rules/testing-discipline.md` is that the narrower spelling
+    `replace("\\n", " ")` survives a `\\r\\n` case, because `str.splitlines()`
+    breaks on `\\r` too -- so narrowing *one* of the two copies leaves one
+    prompt still protected and one open, and every case in this file goes on
+    passing while a search box forges a rule the model reads as ours. One
+    definition makes that edit unspellable.
+
+    An `ast` walk over the *shape* rather than a scan for either name, for
+    `test_no_service_mints_its_own_ledger_row`'s reason one module over: both
+    modules argue about the collapse at length in prose, and only a function
+    whose body really is the collapse counts.
+    """
+    import usher.services.curation_prompt as prompt_module
+    import usher.services.query_expansion as expansion_module
+
+    collapses: list[str] = []
+    for module in (prompt_module, expansion_module):
+        source = Path(inspect.getsourcefile(module) or "").read_text()
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            argument = node.args.args[0].arg if node.args.args else None
+            if argument and ast.unparse(node.body[-1]) == f"return ' '.join({argument}.split())":
+                collapses.append(f"{module.__name__}.{node.name}")
+
+    assert collapses == ["usher.services.curation_prompt.one_line"], (
+        "the whitespace collapse is prompt-injection defence for two prompts, "
+        "so it is one function with one measured argument behind it"
+    )

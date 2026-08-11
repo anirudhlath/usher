@@ -10,12 +10,15 @@ and tests/fixtures/bulk/README.md.
 """
 
 import zipfile
+from collections import Counter
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
 import pytest
 
 from usher.adapters.bulk.movielens import (
+    _TAGS_MEMBER,
     MOVIELENS_ATTRIBUTION,
     MovieLensGenomeDataset,
     _imdb_id,
@@ -377,6 +380,60 @@ async def test_the_tag_vocabulary_is_read_from_the_member_the_width_check_alread
     )
 
 
+def _counted_member_reads(dataset: MovieLensGenomeDataset) -> Counter[str]:
+    """How many times each archive member is opened, counted on the way past.
+
+    Reaches through `_file` deliberately: the claim is about *work*, and the
+    only observable this adapter has for work is which members it asks the
+    cached archive for. Counting decompressions any further down would be
+    counting `zipfile`'s behaviour instead of this class's.
+    """
+    reads: Counter[str] = Counter()
+    original = dataset._file.member_lines
+
+    def counted(member: str, *, skip: int = 0) -> Iterator[str]:
+        reads[member] += 1
+        return original(member, skip=skip)
+
+    dataset._file.member_lines = counted  # type: ignore[method-assign]
+    return reads
+
+
+async def test_the_tag_member_is_parsed_once_however_many_doors_it_is_read_through(
+    tmp_path: Path,
+) -> None:
+    """One parse of `genome-tags.csv` per dataset per revision, across **both**
+    readers of it.
+
+    `_batches` needs the vocabulary's *width* and its contiguity guarantee and
+    throws the names away; `tag_vocabulary` needs the names. Both went through
+    `_vocabulary`, which is what makes a gapped release refuse identically
+    whichever door it is read through -- and a bootstrap calls both, so the
+    18,103-byte member was inflated twice and 1,128 `GenomeTag` objects were
+    built and sorted a second time to be measured with `len()` and discarded.
+
+    **The premise is the half that matters**, because `reads == 1` is also what
+    a run that never reached one of the two doors produces. Both artefacts are
+    asserted: the vocabulary came back with its names, and the vectors came
+    back the width the vocabulary declares.
+    """
+    cache = _default(tmp_path)
+    async with httpx.AsyncClient(transport=_local(cache)) as client:
+        dataset = _dataset(client, cache)
+        reads = _counted_member_reads(dataset)
+        vocabulary = await dataset.tag_vocabulary('"fixture"')
+        drained = dataset.batches(revision='"fixture"')
+        rows = [row async for batch in drained for row in batch.rows]
+
+    assert [tag.tag for tag in vocabulary] == [
+        "a synthetic tag",
+        "another synthetic tag",
+        "a third",
+    ]
+    assert [len(row.relevance) for row in rows] == [3, 3]
+    assert reads[_TAGS_MEMBER] == 1, "the tag member is parsed once, not once per reader"
+
+
 async def test_the_tag_vocabulary_is_ordered_by_tag_id_not_by_file_order(
     tmp_path: Path,
 ) -> None:
@@ -477,6 +534,54 @@ async def test_a_crlf_bodied_member_stores_no_carriage_return_in_a_tag_name(
         GenomeTag(tag_id=2, tag="another synthetic tag"),
         GenomeTag(tag_id=3, tag="a third"),
     )
+
+
+async def test_a_second_release_is_read_again_rather_than_answered_from_the_first(
+    tmp_path: Path,
+) -> None:
+    """The memo behind the case above is keyed on the **revision**, and this is
+    the case that makes the key more than decoration.
+
+    `tag_vocabulary` takes a revision rather than resolving one precisely
+    because `genome_tags.genome_revision` and `genome_scores.genome_revision`
+    must come from a single resolution -- two `HEAD`s straddling an upstream
+    re-upload would stamp release B's vectors with release A's words. A memo
+    that answered across releases would put that mislabelling back, from a
+    cache, with no request to notice it in: the same instance would hand out
+    release A's vocabulary under release B's revision **permanently**, which is
+    the exact failure `ensure_local`'s two separate stamp files exist to make
+    impossible one layer down.
+
+    Two archives, two ETags, one dataset. The second release renames lane 1,
+    which is what a vocabulary change looks like and is the thing that ends up
+    in `genome_tags.tag`.
+    """
+    renamed = "\n".join(["tagId,tag", "1,a renamed tag", "2,another synthetic tag", "3,a third"])
+    releases = [
+        (_archive(tmp_path / "one", links=_LINKS, genome_tags=_TAGS, genome_scores=_SCORES), 1),
+        (_archive(tmp_path / "two", links=_LINKS, genome_tags=renamed, genome_scores=_SCORES), 2),
+    ]
+    served = [releases[0]]
+    cache = tmp_path / "empty"
+    cache.mkdir()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        directory, release = served[0]
+        name = str(request.url).rsplit("/", 1)[-1]
+        return httpx.Response(
+            200,
+            content=(directory / name).read_bytes(),
+            headers={"etag": f'"release-{release}"'},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        dataset = _dataset(client, cache)
+        before = await dataset.tag_vocabulary('"release-1"')
+        served[0] = releases[1]
+        after = await dataset.tag_vocabulary('"release-2"')
+
+    assert before[0].tag == "a synthetic tag", "the premise: the first release names lane 1"
+    assert after[0].tag == "a renamed tag"
 
 
 async def test_the_tag_vocabulary_fetches_the_archive_when_it_is_not_already_cached(

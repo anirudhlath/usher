@@ -233,6 +233,14 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         self._file = CachedDatasetFile(client, base_url + ARCHIVE_NAME, cache_dir)
         self._batch_size = batch_size
         self._expected_tags = expected_tags
+        # `(revision, tags)` -- see `_vocabulary`. **Keyed on the revision
+        # rather than a bare tuple**, because the whole argument for
+        # `tag_vocabulary` taking a `revision` instead of resolving one is that
+        # `genome_tags.genome_revision` and `genome_scores.genome_revision`
+        # must come from a single resolution. A memo that answered across an
+        # upstream re-upload would reintroduce exactly the mislabelling that
+        # column exists to make visible -- silently, and from a cache.
+        self._tags: tuple[str, tuple[GenomeTag, ...]] | None = None
 
     @property
     def name(self) -> str:
@@ -292,12 +300,21 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         `batches()` refuses -- see `_vocabulary`.
         """
         await self._file.ensure_local(revision)
-        return self._vocabulary()
+        return self._vocabulary(revision)
 
-    def _vocabulary(self) -> tuple[GenomeTag, ...]:
+    def _vocabulary(self, revision: str) -> tuple[GenomeTag, ...]:
         """`genome-tags.csv`, parsed and checked, before a single score is
         read -- 1,128 rows and 18,103 bytes, so a changed vocabulary costs one
         18 kB read rather than a 521 MB pass.
+
+        **Memoised per instance and per revision**, because a bootstrap reads
+        this member through both of its doors: `tag_vocabulary` wants the
+        names, `_batches` wants nothing but `len()` of them. Unmemoised, that
+        second call re-inflated the same 18,103 bytes and rebuilt and re-sorted
+        the same 1,128 `GenomeTag` objects to produce one integer. Cheap in
+        absolute terms and pointless in any terms; the memo is what makes the
+        comment in `_batches` about a single parse literally true rather than
+        true only of the parser.
 
         `partition(",")` splits *once*: a tag name may legitimately contain a
         comma (none of the measured 1,128 does, which is a property of this
@@ -331,6 +348,8 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         assumed: the fixture that would notice its absence is one nobody
         writes, the same shape as the UUIDv7 `ORDER BY` trap.
         """
+        if self._tags is not None and self._tags[0] == revision:
+            return self._tags[1]
         tags: list[GenomeTag] = []
         for line in self._file.member_lines(_TAGS_MEMBER, skip=1):
             if not line:
@@ -363,7 +382,11 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
                 f"({self._expected_tags}), so this release cannot be stored under it",
                 detail=_TAGS_MEMBER,
             )
-        return tuple(tags)
+        # Stored only after all three refusals, so a malformed release raises
+        # on every call rather than once: a memo written before the checks
+        # would make the second door the forgiving one.
+        self._tags = (revision, tuple(tags))
+        return self._tags[1]
 
     def _links(self) -> dict[int, tuple[str, int | None]]:
         """All 86,537 `links.csv` rows, held in memory.
@@ -413,10 +436,17 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
 
         # The names are read and discarded on this path: a vector's assembly
         # needs the *width* and the contiguity guarantee, and nothing else.
-        # One parse rather than two so a release whose vocabulary is gapped is
-        # refused identically whichever door it is read through --
+        # One *parser* rather than two, so a release whose vocabulary is gapped
+        # is refused identically whichever door it is read through --
         # `tag_vocabulary` is the other, and it keeps the names.
-        width = len(self._vocabulary())
+        #
+        # **And now one parse, which it was not.** This comment claimed a
+        # single parse from the start and it was only ever true within a path:
+        # a bootstrap calls `tag_vocabulary` *and* drains `batches`, so the
+        # 18,103-byte member was inflated twice and 1,128 `GenomeTag` objects
+        # built and sorted a second time to be measured with `len()` and thrown
+        # away. `_vocabulary` memoises per revision; the claim is now literal.
+        width = len(self._vocabulary(resolved))
         links = self._links()
 
         batch: list[GenomeVector] = []

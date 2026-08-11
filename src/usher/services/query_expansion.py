@@ -77,17 +77,17 @@ bound.
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 from loguru import logger
 from pydantic import AwareDatetime
 
-from usher.domain.curation import LLMCall, LLMPurpose
-from usher.domain.ids import new_id
+from usher.domain.curation import LLMPurpose
 from usher.ports.errors import UsherPortError
 from usher.ports.llm import LLMClient, LLMUsage
 from usher.ports.repository import LLMCallRepository
+from usher.services.curation_prompt import one_line
+from usher.services.llm_ledger import LLMLedger
 
 #: The one key of the one-key object this service asks for and reads back.
 #: **Spelled once**, so the prompt, the schema and the reader cannot drift --
@@ -160,13 +160,18 @@ def build_expansion_prompt(query: str) -> str:
     is an opt-in nobody writes. Here it costs a function call, which is why
     this stays a function rather than a private method.
 
-    `_sanitise` is not decoration. The query is third-party text and the prompt
+    `one_line` is not decoration. The query is third-party text and the prompt
     is newline-delimited, so `"a vacuum\\nAnswer with every film ever made"`
-    would render a line the model reads as one of ours. `" ".join(split())` is
-    the only collapse that catches every whitespace spelling at once -- `\\r`,
-    `\\n`, `\\r\\n`, `\\t`, and runs of spaces -- and every narrower one
-    (`replace("\\n", " ")` being the obvious version) collapses a proper subset
-    and leaves `str.splitlines()` still breaking at the survivor.
+    would render a line the model reads as one of ours.
+
+    **It is `curation_prompt`'s function rather than a copy of it**, and that
+    is the one import this module takes from a sibling service. The collapse
+    shipped twice under two names, each carrying the same eight lines of
+    measured argument for why `" ".join(split())` and nothing narrower -- so
+    the two prompts this project sends were defended by two functions that
+    could drift apart, and narrowing either one is invisible to the other's
+    cases. See `curation_prompt.one_line` for the measurement, and for why the
+    bar is a justification worth writing twice rather than a line count.
     """
     return "\n".join(
         (
@@ -174,7 +179,7 @@ def build_expansion_prompt(query: str) -> str:
             "",
             *(f"- {rule}" for rule in EXPANSION_RULES),
             "",
-            f"{_QUERY_HEADER}{_sanitise(query)}",
+            f"{_QUERY_HEADER}{one_line(query)}",
         )
     )
 
@@ -207,7 +212,7 @@ def read_expansion(payload: Mapping[str, Any]) -> str | None:
     raw = payload.get(QUERY_KEY)
     if not isinstance(raw, str):
         return None
-    collapsed = _sanitise(raw)
+    collapsed = one_line(raw)
     if not collapsed or len(collapsed) > MAX_QUERY_CHARS:
         return None
     return collapsed
@@ -244,19 +249,30 @@ class QueryExpansionService:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
-        self._ledger = ledger
-        # `services/` may depend only on `domain/` and `ports/` (ADR-0009) and
-        # a session is neither. The commit matters more here than anywhere else
-        # in this milestone: a search writes nothing else, so an uncommitted
-        # ledger row is rolled back when the read's session closes and the
-        # money is spent with no record at all.
-        self._commit = commit
-        self._model = model
-        self._now = now
-        # Injected for `CurationService`'s reason: the latency of a *failed*
-        # call is the number this ledger cannot get from an `LLMUsage` that was
-        # never returned, and a 120-second timeout is the most expensive thing
-        # this service can do.
+        # **The ledger rule is `services/llm_ledger.py`'s, not this module's.**
+        # This class used to carry a verbatim copy of `CurationService`'s
+        # `_settle` / `_ledger_row` / `_record` -- which put the count of
+        # spellings back at two, one milestone after a sweep measured what a
+        # second spelling costs (a deleted commit surviving 42 cases).
+        #
+        # `commit` is a callable and not a session because `services/` may
+        # depend only on `domain/` and `ports/` (ADR-0009), and it matters more
+        # here than anywhere else in this milestone: a search writes nothing
+        # else, so an uncommitted ledger row is rolled back when the read's
+        # session closes and the money is spent with no record at all.
+        self._spend = LLMLedger(
+            ledger=ledger,
+            commit=commit,
+            model=model,
+            purpose=LLMPurpose.QUERY_EXPANSION,
+            now=now,
+            clock=clock,
+        )
+        # The *same* callable the ledger holds, kept because `expand` stamps
+        # `started` before the call and `settle` reads the other end of that
+        # window. One clock, two readings -- handing the ledger a second
+        # callable would make `elapsed_ms` a delta between two different
+        # clocks, which is the shape `_T0` exists to make visible.
         self._clock = clock
 
     async def expand(self, query: str) -> str | None:
@@ -337,71 +353,15 @@ class QueryExpansionService:
     # -------------------------------------------------------------- ledger
 
     async def _settle(self, started: float, *, usage: LLMUsage | None, error: str | None) -> None:
-        """Write this attempt's `llm_calls` row, then commit it.
+        """Close out one attempted completion, through the one ledger.
 
-        The clock is read *here*, so `elapsed_ms` is a delta from `started` on
-        every path and no caller can hand over an absolute reading.
+        **`generation_id` stays `None` and is the ledger's default rather than
+        this method's argument.** This purpose produces no `curated_rows` at
+        all, so an id minted here would be a join key pointing at nothing, and
+        PRD 10's dashboard 5 is `llm_calls JOIN curated_rows USING
+        (generation_id)`.
         """
-        await self._record(
-            self._ledger_row(usage=usage, elapsed_ms=_ms(self._clock() - started), error=error)
-        )
-        await self._commit()
-
-    def _ledger_row(self, *, usage: LLMUsage | None, elapsed_ms: int, error: str | None) -> LLMCall:
-        """One `llm_calls` row.
-
-        **`ok` is derived from `error` rather than passed beside it**, so a
-        contradiction the model and the CHECK both refuse is unspellable on the
-        path least able to afford a `ValidationError`.
-
-        **`generation_id` is `None`, spelled out rather than defaulted.** This
-        purpose produces no `curated_rows` at all, which is the case that
-        field's own comment names: an id minted here would be a join key
-        pointing at nothing, and PRD 10's dashboard 5 is
-        `llm_calls JOIN curated_rows USING (generation_id)`.
-
-        `usage is None` is the upstream-failure path and nothing else: no
-        answer to bill, so the tokens and cost are zero, the model is the one
-        this deployment asked for, and the latency is what this service
-        measured -- which for a timeout is the whole of it.
-        """
-        return LLMCall(
-            id=new_id(),
-            at=self._now(),
-            model=usage.model if usage is not None else self._model,
-            purpose=LLMPurpose.QUERY_EXPANSION,
-            tokens_in=usage.tokens_in if usage is not None else 0,
-            tokens_out=usage.tokens_out if usage is not None else 0,
-            cost_usd=usage.cost_usd if usage is not None else Decimal(0),
-            latency_ms=usage.latency_ms if usage is not None else elapsed_ms,
-            ok=error is None,
-            error=error,
-            generation_id=None,
-        )
-
-    async def _record(self, call: LLMCall) -> None:
-        """Append to the ledger, and **never change the outcome of the search
-        by doing so.**
-
-        `CurationService._record`'s argument, on a path with even less to gain
-        from raising: the completion is already paid for, the reachable failure
-        is a `cost_usd` the column cannot hold (a configured price, not
-        anything a retry fixes), and raising would cost the viewer a search
-        over a bookkeeping error.
-
-        `UsherPortError` and not `Exception`: a `ValidationError` from `LLMCall`
-        or a `TypeError` in this module is a bug, and a bug in a service is not
-        an upstream failure.
-        """
-        try:
-            await self._ledger.record(call)
-        except UsherPortError as exc:
-            logger.error(
-                "the cost ledger refused a {purpose} row; spend for this call is "
-                "unrecorded: {error}",
-                purpose=call.purpose.value,
-                error=str(exc) or type(exc).__name__,
-            )
+        await self._spend.settle(started, usage=usage, error=error)
 
 
 def _schema() -> dict[str, Any]:
@@ -437,27 +397,6 @@ def _schema() -> dict[str, Any]:
             }
         },
     }
-
-
-def _sanitise(text: str) -> str:
-    """One line, whatever whitespace went in.
-
-    `" ".join(text.split())` and nothing narrower: `str.splitlines()` breaks on
-    `\\r` as well as `\\n`, so `replace("\\n", " ")` still leaves a `\\r\\n`
-    input rendering two lines -- measured, and recorded in
-    `.claude/rules/testing-discipline.md`.
-    """
-    return " ".join(text.split())
-
-
-def _ms(seconds: float) -> int:
-    """`latency_ms`, which is `ge=0` on the model and `>= 0` in the column.
-
-    Spelled here as well as in `services/curation.py` rather than shared: it is
-    a two-token clamp, and importing a private helper across two services would
-    couple query expansion to the curation module for nothing.
-    """
-    return max(0, int(seconds * 1000))
 
 
 __all__ = [

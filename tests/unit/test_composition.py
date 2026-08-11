@@ -19,6 +19,7 @@ import os
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, cast
 
 import pytest
@@ -52,6 +53,7 @@ from usher.composition import (
     metadata_provider,
 )
 from usher.config import Settings
+from usher.domain.curation import LLMPurpose
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobStatus
@@ -473,6 +475,58 @@ async def test_a_configured_llm_is_built_and_says_nothing(warnings: io.StringIO)
     assert warnings.getvalue() == ""
 
 
+async def test_a_credentialled_endpoint_with_no_prices_says_the_ledger_will_read_zero(
+    warnings: io.StringIO,
+) -> None:
+    """`llm_price_*_per_mtok` both default to `Decimal(0)`, and no provider
+    reports a cost, so `cost_usd` is computed from those two numbers alone --
+    an operator who never set them gets `0.00000000` on every row, which looks
+    like a measurement and is an absence.
+
+    **The credential is the gate, and it is what keeps this off the shipped
+    deployment.** Zero is the *honest* value for the self-hosted vLLM this
+    milestone was verified against, so warning on price alone would be the
+    thing `test_a_configured_llm_is_built_and_says_nothing` above exists to
+    forbid -- a warning every correctly-configured deployment sees. A hosted
+    provider requires an `llm_api_key` and the local endpoint needs none, so
+    the credential separates the two populations.
+    """
+    built, aclose = await llm_client(
+        _settings(llm_enabled=True, llm_api_key=SecretStr("sk-" + "0" * 44)),
+    )
+    try:
+        assert built is not None
+    finally:
+        await aclose()
+
+    logged = warnings.getvalue()
+    assert logged.count("cost_usd") == 1, f"reported more than once: {logged}"
+    # Never the credential itself, on the one line that exists because a
+    # credential is present.
+    assert "sk-" not in logged
+
+
+async def test_a_credentialled_endpoint_with_prices_set_says_nothing(
+    warnings: io.StringIO,
+) -> None:
+    """The control that makes the case above evidence: without it, a warning
+    fired for every credentialled deployment would pass just as well."""
+    built, aclose = await llm_client(
+        _settings(
+            llm_enabled=True,
+            llm_api_key=SecretStr("sk-" + "0" * 44),
+            llm_price_in_per_mtok=Decimal(3),
+            llm_price_out_per_mtok=Decimal(15),
+        ),
+    )
+    try:
+        assert built is not None
+    finally:
+        await aclose()
+
+    assert warnings.getvalue() == ""
+
+
 def test_a_worker_without_an_llm_client_registers_no_curate_handler() -> None:
     """`CURATE` is guarded on the **client**, exactly as `INDEX` is guarded on
     the embedder, and for the identical reason: `run_once` claims
@@ -875,9 +929,14 @@ async def test_an_expansion_is_billed_to_the_pipelines_own_ledger_and_model() ->
         expander = pipeline.search._expander
         assert expander is not None
         assert expander._client is client
-        assert expander._ledger is pipeline.llm_calls
-        assert expander._commit == session.commit
-        assert expander._model == "wired/asked-1"
+        # Through `_spend`, which is where the three of them live since the
+        # ledger rule became `services/llm_ledger.py`'s rather than each
+        # spender's. The assertion is the same one -- these are still the
+        # objects `build_pipeline` is on the hook for wiring.
+        assert expander._spend._ledger is pipeline.llm_calls
+        assert expander._spend._commit == session.commit
+        assert expander._spend._model == "wired/asked-1"
+        assert expander._spend._purpose is LLMPurpose.QUERY_EXPANSION
     finally:
         await engine.dispose()
 

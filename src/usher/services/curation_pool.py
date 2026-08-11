@@ -93,12 +93,6 @@ from usher.domain.title import Title
 from usher.ports.repository import TitleEmbeddingRepository, TitleRepository
 from usher.services.taste import TasteService
 
-#: What `USHER_CURATION_POOL_SIZE` defaults to, restated here so a caller that
-#: is not the composition root -- `usher curate` against a `Settings` it did
-#: not build, a test -- gets the measured value rather than an invented one.
-#: ADR-0028's three handle arms all ran against a 200-film pool.
-DEFAULT_POOL_SIZE = 200
-
 
 class CandidatePoolService:
     """One household's candidate pool, assembled and ordered.
@@ -116,6 +110,24 @@ class CandidatePoolService:
     implementations -- `usher curate` reports what the pool was built from,
     and a report that recomputed the centroid a second way would be a second
     definition of this household's taste.
+
+    **`size` is required, and this module declares no default for it.** It
+    carried `DEFAULT_POOL_SIZE = 200` until 2026-08-10, which was
+    `USHER_CURATION_POOL_SIZE`'s own default written down a second time --
+    exactly what `curation.HISTORY_SIZE`'s comment refuses one module over:
+    *"a constant equal to a default is a constant no case can prove is read."*
+    Nothing in `src/` read it. `composition.build_pipeline` passes
+    `settings.curation_pool_size` on the only construction path there is, so
+    the constant's readers were a test fixture and the two assertions written
+    to watch it for drift -- and a check that N literals agree is a check that
+    runs *after* the drift, which is the argument that deleted `limit`'s three
+    defaults off `list_unwatched_candidates` one port over.
+
+    The fix is the deletion and **not** a read of `Settings` from here, which
+    ADR-0009 forbids and which would answer a different question anyway: the
+    number is a deployment fact (PRD 08), the composition root is where
+    deployment facts are known, and a service that reached for one would be a
+    second place they could disagree.
     """
 
     def __init__(
@@ -124,7 +136,7 @@ class CandidatePoolService:
         titles: TitleRepository,
         embeddings: TitleEmbeddingRepository,
         taste: TasteService,
-        size: int = DEFAULT_POOL_SIZE,
+        size: int,
     ) -> None:
         self._titles = titles
         self._embeddings = embeddings
@@ -200,9 +212,6 @@ def _reranked(
         # so every path out of here has the same aliasing, which is what stops
         # a caller from mutating the repository's own list on one branch only.
         return list(pool)
-    # The positions the comparable members occupy -- ascending, and the only
-    # indices this function is allowed to write to.
-    slots = [rank for rank, _ in scored]
     # `-similarity` then the base rank: two candidates at the same cosine keep
     # the order the signals that need no model gave them, rather than
     # whichever `sorted` happened to see first. Exact ties are ordinary here,
@@ -219,7 +228,20 @@ def _reranked(
     # `scored` any other way would silently lose the first.
     ordered = sorted(scored, key=lambda entry: (-entry[1], entry[0]))
     reranked = list(pool)
-    for slot, (rank, _) in zip(slots, ordered, strict=True):
+    # **`scored` supplies the positions and `ordered` supplies the members**,
+    # and the two are not interchangeable even though both hold the same pairs.
+    # `scored` is ascending in its first field by construction (it is built by
+    # walking `pool`), so it is the list of indices this function is allowed to
+    # write to; `ordered` is that same list by proximity, and it is what goes
+    # *into* those indices. Reversing the two writes the inverse permutation.
+    #
+    # Measured 2026-08-10, because the difference used to be invisible: with
+    # the pairing reversed, all 20 cases in `test_services_curation_pool.py`
+    # passed, since every one of them asserted a *swap* of two candidates and a
+    # transposition is its own inverse.
+    # `test_the_re_rank_writes_the_ranked_members_into_the_positions_it_read_
+    # them_from` seeds a 3-cycle and is what tells the two apart.
+    for (slot, _), (rank, _) in zip(scored, ordered, strict=True):
         reranked[slot] = pool[rank]
     return reranked
 
@@ -269,4 +291,4 @@ def _cosine(centroid: Sequence[float], vector: Sequence[float] | None) -> float 
     return dot / norms
 
 
-__all__ = ["DEFAULT_POOL_SIZE", "CandidatePoolService"]
+__all__ = ["CandidatePoolService"]

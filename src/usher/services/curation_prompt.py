@@ -50,8 +50,13 @@ a UUID handle costs 3.1x the prompt tokens, 3.0x the output tokens and 3.2x the
 latency, and is the least accurate of the three spellings.
 
 **Nothing third-party on a line of its own.** `titles.name` arrives from a
-media server or from TMDb, so every rendered name goes through `_one_line`.
+media server or from TMDb, so every rendered name goes through `one_line`.
 See `_SEPARATOR`.
+
+`one_line` is public and `query_expansion` imports it, which is the one thing
+this module exports to a sibling service rather than to its caller: a viewer's
+typed query is third-party text going into a prompt for exactly the reason a
+title is, and the two prompts had a copy each. See the function.
 """
 
 import uuid
@@ -207,7 +212,7 @@ def described(title: Title) -> str:
     """`Name (Year)`, on one line. See `_SEPARATOR` for why the collapse
     matters."""
     year = f" ({title.year})" if title.year is not None else ""
-    return f"{_one_line(title.name)}{year}"
+    return f"{one_line(title.name)}{year}"
 
 
 def _genres(title: Title) -> str:
@@ -222,13 +227,40 @@ def _engagement(entry: RecentWatch) -> str:
     return f", watched {entry.play_count} times" if entry.play_count >= 2 else ""
 
 
-def _one_line(value: str) -> str:
+def one_line(value: str) -> str:
     """Every run of whitespace collapsed to one space.
 
     Not cosmetic: `titles.name` is third-party text and a newline in one would
     render a second numbered line into the candidate list -- a handle naming
     something that was never in the pool, which is the one property the pool
     being the contract exists to guarantee.
+
+    `" ".join(value.split())` and nothing narrower. `str.splitlines()` breaks
+    on `\\r` as well as `\\n`, so `replace("\\n", " ")` still leaves a `\\r\\n`
+    input rendering two lines -- measured, and recorded in
+    `.claude/rules/testing-discipline.md`, where the mutant survived a six-arm
+    parametrisation that asserted only the negative *"no line starts with
+    `999.`"*. `split()` collapses every whitespace spelling Python recognises
+    (`\\r`, `\\t`, `U+2028`, runs of spaces); every narrower spelling collapses
+    a proper subset.
+
+    **Public, and shared with `query_expansion`, because this is
+    prompt-injection defence for both prompts this project sends.** It shipped
+    twice under two names (`_sanitise` was the other) with that measured
+    argument spelled out in each -- so narrowing one copy would have left one
+    prompt protected and one open, with every case still green: `titles.name`
+    arrives from a media server or TMDb, a viewer's typed query arrives from a
+    search box, and neither module's cases can see the other's collapse. One
+    definition makes that edit unspellable, which is `llm_ledger`'s argument
+    about *"a rule spelled twice"* arriving at a defence rather than at a rule.
+
+    **The bar for sharing is the measurement, not the line count.** Both copies
+    carried eight lines saying *why* this spelling and not a narrower one, and
+    a justification worth writing twice is a decision worth holding once. A
+    helper with nothing behind it -- the `_ms` clamp both spenders used to
+    carry -- is a different call, and it moved for a different reason (it went
+    to `llm_ledger` with the ledger rule it belongs to, not because two copies
+    of `max(0, int(x * 1000))` could disagree).
     """
     return " ".join(value.split())
 
@@ -241,4 +273,5 @@ __all__ = [
     "described",
     "history_lines",
     "instructions",
+    "one_line",
 ]

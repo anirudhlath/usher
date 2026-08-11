@@ -232,6 +232,26 @@ ITEM_IDS_KEY = "item_ids"
 #: copy on `Settings` would be a fourth place for the three to disagree. Adding
 #: it owes a reader **and** an `.env.example` line in the same commit, because
 #: `test_deployment_config.py` checks completeness both ways.
+#:
+#: ⚠️ **That sentence reads like an argument for deleting the parameter, and it
+#: is not one.** Proposed in review 2026-08-10 and declined, with the reason
+#: recorded here because this is the paragraph that invites it: make the three
+#: modules read this constant directly and the *consistency* looks structural,
+#: but what actually disappears is the only way any case can prove they read
+#: what they were handed. With `min_cards` threaded,
+#: `test_the_schema_names_the_keys_the_validator_reads` runs at **7** as well
+#: as at 5, and `test_the_prompt_asks_for_the_minimum_the_validator_enforces`
+#: sends a six-card row under a floor of 7 — which is what kills a service that
+#: renders the number into the prompt and then lets this function fall back to
+#: its own default. Delete the parameter and that mutant becomes *equivalent*:
+#: `validate_curation(min_cards=DEFAULT_MIN_CARDS)` and `validate_curation()`
+#: are the same call, and every assertion left can only ever say `5`. That is
+#: `HISTORY_SIZE`'s own trap — *"a constant equal to a default is a constant no
+#: case can prove is read"* — arriving from the other side, and it is a
+#: different shape from `DEFAULT_POOL_SIZE`, which was deleted the same day
+#: because it was a **second definition** of a number `Settings` already
+#: declared. There is no second definition here; there is one, and a seam that
+#: makes its journey observable.
 DEFAULT_MIN_CARDS = 5
 
 #: See the module docstring's last paragraph. Inclusive bounds.

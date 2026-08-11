@@ -886,6 +886,41 @@ async def llm_client(
             logger.warning("no LLM configured; curate jobs will not be claimed")
         return None, nothing
 
+    if (
+        report
+        and settings.llm_api_key is not None
+        and not settings.llm_price_in_per_mtok
+        and not settings.llm_price_out_per_mtok
+    ):
+        # **Both prices default to zero, so `cost_usd` reads `0.00000000` for
+        # an operator who never set them** -- a number that looks like a
+        # measurement and is an absence. For the local vLLM this milestone was
+        # verified against, zero *is* the honest value; on a paid endpoint it
+        # is spend billing invisibly, and PRD 10's spend dashboard is flat in
+        # both cases.
+        #
+        # **Gated on the credential, and that gate is the whole design of this
+        # warning.** `test_a_configured_llm_is_built_and_says_nothing` states
+        # the rule it would otherwise break: *a warning every
+        # correctly-configured deployment sees is a warning nobody reads*, and
+        # a self-hosted endpoint with no prices is correctly configured -- it
+        # is the shipped shape of this milestone. An `llm_api_key` is what
+        # separates the two populations: a hosted provider requires one and
+        # the local vLLM this was measured against needs none. So the sentence
+        # only reaches the deployment it is actually about.
+        #
+        # A warning and not a refusal, because zero is legitimate. Here rather
+        # than in a `Settings` validator for the reason the TMDb line above
+        # moved here: this function is where the decision is *made*, and each
+        # of the three composition roots calls it exactly once per *process*
+        # -- which is what keeps a per-process fact out of a per-pass log at
+        # 17,280 lines a day.
+        logger.warning(
+            "an LLM credential is configured and USHER_LLM_PRICE_IN_PER_MTOK and "
+            "USHER_LLM_PRICE_OUT_PER_MTOK are both unset; llm_calls.cost_usd will "
+            "record 0 for every call and PRD 10's spend panel will read flat"
+        )
+
     built = OpenAICompatibleClient(
         model=settings.llm_model,
         base_url=settings.llm_base_url,
