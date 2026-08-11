@@ -124,6 +124,21 @@ class PostgresCollectionSeeder(CollectionSeeder):
             },
         )
 
+    async def force_collection(self, title_id: uuid.UUID, collection_id: uuid.UUID) -> None:
+        """A raw `UPDATE`, which is what makes this a bypass rather than a
+        second call to the port.
+
+        `titles` deliberately carries no
+        `CHECK (collection_id IS NULL OR kind = 'movie')` -- see
+        `db/models/collection.py` -- so this really does store a series with a
+        collection id, which is the row the scoped read has to filter out for
+        itself.
+        """
+        await self._session.execute(
+            text("UPDATE titles SET collection_id = CAST(:collection_id AS uuid) WHERE id = :id"),
+            {"collection_id": collection_id, "id": title_id},
+        )
+
     async def collection_of(self, title_id: uuid.UUID) -> uuid.UUID | None:
         stored = (
             await self._session.execute(
@@ -214,3 +229,42 @@ class TestPostgresCollectionRepository(CollectionRepositoryContract):
 
         listed = await repository.list_owned()
         assert [one for one in listed[0].title_ids] == [earlier, later]
+
+    async def test_the_scoped_reads_member_list_is_ordered_by_release_date(
+        self, repository: PostgresCollectionRepository, seeder: PostgresCollectionSeeder
+    ) -> None:
+        """`get`'s own `array_agg(... ORDER BY ...)`, which is a **second copy**
+        of the ordering rather than a share of `list_owned`'s -- so deleting
+        either leaves the other's case green and this one is what covers this
+        statement.
+
+        The premise is asserted rather than assumed, and it is the one a UUIDv7
+        primary key gives away for free: the films are seeded latest-first, so
+        insertion order, id order and physical order all agree with the wrong
+        answer. A bare `array_agg` promises no order at all, and a franchise
+        page renders in release order or it renders wrong.
+
+        The undated member is the second half. `titles.release_date` and
+        `titles.year` are both nullable -- a skeleton row from the IMDb
+        bootstrap has neither -- and Postgres defaults an ASC sort to NULLS
+        LAST, which is right and is written out anyway, because `NULLS FIRST`
+        opens the franchise with the film nobody knows the date of.
+        """
+        await repository.upsert_many([collection(98_000_036, "An Invented Collection")])
+        collection_id = (await repository.resolve_tmdb_ids([98_000_036]))[98_000_036]
+
+        later = await seeder.movie()
+        earlier = await seeder.movie()
+        undated = await seeder.movie()
+        assert later < earlier < undated, "the fixture must make id order disagree with release"
+        for title_id, release_date in ((later, date(2019, 1, 1)), (earlier, date(2001, 1, 1))):
+            await repository._session.execute(
+                text("UPDATE titles SET release_date = :date WHERE id = CAST(:id AS uuid)"),
+                {"date": release_date, "id": title_id},
+            )
+        for title_id in (later, earlier, undated):
+            await repository.attach_titles([(title_id, collection_id)])
+
+        found = await repository.get(collection_id)
+        assert found is not None
+        assert list(found.title_ids) == [earlier, later, undated]

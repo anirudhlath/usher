@@ -179,8 +179,8 @@ be added if a client turns out to need flexible field selection.
 | `GET /titles/{id}/similar` | Precomputed neighbours with similarity reasons |
 | `GET /series/{id}/seasons` · `GET /seasons/{id}/episodes` | Series hierarchy |
 | `GET /episodes/{id}` | Episode detail |
-| `GET /people/{id}` | Filmography grouped by role |
-| `GET /collections/{id}` | Franchise contents with ownership completeness |
+| `GET /people/{id}` ✅ | Filmography grouped by role |
+| `GET /collections/{id}` ✅ | Franchise contents with ownership completeness |
 
 > **Built in M5: `GET /titles/{id}`, narrowed.** ✅ It carries metadata,
 > `enrichment_state`, `enrichment_error`, `availability` and `watch_state` —
@@ -246,6 +246,80 @@ be added if a client turns out to need flexible field selection.
 > [08](08-operations.md)'s "never fails a request local state can answer" as a
 > structural property rather than a caught exception. `TitleReadService` holds
 > no `SourceAdapter` and a test asserts that on its imports.
+
+> **Built in M9: `GET /people/{id}`.** ✅ A person and their filmography, as
+> **groups**: `cast`, plus one group per crew `job`. The job strings are TMDb's
+> own, recorded rather than normalised — a normalisation map is a second
+> opinion nothing measures — so `role` is a **label to print, never a key to
+> branch on**. Groups are ordered `cast` first then the crew labels
+> alphabetically; within a group, titles are newest first by `year` with the
+> title id breaking a tie and unknown years **last**, which matters because
+> `year` is null on every skeleton row [04](04-catalog-bootstrap.md)'s IMDb
+> import wrote.
+>
+> **A person credited twice on one title in two jobs appears in both groups,
+> and the title appears once per group.** That is the other side of the
+> counting rule [06](06-rows-and-recommendations.md)'s People row states —
+> `RecurringPerson.watched_title_count` counts *distinct titles*, because a
+> person credited twice on one film is not two films watched — and it is
+> written here so nobody reconciles the two into a distinct-title collapse. Two
+> characters in one film is one entry in `cast`; writer *and* director on one
+> film is one entry in each of two groups.
+>
+> **`groups` is absent rather than `[]` when a person has no derived credits**,
+> on this section's standing rule: a client cannot tell an empty list from
+> "not derived yet", and the enriched tier is single-digit thousands of titles
+> out of 1.27M. A **404** for an unknown id, with the generic `not_found` of
+> [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md).
+>
+> **At most 50 credits are read, and that bound is the route's rather than the
+> port's.** There is no cursor: a franchise-sized filmography is not a browse,
+> and the day one is needed it is the same opaque codec `/browse` uses. A
+> response at exactly 50 entries may be truncated, which is why the number is
+> in the operation's description in `/openapi.json`.
+>
+> **Four fields [02](02-data-model.md)'s `Person` sketch carries are absent
+> rather than null**: `imdb_id`, `birth_year`, `death_year` and `biography`
+> live on TMDb's `/person/{id}` — one request per person — and are still
+> unassigned ([09](09-roadmap.md)'s M7 orphan). There is no column for them, so
+> there is nothing to render as null. `sort_name` is absent too: it equals
+> `name` on every row today, and a wire field is a promise.
+
+> **Built in M9: `GET /collections/{id}`.** ✅
+> [06](06-rows-and-recommendations.md)'s franchise signal — *"you own 2 of 4"*
+> — as a resource: `owned_count`, `total_count`, and **every** member in
+> release order with an `owned` flag apiece. A member list narrowed to the
+> owned subset would read "2 of 2", a completeness signal that always reads
+> complete; that is why `OwnedCollection` carries two *lists* rather than two
+> counts, and why the two numbers on the wire are their `len()` over what was
+> actually rendered. A client that counts the cards gets the same answer.
+>
+> **`owned` means an available, title-level media item** — the predicate
+> `/browse` settled, `episode_id IS NULL` **and** `available`, written into
+> both statements rather than implied. Both halves fail in the same direction:
+> a retracted copy on an unmounted drive and an episode-level row each read as
+> owned without them, so the page overstates. A collection holds only movies —
+> `belongs_to_collection` is a field of TMDb's `/movie/{id}` with no `/tv/{id}`
+> counterpart — so a series carrying a collection id is a defect and is not a
+> member here; `titles` carries no CHECK to stop such a row being *stored*, so
+> the read filters for itself rather than trusting the writer.
+>
+> **A franchise the household owns none of is a `200` with `owned_count: 0`**,
+> and only a franchise the catalog does not hold is a `404` (the generic
+> `not_found` of
+> [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)).
+> Collapsing the two would make "you own 0 of 7" unreachable, which is a real
+> answer for a client that followed a link from a film it does own.
+>
+> **This is not the home row's read with a filter.** `list_owned`'s floor of
+> two owned members is a statement about what belongs on a *screen*; a
+> franchise you own one of is a single film with a subtitle. Asking for one by
+> id carries **no floor at all**, because "you own 1 of 4" is the honest answer
+> and it is the one a household that has barely started something most wants.
+>
+> **No cursor, stated as a bound.** TMDb franchises are single-digit to
+> low-double-digit members and the hydration is one statement over all of them;
+> the whole answer is two statements regardless of size.
 
 ### Actions
 

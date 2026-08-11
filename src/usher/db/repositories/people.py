@@ -142,6 +142,20 @@ SELECT count(*) FILTER (WHERE inserted) AS inserted,
 FROM all_rows
 """
 
+# `GET /people/{id}`'s first statement. Columns named rather than `SELECT *`,
+# even though `people` has no derived column and the model's field set is held
+# in exact 1:1 correspondence with the table's by
+# `tests/unit/test_db_models_people.py`: a `*` here would make a column added
+# later arrive at `Person.model_validate` as an unexpected key from a statement
+# nobody edited, which is a failure a long way from its cause.
+#
+# `pk_people` is the driving index and the whole predicate.
+_GET_PERSON = """
+SELECT id, tmdb_id, name, sort_name, known_for_department, created_at, updated_at
+FROM people
+WHERE id = CAST(:person_id AS uuid)
+"""
+
 # Unnests the whole batch rather than looping: a single enriched movie names
 # tens of people and the enriched tier is 2k-10k titles, so a lookup per
 # person is the round-trip-per-item shape batching exists to remove.
@@ -385,6 +399,16 @@ LIMIT :limit
 class PostgresPersonRepository(PersonRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def get(self, person_id: uuid.UUID) -> Person | None:
+        with self._session.no_autoflush:
+            row = (
+                await self._session.execute(text(_GET_PERSON), {"person_id": person_id})
+            ).one_or_none()
+        # `one_or_none`, never `first`: `id` is the primary key, so two rows
+        # here would be a corrupt index rather than a result set to pick from,
+        # and `first` would answer one of them without saying so.
+        return Person.model_validate(dict(row._mapping)) if row is not None else None
 
     async def upsert_many(self, people: Sequence[Person]) -> BulkWriteResult:
         if not people:
