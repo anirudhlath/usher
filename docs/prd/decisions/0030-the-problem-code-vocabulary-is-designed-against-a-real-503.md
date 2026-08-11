@@ -104,7 +104,7 @@ directions, so the two cannot drift apart without a red suite.
 | code | status | emitted by |
 |---|---|---|
 | `not_found` | 404 | `GET /titles/{title_id}`, `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play`, `GET /admin/sources/{source_id}/status`, `DELETE /admin/sources/{source_id}`, and every unrouted path — Starlette's router raises it before any handler runs |
-| `validation_failed` | 422 | every route, through FastAPI's request validation and `api/errors.py`'s stripping handler; `GET /events` raises it directly for a malformed `?titles=` |
+| `validation_failed` | 422 | every route, through FastAPI's request validation and `api/errors.py`'s stripping handler; `GET /events` raises it directly for a malformed `?titles=`, and `GET /search` for a `?mode=semantic` this deployment has no embedding model to serve |
 | `method_not_allowed` | 405 | every route, through Starlette's router |
 | `invalid_cursor` | 400 | `api/cursor.py`, on any cursor that does not match the query it is replayed against. **The one member with no route yet** — see Consequences |
 | `source_unavailable` | 503 | `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play` — **beyond the benchmark; forced by** the first route in Usher that holds a `SourceAdapter` |
@@ -341,6 +341,20 @@ the derivation function is not changed to avoid the question.
   three are forced by the playback routes, which are the routes that produced
   the project's first genuine upstream failure. Ten more members were requested
   by the queued fan-out and none of them survives rules 1 and 2.
+- **The first fan-out route to want an eighth member did not mint one, and the
+  question it raises is recorded rather than answered here.** `GET /search`
+  answers `?mode=semantic` on a deployment with no embedding model, and none of
+  the seven means *"the request is well formed and names a capability this
+  deployment does not have"*. `503 source_unavailable` is wrong twice — nothing
+  failed, and no retry reaches the state — and the route ships
+  `422 validation_failed`, whose axis is the closest true one: the remedy is to
+  change the request. **What that spelling cannot express is the difference
+  between a parameter that is malformed and one that is unserviceable *here*,
+  which is a real distinction for a client with more than one Usher
+  deployment.** The rule above holds — a member is minted by amending this
+  record, not by a route — so this is a candidate for that amendment (a
+  `capability_unavailable`-shaped 422 or 409) and deliberately not a decision
+  taken beside the route that noticed it.
 
 ## Evidence
 

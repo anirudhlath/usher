@@ -36,7 +36,7 @@ be added if a client turns out to need flexible field selection.
 | Endpoint | Returns |
 |---|---|
 | `GET /home` | Ordered, hydrated rows with reasons and display hints |
-| `GET /search?q=&semantic=&limit=` | Unified results across catalog and library |
+| `GET /search?q=&mode=&limit=` | Unified results across catalog and library |
 | `GET /search/suggest?q=` | Type-ahead — the cheap narrow path from [05](05-search-and-similarity.md) |
 | `GET /browse?genre=&year=&sort=&owned=&cursor=` | Faceted paging with facet counts |
 
@@ -119,7 +119,7 @@ be added if a client turns out to need flexible field selection.
 > corrected to name what ships rather than exporting the same measurement
 > twice under a `usher.` prefix.
 
-> ⏳ **`GET /search` and `GET /search/suggest` are M9's.** M6 built everything
+> ✅ **`GET /search` ships; ⏳ `GET /search/suggest` is still M9's.** M6 built everything
 > behind them — `SearchService`, `PostgresSearchIndex`, `PostgresSuggestIndex`,
 > RRF fusion and the ranking blend — and **added no HTTP route**, delivering
 > the whole capability through `usher search` and `usher suggest` on the
@@ -141,6 +141,35 @@ be added if a client turns out to need flexible field selection.
 > ([05](05-search-and-similarity.md), MRR 0.733 → 0.373). A populated field
 > means a completion was bought; an absent one means nothing about spend,
 > which is why the route reports it rather than inferring it.
+
+> ✅ **`GET /search` as shipped**, and the four things a client writes against.
+> **`?mode=`** is the `SearchMode` enum in `/openapi.json` — `full_text` (the
+> default) / `semantic` / `fused`; **`?semantic=` is not accepted at all**,
+> since two vocabularies for one field is worse than the rename and
+> `?semantic=true&mode=full_text` has no agreed answer. The body carries
+> `query`, `requested_mode`, `mode`, `semantic_coverage`, `expanded_query` and
+> `results`; **`expanded_query` is present-and-null** rather than absent, which
+> is deliberately not `GET /titles/{id}`'s absence convention — an absent
+> `images` says *this server has no such capability yet*, a null
+> `expanded_query` says *nothing was substituted on this search*, which is a
+> fact about the request a client acts on every time. **A blank or
+> whitespace-only `q` is `200` with no results and buys no completion** — a
+> search box sends one between keystrokes — and **`?limit=` declares a floor
+> and no ceiling**, because `USHER_SEARCH_RESULT_LIMIT` is the ceiling and
+> spelling it twice is two numbers that agree until somebody moves one.
+> ⚠️ **`?mode=semantic` cannot succeed on an API-only deployment and answers
+> `422 validation_failed`** naming the remedy: `create_app` builds an embedding
+> model only when `USHER_WORKER_ENABLED` is true and does not expose it, so the
+> request scope holds none. `?mode=fused` narrows to full text instead and says
+> so through `requested_mode` ≠ `mode`. Closing that is a **new capability** —
+> expose the lifespan's model, or build a second one per API process at 65 MB
+> and a ~4.8 s cold load — not a change to this route. The 422 is the closest
+> member of [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s
+> closed seven: the request is well formed, names a mode this server cannot
+> process, and the client's remedy is to change it. **No member of that
+> vocabulary means "this deployment lacks a capability"** and this route mints
+> none; if a later one needs to distinguish *malformed* from *unserviceable
+> here*, that is an amendment to ADR-0030.
 
 ### Resources
 

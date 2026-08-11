@@ -18,7 +18,7 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.lanes import LaneSupervisor
-from usher.composition import adapter_factory
+from usher.composition import adapter_factory, build_search_service
 from usher.config import Settings
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
@@ -70,6 +70,7 @@ from usher.services.playback import PlaybackService
 from usher.services.playback_ticket import build_ticket_cipher, mint
 from usher.services.reconcile import ReconcileService
 from usher.services.rows.cache import RefreshQueue, RowCache
+from usher.services.search import SearchService
 from usher.services.sources import SourceService
 from usher.services.taste import TasteService
 from usher.services.titles import TitleReadService
@@ -856,3 +857,52 @@ def get_playback_service(
 
 
 PlaybackServiceDep = Annotated[PlaybackService, Depends(get_playback_service)]
+
+
+# ---------------------------------------------------------------------------
+# Search (M9). `GET /search` -- the first route over the retrieval M6 built and
+# delivered through `usher search` alone.
+# ---------------------------------------------------------------------------
+
+
+def get_search_service(session: SessionDep, settings: SettingsDep) -> SearchService:
+    """PRD 05's read path, request-scoped.
+
+    **Reached through `usher.composition` rather than assembled here**, and
+    that is a contract rather than a preference: contract 7 ("no concrete
+    search, embedding or LLM implementation escapes its package") lists
+    `usher.api` whole among its sources, so this module may not name
+    `PostgresSearchIndex` even though it is a composition root and names
+    `Postgres*` repositories on every other line. `allow_indirect_imports =
+    true` is what sanctions the chain `usher.api.deps -> usher.composition ->
+    usher.adapters.search.postgres` while leaving a direct import BROKEN.
+
+    **Deliberately `build_search_service` and not `build_pipeline`.** The
+    latter constructs the whole ingest graph -- matcher, reconciler,
+    watch-state sync, similarity, ten row providers, the curation pool -- to
+    reach one of its fields, once per request.
+
+    **No embedder, and it is the same call `get_taste_service` and
+    `get_home_service` make.** `create_app`'s lifespan builds a model only
+    when `worker_enabled` and does not put it on `app.state`, so a dependency
+    reaching for one would work in development and 500 in exactly the
+    push-only deployment PRD 08 describes; it is also a once-per-process 65 MB
+    resource this module already argues about for the TMDb token bucket.
+
+    What that costs is visible on the wire rather than hidden, which is the
+    difference from the two routes above: `?mode=semantic` answers a problem
+    document naming the missing capability, and `?mode=fused` is served as
+    full text with `requested_mode` and `mode` disagreeing so a client can say
+    so. Closing it is a new capability (expose the lifespan's model, or build
+    one per API process) rather than a change to this wiring.
+
+    **And no expander**, on stricter terms than the embedder: an expansion is
+    a paid completion in front of an embed, and with no embedder there is no
+    embed for one to sit in front of. `SearchService` buys a completion only
+    inside the `else` of its `embedder is None` branch, so this is not a
+    saving that has to be argued -- there is no reachable call site.
+    """
+    return build_search_service(session, settings)
+
+
+SearchServiceDep = Annotated[SearchService, Depends(get_search_service)]
