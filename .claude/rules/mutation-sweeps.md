@@ -2123,3 +2123,96 @@ is the only thing that kills the fourth row, and it needs its own premise
 (`assert DECLINED_MEDIA_TYPES`) because an empty set is disjoint from
 everything — the same guard the AST scan in this task's first round needed for
 the same reason, one data structure over.
+
+## M9 Task C3 — images re-derived from `raw_payloads` (2026-08-11)
+
+`images_from_payload` in `usher.adapters.tmdb.mapping`, `DerivationResult.
+images`, `DeriveService`'s image write and `usher derive`'s new report line.
+**14 targets and 3 controls**, harness at `/tmp/m9-exec/C3/plants.py`, selection
+`tests/unit` whole (3,254 → 3,255 cases, ~26 s a run). Scoped rather than
+whole-suite for B2's and D4's reason — `tests/integration/test_sse_end_to_end.py`
+is intermittent on this tree and a sweep scored on "did the run fail" cannot
+run against a suite holding a flaky case — and the scope is honest here because
+nothing under `tests/integration/` drives `DeriveService` (grepped) and this
+diff touches no repository, no statement and no migration. Defences: exact
+anchor count asserted before every plant, `compile()` dry run, `md5sum`-verified
+restore after each, `PYTHONDONTWRITEBYTECODE=1` with `__pycache__` swept under
+**both** `src/` and `tests/`, and no second `-q`. Zero BAD-ANCHOR, zero
+BROKEN-MUTATION, zero DID-NOT-RUN.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| `_IMAGES_PER_KIND_LIMIT` 10 → 1000 | KILLED | 1 |
+| the `posters`/`backdrops` arrays mapped to each other's `ImageKind` | KILLED | 3 |
+| the top-level fold marks nothing primary (`is_primary=False` both branches) | KILLED | 6 |
+| the top-level pair never read at all (`_PRIMARY_PATHS` → `()`) | KILLED | 6 |
+| the dedupe deleted — the primaries appended beside the array rows | KILLED | 2 |
+| `_positive_int` → `_non_negative_int` on `width`/`height` | KILLED | 1 |
+| `poster_path`/`backdrop_path` mapped to each other's `ImageKind` | KILLED | 2 |
+| the derivation writes no images (`images_written = 0`) | KILLED | 3 |
+| the image scope taken from the rows rather than the page's titles | KILLED | 1 |
+| `images_written` dropped from `_add`'s accumulation | KILLED | 1 |
+| the `images written` line deleted from `usher derive`'s report | KILLED | 2 |
+| `TmdbMetadataProvider.to_derivation` answers `images=()` | KILLED | 2 |
+| the **fake** provider's per-path fold removed | KILLED (predicted SURVIVED) | 1 |
+| the **within-array** dedupe guard deleted | **SURVIVED, then closed** | 0, then 1 |
+
+**Two predictions were wrong and they went opposite ways, which is the entry's
+whole content.**
+
+**The plan's stated reason for the dedupe is refuted.** It says that without it
+*"the fixture itself produces two rows for one path and the write fails on the
+unique key at run time"*. It does not fail: C2's `replace_for_titles`
+deduplicates last-wins on exactly `(title_id, episode_id, person_id, provider,
+provider_path)` in both implementations, deliberately — its port docstring
+records that *"one derivation pass really does see a payload list a poster
+twice"* and that tolerating it is what avoids `CardinalityViolationError`. So
+the real damage of a missing dedupe is quieter and worse: **emission order
+silently decides `is_primary` and the dimensions.** With the fold removed the
+array's unflagged row and the top-level row both reach the repository, the
+repository keeps the last, and which one that is depends on the order the
+mapper happened to emit them in. The two cases that caught it are
+`test_a_path_named_by_both_the_pair_and_an_array_is_one_row_that_keeps_its_size`
+and — the giveaway — `test_the_dimensions_and_the_language_travel_with_the_entry`,
+because a row promoted from the top-level key alone carries no `width` at all.
+The same plant against the *fake* provider was predicted to survive on the
+argument that `FakeImageRepository` dedupes anyway; it was killed, and by the
+service-level id-stability case, for the identical dimensions reason. **A
+downstream deduplicator does not make an upstream dedupe redundant when the
+duplicates differ in a field**, which is the general form and is why "the write
+would fail" was the wrong justification to carry.
+
+**The within-array guard genuinely survived, and it is a gap rather than an
+equivalence.** `if path is None or path in by_path` also covers a path listed
+twice *inside* the arrays — twice in `posters`, or once in `posters` and once
+in `backdrops`. Nothing seeded that, so deleting it passed all 3,254 cases.
+Applying this file's own test — *which collaborator could falsify the promise
+the guard defends, and is one already injected* — the collaborator is the
+payload and a case costs four lines, so it is coverage rather than an
+equivalent mutant. Closed by
+`test_one_path_listed_twice_in_a_payload_is_one_row_and_keeps_its_first_kind`,
+which asserts the surviving row keeps the **first** sighting's `kind` and
+`width`; re-planted after it landed, the mutation fails **only** that case out
+of 3,255. The behaviour it pins is not cosmetic: a logo also filed under
+`posters` would take the second array's kind and render in a 2:3 slot, and a
+duplicate inside one array consumes a slot of the per-kind cap, costing the
+title a poster it does have.
+
+The three equivalent-mutant controls, measured against every gate step
+separately:
+
+| control | `pytest` (`tests/unit`) | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `_IMAGE_ARRAYS` and `_PRIMARY_PATHS`' definition blocks swapped | PASS (3,254) | PASS | PASS | PASS | PASS (9 kept) |
+| `width=`/`height=` keyword arguments written in the other order | PASS (3,254) | PASS | PASS | PASS | PASS (9 kept) |
+| one sentence of `images_from_payload`'s docstring reworded | PASS (3,254) | PASS | PASS | PASS | PASS (9 kept) |
+
+The first is equivalent because both are module-level tuple literals over
+`ImageKind` with no import-time side effect and neither reads the other; the
+second because both are keyword arguments bound by name to side-effect-free
+`entry.get(...)` reads, which is `_ledger_row`'s precedent; the third because
+nothing in `tests/` scans `usher.adapters.tmdb.mapping`'s source — checked
+rather than assumed, by grepping `getsource|getdoc|__doc__|ast.unparse` across
+the whole suite, which lists `tests/unit/test_ports_metadata.py` (it scans
+`usher.ports.metadata` for surviving 🔶 markers) and no file that reads this
+module.

@@ -627,6 +627,60 @@ async def test_to_result_never_sets_the_enrichment_tier() -> None:
     )
 
 
+async def test_to_derivation_carries_the_artwork_the_fetch_already_paid_for() -> None:
+    """M4's boundary call 2 for the fourth entity, asserted at the seam where
+    a second request would have to be issued.
+
+    `to_derivation` is synchronous and the whole payload is already in hand --
+    `images` is one of the six namespaces `MOVIE_APPEND_TO_RESPONSE` asks for,
+    so the rows come out of the response the enrichment crawl already made.
+    The provider is under a `MockTransport` that counts requests, and the
+    derivation happens **outside** the `async with`, so a `to_derivation` that
+    reached the network could not even open a connection.
+
+    `provider` is `PROVIDER_NAME` rather than a display string, because it is
+    half of the natural key: two providers that both spell a path `/abc.jpg`
+    must not collide onto one row.
+    """
+    server = _Server()
+    provider, http = _provider(server)
+    async with http:
+        payload = await provider.fetch(_MOVIE_REF)
+    before = len(server.requests)
+
+    derivation = provider.to_derivation(payload, _TITLE_ID)
+
+    assert len(server.requests) == before
+    assert {one.provider_path for one in derivation.images} == {
+        "/synthetic-poster.jpg",
+        "/synthetic-backdrop.jpg",
+        "/synthetic-logo.png",
+    }
+    assert all(one.provider == "tmdb" for one in derivation.images)
+    assert all(one.title_id == _TITLE_ID for one in derivation.images)
+
+
+async def test_a_series_derivation_carries_its_primaries_and_no_credits_confusion() -> None:
+    """The per-kind control. `series.json` carries three empty image arrays
+    and a `created_by`, so a derivation that read images out of the same place
+    it reads creators, or that treated an empty array as "no artwork", would
+    leave every series in the catalog with no poster at all -- while the movie
+    case above stayed green."""
+    server = _Server()
+    provider, http = _provider(server)
+    async with http:
+        payload = await provider.fetch(_SERIES_REF)
+
+    derivation = provider.to_derivation(payload, _TITLE_ID)
+
+    assert [one.provider_path for one in derivation.images] == [
+        "/synthetic-series-poster.jpg",
+        "/synthetic-series-backdrop.jpg",
+    ]
+    assert all(one.is_primary for one in derivation.images)
+    assert [one.name for one in derivation.people] != []
+
+
 # -- search ----------------------------------------------------------------
 
 

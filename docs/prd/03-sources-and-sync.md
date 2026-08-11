@@ -801,20 +801,39 @@ a stage described only by what it does reads as one that does everything:
   is worth a paragraph in the PRD: it is a *class* of bug this pipeline keeps
   producing.
 
-### 5. Derive — people, credits and collections, with no second network call
+### 5. Derive — people, credits, collections and artwork, with no second network call
 
-✅ **Shipped in M7**, and it is the stage this section previously described
-only as a promise: *"`Person`, `Credit` and `Collection` are populated by the
-milestone that first reads them"* named no mechanism, no job kind and no
-command. All three now come out of `raw_payloads` — `DeriveService`,
-`JobKind.DERIVE` and its handler, and `usher derive` on the command line.
+✅ **Shipped in M7 and completed in M9**, and it is the stage this section
+previously described only as a promise: *"`Person`, `Credit` and `Collection`
+are populated by the milestone that first reads them"* named no mechanism, no
+job kind and no command. All four now come out of `raw_payloads` —
+`DeriveService`, `JobKind.DERIVE` and its handler, and `usher derive` on the
+command line. **`Image` is M9's addition and it needed no new anything**: the
+same walk, the same page, the same transaction, the same job and the same
+command, so an operator gets artwork references from `usher derive --backfill`
+with no second crawl. `usher derive --backfill` prints an `images written`
+count beside the other four.
 
 **No second network call**, which is [ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)'s
 whole point arriving three milestones after the cache was built, and M4's
-boundary call 2 paying off: the payloads the enrichment crawl already fetched
-carry `credits`, `created_by` and `belongs_to_collection`, so re-deriving is a
-read of a local table. A household that enriched its library last year can
-derive today, offline.
+boundary call 2 paying off in full: the payloads the enrichment crawl already
+fetched carry `credits`, `created_by`, `belongs_to_collection` and `images`, so
+re-deriving is a read of a local table. A household that enriched its library
+last year can derive today, offline. **Artwork is the entity that makes that a
+property rather than a slogan**, because it is the one a reader expects to need
+a request: the derived rows carry a provider *path*, and fetching the bytes is
+the serve-time proxy's job
+([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)) rather than
+this stage's.
+
+⚠️ **Expect a small `images written` against a large cache, and it is the age
+of the cache rather than a defect.** `images` is one of the six
+`append_to_response` namespaces, so only payloads fetched with it derive a
+full set — but `poster_path` and `backdrop_path` are top-level detail fields
+rather than part of that namespace, so **every** cached payload derives the two
+references M9's two artwork consumers actually render. The rest are language
+variants, and a per-kind cap keeps a popular film's hundred posters from
+becoming a hundred rows.
 
 **The join back is the trap, and it is a data-integrity one rather than a
 performance one.** `raw_payloads` has no `title_id` — it is keyed by the

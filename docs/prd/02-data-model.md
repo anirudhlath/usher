@@ -310,8 +310,11 @@ class Image(BaseModel):
 `m09c`.** `usher.domain.image.Image`, `usher.ports.repository.image.
 ImageRepository` and `usher.db.repositories.image.PostgresImageRepository`
 exist and are 1:1 with `ImageRow` by field name
-(`tests/unit/test_domain_image.py`). `GET /images/{id}` itself is still to
-come, and so is the writer that fills the table.
+(`tests/unit/test_domain_image.py`), and **the writer landed with them**:
+`DeriveService` fills the table from `raw_payloads` with no second network
+call, on the same walk as people, credits and collections
+([03](03-sources-and-sync.md) stage 5). `GET /images/{id}` itself is still to
+come.
 
 🔴 **`provider_path`, not `remote_url` — corrected 2026-08-11 and the sketch
 above moved with it.** [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)
@@ -756,12 +759,16 @@ exists — a curated row names three to eight titles, in order — but it is a
 and will neither check nor cascade it. `llm_calls` appears on no line at all:
 it references nothing, by the same argument.
 
-🔶 **`Title 1─* Image` is real everywhere except the writer.** `m09a` gave
-`Image` a table and a SQLAlchemy row and `m09c` gave it a domain model, a port
-and a Postgres repository — `ImageRepository.replace_for_titles` is the write
-and `list_for_title` the read. **Nothing calls the write yet.** The rows are
-re-derived from `raw_payloads` with no second network call
-([09](09-roadmap.md)'s M4 boundary call 2) by the M9 task that fills them.
+✅ **`Title 1─* Image` is real, writer included.** `m09a` gave `Image` a table
+and a SQLAlchemy row, `m09c` gave it a domain model, a port and a Postgres
+repository — `ImageRepository.replace_for_titles` is the write and
+`list_for_title` the read — and `DeriveService` is what calls the write. The
+rows are re-derived from `raw_payloads` with **no second network call**
+([09](09-roadmap.md)'s M4 boundary call 2, now paid in full): a derivation
+mints a fresh `Image.id` per sighting and the upsert on
+`uq_images_owner_provider_path` hands back the id the row was first inserted
+with, so `usher derive` can run nightly without invalidating a client's cached
+artwork.
 
 The diagram line understates the table by one edge, deliberately: `images` can
 hang off an *episode* or a *person* as well as a title (`still` and `profile`

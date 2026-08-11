@@ -42,6 +42,7 @@ from tests.fakes.curated_row_repository import FakeCuratedRowRepository
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
+from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient
@@ -279,6 +280,9 @@ def _pipeline(
         people=people,
         credits=FakeCreditRepository(people, titles),
         collections=FakeCollectionRepository(),
+        # A real fake for the same reason `people` above is one: the worker
+        # lane's `DeriveService` is constructed eagerly and takes this slot.
+        images=FakeImageRepository(),
         adapters=fakes.adapters,
         matcher=matcher,
         ingest=ingest,

@@ -724,7 +724,8 @@ async def _work(settings: Settings, *, once: bool) -> None:
 
 
 async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
-    """Report derivation coverage, or re-derive people and credits inline.
+    """Report derivation coverage, or re-derive people, credits, collections
+    and artwork inline.
 
     **The bare form only reads** -- five counts, no writes -- so it is safe on
     a production box while diagnosing something, which is the same bargain
@@ -782,6 +783,10 @@ async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: 
         print(f"people written: {report.people_written:,}")
         print(f"credits written: {report.credits_written:,}")
         print(f"collections linked: {report.collections_written:,}")
+        # **Expect this to be small against a large cache, and that is not a
+        # defect**: `images` joined `*_APPEND_TO_RESPONSE` in M4, so a payload
+        # cached before then derives only its two top-level primaries.
+        print(f"images written: {report.images_written:,}")
 
 
 async def _index(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:

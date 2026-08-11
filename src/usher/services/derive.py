@@ -1,11 +1,22 @@
-"""PRD 06's people, credits and collections, out of the cache ADR-0016 kept.
+"""People, credits, collections and artwork, out of the cache ADR-0016 kept.
 
-M4's boundary call 2 deferred `Person`/`Credit`/`Collection` to this milestone
-by name and promised they would be **re-derived from `raw_payloads` with no
-second network call**. ADR-0016 kept that table for exactly this, and
+M4's boundary call 2 deferred `Person`/`Credit`/`Collection`/`Image` to two
+milestones by name and promised they would be **re-derived from `raw_payloads`
+with no second network call**. ADR-0016 kept that table for exactly this, and
 `ports/metadata.py` wrote the same note from the other end when it explained
 why `EnrichmentResult` has no `people` field. This module is where the note is
-presented.
+presented. M7 presented three quarters of it; M9's group C added `Image`, on
+the same walk, the same page, the same transaction and the same `derive` job --
+which is why an operator gets artwork from `usher derive --backfill` with no
+new command and no new crawl.
+
+**`Image` is the entity that makes "no second network call" a property rather
+than a slogan**, because artwork is the one of the four a reader would expect
+to need one: the rows carry a *path*, not bytes, and fetching the bytes is the
+serve-time proxy's job (ADR-0032) rather than this walk's. Nothing here opens a
+socket, and `test_deriving_writes_images_and_makes_no_provider_fetch` asserts
+it over a provider whose `fetch` raises -- positive control first, because "no
+fetch happened" is also what a derivation that did nothing produces.
 
 **Nothing here reads a provider's JSON key, and that is the layering call of
 the milestone rather than a style rule.** M6 kept the search document's weight
@@ -44,6 +55,7 @@ from usher.ports.repository import (
     CachedPayload,
     CollectionRepository,
     CreditRepository,
+    ImageRepository,
     PersonRepository,
     RawPayloadStore,
     TitleRepository,
@@ -99,13 +111,21 @@ class DerivationReport:
     people_written: int = 0
     credits_written: int = 0
     collections_written: int = 0
+    # **A low number here is the age of the cache, not a defect**, and it is
+    # the one count in this report an operator will misread. `images` joined
+    # `*_APPEND_TO_RESPONSE` in M4 and `poster_path`/`backdrop_path` are
+    # top-level detail fields, so every cached payload derives its two
+    # primaries and only a payload fetched *with* the namespace derives the
+    # rest. `usher derive`'s report prints it as a count beside the others for
+    # the same reason none of them is a ratio.
+    images_written: int = 0
 
 
 class DeriveService:
-    """People, credits and collections for a page of cached payloads.
+    """People, credits, collections and artwork for a page of cached payloads.
 
     **Nothing here fetches.** The collaborator list is a `RawPayloadStore`, a
-    `MetadataProvider` and four repositories, and the provider is held for
+    `MetadataProvider` and five repositories, and the provider is held for
     `to_derivation` alone -- the same purity `to_result` has. A derivation
     that called `fetch` would re-request the enriched tier against a rate
     limit to read data already sitting in a JSONB column, and
@@ -132,6 +152,7 @@ class DeriveService:
         people: PersonRepository,
         credits: CreditRepository,
         collections: CollectionRepository,
+        images: ImageRepository,
         commit: Callable[[], Awaitable[None]],
     ) -> None:
         self._payloads = payloads
@@ -140,6 +161,7 @@ class DeriveService:
         self._people = people
         self._credits = credits
         self._collections = collections
+        self._images = images
         self._commit = commit
 
     async def derive_all(self, *, page_size: int = 500, limit: int = 0) -> DerivationReport:
@@ -246,7 +268,8 @@ class DeriveService:
         return resolved
 
     async def _apply(self, resolved: Sequence[tuple[uuid.UUID, Any]]) -> DerivationReport:
-        """Map, upsert people, re-point credits, link collections, replace.
+        """Map, upsert people, re-point credits, link collections, replace, and
+        replace the artwork.
 
         The order is a dependency chain and not a preference. People must
         exist before a credit may name one (`credits.person_id` is a real
@@ -256,6 +279,12 @@ class DeriveService:
         the id it was inserted with. `EpisodeRepository.resolve_seasons`
         exists for the identical reason and its absence failed on the *second*
         enrichment rather than the first.
+
+        **Images are the one write with no such dependency and no re-point.**
+        Their only foreign key is to `titles`, which the page already resolved,
+        and the id an image keeps comes out of the upsert rather than out of a
+        read-back -- so the write sits last because nothing needs it earlier,
+        not because anything above it does.
         """
         if not resolved:
             return DerivationReport()
@@ -319,14 +348,30 @@ class DeriveService:
             rows.extend(repointed)
             credit_names[title_id] = _credit_names(derivation.credits, people, provider_id_of)
 
-        written = await self._credits.replace_for_titles(
-            [title_id for title_id, _ in derivations], rows, credit_names=credit_names
+        scope = [title_id for title_id, _ in derivations]
+        written = await self._credits.replace_for_titles(scope, rows, credit_names=credit_names)
+        # **The scope is the same `derivations` list, not the titles that
+        # contributed an image**, which is the one thing an image write shares
+        # with the credit write above it: a title whose artwork all disappeared
+        # upstream contributes no rows, so a scope derived from the rows would
+        # leave its stale artwork through every future derivation -- and a
+        # stale row here is a `/images/{id}` the CDN has stopped serving,
+        # served forever with nothing reporting an error.
+        #
+        # No re-pointing pass: an image has no provider integer id, so
+        # `uq_images_owner_provider_path` is the natural key and
+        # `replace_for_titles`' upsert answers with the id the row was first
+        # inserted with. That is the whole of why `usher derive` can run twice
+        # without invalidating a client's cached artwork.
+        images_written = await self._images.replace_for_titles(
+            scope, [one for _, derivation in derivations for one in derivation.images]
         )
         return DerivationReport(
             titles_derived=len(derivations),
             people_written=len(people),
             credits_written=written,
             collections_written=linked,
+            images_written=images_written,
         )
 
 
@@ -393,6 +438,7 @@ def _add(total: DerivationReport, page: DerivationReport, *, read: int) -> Deriv
         people_written=total.people_written + page.people_written,
         credits_written=total.credits_written + page.credits_written,
         collections_written=total.collections_written + page.collections_written,
+        images_written=total.images_written + page.images_written,
     )
 
 

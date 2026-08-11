@@ -393,6 +393,28 @@ form (so `_is_v4_token`'s positive branch has never been exercised against
 a real credential); a season TMDb lists that its own route refuses; TMDb's
 behaviour under sustained concurrency (this run was sequential through one
 token bucket at 25 rps); and any of it against a non-`US` `tmdb_region`.
+**Artwork derives from a payload cached before `images` was appended, and the
+top-level pair is why.** M9's C3 reads `images.{posters,backdrops,logos}[]`
+plus the top-level `poster_path`/`backdrop_path`. Only the first is an
+`append_to_response` namespace; the second pair are ordinary detail fields, so
+**every** cached payload derives the two references M9's two artwork consumers
+render, and only payloads fetched with the namespace derive the rest. An
+operator reading a low `images written` against a large cache is seeing the age
+of the cache, not a defect — say so rather than letting it read as one. The
+recorded fixtures carry both real shapes: `movie.json` has one entry per array
+with `poster_path` naming the **same path** as `posters[0]`, and `series.json`
+has all three arrays `[]` with both top-level paths populated.
+
+**The top-level pair is the only primary signal a TMDb payload carries.**
+Nothing inside `images.posters[]` is flagged — the array is vote-ordered and
+carries `vote_average`/`vote_count`, which is a popularity signal and not
+TMDb's own pick. So `is_primary` comes from those two keys or from nowhere,
+and a derivation that ignored them leaves every row unflagged, at which point
+`ImageRepository.primary_for_titles` falls back to first-in-read-order — which
+is id order, which is whichever language variant the array happened to list
+first. There is no top-level *logo* path, so `logo` never gets a primary at
+all and the fallback is the intended path for that kind.
+
 **A TMDb v3 API key in the query string lands in every trace.**
 `HTTPXClientInstrumentor` (wired in `configure_tracing`) records the full
 URL as a span attribute, and TMDb v3 has no header form for a v3 key. So

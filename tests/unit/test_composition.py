@@ -32,6 +32,7 @@ from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.curated_row_repository import FakeCuratedRowRepository
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
+from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient, usage
@@ -112,7 +113,7 @@ def _pipeline_over_fakes(
     settled = _Recording() if commit is None else commit
 
     unused = cast(Any, None)
-    # `build_derive_service` reads three more slots than
+    # `build_derive_service` reads four more slots than
     # `build_enrich_service` does, so they are real fakes rather than
     # `unused`: `build_worker` constructs the service eagerly, and a `None`
     # there fails at construction rather than at the one wiring decision
@@ -150,6 +151,7 @@ def _pipeline_over_fakes(
         people=people,
         credits=FakeCreditRepository(people, titles_store),
         collections=FakeCollectionRepository(),
+        images=FakeImageRepository(),
         adapters=unused,
         matcher=unused,
         ingest=unused,
