@@ -1219,3 +1219,49 @@ separately by G1.
 
 Gate green before and after on the fully restored tree, with all three touched
 files verified by `md5sum` against their pre-sweep digests.
+
+**M9 Task D3's sweep: 4 plants over `PlaybackService` — 4 killed, 1
+equivalent-mutant control surviving as designed, 0 unintended survivors, 0
+BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place, with
+the plant list written down first (this task's acceptance section names all
+four *and* predicts the control), `PYTHONDONTWRITEBYTECODE=1` and
+`-p no:cacheprovider` in force throughout, every plant asserted *present* by
+its own anchor count before the run that judges it (`assert s.count(old) == 1`
+in the planting script, so a silent no-op edit fails loudly rather than
+reporting a kill it did not earn), and every restore verified by `md5sum`
+against a pre-plant digest **plus** a read-back of each mutation site.
+
+**Selection:** `tests/unit/test_services_playback.py` alone — 26 cases,
+green on a clean tree first and restored to 26 after every plant. Scoped
+rather than whole-suite because nothing outside this task's two files imports
+`usher.services.playback` yet (grepped, not assumed; D4 is the route that will
+change that), so a defect here has no path to collateral anywhere else.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| containment matching → positional pairing (`zip(deep_links, direct_urls)`, M5's own shape) | KILLED | 3 — `…paired_by_containment_and_not_by_position`, `…wraps_no_visible_direct_url_is_dropped`, `…prefix_of_another_copys_url…` |
+| the drop of an unwrappable deep link → pass-through | KILLED | 1 — `…wraps_no_visible_direct_url_is_dropped` |
+| `except UsherPortError` narrowed to `except PortUnavailable` | KILLED | 2 — `…malformed_payload_from_one_copy_does_not_abort_the_others`, `…credential_that_no_longer_decrypts_is_unavailable` |
+| `aclose()` moved out of the `finally` | KILLED | 1 — `…adapter_whose_source_raised_is_closed_too`, on the factory ledger |
+
+**The pass-through plant kills one assertion earlier than the plan predicted,
+and the predicted one is also violated — checked rather than assumed.** The
+plan expected it to fail "the token-absence assertion"; it fails the *kind
+list* two lines above it, because a passed-through orphan makes the case's
+targets three rather than two. Re-run as a standalone scenario under the same
+plant with only the leak assertions evaluated: `tok-Zq7 in rendered` is `True`
+and `quote(invisible_url, safe="") in rendered` is `True`. So the case does
+pin the leak; it just reports the arity first. Worth recording because "killed
+by a different assertion than predicted" is indistinguishable in a summary
+from "killed by the assertion that matters".
+
+**The control, per gate step**, exactly as the acceptance section predicts it:
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| `PlaybackService.__init__`'s `self._media_items` / `self._sources` writes swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,106 / 4 skipped) |
+
+Equivalent because the two are disjoint attributes on a freshly constructed
+object, neither right-hand side reads the other, and nothing runs between
+them — the same shape as the `__all__` reorder and the `SET`-list swap above,
+one layer in. Reported rather than treated as a survivor.
