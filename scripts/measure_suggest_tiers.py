@@ -1003,6 +1003,21 @@ async def run(args: argparse.Namespace) -> None:
     log.verdicts["smoke"] = bool(args.smoke)
     log.verdicts["arguments"] = vars(args)
     log.load["before"] = _load_snapshot()
+
+    def _persist(note: str) -> None:
+        """Write the run log now, whatever else happens.
+
+        **A phase that raises forty minutes into a quiet window must not take
+        the thirty-nine minutes before it with it.** Every phase checkpoints,
+        and a crash writes what it had along with the traceback, because the
+        alternative is asking for a second quiet window to re-measure numbers
+        that were already produced.
+        """
+        if not args.out:
+            return
+        log.verdicts["last_checkpoint"] = note
+        Path(args.out).write_text(json.dumps(asdict(log), indent=2, default=str), encoding="utf-8")
+
     try:
         async with factory() as session:
             log.catalog = await catalog_facts(session)
@@ -1032,6 +1047,7 @@ async def run(args: argparse.Namespace) -> None:
                 _say("indexes: dropping and rebuilding both prefix indexes")
                 log.indexes = await measure_indexes(session)
                 print(json.dumps(log.indexes, indent=2), flush=True)
+                _persist("indexes")
 
             if args.tier1:
                 log.tier1["titles_only"] = await measure_tier1(
@@ -1046,10 +1062,12 @@ async def run(args: argparse.Namespace) -> None:
                     session, cases, with_union=False
                 )
                 print(json.dumps(log.tier1, indent=2, default=str), flush=True)
+                _persist("tier1")
 
             if args.tier2:
                 log.tier2 = await measure_tier2(session, cases, log, diagnose=args.diagnose)
                 print(json.dumps(log.tier2, indent=2, default=str), flush=True)
+                _persist("tier2")
 
             if args.tier2_ab:
                 # **The claim being tested is that a btree cannot tax the `%`
@@ -1089,6 +1107,11 @@ async def run(args: argparse.Namespace) -> None:
                     json.dumps(log.tier2["without_prefix_indexes"], indent=2, default=str),
                     flush=True,
                 )
+                _persist("tier2_ab")
+    except BaseException as failure:
+        log.verdicts["crashed"] = f"{type(failure).__name__}: {failure}"
+        _persist("crashed")
+        raise
     finally:
         await engine.dispose()
     log.load["after"] = _load_snapshot()
