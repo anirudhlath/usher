@@ -395,7 +395,12 @@ else** — no user, no grant, no offset — which is why it is unsigned, and **n
 port ever takes one**; repositories take typed keyset values. A cursor that
 does not match the query it is replayed against is a `400 invalid_cursor`. See
 [ADR-0034](decisions/0034-the-cursor-carries-a-position.md), which also carries
-the `(key IS NOT NULL, key, id)` predicate every paged route spells.
+the **three-arm** keyset predicate every paged route spells. Read it there
+rather than reconstructing it: the ADR originally specified a row comparison
+over `(key IS NOT NULL, key, id)`, and B6 measured that this is wrong for a
+nullable key — a row comparison evaluates to **NULL, not false**, when the
+first differing pair involves one, so resuming from an unkeyed row silently
+drops the whole unkeyed tail with every page still full.
 
 ### Errors
 
