@@ -58,6 +58,7 @@ __all__ = [
     "DEFAULT_IMAGE_WIDTH",
     "IMAGE_LADDER",
     "SUPPORTED_MEDIA_TYPES",
+    "UNSERVABLE_PATH_SUFFIXES",
     "FetchedImage",
     "ImageBlobStore",
     "ImageCacheKey",
@@ -66,6 +67,7 @@ __all__ = [
     "StoredImage",
     "clamp_to_ladder",
     "extension_for",
+    "is_servable_path",
 ]
 
 #: The four widths `GET /images/{id}?w=` clamps to, smallest first.
@@ -138,6 +140,78 @@ SUPPORTED_MEDIA_TYPES: Mapping[str, str] = {
 #: is a rasteriser — the decoder arm 1 of that ADR's bar priced and arm 2
 #: declined.
 DECLINED_MEDIA_TYPES: frozenset[str] = frozenset({"image/svg+xml"})
+
+#: The provider path suffixes that predict a `DECLINED_MEDIA_TYPES` answer, one
+#: per declined type. `is_servable_path` is the reader;
+#: `tests/unit/test_adapters_images.py` pins the two sets together, because two
+#: lists that must move as one are two lists that will not.
+UNSERVABLE_PATH_SUFFIXES: frozenset[str] = frozenset({".svg"})
+
+
+def is_servable_path(provider_path: str) -> bool:
+    """Whether `GET /images/{id}` can ever answer for an image stored at this
+    provider path.
+
+    **C7 is the consumer**, and the decision it implements is *filter, not
+    annotate*: `GET /titles/{id}`'s `images` key is a list of references a
+    client can fetch, so an entry whose fetch will always fail is not a
+    reference — it is a broken link this API mints deliberately, and the client
+    renders a broken image with nothing anywhere reporting an error. That is the
+    same failure `ImageRepository.replace_for_titles`' delete half exists to
+    prevent one layer down, arriving through a DTO instead of through a stale
+    row.
+
+    **C6 is deliberately not a consumer.** The measured gap is logo-only — the
+    provider serves SVG for `logos` and JPEG for posters and backdrops — and
+    `RowCard.artwork` paints a poster or a backdrop, so the state this predicate
+    discriminates is unreachable there. Even if it were reachable, a card's only
+    two behaviours are "render artwork" and "render the fallback", and *"no
+    logo"* and *"a logo we will not serve"* produce the identical one. A
+    discriminator nobody branches on ages into a lie.
+
+    ⚠️ **A filter with no counter is invisible, and that is the half a consumer
+    will skip.** Once C7 drops these rows, *"this catalog has no logos"* and
+    *"this proxy dropped all of them"* look identical to an operator as well as
+    to a client. One metric, or one line in `usher derive`'s report — the choice
+    is C7's, the requirement is that *something* can say how often it fires.
+    Roughly one title in seventeen, measured.
+
+    **Why this is here rather than in a DTO.** `provider_path.endswith(".svg")`
+    written in `api/dto/` is a provider-shaped inference in exactly the layer
+    PRD 01's no-source-concept rule is about, and it would be a second
+    definition of a fact the proxy already owns. One definition means the
+    `Accept` successor and the rasteriser are each a single change here rather
+    than a hunt.
+
+    ⚠️ **It is a prediction from a filename, and the fetcher stays the
+    authority.** The link is the provider's convention — a `file_path` ending
+    `.svg` is what the CDN answers `image/svg+xml` for, at every rung
+    (measured). If that convention ever breaks, this predicate and
+    `extension_for`'s refusal disagree, and the failure is quiet in one
+    direction: a servable image filtered out of `images` looks exactly like a
+    title that has none. The pairing case is what makes the two sets move
+    together; nothing can make the *provider* keep its convention.
+
+    **The alternative considered and rejected: refuse at the write.** C3's
+    derivation could simply not store an `Image` row for an SVG logo, which
+    expresses the gap once, at the boundary that already knows about provider
+    payloads, and makes every consumer correct for free with no predicate at
+    all — and it is recoverable, because `usher derive` re-reads `raw_payloads`
+    with no network call, so a rasteriser landing later backfills the rows it
+    skipped (ADR-0016's whole point). It was genuinely open: C3 had not landed
+    when this was decided. Rejected because `images` should be a faithful record
+    of what the provider published, and a row the catalog holds but this
+    deployment cannot render is exactly the fact an operator debugging a missing
+    logo needs to find with one `SELECT`.
+
+    **It ships one task ahead of its caller, which is an exception this project
+    normally refuses** (*"a port method whose only test is its own test is a
+    liability"*). Taken deliberately: C7 had not started, the alternative was
+    C7 writing `endswith(".svg")` in a DTO and this module learning about it
+    afterwards, and the whole value of one definition is that it exists before
+    the second copy does.
+    """
+    return not provider_path.lower().endswith(tuple(UNSERVABLE_PATH_SUFFIXES))
 
 
 def clamp_to_ladder(width: int | None) -> int:

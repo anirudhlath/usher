@@ -42,12 +42,15 @@ from usher.ports.images import (
     DECLINED_MEDIA_TYPES,
     IMAGE_LADDER,
     SUPPORTED_MEDIA_TYPES,
+    UNSERVABLE_PATH_SUFFIXES,
     FetchedImage,
     ImageBlobStore,
     ImageCacheKey,
     ImageFetcher,
     MediaTypeNotServable,
     StoredImage,
+    extension_for,
+    is_servable_path,
 )
 
 _BASE = "https://images.invalid/t/p/"
@@ -610,6 +613,73 @@ async def test_an_answer_that_is_not_artwork_is_not_demoted_to_a_declined_type()
         await _drain(_fetcher(handler))
 
     assert not isinstance(caught.value, MediaTypeNotServable)
+
+
+#: `(the provider path suffix, the media type the CDN answers for it)`, written
+#: out so the two module-level sets cannot drift apart silently. Measured
+#: 2026-08-11 against three real `.svg` logos: every rung answers
+#: `image/svg+xml`.
+_PREDICTED_MEDIA_TYPES = [(".svg", "image/svg+xml")]
+
+
+@pytest.mark.parametrize(
+    "provider_path,servable",
+    [
+        ("/quiet-vacuum.jpg", True),
+        ("/quiet-vacuum.png", True),
+        ("/quiet-vacuum.webp", True),
+        ("/a-logo.svg", False),
+        # Case, because a provider path is somebody else's string and nothing
+        # in this project normalises it on the way into the row.
+        ("/A-LOGO.SVG", False),
+        # The suffix and nothing shorter: a path that merely *contains* the
+        # letters is an ordinary image, and `in` rather than `endswith` is the
+        # obvious way to write this wrong.
+        ("/svg-poster.jpg", True),
+        ("/.svg.jpg", True),
+    ],
+)
+def test_whether_the_proxy_can_ever_serve_a_row_is_readable_from_the_row(
+    provider_path: str, servable: bool
+) -> None:
+    """C7's filter, and the one definition of it.
+
+    An entry in `GET /titles/{id}`'s `images` whose fetch will always fail is
+    not a reference — it is a broken link this API mints deliberately, and the
+    client renders a broken image with nothing reporting an error.
+    """
+    assert is_servable_path(provider_path) is servable
+
+
+@pytest.mark.parametrize("suffix,media_type", _PREDICTED_MEDIA_TYPES)
+def test_an_unservable_suffix_really_is_a_type_the_fetcher_declines(
+    suffix: str, media_type: str
+) -> None:
+    """The bridge between the two sets, asserted through the *refusal* rather
+    than through a second list.
+
+    `is_servable_path` predicts from a filename what `extension_for` decides
+    from a `Content-Type`, and nothing in the type system connects them. So each
+    pair is walked both ways: the suffix is unservable, and the media type it
+    predicts is one the proxy declines as `MediaTypeNotServable` rather than as
+    a fault. A suffix added to one set and not the other fails here instead of
+    filtering an image the proxy would happily have served — which is the quiet
+    direction of that mistake, because a title whose logo was dropped looks
+    exactly like a title that never had one.
+    """
+    assert not is_servable_path(f"/anything{suffix}")
+
+    with pytest.raises(MediaTypeNotServable):
+        extension_for(media_type)
+
+
+def test_the_two_sets_the_prediction_spans_are_the_same_size() -> None:
+    """A pair table with an entry missing proves nothing about the set it was
+    meant to cover, so the coverage is asserted rather than assumed — the same
+    guard `test_every_port_abc_is_registered_in_all_ports` exists for, over two
+    frozensets instead of a package."""
+    assert {suffix for suffix, _ in _PREDICTED_MEDIA_TYPES} == UNSERVABLE_PATH_SUFFIXES
+    assert {media_type for _, media_type in _PREDICTED_MEDIA_TYPES} == DECLINED_MEDIA_TYPES
 
 
 def test_every_declined_media_type_is_one_the_supported_map_does_not_hold() -> None:
