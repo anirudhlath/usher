@@ -107,9 +107,20 @@ The catalog's row count **and its bootstrap phase**, because
 as a catalog fact and it was wrong by half. The `title_search_names` row count
 and its `kind` breakdown, beside every tier-1 figure, because a union over an
 empty arm is not the union that ships -- and the script **refuses** to print a
-union figure against an empty table. The one-minute load average before and
-after, because every product of this script is a rate or a latency and a number
-taken on a loaded box is void.
+union figure against an empty table.
+
+And **whether the box was quiet, by a metric a clean run can actually pass.**
+Every product of this script is a rate or a latency, so a number taken on a
+loaded box is void -- but the first spelling of that guard compared the
+one-minute load average before against after, which a forty-minute run of
+continuous querying raises *by itself*. That guard condemns every clean run and
+is a measurement of the work rather than of the box. What is read instead, at
+two moments when this harness is deliberately idle, is the **foreign `pytest`
+census** (this run spawns none, so any is somebody else's suite) and the
+**drift** in non-idle CPU. A drift rather than a level, because this host's
+always-on services idle at a baseline nobody has measured and an absolute
+threshold guessed against it repeats the same mistake one level down. The load
+average stays in the record as context and decides nothing.
 """
 
 from __future__ import annotations
@@ -273,8 +284,68 @@ def _quantile(ordered: Sequence[float], q: float) -> float:
     return ordered[rank - 1]
 
 
+# How long `_cpu_busy` samples for, and how far the busy fraction may drift
+# across a run before the run is thrown away. Both are declared here, before
+# any number, because a threshold chosen after seeing a result is not a
+# threshold.
+_CPU_SAMPLE_SECONDS = 2.0
+_CPU_DRIFT_LIMIT = 0.10
+# Let the box settle after the last backend closes, so the closing sample is
+# taken under the same condition as the opening one rather than in this run's
+# own wake.
+_CPU_SETTLE_SECONDS = 5.0
+
+
+def _cpu_counters() -> tuple[int, int]:
+    """`/proc/stat`'s aggregate jiffies as (total, idle-including-iowait)."""
+    fields = [int(one) for one in Path("/proc/stat").read_text().split("\n")[0].split()[1:]]
+    return sum(fields), fields[3] + fields[4]
+
+
+def _cpu_busy(seconds: float = _CPU_SAMPLE_SECONDS) -> float:
+    """The fraction of all CPU that is *not* idle, over `seconds`.
+
+    **Sampled while this script is deliberately doing nothing**, which is the
+    whole point: taken at a moment when the harness is idle, every busy jiffy
+    belongs to somebody else. That is what makes it a measurement of the box
+    rather than a measurement of the run.
+    """
+    first_total, first_idle = _cpu_counters()
+    time.sleep(seconds)
+    second_total, second_idle = _cpu_counters()
+    elapsed = second_total - first_total
+    if elapsed <= 0:
+        return 0.0
+    return round(1.0 - (second_idle - first_idle) / elapsed, 4)
+
+
 def _load_snapshot() -> dict[str, Any]:
-    """What else the box was doing, read rather than assumed."""
+    """What *else* the box was doing, read rather than assumed.
+
+    **This replaces a load-average check that a good run was guaranteed to
+    fail, and the replacement was made before the run rather than after it.**
+    The bar says a run taken on a moving box is discarded and not caveated. The
+    first spelling of that compared the one-minute load average before and
+    after -- but the run is forty minutes of continuous querying whose worst
+    probes go parallel, so a perfectly quiet box ends it two to three above
+    where it started, *entirely from this script's own work*, and the guard
+    then condemns the very measurement it exists to protect. A metric a clean
+    run must fail is not measuring quiet, it is measuring that the work
+    happened.
+
+    So the two things that are read now are read at moments when the harness is
+    idle, and one of them is a drift rather than a level:
+
+    * **`pytest` processes**, which this run never spawns, so any is foreign
+      and a sibling suite is exactly the named noise source; and
+    * **the non-idle CPU fraction**, compared before against after. A *drift*
+      rather than an absolute, because the always-on services on this host
+      (Home Assistant, vLLM, ComfyUI, a reverse proxy) idle at some unknown
+      baseline, and an absolute threshold guessed against that baseline is the
+      same self-inflicted failure one level down.
+
+    The load average stays in the record as context. It is no longer the gate.
+    """
     one, five, fifteen = os.getloadavg()
     procs = {"postgres": 0, "pytest": 0, "python": 0}
     for entry in Path("/proc").iterdir():
@@ -289,7 +360,12 @@ def _load_snapshot() -> dict[str, Any]:
         for key in procs:
             if key in command:
                 procs[key] += 1
-    return {"loadavg": [one, five, fifteen], "processes": procs, "cpus": os.cpu_count()}
+    return {
+        "loadavg": [one, five, fifteen],
+        "processes": procs,
+        "cpus": os.cpu_count(),
+        "cpu_busy": _cpu_busy(),
+    }
 
 
 async def _scalar(session: AsyncSession, statement: str, **parameters: Any) -> Any:
@@ -1114,19 +1190,42 @@ async def run(args: argparse.Namespace) -> None:
         raise
     finally:
         await engine.dispose()
+    # Sampled after the engine is disposed and every backend is gone, so the
+    # "after" reading is taken under the same condition as the "before" one:
+    # this harness idle, and whatever else is on the box still running.
+    time.sleep(_CPU_SETTLE_SECONDS)
     log.load["after"] = _load_snapshot()
     log.verdicts.update(_verdicts(log))
-    drift = abs(log.load["before"]["loadavg"][0] - log.load["after"]["loadavg"][0])
-    log.load["one_minute_drift"] = round(drift, 2)
-    log.load["quiet_enough"] = drift <= 1.0
+    before, after = log.load["before"], log.load["after"]
+    drift = after["cpu_busy"] - before["cpu_busy"]
+    foreign = max(before["processes"]["pytest"], after["processes"]["pytest"])
+    log.load["cpu_busy_drift"] = round(drift, 4)
+    log.load["foreign_pytest_processes"] = foreign
+    # **Absolute, because a box that got *quieter* mid-run is also a box that
+    # was not the same box throughout.** A sibling finishing halfway through
+    # means the first half was contended, which corrupts a p95 exactly as much
+    # as a sibling starting halfway through does. The smoke run that validated
+    # this metric drifted **-0.1037** for that reason and a one-sided test
+    # would have called it quiet.
+    log.load["quiet_enough"] = foreign == 0 and abs(drift) <= _CPU_DRIFT_LIMIT
+    # Kept, and demoted. It is the number a reader will look for and it is no
+    # longer what decides anything -- so it is printed with the reason.
+    log.load["one_minute_loadavg_before_after"] = [before["loadavg"][0], after["loadavg"][0]]
+    log.load["loadavg_is_context_not_a_gate"] = (
+        "a 40-minute run of continuous querying raises its own one-minute average, so a "
+        "before/after load comparison condemns every clean run; the gate is the foreign "
+        "pytest census and the idle-sampled CPU drift above"
+    )
     print(json.dumps(log.verdicts, indent=2), flush=True)
     if args.out:
         Path(args.out).write_text(json.dumps(asdict(log), indent=2, default=str), encoding="utf-8")
         print(f"\nwrote {args.out}", flush=True)
     if not log.load["quiet_enough"]:
         print(
-            "\nWARNING: the one-minute load average moved by "
-            f"{drift:.2f} across this run. Every number above is a latency; discard and re-run.",
+            f"\nWARNING: the box was not quiet -- {foreign} foreign pytest process(es), "
+            f"idle-sampled CPU drift {drift:+.4f} against a limit of "
+            f"+/-{_CPU_DRIFT_LIMIT}. "
+            "Every number above is a latency; discard and re-run.",
             flush=True,
         )
 
