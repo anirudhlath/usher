@@ -70,8 +70,8 @@ from usher.services.playback import PlaybackService
 from usher.services.playback_ticket import build_ticket_cipher, mint
 from usher.services.reconcile import ReconcileService
 from usher.services.rows.cache import RefreshQueue, RowCache
-from usher.services.similar import SimilarityService
 from usher.services.search import SearchService
+from usher.services.similar import SimilarityService
 from usher.services.sources import SourceService
 from usher.services.taste import TasteService
 from usher.services.titles import TitleReadService
