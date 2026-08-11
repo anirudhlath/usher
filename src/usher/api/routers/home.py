@@ -44,24 +44,33 @@ fallback on a household that has watched nothing produces a screen that *looks*
 personalised and is not, which is the failure this milestone exists to refuse.
 `rows: []` is distinguishable; a generic row is not.
 
-**Still M9's, so this is a route and not a land grab:** the RFC 9457 envelope,
-`usher.http.server.duration`, `usher.cache.hits`/`.misses`, HTTP cache headers,
-and pagination. The whole screen comes back in one response with no cursor,
-which is what ADR-0006 specifies and what PRD 07's own endpoint table shows
-(`/browse` carries a cursor; `/home` does not).
+**Now conditional.** `usher.api.caching.conditional_response` hashes the
+composed screen once and answers a 304 with no body when the client's
+`If-None-Match` already holds it -- `max-age` is `_SCREEN_TTL` itself, so the
+header and the in-process screen cache cannot drift apart. See that module for
+the two conditions a route has to meet to adopt it and why `GET /titles/{id}`
+does not.
+
+**Still M9's:** the RFC 9457 envelope, `usher.http.server.duration`,
+`usher.cache.hits`/`.misses`, and pagination -- all landed elsewhere in group
+A, none of them here. The whole screen comes back in one response with no
+cursor, which is what ADR-0006 specifies and what PRD 07's own endpoint table
+shows (`/browse` carries a cursor; `/home` does not).
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request, Response
 
+from usher.api.caching import conditional_response
 from usher.api.deps import HomeServiceDep, RowContextDep
 from usher.api.dto.home import HomeResponse
+from usher.services.home import _SCREEN_TTL
 
 router = APIRouter(tags=["home"])
 
 
 @router.get("/home", response_model=HomeResponse)
-async def get_home(home: HomeServiceDep, ctx: RowContextDep) -> HomeResponse:
-    """Compose this household's screen.
+async def get_home(request: Request, home: HomeServiceDep, ctx: RowContextDep) -> Response:
+    """Compose this household's screen, and answer it conditionally.
 
     The context is a dependency rather than something built here, because it is
     thirteen request-scoped values and `tests/integration/test_pipeline_deps.py`
@@ -69,5 +78,13 @@ async def get_home(home: HomeServiceDep, ctx: RowContextDep) -> HomeResponse:
     annotating one of them without `Depends` is a `FastAPIError` at *route
     registration*, which a unit test that overrides this route's service never
     sees.
+
+    Returns a `Response` rather than a `HomeResponse`, always -- FastAPI
+    passes a `Response` instance through untouched (`response_model` still
+    describes the 200 shape for `/openapi.json`), and that is what lets the
+    same bytes `conditional_response` hashes be the bytes actually sent: a
+    second, independent serialisation through FastAPI's own encoder is exactly
+    the correctness hazard the caching module's docstring warns about.
     """
-    return HomeResponse.of(await home.compose(ctx))
+    body = HomeResponse.of(await home.compose(ctx))
+    return conditional_response(request, body, ttl=_SCREEN_TTL)
