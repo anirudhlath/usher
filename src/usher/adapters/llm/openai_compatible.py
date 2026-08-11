@@ -75,36 +75,19 @@ import httpx
 from opentelemetry import trace
 from pydantic import SecretStr
 
-from usher.adapters.http import retry_after_seconds
-from usher.ports.errors import (
-    PortAuthFailed,
-    PortDataMalformed,
-    PortRateLimited,
-    PortUnavailable,
-)
+from usher.adapters.http import UNTRANSLATED_FAILURES, decode_json, port_error_for
+from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.ports.llm import LLMClient, LLMPurpose, LLMUsage
 
 _COMPLETIONS_PATH = "/chat/completions"
 
-# The one 4xx that means "send this again" rather than "this request is
-# wrong". Same constant and same reason as `TmdbClient`: a household may put
-# a proxy in front of a hosted provider, and a proxy that gives up waiting is
-# what the queue's backoff exists for.
-_REQUEST_TIMEOUT = 408
+# How this endpoint is named in a message. A constant and never `base_url`,
+# never a URL and never a path built from one: a household may be pointed at a
+# provider whose URL carries a token in a path segment, which is also why
+# nothing below passes a `detail` to `usher.adapters.http`.
+_ENDPOINT = "the LLM endpoint"
 
 _TOKENS_PER_PRICE_UNIT = Decimal(1_000_000)
-
-# Everything a send may raise that a caller written against
-# `usher.ports.errors` cannot catch. The same four `TmdbClient` and
-# `EmbySession` enumerate: `StreamError` subclasses `RuntimeError`,
-# `InvalidURL`/`CookieConflict` subclass `Exception` directly, and a closed
-# `httpx.AsyncClient` raises a bare `RuntimeError`.
-_UNTRANSLATED_FAILURES: tuple[type[BaseException], ...] = (
-    httpx.HTTPError,
-    httpx.InvalidURL,
-    httpx.CookieConflict,
-    RuntimeError,
-)
 
 _tracer = trace.get_tracer("usher.llm")
 
@@ -197,8 +180,9 @@ class OpenAICompatibleClient(LLMClient):
             body = self._decode(response)
             latency_ms = max(0, int((self._clock() - started) * 1000))
             content = self._content(body)
-            span.set_attribute("usher.llm.tokens_out", self._usage(body)[1])
-            return self._parse(content), self._as_usage(body, latency_ms)
+            usage = self._as_usage(body, latency_ms)
+            span.set_attribute("usher.llm.tokens_out", usage.tokens_out)
+            return self._parse(content), usage
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -210,41 +194,32 @@ class OpenAICompatibleClient(LLMClient):
             return await self._client.post(
                 f"{self._base_url}{_COMPLETIONS_PATH}", json=payload, headers=headers
             )
-        except _UNTRANSLATED_FAILURES as exc:
+        except UNTRANSLATED_FAILURES as exc:
             # `type(exc).__name__`, never `exc`: httpx's own text for several
             # transport failures includes the request URL, and a household
             # may be pointed at a provider whose URL carries a token.
             raise PortUnavailable(f"POST {_COMPLETIONS_PATH} failed: {type(exc).__name__}") from exc
 
     def _decode(self, response: httpx.Response) -> dict[str, Any]:
-        """Status first, then JSON. No branch here may interpolate the
-        response body, the URL or the prompt."""
-        if response.status_code == 429:
-            raise PortRateLimited(retry_after_seconds(response.headers.get("retry-after")))
-        if response.status_code in (401, 403):
-            raise PortAuthFailed("the LLM endpoint rejected the configured credential")
-        if 400 <= response.status_code < 500 and response.status_code != _REQUEST_TIMEOUT:
-            # The M4-against-TMDb split, applied here. The three that matter
-            # are a schema the provider will not accept, a model name it does
-            # not serve, and a prompt over the context length -- all
-            # permanent properties of *this* request, so five rate-limited
-            # retries reach the same answer and then park with "upstream
-            # unavailable" rather than with what was wrong. The context-length
-            # case is the interesting one and its fix is a smaller pool.
-            raise PortDataMalformed(
-                f"the LLM endpoint rejected the request with HTTP {response.status_code}"
-            )
-        if response.status_code >= 400:
-            raise PortUnavailable(f"POST {_COMPLETIONS_PATH} returned HTTP {response.status_code}")
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise PortDataMalformed("the LLM endpoint did not return JSON") from exc
-        if not isinstance(body, dict):
-            raise PortDataMalformed(
-                f"the LLM endpoint returned a {type(body).__name__}, not an object"
-            )
-        return body
+        """Status first, then JSON, both from `usher.adapters.http`.
+
+        The ladder is `TmdbClient`'s ladder -- same four branches in the same
+        order, and the M4-against-TMDb measurements that justify them are
+        recorded with it rather than restated here. What this method still owns
+        is what it hands over: **no branch may interpolate the response body,
+        the URL or the prompt**, so neither call gets a `detail` and both are
+        given the `_ENDPOINT` constant as their subject. The one bounded
+        exception is the status code itself, which is a number.
+
+        `decode_json`'s `RecursionError` arm is the exposed half of a pair --
+        `_parse`'s subject is bounded by `max_output_tokens` and shielded by
+        the truncation guard, while the envelope is whatever the endpoint, or a
+        proxy in front of it, put on the wire.
+        """
+        error = port_error_for(response, what=_ENDPOINT, request_line=f"POST {_COMPLETIONS_PATH}")
+        if error is not None:
+            raise error
+        return decode_json(response, what=_ENDPOINT)
 
     # ---------------------------------------------------------------- parse
 
@@ -275,7 +250,10 @@ class OpenAICompatibleClient(LLMClient):
     def _parse(self, content: str) -> dict[str, Any]:
         try:
             parsed = json.loads(_strip_fence(content))
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
+            # See `_decode`. Reachable here on the two unconstrained-generation
+            # fallbacks this module's docstring names, where a degenerate
+            # repeating loop is a shape this project has already measured.
             raise PortDataMalformed("the completion was not JSON") from exc
         if not isinstance(parsed, dict):
             # The port is annotated `-> tuple[dict[str, Any], LLMUsage]`, and

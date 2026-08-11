@@ -83,7 +83,8 @@ import httpx
 from opentelemetry import metrics, trace
 
 from usher import __version__
-from usher.adapters.http import retry_after_seconds
+from usher.adapters.http import UNTRANSLATED_FAILURES, retry_after_seconds
+from usher.adapters.http import decode_json as _decode_json_body
 from usher.ports.credentials import SourceCredentials
 from usher.ports.errors import (
     PortAuthFailed,
@@ -105,26 +106,6 @@ SYSTEM_INFO_PATH = "/System/Info"
 _EMBY_AUTH_HEADER = "X-Emby-Token"
 
 _UNSAFE_HEADER_CHARS = re.compile(r"[^A-Za-z0-9 ._+-]")
-
-# Everything a send may raise that a caller written against
-# `usher.ports.errors` cannot catch. `httpx.HTTPError` is not the whole
-# surface, verified against httpx's own hierarchy: `StreamError` subclasses
-# `RuntimeError`, and `InvalidURL`/`CookieConflict` subclass `Exception`
-# directly. None of the three is an `httpx.HTTPError`.
-#
-# `RuntimeError` is in here for a fourth case that is not an httpx
-# exception at all: a *closed* `httpx.AsyncClient` raises a bare
-# `builtins.RuntimeError`. `_raise_if_closed` covers the adapter closing
-# itself; it cannot cover an injected client closed by its owner, which is
-# the other half of the configuration `EmbyAdapter` supports. Broad on
-# purpose -- an unreachable transport is exactly what `PortUnavailable`
-# means, and the alternative is a stdlib exception crossing the port.
-_UNTRANSLATED_FAILURES: tuple[type[BaseException], ...] = (
-    httpx.HTTPError,
-    httpx.InvalidURL,
-    httpx.CookieConflict,
-    RuntimeError,
-)
 
 _tracer = trace.get_tracer("usher.source.emby")
 _meter = metrics.get_meter("usher.source.emby")
@@ -159,20 +140,19 @@ def decode_json(response: httpx.Response, path: str) -> dict[str, Any]:
     Public because `EmbyAdapter.get_item` needs it: that call must inspect
     a 404 before decoding, so it uses `request()` rather than `json_body()`
     and decodes the success path itself.
+
+    The body of this now lives in `usher.adapters.http.decode_json`, which
+    `TmdbClient` and `OpenAICompatibleClient` also call -- the third copy was
+    the only one that had learned `json.loads` raises `RecursionError` rather
+    than a `ValueError` past a nesting depth of 9,999, so this adapter was
+    still one deeply nested payload away from taking the worker process down.
+    What stays here is the Emby-shaped call: the request path is both the
+    subject of the message and its `detail`, which is safe because an Emby URL
+    carries no credential and is *not* true of the other two callers. Keeping
+    the wrapper also keeps this two-positional-argument signature, which
+    `EmbyAdapter` imports.
     """
-    try:
-        body = response.json()
-    except ValueError as exc:
-        # A reverse proxy serving an HTML error page with status 200 is the
-        # realistic case, and a raw json.JSONDecodeError escaping the port
-        # is not something any caller written against usher.ports.errors
-        # can catch.
-        raise PortDataMalformed(f"{path} did not return JSON", detail=path) from exc
-    if not isinstance(body, dict):
-        raise PortDataMalformed(
-            f"{path} returned a {type(body).__name__}, not an object", detail=path
-        )
-    return body
+    return _decode_json_body(response, what=path, detail=path)
 
 
 class EmbySession:
@@ -227,7 +207,7 @@ class EmbySession:
         check only on `request` would let a closed adapter authenticate
         against a live transport and succeed.
 
-        Not made redundant by `_UNTRANSLATED_FAILURES` now catching the
+        Not made redundant by `UNTRANSLATED_FAILURES` now catching the
         bare `RuntimeError` a closed `httpx.AsyncClient` raises. That
         translation governs what crosses the port when a send *fails*; this
         governs the send never happening at all -- and when the client was
@@ -373,7 +353,7 @@ class EmbySession:
                 method, path, params=params, json=payload, headers=dict(headers)
             )
             return await self._client.send(request)
-        except _UNTRANSLATED_FAILURES as exc:
+        except UNTRANSLATED_FAILURES as exc:
             # `exc` carries a method and a URL, never a header or a body,
             # so this message cannot leak the credential -- and the one
             # request that does carry it is never formatted into a message.

@@ -321,3 +321,49 @@ forbidden_modules = [
     "usher.ports.llm",
 ]
 allow_indirect_imports = true
+
+# **`adapters/http.py` is now shared by four adapter packages, and nothing kept
+# it a leaf.** Until 2026-08-10 it held one function (`retry_after_seconds`) and
+# its module docstring's claim to be the home for "HTTP helpers shared by every
+# adapter that talks to an upstream over httpx... instead of each reimplementing
+# it" was mostly aspiration -- `decode_json`, the untranslated-failure tuple and
+# the status-code ladder were each written two or three times, once per adapter.
+# That review consolidated them here, so this module now owns the **error
+# taxonomy translation for the whole project**: `bulk`, `emby`, `llm` and `tmdb`
+# all import it, and `ADR-0027`'s "the error taxonomy is ours" is a property of
+# this one file.
+#
+# Which makes the direction of the edge load-bearing for the first time. A
+# shared module that imports one of its own consumers is a cycle, and the
+# failure is quiet rather than loud: the import resolves, the tests pass, and
+# the next adapter to need a helper finds a "shared" module that drags an Emby
+# session or an httpx-mocked TMDb client in behind it. The generalisation
+# argument is the one the previous contract records -- *prefer a graph property
+# wherever one is expressible* -- and the alternative here is a convention in a
+# docstring, which is what the three duplicate copies grew out of.
+#
+# **No `allow_indirect_imports`, deliberately, and it is the opposite call from
+# the three contracts above.** They carry the flag because their sources
+# legitimately reach the forbidden module through a composition root. This one
+# has no such path: `usher.adapters.http` imports `httpx` and the standard
+# library and nothing else in this project, so an *indirect* chain into an
+# adapter is exactly as much a cycle as a direct one and there is no honest
+# reason for either.
+#
+# Verified in both directions rather than asserted: KEPT at HEAD (9 kept, 0
+# broken), and BROKEN on a plant -- `from usher.adapters.emby.session import
+# EmbySession` added to `adapters/http.py` **in its isort position**, so the
+# careful spelling of the defect is what was measured and not the careless one
+# `ruff check` would have caught first.
+[[tool.importlinter.contracts]]
+name = "the shared http helpers import no concrete adapter"
+type = "forbidden"
+source_modules = ["usher.adapters.http"]
+forbidden_modules = [
+    "usher.adapters.bulk",
+    "usher.adapters.embedding",
+    "usher.adapters.emby",
+    "usher.adapters.llm",
+    "usher.adapters.search",
+    "usher.adapters.tmdb",
+]

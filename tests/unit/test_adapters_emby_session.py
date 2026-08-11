@@ -674,6 +674,46 @@ async def test_a_json_body_that_is_not_an_object_is_malformed() -> None:
         await client.aclose()
 
 
+async def test_a_deeply_nested_body_is_malformed_not_a_recursion_error() -> None:
+    """The defect M8 found and fixed in the LLM adapter, reaching this one --
+    which is the point of `usher.adapters.http.decode_json` being one function
+    rather than three copies.
+
+    `json.loads` raises `RecursionError` past a nesting depth of 9,999, and
+    `RecursionError` subclasses **`RuntimeError`, not `ValueError`**, so the
+    `except ValueError` this adapter carried on its own did not see it. It is
+    not a `UsherPortError` either, so it escaped the port entirely and took the
+    worker process down instead of parking one job. Reachable here for the same
+    reason as the HTML-error-page case above: the body is whatever the server,
+    or a reverse proxy in front of it, put on the wire, and nothing this
+    project controls bounds its depth.
+
+    The depth is measured, not guessed -- 9,998 parses and 9,999 raises on
+    CPython 3.13 at the default recursion limit -- and clears the boundary
+    rather than sitting on it, because the boundary is an interpreter property
+    this case has no business pinning.
+    """
+    depth = 12_000
+    nested = ("[" * depth + "]" * depth).encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/Users/AuthenticateByName":
+            return httpx.Response(200, json={"AccessToken": "t", "User": {"Id": "u"}})
+        return httpx.Response(200, content=nested, headers={"content-type": "application/json"})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="https://emby.invalid"
+    )
+    session = EmbySession(
+        client, CREDENTIALS, source_name="E", device_id=DEVICE_ID, app_version="0.1.0"
+    )
+    try:
+        with pytest.raises(PortDataMalformed):
+            await session.json_body("GET", SYSTEM_INFO_PATH, op="info")
+    finally:
+        await client.aclose()
+
+
 async def test_an_authentication_response_without_a_token_is_malformed() -> None:
     """Distinguished from a 401 on purpose: a 200 with no AccessToken means
     something answered that is not Emby -- a captive portal, a proxy's

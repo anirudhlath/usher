@@ -55,6 +55,15 @@ _SCHEMA: dict[str, Any] = {
 # omits `usage` entirely is a real shape and one case is about it.
 _REPORTED = object()
 
+#: A JSON nesting depth past the one `json.loads` refuses. Measured on CPython
+#: 3.13 at the default recursion limit of 1,000: **9,998 parses and 9,999
+#: raises** `RecursionError` -- the C scanner has its own budget and it is an
+#: order of magnitude past `sys.getrecursionlimit()`, which is why the obvious
+#: guess of "a bit over 1,000" does not reach it and a case built on that guess
+#: would pass against the unfixed code. Clear of the boundary rather than on
+#: it: the exact number is an interpreter property, not this project's.
+_DEEP = 12_000
+
 #: Where the injected clock starts. **Deliberately not zero**, for the reason
 #: `tests/unit/test_services_curation.py` gives one layer up: `time.monotonic`'s
 #: epoch is arbitrary, so a fixture starting at `0.0` makes `clock() - started`
@@ -280,6 +289,59 @@ async def test_a_null_content_is_malformed() -> None:
     job."""
     with pytest.raises(PortDataMalformed):
         await _complete(_client(body=_completion(None)))  # type: ignore[arg-type]
+
+
+async def test_deeply_nested_content_is_malformed_not_a_recursion_error() -> None:
+    """Same family as the `content: null` case above, and missed for the same
+    reason it was caught: `json.loads` raises `RecursionError` past a nesting
+    depth of 9,999, and `RecursionError` subclasses `RuntimeError`, **not**
+    `ValueError` -- so `_parse`'s `except ValueError` does not see it, it is
+    not a `UsherPortError`, and it escapes `CurationService`'s
+    `except UsherPortError` to take the worker down instead of parking one job.
+
+    The depth is measured, not guessed: 9,998 parses and 9,999 raises on
+    CPython 3.13 at the default recursion limit. `_DEEP` clears it with room
+    to spare rather than sitting on the boundary, because the boundary is an
+    interpreter property this case has no business pinning.
+
+    Reachable on the two fallback paths the module docstring names -- the
+    `json_object` arm and the fenced-prose arm -- which are unconstrained
+    generation, and this project has already measured an unsatisfiable bound
+    driving *this endpoint* into a degenerate repeating loop.
+    """
+    nested = "[" * _DEEP + "]" * _DEEP
+    # The premise: this really is the exception the port does not classify,
+    # and it really does escape a bare `except ValueError`. Asserted rather
+    # than assumed, because a case whose subject is an interpreter limit is
+    # one a later CPython could quietly stop exercising.
+    with pytest.raises(RecursionError):
+        try:
+            json.loads(nested)
+        except ValueError:  # pragma: no cover - the point is that it does not fire
+            pytest.fail("json.loads raised a ValueError; this case pins the other branch")
+    with pytest.raises(PortDataMalformed):
+        await _complete(_client(body=_completion(nested)))
+
+
+async def test_a_deeply_nested_envelope_is_malformed_not_a_recursion_error() -> None:
+    """The same defect one layer out, and the layer that is actually exposed.
+
+    `_parse`'s half is largely shielded by `_content`, which refuses
+    `finish_reason == "length"` before anything is parsed -- and a model that
+    ran away into 10,000 open brackets hits the token ceiling first. The
+    *envelope* has no such guard and no token bound at all: it is whatever the
+    endpoint, or a proxy in front of it, put on the wire. `response.json()`
+    raises the same unclassified `RecursionError` from `_decode`.
+    """
+    nested = ('{"a":' * _DEEP) + "null" + ("}" * _DEEP)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=nested.encode(), headers={"content-type": "application/json"}
+        )
+
+    with pytest.raises(PortDataMalformed):
+        await _complete(_client(handler))
 
 
 async def test_a_truncated_completion_is_refused_and_names_the_cap() -> None:
