@@ -22,7 +22,11 @@ is one the next edit leaves behind.
 `PostgresSuggestIndex` runs the second contract suite from the same file,
 because the two implementations share a session and the `titles` table and
 nothing else -- which is the observation that made them two ports (ADR-0021)
-and the reason one module holds both.
+and the reason one module holds both. Since M9 it runs
+`TypoTolerantSuggestIndexContract` rather than `SuggestIndexContract`: this is
+**tier 2** of the two-tier suggest, and tier 1 -- the btree prefix probe, whose
+measured typo recall is 1.9% -- signs only the base half of that contract, in
+`test_adapters_search_prefix.py`.
 """
 
 import dataclasses
@@ -37,7 +41,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.contract.search_index_contract import SearchIndexContract
-from tests.contract.suggest_index_contract import SuggestIndexContract
+from tests.contract.suggest_index_contract import TypoTolerantSuggestIndexContract
 from usher.adapters.search.postgres import (
     _LEVENSHTEIN_MAX_INPUT,
     _MAX_DISTANCE,
@@ -532,7 +536,7 @@ async def _candidate_rows(
 
 
 @pytest.mark.integration
-class TestPostgresSuggestIndex(SuggestIndexContract):
+class TestPostgresSuggestIndex(TypoTolerantSuggestIndexContract):
     # The real path caps its candidate set before the re-rank, which is the
     # one property `FakeSuggestIndex` structurally cannot have -- it computes
     # edit distance over its whole dict, so its typo tolerance is *better*
