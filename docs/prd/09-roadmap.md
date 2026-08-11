@@ -864,8 +864,21 @@ suspicion.
   measurement, and is not rendered; the corrected sentence costs +26 tokens
   once. Evidence and the arm not taken are in
   [ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s dated amendment.
-  ⚠️ **The second half of this entry — that `min_cards = 5` bills a small pool
-  for nothing — is not settled here** and stays open for the task that owns it.
+  ✅ **The second half of this entry — that `min_cards = 5` bills a small pool
+  for nothing — was paid by M9 Task G4 on 2026-08-11**, and it is the half that
+  was arithmetic rather than a decision. `CurationService.generate`'s
+  empty-pool guard was widened from `len(pool) == 0` to
+  `len(pool) < min_cards`, so a pool that cannot fill one row is refused in
+  front of `complete_json`: no completion is bought, no `llm_calls` row is
+  written, and the job parks on `PortDataMalformed` with a sentence naming the
+  count and the floor. No new setting — `min_cards` crosses the prompt, the
+  schema and the validator from one definition. ⚠️ **How often it can fire is
+  the part to quote with it:** because G3 left the pool unfiltered, only a
+  catalog whose *whole* unwatched set is below the floor reaches the guard, so
+  it is rare rather than nightly and what it buys is the completion it declines
+  on the run where it fires. Under the filtered arm it would have been the
+  common case — and a park would then have been a permanent block on a
+  transient condition.
 - ✅ **`ports/repository.py` was 3,434 lines holding 19 ABCs, and it was the one
   layer that did not mirror `db/repositories/`** — found by M8's review
   2026-08-10, **paid by M9 Task A1 on 2026-08-11**, which is the entry this list

@@ -915,6 +915,61 @@ async def test_an_empty_pool_never_reaches_the_model() -> None:
     assert household.rows.calls == 0
 
 
+async def test_a_pool_below_the_card_floor_buys_no_completion() -> None:
+    """**Provable arithmetic, not a product judgement.** `_row` discards a row
+    carrying fewer than `min_cards` *distinct* cards and `_cards` de-duplicates
+    by title id, so a pool of four candidates cannot produce a surviving row at
+    a floor of five: every row is `row_too_short`, `validate_curation` rejects,
+    and `llm_calls` records `ok = false` with real tokens and a real cost for a
+    guaranteed-empty answer. The guard is the empty pool's raise one inequality
+    wider, and it sits where that one does -- in front of `complete_json`.
+
+    **Three pools in one case, and the boundary is where the arithmetic
+    changes**, not a comfortably small number: `min_cards - 1`, `min_cards` and
+    `min_cards + 1`. The two satisfiable arms are this case's premise as much as
+    its coverage -- `calls == []` is also what a fixture that never reached the
+    service produces, and `tests/fakes/llm_client.py` repeats its last scripted
+    response forever, so no count is constrained unless a case constrains it.
+
+    **And the below-floor arm asserts its pool is not empty**, because the
+    shipped `if not candidates` guard already buys nothing for a pool of zero:
+    without that premise this case would go green against the unwidened
+    inequality the moment a fixture stopped seeding.
+    """
+    floor = DEFAULT_MIN_CARDS
+    bought: dict[int, int] = {}
+    for count in (floor - 1, floor, floor + 1):
+        household = _Household()
+        await _candidates(household, count=count)
+        client = FakeLLMClient.returning(_payload(_row("Quiet Thrillers", _five())))
+        service = household.service(client)
+        if count < floor:
+            pool = await household.pool().for_user(USER)
+            assert len(pool) == count and pool, (
+                "the premise: the pool is non-empty, so it is the floor and not "
+                "the empty-pool guard that refuses"
+            )
+            with pytest.raises(PortDataMalformed) as raised:
+                await service.generate(USER)
+            assert client.calls == [], "a pool that cannot fill one row bought a completion"
+            assert household.ledger.calls == [], "a pool that cannot fill one row was billed"
+            assert household.rows.calls == 0, "last night's screen was replaced by nothing"
+            # The diagnostics, not the verdict: a rejection is the weakest
+            # assertion anybody writes and `CurationRejected` reaches this same
+            # exception type from the far side of a paid-for completion.
+            message = str(raised.value)
+            assert f"{count}" in message and f"{floor}" in message, message
+            assert "empty" not in message, message
+            assert str(USER) not in message, message
+        else:
+            report = await service.generate(USER)
+            assert report.pool_size == count
+            assert len(report.rows) == 1
+        bought[count] = len(client.calls)
+
+    assert bought == {floor - 1: 0, floor: 1, floor + 1: 1}
+
+
 async def test_the_empty_pool_message_carries_no_household_id() -> None:
     """**`usher curate` renders this raise as its whole message**, so whatever
     `detail` holds is what an operator reads at a terminal.

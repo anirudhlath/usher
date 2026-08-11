@@ -36,20 +36,28 @@ Two traps on that path, both of which lose the row the ledger exists for:
   rather than anything a retry fixes, and raising would buy a second completion
   to write the same unwritable row -- five times, on the queue's backoff.
 
-**The one path that records nothing is the one that attempted nothing.** An
-empty candidate pool raises before the client is touched, so the rule this
-module implements is *record on every path that **attempted** a call* --
-narrower than "every path", and wider than "every path that got an answer",
-because the upstream-failure path got no answer either and writes its row all
-the same.
+**The one path that records nothing is the one that attempted nothing.** A
+candidate pool that cannot fill one row raises before the client is touched, so
+the rule this module implements is *record on every path that **attempted** a
+call* -- narrower than "every path", and wider than "every path that got an
+answer", because the upstream-failure path got no answer either and writes its
+row all the same.
 
 It is **not** an argument from `LLMCall.model`'s `min_length=1`. That field has
 a perfectly honest value for a call nobody made -- `self._model`, the model
 this deployment asked for, which is exactly what the upstream-failure path
-writes for a call that also completed nothing. What excludes the empty pool is
-that it is not an event of the LLM subsystem at all: an empty catalog is an
-operator's problem, no completion was attempted, none was billed, and a row
-saying otherwise is spend an operator has to explain away.
+writes for a call that also completed nothing. What excludes this path is that
+it is not an event of the LLM subsystem at all: a catalog with nothing to
+recommend from is an operator's problem, no completion was attempted, none was
+billed, and a row saying otherwise is spend an operator has to explain away.
+
+**That guard was `not candidates` until 2026-08-11 and is now
+`len(candidates) < min_cards`** (M9 Task G4), which is the same argument one
+inequality wider: `curation_validate._row` discards a row of fewer than
+`min_cards` *distinct* cards, so a pool below the floor is billed in full for
+an answer that is guaranteed to validate to nothing. The raise site carries how
+often that is reachable, which is the half worth reading before treating it as
+a nightly saving.
 
 ## Two failures, two exception types, and the choice is `JobWorker`'s policy
 
@@ -361,13 +369,33 @@ class CurationService:
 
             candidates = await self._pool.for_user(user_id)
             span.set_attribute("usher.curation.pool", len(candidates))
-            if not candidates:
+            if len(candidates) < self._min_cards:
                 # **Before the client, and therefore before the ledger.** A
                 # completion bought for a household with nothing to recommend
                 # is a charge with a guaranteed empty answer, and nothing was
                 # attempted here for the ledger to hold a row about. Malformed
                 # rather than unavailable: an empty catalog is an operator's
                 # problem and does not improve on a backoff schedule.
+                #
+                # **The floor and not merely zero, widened 2026-08-11 (M9 Task
+                # G4).** `curation_validate._row` discards a row carrying fewer
+                # than `min_cards` *distinct* cards and `_cards` de-duplicates
+                # by title id, so a pool below the floor cannot produce one
+                # surviving row however good the completion is: every row is
+                # `row_too_short`, the outcome is `CurationRejected`, and the
+                # household is billed in full for a guaranteed-empty answer.
+                # That is arithmetic rather than a judgement, which is why it
+                # is a guard and not a setting -- and it is the same guard
+                # rather than a second one because the empty pool is its `0`.
+                #
+                # **How often this can fire is worth knowing before reading it
+                # as a nightly saving.** The pool is
+                # `min(catalog_unwatched, USHER_CURATION_POOL_SIZE)` and
+                # ownership is an `ORDER BY` key rather than a filter (M9 Task
+                # G3, measured), so a *small library* does not make a small
+                # pool: only a catalog whose entire unwatched set is below the
+                # floor reaches here. Rare, not nightly. What it is worth is
+                # the completion it does not buy on the run where it fires.
                 #
                 # **No `detail`, and it carried `str(user_id)` until
                 # 2026-08-07.** `PortDataMalformed.detail` promises *"enough to
@@ -383,9 +411,11 @@ class CurationService:
                 # *"an id an operator has no way to look up on a deployment
                 # that has exactly one"*. So the id was the sentence's only
                 # concrete token and the command's own stated reasoning says an
-                # operator cannot read it.
+                # operator cannot read it. The widened arm's sentence obeys the
+                # same rule and says the two things the empty one has no room
+                # for: how many candidates were found, and what the floor is.
                 span.set_attribute("usher.failed", True)
-                raise PortDataMalformed("the candidate pool is empty; there is nothing to curate")
+                raise PortDataMalformed(_nothing_to_curate(len(candidates), self._min_cards))
             # **1-based, and this map is the whole security boundary.** The
             # validator does no arithmetic on it, so which handles were sent is
             # a fact this service owns -- and `enumerate(..., start=1)` is the
@@ -582,6 +612,33 @@ class CurationService:
                 cards_lost += count
         span.set_attribute("usher.curation.dropped_rows", rows_lost)
         span.set_attribute("usher.curation.dropped_cards", cards_lost)
+
+
+def _nothing_to_curate(found: int, min_cards: int) -> str:
+    """What `generate` raises when the pool cannot fill one row, and what
+    `usher curate` prints as its whole message.
+
+    **Two sentences from one guard, because they are two diagnoses.** A pool of
+    zero is *"there is nothing here"* -- most often a deployment that has not
+    finished a sync or a bootstrap -- and it keeps the sentence two cases and
+    the comment at the raise site argue about, word for word. A pool of four
+    under a floor of five is *"there is not enough here"*, and the operator's
+    question is immediately how much is missing, so that arm carries the two
+    numbers rather than the word `empty`.
+
+    **No id, no credential, no host**, on the same reasoning that took
+    `str(user_id)` off the empty-pool raise on 2026-08-07: `usher curate`
+    renders this as its entire message and `build_parser` refuses a `--user`
+    flag because a household id is *"an id an operator has no way to look up on
+    a deployment that has exactly one"*. `found` and `min_cards` are both
+    counts of things, and neither is looked up anywhere.
+    """
+    if not found:
+        return "the candidate pool is empty; there is nothing to curate"
+    return (
+        f"the candidate pool holds {found} candidates and a row needs at least "
+        f"{min_cards}; there is nothing to curate"
+    )
 
 
 def _schema(pool_size: int, *, min_cards: int) -> dict[str, Any]:
