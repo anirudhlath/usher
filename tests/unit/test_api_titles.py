@@ -264,28 +264,53 @@ async def test_four_fields_prd_07_shows_are_absent_rather_than_empty(
     assert not {"credits", "images", "similar", "seasons"} & set(body)
 
 
-async def test_an_unknown_title_is_a_404_in_the_shape_m3_ships(
+async def test_an_unknown_title_is_a_404_in_prd_07s_envelope(
     client: httpx.AsyncClient,
 ) -> None:
-    """Not RFC 9457. Identical in kind to `GET /admin/sources/{id}/status`'s
-    404, which M3 shipped in this shape deliberately: the envelope is a client
-    contract and the first route that can honestly answer "the source is down
-    and I cannot serve this from local state" is M9's `/play`."""
-    response = await client.get(f"/titles/{uuid.uuid4()}")
+    """This case read `== {"detail": "title not found"}` until M9 and was
+    named `..._in_the_shape_m3_ships`: FastAPI's default, which M5 shipped
+    deliberately because there was no `code` vocabulary to name and no 503 on
+    this route to force one. M9 lands the envelope's *shape* off the surface
+    that already exists, so the 404 is now a problem document while the 503
+    that would have forced it still does not exist here.
+
+    Kept deliberately thin -- the whole envelope is asserted in
+    `tests/unit/test_api_problem.py`, and duplicating it here would make two
+    files that have to move together."""
+    title_id = uuid.uuid4()
+    response = await client.get(f"/titles/{title_id}")
     assert response.status_code == 404
-    assert response.json() == {"detail": "title not found"}
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "not_found"
+    assert response.json()["instance"] == f"/titles/{title_id}"
 
 
-async def test_a_malformed_id_is_a_422_that_does_not_echo_it(
+async def test_a_malformed_id_is_a_422_that_does_not_echo_it_where_it_was_submitted(
     client: httpx.AsyncClient,
 ) -> None:
     """`usher.api.errors` strips pydantic's `input` app-wide -- registered on
     the app rather than on a router precisely so a route added later cannot
     forget to opt in. This is that guarantee, checked on the route that was
-    added later."""
+    added later.
+
+    **This case asserted `"not-a-uuid" not in response.text` until M9 and
+    that is no longer true, for a reason worth stating rather than
+    weakening.** RFC 9457's `instance` "identifies the specific occurrence of
+    the problem", which is the request path, so a rejected *path parameter*
+    is necessarily in the document -- there is no `instance` that identifies
+    the occurrence and omits the path. Nothing about the credential rule
+    moves: PRD 08's is about what a client *submitted as data*, which in this
+    API is a body or a query string, and both are still absent. The
+    assertion is therefore where the leak would be -- pydantic's `input`,
+    which is what carried a whole request body -- rather than over the whole
+    text."""
     response = await client.get("/titles/not-a-uuid")
     assert response.status_code == 422
-    assert "not-a-uuid" not in response.text
+    document = response.json()
+    assert document["instance"] == "/titles/not-a-uuid"
+    for error in document["errors"]:
+        assert "input" not in error
+        assert "not-a-uuid" not in repr(error)
 
 
 async def test_watch_state_is_rendered_when_there_is_one(
