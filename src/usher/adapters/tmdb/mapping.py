@@ -427,6 +427,17 @@ def images_from_payload(
     `iso_639_1` -- a bare promotion from the top-level key alone has no
     dimensions at all, and a layout engine cannot ask for them again.
 
+    **A path is recorded whatever its extension, and a `logo` is where that
+    matters.** The provider publishes some logos as `.svg`, and
+    `usher.ports.images.SUPPORTED_MEDIA_TYPES` deliberately has no entry for
+    `image/svg+xml` — so a row derived here can name artwork the proxy will
+    refuse to cache. That is the right split rather than an oversight: this
+    stage records what the provider says it has, from a payload months old,
+    with no way to ask what the CDN would answer today; which media types are
+    servable is a serve-time fact and belongs to the fetcher that meets one.
+    Dropping the row here instead would make `GET /titles/{id}` deny the
+    existence of a logo the provider does publish.
+
     **Nothing TMDb can put in a payload may raise**, this module's standing
     rule, and `Image` bounds four fields: `provider_path` and `provider` are
     `min_length=1` and `width`/`height` are `gt=0`. An entry with no usable
