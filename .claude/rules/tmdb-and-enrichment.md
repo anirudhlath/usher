@@ -333,3 +333,19 @@ records the `/search/movie` shape and never `/search/tv`'s. Fine for a shape
 diff (the two pages are the same shape but for `title`/`name` and
 `release_date`/`first_air_date`), worth knowing before reading its output as
 evidence about TV search.
+
+**And since M9's T1, `--kind series` no longer reproduces the first request
+the provider issues.** The script sends `SERIES_APPEND_TO_RESPONSE` alone;
+`TmdbMetadataProvider.fetch` sends that plus `season/0…season/13`. It used to
+match byte for byte, and that is a genuine loss for a tool whose whole job is
+to diff the shipped request's response against a committed shape. Left alone
+on purpose — the season blocks are popped before `fetch` returns, so
+capturing them would record shapes nothing reads, and `season.json` already
+records the season shape from its own route. **The reason first given for
+leaving it was wrong and is corrected here**: it is *not* that the
+namespace-only capture is "exactly the shape `raw_payloads` holds".
+`raw_payloads`' `seasons[]` entries carry merged episode data no bare
+`SERIES_APPEND_TO_RESPONSE` response has ever contained — true of the `1+N`
+path too, so the fixtures have never recorded a stored payload's shape and
+were never meant to. A wrong reason in a docstring outlives the decision it
+justifies, which is why this is written down rather than quietly fixed.

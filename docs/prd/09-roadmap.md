@@ -72,15 +72,31 @@ write-back route was simply wrong, and TMDb turned out to classify two
 permanent 4xx failures as retryable outages and to filter search years
 *exactly* where the match ladder filters ±1. `CLAUDE.md` carries both runs
 guess by guess, including what remains unverified. **One measured
-opportunity is recorded and deliberately not taken:**
+opportunity was recorded and deliberately not taken, and M9 took it:**
 `append_to_response=season/N` collapses a series' enrichment from 1+N
 requests to 1 — at 32,409 series and a measured median of 9 seasons, ~324k
 requests against ~32k, i.e. **~10x** on the series half of a full pass. (The
 "~190k → ~35k, ~5x" first recorded here was arithmetically impossible;
 [04](04-catalog-bootstrap.md) and `CLAUDE.md` carry the correction and where
-the wrong figure came from.) It changes [03](03-sources-and-sync.md)'s
-request table and [04](04-catalog-bootstrap.md)'s crawl arithmetic and
-belongs in its own change.
+the wrong figure came from. The median's sample is 30 popular-skewed series,
+so ~324k is an upper bound on that measurement rather than a prediction of
+what the 1+N shape would have cost a real catalog.) It changed
+[03](03-sources-and-sync.md)'s request table,
+[04](04-catalog-bootstrap.md)'s crawl arithmetic and
+`TmdbMetadataProvider.fetch` — which is precisely why M4 left it to its own
+change, and M9 is where that change happened. It gave up one property in the
+process: a season TMDb refuses can no longer park the job, because an absent
+season and an omitted one are the same `200`. Recorded with the shipped code
+rather than only here.
+
+**And the deferral itself is worth one sentence, because this file is where
+that lesson keeps landing.** The call was recorded in three places and still
+sat four milestones, then had to be found by a reviewer rather than picked up
+by a plan: nothing in M9's own 74-task breakdown claimed this paragraph, so
+the change shipped and the retrospective describing it as "not taken" would
+have survived it. A deferral recorded in a retrospective has no owner, which
+is the same failure as *"a document with no markers is not a document with no
+gaps"* below, one level up — in the ledger rather than in the spec.
 
 **M5's boundary was ambiguous in six places, and each was decided
 deliberately rather than drifted into.**
