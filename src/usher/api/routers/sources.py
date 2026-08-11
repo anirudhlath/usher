@@ -16,10 +16,12 @@ exists for.
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Response, status
 
 from usher.api.deps import SourceServiceDep
+from usher.api.dto.problem import ProblemCode
 from usher.api.dto.source import SourceCreateRequest, SourceResponse, SourceStatusResponse
+from usher.api.errors import ProblemException
 from usher.ports.credentials import SourceCredentials
 
 router = APIRouter(prefix="/admin/sources", tags=["admin"])
@@ -51,14 +53,22 @@ async def list_sources(sources: SourceServiceDep) -> list[SourceResponse]:
 async def source_status(source_id: uuid.UUID, sources: SourceServiceDep) -> SourceStatusResponse:
     result = await sources.status(source_id)
     if result is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="source not found")
+        raise ProblemException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code=ProblemCode.NOT_FOUND,
+            detail="source not found",
+        )
     return SourceStatusResponse.of(result)
 
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_source(source_id: uuid.UUID, sources: SourceServiceDep) -> Response:
     if not await sources.remove(source_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="source not found")
+        raise ProblemException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code=ProblemCode.NOT_FOUND,
+            detail="source not found",
+        )
     # An explicit empty `Response`, not a bare `return None`: FastAPI
     # serializes a returned `None` into a literal `null` body, which a 204
     # is not allowed to carry.

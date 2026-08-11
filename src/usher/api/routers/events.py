@@ -11,17 +11,26 @@ narrows functionality; it never fails a request local state can answer" --
 holds here by construction rather than by care: the bus is in-memory and this
 handler touches no `SourceAdapter`, so `PortUnavailable` is not reachable
 from it. The one failure it *can* have is a malformed `?titles=`, answered
-422 in the shape M3 already ships.
+422 as an RFC 9457 problem document like every other rejected request.
+
+**The route is on `dto/problem.py`'s exemption list and that is about the
+stream, not about the 422.** Once this handler has answered `200
+text/event-stream` there is no status code left to carry a problem document,
+so every later failure is an SSE event (`resync_required`) or a closed
+connection; the 422 below is decided before the stream starts and is an
+ordinary document.
 """
 
 import asyncio
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from usher.api.deps import EventBusDep, SettingsDep
 from usher.api.dto.events import encode_sse, parse_titles
+from usher.api.dto.problem import ProblemCode
+from usher.api.errors import ProblemException
 from usher.services.events import SentEvent
 
 router = APIRouter(tags=["events"])
@@ -44,7 +53,7 @@ async def events(
         # The rule, never the value. PRD 08: a rejected request never echoes
         # what it rejected, and a query string is a submitted body's
         # neighbour rather than its exception.
-        raise HTTPException(
+        raise ProblemException(
             # `..._CONTENT`, not `..._ENTITY`. Starlette 1.3 deprecated the
             # older spelling behind a module `__getattr__`, so the older one
             # emits a `StarletteDeprecationWarning` **per request** rather
@@ -52,6 +61,7 @@ async def events(
             # expected warnings, because a suite with one permanent warning
             # is a suite where the next real one is invisible.
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code=ProblemCode.VALIDATION_FAILED,
             detail="titles must be a comma-separated list of uuids",
         ) from exc
     last_event_id = request.headers.get("last-event-id")

@@ -160,29 +160,33 @@ Tier 1 is the default and is sufficient for any realistic home library plus a
 generous recommendation pool. One request per title thanks to
 `append_to_response`.
 
-**"One request per title" holds for a movie and does not for a series**, and
-the table above predates that distinction. A series costs one request plus
-one per season, because TMDb's series detail lists its seasons and carries no
-episodes ([03](03-sources-and-sync.md)). Measured live 2026-08-01: the sampled
+**"One request per title" holds for a series too now, and it did not until
+M9.** A series used to cost one request plus one per season, because TMDb's
+series detail lists its seasons and carries no episodes
+([03](03-sources-and-sync.md)). Measured live 2026-08-01: the sampled
 long-running series cost ten requests each, and 30 series carried 320 seasons
-between them — **median 9**. So the series half of a full pass is 32,409 ×
+between them — **median 9**. So the series half of a full pass *was* 32,409 ×
 (1 + 9) ≈ **324k requests**.
 
-**`append_to_response=season/N` collapses that back to one** — 32,409, i.e.
-**~10x** — verified, including the 20-item ceiling that bounds it at 14
-seasons alongside the six namespaces already appended (a series with more
-seasons than that needs a second request; a small tail), and including that a
-season the series does not have is silently omitted rather than erroring.
-Recorded here, not yet taken; it is a change to the adapter's `fetch` and to
-[03](03-sources-and-sync.md)'s request table, and belongs in its own change.
+**`append_to_response=season/N` collapses that back to one** — **~32k against
+~324k, i.e. ~10x** — verified, including the 20-item ceiling that bounds it at
+14 seasons alongside the six namespaces already appended (a series with more
+seasons than that needs a second request; a small tail, which is why the
+figure is ~32k rather than 32,409 exactly), and including that a season the
+series does not have is silently omitted rather than erroring. **Taken**: the
+adapter's `fetch` issues the blind `season/0…season/13` window, reconciles it
+against the `seasons[]` summary the same response carries, and follows up only
+for listed numbers that window missed.
 
 Two honest caveats on the 324k, because it is a planning figure and not a
 measurement. The median comes from **30 series that skew popular**, and
-popular series have more seasons than a library's median does, so this is an
-upper bound. And an earlier draft of this paragraph said "~190k → ~35k, ~5x":
-`~190k` was the tier-1 *title* count from the table above, borrowed one
-section over and read as a series *request* count. `CLAUDE.md` records the
-correction. 32,409 × 10 is 324k; ~190k would require a median of ~4.9.
+popular series have more seasons than a library's median does, so **~324k is
+an upper bound on that measurement rather than a prediction** of what the
+`1+N` shape would have cost a real catalog. And an earlier draft of this
+paragraph said "~190k → ~35k, ~5x": `~190k` was the tier-1 *title* count from
+the table above, borrowed one section over and read as a series *request*
+count. `CLAUDE.md` records the correction. 32,409 × 10 is 324k; ~190k would
+require a median of ~4.9.
 
 TMDb disabled its old hard rate limit in 2019; current guidance is a ceiling
 "somewhere in the 40 requests per second range". Usher self-limits to ~25 rps
@@ -274,7 +278,13 @@ does to the term's weight.
 ⏳ **Still not measured: coverage against a genuinely *enriched* tier.** That
 run had no TMDb key, so its "owned" titles are name-shaped skeletons and its
 candidate pools are name-selected — which weakens exactly the correlation being
-measured, making 1.81% a conservative floor rather than an estimate.
+measured, making 1.81% a conservative floor rather than an estimate. **The
+population is half the number and the arithmetic recovers it**: 502,000
+candidate pairs over a 100-title pool is exactly **5,020 seeds**, and those
+5,020 were the household's owned titles, moved onto the enriched tier by a
+direct `UPDATE` that changed the label and not the document. So 1.81% is a
+floor over 5,020 owned, name-shaped seeds and is **not a baseline** for a run
+over a larger or differently-selected population.
 
 **Two physical properties of this snapshot the importer verifies rather than
 assumes.** Both were measured for M7 and neither is documented by GroupLens
@@ -396,8 +406,9 @@ Hard rules encoded in the project:
 2. **Never scrape imdb.com** — IMDb's terms permit the published dumps only.
 3. **Honour the TMDb cache ceiling.** `provider_cache_meta` tracks fetch times;
    nothing is retained past 6 months without refresh.
-4. **Render attribution in clients.** The API exposes required attribution
-   strings so every client can display them.
+4. **Render attribution in clients.** `GET /meta/attribution`
+   ([07](07-client-api.md)) serves the four required strings — IMDb, TMDb,
+   MovieLens, Wikidata — so every client can display them.
 5. **Commercial use is out of scope.** Both IMDb and TMDb require separate
    licensing for it, and TMDb explicitly names AI/ML training on their content
    as commercial.

@@ -186,9 +186,15 @@ rather than a constant.
 **The measured pair rate is below the floor the weight assumes.** Both sides of
 a candidate pair need a vector for the term to contribute, and that rate is
 **1.81%** (9,069 of 502,000 pairs) against a 10% floor — measured, never
-squared, on a catalog with no TMDb enrichment. It is a conservative floor
+squared, on a catalog with no TMDb enrichment. **The population is part of the
+number and the arithmetic recovers it**: 502,000 pairs over a 100-title
+candidate pool is exactly **5,020 seeds**, and those 5,020 were one household's
+owned titles, moved onto the enriched tier by a direct `UPDATE` so the tier
+*label* changed and the composed document did not. It is a conservative floor
 rather than an estimate, because a name-shaped document selects a name-shaped
-pool, which weakens exactly the correlation being measured. **This ADR is about
+pool, which weakens exactly the correlation being measured — and for the same
+reason it is a floor over *that* population and **not a baseline** for a run
+over a differently-selected, genuinely enriched one. **This ADR is about
 the shape, not the weight**, and the shape is right at any coverage; if the
 term is eventually removed, the table is still the cheapest form of a signal
 worth keeping around.

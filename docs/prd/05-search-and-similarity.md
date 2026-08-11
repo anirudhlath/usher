@@ -884,6 +884,25 @@ inside a keystroke — with the trigram + `levenshtein_less_equal` path
 tolerance at all (1.9%) and the trigram path cannot meet a keystroke budget
 at any setting.
 
+✅ **Tier 1 is built.** `PostgresPrefixSuggestIndex`
+(`adapters/search/prefix.py`) is the probe: `lower(name) LIKE 'typed%'` over
+`titles` **and** `title_search_names` as one `UNION`, so a person's name
+reaches their films from the first keystroke, ordered by the same three keys
+tier 2 uses under its distance (`popularity DESC NULLS LAST, vote_count DESC
+NULLS LAST, id ASC`) so the box does not reshuffle when the debounced tier
+arrives behind it. It reads the two `text_pattern_ops` indexes `m09a` ships and
+**writes nothing**, so ADR-0021's dual-write cost is still unpaid by a second
+implementation of that port.
+
+🔶 **What is measured about it here is a probe, not the shipped statement.**
+The 0.6 ms figure above is a prefix probe over 1,271,138 names; the union, the
+de-duplication and the sort above the `LIMIT` are not in it, and Postgres has
+no `LIMIT` pushdown through a sort — so a one-character keystroke over a large
+catalog is the open question. **M9's B3 measures the shipped statement at
+catalog scale against a bar written before the run, and is the task authorised
+to narrow the union on the strength of it.** The route that serves both tiers,
+and the ADR recording the split, are B5's.
+
 **The gate as this section defined it measured the wrong half, and that
 correction stands.** A synthetic dry run over 604 cases first showed it, and
 the real run confirmed the shape: recall is the half that is arguable, and a

@@ -596,8 +596,8 @@ mostly offline.
 
 ### 3. Enrich
 
-One TMDb request per title, plus per-season episode fetches for series, and
-sets `field_provenance`.
+One TMDb request per title — for a series that one request carries the whole
+season hierarchy, see the table below — and sets `field_provenance`.
 
 **The `append_to_response` list is not the same for both id spaces**, which
 is a correction to what this section said before M4 built the adapter:
@@ -614,26 +614,31 @@ successful.
 | Kind | Request |
 |---|---|
 | movie | `GET /movie/{id}?append_to_response=credits,keywords,images,videos,external_ids,release_dates` |
-| series | `GET /tv/{id}?append_to_response=credits,keywords,images,videos,external_ids,content_ratings`, then `GET /tv/{id}/season/{n}` per season |
+| series | `GET /tv/{id}?append_to_response=credits,keywords,images,videos,external_ids,content_ratings,season/0,…,season/13` — one request, seasons and episodes included; a listed season outside that window costs one follow-up carrying only `season/N` items |
 
 Two facts about that second row, both measured live on 2026-08-01 and both
 consequential enough to state here rather than in an adapter docstring:
 
 - **`credits` is a valid TV namespace** (`aggregate_credits` exists
   alongside it and is *also* valid — it is a second view, not a replacement).
-- **`append_to_response=season/N` works**, so the per-season requests in
-  that row are optional rather than necessary. One request carrying
+- **`append_to_response=season/N` works**, so a series costs one request
+  rather than one per season. One request carrying
   `credits,keywords,images,videos,external_ids,content_ratings` plus
   `season/0…season/13` — exactly TMDb's documented 20-item ceiling, which is
   enforced with an HTTP 400 at 21 — returned Game of Thrones' entire
   hierarchy, all 373 episodes across 9 seasons, in place of the ten requests
-  the row above costs. A season the series does not have is silently omitted
-  rather than erroring, and the appended block is byte-identical to the
-  season's own detail response but for a missing top-level `id`, which the
-  series' own `seasons[]` summary already carries. **This is recorded and
-  not yet taken**: it is a change to this row, to the adapter's `fetch`, and
-  to the request-budget arithmetic in [04](04-catalog-bootstrap.md), and it
-  belongs in its own change rather than folded into a verification run.
+  the `1+N` shape cost. A season the series does not have is silently omitted
+  rather than erroring, which is what makes a blind window legal, and the
+  appended block is byte-identical to the season's own detail response but
+  for a missing top-level `id`, which the series' own `seasons[]` summary
+  already carries. **Taken, and this row is it.** TMDb permits any integer
+  season number, so the blind window is reconciled against the `seasons[]`
+  summary the same response carries and any listed number it missed is
+  fetched by a follow-up; that follow-up spends no slot on a namespace, so it
+  gets all twenty. Identity with the `1+N` payload is the contract — the
+  block is merged over the summary exactly as the per-season response was,
+  and no `season/N` key survives into `raw_payloads`. The request-budget
+  arithmetic is in [04](04-catalog-bootstrap.md).
 
 The same divergence runs through the field names (`title`/`name`,
 `release_date`/`first_air_date`, `keywords.keywords`/`keywords.results`, a

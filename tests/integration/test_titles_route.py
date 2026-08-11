@@ -479,9 +479,22 @@ async def test_the_route_answers_with_the_source_down(
 
 
 async def test_an_unknown_id_is_a_404_against_a_real_schema(client: AsyncClient) -> None:
-    """The 404 shape M3 ships, from a read that really went to Postgres and
-    really found nothing -- `usher.ports.errors` draws the line this rests
-    on: absence is not `PortUnavailable`."""
-    response = await client.get(f"/titles/{new_id()}")
+    """PRD 07's RFC 9457 envelope, from a read that really went to Postgres
+    and really found nothing -- `usher.ports.errors` draws the line this
+    rests on: absence is not `PortUnavailable`.
+
+    It read `== {"detail": "title not found"}` until M9. Changing a 4xx body
+    is a client-visible break, so the cases that pinned the old shape move in
+    the commit that changes it rather than quietly afterwards."""
+    title_id = new_id()
+    response = await client.get(f"/titles/{title_id}")
     assert response.status_code == 404
-    assert response.json() == {"detail": "title not found"}
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json() == {
+        "type": "https://usher.dev/errors/not-found",
+        "title": "Not found",
+        "status": 404,
+        "code": "not_found",
+        "detail": "title not found",
+        "instance": f"/titles/{title_id}",
+    }

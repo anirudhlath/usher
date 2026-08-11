@@ -57,6 +57,15 @@ correct on its own terms rather than depending on a trigger it does not
 declare. `tests/integration/test_watch_state_repository.py::
 test_the_update_trigger_owns_updated_at` pins the actual behaviour so it is a
 recorded fact rather than a surprise for whatever reads this column next.
+
+**`set_from_client` is the other side of the conflict rule, single-row and
+one statement.** `merge_from_source` above exists to *lose* to a client;
+`set_from_client` exists to *win*, and it can do so with none of this
+module's staging/`COALESCE` machinery -- it has no batch, no absent field to
+preserve, and no `observed_at` to compare, because the same
+`trg_watch_states_set_updated_at` this module already leans on makes every
+client write later than any walk by construction. See its own docstring on
+the port ABC for the field semantics.
 """
 
 import uuid
@@ -68,12 +77,12 @@ from sqlalchemy import CursorResult, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.db.repositories._errors import constraint_name
+from usher.db.repositories._errors import constraint_name, refusals_as_conflict
 from usher.db.staging import stage_records
 from usher.domain.ids import new_id
 from usher.domain.watch import WatchState
 from usher.ports.errors import PortDataMalformed, RepositoryConflict
-from usher.ports.ingest import WatchStateMerge
+from usher.ports.ingest import WatchStateMerge, WatchStateWrite
 from usher.ports.repository import RecentWatch, WatchStateRepository
 
 # `ordinal` breaks a tie in `observed_at`, which is the *common* case rather
@@ -175,6 +184,60 @@ _STATEMENTS = (
     _update("episode_id"),
     _insert("episode_id", "title_id"),
 )
+
+
+def _upsert(target: str, other: str) -> str:
+    """`set_from_client`'s whole statement: one row, one target, no staging.
+
+    The other side of `_update`/`_insert` above -- and simpler than both,
+    because a client write is never a batch and never `COALESCE`s toward a
+    possibly-absent value. `position_seconds` and `played` are `excluded`'s
+    verbatim, always; `play_count`/`last_played_at` are the only fields that
+    branch, and they branch on `excluded.played` -- the row this statement is
+    about to write -- rather than reading `:played` a second time.
+
+    `other` is written as the literal `NULL`, never a bound parameter, the
+    same choice `_insert` above makes and for the same reason: the caller has
+    already validated exactly one of `title_id`/`episode_id` is set, and
+    spelling the untouched column as data rather than as logic is one fewer
+    thing that validation has to keep true.
+
+    No `updated_at` on either path. The `INSERT` needs none: the column's own
+    `server_default` is `now()` (`a8a0e10ff464`'s DDL), which is the same
+    instant this statement's other `now()` calls read, frozen for the
+    transaction. The `ON CONFLICT ... DO UPDATE` needs none either --
+    `trg_watch_states_set_updated_at` (`BEFORE UPDATE`, unconditional) is the
+    entire mechanism the port docstring names, and writing it here too would
+    only be overwritten a second time by the same value.
+    """
+    return f"""
+    INSERT INTO watch_states (
+        id, user_id, {target}, {other}, position_seconds, played,
+        play_count, last_played_at, origin
+    ) VALUES (
+        :id, :user_id, :target_id, NULL, :position_seconds, :played,
+        CASE WHEN :played THEN 1 ELSE 0 END,
+        CASE WHEN :played THEN now() ELSE NULL END,
+        'api'
+    )
+    ON CONFLICT (user_id, {target}) DO UPDATE SET
+        position_seconds = excluded.position_seconds,
+        played = excluded.played,
+        play_count = CASE WHEN excluded.played
+                          THEN GREATEST(watch_states.play_count, 1)
+                          ELSE watch_states.play_count END,
+        last_played_at = CASE WHEN excluded.played
+                              THEN now()
+                              ELSE watch_states.last_played_at END,
+        origin = 'api'
+    RETURNING *
+    """  # noqa: S608 -- `target`/`other` are one of two module literals, never input
+
+
+_SET_FROM_CLIENT = {
+    "title_id": _upsert("title_id", "episode_id"),
+    "episode_id": _upsert("episode_id", "title_id"),
+}
 
 # `played AND play_count = 0` is how "history unknown" is spelled, because
 # the column is NOT NULL DEFAULT 0 and a walk that could not determine the
@@ -381,6 +444,47 @@ class PostgresWatchStateRepository(WatchStateRepository):
                 constraint=constraint_name(exc),
             ) from exc
         return changed
+
+    async def set_from_client(self, write: WatchStateWrite) -> WatchState:
+        # Same validation, same reasoning, as `merge_from_source` above: a
+        # caller must not receive `ck_watch_states_exactly_one_target` as a
+        # raw storage exception, and checking before opening the SAVEPOINT is
+        # what stops a both-targets write from being interpretable as a
+        # single-target one at all.
+        if (write.title_id is None) == (write.episode_id is None):
+            raise PortDataMalformed(
+                "a watch state must name exactly one of title_id or episode_id",
+                detail=f"user_id={write.user_id}",
+            )
+        target = "title_id" if write.title_id is not None else "episode_id"
+        target_id = write.title_id if target == "title_id" else write.episode_id
+        # `refusals_as_conflict`, not the module's own `try/except
+        # IntegrityError` above: `position_seconds` is `Field(default=0,
+        # ge=0)` with no ceiling against an `integer` column -- the "field
+        # bounded on fewer sides than the column" shape -- so `2**31` is
+        # refused client-side by asyncpg's own encoder as an unclassified
+        # `DBAPIError`, which `except IntegrityError` does not catch and
+        # `is_row_refusal` does.
+        async with refusals_as_conflict(
+            self._session, "a client watch write conflicts with the catalog"
+        ):
+            row = (
+                (
+                    await self._session.execute(
+                        text(_SET_FROM_CLIENT[target]),
+                        {
+                            "id": new_id(),
+                            "user_id": write.user_id,
+                            "target_id": target_id,
+                            "position_seconds": write.position_seconds,
+                            "played": write.played,
+                        },
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        return WatchState.model_validate(dict(row))
 
     async def list_needing_history(
         self, *, limit: int = 500

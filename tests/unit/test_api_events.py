@@ -134,16 +134,30 @@ async def test_two_titles_are_comma_separated(
 async def test_a_malformed_titles_filter_is_a_422_that_does_not_echo_it(
     client: httpx.AsyncClient,
 ) -> None:
-    """M3's shipped error shape, not PRD 07's RFC 9457 envelope -- see the
-    M5 plan's "Does a streaming surface force the error envelope?". And the
-    detail names the *rule* rather than the submitted value: `usher.api.
-    errors` strips `input` from every validation error app-wide because a
-    422 must never echo what it rejected, and a query string is a submitted
-    body's neighbour rather than its exception."""
+    """PRD 07's RFC 9457 envelope, which this route's *stream* is exempt from
+    and this failure is not: the 422 is decided before `200
+    text/event-stream` is answered, so there is still a status code to carry
+    a document. (It read `== {"detail": …}` until M9 -- see the M5 plan's
+    "Does a streaming surface force the error envelope?" for the shape it
+    used to have.)
+
+    The detail still names the *rule* rather than the submitted value, and
+    `instance` is the path with the query string dropped: `usher.api.errors`
+    strips `input` from every validation error app-wide because a 422 must
+    never echo what it rejected, and a query string is a submitted body's
+    neighbour rather than its exception."""
     response = await client.get("/events?titles=not-a-uuid")
     assert response.status_code == 422
     assert "not-a-uuid" not in response.text
-    assert response.json() == {"detail": "titles must be a comma-separated list of uuids"}
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json() == {
+        "type": "https://usher.dev/errors/validation-failed",
+        "title": "Validation failed",
+        "status": 422,
+        "code": "validation_failed",
+        "detail": "titles must be a comma-separated list of uuids",
+        "instance": "/events",
+    }
 
 
 async def test_a_partly_malformed_titles_filter_is_also_a_422(

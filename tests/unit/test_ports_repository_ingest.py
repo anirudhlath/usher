@@ -35,6 +35,14 @@ def test_media_item_repository_surface() -> None:
             # would let a stale implementation type-check while
             # `GET /titles/{id}` lost its badges.
             "list_for_title",
+            # M9's episode-keyed counterpart (D2), for `POST /episodes/{id}
+            # /play`: `list_for_title` carries `AND episode_id IS NULL`,
+            # which is exactly what makes it useless for an episode's own
+            # copies. Named here for the same reason `list_for_title` is --
+            # dropped from the ABC, every implementation could stop
+            # providing it and still type-check, and the episode play route
+            # would silently rank against zero targets forever.
+            "list_for_episode",
             "list_unmatched",
             "attach_title",
             # M7's episode-keyed ownership read, and it is named here rather
@@ -69,6 +77,13 @@ def test_watch_state_repository_surface() -> None:
     assert WatchStateRepository.__abstractmethods__ == frozenset(
         {
             "merge_from_source",
+            # M9's local watch write, and the reason it is named here rather
+            # than trusted to the type checker alone: dropped from the ABC,
+            # every implementation could stop providing it and still
+            # type-check, and the four action routes D7 builds on top of it
+            # would have nothing to call -- a silent absence, not a wrong
+            # answer.
+            "set_from_client",
             "list_needing_history",
             "get_for_title",
             "get_for_episode",
