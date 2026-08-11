@@ -26,19 +26,43 @@ All figures below were measured on 2026-07-28.
 
 | Dataset | Provides | Size | Time |
 |---|---|---|---|
-| [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/) | 12.7M titles, 1.7M ratings, 100M cast/crew rows, 58M localised titles | 1.83 GiB gz | 20–40 min |
+| [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/) | 12.7M titles, 1.7M ratings, **101,151,422** cast/crew rows, **58,906,368** localised titles, **15,563,615** names | **1.832 GiB gz** (1,967,348,042 B over seven files) | 20–40 min |
 | [TMDb daily ID export](https://developer.themoviedb.org/docs/daily-id-exports) | 1.23M movie + 228k series IDs **with popularity** | 31 MiB gz | < 1 min |
 | Wikidata SPARQL | ~386k verified IMDb↔TMDb↔TVDb ID pairs (CC0) | no download | ~18 s of query time |
 | TMDb API (per-id crawl) | Overviews, artwork, keywords, full credits | — | 1.5–2.5 h for the priority tier |
 | [MovieLens tag genome](https://grouplens.org/datasets/movielens/) (`ml-latest.zip`) | **18,472,128** movie×tag relevance scores for **16,376** movies over 1,128 tags | **334.6 MiB** (350,896,731 B) | ~10 min |
 
 > **What Phases 0–2 actually download: ~250 MiB, not 2.2 GiB** (measured
-> 2026-07-30). From IMDb, only `title.basics.tsv.gz` (214.4 MiB) and
-> `title.ratings.tsv.gz` (8.2 MiB) — the other five files carry cast, crew,
-> akas, and episodes, which need entities that do not exist yet (see Phase 0).
-> From TMDb, the two ID exports (`movie_ids` measured at 26.1 MiB, plus the
-> much smaller `tv_series_ids`). Wikidata downloads nothing. The rest of the
-> 2.2 GiB in the Cost table belongs to Phases 3–4.
+> 2026-07-30, re-measured 2026-08-11). From IMDb, only `title.basics.tsv.gz`
+> (**214.9 MiB**) and `title.ratings.tsv.gz` (**8.2 MiB**) — the other five
+> files carry cast, crew, akas, and episodes. From TMDb, the two ID exports
+> (`movie_ids` measured at 26.1 MiB, plus the much smaller `tv_series_ids`).
+> Wikidata downloads nothing. The rest of the 2.2 GiB in the Cost table belongs
+> to Phases 3–4.
+
+> **The IMDb row's two headline figures were re-measured on 2026-08-11 and both
+> hold.** *"100M cast/crew rows"* is 101,151,422 `title.principals` data rows
+> and *"58M localised titles"* is 58,906,368 `title.akas` data rows; the seven
+> files total 1,967,348,042 B, i.e. 1.832 GiB, against the row's stated
+> 1.83 GiB. What the row never said is how little of that survives a join
+> against this catalog: **12,626,452 of the 101,151,422 principals (12.5%)** and
+> **7,536,366 of the 58,906,368 akas (12.8%)** name one of the 1,271,138 titles
+> `_RETAINED_TYPES` keeps, because the other 87% belong to the episodes,
+> shorts, video games and adult titles Phase 0 drops.
+>
+> **The three unimported files are 1.49 GiB of the 1.83 GiB**, and they are
+> `title.principals.tsv.gz` (742.3 MiB), `title.akas.tsv.gz` (486.5 MiB) and
+> `name.basics.tsv.gz` (293.7 MiB). The per-file sizes and what each costs in
+> stored rows are in `.claude/rules/bootstrap-and-datasets.md`, together with
+> the measured refusal of a `people`/`credits` design for the whole catalog.
+>
+> **The seven files are not one snapshot.** On 2026-08-11 five carried
+> `Last-Modified: Tue, 11 Aug 2026 00:47–00:48 GMT` while `name.basics` and
+> `title.akas` carried `Mon, 10 Aug 2026 12:53 GMT` — twelve hours older. A
+> cross-file join therefore spans two regenerations by default, which is
+> observable rather than theoretical: **969 of the 3,212,911 `nconst` values
+> that day's `title.principals` referenced did not exist in that day's
+> `name.basics` at all.**
 
 ### What the bulk data does *not* contain
 
@@ -76,6 +100,30 @@ Pruning that keeps this sane: retain `movie`, `tvMovie`, `tvSeries`, and
 > that adds those entities ([09](09-roadmap.md) places the ingest pipeline and
 > its people/episode modelling in M4). Retaining exactly the four `titleType`s
 > above is what yields the 1,127,975 figure this section already cites.
+
+> **Half of that correction has itself been overtaken, 2026-08-11 (M9).**
+> **`title.akas` now has somewhere to land** — `m09a` created
+> `title_search_names`, with a `region` and a `language` column — and
+> `usher.adapters.bulk.imdb.parse_akas_row` plus `IMDbAkaDataset` are the
+> parser and the dataset for it. Nothing in `usher.cli` constructs that
+> dataset yet, so no bootstrap phase reads the file and no operator pays its
+> **486.5 MiB** today; the phase is a separate change.
+>
+> **The other half hardened rather than lifted.** `title.principals` and
+> `name.basics` are now refused on a *measurement* rather than on a missing
+> table: loaded against a real 1,271,138-title catalog, the `people` +
+> `credits` design measured **2.702 GB against a 2.0 GB ceiling** — 2.395 GB
+> stripped to five columns and three indexes — so **no `people` or `credits`
+> row is bulk-loaded from IMDb at all**, and the two sources never own one
+> entity. `title.crew` and `title.episode` keep the status the paragraph above
+> describes. Full evidence, with its bar written before the download, is in
+> `.claude/rules/bootstrap-and-datasets.md`.
+>
+> The akas retention policy, and what each clause was measured to cost, is on
+> `parse_akas_row` itself. In one line: every row whose `title` can be stored
+> is kept, the rows IMDb flags `isOriginalTitle = 1` are dropped (21.6% of the
+> file, costing **7 aliases in 1,663,330**), and nothing is filtered on
+> `region`, `language`, `types` or `attributes`.
 
 **Index handling during Phase 0 — measured, decided.** `ix_titles_sort_name`
 and `ix_titles_name_lower_year` are dropped before the load and rebuilt
@@ -159,6 +207,36 @@ The only expensive phase, and the one that produces overviews.
 Tier 1 is the default and is sufficient for any realistic home library plus a
 generous recommendation pool. One request per title thanks to
 `append_to_response`.
+
+⚠️ **That table's tier-1 row is measured now, and it was wrong in three
+independent places, all flattering. Read this paragraph instead of the row.**
+Measured 2026-08-11 (M9 S2) over a systematic 1-in-261 sample of the movie
+tier — 500 titles, drained through the shipped `usher work`, 499 × 200 and
+1 × 404. **The population is 130,806, not ~189k**: of the 161,789 movies at
+`vote_count >= 100`, only 130,806 carry a `tmdb_id`, and `EnrichService.
+_ref_for` parks the other 30,983 on their first attempt rather than fetching
+them. **The rate is not the rate limit**: `JobWorker` runs jobs sequentially
+and the token bucket lives on one client per process, so one worker runs at
+`1/latency` — measured **10.38 rps against a bucket set to 30**, a per-title
+cycle whose mean is 0.0963 s and of which HTTP is 65%. **So tier 1 is ~3.5 h
+at one worker** (95% CI [3.41, 3.59]), not 1.5–2.5 h, and reaching 30 rps
+needs three worker processes each configured to `30/N`. It also writes **~1.0
+GiB into `raw_payloads`** and **two follow-up jobs per enriched title**
+(`INDEX` and `DERIVE`), the `INDEX` half of which nothing claims unless
+`USHER_EMBEDDING_ENABLED` is on. Full evidence in
+`.claude/rules/tmdb-and-enrichment.md`.
+
+⚠️ **And the tier is not a fixed population, because enriching a title can
+remove it from the tier.** `vote_count` is enrichable, the bulk loader writes
+IMDb `numVotes` into it and TMDb's own `vote_count` overwrites that on
+enrichment — a different electorate entirely. Measured over 537 enriched tier
+movies: **80 still satisfy `>= 100` (14.9%)**, median TMDb vote count **16**
+against a median IMDb `numVotes` of **581** on the unenriched tier. The
+keyset walk is unaffected (a row leaves the tier only after the cursor has
+passed it), but **any tier statistic re-derived from the predicate after the
+crawl answers about a population roughly a seventh the size**. The enriched
+row records `"vote_count": "tmdb"` in `field_provenance`; no predicate reads
+it.
 
 **"One request per title" holds for a series too now, and it did not until
 M9.** A series used to cost one request plus one per season, because TMDb's

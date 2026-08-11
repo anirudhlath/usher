@@ -1,10 +1,33 @@
 """The server process's background lanes (PRD 01's concurrency model).
 
-Two kinds: one push lane per enabled source, and one job worker. Both are
-settings-gated, which is PRD 01's "`--worker` entrypoint flag ... so lanes
-can be moved to a separate container later by editing compose, with no code
-change" expressed as configuration rather than as an argument -- one image
-serves an all-in-one deployment and a split one.
+Three kinds: one push lane per enabled source, one job worker, and one
+`rows.refresh` lane. The first two are settings-gated, which is PRD 01's
+"`--worker` entrypoint flag ... so lanes can be moved to a separate container
+later by editing compose, with no code change" expressed as configuration
+rather than as an argument -- one image serves an all-in-one deployment and a
+split one.
+
+**The third is gated on being handed a cache and a queue, not on a setting.**
+A switch would let an operator configure the state PRD 06's serve-stale must
+never reach: a stale screen served with nothing behind it to replace it. What
+turns the lane on is `create_app` building the pair -- and `usher work`, which
+serves no screens, builds neither. `Settings` is `extra="forbid()"`-strict for
+the same reason `_MAX_ROWS` is not a field: a knob owes a reader *and* a
+reason, and "make serve-stale silently wrong" is not one.
+
+**It is one lane, not one task per stale key** -- the shape
+`services/rows/cache.py` names as the wrong one. Its bound is the queue's
+(`REFRESH_QUEUE_SIZE`) and its concurrency is one, so it is a *third*
+long-running consumer of the connection pool alongside the push lanes and the
+worker, holding at most one session at a time. Both numbers are in PRD 01's
+concurrency table, because a bound an operator cannot read is not one.
+
+**And it is not a source lane.** `running_sources()` still means "push lanes
+with a live task" and readiness still reports exactly what it reported -- a
+third lane kind that quietly joined that list would take a process out of a
+load balancer for a screen refresh, which is the inversion the
+liveness/readiness split exists to prevent
+(`tests/integration/test_health.py`).
 
 **The worker runs here rather than only in `usher work`, and that is the
 milestone's boundary call 5.** PRD 03's read-through loop is `open -> stub ->
@@ -56,6 +79,9 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 from loguru import logger
+from opentelemetry import trace
+from opentelemetry.context import Context
+from opentelemetry.trace import Link
 
 from usher.composition import (
     Pipeline,
@@ -64,6 +90,7 @@ from usher.composition import (
     SourceRegistry,
     UnitOfWork,
     build_push_applier,
+    build_row_context,
     build_worker,
     open_adapter,
     selected_sources,
@@ -76,9 +103,12 @@ from usher.ports.events import EventPublisher
 from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
 from usher.ports.source import SourceAdapter, SourceEvent
+from usher.services.home import HomeService
 from usher.services.push import PushOutcome, PushSupervisor
-from usher.services.rows.cache import RowCache
+from usher.services.rows.cache import RefreshQueue, RowCache, StaleScreen
 from usher.telemetry import PushSnapshot, register_queue_gauges, register_search_gauges
+
+_tracer = trace.get_tracer("usher.rows")
 
 # How long the worker lane waits after a pass that claimed nothing. Not a
 # setting, for the reason `usher.cli`'s copy of this constant is not: it is
@@ -100,6 +130,7 @@ class LaneSupervisor:
         embedder: Embedder | None = None,
         client: LLMClient | None = None,
         rows: RowCache | None = None,
+        refreshes: RefreshQueue | None = None,
         idle_seconds: float = IDLE_SLEEP_SECONDS,
     ) -> None:
         self._settings = settings
@@ -110,6 +141,12 @@ class LaneSupervisor:
         # -- and it is optional for the same reason `provider` and `embedder`
         # are: a lane supervisor in a test has no `app.state` to read one off.
         self._rows = rows
+        # The stale-key handover, filled by `HomeService` on the request path
+        # and drained by the one lane below. `None` alongside `rows` is `None`
+        # -- the pair is the switch, see the module docstring -- and a
+        # supervisor given one without the other starts no refresh lane rather
+        # than half of one.
+        self._refreshes = refreshes
         self._user_id = user_id
         self._provider = provider
         # Carried, never built here. All three of these are per-*process*
@@ -134,6 +171,7 @@ class LaneSupervisor:
         self._open_adapters: dict[uuid.UUID, SourceAdapter] = {}
         self._worker: asyncio.Task[None] | None = None
         self._refresher: asyncio.Task[None] | None = None
+        self._rows_lane: asyncio.Task[None] | None = None
         self._gauges = QueueGauges()
         # PRD 10's embedding backlog, on the same beat and for the same
         # reason: an OTel observable callback runs on the metric reader's
@@ -158,6 +196,10 @@ class LaneSupervisor:
             self._worker = asyncio.create_task(self._run_worker(), name="usher.lane.worker")
         if self._settings.push_enabled:
             self._refresher = asyncio.create_task(self._refresh_loop(), name="usher.lane.refresh")
+        if self._rows is not None and self._refreshes is not None:
+            self._rows_lane = asyncio.create_task(
+                self._run_row_refresh(), name="usher.lane.rows.refresh"
+            )
 
     async def stop(self) -> None:
         """Cancel every lane, then close every adapter.
@@ -167,7 +209,11 @@ class LaneSupervisor:
         as a failure and back off on -- during shutdown, into a task that is
         about to be cancelled anyway. Cancelling first makes shutdown quiet.
         """
-        tasks = [task for task in (self._worker, self._refresher, *self._lanes.values()) if task]
+        tasks = [
+            task
+            for task in (self._worker, self._refresher, self._rows_lane, *self._lanes.values())
+            if task
+        ]
         for task in tasks:
             task.cancel()
         # `return_exceptions=True`: a lane that was cancelled mid-await
@@ -178,6 +224,7 @@ class LaneSupervisor:
         self._lanes.clear()
         self._worker = None
         self._refresher = None
+        self._rows_lane = None
         for adapter in self._open_adapters.values():
             await adapter.aclose()
         self._open_adapters.clear()
@@ -201,6 +248,19 @@ class LaneSupervisor:
 
     def worker_running(self) -> bool:
         return self._worker is not None and not self._worker.done()
+
+    def rows_refreshing(self) -> bool:
+        """Whether the `rows.refresh` lane has a live task.
+
+        **Deliberately not part of `running_sources()` and deliberately not in
+        `ReadinessChecks`.** It is not a source, and readiness gates on
+        `checks` alone: a screen refresh lane that could 503 this process would
+        take it out of a load balancer for a reason restarting it cannot fix,
+        while `GET /home` carries on answering from a cache and a full compose.
+        `tests/integration/test_health.py` is where a reachable database makes
+        both of those mutations die.
+        """
+        return self._rows_lane is not None and not self._rows_lane.done()
 
     def push_snapshots(self) -> dict[str, PushSnapshot]:
         """PRD 10's two push series, read live off each adapter's ledger.
@@ -364,6 +424,78 @@ class LaneSupervisor:
                 return
             await pipeline.sources.update(stored.evolve(supports_push=available))
             await pipeline.commit()
+
+    # -- the rows.refresh lane -------------------------------------------
+
+    async def _run_row_refresh(self) -> None:
+        """PRD 06's "served stale while refreshing", drained one key at a time.
+
+        One consumer, so at most one refresh is ever in flight and the pool
+        sees at most one extra session. The queue in front of it is where the
+        *bound* lives: full means dropped, and a dropped key costs one hard
+        miss on the next request past `TTL + grace` -- the cost M7 already
+        pays on every expiry.
+        """
+        # Bound once rather than re-narrowed per statement -- `start()` is what
+        # guarantees it is not `None`, and `assert` is not available in shipped
+        # code.
+        refreshes = self._refreshes
+        if refreshes is None:  # pragma: no cover -- `start()` gates on it
+            return
+        while True:
+            stale = await refreshes.take()
+            try:
+                await self._refresh_screen(stale)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # **Named, and named with the lane.** Without this the lane
+                # task dies and CPython reports the unretrieved exception at
+                # GC time, to stderr, with no source in it -- the shape
+                # `_guard` above exists for, arriving here through a `while
+                # True` instead of through a task. The stale entry is left
+                # exactly where it was, so the next request is still served
+                # and the household sees a screen rather than a 500.
+                logger.exception(
+                    "the rows.refresh lane failed to refresh a screen and left the "
+                    "stale one in place: {error}",
+                    error=str(exc),
+                )
+            finally:
+                # In a `finally` so a refresh that raised still releases its
+                # key. Cleared here rather than at `take()`, which is what
+                # makes the dedup cover the refresh itself: a request arriving
+                # mid-refresh schedules nothing.
+                refreshes.done(stale.user.id)
+
+    async def _refresh_screen(self, stale: StaleScreen) -> None:
+        """One household's screen, rebuilt on this lane's own session.
+
+        **A root span with a `Link`, never a child.** PRD 10 specifies exactly
+        this for a worker's `job.*` and the reason is the same: the request
+        that served the stale screen has usually already returned, so a child
+        span of a finished parent misstates causality. It also corrects PRD
+        10's "the number of `row.build` children of a `home.compose` is the
+        number of misses" -- these `row.build` spans have no `home.compose`
+        parent at all, because `HomeService.rebuild` opens none.
+        """
+        links = [Link(stale.link)] if stale.link.is_valid else []
+        # `context=Context()` -- an empty context -- so "root" is structural
+        # rather than a property of where `start()` happened to be called.
+        # A worker's `job.*` relies on there being no ambient span, which is
+        # true today and is not enforced; a lane task inherits the context of
+        # whatever created it (`asyncio.create_task` copies it), so a lifespan
+        # or a test that started the supervisor inside a span would silently
+        # turn every refresh into a child of one request forever.
+        with _tracer.start_as_current_span("rows.refresh", context=Context(), links=links) as span:
+            async with self._work() as pipeline:
+                # A session this lane opened, closed when the block ends --
+                # never the request's, which `get_session` committed and closed
+                # when the handler returned. That is the whole reason M7
+                # deferred this rather than half-implementing it.
+                service = HomeService(pipeline.row_providers, cache=self._rows)
+                screen = await service.rebuild(build_row_context(pipeline, stale.user))
+            span.set_attribute("usher.home.rows", len(screen))
 
     # -- the worker lane -------------------------------------------------
 

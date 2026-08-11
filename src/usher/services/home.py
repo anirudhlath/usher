@@ -56,6 +56,18 @@ row. Nothing said so until M8:
 provider_that_pins_and_it_pins_one_row` is the assertion, and it is what keeps
 the paragraph above from going quiet the day a second provider pins.
 
+**Served stale while refreshing (M9), in three constraints.** Between
+`_SCREEN_TTL` and `_SCREEN_TTL + SCREEN_STALE_GRACE` a cached screen is still
+*served*, and the key is handed to an injected callable that schedules a
+rebuild out of band. The callable is **synchronous**, so there is nothing here
+for a request to await and the defect this exists to prevent does not
+type-check; the queue behind it is **bounded** and drops rather than blocks;
+and past the grace window the entry is a hard miss, which is exactly what M7
+did on every expiry. **The grace is zero when no refresher was injected** --
+`usher home` is that caller -- because a stale screen with nothing behind it to
+replace it is strictly worse than the miss it avoided and is silent. `rebuild`
+is the refresh's own entry point and says why it is not `compose`.
+
 **The build loop is a `for`, and that is a decision rather than an accident.**
 `AsyncSession` is not safe for concurrent use, so `asyncio.gather` over
 providers sharing the request's session is corruption rather than speed -- and
@@ -65,16 +77,17 @@ in-flight depth rather than on a comment.
 """
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
 from opentelemetry import metrics, trace
 
 from usher.domain.rows import BuiltRow, RowFamily
+from usher.domain.watch import User
 from usher.ports.rows import Row, RowContext, RowProvider, ScoredRow
 from usher.services.rows import ROW_PROVIDERS
-from usher.services.rows.cache import RowCache
+from usher.services.rows.cache import Freshness, RowCache, ScreenRead
 
 _meter = metrics.get_meter("usher.home")
 _tracer = trace.get_tracer("usher.home")
@@ -103,12 +116,11 @@ _row_build_duration = _meter.create_histogram(
     "usher.row.build.duration", unit="s", description="Wall time to build one row, by provider"
 )
 
-# `usher.cache.hits` / `usher.cache.misses` are **M9's** (PRD 10) and are
-# deliberately not declared here, in either direction: an unrecorded metric is
-# an empty panel, and a metric recorded a milestone before its dashboard is the
-# `search_queries` failure -- a shape fixed before anything has tried to fill
-# it. `usher home`'s cold/warm pair is this milestone's only measurement of the
-# cache, and it is a printed number rather than an instrument.
+# `usher.cache.hits` / `usher.cache.misses` are declared in
+# `services/rows/cache.py` and recorded at the *read*, which is deliberately
+# not here: every future reader of the cache is then counted rather than every
+# future caller remembering to. A stale serve is a hit carrying
+# `freshness="stale"`, and that module argues both halves.
 
 # `_MAX_ROWS` and `_MAX_PER_FAMILY` are constants and constructor defaults, not
 # `Settings` fields. The mechanism exists (unlike the concurrency setting PRD
@@ -123,6 +135,27 @@ _MAX_PER_FAMILY = 4
 # the only lifetime stated here -- a row's is the row's to state, and the two
 # layers are what keeps a six-hour similarity row off a 30 s rebuild cycle.
 _SCREEN_TTL = timedelta(seconds=30)
+
+# How far past `_SCREEN_TTL` a composed screen may still be served while its
+# replacement is built out of band. **This is "how stale is too stale", and it
+# sits here rather than in the cache because it is a property of *this*
+# artefact** -- the cache's grace is a parameter, and the row half has none at
+# all (`services/rows/cache.py:get_row` says why).
+#
+# 60 s, i.e. twice the TTL. The number is a ceiling on how wrong a screen may
+# be, and the thing that normally ends the window is the refresh completing --
+# measured at p50 710 ms against the scale ceiling (`.claude/rules/
+# rows-and-genome.md`; the 23.9 ms figure belongs to a 5,200-copy household and
+# must never be quoted without it), so 60 s is two orders of magnitude of
+# headroom for a lane that is behind rather than a lifetime anyone plans to
+# use. Past it the entry is a hard miss and the request rebuilds, which is
+# exactly what M7 did on every expiry.
+#
+# Not a `Settings` field, for the reason `_MAX_ROWS` is not: the mechanism
+# exists, but the reason to move this number is an operator looking at a
+# screen, and `Settings` is `extra="forbid"` so every field there owes a reader
+# *and* a reason. PRD 06's caching table is where it is quoted.
+SCREEN_STALE_GRACE = timedelta(seconds=60)
 
 # No *window* of this many adjacent rows is all `SIMILARITY`. Spelled as the
 # window length PRD 06 states rather than as "at most two in a row", so the
@@ -221,6 +254,8 @@ class HomeService:
         providers: Sequence[RowProvider] = ROW_PROVIDERS,
         *,
         cache: RowCache | None = None,
+        refresh: Callable[[User], None] | None = None,
+        stale_grace: timedelta = SCREEN_STALE_GRACE,
         max_rows: int = _MAX_ROWS,
         max_per_family: int = _MAX_PER_FAMILY,
     ) -> None:
@@ -230,6 +265,30 @@ class HomeService:
         # for `usher home`. A cache that could not be absent would make the
         # milestone's one cache measurement untakeable.
         self._cache = cache
+        # **Injected as a plain callable, and synchronous.**
+        #
+        # A callable rather than a port because `usher.services` may not name
+        # the composition root and ADR-0001 warns against an ABC with one
+        # implementation -- `RowContext.affinities` is already a `Callable`
+        # field one file over (`ports/rows.py`), so the precedent is set.
+        #
+        # *Synchronous* because that is the strongest available spelling of
+        # "the screen never waits on it": there is nothing to await, so
+        # `await self._refresh(...)` -- the whole defect this feature exists to
+        # prevent, and the one every non-blocking fixture hides -- does not
+        # type-check. The real implementation is `RefreshQueue.schedule`, whose
+        # `put_nowait` genuinely cannot suspend.
+        #
+        # `None` is a composer that may not serve stale at all. See
+        # `_stale_grace` below: the two are one decision, not two.
+        self._refresh = refresh
+        # Zero unless something can act on a scheduled key. A grace window with
+        # no refresher behind it serves a stale screen and never replaces it,
+        # which is strictly worse than the miss it avoided and is silent --
+        # `usher home` and every composer built without a queue take this
+        # branch, which is why "served stale and never refreshed" is
+        # unreachable rather than merely unlikely.
+        self._stale_grace = stale_grace if refresh is not None else timedelta(0)
         self._max_rows = max_rows
         self._max_per_family = max_per_family
 
@@ -251,56 +310,36 @@ class HomeService:
         over the providers would describe a composition that never happened,
         and the first thing it would get wrong is which rows the cap dropped.
         """
-        cached = None if self._cache is None else self._cache.get_screen(ctx.user.id)
-        if cached is not None:
-            # A screen hit does not re-propose. `propose` is the cheap phase,
-            # not the free one -- ten bounded reads is still ten round trips
-            # for an answer already on hand. The report is empty of providers
-            # for the same reason: none of them ran.
-            return ComposeReport(rows=cached, providers=(), duration_seconds=0.0)
-        started = time.perf_counter()
+        read = (
+            ScreenRead(freshness=Freshness.ABSENT, screen=None)
+            if self._cache is None
+            else self._cache.read_screen(ctx.user.id, grace=self._stale_grace)
+        )
+        if read.screen is not None:
+            if read.freshness is Freshness.STALE and self._refresh is not None:
+                # **No `await`, and none is possible**: `_refresh` returns
+                # `None`. PRD 06's "the home screen never blocks on a slow
+                # row", spelled so that the spelling that breaks it does not
+                # type-check. The `User` crosses over and nothing else does --
+                # `ctx` holds ten repositories on a session `get_session` is
+                # about to commit and close.
+                self._refresh(ctx.user)
+            # A screen hit does not re-propose, stale or fresh. `propose` is
+            # the cheap phase, not the free one -- ten bounded reads is still
+            # ten round trips for an answer already on hand. The report is
+            # empty of providers for the same reason: none of them ran.
+            return ComposeReport(rows=read.screen, providers=(), duration_seconds=0.0)
         # Keyed by `slug_prefix` and seeded from the **registry**, so a provider
         # that proposed nothing still has a line. See `ProviderReport`.
         tally = {provider.slug_prefix: _Tally() for provider in self._providers}
+        started = time.perf_counter()
         with _tracer.start_as_current_span("home.compose") as span:
-            candidates: list[_Candidate] = []
-            for provider in self._providers:
-                at = time.perf_counter()
-                proposals = await provider.propose(ctx)
-                entry = tally[provider.slug_prefix]
-                entry.propose_seconds += time.perf_counter() - at
-                entry.proposed += len(proposals)
-                for proposal in proposals:
-                    candidates.append(_Candidate(provider=provider, proposal=proposal))
-            built: list[BuiltRow] = []
-            # **A `for`, not a `gather`.** See the module docstring and
-            # boundary call 8: two coroutines awaiting on one `AsyncSession`
-            # interleave on one connection, and the failure is an intermittent
-            # `InvalidRequestError` or a result set attributed to the wrong
-            # query, under load, after it has usually worked.
-            for candidate in self._select(candidates):
-                entry = tally[candidate.provider.slug_prefix]
-                entry.selected += 1
-                at = time.perf_counter()
-                row = await self._build(ctx, candidate)
-                entry.build_seconds += time.perf_counter() - at
-                # Drops any that build empty -- and substitutes nothing.
-                # Padding the screen back to N is the "generic row" failure
-                # wearing the composer's clothes: the replacement is by
-                # construction the next-best-scoring thing rather than
-                # something this household has a reason to see.
-                if row.cards:
-                    entry.built += 1
-                    entry.cards += len(row.cards)
-                    built.append(row)
-            screen = self._order(built)
-            span.set_attribute("usher.home.proposed", len(candidates))
-            span.set_attribute("usher.home.built", len(built))
+            screen = await self._compose(ctx, tally)
+            span.set_attribute("usher.home.proposed", sum(one.proposed for one in tally.values()))
+            span.set_attribute("usher.home.built", sum(one.built for one in tally.values()))
             span.set_attribute("usher.home.rows", len(screen))
         duration = time.perf_counter() - started
         _compose_duration.record(duration)
-        if self._cache is not None:
-            self._cache.put_screen(ctx.user.id, screen, ttl=_SCREEN_TTL)
         return ComposeReport(
             rows=screen,
             providers=tuple(
@@ -317,6 +356,77 @@ class HomeService:
             ),
             duration_seconds=duration,
         )
+
+    async def rebuild(self, ctx: RowContext) -> tuple[BuiltRow, ...]:
+        """Compose **ignoring** the cached screen, and store the result.
+
+        This is what the refresh lane runs, and it is a different entry point
+        from `compose` for one reason: a refresh that went through the ordinary
+        read would find its own stale entry, serve it to itself, schedule
+        another refresh and leave the household looking at the same screen --
+        a lane spinning on one key forever, with no error anywhere.
+
+        **It opens no `home.compose` span**, so the `row.build` spans it emits
+        hang off whatever root the caller opened -- `rows.refresh`, a root with
+        a `Link` (`api/lanes.py`). PRD 10's rule that "the number of `row.build`
+        children of a `home.compose` is the number of misses" is corrected in
+        the same commit rather than quietly broken: a background refresh builds
+        outside any request, so nesting it under a request's tree, or minting a
+        second `home.compose` nobody asked for, would both misstate what
+        happened. The cost stays visible as `usher.row.build.duration` points.
+
+        The *row* cache is still consulted underneath, deliberately: a
+        six-hour similarity row does not become wrong because a 30 s screen
+        did, and rebuilding it would make every refresh pay for the layer PRD
+        06 has two of.
+        """
+        tally = {provider.slug_prefix: _Tally() for provider in self._providers}
+        return await self._compose(ctx, tally)
+
+    async def _compose(self, ctx: RowContext, tally: dict[str, "_Tally"]) -> tuple[BuiltRow, ...]:
+        """Propose, select, build sequentially, drop empties, order, store.
+
+        Extracted from `compose_report` so `rebuild` can run the same
+        composition under a different span and without the cache read -- one
+        body rather than two, because a second copy is a second place for the
+        cap, the adjacency rule and the TTL to drift.
+        """
+        candidates: list[_Candidate] = []
+        for provider in self._providers:
+            at = time.perf_counter()
+            proposals = await provider.propose(ctx)
+            entry = tally[provider.slug_prefix]
+            entry.propose_seconds += time.perf_counter() - at
+            entry.proposed += len(proposals)
+            for proposal in proposals:
+                candidates.append(_Candidate(provider=provider, proposal=proposal))
+        built: list[BuiltRow] = []
+        # **A `for`, not a `gather`.** See the module docstring and boundary
+        # call 8: two coroutines awaiting on one `AsyncSession` interleave on
+        # one connection, and the failure is an intermittent
+        # `InvalidRequestError` or a result set attributed to the wrong query,
+        # under load, after it has usually worked. The refresh lane does not
+        # weaken this -- it runs on a session of its own, which is the only
+        # reason it is allowed to run at all.
+        for candidate in self._select(candidates):
+            entry = tally[candidate.provider.slug_prefix]
+            entry.selected += 1
+            at = time.perf_counter()
+            row = await self._build(ctx, candidate)
+            entry.build_seconds += time.perf_counter() - at
+            # Drops any that build empty -- and substitutes nothing. Padding
+            # the screen back to N is the "generic row" failure wearing the
+            # composer's clothes: the replacement is by construction the
+            # next-best-scoring thing rather than something this household has
+            # a reason to see.
+            if row.cards:
+                entry.built += 1
+                entry.cards += len(row.cards)
+                built.append(row)
+        screen = self._order(built)
+        if self._cache is not None:
+            self._cache.put_screen(ctx.user.id, screen, ttl=_SCREEN_TTL)
+        return screen
 
     async def _build(self, ctx: RowContext, candidate: _Candidate) -> BuiltRow:
         """One row, timed and traced under its provider's own name.

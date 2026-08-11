@@ -425,18 +425,19 @@ def test_type_is_derived_from_code_for_every_member() -> None:
 
 
 def test_the_vocabulary_is_the_members_the_shipped_routes_emit() -> None:
-    """A pin, not a design. The names are provisional and the
-    generic-vs-per-resource question (`not_found` against `title_not_found`)
-    is group V's ADR-0030 -- this asserts only that nobody has started the
-    sprawl `ProblemCode`'s own docstring exists to prevent.
+    """A literal pin on the seven members, kept beside the derived one.
 
-    **Four members were A2's; three are D4's**, and the pin grew rather than
-    being relaxed, so a route adding a fourth still has to come here and say
-    which route emits it. `source_unavailable` is the one PRD 07's worked
-    example already spells and the one ADR-0030 may not rename.
-    `title_not_found`/`episode_not_found` were named by the D4 plan and are
-    deliberately absent -- `api/routers/playback.py`'s two 404s reuse
-    `not_found`, so this tree ships one 404 convention rather than two.
+    **The generic-vs-per-resource question is settled**, by ADR-0030 ruling
+    1: one generic `not_found`, no `title_not_found` and no
+    `episode_not_found`. `tests/unit/test_api_problem_vocabulary.py` is where
+    that closure is *encoded* -- it parses the ADR's table and compares it to
+    this enum in both directions, and it is the case a fan-out task will fail.
+
+    This one stays because the two say different things. The derived case
+    fails when the enum and the record disagree; this one fails when they
+    agree on something nobody meant, which is what a literal list is for. It
+    is also the cheaper failure to read: `assert {..} == {..}` names the
+    member, where the derived case names it and a document to go and amend.
     """
     assert {code.value for code in ProblemCode} == {
         "not_found",

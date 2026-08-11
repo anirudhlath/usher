@@ -27,12 +27,12 @@ from tests.fakes.streaming_asgi_transport import StreamingASGITransport
 from tests.unit.rows import Library, days_ago
 from usher.api import caching
 from usher.api.app import create_app
-from usher.api.deps import get_row_cache, get_row_context
+from usher.api.deps import get_refresh_queue, get_row_cache, get_row_context
 from usher.api.dto.home import HomeResponse
 from usher.config import Settings
 from usher.ports.rows import RowContext
-from usher.services.home import _SCREEN_TTL
-from usher.services.rows.cache import RowCache
+from usher.services.home import _SCREEN_TTL, SCREEN_STALE_GRACE
+from usher.services.rows.cache import RefreshQueue, RowCache
 
 _START = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
 
@@ -59,7 +59,12 @@ class _Clock:
         return self.now
 
 
-def _app(context: RowContext, *, cache: RowCache | None = None) -> FastAPI:
+def _app(
+    context: RowContext,
+    *,
+    cache: RowCache | None = None,
+    refreshes: RefreshQueue | None = None,
+) -> FastAPI:
     built = create_app(
         Settings(
             # A deliberately dead port, exactly as `test_api_home.py`'s own
@@ -73,6 +78,15 @@ def _app(context: RowContext, *, cache: RowCache | None = None) -> FastAPI:
     built.dependency_overrides[get_row_context] = lambda: context
     if cache is not None:
         built.dependency_overrides[get_row_cache] = lambda: cache
+    if refreshes is not None:
+        # A queue **nothing drains**, for the cases about the stale-serve
+        # window. `create_app`'s `rows.refresh` lane closes over the app's own
+        # cache and queue in the lifespan, so a `dependency_overrides` entry
+        # does not reach it -- which is what makes this override the way to
+        # observe a scheduled refresh without racing one that runs. (The lane
+        # against the app's own queue has nothing to do here either: its unit
+        # of work opens a session to the dead port above, fails, and logs.)
+        built.dependency_overrides[get_refresh_queue] = lambda: refreshes
     return built
 
 
@@ -125,11 +139,20 @@ async def test_a_changed_screen_changes_the_etag() -> None:
     case where the content genuinely differs and the ETag is asserted to
     differ with it rules those out.
 
-    The row cache's clock is stepped past `_SCREEN_TTL` between the two
-    requests, so the second answers from a fresh compose rather than from the
-    30 s screen cache -- otherwise this case would pass against an
-    implementation that never re-hashed anything, for the boring reason that
-    the composed screen had not changed either.
+    **The clock is stepped past `_SCREEN_TTL + SCREEN_STALE_GRACE`, which is
+    where the screen cache stops answering at all.** It used to step 31 s, past
+    the TTL alone, and that premise stopped being true when A6 landed
+    serve-stale: between 30 s and 90 s an expired entry is *served* while a
+    refresh is scheduled, so the second request answered the first screen's
+    bytes, the new title was absent, and the ETag was correctly identical --
+    the case failed on a true statement about the cache. Past the grace window
+    the entry is a hard miss (`services/rows/cache.py`), which is the state
+    this case has always needed and used to get from the TTL alone.
+
+    Both bounds are imported rather than written as `91`, for the reason the
+    304 case imports `_SCREEN_TTL` rather than writing `30`: a case pinning the
+    literal still passes the day the constant moves, and here it would go back
+    to passing for the wrong reason.
     """
     library = Library()
     resuming = await library.title("A Film Half Watched", added=days_ago(200))
@@ -141,12 +164,140 @@ async def test_a_changed_screen_changes_the_etag() -> None:
         assert first.status_code == 200
         first_etag = first.headers["etag"]
 
-        clock.advance(timedelta(seconds=31))
+        clock.advance(_SCREEN_TTL + SCREEN_STALE_GRACE + timedelta(seconds=1))
         await library.title("A Film That Just Arrived", added=days_ago(1))
 
         second = await client.get("/home")
         assert second.status_code == 200
         assert second.headers["etag"] != first_etag, "the screen changed and the ETag did not"
+
+
+async def test_a_read_inside_the_grace_window_serves_the_previous_bytes_and_the_same_etag() -> None:
+    """**The interaction the case above exists on the other side of**, and it
+    is intended behaviour rather than a tolerated one.
+
+    Inside `SCREEN_STALE_GRACE` the screen cache answers with the entry it
+    already has, so the household is served bytes composed before the new title
+    arrived -- and the ETag is a hash of exactly those bytes, so it is
+    *correctly* unchanged. A conditional GET at this moment is a 304, which is
+    the right answer: nothing the client holds has gone out of date relative to
+    what this server will serve it.
+
+    **The third assertion is what keeps "serve stale" from being "serve stale
+    forever".** Two things bound it and only one of them is the grace constant:
+    the entry stops being servable at `TTL + grace` (the case above), and a
+    stale read *hands the key to the refresher* rather than merely shrugging.
+    Without the `depth == 1` assertion, a `HomeService` that opened the grace
+    window and scheduled nothing passes this whole file, and the household sees
+    the same screen for the full 90 s with no rebuild in flight.
+
+    The queue is overridden with one **nothing drains**, deliberately: the
+    `rows.refresh` lane `create_app` starts holds the app's *own* cache and
+    queue rather than these overrides, so leaving it to race would make an
+    ETag case depend on whether a background rebuild landed between two
+    requests. Here the refresh is observed as *scheduled* and never runs.
+    """
+    library = Library()
+    resuming = await library.title("A Film Half Watched", added=days_ago(200))
+    await library.in_progress(resuming, at=days_ago(2))
+    clock = _Clock()
+    queue = RefreshQueue()
+    app = _app(library.context(), cache=RowCache(clock=clock), refreshes=queue)
+    async with _client(app) as client:
+        first = await client.get("/home")
+        assert first.status_code == 200
+        first_etag = first.headers["etag"]
+        assert queue.depth == 0, "a fresh compose has nothing to refresh"
+
+        clock.advance(_SCREEN_TTL)
+        arrived = await library.title("A Film That Just Arrived", added=days_ago(1))
+
+        second = await client.get("/home")
+        assert second.status_code == 200
+        assert second.headers["etag"] == first_etag, (
+            "a stale-but-served screen is the same bytes, so it is the same ETag"
+        )
+        assert str(arrived) not in second.text, (
+            "the served screen predates the new title -- that is what stale means"
+        )
+        assert queue.depth == 1, (
+            "the stale read served the old bytes and scheduled no refresh, which is "
+            "serve-stale-forever rather than serve-stale-while-refreshing"
+        )
+
+        # The control that makes the absence above falsifiable. `str(arrived)
+        # not in ...` is a negative assertion over a body, and a negative
+        # assertion is satisfied by a body that could never have contained the
+        # value -- a renamed DTO field, a title the provider would not have
+        # shown anyway. Past the grace window the same fixture, the same
+        # client and the same title produce a body that *does* carry it.
+        clock.advance(SCREEN_STALE_GRACE)
+        third = await client.get("/home")
+        assert str(arrived) in third.text, (
+            "the new title never reaches this screen at all, so its absence above "
+            "was not evidence of anything"
+        )
+        assert third.headers["etag"] != first_etag
+
+
+async def test_a_conditional_get_against_a_stale_but_served_screen_is_a_304() -> None:
+    """`usher/api/caching.py`'s module docstring reasons about this case and
+    invites A6 to agree with it or contradict it; this is the agreement, in a
+    case rather than in prose.
+
+    The helper hashes whatever the handler handed it, so it is **orthogonal to
+    freshness**: there is no second notion of "fresh enough to 304", only
+    "identical to what was last sent". A client holding the bytes a stale entry
+    is still serving has nothing to re-fetch, so 304 is the correct answer and
+    not a leniency. The day the refresh lands, the served bytes change and the
+    next ETag changes with them -- which is the case above, one boundary over.
+
+    **A title is added between the two requests, and that is what gives this
+    case teeth.** Without it a hard miss would recompose the *same* screen from
+    an unchanged household, hash to the same ETag and answer 304 as well -- so
+    the case would pass whether or not the stale entry was served, and would be
+    a test of nothing. With it, only a stale serve can still answer 304: a
+    rebuild sees the new title, produces different bytes, and answers 200. The
+    third request is the control that says so out loud.
+
+    **What it still cannot see, measured rather than reasoned.** A path that
+    serves the stale entry and then *drops* it survives this whole file: the
+    damage lands on the *next* read, and this case's third request is past the
+    grace window and rebuilding anyway.
+    `tests/unit/test_services_home_stale.py::test_two_reads_over_one_stale_key_schedule_one_refresh`
+    is where that one dies, on the second of two reads inside a single window.
+    """
+    library = Library()
+    resuming = await library.title("A Film Half Watched", added=days_ago(200))
+    await library.in_progress(resuming, at=days_ago(2))
+    clock = _Clock()
+    app = _app(library.context(), cache=RowCache(clock=clock), refreshes=RefreshQueue())
+    async with _client(app) as client:
+        first = await client.get("/home")
+        etag = first.headers["etag"]
+
+        clock.advance(_SCREEN_TTL)
+        await library.title("A Film That Just Arrived", added=days_ago(1))
+
+        stale = await client.get("/home", headers={"If-None-Match": etag})
+        assert stale.status_code == 304
+        assert stale.content == b""
+        assert stale.headers["etag"] == etag
+        assert stale.headers["cache-control"] == first.headers["cache-control"], (
+            "a stale serve must not advertise a different lifetime than a fresh one"
+        )
+
+        # The control. Past the grace window the same conditional request
+        # against the same client's ETag is a 200, because the screen it would
+        # now be sent genuinely differs -- which is what makes the 304 above a
+        # statement about the stale entry rather than about an unchanged
+        # household.
+        clock.advance(SCREEN_STALE_GRACE)
+        rebuilt = await client.get("/home", headers={"If-None-Match": etag})
+        assert rebuilt.status_code == 200, (
+            "a hard miss recomposed the identical screen, so the 304 above proved nothing"
+        )
+        assert rebuilt.headers["etag"] != etag
 
 
 async def test_the_etag_reflects_the_served_bytes_and_not_a_separate_representation(

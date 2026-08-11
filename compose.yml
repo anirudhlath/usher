@@ -46,6 +46,16 @@ services:
       # this sentence, instead of as a container that starts and dies on a
       # validation error the operator has to go and read the logs for.
       USHER_SECRET_KEY: ${USHER_SECRET_KEY:?set USHER_SECRET_KEY in .env, e.g. openssl rand -hex 32}
+      # The image cache, and the fifth entry this list has ever had. A
+      # bind-mount path is a topology fact in exactly the way the four above
+      # are: `volumes:` below mounts the host's ./data/images at
+      # /data/images, and `.env`'s `data/images` is right for a dev shell and
+      # wrong inside a container whose WORKDIR is /app -- there it would put
+      # the cache in the image's own writable layer, where it survives no
+      # `docker compose up --build` and appears in no `du` an operator runs
+      # against the mount. The other three USHER_IMAGE_* settings are the
+      # operator's and are deliberately absent from this block.
+      USHER_IMAGE_CACHE_DIR: /data/images
       # **`HF_HUB_OFFLINE` is deliberately not a fifth entry**, though M6's
       # plan asked for one as a topology fact. `environment:` beats
       # `env_file:` absolutely, and `usher.composition.embedder` reaches the
@@ -69,6 +79,16 @@ services:
       # first step -- fail every entry point with `extra_forbidden`.
       - "${USHER_COMPOSE_HOST_PORT:-8100}:8000"
     volumes:
+      # The image proxy's cache (PRD 07's GET /images/{id}, M9). Bind-mounted
+      # rather than a named volume so an operator can see it, measure it and
+      # delete it -- there is no eviction and none is wanted: the ladder
+      # bounds the cache at four entries an image and reclaiming space costs a
+      # re-fetch (ADR-0032). **Docker creates the host directory as root if it
+      # does not exist**, and the container runs as uid 1000, so a first
+      # `docker compose up` on a fresh checkout needs
+      # `mkdir -p data/images && sudo chown 1000:1000 data/images` -- the
+      # Dockerfile's `chown` reaches the image's own /data and a bind mount's
+      # host-side ownership wins once mounted. README.md carries the line.
       - ./data/images:/data/images
     depends_on:
       postgres:

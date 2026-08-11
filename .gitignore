@@ -10,3 +10,6 @@ __pycache__/
 .coverage
 htmlcov/
 data/
+
+# Per-worktree scratch written by the M9 execution harness
+.uvicorn-port

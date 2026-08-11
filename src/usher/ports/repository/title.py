@@ -9,14 +9,140 @@ calls it on the title repository it already holds.
 
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from enum import StrEnum
+from types import MappingProxyType
+from typing import Final
 
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
+from usher.ports.search import FilterNotSupported
 
 __all__ = [
+    "BrowseCursorPosition",
+    "BrowseFacets",
+    "BrowseSort",
     "TitleRepository",
 ]
+
+
+#: Each sort's `titles` column -- which is also its `Title` field, because the
+#: two are 1:1 by the rule `db/models/title.py` and `_to_domain` share -- and
+#: whether it runs descending. **One mapping, no copies**: the route minting a
+#: cursor, the Postgres statement and the fake all read this, for the reason
+#: `list_unwatched_candidates` gives for having no `limit` default in three
+#: signatures. A member added to `BrowseSort` with no entry here is not a
+#: silent fallback to some other order -- `BrowseSort.order_for` raises.
+_ORDERS: Final[Mapping[str, tuple[str, bool]]] = MappingProxyType(
+    {
+        "name": ("sort_name", False),
+        "year": ("year", True),
+        "popularity": ("popularity", True),
+        "vote_count": ("vote_count", True),
+    }
+)
+
+
+class BrowseSort(StrEnum):
+    """The closed vocabulary `browse` orders by.
+
+    Four members, and three of the four keys are **nullable** —
+    `titles.year`, `titles.popularity` and `titles.vote_count` all are, and
+    `popularity` was measured NULL on all 1,271,138 rows of a bootstrap-only
+    catalog. That is why every order here is NULLS LAST and why the keyset
+    predicate carries an `IS NOT NULL` leg: see `TitleRepository.browse`.
+
+    `name` sorts on `sort_name` rather than on `name`, which is the column
+    `Title.sort_name`'s own comment reserves for "catalog ordering", and it is
+    the one key that cannot be NULL.
+    """
+
+    NAME = "name"
+    YEAR = "year"
+    POPULARITY = "popularity"
+    VOTE_COUNT = "vote_count"
+
+    @classmethod
+    def order_for(cls, sort: "BrowseSort") -> tuple[str, bool]:
+        """`(column, descending)` for `sort`, or `FilterNotSupported`.
+
+        **A classmethod taking the value rather than a property**, because the
+        argument this has to refuse is precisely one that is *not* a member:
+        a route mapping a query string, or a later member added here without
+        an entry in `_ORDERS`. `str(sort)` is the member's value for a real
+        member and the raw string for anything cast into the annotation, so
+        both reach the same lookup.
+
+        Raising is the whole point, and it is `FilterNotSupported`'s own
+        stated argument one port over: a sort quietly ignored answers with
+        *more* rows in some other order, and more rows reads as working. A
+        `/browse` that silently fell back to `id` would page correctly, look
+        correct, and be a different screen.
+        """
+        try:
+            return _ORDERS[str(sort)]
+        except KeyError:
+            raise FilterNotSupported("sort") from None
+
+    @classmethod
+    def position_of(cls, title: Title, *, sort: "BrowseSort") -> "BrowseCursorPosition":
+        """Where `title` sits in `sort`'s order — what a caller hands back as
+        `browse`'s `after`.
+
+        Here rather than in the caller so the sort's key is read from
+        `_ORDERS` in one place. A route that spelled `title.year` for itself
+        would be a second definition of what `year` means, free to disagree
+        with the statement it is paging.
+        """
+        column, _ = cls.order_for(sort)
+        key: str | int | float | None = getattr(title, column)
+        return BrowseCursorPosition(key=key, id=title.id)
+
+
+@dataclass(frozen=True, slots=True)
+class BrowseCursorPosition:
+    """One row's place in a `BrowseSort`'s order: the sort key, and the id.
+
+    **Typed values, never a cursor.**
+    [ADR-0034](../../../docs/prd/decisions/0034-the-cursor-carries-a-position.md)
+    holds that no port takes an opaque cursor — the base64 lives in
+    `usher.api.cursor` and a port that accepted one would have to decode it,
+    which means knowing the sort vocabulary of the layer above. So the route
+    decodes, builds one of these, and hands it down.
+
+    `key` is `None` for a row whose sort column is NULL, and that is a
+    *position* rather than a missing value: `browse` orders NULLs last, so a
+    page boundary can land inside the unkeyed group and the walk has to be
+    able to resume from it. `id` is the UUIDv7 primary key, which is what
+    makes the keyset a total order (ADR-0003, and `CursorSpec` refuses a
+    keyset that does not end in one).
+    """
+
+    key: str | int | float | None
+    id: uuid.UUID
+
+
+@dataclass(frozen=True, slots=True)
+class BrowseFacets:
+    """What else the client could have asked for, counted.
+
+    Each facet is computed over the filtered population **minus its own
+    predicate** — see `TitleRepository.browse_facets`, which is where that
+    rule is argued.
+
+    Both maps are wrapped in a `MappingProxyType` so a caller cannot mutate a
+    count it was handed. Immutability only: `mappingproxy` delegates
+    `__hash__` to the dict it wraps, which is `None`, so this dataclass is not
+    hashable and does not claim to be (CLAUDE.md).
+    """
+
+    genres: Mapping[str, int] = field(default_factory=dict)
+    years: Mapping[int, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "genres", MappingProxyType(dict(self.genres)))
+        object.__setattr__(self, "years", MappingProxyType(dict(self.years)))
 
 
 class TitleRepository(ABC):
@@ -441,6 +567,152 @@ class TitleRepository(ABC):
         `ix_titles_popularity`'s mistake repeated. M8's boundary call 2 is
         what makes that affordable: generation is a background job and is
         never on a request path.
+        """
+
+    @abstractmethod
+    async def browse(
+        self,
+        *,
+        sort: BrowseSort,
+        genre: str | None = None,
+        year: int | None = None,
+        owned: bool | None = None,
+        after: BrowseCursorPosition | None = None,
+        limit: int,
+    ) -> list[Title]:
+        """One keyset page of the catalog, filtered and sorted.
+
+        **`list_owned_by_tag` refuses exactly this call and is right to.** Its
+        docstring says an unpredicated read is *"a request for the library
+        ordered by popularity, which is the popular-titles fallback spelled as
+        a query -- so the port declines to express it"*. That refusal is
+        correct for a *row provider*, whose limit is a candidate budget feeding
+        a 20-card shelf, and wrong for a browse screen, which is precisely the
+        request to walk the catalog. So `browse` expresses it, and every filter
+        here is optional.
+
+        **Keyset, never `OFFSET`.** PRD 07 rules offset paging out on two
+        grounds and both are measured in this repository:
+        `MediaItemRepository.list_unmatched`'s `OFFSET` is **43.7 ms at offset
+        0 and 388.9 ms at offset 1,126,574** — linear per page and quadratic to
+        drain — and an offset re-counts rows on every request, so a row
+        inserted ahead of the client's position pushes one it has already seen
+        onto the next page. The second half is not asserted here either:
+        `tests/integration/test_title_repository.py::
+        test_offset_duplicates_a_row_a_concurrent_insert_pushed_down_and_the_keyset_does_not`
+        runs both spellings against a real database with a real concurrent
+        insert between the two pages, which is the case ADR-0034's
+        *Uncertainty* section filed against group B's first paged route.
+
+        **The keyset is `(key IS NOT NULL, key, id)` and the comparison is
+        strict.** ADR-0034 fixes that spelling once for the three groups
+        writing keyset SQL independently this milestone. Three things about it,
+        each of which is a way to be wrong:
+
+        - **The `IS NOT NULL` leg is not decoration.** Three of the four sort
+          keys are nullable. A predicate that compares a NULL — including the
+          natural `ROW(...) > ROW(...)` spelling — evaluates to NULL rather
+          than to true, so resuming from an unkeyed boundary **silently drops
+          every remaining unkeyed row** and the page still looks full.
+          Measured on `pgvector/pgvector:pg17`: over five rows of which three
+          have a NULL key, resuming from the first NULL-keyed row, the
+          row-comparison spelling returns the two *keyed* rows and neither of
+          the two unkeyed ones. ADR-0034 carries the table.
+        - **NULLs sort last**, so the leg is `(key IS NOT NULL) DESC` and the
+          `ORDER BY` and the predicate share one spelling. Written out rather
+          than as `nulls_last(...)` — which is the same order — because the
+          predicate has to agree with it term for term, and two spellings of
+          one rule is how they stop agreeing.
+        - **Strict `>`.** Relaxed to `>=` the walk re-serves the boundary row
+          at every page break, and a test whose pages do not abut cannot see
+          it.
+
+        `after` is a typed position and never a cursor: ADR-0034, and
+        `tests/unit/test_ports_pagination.py` is what keeps it one.
+
+        **`owned` is `True` for an available, title-level copy, and this port
+        is where the codebase's two readings of the word are settled.**
+        `MediaItemRepository.owned_title_ids` carries `episode_id IS NULL` and
+        counts a *retracted* copy; `list_owned_by_tag` requires `available` and
+        deliberately carries no episode bound. Browse takes one leg from each,
+        and both choices are about what the screen is:
+
+        - **`episode_id IS NULL`**, because browse is a *title-level* screen
+          and its `owned` badge is a claim about this row. `IngestService`
+          writes an episode's `media_items` row with its series' `title_id`
+          alongside its own `episode_id`, so without the bound a read of a
+          series is one row per episode file — 20,001 rows / 22.901 ms / 402
+          buffers against 1 row / 0.251 ms / 21 buffers on this project's own
+          measurement. The cost is the one `owned_title_ids` already records
+          and accepts: **a library that reported a series' episodes but never
+          the series' own item reads as not-owned for that series**, and a
+          contract case seeds exactly that so the choice is asserted rather
+          than inherited from whichever join got written.
+        - **`available`**, because this filter answers *"show me what I can
+          play"* and a retracted copy cannot be played. `owned_title_ids`
+          keeps a retracted copy on purpose, so that a *search ranking* does
+          not move when a source goes down; a filter the user typed is the
+          other case, and answering it with titles that are not there is the
+          "more rows reads as working" failure one paragraph up.
+
+        `owned=False` is the complement — no such copy — rather than "no
+        predicate", which is `None`. Three states, spelled as three values,
+        because a two-valued flag makes *"unset"* and *"the user asked for
+        unowned"* the same request.
+
+        `genre` matches the `genres` array (containment, never the keywords
+        array beside it) and `year` is exact. Both narrow; given together they
+        intersect.
+
+        `limit` rows at most, and it has **no default** for
+        `list_unwatched_candidates`' recorded reason: three signatures with
+        three literals is a drift a contract suite finds only after it has
+        happened. The caller asks for one more row than it will serve
+        (`usher.api.cursor.over_fetch`) and that is the caller's business, not
+        this port's.
+
+        **This ships no index.** `titles` has none that serves an arbitrary
+        `(genre, year, sort)` browse, and one added on a guess is
+        `ix_titles_popularity` again — declared, unusable, and dropped two
+        milestones later in `ffc`. B7's measurement decides.
+        """
+
+    @abstractmethod
+    async def browse_facets(
+        self,
+        *,
+        genre: str | None = None,
+        year: int | None = None,
+        owned: bool | None = None,
+    ) -> BrowseFacets:
+        """What else the same client could have asked for, counted.
+
+        A second method rather than a second field on the page, because they
+        are two questions: `browse` is a keyset window and this is an
+        aggregate over the whole filtered population. It takes no `sort`, no
+        `after` and no `limit` for that reason — none of the three can change
+        a count.
+
+        **Each facet is computed over the filtered population minus its own
+        predicate.** With `genre=Horror&year=1999` active, the genre facet
+        drops the genre predicate and keeps the year one; the year facet does
+        the reverse. That is what makes the counts *navigable*: a facet folded
+        back onto its own filter answers "how many Horror films are Horror",
+        which is the size of the page the client is already looking at — and
+        it looks entirely correct on every request that does not use that
+        facet, which is most of them.
+
+        **A facet the client asked for is present at `0`, never absent.** This
+        is `count_by_state`'s rule — *"never a sparse dict"* — arriving at a
+        vocabulary that is open rather than an enum, so the guarantee is
+        narrowed to the values the request itself named: `genre` and `year`.
+        A `GROUP BY` returns only the values that have rows, so without this a
+        filter that matches nothing comes back as a *missing key*, which is
+        indistinguishable from a filter the client did not send.
+
+        `years` is keyed by year and a NULL-year title is in no bucket: the
+        map's key type says so, and "unknown" is not a year a client can
+        filter on. A title with no genres is likewise in no genre bucket.
         """
 
     @abstractmethod

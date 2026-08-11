@@ -23,6 +23,7 @@ from usher.ports.errors import (
     UsherPortError,
 )
 from usher.ports.events import EventPublisher
+from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
 from usher.ports.llm import LLMClient, LLMPurpose, LLMUsage
 from usher.ports.metadata import MetadataCandidate, MetadataProvider
@@ -74,6 +75,8 @@ ALL_PORTS: list[type[ABC]] = [
     SuggestIndex,
     Embedder,
     LLMClient,
+    ImageFetcher,
+    ImageBlobStore,
     BulkDataset,
     EventPublisher,
     JobQueue,
