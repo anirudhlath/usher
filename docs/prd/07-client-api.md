@@ -562,13 +562,35 @@ proxies that mangle upgrades, and it reconnects natively in browsers.
 
 ## Images
 
-`GET /images/{image_id}?w=&h=&fmt=` — the caching proxy from
-[02](02-data-model.md). Fetches from the provider on first request, resizes,
-stores on disk, serves with immutable cache headers thereafter.
+`GET /images/{image_id}?w=` — the caching proxy from [02](02-data-model.md).
+Fetches a provider **rung** on first request, stores the bytes on disk, and
+serves them with immutable cache headers thereafter. It does not decode and does
+not re-encode: nothing in Usher's runtime can read an image, and nothing needs
+to. See [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md).
 
-Clients never see provider image URLs and never need a provider key. Requested
-widths are clamped to a fixed ladder so the cache can't be trivially blown up by
-arbitrary dimensions.
+Clients never see provider image URLs and never need a provider key. `w` is
+clamped **up** to a closed ladder of four widths — `154 342 780 1280`, a code
+constant — with `342` when it is omitted and a 422 for anything that is not a
+positive integer. There is no `original` rung: a provider's original is 4× to
+12× the top rung (median ~1 MB, measured maximum 4.7 MB), and serving it is the
+disk-and-bandwidth hazard the clamp exists to prevent.
+
+🔴 **This section promised `?w=&h=&fmt=` until 2026-08-11 and two of those three
+are withdrawn**, because the mechanism turned out not to support them and a
+parameter the server ignores is worse than one it never offered. **`h=`**: the
+provider publishes exactly one height rung, and only for `profile`, a kind M9
+does not emit — and artwork aspect ratio is fixed by kind, so a height is a
+width divided by a constant the client already knows. **`fmt=`**: the provider
+serves what it holds and negotiates format on `Accept`, not on a query string —
+measured, it will re-encode to WebP for a client that asks in the header and
+will not transcode to a format it does not hold. Format negotiation over
+`Accept` is the named successor, it is strictly additive, and it is worth
+roughly a third of the bytes; it is not built here.
+
+The clamp is also **not** what makes the space finite, which this section
+assumed: the provider's own CDN enforces a closed 15-rung allowlist and answers
+HTTP 400 to everything else. The ladder bounds *Usher's* disk cache at four
+entries per image and keeps Usher's API off a provider's vocabulary.
 
 ## Playback
 
