@@ -37,6 +37,7 @@ from usher.ports.repository.curation import (
     CuratedRowRepository,
 )
 from usher.ports.repository.episode import (
+    EpisodeCursorPosition,
     EpisodeRepository,
 )
 from usher.ports.repository.genome import (
@@ -119,6 +120,7 @@ __all__ = [
     "CreditedPerson",
     "CrosswalkLinkResult",
     "CuratedRowRepository",
+    "EpisodeCursorPosition",
     "EpisodeRepository",
     "GenomeCoverage",
     "GenomeRepository",

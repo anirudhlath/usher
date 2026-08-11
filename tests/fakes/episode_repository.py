@@ -39,7 +39,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from usher.domain.episode import Episode, Season
-from usher.ports.repository import BulkWriteResult, EpisodeRepository
+from usher.ports.repository import BulkWriteResult, EpisodeCursorPosition, EpisodeRepository
 
 _SeasonKey = tuple[uuid.UUID, int]
 _EpisodeKey = tuple[uuid.UUID, int, int]
@@ -197,6 +197,53 @@ class FakeEpisodeRepository(EpisodeRepository):
                 continue
             result.setdefault(one.title_id, one)
         return result
+
+    async def list_seasons(self, title_id: uuid.UUID) -> list[Season]:
+        # One increment, matching the real one statement -- which is what lets
+        # the route's own case hold the call count fixed across a series with
+        # two seasons and one with twenty-five.
+        self.calls += 1
+        return sorted(
+            (one for one in self._seasons.values() if one.title_id == title_id),
+            key=lambda one: one.season_number,
+        )
+
+    async def get_season(self, season_id: uuid.UUID) -> Season | None:
+        self.calls += 1
+        # Keyed on `(title_id, season_number)` here, so a lookup by the row's
+        # own id is a scan. That is a divergence from Postgres, where it is a
+        # primary-key probe -- it changes the cost and not the answer, which is
+        # the shape every entry in this module's docstring has.
+        for one in self._seasons.values():
+            if one.id == season_id:
+                return one
+        return None
+
+    async def list_season_episodes(
+        self,
+        season_id: uuid.UUID,
+        *,
+        limit: int,
+        after: EpisodeCursorPosition | None = None,
+    ) -> list[Episode]:
+        self.calls += 1
+        ordered = sorted(
+            (one for one in self._episodes.values() if one.season_id == season_id),
+            key=lambda one: (one.episode_number, one.id),
+        )
+        if after is not None:
+            # Python's tuple comparison is lexicographic and strict, which is
+            # the two-arm predicate spelled in one expression -- the same
+            # relationship `_NEXT_UP`'s row comparison has to its hand-expanded
+            # form. ADR-0034's third arm, `key IS NULL`, has no spelling here
+            # because `Episode.episode_number` is a non-optional `int`: the
+            # unkeyed group it exists for cannot be constructed.
+            ordered = [
+                one
+                for one in ordered
+                if (one.episode_number, one.id) > (after.episode_number, after.id)
+            ]
+        return ordered[:limit]
 
     async def list_for_title(self, title_id: uuid.UUID) -> tuple[list[Season], list[Episode]]:
         seasons = sorted(

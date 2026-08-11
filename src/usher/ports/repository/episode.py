@@ -6,13 +6,52 @@ Implemented by `usher.db.repositories.episode.PostgresEpisodeRepository`.
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from usher.domain.episode import Episode, Season
 from usher.ports.repository._results import BulkWriteResult
 
 __all__ = [
+    "EpisodeCursorPosition",
     "EpisodeRepository",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeCursorPosition:
+    """One episode's place in a season's order: its number, and its id.
+
+    **Typed values, never a cursor.**
+    [ADR-0034](../../../docs/prd/decisions/0034-the-cursor-carries-a-position.md)
+    holds that no port takes an opaque cursor -- the base64 lives in
+    `usher.api.cursor`, and a port that accepted one would have to decode it,
+    which means knowing the sort vocabulary of the layer above. So
+    `GET /seasons/{id}/episodes` decodes, builds one of these, and hands it
+    down. `BrowseCursorPosition` is the same shape for `browse`, and the two
+    are deliberately separate types rather than one generic: they carry
+    different keys and neither route can serve the other's cursor.
+
+    **`episode_number` is `int` and not `int | None`, and that is the whole of
+    why this keyset is simpler than `browse`'s.** ADR-0034's predicate has
+    three arms because `titles.year`, `titles.popularity` and
+    `titles.vote_count` are nullable, so a page boundary can land *inside* the
+    unkeyed group and the walk has to resume from it. `episodes.episode_number`
+    is `nullable=False` with `ck_episodes_episode_number_non_negative` beside
+    it (`db/models/episode.py:86`), so the unkeyed group is provably empty and
+    the `IS NOT NULL` leg is unreachable rather than forgotten. This annotation
+    is that fact spelled where a type checker can hold it: a caller cannot
+    construct the position the missing leg would have been for.
+
+    `id` is the UUIDv7 primary key, which is what makes the keyset a total
+    order (ADR-0003, and `CursorSpec` refuses a keyset that does not end in
+    one). It is not redundant merely because
+    `uq_episodes_title_season_episode` already makes `episode_number` unique
+    within a season: the codec's rule is structural, and a route that dropped
+    it would have to argue the uniqueness case again at every call site.
+    """
+
+    episode_number: int
+    id: uuid.UUID
 
 
 class EpisodeRepository(ABC):
@@ -178,7 +217,100 @@ class EpisodeRepository(ABC):
         """
 
     @abstractmethod
+    async def list_seasons(self, title_id: uuid.UUID) -> list[Season]:
+        """One series' seasons, ordered by `season_number`. **Unpaged, and
+        that is a measurement rather than an oversight**: the one deployment
+        measured holds 32,409 series at a median of 9 seasons, and a client
+        renders all of them at once. A cursor over a nine-row answer is a
+        second round trip for a screen that is already complete.
+
+        **Season 0 is included, and this is the one place this port diverges
+        from `next_up`.** Specials are out-of-band for *"what do I watch
+        next"* and perfectly ordinary in *"show me this series"* -- TMDb
+        numbers them as season 0 and Emby emits `ParentIndexNumber: 0`, so
+        excluding them here would hide a shelf of rows the catalog holds.
+        `test_season_zero_is_a_season_of_the_series_and_never_a_next_episode`
+        pins both halves in one case so that "fixing" either to match the
+        other fails.
+
+        **A title with no seasons answers `[]`, and so does an id no title
+        carries.** This read is scoped to `seasons` and cannot tell the two
+        apart; a movie having no seasons is a fact about the title, so
+        `GET /series/{id}/seasons` asks `TitleRepository` first and reserves
+        `404` for the id that does not exist at all.
+
+        Not `list_for_title`, which answers the same question and returns the
+        **whole tree** with it -- 20,001 rows / 22.901 ms / 402 buffers for the
+        one measured pathological series. That method exists for enrichment's
+        change detection and the CLI's report; no route may use it.
+        """
+
+    @abstractmethod
+    async def get_season(self, season_id: uuid.UUID) -> Season | None:
+        """One season by its own id, or `None`.
+
+        `None` and not an empty `Season`: `GET /seasons/{id}/episodes` answers
+        `404` for a season that does not exist and `200` with an empty list
+        for one that exists and holds nothing, and the route can only tell
+        those apart if this read does. The second is a real state rather than
+        a defect -- since M9's T1 an `append_to_response` season block that
+        TMDb declines to serve is the *same 200 with the key absent* as one
+        the show does not have, so a listed season whose block never arrived
+        leaves a `Season` row with no episodes.
+        """
+
+    @abstractmethod
+    async def list_season_episodes(
+        self,
+        season_id: uuid.UUID,
+        *,
+        limit: int,
+        after: EpisodeCursorPosition | None = None,
+    ) -> list[Episode]:
+        """One page of one season's episodes, ordered by `(episode_number,
+        id)`, keyset-resumed from `after`.
+
+        **Scoped to a season, not to a series.** Every series has an S01E01,
+        and a read that forgot the scope answers with the whole tree in
+        physical order -- which satisfies every membership assertion a caller
+        could write. `test_a_seasons_episodes_page_excludes_another_seasons`
+        asserts position and seeds the distractor for that reason.
+
+        **The keyset is ADR-0034's, minus one arm it can prove empty.** That
+        record's predicate has three arms because a nullable sort column puts
+        a page boundary inside an unkeyed group and the walk has to resume
+        from it -- and a row comparison over `(key IS NOT NULL, key, id)`
+        evaluates to NULL rather than false there, dropping the whole unkeyed
+        tail with every page still full. Here `episodes.episode_number` and
+        `episodes.season_number` are `nullable=False`
+        (`db/models/episode.py:85-86`), so the unkeyed group is provably empty
+        and `EpisodeCursorPosition.episode_number` is typed `int` rather than
+        `int | None` to hold that at the type level. Named because *"we did
+        not need the `IS NOT NULL` leg"* and *"we forgot it"* look identical
+        in a diff.
+
+        The comparison is **strict** on the id tail: relaxed to `>=` the walk
+        re-serves its boundary row at every page break, which a test whose
+        pages do not abut cannot see.
+
+        `after` is a typed position and never a cursor -- ADR-0034's first
+        decision, and the reason the base64 lives in `usher.api.cursor`. The
+        route decodes, builds one of these, and hands it down.
+
+        **One statement per page, never one per episode.** The N+1 that
+        `resolve_episodes` and `next_up` both exist to prevent is the same one
+        arriving at a route, and this is where a paged screen would meet it.
+        """
+
+    @abstractmethod
     async def list_for_title(self, title_id: uuid.UUID) -> tuple[list[Season], list[Episode]]:
         """Everything under one series, seasons then episodes, each ordered by
         its own numbering. Used by enrichment to decide what changed, and by
-        the CLI's report."""
+        the CLI's report.
+
+        **No route may use this.** It returns the whole tree -- 20,001 rows /
+        22.901 ms / 402 buffers for the one measured pathological series -- so
+        the response length is a property of the show rather than of the
+        request. `list_seasons` and `list_season_episodes` are the bounded
+        reads a route takes instead.
+        """

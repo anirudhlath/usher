@@ -205,6 +205,50 @@ be added if a client turns out to need flexible field selection.
 > structural property rather than a caught exception. `TitleReadService` holds
 > no `SourceAdapter` and a test asserts that on its imports.
 
+> **Built in M9: the series hierarchy and `GET /episodes/{id}`.** ✅
+> `GET /series/{id}/seasons` answers every season of one title ordered by
+> `season_number`, unpaged — 32,409 series at a median of 9 seasons, and a
+> client renders all of them, so a cursor over a nine-row answer would be a
+> second round trip for a complete screen. `GET /seasons/{id}/episodes` is
+> keyset-paged by `episode_number` within the season
+> ([ADR-0034](decisions/0034-the-cursor-carries-a-position.md)), and
+> `GET /episodes/{id}` carries the episode's own fields plus its `title_id`
+> and `season_id`, so a client that opened an episode from a search result or
+> a Next Up card can climb back to its season and its series without a second
+> search. No `tmdb_id`, no `imdb_id` and no `external_id` on any of the three.
+>
+> **They stay separate routes, and the hierarchy is still absent from
+> `GET /titles/{id}`.** One measured series holds 20,000 episodes, so inlining
+> the tree would make the length of a title response a property of the show
+> rather than of the request. That is also why no route reads
+> `EpisodeRepository.list_for_title`, which answers both questions at once and
+> returns the whole tree with them — 20,001 rows in 22.901 ms over 402 buffers
+> for that series. Two bounded reads instead, each one statement, and a
+> statement-count case asserts the seasons route costs the same for 2 seasons
+> as for 25 and the episodes route the same for a page of 2 as for a page of
+> 50.
+>
+> **Season 0 is a season of the series here, and is still excluded from Next
+> Up.** Specials are TMDb's season 0 and Emby's `ParentIndexNumber: 0`; the
+> divergence is deliberate — *"what do I watch next"* has no place for them and
+> *"show me this series"* does — and one contract case pins both halves so that
+> "fixing" either to match the other fails.
+>
+> **An empty season list and an empty episode page are `200`, not `404`.** A
+> movie has no seasons and that is a fact about the title; and since M9's T1
+> moved enrichment onto one `append_to_response` request per series, a season
+> block TMDb declines to serve arrives as the same `200` with the key silently
+> absent as a season the show does not have — so a listed season whose block
+> never came leaves a real `Season` row with no episodes, and an empty page is
+> a state the catalog genuinely holds. `404` is reserved for a title, season or
+> episode id that does not exist at all, in the envelope below with the generic
+> `not_found` code, and one case per route asserts the two are distinguishable.
+>
+> **No `watch_state` on these responses.** `PUT /watch/episodes/{id}` under
+> *Actions* owns that state; a `watch_state` key on an episode would be a
+> second read per episode on a paged route. Adding it is an additive change to
+> the DTO.
+
 ### Actions
 
 | Endpoint | Effect |
