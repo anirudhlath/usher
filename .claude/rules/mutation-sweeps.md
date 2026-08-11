@@ -1221,7 +1221,6 @@ Gate green before and after on the fully restored tree, with all three touched
 files verified by `md5sum` against their pre-sweep digests.
 
 
->>>>>>> m9/D4
 **M9 Task D3's sweep: 4 plants over `PlaybackService` — 4 killed, 1
 equivalent-mutant control surviving as designed, 0 unintended survivors, 0
 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place, with
@@ -1268,7 +1267,6 @@ object, neither right-hand side reads the other, and nothing runs between
 them — the same shape as the `__all__` reorder and the `SET`-list swap above,
 one layer in. Reported rather than treated as a survivor.
 
-<<<<<<< HEAD
 ## M9 Task G3 — the curation prompt's ownership claim (2026-08-11)
 
 Seven plants over `services/curation_prompt.py`, **in place, against the whole
@@ -1338,7 +1336,7 @@ has now been bitten by each.**
 `milestone/m9-api-surface`, and against 3,166 after the narrowing. Same
 verdicts, same restored digest — *a survivor is only a survivor of the
 selection it ran against*.
-=======
+
 **M9 Task D4's sweep: 13 plants over the playback router — 11 targets of which
 10 were killed on the first pass and 1 was a real coverage gap since closed,
 plus 2 equivalent-mutant controls surviving as designed. 1 BAD-ANCHOR
@@ -1434,3 +1432,64 @@ files, so it is a sweep target for the *envelope* rather than for this route.
 What it does confirm is the plan's reason for the pairing: three of the
 nineteen are the two POST routes' own cases, and the episode route's
 `instance` is only ever asserted by the episode route's case.
+## M9 Task C2 — `Image`, `ImageRepository` and `m09c`'s natural key
+
+**20 mutations, 18 killed, 2 controls surviving as designed, 0 unintended
+survivors, 0 HUNG, 0 DID-NOT-RUN, 0 BROKEN.** Run 2026-08-11 in place against
+`tests/unit` plus the three integration files this task touches (baseline
+36 s green; every mutation dry-run through `compile()` first), under all three
+`.pyc` defences.
+
+**The `-q`/`-qq` trap fired again, and the guard is what caught it.** The
+harness passed `-q` to pytest — and `pyproject.toml`'s `addopts` already
+carries one, so the run was `-qq`, which **suppresses the final
+`N passed, M failed` line entirely**. Two mutations scored `DID-NOT-RUN`
+before the sweep was killed and the harness fixed. Both had in fact run for a
+full 40 s and killed 22 and 7 cases respectively. Worth carrying in this
+spelling: **the trap is not "do not pass `-qq`", it is that a project-level
+`addopts` makes a harness's own flag additive**, so a sweep harness must either
+pass no verbosity flag at all or read `addopts` first. The reason this was a
+lost 80 seconds rather than a false result is that the harness treats "no
+summary line" as `DID-NOT-RUN` instead of falling through to `KILLED` on a
+non-zero exit code — the rule paid for itself on its first run.
+
+Three results worth carrying:
+
+- **The headline plant is loud, not silent.** `ON CONFLICT ON CONSTRAINT
+  uq_images_owner_provider_path` respelled as the column list
+  `(title_id, provider, provider_path)` — the spelling ADR-0032's request
+  invites — fails **22 cases** with `InvalidColumnReferenceError: there is no
+  unique or exclusion constraint matching the ON CONFLICT spec`. So the
+  careless *writer* cannot ship; only the careless *DDL* can, which is why the
+  constraint's own spelling needed a case of its own.
+- **And that case earns its keep.** Mutating `m09c`'s DDL from
+  `UNIQUE NULLS NOT DISTINCT` to plain `UNIQUE` fails **7** cases — but note
+  what they are: `test_the_key_is_nulls_not_distinct_and_the_obvious_spelling_
+  would_not_be` and `..._is_declared_nulls_not_distinct_in_the_catalog` are the
+  two written for it, and the other five are collateral from
+  `test_migration_matches_the_orm_metadata`. Against the *fake* arm the same
+  defect is invisible by construction: a Python tuple key treats `None` as an
+  ordinary value, so every one of the 21 shared contract cases passes against
+  the inert spelling. **A fake can be silently stricter than its Postgres arm,
+  and that direction is the dangerous one** — `fixtures-and-fakes.md` records
+  divergences where the fake is more forgiving; this is the mirror.
+- **`COALESCE(excluded.language, images.language)` dies on one case**, and it
+  is the defensive-looking spelling rather than a typo. `people`'s
+  `known_for_department` is COALESCEd for a measured reason; copying that habit
+  to `images.language` makes a language a provider *removed* unremovable. The
+  case that kills it is the one that moves `language` to `None`.
+
+**The two controls, measured against every gate step** rather than pytest
+alone:
+
+| control | `pytest` (scoped) | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `replace_for_titles`' `keep_providers`/`keep_paths` bind-parameter dict entries swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `db/repositories/image.py`'s module docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first is equivalence as a *fact about the code*: both are keys of one dict
+handed to one `execute`, and a mapping's insertion order cannot reach a bound
+parameter. The second was checked against
+`grep -rn "getdoc\|__doc__\|ast.unparse\|getsource" tests/` first — no case
+scans that module's prose, unlike `ports/embedding.py` and the five others that
+entry names.

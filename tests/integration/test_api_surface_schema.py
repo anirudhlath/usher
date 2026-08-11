@@ -106,9 +106,9 @@ async def _seed_episode(session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
 
 _INSERT_IMAGE = text(
     "INSERT INTO images "
-    "(id, title_id, episode_id, person_id, kind, provider, remote_url, "
+    "(id, title_id, episode_id, person_id, kind, provider, provider_path, "
     " width, height, language, is_primary) "
-    "VALUES (:id, :title_id, :episode_id, :person_id, :kind, :provider, :remote_url, "
+    "VALUES (:id, :title_id, :episode_id, :person_id, :kind, :provider, :provider_path, "
     "        :width, :height, :language, :is_primary)"
 )
 
@@ -121,7 +121,12 @@ def _image(**overrides: object) -> dict[str, object]:
         "person_id": None,
         "kind": "poster",
         "provider": "tmdb",
-        "remote_url": "https://example.invalid/p/abc.jpg",
+        # A provider *path*, not a URL -- `m09c` renamed the column, because
+        # ADR-0032's ladder is `{base}{rung}{path}` and a stored URL turns rung
+        # selection into string surgery. Each caller of `_image` that needs two
+        # distinct rows overrides it, since `uq_images_owner_provider_path` now
+        # refuses a second row with the same owner, provider and path.
+        "provider_path": "/an-invented-path.jpg",
         "width": 500,
         "height": 750,
         "language": "en",
@@ -289,15 +294,36 @@ async def test_every_cascade_in_this_migration_has_an_index_the_lookup_can_use(
     the table ships no index beyond its primary key, so
     `fk_search_queries_clicked_title_id_titles`' SET NULL scans it on every
     title delete. That is the plan's call, recorded in the migration docstring
-    rather than quietly repaired here."""
+    rather than quietly repaired here.
+
+    **`images.title_id` has two acceptable answers since `m09c`, and that is a
+    measurement rather than a shrug.** `uq_images_owner_provider_path` leads on
+    `title_id`, so it can serve this lookup too -- and on the *empty* table this
+    fixture builds, the two cost identically (`4.16..9.52` for both) and the
+    planner's tie-break is arbitrary: it named the unique constraint the first
+    time `m09c` ran against this case. Measured on `pgvector/pgvector:pg17`
+    with 200,000 images over 40,000 titles and `ANALYZE` run, which is the
+    state a real deployment is in:
+
+    | index | size | chosen for `WHERE title_id = ?` |
+    |---|---|---|
+    | `ix_images_title_id` | 2,680 kB | **yes**, `Index Scan`, 4 buffers |
+    | `uq_images_owner_provider_path` | 13 MB | no |
+
+    The same narrow index is chosen for the real parent `DELETE` and for
+    `list_for_title`. So `ix_images_title_id` is not made redundant by `m09c`,
+    it is simply indistinguishable from the wider index at zero rows -- and the
+    property this case claims is *"a usable index exists at all"*, which both
+    satisfy. Naming one of them would be asserting a tie-break.
+    """
     probes = [
-        ("images", "title_id", "ix_images_title_id"),
-        ("images", "episode_id", "ix_images_episode_id"),
-        ("images", "person_id", "ix_images_person_id"),
-        ("title_search_names", "title_id", "ix_title_search_names_title_id"),
+        ("images", "title_id", {"ix_images_title_id", "uq_images_owner_provider_path"}),
+        ("images", "episode_id", {"ix_images_episode_id"}),
+        ("images", "person_id", {"ix_images_person_id"}),
+        ("title_search_names", "title_id", {"ix_title_search_names_title_id"}),
     ]
     await session.execute(text("SET LOCAL enable_seqscan = off"))
-    for table, column, index_name in probes:
+    for table, column, acceptable in probes:
         result = await session.execute(
             text(
                 f"EXPLAIN SELECT 1 FROM {table} "  # noqa: S608 -- both are literals above
@@ -305,7 +331,11 @@ async def test_every_cascade_in_this_migration_has_an_index_the_lookup_can_use(
             )
         )
         plan = "\n".join(row[0] for row in result)
-        assert index_name in plan, f"{table}.{column}: {plan}"
+        # A *set*, and three of the four hold exactly one name -- so this is
+        # not a blanket "some index was used", which `Seq Scan` would also have
+        # to be excluded from by hand. Only the column with two genuine
+        # candidates has two.
+        assert any(name in plan for name in acceptable), f"{table}.{column}: {plan}"
 
 
 # --- the CHECK bodies, exercised rather than described -----------------------

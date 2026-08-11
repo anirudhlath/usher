@@ -6,10 +6,12 @@ Docker and where a later reader "tidying" a nullable column or a column type
 is a code change rather than a migration. Same split
 `test_db_models.py`/`test_search_schema.py` already make.
 
-None of these four has a domain twin, deliberately -- the 1:1 row/model rule
-(`test_title_and_title_row_have_matching_field_sets`) is scoped to
-`TitleRow`/`Title` only, so four rows with no `Image`, `SearchQuery`,
-`RowProviderSetting` or `TitleSearchName` break nothing.
+Three of these four still have no domain twin, and the fourth stopped being an
+exception when `m09c` landed: `Image` exists, and its 1:1 correspondence with
+`ImageRow` is asserted in `tests/unit/test_domain_image.py` rather than here,
+because `test_title_and_title_row_have_matching_field_sets` is scoped to
+`TitleRow`/`Title` only. `SearchQuery`, `RowProviderSetting` and
+`TitleSearchName` are still deliberately absent.
 """
 
 from typing import cast
@@ -46,7 +48,14 @@ def test_images_carries_prd_02s_eleven_fields_and_no_twelfth() -> None:
     list rather than a superset of it. No `created_at`, no `updated_at` and no
     cached-derivative columns: artwork is *referenced*, never mirrored (PRD 02
     prices mirroring a 1.2M-title catalog at ~120 GB), and the image proxy's
-    on-disk cache "is not a release artifact"."""
+    on-disk cache "is not a release artifact".
+
+    **`provider_path`, not `remote_url` -- `m09c` renamed it**, and there is
+    still no twelfth column: `sort_order` was asked for by group C's preamble
+    and deliberately left out of that revision's authorisation, so the read
+    order is `(is_primary DESC, id)`. Eleven either way, which is why this
+    case's name did not have to move.
+    """
     table = cast(Table, ImageRow.__table__)
     assert {c.name for c in table.columns} == {
         "id",
@@ -55,7 +64,7 @@ def test_images_carries_prd_02s_eleven_fields_and_no_twelfth() -> None:
         "person_id",
         "kind",
         "provider",
-        "remote_url",
+        "provider_path",
         "width",
         "height",
         "language",
@@ -72,7 +81,7 @@ def test_the_three_image_owner_columns_are_all_nullable_and_the_rest_are_not() -
     table = cast(Table, ImageRow.__table__)
     for owner in ("title_id", "episode_id", "person_id"):
         assert table.c[owner].nullable is True, owner
-    for required in ("kind", "provider", "remote_url", "is_primary"):
+    for required in ("kind", "provider", "provider_path", "is_primary"):
         assert table.c[required].nullable is False, required
     # Nullable because a provider that reports no dimensions and no language
     # is ordinary, and a placeholder is a lie a layout engine acts on.
@@ -81,11 +90,19 @@ def test_the_three_image_owner_columns_are_all_nullable_and_the_rest_are_not() -
 
 
 def test_every_image_check_and_delete_rule_is_declared() -> None:
-    """The CHECK names and the three `ondelete`s in one place, because the
-    delete rules and the owner CHECK are a single decision: SET NULL would
-    leave `num_nonnulls(...) = 0`, which the CHECK refuses, so a parent delete
-    would fail naming a table the operator never touched. CASCADE is not the
-    convenient answer here, it is the only available one."""
+    """The CHECK names, the three `ondelete`s and `m09c`'s unique constraint in
+    one place, because the delete rules and the owner CHECK are a single
+    decision: SET NULL would leave `num_nonnulls(...) = 0`, which the CHECK
+    refuses, so a parent delete would fail naming a table the operator never
+    touched. CASCADE is not the convenient answer here, it is the only
+    available one.
+
+    `uq_images_owner_provider_path` is asserted here only as *present*; that it
+    is spelled `NULLS NOT DISTINCT`, and what the default spelling would have
+    admitted, is
+    `tests/integration/test_image_repository.py`'s -- a declaration cannot show
+    which rows a constraint refuses.
+    """
     table = cast(Table, ImageRow.__table__)
     assert {c.name for c in table.constraints if c.name} == {
         "pk_images",
@@ -94,9 +111,10 @@ def test_every_image_check_and_delete_rule_is_declared() -> None:
         "fk_images_person_id_people",
         "ck_images_exactly_one_owner",
         "ck_images_provider_not_empty",
-        "ck_images_remote_url_not_empty",
+        "ck_images_provider_path_not_empty",
         "ck_images_width_positive",
         "ck_images_height_positive",
+        "uq_images_owner_provider_path",
     }
     for owner in ("title_id", "episode_id", "person_id"):
         assert next(iter(table.c[owner].foreign_keys)).ondelete == "CASCADE", owner

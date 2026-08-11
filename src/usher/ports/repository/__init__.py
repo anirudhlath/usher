@@ -43,6 +43,9 @@ from usher.ports.repository.genome import (
     GenomeRepository,
     GenomeVectorRow,
 )
+from usher.ports.repository.image import (
+    ImageRepository,
+)
 from usher.ports.repository.import_run import (
     ImportRunRepository,
 )
@@ -115,6 +118,7 @@ __all__ = [
     "GenomeRepository",
     "GenomeVectorRow",
     "GenomeWriteResult",
+    "ImageRepository",
     "ImportRunRepository",
     "LLMCallRepository",
     "LibraryGenres",
