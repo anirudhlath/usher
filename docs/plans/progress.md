@@ -2170,7 +2170,10 @@ constant or validator in the system would have to be true for it to be.**
 **Mutation sweep — 6 plants over `services/curation_prompt.py`: 4 targets killed, 2
 equivalent-mutant controls surviving as designed, 0 unintended survivors, 0 BAD-ANCHOR, 0
 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place against the whole `tests/unit` selection
-(3,041 cases, ~22 s a run), with the plant list and its expected verdict written down first, the
+and **re-run unchanged after merging `milestone/m9-api-surface`**, which grew that selection from
+3,041 cases to 3,081 — a survivor is only a survivor of the selection it ran against, and 44 test
+files arrived between the two runs. Same six verdicts, same single case killing all four targets,
+same restored digest. The plant list and its expected verdict were written down first, with the
 three `.pyc` defences in force (`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept before every run,
 an equivalent-mutant control), and every restore verified by `md5sum` against a pre-plant digest.
 **A prompt sweep's yield is near 100% because nothing observes a prompt unless a case opts in by
