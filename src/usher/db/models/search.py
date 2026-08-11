@@ -1,7 +1,7 @@
-"""The semantic half's two tables.
+"""The semantic half's two tables, plus M9's narrow name table.
 
-Neither carries a `set_updated_at` trigger, and both reasons are already
-precedents in this schema rather than new judgements.
+None of the three carries a `set_updated_at` trigger, and every reason is
+already a precedent in this schema rather than a new judgement.
 
 `title_embeddings` follows `jobs`: one writer, which sets `updated_at`
 explicitly in its own `ON CONFLICT DO UPDATE` clause. The tables that *do*
@@ -17,9 +17,13 @@ and `computed_at` is the only timestamp that means anything about it. A
 second timestamp recording when the row was *written* would differ from the
 first only by the width of a transaction.
 
-Both are consequences worth naming for
+`title_search_names` follows `credits`: it is replaced per `(title_id, kind)`
+by whichever loader owns that half, so there is no `updated_at` column at all
+for a trigger to own.
+
+All three are consequences worth naming for
 `tests/integration/test_migrations.py::test_migration_creates_the_updated_at_triggers`,
-which asserts the trigger set **exactly**: this module adds two tables and
+which asserts the trigger set **exactly**: this module adds three tables and
 that set does not move.
 """
 
@@ -36,13 +40,33 @@ from sqlalchemy import (
     Integer,
     PrimaryKeyConstraint,
     Text,
+    column,
     func,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from usher.db.base import Base
+from usher.db.base import Base, enum_column
+from usher.domain.enums import SearchNameKind
+
+#: **The character bound on `title_search_names.name`, and its arithmetic.**
+#: Postgres refuses a btree entry over `BTMaxItemSize` — **2,704 bytes** on the
+#: standard 8 kB page — and `ix_title_search_names_name_lower_prefix` is a
+#: btree over `lower(name)`. 512 characters is 2,048 bytes at UTF-8's four-byte
+#: worst case, plus an 8-byte index-tuple header and a 4-byte varlena header,
+#: for 2,060 against 2,704: a 24% margin, which is what absorbs the handful of
+#: code points `lower()` *lengthens* (U+0130 LATIN CAPITAL LETTER I WITH DOT
+#: ABOVE lowercases to two code points).
+#:
+#: The bound is a **named CHECK** rather than the index's own refusal, and that
+#: is the whole reason it exists: an index-side refusal carries no constraint
+#: name for `constraint_name()` to report, so a loader handed one long alias out
+#: of IMDb's `title.akas` could not tell it from any other write failure. Same
+#: ordering-of-two-refusals argument
+#: `test_the_genome_tag_id_column_is_wide_enough_that_a_constraint_refuses_it_first`
+#: makes for `genome_tags.tag_id`, arriving at a text column instead of an int.
+SEARCH_NAME_MAX_CHARS = 512
 
 #: The one place the width is written down on the storage side. It has to
 #: agree with `Embedder.dimension`, and nothing can make that structural --
@@ -271,4 +295,102 @@ class TitleNeighborRow(Base):
         CheckConstraint("title_id <> neighbor_id", name="ck_title_neighbors_not_self"),
         CheckConstraint("score >= 0 AND score <= 1", name="ck_title_neighbors_score_range"),
         CheckConstraint("rank >= 0", name="ck_title_neighbors_rank_non_negative"),
+    )
+
+
+class TitleSearchNameRow(Base):
+    """The narrow name table M6 refused and M7 restated the refusal of --
+    **created here, never extended, because it has never existed.**
+
+    M6's boundary call 3 declined it on the ground that with no aliases and no
+    people it would hold one row per title duplicating four columns of
+    `titles`. M7 *restated* that refusal rather than renewing it, because M7
+    landed people and not aliases. Both halves now have a source inside one
+    milestone -- Track 2's `title.akas` loader and Track 1's two-tier
+    suggest -- so the duplication argument no longer holds and the table ships.
+
+    **Five columns, not PRD 05's four, and the two extra ones are not
+    decoration.** IMDb `title.akas` is the alias source; without `region` and
+    `language` a French and a Brazilian alias for the same film are
+    indistinguishable rows, which is a defect the loader cannot repair later
+    without a second migration this milestone has no id for.
+
+    **And `popularity` -- PRD 05's fourth column -- is refused, with a
+    number.** `titles.popularity` is NULL on **all 1,271,138 rows**
+    (`.claude/rules/search-and-embeddings.md`), which is why M6's shipped
+    suggest ordering was inert and why the vote-count tiebreak was added.
+    Copying a column that is 100% NULL into a narrow table is precisely the
+    duplication boundary call 3 refused. The re-rank reads `titles.vote_count`,
+    as it already does.
+
+    **The delete scope is `(title_id, kind)`, and it is stated here rather
+    than discovered by a loader.** Two writers land in this table in the same
+    milestone, and a `credits`-shaped `replace_for_titles` deleting by
+    `title_id` alone makes them mutually destructive: whichever runs second
+    erases the other's rows. There is deliberately **no unique constraint** --
+    the write is replace-scoped, matching `credits` -- and what would reverse
+    that is a writer that upserts.
+    """
+
+    __tablename__ = "title_search_names"
+
+    # A surrogate key, unlike `title_embeddings`' and `genome_tags`'. There is
+    # no natural one: `(title_id, name, kind, region, language)` admits two
+    # identical akas rows from one dump, and a five-column primary key over a
+    # 512-character text column is a btree entry this table already has a
+    # CHECK about.
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    # CASCADE, `title_embeddings`' case rather than `watch_states`': a search
+    # name protects no user state and is fully re-derivable from the title
+    # plus a loader.
+    title_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[SearchNameKind] = mapped_column(
+        enum_column(SearchNameKind, length=16), nullable=False
+    )
+    # IMDb `title.akas`' own `region` and `language`, nullable because most
+    # rows carry one and not the other and plenty carry neither. NULL means
+    # "not specific to a region", which is a different fact from any code.
+    # Deliberately unconstrained beyond nullability: the vocabularies are the
+    # dump's, and a CHECK here would be a migration the day IMDb adds a code.
+    region: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("name <> ''", name="ck_title_search_names_name_not_empty"),
+        # The btree bound. `SEARCH_NAME_MAX_CHARS`' own comment carries the
+        # arithmetic; the constraint is what makes the refusal classifiable.
+        CheckConstraint(
+            f"length(name) <= {SEARCH_NAME_MAX_CHARS}",
+            name="ck_title_search_names_name_within_btree_bound",
+        ),
+        # The cascade's own lookup, and the leading column of the
+        # `(title_id, kind)` delete scope above. Postgres implements ON DELETE
+        # CASCADE by finding referencing rows *by that column*; the same
+        # argument `ix_title_neighbors_neighbor_id` two classes up records.
+        Index("ix_title_search_names_title_id", "title_id"),
+        # **Tier 1 of the two-tier suggest, on the half that holds aliases and
+        # people.** Measured on a real 1,271,138-title catalog: p50 0.6 ms,
+        # p95 1.0 ms, max 10 ms, 44 MB, building in 0.559 s
+        # (`.claude/rules/search-and-embeddings.md`) -- against a GIN trigram
+        # path whose p50 is 33.3 ms and whose max is 734 ms. Free here, because
+        # the table ships empty.
+        #
+        # The same three-way spelling question `ix_titles_name_lower_prefix`
+        # records in `title.py`, answered the same way: a labelled expression
+        # plus `postgresql_ops`, because the `text("... text_pattern_ops")`
+        # form makes alembic skip the index and the
+        # `postgresql_ops={"lower(name)": ...}` form silently drops the
+        # opclass. Which is why the case for this index asserts
+        # `text_pattern_ops` off `pg_indexes.indexdef` and then probes the
+        # planner, rather than asserting that the index exists.
+        Index(
+            "ix_title_search_names_name_lower_prefix",
+            func.lower(column("name")).label("lower_name"),
+            postgresql_ops={"lower_name": "text_pattern_ops"},
+        ),
+        # No index on `kind`. Two members and no selectivity, and the delete
+        # scope's leading column is already indexed above.
     )

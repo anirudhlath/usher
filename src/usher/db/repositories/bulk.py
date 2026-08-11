@@ -125,6 +125,18 @@ _SUSPENDABLE_INDEXES: dict[str, str] = {
     "ix_titles_name_lower_year": (
         "CREATE INDEX ix_titles_name_lower_year ON titles (lower(name), year)"
     ),
+    # **M9's tier-1 prefix index, and it is not the entry above.** That one
+    # carries the *default* opclass and cannot answer `LIKE 'pre%'` under this
+    # database's collation (measured -- `Seq Scan` even with
+    # `enable_seqscan = off`); this one carries `text_pattern_ops` and is the
+    # whole of the two-tier suggest's first tier. The two differ by one token,
+    # which is exactly the drift this dict's round-trip case exists for: an
+    # entry that loses `text_pattern_ops` rebuilds an index that is not an
+    # error and simply stops serving type-ahead, after a first bootstrap and
+    # only after one.
+    "ix_titles_name_lower_prefix": (
+        "CREATE INDEX ix_titles_name_lower_prefix ON titles (lower(name) text_pattern_ops)"
+    ),
     "ix_titles_search_document": (
         "CREATE INDEX ix_titles_search_document ON titles "
         "USING gin (search_document) WITH (fastupdate = off)"

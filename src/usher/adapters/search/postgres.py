@@ -784,11 +784,18 @@ class PostgresSuggestIndex(SuggestIndex):
 
     ADR-0021 gives this its own port with no write method, and this class is
     why: it reads `titles` through a trigram index and maintains no artefact
-    of its own. Boundary call 3 declined PRD 05's `title_search_names` table
-    for the same reason -- with no aliases and no people in M6 it would hold
-    one row per title duplicating `titles(id, name, kind, popularity)`, a
-    second copy and a second staleness problem, in the milestone whose whole
-    purpose is to delete staleness problems.
+    of its own. M6's boundary call 3 declined PRD 05's `title_search_names`
+    table for the same reason -- with no aliases and no people it would have
+    held one row per title duplicating `titles(id, name, kind, popularity)`,
+    a second copy and a second staleness problem.
+
+    **M9's `m09a` builds that table, and this class still writes nothing and
+    still does not read it.** The narrow table holds *aliases* and *people* --
+    the two things that finally have sources -- and deliberately no `primary`
+    rows, so nothing in it duplicates `titles`, and `popularity` is refused
+    there with the measurement that killed it here too (NULL on all 1,271,138
+    rows). Reading it is the two-tier suggest's job, which *replaces* this
+    path rather than extending it.
 
     **GIN, not the GiST PRD 05 specifies.** At 2.08M names the `%` path is
     ~110x faster under GIN (1.671 ms / 205 buffers against 182.5 ms /

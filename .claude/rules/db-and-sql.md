@@ -58,6 +58,17 @@ vocabulary) shipped 2026-08-07; the rule for the next milestone is now
 mechanical rather than a decision:
 `m09a`, then `m10a`.
 
+**M9 took the convention and shipped one revision where a draft plan wanted
+seven, and the reason generalises.** `m09a` (`images`, `search_queries`,
+`row_provider_settings`, `title_search_names`, the two tier-1 prefix indexes)
+carries four tables sharing no column, no foreign key and no lifetime — `m08a`'s
+precedent. The refuted alternative was `m09a`…`m09g`, one id per task group, on
+the theory that a revision each lets them author in parallel: it does the
+opposite, because **every integration test runs `alembic upgrade head`**, so a
+worktree holding `m09d` cannot migrate until `m09a`–`m09c` merge. A
+pre-allocated chain is a serial spine across every group that holds a link in
+it. Allocate a revision id per *merge*, never per author.
+
 **The zero-padding is the whole point and must not be "simplified" away.**
 Unpadded, `sorted(["m8a", "m9a", "m10a"])` is `["m10a", "m11a", "m8a", "m9a"]`
 — `m10a` sorts *first*, because `"1" < "8"` and string comparison never
@@ -88,10 +99,12 @@ because twelve rows happened to be nine.
 **`tests/integration/test_migrations.py`'s down/up cycle needs attention from
 every group that adds a migration, and the `-1` half breaking is the design,
 not the defect.** The `-1`-from-head half asserts on whatever the *current*
-head reverses, so it has to be re-pointed every time. **Five landings, five
+head reverses, so it has to be re-pointed every time. **Six landings, six
 loud breaks** — Group F re-pointed it for `ffa`, `af64ba2` (the `ffb`
-migration itself) for `ffb`, M7 Task 36 for `ffc`, M8 Task 8 for `m08a`, and
-M8 Task 19 for `m08b`.
+migration itself) for `ffb`, M7 Task 36 for `ffc`, M8 Task 8 for `m08a`,
+M8 Task 19 for `m08b`, and M9 Task M1 for `m09a`. The sixth was run and
+watched to fail before it was touched: `AssertionError: assert
+'pk_genome_tags' not in {...}`.
 
 **An inherited `-1` assertion that had teeth cannot survive a new head, and
 the failure is always loud.** Having teeth *means* being true at the state
@@ -452,6 +465,45 @@ just by running it:**
   the first migration). These aren't SQLAlchemy `Table` metadata at all, so
   autogenerate never sees them, in either direction — adding, dropping, or
   changing one is always a hand-written `op.execute(...)` migration.
+
+**An expression index with an operator class has three spellings, two of them
+wrong, and only one of the two is loud.** Measured 2026-08-10 on `m09a`'s two
+`lower(name) text_pattern_ops` indexes, by compiling the DDL and by running
+`compare_metadata` against a real `pgvector/pgvector:pg17`:
+
+| spelling | compiled DDL | `compare_metadata` |
+|---|---|---|
+| `Index(n, text("lower(name) text_pattern_ops"))` | **right** | `UserWarning: … Expression compare cannot proceed` and the index is **skipped** |
+| `Index(n, text("lower(name)"), postgresql_ops={"lower(name)": "text_pattern_ops"})` | `CREATE INDEX … (lower(name))` — **opclass silently dropped** | compares, against the wrong index |
+| `Index(n, func.lower(column("name")).label("lower_name"), postgresql_ops={"lower_name": "text_pattern_ops"})` | **right** | compares, no warning |
+
+`postgresql_ops` keys match a column name or an expression's **label**, never
+its text, and an unmatched key is not an error — so the middle row builds a
+default-opclass index that is not an error either and simply cannot serve
+`LIKE 'pre%'`. The first row is the careless-versus-careful pattern inverted:
+the *readable* spelling is the one that quietly costs you
+`test_migration_matches_the_orm_metadata`'s coverage of that index. Take the
+third; it is byte-identical to the first and diffable.
+
+**And the default opclass genuinely cannot serve a prefix, which is what makes
+"two indexes that look like one" a measurement.** On the pre-`m09a` schema with
+`SET enable_seqscan = off`, `WHERE lower(name) LIKE 'pre%'` plans as `Seq Scan
+on titles` at cost 1e10 against the existing `ix_titles_name_lower_year`
+(`(lower(name), year)`, default opclass) — not merely not-chosen, not
+choosable. With `(lower(name) text_pattern_ops)` present the same query is
+`Index Scan`, `Index Cond: ((lower(name) ~>=~ 'pre') AND (lower(name) ~<~
+'prf'))`.
+
+**A schema case filtered by `conname LIKE '%<suffix>'` is exhaustive only until
+the next migration.** Found the same day: M4's
+`test_the_new_episode_foreign_keys_carry_the_delete_rule_they_were_given` reads
+`WHERE contype = 'f' AND conname LIKE '%episode_id_episodes'`, and `m09a` gave
+`images` a third foreign key to `episodes` — so an M4 case about ADR-0010's
+two-way asymmetry failed on a correct entry in a table it is not about. Widening
+the expected map would have made that case silently own every future episode
+FK's delete rule; it is scoped by `conrelid` instead. **A `pg_constraint` read
+in a case about specific constraints is scoped by relation, not by a name
+pattern** — the pattern is a taxonomy nobody re-enumerates.
 
 **And the trap is not "a bounded `NUMERIC`" — it is any column narrower than
 the field feeding it, which includes every `Integer` in this schema.** Found

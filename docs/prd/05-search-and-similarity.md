@@ -131,7 +131,7 @@ Instead: a trigram index, candidates capped at a few hundred, then
 `levenshtein_less_equal` from the core `fuzzystrmatch` module as a re-rank over
 that capped set, ordered by popularity.
 
-**There is no narrow `title_search_names` table, and the trigram index goes
+**M6 built no narrow `title_search_names` table, and put the trigram index
 directly on `titles`.** This section used to specify a narrow
 `(title_id, name, kind, popularity)` table "over names and aliases", and its
 justification is exactly that — *aliases and people names*, one title
@@ -141,9 +141,39 @@ above), so the table would have held exactly one row per title duplicating
 second thing to keep fresh, and a new instance of precisely the staleness
 problem this milestone exists to eliminate. Boundary call 3.
 
-⏳ **Still not built after M7, and the condition is restated rather than
-renewed.** M6 deferred this to *"the day M7 lands aliases and people"*. **M7
-landed people and not aliases**, so the condition is not met — and a deferral
+✅ **Built by `m09a`, with five columns and not the four this section
+sketches — and the paragraph above still stands.** The trigram index stays
+directly on `titles`, and the narrow table duplicates nothing from it: it
+carries **no `primary` rows**, because a canonical name is answered by
+`ix_titles_name_lower_prefix` on `titles` itself, so a `primary` row would be
+exactly the one-row-per-title copy boundary call 3 refused. Its two members
+are `alias` and `person`, each with a named emitter inside M9.
+
+`(title_id, name, kind, region, language)`. **`region` and `language` are new
+and are not decoration:** IMDb `title.akas` is the alias source, and without
+them a French and a Brazilian alias for the same film are indistinguishable
+rows — a defect the loader cannot repair later without a second migration.
+
+🔴 **`popularity` — the fourth column this section specified — is refused,
+with a number.** `titles.popularity` is NULL on **all 1,271,138 rows**
+(measured 2026-08-03), which is why the shipped suggest ordering was inert and
+why the vote-count tiebreak was added. Copying a 100%-NULL column into a narrow
+table is precisely the duplication boundary call 3 refused; the re-rank reads
+`titles.vote_count`, as it already does. Correspondingly, *"ordered by
+popularity"* in the sketch above is aspirational rather than shipped.
+
+**Two tier-1 indexes, not one, and the pre-existing `ix_titles_name_lower_year`
+is neither.** That index is `(lower(name), year)` with the *default* opclass,
+which under this database's collation cannot answer `LIKE 'pre%'` at all —
+measured on `pgvector/pgvector:pg17`, the plan is a `Seq Scan` even with
+`enable_seqscan = off`. So `m09a` adds a btree on `lower(name)
+text_pattern_ops` to **both** `titles` and `title_search_names`: p50 0.6 ms,
+p95 1.0 ms, max 10 ms, 44 MB, building in 0.559 s over 1,271,138 rows, against
+the trigram path's 33.3 ms p50 and 734 ms max.
+
+⏳ **The table is empty, and both halves that fill it are still owed.** M6
+deferred this to *"the day M7 lands aliases and people"*. **M7 landed people
+and not aliases**, so `m09a` builds the shape and neither writer — a deferral
 silently rolled forward is the exact failure [09](09-roadmap.md) names for the
 tag genome (*"an obligation recorded only where it was postponed is one nobody
 plans"*). Both halves, with an owner:
@@ -154,11 +184,13 @@ plans"*). Both halves, with an owner:
   entirely — landing them changes the crawl's *request shape* and re-fetches
   the whole enriched tier. **Unassigned**, and named in PRD 03 rather than
   left implied by this deferral.
-- **The people half now belongs with M9's two-tier suggest**, which
+- **The people half belongs with M9's two-tier suggest**, which
   [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges and
-  which *replaces* the shipped suggest path rather than extending it. Building
-  the narrow table now means M9 redesigns it against a table built for the
-  design it is replacing. **Owner: M9**, together with the two-tier suggest.
+  which *replaces* the shipped suggest path rather than extending it. **Owner:
+  M9**, together with the two-tier suggest, and it is the writer rather than
+  the schema: `m09a` builds the table as part of the design that replaces the
+  path, which is what removes the "redesigns against a table built for the
+  design it is replacing" objection this bullet used to carry.
 
 Stated honestly: **that call rests on a structural argument, not on a
 latency measurement.** No variant was built and timed against the direct

@@ -157,6 +157,12 @@ deliberately rather than drifted into.**
    second copy, and a new instance of the staleness problem this milestone
    exists to eliminate. The trigram index goes directly on `titles`. When M7
    lands aliases and people, the narrow table is the migration that adds them.
+   **Settled in M9 (`m09a`), and the duplication is still refused**: the table
+   holds only `alias` and `person` rows — no `primary` — so `titles` remains
+   the sole home of a canonical name, and `popularity` is dropped from the
+   column list with the measurement that killed it (NULL on all 1,271,138
+   rows). It gains `region` and `language`, which the sketch here did not
+   have. The trigram index on `titles` stays exactly as M6 built it.
 4. **Embeddings cover the enriched tier, not the 1.27M-row catalog.** This is
    [05](05-search-and-similarity.md)'s own two-workload split taken
    seriously. The population is `enrichment_state <> 'skeleton'`, for which
@@ -341,6 +347,14 @@ carries a measurement they do not.
    roadmap names for the tag genome below: *an obligation recorded only where
    it was postponed is one nobody plans.*
 
+   **M9 builds it (`m09a`), and the restatement is what made that decidable.**
+   The objection above was that building it in M7 would mean M9 redesigning
+   against a table built for the design it replaces; building it *in* M9,
+   inside the two-tier suggest that replaces the path, is the same argument
+   answered rather than deferred again. The table ships **empty** — the people
+   half is M9's writer and the alias half needs `alternative_titles` in the
+   crawl's request shape, which is still unassigned.
+
 7. **The MovieLens tag genome IS built, and `genome_scores` is one dense
    `halfvec(1128)` per title rather than [02](02-data-model.md)'s implied tall
    table.** Measured on `pgvector/pgvector:pg17` (pgvector 0.8.6) at the real
@@ -450,7 +464,7 @@ carries a measurement they do not.
    row provider enable/disable | Runtime, via admin API"* — and the admin API
    is M9's. A table whose only writer is a route in a later milestone is the
    `search_queries` failure again, and this one would be worse: a
-   `row_providers` table with nine rows all reading `enabled = true` is
+   `row_providers` table with **ten** rows all reading `enabled = true` is
    indistinguishable from no table, right up until an operator finds it and
    expects toggling it to do something. **Providers are enabled by
    registration in code in M7**, and [08](08-operations.md)'s row is annotated
@@ -458,6 +472,22 @@ carries a measurement they do not.
    what makes the injected clock belong on `RowContext` rather than on each
    provider's constructor: a provider registered once cannot take a
    per-request argument at construction.
+
+   *(This item said **nine**, which was true when it was written and stopped
+   being true with `CuratedProvider`: `row_providers()` returns ten. Corrected
+   rather than left as a stale counted fact.)*
+
+   **Come due in M9 (`m09a`), and the refusal's own condition is what
+   discharges it**: `row_provider_settings(slug_prefix PK, enabled, updated_at)`
+   lands with the admin API that writes it. The half of the refusal that
+   survives is that it is **created empty** — an absent row means enabled,
+   which is exactly what *"enabled by registration in code"* already means, so
+   there is no state where the table exists and says nothing. It is
+   deliberately **not seeded with ten slugs**: a migration hard-coding the
+   registry is a second copy of `services/rows/__init__.py` with nothing
+   anywhere to detect drift. The natural key is `RowProvider.slug_prefix`,
+   which that port already declares *"declared rather than derived"* and
+   *"bounded at ten"*.
 
 **M7 is complete, and it is the first milestone whose *subject document* was
 written entirely before any of it existed.** [06](06-rows-and-recommendations.md)

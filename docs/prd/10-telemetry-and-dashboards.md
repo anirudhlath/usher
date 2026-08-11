@@ -417,12 +417,31 @@ llm_calls(
   generation_id                     -- ✅ M8. NULL for a purpose that produces
 )                                   --    no rows. See below
 
-search_queries(                       -- M9, whole. Not built in M6; see below
-  id, at, user_id, query, mode,
+search_queries(                       -- 🔶 M9 (`m09a`): the table, whole.
+  id, at, user_id, query, mode,       --    No writer yet; see below
   result_count, latency_ms,
   clicked_title_id, played          -- outcome attribution
 )
 ```
+
+🔶 **`search_queries` exists as of `m09a`, with these nine columns and no
+tenth, and nothing writes it.** *Whole* is what the table got and it is only
+half of what the paragraph above asks for — the argument for shipping all nine
+at once is that a dashboard reading a half-populated analytics table cannot
+tell a real zero from a column nobody filled, and an empty table is at least
+honestly empty. The writer, and the attribution update that fills
+`clicked_title_id` and `played` after the fact, belong to the M9 task that owns
+the search routes.
+
+The same "whole" cuts the other way: `requested_mode` is wire-only and is
+deliberately **not** a tenth column. `played` is `NOT NULL` rather than
+nullable for exactly the reason in this paragraph. `user_id` is `ON DELETE
+RESTRICT` — a household's search history is user state — and
+`clicked_title_id` is `ON DELETE SET NULL`, because a deleted title must not
+delete the record that somebody searched. The table ships **no index beyond
+its primary key**: its readers are the dashboards below, and an index whose
+reader is a later milestone is the failure [09](09-roadmap.md)'s boundary call
+9 names.
 
 🔴 **This paragraph read *"`litellm` reports per-call cost natively, so cost
 analysis is exact SQL rather than estimated counters"* and its premise is

@@ -16,7 +16,17 @@ from sqlalchemy import Enum as SAEnum
 from sqlalchemy import Integer, SmallInteger, Table
 
 from usher.db.base import Base
-from usher.db.models import LLMCallRow, MediaItemRow, SourceRow, TitleRow, UserRow, WatchStateRow
+from usher.db.models import (
+    ImageRow,
+    LLMCallRow,
+    MediaItemRow,
+    SearchQueryRow,
+    SourceRow,
+    TitleRow,
+    TitleSearchNameRow,
+    UserRow,
+    WatchStateRow,
+)
 from usher.db.models.search import (
     EMBEDDING_DIMENSIONS,
     TitleEmbeddingRow,
@@ -28,12 +38,15 @@ from usher.domain.curation import LLMPurpose
 from usher.domain.enums import (
     EnrichmentState,
     HdrFormat,
+    ImageKind,
     ProductionStatus,
+    SearchNameKind,
     SourceKind,
     TitleKind,
     WatchStateOrigin,
 )
 from usher.domain.title import Title
+from usher.ports.search import SearchMode
 
 
 def test_all_core_tables_registered() -> None:
@@ -170,6 +183,15 @@ def test_enum_columns_are_real_enums_not_bare_strings() -> None:
         # domain model and `usher.domain` may not import `usher.ports` --
         # `ports.llm` re-exports it, so this is the same enum either way.
         (LLMCallRow.__table__.c.purpose, LLMPurpose),
+        # M9's three, all from `m09a`. `search_queries.mode` reuses
+        # `usher.ports.search.SearchMode` rather than minting a domain copy:
+        # `usher.db` sits outside the four-layer contract so the import is
+        # legal, and `usher/domain/search.py` deliberately declares no
+        # `SearchMode`. A second copy of a three-member vocabulary is a
+        # vocabulary that can drift.
+        (ImageRow.__table__.c.kind, ImageKind),
+        (SearchQueryRow.__table__.c.mode, SearchMode),
+        (TitleSearchNameRow.__table__.c.kind, SearchNameKind),
     ]
     for column, enum_cls in cases:
         column_type = column.type

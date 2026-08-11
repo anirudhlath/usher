@@ -642,3 +642,69 @@ after: **2,903 unit / 4 skipped**, **899 integration / 8 skipped**, mypy over
 It is a fact about the *code* rather than about what the tools look at: an OTel
 span's attributes are a map, both calls are side-effect-free reads of an
 argument and an attribute, and neither can observe the other.
+
+**M9 Task M1's sweep: 40 plants over `m09a` and its four models — 37 killed, 3
+equivalent-mutant controls surviving as designed, 0 unintended survivors, 0
+BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-10 in place, with
+the plant list written down before the first run, the three `.pyc` defences in
+force, and every restore verified by `md5sum` against the pre-plant digest.
+Selection, stated because a survivor list is only true of the selection it was
+measured against: `test_api_surface_schema.py`, `test_migrations.py`,
+`test_bulk_repository.py`, `test_db_models.py`, `test_db_models_api_surface.py`
+and `test_db_migration_status.py` (~15 s a run), plus
+`test_title_match_repository.py` for the one plant outside the migration.
+
+The plant list, by group: `downgrade()` losing each `drop_table` in turn and
+the whole body replaced by `pass` (6); each of the eleven CHECKs deleted, plus
+the owner CHECK loosened `= 1` → `>= 1` and the btree bound loosened by one
+character (13); `text_pattern_ops` dropped from each prefix index on both the
+migration and the model side, plus the opclass re-keyed on the expression text
+(4); each of the six foreign keys' `ondelete` flipped (6); each cascade-lookup
+index never created (2); the `_SUSPENDABLE_INDEXES` string losing one token
+(1); four nullability/column-set mutations (4); the match path lowercasing the
+probe instead of the column (1); three controls.
+
+**Two results worth carrying.**
+
+- **Every one of the six `downgrade()` plants is killed by exactly one case,
+  and it is the same case for all six** —
+  `test_a_full_down_and_up_cycle_restores_every_index`. Nothing else in the
+  repository can see a `downgrade()` at all: the integration schema is built by
+  one session-scoped `upgrade head` and never goes down. That is the argument
+  for the "one assertion per table" rule stated as a measurement rather than as
+  a rule — with four tables and one head, four of those six plants are
+  distinguishable only by which assertion in that block fires.
+- **A `pg_constraint` read filtered by a name pattern is a taxonomy that ages,
+  and this landing aged one.** M4's
+  `test_the_new_episode_foreign_keys_carry_the_delete_rule_they_were_given`
+  reads `conname LIKE '%episode_id_episodes'`; `images` is the third table to
+  reference `episodes`, so an M4 case failed on a correct M9 entry. Not a
+  mutation — collateral found by running the suite — and the repair is to scope
+  by `conrelid`. Same shape, in the same landing, as
+  `test_name_year_matching_uses_the_expression_index` asserting an index *name*
+  where a second expression index on `lower(name)` can now serve the same
+  equality: both cases named an artefact where they meant a property. The plan
+  assertion is now on the `Index Cond`, which is strictly stronger, and the
+  swap was measured to cost nothing (200,000 rows: 4 buffers and 0.031 ms
+  either way).
+
+The three controls, each against every gate step — all three pass all five:
+
+| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `images`' `width` and `height` CHECKs swapped | PASS | PASS | PASS | PASS | PASS |
+| `images`' two independent cascade-lookup `create_index` calls swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `ImageRow`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first two are facts about the *code* rather than about what the tools look
+at: a `CREATE TABLE`'s constraint list has no ordering semantics (Postgres
+stores them by name and `test_every_check_constraint_in_the_models_exists_in_the_database`
+compares a dict), and two `CREATE INDEX` statements on different columns of the
+same table cannot observe each other. The docstring reword was checked first
+against the docstring-scan grep this file records — the ten files it finds scan
+`ports/`, `services/` and `api/`, and **none of them scans `db/models/`**.
+
+And the repaired assertions were planted against, not just reasoned about: the
+match-path case fails on its own `E` line under the defect it names (the plan
+becomes `Hash Join` over a `Seq Scan`, `Hash Cond: ((t.name = lower(p.name)) …)`),
+with the restore md5-verified.

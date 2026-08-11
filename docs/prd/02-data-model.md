@@ -303,6 +303,23 @@ class Image(BaseModel):
     is_primary: bool
 ```
 
+🔶 **The table exists as of `m09a`; the model above does not.** M9 ships
+`images` with exactly these eleven fields, a SQLAlchemy row (`ImageRow`), and
+**no `Image` domain model, no port and no repository** — those belong with
+`GET /images/{id}`, and writing "Image landed" here before they exist would be
+the stale "verified" fact worse than none.
+
+Three things the table settles that this sketch leaves open. The three owner
+columns are constrained by `ck_images_exactly_one_owner`
+(`num_nonnulls(title_id, episode_id, person_id) = 1`) rather than by a
+polymorphic `(owner_kind, owner_id)` pair, which could carry no foreign key at
+all. All three foreign keys are **`ON DELETE CASCADE`**, and that is forced
+rather than chosen: `SET NULL` would leave zero owners, which the CHECK
+refuses, so the parent delete would fail naming a table the operator never
+touched. And `kind`'s vocabulary is closed as the `ImageKind` enum above —
+`poster | backdrop | logo | still | profile` — stored as `VARCHAR(16)`, since
+this schema creates no native Postgres enum type anywhere.
+
 ### Source / MediaItem
 
 The availability layer — the only place a backend server is represented.
@@ -709,10 +726,16 @@ exists — a curated row names three to eight titles, in order — but it is a
 and will neither check nor cascade it. `llm_calls` appears on no line at all:
 it references nothing, by the same argument.
 
-⏳ **One of those lines still describes a table that does not exist.** `Image`
-has no table, no model and no port anywhere in `src/`, and it lands with M9,
-re-derived from `raw_payloads` with no second network call
-([09](09-roadmap.md)'s M4 boundary call 2).
+🔶 **`Title 1─* Image` is a third of the way real.** `m09a` gives `Image` a
+table and a SQLAlchemy row; it still has **no domain model and no port
+anywhere in `src/`**, and nothing writes it. The rows are re-derived from
+`raw_payloads` with no second network call ([09](09-roadmap.md)'s M4 boundary
+call 2) by the M9 task that serves them.
+
+The diagram line understates the table by one edge, deliberately: `images` can
+hang off an *episode* or a *person* as well as a title (`still` and `profile`
+are two of the five `ImageKind` members), which is three foreign keys and one
+CHECK rather than the single parent the `1─*` notation can draw.
 
 `Collection`, `Person` and `Credit` **landed in M7** (`fd7c3a5b9e12`), which
 also gave `titles.collection_id` — a bare nullable UUID with no foreign key

@@ -96,6 +96,16 @@ async def test_migration_creates_the_updated_at_triggers(postgres_url: str) -> N
         # `db/models/curation.py` says so on both tables, because the
         # tempting edit is to add one "for consistency" and it would fail
         # here rather than there.
+        #
+        # M9's `m09a` adds four tables and this set still does not move, with
+        # a different reason each, all of them precedents already in this
+        # comment: `images` is replaced wholesale per owner (`credits`', which
+        # has no `updated_at` at all for exactly that reason);
+        # `search_queries` records something that already happened
+        # (`llm_calls`'); `title_search_names` is replaced per
+        # `(title_id, kind)` (`credits`' again); and
+        # `row_provider_settings`' one writer -- the admin route -- sets
+        # `updated_at` explicitly on every statement (`jobs`').
     }
 
 
@@ -197,13 +207,24 @@ async def test_the_new_episode_foreign_keys_carry_the_delete_rule_they_were_give
 
     `confdeltype::text` is not decoration -- the column's type is `"char"`,
     which asyncpg hands back as `bytes`, so the uncast comparison fails
-    against `b'n'`."""
+    against `b'n'`.
+
+    **Scoped by `conrelid`, and that is a correction M9 forced.** This read
+    was `conname LIKE '%episode_id_episodes'`, which was exhaustive when M4
+    wrote it and stopped being so the moment `m09a` gave `images` a third
+    foreign key to `episodes` -- the case then failed on an entry that is
+    correct, in a table it is not about. Widening the expected map instead
+    would make an M4 case about ADR-0010's two-way asymmetry silently own
+    every future episode FK's delete rule; `images`' three are asserted in
+    `test_api_surface_schema.py`, beside the CHECK that decides them."""
     engine = build_engine(postgres_url)
     async with engine.connect() as conn:
         result = await conn.execute(
             text(
                 "SELECT conname, confdeltype::text FROM pg_constraint "
-                "WHERE contype = 'f' AND conname LIKE '%episode_id_episodes'"
+                "WHERE contype = 'f' AND conname LIKE '%episode_id_episodes' "
+                "AND conrelid IN ('public.media_items'::regclass, "
+                "                 'public.watch_states'::regclass)"
             )
         )
         rules = {name: rule for name, rule in result.all()}
@@ -418,17 +439,23 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     landed on top -- the failure this case had on the first run after that,
     and a good illustration of why a step count is the wrong pin.
 
-    **Head is `m08b` and the `-1` half is re-pointed at its artefact.** The
-    previous spelling asserted `pk_curated_rows`/`pk_llm_calls` were *absent*,
-    which held because `-1`-from-`m08a` ran `m08a.downgrade()` and dropped
-    both tables. `-1`-from-`m08b` runs `m08b.downgrade()` instead and stops at
-    the `m08a` state, where both tables are present -- so the inherited
-    assertion **fails, loudly and immediately**, which is the fifth landing in
-    a row to do so (`ffa`, `ffb`, `ffc`, `m08a`, `m08b`). The one before it
-    read `ix_titles_popularity` and broke for the mirror-image reason.
+    **Head is `m09a` and the `-1` half is re-pointed at its artefacts.** The
+    previous spelling asserted `pk_genome_tags` was *absent*, which held
+    because `-1`-from-`m08b` ran `m08b.downgrade()` and dropped `genome_tags`.
+    `-1`-from-`m09a` runs `m09a.downgrade()` instead and stops at the `m08b`
+    state, where that table is present -- so the inherited assertion **failed,
+    loudly and immediately**, and it was run and watched to fail before it was
+    touched (`AssertionError: assert 'pk_genome_tags' not in {...}`). That is
+    the sixth landing in a row to do so (`ffa`, `ffb`, `ffc`, `m08a`, `m08b`,
+    `m09a`).
 
-    `m08b` creates exactly one table, so it needs exactly one assertion --
-    the "one per table" rule `m08a` needed for two.
+    `m09a` creates **four** tables, so it needs four assertions -- the "one
+    per table" rule `m08a` needed for two and `m08b` for one. It also gets a
+    fifth, on `ix_titles_name_lower_prefix`, and that one is **not** the
+    redundant kind the note below rules out: it is the only artefact this head
+    creates that no `drop_table` would take with it, because it sits on
+    `titles`, which survives the step back. Deleting its `op.drop_index` from
+    `m09a.downgrade()` is caught here and nowhere else.
 
     That is the general case rather than this migration's luck, and it is
     worth stating because the opposite was written here first and was wrong:
@@ -439,10 +466,10 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
     false. The direction of the assertion has nothing to do with it: `ffc`'s
     was positive (`in`) and broke; `ffb`'s was negative (`not in`) and broke
     too, because `-1`-from-`ffc` lands at the `ffb` state where
-    `blend_fingerprint` is present. Five landings, five loud breaks (`ffa`,
-    `ffb`, `ffc`, `m08a`, `m08b`) -- the same five the paragraph above counts,
-    which is the point of stating the number in both places. **So the alarm to
-    watch for is a `-1` half that stays
+    `blend_fingerprint` is present. Six landings, six loud breaks (`ffa`,
+    `ffb`, `ffc`, `m08a`, `m08b`, `m09a`) -- the same six the paragraph above
+    counts, which is the point of stating the number in both places. **So the
+    alarm to watch for is a `-1` half that stays
     green after a new migration**, which means the assertion it inherited
     never had teeth. `.claude/rules/db-and-sql.md` carries the measurement.
 
@@ -477,31 +504,42 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # job while it is false at the head's own state, which is precisely
         # what makes it fail the moment `-1` starts landing there. Group F
         # re-pointed it for `ffa`, `af64ba2` for `ffb`, M7 Task 36 for `ffc`,
-        # M8 Task 8 for `m08a`, M8 Task 19 for `m08b`.
+        # M8 Task 8 for `m08a`, M8 Task 19 for `m08b`, M9 Task M1 for `m09a`.
         # It is cheaper than a step count, which keeps passing for the wrong
         # reason instead of failing for the right one.
         #
-        # **The direction of the assertion does not decide this.** `m08b`
-        # creates a table so its artefact is asserted *absent*; `ffc` dropped
+        # **The direction of the assertion does not decide this.** `m09a`
+        # creates tables so its artefacts are asserted *absent*; `ffc` dropped
         # an index so its artefact was asserted *present*. Both spellings
         # break for the same reason when a head lands on them -- verified
         # against the real chain, see this test's docstring. You do not get to
         # pick the direction; the head's own `downgrade()` does.
         #
-        # `m08b.downgrade()` drops its one table, so after one step back its
-        # primary key does not exist. **One assertion per table** is the rule
-        # `m08a` needed twice and this head needs once: a downgrade that drops
-        # one of two tables passes a check naming only the first.
-        # `genome_tags` ships no index beyond its primary key -- deliberately,
-        # `genome_scores`' precedent -- so `pk_genome_tags` is the whole of
-        # what stands for it here.
+        # `m09a.downgrade()` drops its four tables, so after one step back
+        # none of their primary keys exists. **One assertion per table** is
+        # the rule `m08a` needed twice, `m08b` once, and this head needs four
+        # times: a downgrade that drops three of four passes a check naming
+        # only the first.
+        #
+        # The fifth line is not a fifth table. `ix_titles_name_lower_prefix`
+        # sits on `titles`, which survives the step back, so it is the one
+        # artefact this head creates that no `drop_table` collects, and
+        # deleting its `op.drop_index` from `m09a.downgrade()` is observable
+        # here and nowhere else. `ix_images_title_id` and its two siblings are
+        # the redundant kind ruled out below, and so is
+        # `ix_title_search_names_name_lower_prefix`: none of them can fail
+        # independently of its own table's primary key.
         #
         # The mutation this block catches is a `downgrade()` body replaced by
         # `pass`, which no other case in this suite can see -- the shared
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
         stepped_back = await _index_set(url)
-        assert "pk_genome_tags" not in stepped_back
+        assert "pk_images" not in stepped_back
+        assert "pk_search_queries" not in stepped_back
+        assert "pk_row_provider_settings" not in stepped_back
+        assert "pk_title_search_names" not in stepped_back
+        assert "ix_titles_name_lower_prefix" not in stepped_back
 
         # Then down to the revision *below* `ff`, which is where M7 group E's
         # two index changes become observable -- `ffa` sits between head and
@@ -543,6 +581,14 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # claiming this block covers it.
         assert "pk_curated_rows" not in stepped
         assert "pk_llm_calls" not in stepped
+        # `m08b`'s one, displaced from the `-1` half the moment `m09a` became
+        # head -- and it is displaced *because it had teeth*, not because it
+        # stopped having them: it failed loudly on the first run with `m09a`
+        # present, which is the sixth landing in a row to do so.
+        # `genome_tags` ships no index beyond its primary key -- deliberately,
+        # `genome_scores`' precedent -- so `pk_genome_tags` is the whole of
+        # what stands for it.
+        assert "pk_genome_tags" not in stepped
         assert "blend_fingerprint" not in await _column_set(url, "title_neighbors")
         assert "ix_watch_states_user_recent" not in stepped
         assert "ix_media_items_recently_added" not in stepped

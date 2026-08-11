@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    column,
     func,
     text,
 )
@@ -358,13 +359,19 @@ class TitleRow(Base):
             postgresql_using="gin",
             postgresql_with={"fastupdate": "off"},
         ),
-        # The type-ahead path's whole index. Directly on `titles`, because
-        # PRD 05's narrow `title_search_names(title_id, name, kind,
-        # popularity)` table is refused (boundary call 3): its justification
-        # is aliases and people names, neither of which has a data source in
-        # M6, so it would hold exactly one row per title duplicating four
-        # columns of this one -- a second copy to keep fresh, which is the
-        # problem this milestone exists to eliminate.
+        # The type-ahead path's tier-2 index. Directly on `titles`, because
+        # M6 refused PRD 05's narrow `title_search_names(title_id, name, kind,
+        # popularity)` table (boundary call 3): its justification is aliases
+        # and people names, neither of which had a data source in M6, so it
+        # would have held exactly one row per title duplicating four columns
+        # of this one.
+        #
+        # **M9 builds that table (`m09a`), and this index stays exactly as it
+        # is.** The narrow table holds *aliases and people* -- the two things
+        # that finally have sources -- and deliberately no `primary` rows, so
+        # a canonical name is still answered from `titles` and nothing here is
+        # duplicated. `popularity` is refused there too, with the measurement:
+        # it is NULL on all 1,271,138 rows.
         #
         # GIN, not the GiST PRD 05 specifies -- but the two answer different
         # questions and only one of them is settled. For "which rows are
@@ -386,6 +393,50 @@ class TitleRow(Base):
             "name",
             postgresql_using="gin",
             postgresql_ops={"name": "gin_trgm_ops"},
+        ),
+        # **Tier 1 of the two-tier suggest ADR-0002's failed gate obliges, and
+        # `ix_titles_name_lower_year` two entries up is NOT this index.** That
+        # one is `Index(..., text("lower(name)"), "year")` with the *default*
+        # opclass, which under this database's collation cannot answer
+        # `LIKE 'pre%'` at all -- measured on `pgvector/pgvector:pg17` at the
+        # pre-`m09a` schema: with `enable_seqscan = off`, the plan for
+        # `WHERE lower(name) LIKE 'pre%'` is still `Seq Scan on titles`. Two
+        # indexes that look like one, and the case that pins this proves the
+        # difference with a planner probe rather than asserting it.
+        #
+        # Measured on a real 1,271,138-title catalog
+        # (`.claude/rules/search-and-embeddings.md`): p50 **0.6 ms**, p95
+        # **1.0 ms**, max **10 ms**, **44 MB**, building in **0.559 s** --
+        # against the shipped GIN trigram path's 33.3 ms p50 and 734 ms max,
+        # which is 6x over the 50 ms as-you-type budget at the tail. The
+        # trigram index above stays: tier 1 answers a prefix on every
+        # keystroke and tier 2 is the debounced typo-tolerant path behind it.
+        #
+        # **The spelling is `func.lower(column("name")).label(...)` plus
+        # `postgresql_ops`, and the two obvious alternatives are each wrong in
+        # a different direction -- measured by compiling all three.**
+        #
+        #   Index(..., text("lower(name) text_pattern_ops"))
+        #       -> correct DDL, and alembic warns "Expression compare cannot
+        #          proceed" and *skips the index*, so
+        #          `test_migration_matches_the_orm_metadata` goes blind to it.
+        #   Index(..., text("lower(name)"),
+        #         postgresql_ops={"lower(name)": "text_pattern_ops"})
+        #       -> `CREATE INDEX ... (lower(name))`. The opclass is silently
+        #          dropped: `postgresql_ops` keys match a column name or an
+        #          expression's *label*, never its text, and an unmatched key
+        #          is not an error. That builds a default-opclass index which
+        #          is not an error either and simply cannot serve `LIKE 'pre%'`
+        #          -- the careless spelling of this defect, caught by nothing.
+        #   the spelling below
+        #       -> byte-identical DDL to the first, and alembic compares it.
+        #
+        # This index is in `_SUSPENDABLE_INDEXES`, whose entries are literal
+        # `CREATE INDEX` strings, so the drift hazard is real twice over.
+        Index(
+            "ix_titles_name_lower_prefix",
+            func.lower(column("name")).label("lower_name"),
+            postgresql_ops={"lower_name": "text_pattern_ops"},
         ),
         # FranchiseProvider's whole read (CollectionRepository.list_owned),
         # and the referencing-side lookup collections' SET NULL performs on
