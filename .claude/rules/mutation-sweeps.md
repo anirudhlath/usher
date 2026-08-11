@@ -1563,3 +1563,85 @@ Gate green before and after on the fully restored tree (`md5sum`-verified
 byte-identical to the pre-sweep digest): whole suite **4141 unit+integration
 passed / 12 skipped**, `ruff check`, `ruff format --check`, `mypy` over 491
 files, `lint-imports` 9 kept / 0 broken.
+**M9 Task B6's sweep: 16 plants over `TitleRepository.browse`/`browse_facets` —
+14 targets all killed, 2 equivalent-mutant controls surviving all five gate
+steps, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in
+place with the plant list and its **expected verdict** written down first,
+`PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under `src/` **and**
+`tests/` before every run, `compile()` as the dry run, the plant asserted
+*present* by reading the file back before the run that judges it, and every
+restore verified by `md5sum` against a pre-plant digest of all four touched
+files.
+
+**Selection:** `tests/unit/test_title_repository_contract.py` and
+`tests/integration/test_title_repository.py` — 168 cases together, 0.3 s and
+~11 s a run. Scoped rather than whole-suite because nothing outside these files
+imports `browse` yet (grepped, not assumed; B7 is the route that will change
+that), and because the flaky `test_sse_end_to_end` case recorded above is in
+`tests/integration` and would give every plant a false-kill rate.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| the offset arm of the concurrency case resumes from a position instead | KILLED | 1 — the OFFSET case itself |
+| pg keyset loses the NULLs-sort-last disjunct | KILLED | 7 |
+| fake keyset loses the same | KILLED | 7 |
+| pg keyset drops its unkeyed-boundary branch (the row-comparison defect) | KILLED | 9 |
+| pg keyset tail relaxed `>` → `>=` | KILLED | 11 |
+| fake keyset tail relaxed | KILLED | 10 |
+| pg `ORDER BY` loses the `id` tail | KILLED | 3 |
+| pg `ORDER BY` takes Postgres's `DESC` NULLS FIRST default | KILLED | 12 |
+| pg genre facet folds its own predicate back in | KILLED | 2 |
+| pg year facet folds its own predicate back in | KILLED | 3 |
+| pg a requested facet with no rows is absent rather than zero | KILLED | 2 |
+| pg ownership loses `episode_id IS NULL` | KILLED | 1 |
+| pg ownership loses `available` | KILLED | 1 |
+| an unsupported sort falls back to `id` instead of raising | KILLED | 1 |
+
+**The one mis-spelled plant is the finding, and it is a fact about the port
+rather than about the suite.** *"The fake resumes by `OFFSET`"* was first
+spelled as: find `after.id`'s index in the freshly-ordered list, skip that
+many. It **survived all 74 unit cases**, correctly — that is not an offset
+implementation, it is the keyset spelled by index, and it answers identically
+because it resolves a *position* against the live population. **A port that
+takes `after: BrowseCursorPosition` cannot express the defect PRD 07 refuses**:
+an offset is a count of rows the client has already been served, and no
+argument in the signature carries one. So the fake arm has nothing to plant,
+and the comparison has to be — and is — a raw `LIMIT/OFFSET` statement in the
+integration file, run against the same table with the same `ORDER BY`. Its own
+teeth were then measured the other way round, by planting `OFFSET :offset` →
+`OFFSET 0` (the duplicate disappears; the case fails).
+**The general form: when a plant survives, check whether the mutant is the
+defect the plan named before writing the survivor up — a defect the type
+signature makes unreachable is a design result, not a coverage gap.**
+
+The two controls, measured against every gate step separately, because "the
+gate holds it" and "the suite holds it" are different claims:
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| `_browse_filters`' `genre` and `year` blocks swapped | PASS | PASS | PASS | PASS | PASS (168) |
+| one sentence of `_browse_after`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (168) |
+
+The first is a fact about the *code* rather than about what the tools look at:
+both blocks append to the same list from two independent parameters, neither
+reads the other, and the list is splatted into `.where(...)`, whose conjuncts
+have no ordering semantics — the planner reorders them regardless. The
+docstring reword was checked first against the docstring-scan grep this file
+records: the fourteen test files it finds scan `ports/`, `services/` and
+`api/`, and `test_ports_repository_package.py`'s scan is over
+`usher.ports.repository` and checks a docstring's **presence**, so **none of
+them reads `db/repositories/title.py`'s prose**.
+
+Gate green before and after on the fully restored tree: **3,184 unit / 4
+skipped**, **1,003 integration / 8 skipped**, ruff, `ruff format --check`, mypy
+over 489 files, `lint-imports` 9 kept / 0 broken, PRD link check `OK`.
+
+**And one harness note that cost a crashed run and a hand restore.** The
+"assert the plant landed" check was spelled `path.read_text().count(new) == 1`,
+which is wrong whenever the replacement is a *prefix* of text elsewhere in the
+file — deleting a branch left `    later` as the replacement, and
+`        later,` eight lines down contains it. The harness raised **after
+writing the plant and before restoring**, leaving the tree mutated; the `cp`
+backup is what recovered it, exactly as the SIGTERM entry above predicts.
+Spell the landing check as `old not in landed and new in landed`, which is what
+the check actually means and is immune to the substring.

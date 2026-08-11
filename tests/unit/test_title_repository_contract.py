@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 import pytest
 
 from tests.contract.title_repository_contract import (
+    TitleRepositoryBrowseContract,
     TitleRepositoryCandidateContract,
     TitleRepositoryContract,
     TitleRepositoryOwnedContract,
@@ -108,3 +109,37 @@ class TestFakeTitleRepositoryCandidates(TitleRepositoryCandidateContract):
     @pytest.fixture
     def other_user_id(self) -> uuid.UUID:
         return new_id()
+
+
+class TestFakeTitleRepositoryBrowse(TitleRepositoryBrowseContract):
+    """`browse`/`browse_facets` against the fake. The Postgres half is
+    `tests/integration/test_title_repository.py`, and it is the one that can
+    fail on the keyset's `IS NOT DISTINCT FROM` arm, on `NULLS LAST`, on `@>`
+    and on `unnest`."""
+
+    @pytest.fixture
+    def repo(self) -> FakeTitleRepository:
+        return FakeTitleRepository()
+
+    @pytest.fixture
+    def own(self, repo: FakeTitleRepository) -> Callable[..., Awaitable[None]]:
+        async def _own(
+            title_id: uuid.UUID, *, episode: bool = False, available: bool = True
+        ) -> None:
+            # The candidate arm's fixture, verbatim in shape and for the same
+            # reasons -- see its comment. `available=False` leaves no trace
+            # because `available_copies` models the *available* half of
+            # `media_items` by construction, so the retracted distractor in
+            # `test_owned_means_an_available_title_level_copy` is load-bearing
+            # in the integration run and merely available in this one.
+            #
+            # `episode=True` is **not** vacuous here, unlike in the candidate
+            # arm: browse's `owned` carries `episode_id IS NULL`, and the list
+            # stores `None` for a title-level copy and an episode id for an
+            # episode one, so the fake can and does tell the two apart.
+            if not available:
+                return
+            copies = repo.available_copies.setdefault(title_id, [])
+            copies.append(new_id() if episode else None)
+
+        return _own

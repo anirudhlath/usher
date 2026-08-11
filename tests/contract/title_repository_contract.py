@@ -33,6 +33,7 @@ concrete subclasses.
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
+from typing import cast
 
 import pytest
 
@@ -40,7 +41,8 @@ from usher.domain.enums import EnrichmentState, ProductionStatus, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
-from usher.ports.repository import TitleRepository
+from usher.ports.repository import BrowseCursorPosition, BrowseSort, TitleRepository
+from usher.ports.search import FilterNotSupported
 
 
 class TitleRepositoryContract:
@@ -1120,3 +1122,561 @@ class TitleRepositoryCandidateContract:
         rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
 
         assert [row.id for row in rows] == [skeleton.id, enriched.id]
+
+
+#: A page walk's runaway bound. A keyset relaxed from `>` to `>=` re-serves its
+#: boundary row at every break and never terminates, so a walk with no bound
+#: hangs where it should fail -- the shape `.claude/rules/testing-discipline.md`
+#: records for the event bus, arriving in a loop instead of an await.
+_MAX_PAGES = 20
+
+#: The shared browse population, in the order the fixture seeds it -- which is
+#: id order, and is not the answer's order under any of the four sorts. Each
+#: sort's key carries a **tie** and, where the column is nullable, a group of
+#: **NULLs**, so one fixture exercises the `id` tail and the `IS NOT NULL` leg
+#: for every member of the enum at once.
+_BROWSE_POPULATION: tuple[tuple[str, int | None, float | None, int | None], ...] = (
+    # name, year, popularity, vote_count
+    ("Delta", 1999, 3.0, 40),
+    ("Alpha", None, None, None),
+    ("Foxtrot", 2010, None, 5),
+    ("Bravo", None, 9.0, None),
+    ("Echo", 1999, 1.0, 900),
+    ("Charlie", 2010, None, None),
+)
+
+#: What each sort makes of `_BROWSE_POPULATION`, by name. Hard-coded rather
+#: than recomputed from the fixture: an expectation derived by re-implementing
+#: the sort is an assertion that the test agrees with itself.
+#:
+#: Every row of this table is a mutation the suite would otherwise miss --
+#: reverse the direction, default to NULLS FIRST, drop the `id` tail, or read
+#: the neighbouring column, and exactly one of these four lists changes.
+_BROWSE_EXPECTED: dict[str, tuple[str, ...]] = {
+    "name": ("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"),
+    "year": ("Foxtrot", "Charlie", "Delta", "Echo", "Alpha", "Bravo"),
+    "popularity": ("Bravo", "Delta", "Echo", "Alpha", "Foxtrot", "Charlie"),
+    "vote_count": ("Echo", "Delta", "Foxtrot", "Alpha", "Bravo", "Charlie"),
+}
+
+
+class TitleRepositoryBrowseContract:
+    """`browse` and `browse_facets` -- the read `GET /browse` is built on.
+
+    A separate mixin for `TitleRepositoryOwnedContract`'s reason: the `owned`
+    filter depends on `media_items`, which `titles` does not contain, so a
+    subclass supplies `own`.
+
+    **What the wrong implementations look like, because every one of them is
+    populated and correctly shaped.** A browse screen renders whatever it is
+    handed, in order, with a working "next page" button:
+
+    - **`OFFSET` instead of a keyset.** Correct on a static table and wrong
+      the moment anything is written: a row inserted ahead of the client's
+      position pushes a row it has already seen onto the next page.
+    - **The `IS NOT NULL` leg dropped.** Three of the four sort keys are
+      nullable, and a comparison against a NULL is NULL rather than false --
+      so the walk drops every unkeyed row after an unkeyed boundary and each
+      page it serves is still full.
+    - **`>=` instead of `>`.** One duplicate at every page break, invisible to
+      any test whose pages do not abut.
+    - **The `id` tail dropped.** Ties resolve to whatever the storage
+      returned, so a row can appear on two pages or on none.
+    - **A facet folded back onto its own predicate.** The genre facet then
+      counts the page the client is already looking at, and it looks exactly
+      right on every request that does not use that facet.
+    - **A facet the request named but nothing matched, absent rather than
+      zero.** Indistinguishable from a filter the client never sent.
+
+    Every case therefore asserts on **position** or on a whole map, never on
+    membership.
+    """
+
+    @pytest.fixture
+    def repo(self) -> TitleRepository:  # pragma: no cover - supplied by subclasses
+        raise NotImplementedError
+
+    @pytest.fixture
+    def own(self) -> Own:  # pragma: no cover - supplied by subclasses
+        raise NotImplementedError
+
+    @staticmethod
+    def _browsable(
+        name: str,
+        *,
+        genres: tuple[str, ...] = (),
+        keywords: tuple[str, ...] = (),
+        year: int | None = None,
+        popularity: float | None = None,
+        vote_count: int | None = None,
+        title_id: uuid.UUID | None = None,
+    ) -> Title:
+        """One catalog row, with an id nameable for the tiebreak cases.
+
+        `title_id` is a parameter for `_candidate`'s reason: `new_id()` is
+        monotonic, so a fixture that mints in insertion order makes
+        `ORDER BY id` and "no ordering at all" the same answer.
+        """
+        return Title(
+            id=title_id if title_id is not None else new_id(),
+            kind=TitleKind.MOVIE,
+            name=name,
+            sort_name=name.lower(),
+            genres=genres,
+            keywords=keywords,
+            year=year,
+            popularity=popularity,
+            vote_count=vote_count,
+            enrichment_state=EnrichmentState.ENRICHED,
+        )
+
+    async def _seed_population(self, repo: TitleRepository) -> dict[str, Title]:
+        """`_BROWSE_POPULATION`, seeded in its declared order."""
+        seeded: dict[str, Title] = {}
+        for name, year, popularity, vote_count in _BROWSE_POPULATION:
+            one = self._browsable(name, year=year, popularity=popularity, vote_count=vote_count)
+            await repo.add(one)
+            seeded[name] = one
+        return seeded
+
+    @staticmethod
+    async def _walk(
+        repo: TitleRepository, *, sort: BrowseSort, limit: int, **filters: object
+    ) -> list[Title]:
+        """Every row `sort` reaches, one keyset page at a time.
+
+        The walk stops on an **empty** page rather than on a short one, which
+        is the repository-level shape of `over_fetch`'s argument one layer up:
+        a population whose size is an exact multiple of `limit` has a full
+        last page, and reading "full" as "there is more" is precisely the
+        off-by-one ADR-0034 exists to remove. Here that costs one extra
+        request; at the route it costs a client a round trip to learn it has
+        finished, which is why the route over-fetches instead.
+        """
+        collected: list[Title] = []
+        after: BrowseCursorPosition | None = None
+        for _ in range(_MAX_PAGES):
+            page = await repo.browse(sort=sort, after=after, limit=limit, **filters)  # type: ignore[arg-type]
+            if not page:
+                return collected
+            collected += page
+            after = BrowseSort.position_of(page[-1], sort=sort)
+        raise AssertionError(
+            f"the walk did not terminate in {_MAX_PAGES} pages, which is what a "
+            "keyset relaxed from `>` to `>=` does: it re-serves its own boundary "
+            f"row forever. Collected {[one.name for one in collected]}"
+        )
+
+    async def test_a_row_inserted_before_the_cursor_between_two_pages_neither_duplicates_nor_drops(
+        self, repo: TitleRepository
+    ) -> None:
+        """**PRD 07's stated reason for the whole design, as a test.**
+        *"Offset paging is not offered -- it degrades badly over a 1.3M-row
+        catalog and produces duplicates under concurrent writes."* The first
+        half is measured; the second half is this case, and until it existed
+        the argument ADR-0034 rests on shipped unverified (that ADR's own
+        *Uncertainty* section says so and files it against group B's first
+        paged route).
+
+        Page 1 is served, a row is inserted that sorts **inside** it, page 2 is
+        served from the cursor. Under a keyset the client sees the pre-insert
+        population exactly once and simply never sees the new row -- it landed
+        behind the cursor. Under `OFFSET 3` page 2 begins one row too late:
+        the last row of page 1 comes back a second time and the last row of the
+        population is never served at all.
+
+        The premise is asserted rather than assumed, because a row inserted
+        *after* the cursor makes this case vacuous -- it would be a page-2 row
+        under both spellings, and both would pass.
+        """
+        seeded = [self._browsable(name) for name in ("Alpha", "Bravo", "Charlie", "Delta", "Echo")]
+        for one in seeded:
+            await repo.add(one)
+
+        first = await repo.browse(sort=BrowseSort.NAME, limit=3)
+        assert [one.name for one in first] == ["Alpha", "Bravo", "Charlie"], (
+            "the premise: page 1 is the head of the order"
+        )
+
+        inserted = self._browsable("Bravissimo")
+        await repo.add(inserted)
+        boundary = BrowseSort.position_of(first[-1], sort=BrowseSort.NAME)
+        assert isinstance(boundary.key, str) and inserted.sort_name < boundary.key, (
+            "the premise: the new row sorts *before* the cursor, i.e. into the "
+            "page the client has already been served. A row after the cursor is "
+            "an ordinary page-2 row and both spellings answer it identically"
+        )
+
+        second = await repo.browse(sort=BrowseSort.NAME, after=boundary, limit=3)
+
+        served = [one.id for one in first] + [one.id for one in second]
+        assert len(served) == len(set(served)), (
+            f"a row was served twice: {[one.name for one in first + second]}"
+        )
+        assert served == [one.id for one in seeded], (
+            "the two pages together are the pre-insert population, in order, "
+            f"once each: {[one.name for one in first + second]}"
+        )
+
+    @pytest.mark.parametrize("sort", list(BrowseSort))
+    @pytest.mark.parametrize("limit", [2, 4])
+    async def test_a_walk_returns_the_whole_population_exactly_once(
+        self, repo: TitleRepository, sort: BrowseSort, limit: int
+    ) -> None:
+        """The paged walk and the unpaged read are the same list.
+
+        **`limit=2` over six rows is the exact-exhaustion arm and it is not
+        decoration.** ADR-0034 measured that the off-by-one this design exists
+        to remove *"is invisible outside `count % limit == 0`"*: at `limit=4`
+        the population partitions 4 + 2 and a wrong terminating rule still
+        looks right. Both arms run over the same fixture so the difference is
+        the arithmetic and nothing else.
+
+        The premise guards against the trap this repository has paid for five
+        times over: a UUIDv7 primary key makes `ORDER BY id` and `ORDER BY <the
+        real key>` agree by accident, and then a walk that ignored the sort
+        entirely would satisfy this.
+        """
+        await self._seed_population(repo)
+
+        whole = await repo.browse(sort=sort, limit=_ROOMY)
+        assert len(whole) == len(_BROWSE_POPULATION), "the premise: the fixture is all there"
+        assert [one.id for one in whole] != sorted(one.id for one in whole), (
+            "the premise: this sort's answer is not id order, or a walk that "
+            "ignored the sort key would satisfy every assertion below"
+        )
+
+        walked = await self._walk(repo, sort=sort, limit=limit)
+
+        assert [one.id for one in walked] == [one.id for one in whole], (
+            f"the walk and the single page disagree: {[one.name for one in walked]} "
+            f"against {[one.name for one in whole]}"
+        )
+
+    @pytest.mark.parametrize("sort", list(BrowseSort))
+    async def test_the_order_is_the_sort_key_with_nulls_last_and_the_id_tail(
+        self, repo: TitleRepository, sort: BrowseSort
+    ) -> None:
+        """The four orders, spelled out.
+
+        One fixture, four expectations, and every one of them is a different
+        mutation: reverse a direction, take Postgres's `DESC` default of NULLS
+        FIRST, drop the `id` tail, or read the column next door, and exactly
+        one of these lists moves. `_BROWSE_EXPECTED` is hard-coded rather than
+        recomputed, because an expectation derived by re-implementing the sort
+        is an assertion that the test agrees with itself.
+
+        The `name` arm is the one whose key cannot be NULL, which is why it is
+        here rather than only in the nullable cases below: a `nulls_last` that
+        was really a `coalesce` to a sentinel would pass three of these four.
+        """
+        await self._seed_population(repo)
+
+        rows = await repo.browse(sort=sort, limit=_ROOMY)
+
+        assert [one.name for one in rows] == list(_BROWSE_EXPECTED[sort.value])
+
+    @pytest.mark.parametrize(
+        "sort", [BrowseSort.YEAR, BrowseSort.POPULARITY, BrowseSort.VOTE_COUNT]
+    )
+    async def test_a_page_boundary_inside_the_unkeyed_group_does_not_drop_the_rest_of_it(
+        self, repo: TitleRepository, sort: BrowseSort
+    ) -> None:
+        """**The NULL trap, and it is the quietest defect in this port.**
+
+        `titles.year`, `titles.popularity` and `titles.vote_count` are all
+        nullable, and `popularity` was measured NULL on all 1,271,138 rows of a
+        bootstrap-only catalog -- so the unkeyed group is not an edge case,
+        it is most of the catalog on a fresh install. A keyset that compares a
+        NULL evaluates to NULL rather than to false, so once the cursor lands
+        inside that group **every remaining unkeyed row is dropped** and each
+        page the client was served was full.
+
+        Measured on `pgvector/pgvector:pg17` over five rows of which three are
+        unkeyed: resuming from the first unkeyed row, the natural
+        `ROW(...) > ROW(...)` spelling ADR-0034 first carried returns the two
+        *keyed* rows and neither remaining unkeyed one. That table is now in
+        the ADR.
+
+        The premise is the case: it asserts the boundary really is inside the
+        unkeyed group, because a fixture whose last page break happens to land
+        on a keyed row tests nothing at all.
+        """
+        keys: dict[str, tuple[int | None, float | None, int | None]] = {
+            "year": (2001, None, None),
+            "popularity": (None, 9.0, None),
+            "vote_count": (None, None, 900),
+        }
+        year, popularity, vote_count = keys[sort.value]
+        keyed = [
+            self._browsable(
+                f"Keyed {index}", year=year, popularity=popularity, vote_count=vote_count
+            )
+            for index in range(2)
+        ]
+        unkeyed = [self._browsable(f"Unkeyed {index}") for index in range(3)]
+        for one in [*keyed, *unkeyed]:
+            await repo.add(one)
+
+        first = await repo.browse(sort=sort, limit=2)
+        boundary = BrowseSort.position_of(first[-1], sort=sort)
+        assert boundary.key is not None, "the premise: page 1 is the keyed group"
+        second = await repo.browse(sort=sort, after=boundary, limit=2)
+        boundary = BrowseSort.position_of(second[-1], sort=sort)
+        assert boundary.key is None, (
+            "the premise: the cursor now names an *unkeyed* row, which is the "
+            "only position from which the NULL comparison can be observed"
+        )
+
+        third = await repo.browse(sort=sort, after=boundary, limit=2)
+
+        assert [one.id for one in first + second + third] == [
+            one.id for one in [*keyed, *unkeyed]
+        ], (
+            "the unkeyed group is served after the keyed one, whole: "
+            f"{[one.name for one in first + second + third]}"
+        )
+
+    async def test_every_sort_the_enum_declares_is_served(self, repo: TitleRepository) -> None:
+        """A member added to `BrowseSort` with no order behind it must fail
+        here rather than fall back to something plausible.
+
+        The floor on the member count is the premise: an enum that lost three
+        members would make an "every member works" loop trivially true, which
+        is the `len(x) > 0` failure arriving at a `for`.
+        """
+        assert len(list(BrowseSort)) >= 4, "the premise: there are sorts to be exhaustive about"
+        await self._seed_population(repo)
+
+        for sort in BrowseSort:
+            rows = await repo.browse(sort=sort, limit=_ROOMY)
+            assert len(rows) == len(_BROWSE_POPULATION), f"{sort} answered {len(rows)} rows"
+
+    async def test_a_sort_this_port_cannot_express_raises_rather_than_being_ignored(
+        self, repo: TitleRepository
+    ) -> None:
+        """`FilterNotSupported`'s own argument, applied to the sort: an
+        ignored order answers with *more* rows in some other sequence, and
+        more rows reads as working.
+
+        The `cast` is the point rather than a wart. `BrowseSort` is closed, so
+        the only way to reach this arm is the way a route reaches it -- a
+        string that is not a member, arriving through an annotation that says
+        it is one. The catalog is deliberately populated, so the refusal is
+        the port declining rather than the fixture being empty.
+        """
+        assert "runtime" not in {one.value for one in BrowseSort}, (
+            "the premise: this really is not a member, or the case is about something else entirely"
+        )
+        await self._seed_population(repo)
+        assert await repo.browse(sort=BrowseSort.NAME, limit=_ROOMY), (
+            "the premise: a supported sort answers, so an exception below is "
+            "about the sort and not about an empty catalog"
+        )
+
+        with pytest.raises(FilterNotSupported):
+            await repo.browse(sort=cast(BrowseSort, "runtime"), limit=_ROOMY)
+
+    async def test_the_genre_filter_matches_the_genres_array_and_not_the_keywords_beside_it(
+        self, repo: TitleRepository
+    ) -> None:
+        """Two arrays, one predicate. The wrong implementation searches
+        whichever it was written against and answers plausibly for the other.
+        """
+        by_genre = self._browsable("A Genred Film", genres=("Horror",))
+        by_keyword = self._browsable("A Keyworded Film", keywords=("Horror",))
+        for one in (by_genre, by_keyword):
+            await repo.add(one)
+
+        rows = await repo.browse(sort=BrowseSort.NAME, genre="Horror", limit=_ROOMY)
+
+        assert [one.id for one in rows] == [by_genre.id]
+
+    async def test_the_year_filter_is_exact_and_the_two_filters_intersect(
+        self, repo: TitleRepository
+    ) -> None:
+        """The natural wrong spelling of two filters is `OR`, which answers
+        with a strictly larger, less relevant page that still looks right."""
+        both = self._browsable("Both", genres=("Horror",), year=1999)
+        genre_only = self._browsable("Genre Only", genres=("Horror",), year=2001)
+        year_only = self._browsable("Year Only", genres=("Comedy",), year=1999)
+        for one in (both, genre_only, year_only):
+            await repo.add(one)
+
+        assert [
+            one.id for one in await repo.browse(sort=BrowseSort.NAME, year=1999, limit=_ROOMY)
+        ] == [
+            both.id,
+            year_only.id,
+        ]
+        rows = await repo.browse(sort=BrowseSort.NAME, genre="Horror", year=1999, limit=_ROOMY)
+        assert [one.id for one in rows] == [both.id]
+
+    async def test_owned_means_an_available_title_level_copy(
+        self, repo: TitleRepository, own: Own
+    ) -> None:
+        """**The two readings of "owned" in this codebase, settled by a
+        fixture rather than by whichever join got written.**
+
+        `MediaItemRepository.owned_title_ids` carries `episode_id IS NULL` and
+        counts a retracted copy; `list_owned_by_tag` requires `available` and
+        carries no episode bound. Browse takes one leg from each, and each of
+        the two distractors here is the row the *other* reading would have
+        answered with:
+
+        - **the retracted copy**, which `owned_title_ids`' reading keeps and a
+          "show me what I can play" filter must not;
+        - **the series owned only through its episode files**, which
+          `list_owned_by_tag`'s reading keeps and a title-level screen must
+          not -- the cost `owned_title_ids` already records and accepts.
+
+        All three arms are asserted, because `owned=False` is the complement
+        rather than "no predicate": a two-valued flag would make *unset* and
+        *the user asked for unowned* the same request, and the `None` arm
+        would then be untestable.
+        """
+        playable = self._browsable("Playable")
+        retracted = self._browsable("Retracted")
+        episodes_only = self._browsable("Episodes Only")
+        nothing = self._browsable("Nothing")
+        for one in (playable, retracted, episodes_only, nothing):
+            await repo.add(one)
+        await own(playable.id)
+        await own(retracted.id, available=False)
+        await own(episodes_only.id, episode=True)
+
+        owned_rows = await repo.browse(sort=BrowseSort.NAME, owned=True, limit=_ROOMY)
+        unowned_rows = await repo.browse(sort=BrowseSort.NAME, owned=False, limit=_ROOMY)
+        every_row = await repo.browse(sort=BrowseSort.NAME, limit=_ROOMY)
+
+        assert [one.id for one in owned_rows] == [playable.id]
+        assert [one.id for one in unowned_rows] == [
+            episodes_only.id,
+            nothing.id,
+            retracted.id,
+        ]
+        assert len(every_row) == 4, "the premise: with no predicate all four are reachable"
+
+    async def test_the_limit_keeps_the_head_of_the_order_rather_than_the_first_found(
+        self, repo: TitleRepository
+    ) -> None:
+        """A limit applied before the ordering keeps whichever rows the scan
+        reached first, which on a freshly-seeded table is insertion order."""
+        await self._seed_population(repo)
+
+        rows = await repo.browse(sort=BrowseSort.NAME, limit=2)
+
+        assert [one.name for one in rows] == ["Alpha", "Bravo"]
+
+    async def test_the_genre_facet_is_counted_without_its_own_predicate(
+        self, repo: TitleRepository
+    ) -> None:
+        """**The facet's whole job.** With `genre=Horror` active the genre
+        facet must still say how many comedies there are, or the client cannot
+        navigate anywhere: a facet folded back onto its own filter answers
+        "how many Horror films are Horror", which is the size of the page
+        already on screen.
+
+        The assertion is that the map is *unchanged* by activating the filter,
+        which is the strongest form and the one that catches the fold-back on
+        its other entries -- the count of the active genre itself cannot move,
+        so a case asserting only that would pass against the defect.
+        """
+        for index in range(3):
+            await repo.add(self._browsable(f"Horror {index}", genres=("Horror",)))
+        for index in range(2):
+            await repo.add(self._browsable(f"Comedy {index}", genres=("Comedy",)))
+
+        unfiltered = await repo.browse_facets()
+        assert dict(unfiltered.genres) == {"Horror": 3, "Comedy": 2}, "the premise"
+
+        filtered = await repo.browse_facets(genre="Horror")
+
+        assert dict(filtered.genres) == dict(unfiltered.genres)
+
+    async def test_the_year_facet_is_counted_without_its_own_predicate(
+        self, repo: TitleRepository
+    ) -> None:
+        """`test_the_genre_facet_is_counted_without_its_own_predicate`'s twin,
+        and it is a separate case because the two facets are two statements: a
+        drop-your-own-predicate rule applied to one of them and forgotten for
+        the other is exactly the shape a shared docstring hides."""
+        for index in range(2):
+            await repo.add(self._browsable(f"Nineties {index}", year=1999))
+        await repo.add(self._browsable("Noughties", year=2000))
+        await repo.add(self._browsable("Undated"))
+
+        unfiltered = await repo.browse_facets()
+        assert dict(unfiltered.years) == {1999: 2, 2000: 1}, (
+            "the premise, and its second half: a title with no year is in no "
+            "bucket rather than in a null one"
+        )
+
+        filtered = await repo.browse_facets(year=1999)
+
+        assert dict(filtered.years) == dict(unfiltered.years)
+
+    async def test_the_facets_keep_every_predicate_that_is_not_their_own(
+        self, repo: TitleRepository, own: Own
+    ) -> None:
+        """The other half of the rule, and the one a "drop the filters"
+        shortcut gets wrong: the genre facet drops the *genre* predicate and
+        keeps the year and ownership ones.
+
+        Without this, a facet bar computed over the whole catalog reports
+        counts the client's own filters make unreachable -- 4,000 comedies
+        beside a filter that would answer with three.
+        """
+        owned_1999 = self._browsable("Owned Nineties", genres=("Comedy",), year=1999)
+        unowned_1999 = self._browsable("Unowned Nineties", genres=("Horror",), year=1999)
+        owned_2000 = self._browsable("Owned Noughties", genres=("Comedy",), year=2000)
+        for one in (owned_1999, unowned_1999, owned_2000):
+            await repo.add(one)
+        await own(owned_1999.id)
+        await own(owned_2000.id)
+
+        facets = await repo.browse_facets(genre="Comedy", year=1999, owned=True)
+
+        assert dict(facets.genres) == {"Comedy": 1}, (
+            "the genre facet drops `genre` and keeps `year=1999` and `owned`, "
+            "so the unowned horror of 1999 and the owned comedy of 2000 are "
+            "both out of it"
+        )
+        assert dict(facets.years) == {1999: 1, 2000: 1}, (
+            "the year facet drops `year` and keeps `genre=Comedy` and `owned`, "
+            "so the owned comedy of 2000 is counted -- that bucket is the whole "
+            "point of the facet, it is where the client can navigate to -- and "
+            "the unowned horror of 1999 is not"
+        )
+
+    async def test_a_genre_the_request_named_is_present_at_zero_rather_than_absent(
+        self, repo: TitleRepository
+    ) -> None:
+        """`count_by_state`'s *"never a sparse dict"* rule, narrowed to the
+        values the request itself named -- a genre vocabulary is open, so
+        "every possible key" is not a thing this can promise.
+
+        A `GROUP BY` returns only the values that have rows, so the defect is
+        a **missing key**, which a client cannot tell apart from a filter it
+        did not send. The fixture is the reachable shape rather than a
+        nonsense one: `genre=Horror&year=1999` over a catalog whose only
+        horror film is from 1998.
+        """
+        await repo.add(self._browsable("Old Horror", genres=("Horror",), year=1998))
+        await repo.add(self._browsable("New Comedy", genres=("Comedy",), year=1999))
+
+        facets = await repo.browse_facets(genre="Horror", year=1999)
+
+        assert dict(facets.genres) == {"Comedy": 1, "Horror": 0}
+
+    async def test_a_year_the_request_named_is_present_at_zero_rather_than_absent(
+        self, repo: TitleRepository
+    ) -> None:
+        """The year facet's half of the same rule. Separate for the reason the
+        two "without its own predicate" cases are separate."""
+        await repo.add(self._browsable("Old Horror", genres=("Horror",), year=1998))
+        await repo.add(self._browsable("New Comedy", genres=("Comedy",), year=1999))
+
+        facets = await repo.browse_facets(year=1899)
+
+        assert dict(facets.years) == {1998: 1, 1999: 1, 1899: 0}

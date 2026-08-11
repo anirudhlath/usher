@@ -96,6 +96,9 @@ from usher.ports.repository.taste import (
     TasteRepository,
 )
 from usher.ports.repository.title import (
+    BrowseCursorPosition,
+    BrowseFacets,
+    BrowseSort,
     TitleRepository,
 )
 from usher.ports.repository.watch_state import (
@@ -105,6 +108,9 @@ from usher.ports.repository.watch_state import (
 
 __all__ = [
     "AddedTitle",
+    "BrowseCursorPosition",
+    "BrowseFacets",
+    "BrowseSort",
     "BulkCatalogRepository",
     "BulkWriteResult",
     "CachedPayload",

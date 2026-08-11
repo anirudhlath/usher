@@ -14,7 +14,12 @@ from datetime import UTC, datetime
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
-from usher.ports.repository import TitleRepository
+from usher.ports.repository import (
+    BrowseCursorPosition,
+    BrowseFacets,
+    BrowseSort,
+    TitleRepository,
+)
 
 # Mirrors db/models/title.py's three partial unique indexes exactly, name
 # for name -- this is what lets RepositoryConflict.constraint agree
@@ -146,6 +151,37 @@ class FakeTitleRepository(TitleRepository):
       here; only a real `media_items` row carrying **both** ids (the
       production shape, per `ports/ingest.py`'s `MediaItemTarget`) can fail
       against a spurious bound.
+
+    **And where `browse`/`browse_facets` here are more forgiving. Five, and
+    the first is the one this port's whole design turns on:**
+
+    - **A NULL cannot poison a comparison in Python, so the keyset's hardest
+      failure is Postgres-only.** `((k IS NOT NULL), k, id) > (...)` answers
+      **NULL** — not false — for an unkeyed boundary and silently drops the
+      rest of the unkeyed group; the Python transcription of the same mistake
+      (`None > None`) raises `TypeError`, loudly, in the first case that
+      reaches it. So `test_a_page_boundary_inside_the_unkeyed_group_does_not_
+      drop_the_rest_of_it` is a *quiet* defect there and a crash here, and only
+      the integration arm reproduces the shipped hazard.
+    - **`NULLS LAST` is two lists rather than a clause**, for the reason
+      `list_unwatched_candidates` records one bullet up: the two agree only
+      because both were written to, and Postgres's `DESC` default is the
+      opposite of what the read wants.
+    - **`@>` is `in` and `unnest` is a `for` loop.** Neither operator exists
+      here to be spelled wrongly, and the genre facet's subquery has no Python
+      counterpart at all.
+    - **`media_items.available` is still not modelled**, so browse's
+      *retracted* distractor is load-bearing only in the integration run —
+      exactly as it is for `list_unwatched_candidates`. The `episode_id IS
+      NULL` half of the same filter **is** expressible here, because
+      `available_copies` stores `None` for a title-level copy and an episode
+      id for an episode one, which is the one bound this fake can tell apart.
+    - **`browse` cannot be spelled with an `OFFSET` by accident.** The fake
+      holds a list and the port takes a position, so the defect PRD 07 refuses
+      has to be written deliberately to be observed. The comparison against a
+      real `OFFSET`, over a real concurrent write, is
+      `tests/integration/test_title_repository.py::test_offset_duplicates_a_
+      row_a_concurrent_insert_pushed_down_and_the_keyset_does_not`.
     """
 
     def __init__(self) -> None:
@@ -385,6 +421,125 @@ class FakeTitleRepository(TitleRepository):
             if title_id is not None:
                 played.add(title_id)
         return played
+
+    def _owns_a_title_level_copy(self, title_id: uuid.UUID) -> bool:
+        """`browse`'s `owned`: an **available, title-level** copy.
+
+        `available_copies` stores `None` for a title-level copy and an episode
+        id for an episode one, so `episode_id IS NULL` -- which browse carries
+        and `list_owned_by_tag` deliberately does not -- is one of the two
+        readings this fake *can* tell apart. `available` is the other, and it
+        cannot: a retracted copy leaves no trace here at all.
+        """
+        return any(copy is None for copy in self.available_copies.get(title_id, []))
+
+    def _browse_matches(
+        self, title: Title, *, genre: str | None, year: int | None, owned: bool | None
+    ) -> bool:
+        """`browse`'s `WHERE`, shared with `browse_facets` so a facet is the
+        same population minus one predicate rather than a second reading of
+        the filters."""
+        if genre is not None and genre not in title.genres:
+            return False
+        if year is not None and title.year != year:
+            return False
+        return not (owned is not None and self._owns_a_title_level_copy(title.id) is not owned)
+
+    @staticmethod
+    def _browse_ordered(rows: list[Title], *, column: str, descending: bool) -> list[Title]:
+        """`(key IS NOT NULL) DESC, key <dir>, id`, in Python.
+
+        Two lists rather than one sort key, because a descending sort over a
+        `str` key cannot be spelled by negating it and `reverse=True` would
+        also reverse the `id` tail. Python's sort is stable and `reverse` does
+        **not** reorder ties, so sorting by `id` first and by the key second
+        leaves ties in ascending id order under either direction -- which is
+        the tail the real statement spells `TitleRow.id.asc()`.
+        """
+        keyed = sorted(
+            (one for one in rows if getattr(one, column) is not None), key=lambda o: o.id
+        )
+        keyed.sort(key=lambda one: getattr(one, column), reverse=descending)
+        unkeyed = sorted((one for one in rows if getattr(one, column) is None), key=lambda o: o.id)
+        # NULLs last, which is the opposite of Postgres's own `DESC` default
+        # and the reason the real statement spells the leg out.
+        return keyed + unkeyed
+
+    @staticmethod
+    def _browse_after(
+        title: Title, after: BrowseCursorPosition, *, column: str, descending: bool
+    ) -> bool:
+        """The keyset predicate, arm for arm with the Postgres one.
+
+        The `after.key is None` branch is what the SQL spells
+        `key IS NOT DISTINCT FROM :after_key`: a boundary inside the unkeyed
+        group can only be followed by the rest of that group, and comparing
+        the key at all would answer "unknown" there -- which in SQL is not
+        true, so every remaining unkeyed row would be dropped.
+        """
+        key = getattr(title, column)
+        if after.key is None:
+            return bool(key is None and title.id > after.id)
+        if key is None:
+            # NULLs sort last, so every unkeyed row follows every keyed one.
+            return True
+        if key == after.key:
+            return bool(title.id > after.id)
+        return bool(key < after.key if descending else key > after.key)
+
+    async def browse(
+        self,
+        *,
+        sort: BrowseSort,
+        genre: str | None = None,
+        year: int | None = None,
+        owned: bool | None = None,
+        after: BrowseCursorPosition | None = None,
+        limit: int,
+    ) -> list[Title]:
+        column, descending = BrowseSort.order_for(sort)
+        matching = [
+            title
+            for title in self._titles.values()
+            if self._browse_matches(title, genre=genre, year=year, owned=owned)
+        ]
+        ordered = self._browse_ordered(matching, column=column, descending=descending)
+        if after is not None:
+            ordered = [
+                title
+                for title in ordered
+                if self._browse_after(title, after, column=column, descending=descending)
+            ]
+        return ordered[: max(limit, 0)]
+
+    async def browse_facets(
+        self,
+        *,
+        genre: str | None = None,
+        year: int | None = None,
+        owned: bool | None = None,
+    ) -> BrowseFacets:
+        genres: dict[str, int] = {}
+        for title in self._titles.values():
+            # `genre=None`: the genre facet drops its **own** predicate and
+            # keeps the other two.
+            if self._browse_matches(title, genre=None, year=year, owned=owned):
+                for name in title.genres:
+                    genres[name] = genres.get(name, 0) + 1
+        years: dict[int, int] = {}
+        for title in self._titles.values():
+            if title.year is not None and self._browse_matches(
+                title, genre=genre, year=None, owned=owned
+            ):
+                years[title.year] = years.get(title.year, 0) + 1
+        # A value the request named is present at zero rather than absent --
+        # `count_by_state`'s "never a sparse dict", narrowed to the keys the
+        # request itself supplied because a genre vocabulary is open.
+        if genre is not None:
+            genres.setdefault(genre, 0)
+        if year is not None:
+            years.setdefault(year, 0)
+        return BrowseFacets(genres=genres, years=years)
 
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         counts: dict[EnrichmentState, int] = dict.fromkeys(EnrichmentState, 0)

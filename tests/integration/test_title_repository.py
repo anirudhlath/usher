@@ -11,6 +11,7 @@ from sqlalchemy import Table, event, insert, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from tests.contract.title_repository_contract import (
+    TitleRepositoryBrowseContract,
     TitleRepositoryCandidateContract,
     TitleRepositoryContract,
     TitleRepositoryOwnedContract,
@@ -24,6 +25,7 @@ from usher.domain.ids import new_id
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
+from usher.ports.repository import BrowseSort
 
 
 @pytest.fixture
@@ -805,3 +807,174 @@ async def _add_episode(session: AsyncSession, series_id: uuid.UUID) -> uuid.UUID
         {"id": episode_id, "title_id": series_id, "season_id": season_id, "number": number},
     )
     return episode_id
+
+
+class TestPostgresTitleRepositoryBrowse(TitleRepositoryBrowseContract):
+    """`browse`/`browse_facets` against real Postgres, which is where four of
+    this read's halves can fail and the fake's cannot.
+
+    The keyset's NULL branch is the one that matters: the natural
+    `ROW(...) > ROW(...)` spelling answers **NULL** rather than false for an
+    unkeyed boundary, which Python's `None` comparison cannot reproduce
+    (it raises instead). `NULLS LAST` under a `DESC` sort is the opposite of
+    Postgres's own default; `@>` on a generic `ARRAY(Text)` is the operator
+    `list_owned_by_tag` already records raising `NotImplementedError` through
+    SQLAlchemy's helper; and the genre facet's `unnest` has no Python
+    counterpart at all.
+
+    And this is the arm where `available = false` is a real row rather than an
+    absence, which is the only way browse's `available` predicate is
+    observable.
+    """
+
+    @pytest.fixture
+    def repo(self, session: AsyncSession) -> PostgresTitleRepository:
+        return PostgresTitleRepository(session)
+
+    @pytest_asyncio.fixture
+    async def owning_source_id(self, session: AsyncSession) -> uuid.UUID:
+        source = Source(
+            kind=SourceKind.EMBY,
+            name=f"Browse Contract Source {new_id()}",
+            base_url="https://emby.invalid",
+            credentials_ref=f"ref-{new_id()}",
+            device_id=str(new_id()),
+        )
+        await PostgresSourceRepository(session).add(source)
+        return source.id
+
+    @pytest.fixture
+    def own(
+        self, session: AsyncSession, owning_source_id: uuid.UUID
+    ) -> Callable[..., Awaitable[None]]:
+        async def _own(
+            title_id: uuid.UUID, *, episode: bool = False, available: bool = True
+        ) -> None:
+            # `episode=True` writes **both** ids, which is the production shape
+            # (`ports/ingest.py`'s `MediaItemTarget`) and the only row that can
+            # tell browse's `episode_id IS NULL` bound apart from
+            # `list_owned_by_tag`'s deliberate absence of one. The candidate
+            # arm's fixture records at length why leaving `episode_id` NULL
+            # here would make the case vacuous.
+            #
+            # `available=False` writes a real retracted row -- what
+            # `mark_unseen_unavailable` leaves behind -- which the fake cannot
+            # express at all.
+            await session.execute(
+                insert(cast(Table, MediaItemRow.__table__)).values(
+                    id=new_id(),
+                    source_id=owning_source_id,
+                    external_id=str(new_id()),
+                    title_id=title_id,
+                    episode_id=await _add_episode(session, title_id) if episode else None,
+                    available=available,
+                    last_seen_at=datetime.now(UTC),
+                )
+            )
+
+        return _own
+
+
+async def _browse_by_offset(
+    session: AsyncSession, *, limit: int, offset: int
+) -> list[tuple[uuid.UUID, str]]:
+    """`browse(sort=name)`'s page, spelled the way PRD 07 refuses.
+
+    Raw SQL and not a second implementation on the repository: the offset
+    spelling exists to be **compared against**, and putting it behind the port
+    would be shipping the thing the port is defined not to do. Same `ORDER BY`
+    as `PostgresTitleRepository.browse`'s `name` sort, so the only difference
+    between the two arms below is how page 2 finds its start.
+    """
+    rows = await session.execute(
+        text(
+            "SELECT id, sort_name FROM titles "
+            "ORDER BY (sort_name IS NOT NULL) DESC, sort_name ASC, id ASC "
+            "LIMIT :limit OFFSET :offset"
+        ),
+        {"limit": limit, "offset": offset},
+    )
+    return [(row[0], row[1]) for row in rows.all()]
+
+
+async def test_offset_duplicates_a_row_a_concurrent_insert_pushed_down_and_the_keyset_does_not(
+    repo: PostgresTitleRepository, session: AsyncSession
+) -> None:
+    """**PRD 07's own reason for refusing offset paging, measured instead of
+    asserted.**
+
+    *"Offset paging is not offered -- it degrades badly over a 1.3M-row catalog
+    and produces duplicates under concurrent writes."* The first clause was
+    measured in M4 (`list_unmatched`'s `OFFSET` at 43.7 ms / 388.9 ms). The
+    second was not, and ADR-0034's *Uncertainty* section says so in as many
+    words: it *"needs a real database with a row inserted between page 1 and
+    page 2 -- which needs a repository that exposes a wire-paged read, and none
+    does yet. It must ride with group B's first paged route."* This is that
+    read, so this is that case.
+
+    Both arms page the same table with the same `ORDER BY`, and a row is
+    committed between the two requests -- an ordinary concurrent write, not a
+    contrived one. The keyset resumes from a *position* and is unaffected; the
+    offset resumes from a *count* and the count moved under it.
+
+    **Three premises, because without them the case is a coincidence.** The
+    inserted row must sort into the page already served (a row after the
+    cursor is a page-2 row under both spellings); the two spellings must agree
+    on page 1 (or the disagreement below is about the `ORDER BY` rather than
+    about how page 2 resumes); and the offset arm's duplicate is asserted *as
+    a duplicate*, by name, rather than inferred from a length.
+
+    **What this measures is a duplicate and not a drop, which is exactly what
+    PRD 07 claims.** An insert grows the population by one, so the window that
+    slid by one still reaches the last row: nothing here is lost, `Charlie` is
+    simply served twice. The mirror defect — a row *never* served — needs a
+    concurrent **delete**, which is a different write and is not claimed by
+    the sentence this case exists to verify.
+    """
+    seeded = [
+        Title(kind=TitleKind.MOVIE, name=name, sort_name=name.lower())
+        for name in ("Alpha", "Bravo", "Charlie", "Delta", "Echo")
+    ]
+    for one in seeded:
+        await repo.add(one)
+
+    keyset_first = await repo.browse(sort=BrowseSort.NAME, limit=3)
+    offset_first = await _browse_by_offset(session, limit=3, offset=0)
+    assert [one.name for one in keyset_first] == ["Alpha", "Bravo", "Charlie"]
+    assert [row[0] for row in offset_first] == [one.id for one in keyset_first], (
+        "the premise: the two spellings agree on page 1, so any disagreement "
+        "below is about how page 2 resumes and nothing else"
+    )
+
+    inserted = Title(kind=TitleKind.MOVIE, name="Bravissimo", sort_name="bravissimo")
+    await repo.add(inserted)
+    boundary = BrowseSort.position_of(keyset_first[-1], sort=BrowseSort.NAME)
+    assert isinstance(boundary.key, str) and inserted.sort_name < boundary.key, (
+        "the premise: the new row sorts *before* the cursor, i.e. into the page "
+        "the client has already been served -- which is what makes every later "
+        "row's offset one larger than it was"
+    )
+
+    keyset_second = await repo.browse(sort=BrowseSort.NAME, after=boundary, limit=3)
+    offset_second = await _browse_by_offset(session, limit=3, offset=3)
+
+    keyset_served = [one.id for one in keyset_first] + [one.id for one in keyset_second]
+    assert keyset_served == [one.id for one in seeded], (
+        "the keyset serves the pre-insert population once, in order: "
+        f"{[one.name for one in keyset_first + keyset_second]}"
+    )
+
+    offset_served = [row[0] for row in offset_first] + [row[0] for row in offset_second]
+    repeated = {name for _, name in offset_first} & {name for _, name in offset_second}
+    assert repeated == {"charlie"}, (
+        "the refutation this case exists for: under `OFFSET 3` the row that was "
+        "last on page 1 is first on page 2, because the insert pushed it down. "
+        f"Page 1 {[name for _, name in offset_first]}, page 2 "
+        f"{[name for _, name in offset_second]}"
+    )
+    assert len(offset_served) != len(set(offset_served)), "a duplicate, spelled as one"
+    assert len(keyset_served) == len(set(keyset_served)), (
+        "and the keyset over the identical two requests and the identical "
+        "concurrent write has none, which is the comparison and not a second "
+        "reading of the assertion four lines up"
+    )

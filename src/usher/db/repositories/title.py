@@ -66,7 +66,7 @@ autoflush fails.
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import Text, exists, func, literal, nulls_last, select
+from sqlalchemy import ColumnElement, Text, and_, exists, func, literal, nulls_last, or_, select
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.exc import IntegrityError
@@ -81,7 +81,12 @@ from usher.db.repositories._errors import constraint_name
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict, RepositoryNotFound
-from usher.ports.repository import TitleRepository
+from usher.ports.repository import (
+    BrowseCursorPosition,
+    BrowseFacets,
+    BrowseSort,
+    TitleRepository,
+)
 
 
 def _to_domain(row: TitleRow) -> Title:
@@ -166,6 +171,81 @@ def _to_row(title: Title) -> TitleRow:
     for field in _ARRAY_FIELDS:
         data[field] = list(data[field])
     return TitleRow(**data)
+
+
+def _browse_filters(
+    *, genre: str | None, year: int | None, owned: bool | None
+) -> list[ColumnElement[bool]]:
+    """`browse`'s `WHERE`, built once so `browse_facets` can leave exactly one
+    predicate out rather than re-read the filters.
+
+    Two copies of a filter set is two chances for a facet to be counted over a
+    population the page is not drawn from -- the same argument
+    `_WITHOUT_DERIVED_COLUMNS` makes for looping over `DERIVED_COLUMNS`.
+    """
+    clauses: list[ColumnElement[bool]] = []
+    if genre is not None:
+        # `@>` written out for `list_owned_by_tag`'s measured reason: the
+        # generic `ARRAY` these columns are declared with raises
+        # `NotImplementedError` from `ARRAY.contains()`, at statement-build
+        # time in the integration run and never at all against the fake.
+        clauses.append(TitleRow.genres.bool_op("@>")(sql_cast([genre], PG_ARRAY(Text))))
+    if year is not None:
+        clauses.append(TitleRow.year == year)
+    if owned is not None:
+        # **`episode_id IS NULL` and `available`, one leg from each of this
+        # codebase's two readings of "owned".** The port's docstring carries
+        # the argument; the short version is that browse is a title-level
+        # screen (so a series' episode files are not this row's copy) and its
+        # filter answers "what can I play" (so a retracted copy is not one).
+        # `EXISTS` rather than a join, so a 20,000-episode series costs one
+        # probe rather than 20,000 rows.
+        copy = exists().where(
+            MediaItemRow.title_id == TitleRow.id,
+            MediaItemRow.episode_id.is_(None),
+            MediaItemRow.available.is_(True),
+        )
+        clauses.append(copy if owned else ~copy)
+    return clauses
+
+
+def _browse_after(
+    key: ColumnElement[object], *, descending: bool, after: BrowseCursorPosition
+) -> ColumnElement[bool]:
+    """ADR-0034's keyset predicate, for an order of `(key IS NOT NULL) DESC,
+    key <dir>, id`.
+
+    **Not the row comparison the ADR first carried, and that is a
+    measurement.** `((k IS NOT NULL), k, id) > ((:ak IS NOT NULL), :ak, :aid)`
+    reads well and is wrong for a nullable key: Postgres evaluates a row
+    comparison element-wise and answers **NULL**, not false, when the first
+    differing pair involves one. Measured on `pgvector/pgvector:pg17` over
+    five rows of which three have a NULL key, resuming from the first of
+    those: the row form returns the two *keyed* rows and neither remaining
+    unkeyed one -- so a page walk drops the whole tail of the unkeyed group
+    while every page it served looked full. ADR-0034 now carries the table.
+
+    So the NULL boundary is its own branch, which is what
+    `IS NOT DISTINCT FROM` would spell in one expression. The two branches
+    together are still one rule -- everything strictly after `after` in the
+    order above -- and the `ORDER BY` is built from the same `key` and the
+    same `descending`.
+
+    Strict `>` on the `id` tail: relaxed to `>=` the walk re-serves its
+    boundary row at every page break.
+    """
+    if after.key is None:
+        # The boundary is inside the unkeyed group, which sorts last, so only
+        # the rest of that group can follow it.
+        return and_(key.is_(None), TitleRow.id > after.id)
+    later = key < after.key if descending else key > after.key
+    return or_(
+        # Every unkeyed row follows every keyed one -- NULLS LAST. This is the
+        # leg a row comparison loses.
+        key.is_(None),
+        later,
+        and_(key == after.key, TitleRow.id > after.id),
+    )
 
 
 def _conflict(title_id: uuid.UUID, constraint: str | None) -> RepositoryConflict:
@@ -561,6 +641,93 @@ class PostgresTitleRepository(TitleRepository):
         with self._session.no_autoflush:  # see get()'s comment
             result = await self._session.execute(statement)
         return [_to_domain(row) for row in result.scalars().all()]
+
+    async def browse(
+        self,
+        *,
+        sort: BrowseSort,
+        genre: str | None = None,
+        year: int | None = None,
+        owned: bool | None = None,
+        after: BrowseCursorPosition | None = None,
+        limit: int,
+    ) -> list[Title]:
+        # `order_for` raises `FilterNotSupported` before a statement is built,
+        # which is the whole of the port's "an ignored sort answers with more
+        # rows in some other order" argument.
+        column, descending = BrowseSort.order_for(sort)
+        key: ColumnElement[object] = getattr(TitleRow, column)
+        statement = (
+            select(TitleRow)
+            .options(*_WITHOUT_DERIVED_COLUMNS)
+            .where(*_browse_filters(genre=genre, year=year, owned=owned))
+        )
+        if after is not None:
+            statement = statement.where(_browse_after(key, descending=descending, after=after))
+        statement = statement.order_by(
+            # `nulls_last(...)` written out, because the keyset predicate has
+            # to agree with this term for term and two spellings of one rule
+            # is how they stop agreeing. Postgres defaults a `DESC` sort to
+            # NULLS FIRST, and `titles.popularity` was measured NULL on all
+            # 1,271,138 rows of a bootstrap-only catalog -- so the default
+            # puts the entire unknown population on page one.
+            key.is_not(None).desc(),
+            key.desc() if descending else key.asc(),
+            # The total order, and the only reason two reads of one unchanged
+            # catalog agree about which page a row is on. ADR-0034 refuses to
+            # mint a cursor for a keyset that does not end in the primary key.
+            TitleRow.id.asc(),
+        ).limit(limit)
+        with self._session.no_autoflush:  # see get()'s comment
+            result = await self._session.execute(statement)
+        return [_to_domain(row) for row in result.scalars().all()]
+
+    async def browse_facets(
+        self,
+        *,
+        genre: str | None = None,
+        year: int | None = None,
+        owned: bool | None = None,
+    ) -> BrowseFacets:
+        # **`genre=None` and `year=None` are each facet dropping its own
+        # predicate**, and the two calls are what make that visible: the genre
+        # facet keeps `year` and `owned`, the year facet keeps `genre` and
+        # `owned`. Folded back onto itself, a facet counts the page already on
+        # screen and looks correct on every request that does not use it.
+        #
+        # `unnest` inside a subquery rather than beside the `GROUP BY`: a
+        # set-returning function is legal in a target list and a `GROUP BY`
+        # over its output needs somewhere to name it. A title whose `genres`
+        # is `'{}'` unnests to no rows and is therefore in no bucket, which is
+        # the same statement the `years` read makes with `IS NOT NULL`.
+        unnested = (
+            select(func.unnest(TitleRow.genres).label("genre"))
+            .where(*_browse_filters(genre=None, year=year, owned=owned))
+            .subquery("browse_genres")
+        )
+        with self._session.no_autoflush:  # see get()'s comment
+            genre_rows = await self._session.execute(
+                select(unnested.c.genre, func.count()).group_by(unnested.c.genre)
+            )
+            year_rows = await self._session.execute(
+                select(TitleRow.year, func.count())
+                .where(
+                    TitleRow.year.is_not(None),
+                    *_browse_filters(genre=genre, year=None, owned=owned),
+                )
+                .group_by(TitleRow.year)
+            )
+        genres = {name: count for name, count in genre_rows.all()}
+        years = {value: count for value, count in year_rows.all()}
+        # `count_by_state`'s "never a sparse dict", narrowed to the keys the
+        # request itself named because a genre vocabulary is open. A `GROUP BY`
+        # returns only the values with rows, and an absent facet is
+        # indistinguishable from a filter the client did not send.
+        if genre is not None:
+            genres.setdefault(genre, 0)
+        if year is not None:
+            years.setdefault(year, 0)
+        return BrowseFacets(genres=genres, years=years)
 
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         with self._session.no_autoflush:  # see get()'s comment
