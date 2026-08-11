@@ -765,3 +765,61 @@ them, in opposite directions, and that is the whole yield of the sweep.**
   docstring-scan grep this file records — the ten test files it finds scan
   `ports/embedding.py`, `ports/metadata.py`, `services/` and `api/`, and **none
   of them scans `ports/repository`**.
+
+**M9 Task A5's first reported equivalent-mutant control was mischaracterised,
+and it is recorded here rather than quietly replaced.** The write-up claimed
+*"swapping `counter.add`'s two keyword arguments' written order"* survived all
+five gate steps, invoking the `_ledger_row`/`_settle`/`cli._search` precedent
+above by name. That precedent's reasoning — binding is by name regardless of
+position, so reordering *already-written* keywords is inert — does not
+transfer: every `counter.add` call in `src/usher/services/rows/cache.py` is
+positional (`_cache_hits.add(1, {"cache": "screen"})`), and a grep for
+keyword-style counter calls across `src/usher` finds none, anywhere. There was
+no written keyword order to swap. Reconstructed from the working log, what was
+actually planted was `_cache_hits.add(1, {"cache": "screen"})` rewritten to
+`_cache_hits.add(attributes={"cache": "screen"}, amount=1)` — a positional call
+*converted* to an equivalent keyword call, correctly bound, not a reordering of
+a pair that already existed. It is genuinely inert (same value to the same
+parameter, spelled two ways), which is why it survived every step measured
+against it, but it is not the control the ledger's bar asks for: it is not a
+plausible mutation at all — no AST-level argument reordering produces a
+positional-to-keyword rewrite — so its survival demonstrates nothing about
+whether the suite would catch a real argument-order defect.
+
+**And the real version of that defect is not inert.** A genuine positional
+swap — `_cache_hits.add({"cache": "screen"}, 1)` — is not an equivalent
+mutant: `opentelemetry.sdk.metrics._internal.instrument.Counter.add` calls
+`math.isfinite(amount)` before anything else, and `math.isfinite` on a `dict`
+raises `TypeError: must be real number, not dict` (confirmed directly). Every
+case in `test_telemetry_cache.py`/`test_services_rows_cache.py` installs a real
+`MeterProvider` (`Counter._is_enabled()` is true), so that swap is a clean
+kill, not a survivor — reporting it as a control would have been the exact
+inversion this file's controls exist to prevent: a kill mistaken for a
+survivor, which hides a broken control rather than a broken suite.
+
+The corrected control — a fact about the *code*, matching `complete_json`'s
+`span.set_attribute` pair above — and measured against every gate step
+separately, because "the gate holds it" and "the suite holds it" are different
+claims:
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| `get_row`'s miss branch: `self._rows.pop(key, None)` and `_cache_misses.add(1, {"cache": "row"})` swapped | PASS | PASS | PASS | PASS | PASS (2992 / 4 skipped) |
+
+`self._rows` (a plain dict) and `_cache_misses` (an OTel counter) are disjoint
+pieces of state; nothing between the two statements reads either, and both run
+unconditionally before the branch's `return None`, so their relative order is
+unobservable — the same shape as the OTel span-attribute pair, one signal over.
+Restored via `cp` backup, verified byte-identical against the pre-plant
+`md5sum` before continuing.
+
+**Unrelated, found the same day and worth carrying because it was first
+misattributed in a report rather than in this file:** `tests/integration/
+test_sse_end_to_end.py::test_opening_a_stub_promotes_it_and_the_client_is_told_
+when_it_lands` failing inside a whole-suite run was first read as host
+contention from concurrent sibling worktrees. A second implementer's 5/5
+reproduction in isolated `git archive` copies, each with its own `uv sync`, at
+three commits including one that is docs-only on the M8 merge, and on a
+default no-extra venv, refutes that: the failure predates M9 and is not
+load-dependent. Recorded here rather than in a chat transcript, which is what
+made it findable the first time.
