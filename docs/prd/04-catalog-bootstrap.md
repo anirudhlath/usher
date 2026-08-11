@@ -26,19 +26,43 @@ All figures below were measured on 2026-07-28.
 
 | Dataset | Provides | Size | Time |
 |---|---|---|---|
-| [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/) | 12.7M titles, 1.7M ratings, 100M cast/crew rows, 58M localised titles | 1.83 GiB gz | 20–40 min |
+| [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/) | 12.7M titles, 1.7M ratings, **101,151,422** cast/crew rows, **58,906,368** localised titles, **15,563,615** names | **1.832 GiB gz** (1,967,348,042 B over seven files) | 20–40 min |
 | [TMDb daily ID export](https://developer.themoviedb.org/docs/daily-id-exports) | 1.23M movie + 228k series IDs **with popularity** | 31 MiB gz | < 1 min |
 | Wikidata SPARQL | ~386k verified IMDb↔TMDb↔TVDb ID pairs (CC0) | no download | ~18 s of query time |
 | TMDb API (per-id crawl) | Overviews, artwork, keywords, full credits | — | 1.5–2.5 h for the priority tier |
 | [MovieLens tag genome](https://grouplens.org/datasets/movielens/) (`ml-latest.zip`) | **18,472,128** movie×tag relevance scores for **16,376** movies over 1,128 tags | **334.6 MiB** (350,896,731 B) | ~10 min |
 
 > **What Phases 0–2 actually download: ~250 MiB, not 2.2 GiB** (measured
-> 2026-07-30). From IMDb, only `title.basics.tsv.gz` (214.4 MiB) and
-> `title.ratings.tsv.gz` (8.2 MiB) — the other five files carry cast, crew,
-> akas, and episodes, which need entities that do not exist yet (see Phase 0).
-> From TMDb, the two ID exports (`movie_ids` measured at 26.1 MiB, plus the
-> much smaller `tv_series_ids`). Wikidata downloads nothing. The rest of the
-> 2.2 GiB in the Cost table belongs to Phases 3–4.
+> 2026-07-30, re-measured 2026-08-11). From IMDb, only `title.basics.tsv.gz`
+> (**214.9 MiB**) and `title.ratings.tsv.gz` (**8.2 MiB**) — the other five
+> files carry cast, crew, akas, and episodes. From TMDb, the two ID exports
+> (`movie_ids` measured at 26.1 MiB, plus the much smaller `tv_series_ids`).
+> Wikidata downloads nothing. The rest of the 2.2 GiB in the Cost table belongs
+> to Phases 3–4.
+
+> **The IMDb row's two headline figures were re-measured on 2026-08-11 and both
+> hold.** *"100M cast/crew rows"* is 101,151,422 `title.principals` data rows
+> and *"58M localised titles"* is 58,906,368 `title.akas` data rows; the seven
+> files total 1,967,348,042 B, i.e. 1.832 GiB, against the row's stated
+> 1.83 GiB. What the row never said is how little of that survives a join
+> against this catalog: **12,626,452 of the 101,151,422 principals (12.5%)** and
+> **7,536,366 of the 58,906,368 akas (12.8%)** name one of the 1,271,138 titles
+> `_RETAINED_TYPES` keeps, because the other 87% belong to the episodes,
+> shorts, video games and adult titles Phase 0 drops.
+>
+> **The three unimported files are 1.49 GiB of the 1.83 GiB**, and they are
+> `title.principals.tsv.gz` (742.3 MiB), `title.akas.tsv.gz` (486.5 MiB) and
+> `name.basics.tsv.gz` (293.7 MiB). The per-file sizes and what each costs in
+> stored rows are in `.claude/rules/bootstrap-and-datasets.md`, together with
+> the measured refusal of a `people`/`credits` design for the whole catalog.
+>
+> **The seven files are not one snapshot.** On 2026-08-11 five carried
+> `Last-Modified: Tue, 11 Aug 2026 00:47–00:48 GMT` while `name.basics` and
+> `title.akas` carried `Mon, 10 Aug 2026 12:53 GMT` — twelve hours older. A
+> cross-file join therefore spans two regenerations by default, which is
+> observable rather than theoretical: **969 of the 3,212,911 `nconst` values
+> that day's `title.principals` referenced did not exist in that day's
+> `name.basics` at all.**
 
 ### What the bulk data does *not* contain
 
