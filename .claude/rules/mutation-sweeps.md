@@ -2406,3 +2406,102 @@ import and dies on `F401`), and the season-scope drop as
 `WHERE :season_id IS NOT NULL` rather than deleting the clause (which would
 have left an unused bind — measured harmless for `text()`, but the retained
 bind keeps the plant a statement about the predicate).
+
+## M9 Task B9 — `cast` and `crew` on `GET /titles/{id}` (2026-08-11)
+
+**11 plants over `services/titles.py`, `api/dto/title.py`,
+`api/routers/titles.py` and `tests/fakes/credit_repository.py` — 7 behavioural
+targets of which 6 were killed on the first pass and **1 was a real survivor
+since closed**, plus 3 equivalent-mutant controls surviving all five gate
+steps. 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Harness at
+`/var/tmp/m9-B9/plants.py`, **outside the working tree** for the reason V1's
+entry records — `ruff check .` and `mypy src tests` walk the whole repository,
+so a harness at the root makes every gate-step control read FAIL. Plant list
+and expected verdict written down first, exact anchor count asserted before
+each plant, the landing spelled `old not in landed and new in landed` (B6's
+substring-immune form), `compile()` as the dry run,
+`PYTHONDONTWRITEBYTECODE=1` with `__pycache__` swept under **both** `src/` and
+`tests/`, every restore `md5sum`-verified, and no second `-q`.
+
+**Selection:** `test_api_titles.py`, `test_services_titles.py`,
+`test_api_problem.py` and `test_api_dto.py` — 64 cases, ~1.6 s a run, green
+before and after. Scoped rather than whole-suite for B2's and D4's reason:
+`tests/integration/test_sse_end_to_end.py` is intermittent on this tree and
+**a sweep scored on "did the run fail" cannot run against a suite holding a
+flaky case**. `test_api_problem.py` and `test_api_dto.py` are in the selection
+because both reach `TitleReadService`/`api/dto/` from outside this task's own
+files and would be where a signature or a credential-shaped field showed up.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the cast read loses its `kind` filter | KILLED | 4 |
+| P2 the crew read loses its `kind` filter | KILLED | 3 |
+| P3 the fake's ordering drops `billing_order` for `person_id` | KILLED | 3 |
+| P4 an empty cast rendered `[]` rather than omitted | KILLED | 3 |
+| P5 the route stops excluding unset fields | KILLED | 3 |
+| P6 `CAST_LIMIT` widened 20 → 50 | **SURVIVED, then closed** | 0, then 1 |
+| P7 `CreditResponse` renders `billing_order` after all | KILLED | 1 |
+
+**The survivor is D4's `TICKET_TTL_SECONDS` finding arriving at a different
+constant, one wave later, in a case written after that entry was in the
+file — which is the part worth recording.**
+`test_the_cast_and_crew_are_capped_and_the_caps_are_chosen_not_measured`
+seeds `CAST_LIMIT + 5` members and asserts `len(cast) == CAST_LIMIT`, so
+widening the constant moves the fixture and the expectation together and the
+case cannot see it. **It is not an equivalent mutant, and the specific value
+50 is why:** `adapters/tmdb/mapping._CAST_LIMIT` bounds the *stored* cast at
+exactly 50 per title, so a cap set there is a cap that never fires and the
+detail response quietly becomes the whole stored cast. Closed by
+`test_the_caps_are_twenty_and_not_the_number_the_storage_layer_bounds`, whose
+every number is a **literal** (25 seeded, 20 expected); re-planted, the
+mutation fails **that case alone** out of 65. Both cases are kept and each
+says in its own docstring what the other cannot see. **The general form,
+restated because two tasks in one milestone have now paid for it: a case whose
+fixture is derived from the constant under test pins that the constant is in
+force and cannot pin its value — those are two claims and they need two
+cases.** The tell is that the constant appears on *both* sides of the
+assertion.
+
+**And a measurement that chose the mechanism, recorded because the obvious
+spelling is the wrong one.** "Absent rather than `[]`" wants a pydantic
+`@model_serializer(mode="wrap")` that pops the key — and pydantic derives the
+**serialization** JSON schema from such a serializer's return annotation, so
+`-> dict[str, Any]` renders the whole model as `{"type": "object",
+"additionalProperties": true}`. FastAPI generates response schemas in
+serialization mode, so `GET /titles/{id}` would stop describing a single field
+in `/openapi.json` while every behavioural case stayed green. Confirmed
+directly on a two-field probe before anything was written. The shipped
+mechanism is `response_model_exclude_unset=True` plus an `of` that declines to
+*set* an empty key, with the field typed `tuple[CreditResponse, ...] = ()` so
+the schema says `array` and never `array | null` — absence is the only empty
+this route emits. Its cost is that `exclude_unset` is a rule about *every*
+field, so `test_the_response_carries_every_field_of_its_own_model` derives the
+expected key set from `model_fields` and is what would notice a field added to
+the model and forgotten in `of`.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| C1 the `cast` and `crew` reads swapped in written order | PASS | PASS | PASS | PASS (9/0) | PASS (3,492 / 4 skipped) |
+| C2 `CreditResponse.of`'s `character=`/`job=` arguments swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,492 / 4 skipped) |
+| C3 one sentence of `CreditResponse`'s docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (3,492 / 4 skipped) |
+
+C1 and C2 are facts about the *code* rather than about what the tools look at:
+the two reads are `await`s on one session with no shared state, each scoped by
+its own `kind`, and neither result is read before both have returned — the
+repository is not asked anything whose answer either could change; and keyword
+arguments are bound by name and both expressions are side-effect-free
+attribute reads on one frozen dataclass, which is `_ledger_row`'s precedent.
+Neither is an argument *reorder* of a positional call, which A5's entry is the
+reason for checking rather than assuming. C3 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`: the nineteen
+files it finds scan `ports/`, `services/`, `adapters/`, `api/dto/playback.py`,
+`api/routers/rows.py`, `api/caching.py` and `api/errors.py`'s
+`problem_response`, and **none of them reads `api/dto/title.py`**. The one
+scan that reads `api/routers/titles.py` (`test_api_similar.py`'s no-adapter
+name scan) strips docstrings through `ast.unparse` first, so the route
+docstring this task adds is outside it — checked, not assumed.
+
+Gate green before and after on the fully restored tree: **3,492 unit / 4
+skipped**, **1,063 integration / 22 skipped**, `ruff check`,
+`ruff format --check`, `mypy` over 532 files, `lint-imports` 9 kept / 0 broken,
+PRD link check `OK`.

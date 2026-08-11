@@ -17,18 +17,21 @@ import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 
+from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import EnrichmentState, HdrFormat, SourceKind, TitleKind
 from usher.domain.jobs import JobKind, JobPriority, JobStatus
+from usher.domain.people import Credit, CreditKind, Person, person_sort_name
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.ports.jobs import JobRequest
-from usher.services.titles import TitleReadService
+from usher.services.titles import CAST_LIMIT, CREW_LIMIT, TitleReadService
 
 USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
 OTHER_USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000002")
@@ -61,14 +64,25 @@ def queue() -> FakeJobQueue:
 
 
 @pytest.fixture
+def people() -> FakePersonRepository:
+    return FakePersonRepository()
+
+
+@pytest.fixture
+def credits(people: FakePersonRepository, titles: FakeTitleRepository) -> FakeCreditRepository:
+    return FakeCreditRepository(people, titles)
+
+
+@pytest.fixture
 def service(
     titles: FakeTitleRepository,
     media_items: FakeMediaItemRepository,
     sources: FakeSourceRepository,
     watch_states: FakeWatchStateRepository,
     queue: FakeJobQueue,
+    credits: FakeCreditRepository,
 ) -> TitleReadService:
-    return TitleReadService(titles, media_items, sources, watch_states, queue)
+    return TitleReadService(titles, media_items, sources, watch_states, queue, credits)
 
 
 async def _seed_source(sources: FakeSourceRepository, name: str = "Living Room Emby") -> Source:
@@ -156,6 +170,46 @@ async def _seed_watch_state(
             )
         ]
     )
+
+
+async def _seed_cast(
+    credits: FakeCreditRepository,
+    people: FakePersonRepository,
+    title_id: uuid.UUID,
+    *,
+    size: int,
+    crew: int = 0,
+) -> None:
+    """`size` billed cast members and `crew` unbilled crew, in one write.
+
+    Billing runs **descending** against the seeding order, so the person whose
+    UUIDv7 is lowest is the one billed last -- the fixture arrangement that
+    stops `ORDER BY person_id` from agreeing with `ORDER BY billing_order` by
+    accident.
+    """
+    entries: list[Credit] = []
+    names: list[str] = []
+    for index in range(size):
+        person = Person(name=f"Actor {index}", sort_name=person_sort_name(f"Actor {index}"))
+        await people.upsert_many([person])
+        entries.append(
+            Credit(
+                person_id=person.id,
+                title_id=title_id,
+                kind=CreditKind.CAST,
+                character=f"Role {index}",
+                billing_order=size - 1 - index,
+            )
+        )
+        names.append(person.name)
+    for index in range(crew):
+        person = Person(name=f"Crew {index}", sort_name=person_sort_name(f"Crew {index}"))
+        await people.upsert_many([person])
+        entries.append(
+            Credit(person_id=person.id, title_id=title_id, kind=CreditKind.CREW, job=f"Job {index}")
+        )
+        names.append(person.name)
+    await credits.replace_for_titles([title_id], entries, credit_names={title_id: names})
 
 
 async def _enrich_jobs(queue: FakeJobQueue) -> list[tuple[JobKind, str, int]]:
@@ -500,6 +554,149 @@ async def test_the_source_names_cost_one_read_however_many_badges(
     assert reads_for_one == reads_for_many, (
         f"{reads_for_one} source reads for 1 copy, {reads_for_many} for 6"
     )
+
+
+async def test_the_cast_and_the_crew_are_two_bounded_reads(
+    service: TitleReadService,
+    titles: FakeTitleRepository,
+    credits: FakeCreditRepository,
+    people: FakePersonRepository,
+) -> None:
+    """One read per `CreditKind`, each with its own cap.
+
+    Two reads rather than one unbounded one: `list_for_title`'s `limit`
+    applies to the *ordered* result, so a single `kind=None` read capped at 20
+    would spend the whole budget on a well-billed cast and answer a film with
+    no crew at all. The two caps are also independently adjustable, which is
+    the thing a shared one is not.
+    """
+    title = await _seed_title(titles, EnrichmentState.ENRICHED)
+    await _seed_cast(credits, people, title.id, size=3, crew=2)
+
+    credits.reset_calls()
+    detail = await service.detail(title.id, user_id=USER_ID)
+
+    assert detail is not None
+    assert [one.name for one in detail.cast] == ["Actor 2", "Actor 1", "Actor 0"]
+    assert [one.name for one in detail.crew] == ["Crew 0", "Crew 1"]
+    assert credits.calls == 2, "one read per kind, and nothing per credit or per person"
+
+
+async def test_the_cast_and_crew_are_capped_and_the_caps_are_chosen_not_measured(
+    service: TitleReadService,
+    titles: FakeTitleRepository,
+    credits: FakeCreditRepository,
+    people: FakePersonRepository,
+) -> None:
+    """Twenty each, **chosen rather than measured**, and what this case pins
+    is that the cap is applied *after* the ordering -- the survivors are the
+    top-billed, not whichever the storage layer reached first.
+
+    **It cannot pin the caps' values, and that is measured rather than
+    assumed.** Every number here is spelled `CAST_LIMIT ± n`, so a plant
+    widening the constant moves the fixture and the expectation together and
+    this case stays green -- `CAST_LIMIT = 50` survived it, along with all 64
+    cases in the round. That is a claim about the constant being *in force*,
+    which is a different claim from its value, and
+    `test_the_caps_are_twenty_and_not_the_number_the_storage_layer_bounds`
+    is the one that makes the other. Both are kept.
+    """
+    title = await _seed_title(titles, EnrichmentState.ENRICHED)
+    await _seed_cast(credits, people, title.id, size=CAST_LIMIT + 5, crew=CREW_LIMIT + 5)
+
+    detail = await service.detail(title.id, user_id=USER_ID)
+
+    assert detail is not None
+    assert (len(detail.cast), len(detail.crew)) == (CAST_LIMIT, CREW_LIMIT)
+    assert detail.cast[0].billing_order == 0, "the cap keeps the top of the billing, not the tail"
+    assert [one.name for one in detail.cast][:2] == [
+        f"Actor {CAST_LIMIT + 4}",
+        f"Actor {CAST_LIMIT + 3}",
+    ]
+
+
+async def test_the_caps_are_twenty_and_not_the_number_the_storage_layer_bounds(
+    service: TitleReadService,
+    titles: FakeTitleRepository,
+    credits: FakeCreditRepository,
+    people: FakePersonRepository,
+) -> None:
+    """Every number in this case is a **literal**, deliberately, and that is
+    the whole reason it exists beside the case above.
+
+    A boundary case whose fixture is spelled `CAST_LIMIT + 5` pins that the
+    constant is in force and cannot pin its value: widen the constant and both
+    sides move together. Measured -- `CAST_LIMIT = 50` survives that case and
+    fails this one. It is not an equivalent mutant: 50 is exactly what
+    `adapters/tmdb/mapping._CAST_LIMIT` *stores* per title, so a cap set there
+    is a cap that never fires, and the response quietly becomes the whole
+    stored cast on the screen a client opens most.
+
+    The numbers being chosen rather than measured is what makes pinning them
+    worth a case rather than an irritation: nothing downstream would notice
+    them drifting, so nothing except this would notice them being wrong."""
+    title = await _seed_title(titles, EnrichmentState.ENRICHED)
+    await _seed_cast(credits, people, title.id, size=25, crew=25)
+
+    detail = await service.detail(title.id, user_id=USER_ID)
+
+    assert detail is not None
+    assert (len(detail.cast), len(detail.crew)) == (20, 20)
+
+
+async def test_the_credit_reads_do_not_grow_with_the_cast(
+    service: TitleReadService,
+    titles: FakeTitleRepository,
+    credits: FakeCreditRepository,
+    people: FakePersonRepository,
+) -> None:
+    """A title with 50 credits costs the same statements as one with 2.
+
+    The N+1 this port was shaped to prevent is a `people` read per credit, and
+    it is invisible to an assertion on the *answer*, which is byte-identical
+    either way -- `CreditedPerson` carries the joined name precisely so that a
+    caller cannot invent that loop. Asserted as "the count does not grow"
+    rather than as a magic number, the shape
+    `test_the_source_names_cost_one_read_however_many_badges` uses one port
+    over.
+    """
+    small = await _seed_title(titles, EnrichmentState.ENRICHED)
+    large = await _seed_title(titles, EnrichmentState.ENRICHED)
+    await _seed_cast(credits, people, small.id, size=2)
+    await _seed_cast(credits, people, large.id, size=50)
+
+    credits.reset_calls()
+    with_two = await service.detail(small.id, user_id=USER_ID)
+    reads_for_two = credits.calls
+    credits.reset_calls()
+    with_fifty = await service.detail(large.id, user_id=USER_ID)
+    reads_for_fifty = credits.calls
+
+    assert with_two is not None and with_fifty is not None
+    assert (len(with_two.cast), len(with_fifty.cast)) == (2, CAST_LIMIT), (
+        "the premise: the two titles really do carry different numbers of credits"
+    )
+    assert reads_for_two == reads_for_fifty, (
+        f"{reads_for_two} credit reads for 2 credits, {reads_for_fifty} for 50"
+    )
+
+
+async def test_a_title_with_no_credits_answers_with_two_empty_tuples(
+    service: TitleReadService, titles: FakeTitleRepository
+) -> None:
+    """The service returns empty, and the *wire* turns empty into absent
+    (`api/dto/title.py`). Keeping the emptiness here means the one place that
+    decides "absent rather than `[]`" is the DTO, rather than a `None` that
+    every reader of `TitleDetail` has to narrow.
+
+    T6 makes this the ordinary answer rather than a corner: it fills
+    `titles.credit_names` for ~93.8% of the catalog from IMDb with no
+    `people`/`credits` rows behind it, so a title can be searchable by a
+    credited name and still have nothing for this read to find."""
+    title = await _seed_title(titles, EnrichmentState.ENRICHED)
+    detail = await service.detail(title.id, user_id=USER_ID)
+    assert detail is not None
+    assert (detail.cast, detail.crew) == ((), ())
 
 
 async def test_reading_a_title_never_touches_a_source(service: TitleReadService) -> None:

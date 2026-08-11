@@ -38,10 +38,19 @@ from usher.api.errors import ProblemException
 router = APIRouter(tags=["titles"])
 
 
-@router.get("/titles/{title_id}", response_model=TitleResponse)
+@router.get("/titles/{title_id}", response_model=TitleResponse, response_model_exclude_unset=True)
 async def get_title(
     title_id: uuid.UUID, titles: TitleReadServiceDep, user_id: DefaultUserIdDep
 ) -> TitleResponse:
+    """One title, everything local about it, and a promotion if it needs one.
+
+    **`response_model_exclude_unset=True` is what makes an empty `cast` or
+    `crew` an absent key rather than `[]`** -- `TitleResponse.of` declines to
+    *set* either when it has no members, and every other field it sets
+    unconditionally, so nothing else moves. The reasoning, the two spellings
+    rejected and the guard that keeps `of` honest are all in
+    `api/dto/title.py`; this flag is the half that cannot live there.
+    """
     detail = await titles.detail(title_id, user_id=user_id)
     if detail is None:
         # PRD 07's envelope, in the one line adopting it costs. `not_found`

@@ -215,6 +215,30 @@ is `CHECK (>= 0)` and nullable, because a crew credit has no billing.
 wholesale when that payload is re-derived; there is no update path for a
 trigger to fire on.
 
+✅ **Four of these fields reach the wire, and M9 is where that was decided.**
+`GET /titles/{id}` renders `person_id`, the person's `name`, `character` and
+`job` ([07](07-client-api.md) has the full shape: `cast` and `crew` as
+separate keys, each capped at 20 and absent when empty). **`billing_order`
+and `department` are stored and deliberately not rendered.** `billing_order`
+is the response's own ordering, already spent by the time a client sees it —
+shipping the column invites a client-side re-sort, and the obvious spelling
+of that (`billing_order or 0`) puts an unbilled crew member above the lead,
+which is the defect `ORDER BY billing_order ASC NULLS LAST` exists to
+prevent, relocated somewhere nobody here can fix it. `department` is a
+coarser grouping than that shape uses; adding it later is additive, and
+removing a field clients render is not. `tmdb_credit_id` stays off the wire
+for [ADR-0003](decisions/0003-own-uuid-identity.md)'s reason — identity in an
+API contract is Usher's own UUIDv7 and a provider id is an indexed attribute.
+
+⚠️ **A title can carry `titles.credit_names` and no `credits` rows at all**,
+and after the IMDb principals loader that is the ordinary state rather than a
+corner: it fills that column for ~93.8% of the catalog without deriving a
+single `people` or `credits` row, because it reads a bulk dataset rather than
+a TMDb payload. So weight class B can match a person's name on a title whose
+`credits` are empty, and `GET /titles/{id}` correctly answers such a title
+with neither `cast` nor `crew`. The two are populated by different pipelines
+and neither implies the other.
+
 ⏳ **`imdb_id`, `birth_year`, `death_year` and `biography` are not built, and
 they are not deferred pending a decision — they are a different milestone's
 network budget.** None of them is on a `credits.cast[]`, `credits.crew[]` or
