@@ -69,6 +69,7 @@ from pydantic import AwareDatetime
 from usher.domain.taste import Centroid, GenreAffinity
 from usher.ports.embedding import Embedder
 from usher.ports.repository import (
+    LibraryGenres,
     StoredTaste,
     TasteRepository,
     TitleEmbeddingRepository,
@@ -182,6 +183,51 @@ class TasteService:
         self._taste = taste
         self._embedder = embedder
         self._now = now
+        # --- the two memos, and the lifetime that makes them safe ----------
+        #
+        # **Both die with this object, and this object is per request or per
+        # unit of work.** Verified rather than assumed, because a wrong cache
+        # lifetime on a per-user read is a cross-household data leak and not a
+        # latency regression. The two composition roots:
+        #
+        # - `api/deps.py:get_taste_service` is a `Depends` with no
+        #   `use_cache=False`, so FastAPI builds exactly one per request and
+        #   drops it when the response is sent.
+        # - `composition.build_pipeline` builds one per `Pipeline`, which is
+        #   one per `AsyncSession`: a CLI command, or one turn of
+        #   `api/lanes.py:_run_worker`'s loop.
+        #
+        # The worker's is the longest, and it is bounded by what one pass can
+        # ask *twice*. `JobWorker.run_once` claims up to `job_batch_size` jobs
+        # in one statement, and `uq_jobs_kind_key` allows one pending row per
+        # `(kind, key)` -- `JobKind.CURATE` keys on the household -- so one
+        # claimed batch cannot hold two generations for one household. The
+        # second ask therefore always comes from inside the *same* job:
+        # `CandidatePoolService.for_user`'s `genre_affinity` then `centroid`,
+        # one transaction, one snapshot, where the two reads are guaranteed to
+        # agree anyway. A `WATCH_HISTORY` job later in the same batch moves the
+        # history and is followed by no second ask for that household.
+        #
+        # **That argument is about `src/` as it stands, so the memo does not
+        # rest on it**: `_engaged` re-reads whenever a caller holding a
+        # watermark presents one that disagrees with the memo's. Two existing
+        # cases are what made that necessary rather than tidy -- they hold one
+        # service across a merge and require the second read to see it, which
+        # is ADR-0020's whole scheme -- and both stayed green, unedited,
+        # through this change. See `_engaged`.
+        #
+        # Keyed by `user_id` and never global. A memo keyed on nothing answers
+        # the second household with the first one's history, and the affinity,
+        # the centroid, the candidate pool and the shelves an LLM is paid to
+        # name are then all about somebody else's viewing -- rendered
+        # perfectly, raising nothing.
+        # `test_one_households_window_is_never_answered_from_anothers` is the
+        # assertion; the bound on the key space is the `users` table, which v1
+        # holds one row of.
+        self._engaged_windows: dict[uuid.UUID, _Memoised] = {}
+        # The library-wide aggregate takes no `user_id` at all, so there is no
+        # household to key it by and nothing to leak. See `_library_genres`.
+        self._library_genres_memo: LibraryGenres | None = None
 
     async def centroid(self, user_id: uuid.UUID) -> Centroid | None:
         """This household's taste as one unit vector, or `None`.
@@ -219,7 +265,12 @@ class TasteService:
             # stands until the household's history moves.
             return _as_centroid(stored)
 
-        window = await self._engaged(user_id)
+        # **The watermark read four lines up is handed to the memo**, which is
+        # what makes it self-invalidating for free: this is the one caller that
+        # already holds `max(updated_at)` for its own reasons, so the memo is
+        # checked against the same fact ADR-0020 invalidates the *stored* row
+        # on, and costs no statement to check it with.
+        window = await self._engaged(user_id, at=_Reading(watermark))
         vectors = await self._embeddings.list_for_titles([entry.title_id for entry in window])
         # An absent vector is dropped from the mean, never averaged in as an
         # origin -- ADR-0014. A zero here does not mean "no opinion": it drags
@@ -348,7 +399,7 @@ class TasteService:
         if total_weight == 0.0:
             return []
 
-        library = await self._taste.library_genre_counts()
+        library = await self._library_genres()
         if library.tagged_titles == 0:
             # An empty catalog is `[]`, never a `ZeroDivisionError` in the
             # request path -- the naive spelling divides by the owned total.
@@ -378,23 +429,139 @@ class TasteService:
         affinities.sort(key=lambda one: (-one.lift, one.genre))
         return affinities[:_MAX_AFFINITY_ROWS]
 
-    async def _engaged(self, user_id: uuid.UUID) -> Sequence["_Engaged"]:
+    async def _engaged(
+        self, user_id: uuid.UUID, *, at: "_Reading | None" = None
+    ) -> Sequence["_Engaged"]:
         """The recency-ordered engaged window, and the *only* history read in
-        this module.
+        this module -- **read once per household per service, and again only
+        if the household's history moves under it**.
 
         `list_recent` owns the population (`played`), the episode rollup, the
         one-row-per-title dedup and the `last_played_at DESC NULLS LAST`
-        order; this method owns nothing but the shape. See the module
-        docstring for why there is no second statement here.
+        order; this method owns nothing but the shape and the memo. See the
+        module docstring for why there is no second statement here.
+
+        **Why the memo, in statements.** Both public methods open with this
+        call -- they are *"two answers to one question"*, which is this
+        module's opening sentence and the reason they share a class -- so
+        every caller holding one service pays for the window once per method.
+        `CandidatePoolService.for_user` calls `genre_affinity` and then
+        `centroid`, so one generation on a deployment with an embedder read
+        this twice; `list_recent` is an episode rollup and dedup over
+        `watch_states`, whose siblings measure 100-300 ms against the
+        1,277,878-watch-state ceiling `.claude/rules/rows-and-genome.md`
+        records. The two calls are inside one job and one transaction, so the
+        second was guaranteed to return what the first did.
+
+        **`at` is what keeps this from being a second, quieter staleness
+        bug**, and it was two existing cases rather than an argument that put
+        it here. `centroid` reads the household's `max(updated_at)` before
+        anything else -- ADR-0020's fingerprint, and the thing that decides
+        whether the *stored* row still stands -- so it is the one caller that
+        can say "the history has moved since you filled this" for free. Hand
+        it the same watermark and a memo filled at an older one is discarded:
+        `test_a_newer_watch_state_recomputes_the_centroid_without_any_event`
+        and `test_a_household_below_the_minimum_gets_a_written_refusal_and_is_
+        reclaimed_exactly_once` both hold one service across a merge, both
+        failed against a memo without this, and both stayed unedited with it.
+
+        `genre_affinity` passes nothing, because the read that would let it
+        pass something is a statement -- and buying a watermark to save a
+        window is the trade this method exists to refuse. A memo filled by it
+        therefore carries no reading, and the first caller that *does* hold one
+        adopts it: what remains unobservable is a history that moves between a
+        `genre_affinity` and a `centroid` on one service, which no caller in
+        `src/` performs a write between.
+
+        **What a memo here is not.** It is not `user_taste`'s fingerprint
+        scheme in miniature and must never grow into one: that row is a
+        *stored* artefact whose staleness has to survive a process restart,
+        and this is a value living for one request. `__init__` argues the
+        lifetime, which is the half that has to be right.
         """
+        held = self._engaged_windows.get(user_id)
+        if held is not None and (at is None or held.at is None or held.at == at):
+            if at is not None and held.at is None:
+                # The first reading to arrive is adopted, so the *next*
+                # disagreement is detectable. Without this a memo filled by
+                # `genre_affinity` would stay unvalidatable for the life of the
+                # service and every later `centroid` would accept it.
+                self._engaged_windows[user_id] = _Memoised(window=held.window, at=at)
+            return held.window
         recent = await self._watch_states.list_recent(user_id, limit=_WINDOW)
-        return [_Engaged(entry.title_id, entry.play_count) for entry in recent]
+        window = [_Engaged(entry.title_id, entry.play_count) for entry in recent]
+        # Stored even when empty, and `held is not None` rather than a
+        # truthiness test for exactly that reason: a household that has watched
+        # nothing is the *common* answer on a fresh install, and a memo that
+        # treated `[]` as a miss would re-read on every ask for precisely the
+        # households with nothing to re-read.
+        self._engaged_windows[user_id] = _Memoised(window=window, at=at)
+        return window
+
+    async def _library_genres(self) -> LibraryGenres:
+        """How many owned titles carry each genre -- **once per service**.
+
+        `TasteRepository.library_genre_counts` takes no `user_id`: it is an
+        `unnest(genres) GROUP BY` over the whole owned library, identical for
+        every household and unchanged between requests, and on the measured
+        1,271,570-title catalog it was paid once per generation *and* once per
+        home-screen build. It is the denominator of every lift above, so it is
+        read on the path that a screen-cache hit was supposed to make free.
+
+        **Memoised here rather than on the repository**, which is the
+        placement question this method exists to answer. A memo on
+        `PostgresTasteRepository` would have the same lifetime -- the session
+        -- and would be invisible to any later caller that wanted a *fresh*
+        count after a walk landed, because a repository method that quietly
+        stops issuing its statement is not a thing a caller can opt out of.
+        The service is the object whose lifetime is argued (`__init__`), so
+        the memo goes where the argument is.
+
+        **Not a process-wide cache, and that is deliberate.** Library-wide
+        counts move whenever a walk merges items or a title gains a genre, and
+        a process-scoped memo would need a TTL, an invalidation, or an
+        argument about how stale a genre baseline may be -- none of which this
+        milestone has measured. Per instance is bounded by construction: the
+        staleness window is one request, which is shorter than the 30 s screen
+        cache already sitting in front of it.
+        """
+        if self._library_genres_memo is None:
+            self._library_genres_memo = await self._taste.library_genre_counts()
+        return self._library_genres_memo
 
 
 @dataclass(frozen=True, slots=True)
 class _Engaged:
     title_id: uuid.UUID
     play_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class _Reading:
+    """One `max(updated_at)` over a household's `watch_states`, wrapped.
+
+    Wrapped rather than passed bare so that **"no reading was taken" and "the
+    reading is `None`" are different values**. `TasteRepository.watermark`
+    answers `None` for a household with no history at all -- the common state
+    on a fresh install -- and a bare `AwareDatetime | None` parameter would
+    make that indistinguishable from `genre_affinity`, which takes no reading
+    because taking one is the statement the memo exists to save. Collapsing
+    them makes every new household's memo permanently unvalidatable.
+    """
+
+    watermark: AwareDatetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Memoised:
+    """One household's engaged window and the reading it was taken at.
+
+    `at` is `None` when the caller that filled it held no reading; the first
+    caller that does adopts it. See `TasteService._engaged`.
+    """
+
+    window: Sequence[_Engaged]
+    at: _Reading | None
 
 
 def _weight(rank: int, population: int, play_count: int) -> float:

@@ -1219,6 +1219,25 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
         # The same wiring `api/deps.py` builds per request, minus the request:
         # `taste` and `affinities` are values the composer hands over, because
         # a provider may import only `domain/` and `ports/`.
+        #
+        # **`affinities` is a callable here for the reason it is one there**
+        # (`ports/rows.py` argues it): the read behind it is three statements,
+        # and only `GenreAffinityProvider` awaits them.
+        #
+        # One consequence is specific to this command and worth naming, since
+        # `--repeat` exists to produce a number somebody quotes. The affinity
+        # read used to happen *once*, before the timed loop, so no repeat paid
+        # for it; it is now inside every run that reaches the provider. Two of
+        # its three statements -- `list_recent` and the library-wide genre
+        # aggregate -- are memoised on `TasteService`, which is one object for
+        # this whole command, so run 1 pays them and runs 2..N do not; the
+        # `list_by_ids` over the window is paid by each. Deliberately *not*
+        # wrapped in the route's per-request memo (`api/deps.py:_Affinities`):
+        # a repeat that skipped the read entirely would report a cold compose
+        # that never happens on the route.
+        #
+        # No lambda-in-a-loop hazard: this closes over `pipeline` and `user`,
+        # both bound once above.
         ctx = RowContext(
             user=user,
             now=lambda: datetime.now(UTC),
@@ -1230,7 +1249,7 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
             people=pipeline.people,
             credits=pipeline.credits,
             collections=pipeline.collections,
-            affinities=await pipeline.taste.genre_affinity(user.id),
+            affinities=lambda: pipeline.taste.genre_affinity(user.id),
             curated=pipeline.curated_rows,
         )
         cache = RowCache(clock=lambda: datetime.now(UTC))

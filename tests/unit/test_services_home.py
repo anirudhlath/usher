@@ -15,18 +15,22 @@ to "what does a fake row do", one file away from the one `tests/fakes/` already
 holds.
 """
 
+import dataclasses
 from collections import Counter
 from collections.abc import Sequence
 
 import pytest
 
 from tests.fakes.row_provider import FakeRow, FakeRowProvider
-from tests.unit.rows import Library
+from tests.unit.rows import NOW, Library
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.rows import BuiltRow, RowCard, RowFamily
+from usher.domain.taste import GenreAffinity
 from usher.ports.rows import RowContext, ScoredRow
 from usher.services.home import _MAX_PER_FAMILY, HomeService
+from usher.services.rows.cache import RowCache
+from usher.services.rows.genre_affinity import GenreAffinityProvider
 
 
 @pytest.fixture
@@ -504,3 +508,61 @@ async def test_a_proposal_the_cap_declined_is_selected_zero_rather_than_absent(
     declined = [one for one in report.providers if one.proposed == 1 and one.selected == 0]
     assert len(declined) == 4, "the cap declined nothing, so the case proves nothing"
     assert all(one.built == 0 for one in declined)
+
+
+async def test_a_screen_the_cache_can_answer_reads_no_taste_at_all(ctx: RowContext) -> None:
+    """**PRD 06's ~30 s screen cache is meant to cost nothing, and one
+    dependency was making it cost three statements.**
+
+    `RowContext.affinities` was `await taste.genre_affinity(user.id)` evaluated
+    while FastAPI assembled the context -- i.e. before `compose_report` could
+    look in the cache -- so a screen hit had already paid `list_recent(50)`,
+    `list_by_ids(50)` and the library-wide `unnest(genres) GROUP BY`. On the
+    measured 1,271,570-title catalog that is the most expensive thing a *hit*
+    does, and most requests are hits.
+
+    So the field is a callable, awaited by the one provider that reads it, and
+    this case asserts both halves of what that has to mean:
+
+    - **one** read on a miss, which is what makes the deferral a deferral and
+      not a field quietly wired to nothing (the failure
+      `.claude/rules/testing-discipline.md` records for this exact dependency);
+    - **still one** after a second compose the cache answers, which is the
+      finding.
+
+    **What "before" was, stated exactly, because there is no honest count to
+    quote here.** Against the old shape this case is not expressible at all --
+    the field was the sequence, so a counting callable in it fails inside
+    `GenreAffinityProvider.propose` with `TypeError: 'function' object is not
+    subscriptable`, which is what it did. The before/after *number* belongs to
+    the dependency and is measured there:
+    `test_api_home.py::test_the_route_does_not_read_a_households_taste_until_a_
+    row_asks_for_it` went from 1 read to 0 at context assembly. This case is
+    the other half -- that the read the assembly no longer does is done by the
+    composition that needs it, and by no other.
+    """
+    reads = 0
+
+    async def affinities() -> Sequence[GenreAffinity]:
+        nonlocal reads
+        reads += 1
+        return (GenreAffinity(genre="Western", lift=4.0, support=4),)
+
+    deferred = dataclasses.replace(ctx, affinities=affinities)
+    cache = RowCache(clock=lambda: NOW)
+    service = HomeService(
+        providers=[GenreAffinityProvider(), _stub("alpha", score=0.5)], cache=cache
+    )
+
+    first = await service.compose(deferred)
+
+    assert reads == 1, "the row that reads the affinity never asked for it"
+
+    second = await service.compose(deferred)
+
+    assert reads == 1, "a screen served from the cache still paid for the household's taste"
+    # The premise: the second compose really was a cache hit rather than a
+    # second composition that happened to agree. `_slugs` is the screen, and a
+    # miss here would re-propose and rebuild.
+    assert _slugs(second) == _slugs(first)
+    assert cache.get_screen(ctx.user.id) is not None

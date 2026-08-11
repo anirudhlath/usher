@@ -59,10 +59,15 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.taste import Centroid
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
+from usher.ports.repository import LibraryGenres, RecentWatch
 from usher.services.taste import TasteService
 
 NOW = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
 USER = uuid.UUID("00000000-0000-7000-8000-0000000000aa")
+# A second household in the same deployment. v1 has one user (PRD 07's
+# authentication seam), so this id never reaches a fixture that is not about
+# *scoping* -- and scoping is exactly what a memo on a per-user read can lose.
+OTHER = uuid.UUID("00000000-0000-7000-8000-0000000000bb")
 
 _DIMENSION = 384
 
@@ -116,10 +121,15 @@ class _Household:
     write instant is not the household's viewing instant.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, watch_states: FakeWatchStateRepository | None = None) -> None:
         self.titles = FakeTitleRepository()
         self.embeddings = FakeTitleEmbeddingRepository(catalog=self.titles)
-        self.watch_states = FakeWatchStateRepository()
+        # Injectable so a counting subclass can be wired *before* the taste
+        # fake binds to it: `FakeTasteRepository` computes its watermark from
+        # whatever history object it was handed, so swapping the attribute
+        # after construction would leave the two halves modelling two
+        # different `watch_states` tables.
+        self.watch_states = FakeWatchStateRepository() if watch_states is None else watch_states
         self.media_items = FakeMediaItemRepository()
         self.taste = FakeTasteRepository(
             self.watch_states, titles=self.titles, media_items=self.media_items
@@ -137,6 +147,7 @@ class _Household:
         runtime_seconds: int | None = 7200,
         days_ago: int | None = None,
         genres: Sequence[str] = (),
+        user_id: uuid.UUID = USER,
     ) -> uuid.UUID:
         title_id = uuid.uuid4()
         self._seeded += 1
@@ -144,7 +155,7 @@ class _Household:
         await self.watch_states.merge_from_source(
             [
                 WatchStateMerge(
-                    user_id=USER,
+                    user_id=user_id,
                     title_id=title_id,
                     episode_id=None,
                     position_seconds=position_seconds,
@@ -839,3 +850,208 @@ async def test_support_counts_engaged_titles_rather_than_a_weight() -> None:
     affinities = await house.service().genre_affinity(USER)
 
     assert [one.support for one in affinities] == [6]
+
+
+# --- what one household's history costs to read, and how often ------------
+
+
+class _CountingWatchStates(FakeWatchStateRepository):
+    """`FakeWatchStateRepository` with a tally on the one read this module makes.
+
+    A subclass rather than a counter on the fake itself: `list_recent` is
+    contract-tested against Postgres, and a tally is a fact about *this* file's
+    question ("how many times") rather than about the port's answer.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.recent_reads = 0
+
+    async def list_recent(self, user_id: uuid.UUID, *, limit: int = 20) -> list[RecentWatch]:
+        self.recent_reads += 1
+        return await super().list_recent(user_id, limit=limit)
+
+
+class _CountingTaste(FakeTasteRepository):
+    """`FakeTasteRepository` with a tally on the library-wide aggregate."""
+
+    def __init__(
+        self,
+        watch_states: FakeWatchStateRepository,
+        *,
+        titles: FakeTitleRepository,
+        media_items: FakeMediaItemRepository,
+    ) -> None:
+        super().__init__(watch_states, titles=titles, media_items=media_items)
+        self.library_reads = 0
+
+    async def library_genre_counts(self) -> LibraryGenres:
+        self.library_reads += 1
+        return await super().library_genre_counts()
+
+
+async def _two_households(house: _Household) -> None:
+    """One library, two households, one genre each -- so a memo that answered
+    the wrong household's question is visible as a *genre*, not only as a count.
+
+    The library is 2 westerns, 2 horrors and 96 dramas, so either household's
+    own genre clears `_MIN_LIFT` by a factor of tens while the genre the *other*
+    one watches clears nothing at all.
+    """
+    for _ in range(6):
+        await house.watched(None, genres=("western",))
+    for _ in range(6):
+        await house.watched(None, genres=("horror",), user_id=OTHER)
+    await _owned(house, ("western",), count=2)
+    await _owned(house, ("horror",), count=2)
+    await _owned(house, ("drama",), count=96)
+
+
+async def test_the_engaged_window_is_read_once_however_many_answers_are_asked_of_it() -> None:
+    """**Two public methods, one history read**, and the count is the assertion.
+
+    `genre_affinity` and `centroid` are *"two answers to one question"* --
+    this module's own opening sentence -- and both of them open with
+    `_engaged`. Unmemoised, one `CandidatePoolService.for_user` on a deployment
+    with an embedder pays `list_recent(50)` twice for a window that cannot have
+    moved between them: the two calls are inside one job, inside one
+    transaction, so the second read is guaranteed to return what the first did.
+    `list_recent` is an episode-rollup and dedup over `watch_states`, whose
+    siblings measure 100-300 ms against the 1,277,878-watch-state ceiling in
+    `.claude/rules/rows-and-genome.md`, so the saving is a read of that size per
+    generation.
+
+    **Measured before the memo landed: `recent_reads == 2`.** The assertion is
+    the count and not a timing, because a timing assertion on a fake measures
+    the fake.
+    """
+    counted = _CountingWatchStates()
+    house = _Household(watch_states=counted)
+    pole, _ = planted_pair(math.pi / 2)
+    for _ in range(6):
+        await house.watched(pole, genres=("western",))
+    await _owned(house, ("western",), count=2)
+    await _owned(house, ("drama",), count=98)
+    service = house.service()
+
+    affinities = await service.genre_affinity(USER)
+    centroid = await service.centroid(USER)
+
+    assert counted.recent_reads == 1, "the engaged window was read more than once"
+    # The premise: both answers are real ones. A memo that returned an empty
+    # window would also read once, and would be this case passing for the one
+    # reason it must not.
+    assert [one.genre for one in affinities] == ["western"]
+    assert centroid is not None
+    assert _cos(centroid.vector, pole) == pytest.approx(1.0, abs=1e-9)
+
+
+async def test_one_households_window_is_never_answered_from_anothers() -> None:
+    """**The memo is keyed by household, and this is the case that says so.**
+
+    A cache on a per-user read is the one optimisation whose failure mode is a
+    data leak rather than a slow screen: a memo keyed on nothing at all answers
+    the second household with the first one's watch history, and every artefact
+    downstream -- the affinity, the centroid, the candidate pool, the shelves an
+    LLM is paid to name -- is then about somebody else's viewing. It raises
+    nothing and renders perfectly.
+
+    Two reads for two households is the *correct* count, so this case asserts
+    the count **and** the answers: the count alone is satisfied by a memo that
+    re-reads and then returns the wrong entry anyway.
+    """
+    counted = _CountingWatchStates()
+    house = _Household(watch_states=counted)
+    await _two_households(house)
+    service = house.service()
+
+    mine = await service.genre_affinity(USER)
+    theirs = await service.genre_affinity(OTHER)
+
+    assert [one.genre for one in mine] == ["western"]
+    assert [one.genre for one in theirs] == ["horror"]
+    assert counted.recent_reads == 2, "one household answered from the other's memo"
+
+
+async def test_the_library_wide_genre_aggregate_is_read_once_and_not_once_per_answer() -> None:
+    """**`library_genre_counts` takes no `user_id`, and that is the whole
+    argument for memoising it where the per-user reads cannot be.**
+
+    It is an `unnest(genres) GROUP BY` over the entire owned library -- 1.27M
+    titles on the measured catalog -- and its answer is identical for every
+    household and for every ask inside one request. Unmemoised it is paid once
+    per generation *and* once per home-screen build, for a number that changes
+    only when the library does.
+
+    **The memo is on `TasteService`, not on the repository**, and that is a
+    deliberate placement rather than the convenient one: a memo on
+    `PostgresTasteRepository` would be scoped to the session, which is right,
+    but it would also silently apply to `usher curate`'s reporting path and to
+    any future caller that wanted a *fresh* count after a walk landed. The
+    service is the object whose lifetime this module can argue (see
+    `TasteService.__init__`), so it is where the argument goes.
+
+    **Measured before the memo landed: `library_reads == 3`.**
+    """
+    house = _Household()
+    counted = _CountingTaste(house.watch_states, titles=house.titles, media_items=house.media_items)
+    house.taste = counted
+    await _two_households(house)
+    service = house.service()
+
+    first = await service.genre_affinity(USER)
+    again = await service.genre_affinity(USER)
+    theirs = await service.genre_affinity(OTHER)
+
+    assert counted.library_reads == 1, "the library-wide aggregate was read more than once"
+    # The premise, in both directions: the aggregate really is the same answer
+    # for two households, and it really is being *used* -- an affinity is a
+    # ratio against it, so a memo handing back an empty `LibraryGenres` would
+    # return no affinities at all rather than these.
+    assert [one.genre for one in first] == ["western"]
+    assert [one.genre for one in again] == ["western"]
+    assert [one.genre for one in theirs] == ["horror"]
+
+
+async def test_a_history_that_moves_is_re_read_rather_than_answered_from_the_memo() -> None:
+    """**The memo's own invalidation, asserted where the memo is -- on the
+    count.**
+
+    `test_a_newer_watch_state_recomputes_the_centroid_without_any_event` and
+    its sibling already pin that a moved history produces a *different answer*;
+    both failed against a first draft of the memo and are what put the
+    watermark check into `_engaged`. This case pins the mechanism they exercise
+    from the other side, and it is the one that reaches the branch neither of
+    them can: the memo here is filled by `genre_affinity`, which takes **no**
+    watermark reading, so the first `centroid` has to *adopt* the reading it
+    holds for the disagreement to be detectable at all.
+
+    Delete that adoption and this case fails on both arms at once -- one read
+    instead of two, and an `after` centroid still pointing at `a` -- which is
+    the whole failure mode: a household's taste frozen at whatever its first
+    ask of the process saw.
+    """
+    counted = _CountingWatchStates()
+    house = _Household(watch_states=counted)
+    a, b = planted_pair(math.pi / 2)
+    for _ in range(5):
+        await house.watched(a)
+    service = house.service()
+
+    # Fills the memo with no reading taken -- `genre_affinity` reads no
+    # watermark, and buying one to save a window is the trade `_engaged`
+    # refuses.
+    await service.genre_affinity(USER)
+    before = await service.centroid(USER)
+
+    assert counted.recent_reads == 1, "the centroid re-read a window it was handed"
+
+    for _ in range(20):
+        await house.watched(b)
+    after = await service.centroid(USER)
+
+    assert counted.recent_reads == 2, "the moved history was answered from a stale memo"
+    assert before is not None
+    assert after is not None
+    assert _cos(before.vector, a) == pytest.approx(1.0, abs=1e-9)
+    assert _cos(after.vector, b) > _cos(after.vector, a)

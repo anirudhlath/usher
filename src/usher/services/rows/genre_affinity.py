@@ -167,6 +167,15 @@ class GenreAffinityProvider(RowProvider):
         # household has watched nothing. **Never "the library's most common
         # genres"**, which is the popular-titles fallback wearing a taste row's
         # title.
+        #
+        # **Awaited here, and this provider is the only thing in the project
+        # that awaits it.** That is what makes deferring it worth anything: the
+        # three statements behind this call are paid on the compositions that
+        # reach this line and on no others, so a screen served from
+        # `RowCache.get_screen` -- which is most requests -- costs nothing at
+        # all. `ports/rows.py` argues the shape; the composer decides when this
+        # runs, which is why the memo is not here.
+        affinities = await ctx.affinities()
         return [
             ScoredRow(
                 row=GenreAffinityRow(affinity, candidates=self._candidates, cards=self._cards),
@@ -177,7 +186,7 @@ class GenreAffinityProvider(RowProvider):
             # The order is the one it was handed. Re-sorting by `support` here
             # is the volume ranking arriving one layer later than Task 23
             # refused it.
-            for affinity in ctx.affinities[: self._limit]
+            for affinity in affinities[: self._limit]
         ]
 
 

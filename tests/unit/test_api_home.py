@@ -12,13 +12,14 @@ import dataclasses
 import inspect
 import pathlib
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
+from pydantic import AwareDatetime
 
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
@@ -28,6 +29,14 @@ from usher.api.deps import get_home_service, get_row_cache, get_row_context
 from usher.api.dto.home import RowResponse
 from usher.config import Settings
 from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
+from usher.domain.taste import GenreAffinity
+from usher.ports.embedding import Embedder
+from usher.ports.repository import (
+    TasteRepository,
+    TitleEmbeddingRepository,
+    TitleRepository,
+    WatchStateRepository,
+)
 from usher.ports.rows import RowContext
 from usher.services.home import HomeService
 from usher.services.rows import ROW_PROVIDERS
@@ -35,6 +44,40 @@ from usher.services.rows.cache import RowCache
 from usher.services.taste import TasteService
 
 EXTERNAL_ID = "emby-item-9f31a2"
+
+
+class _CountingTaste(TasteService):
+    """`TasteService` with a tally on the one method this route calls.
+
+    A subclass rather than a stub, so the count is taken over the *real*
+    service reading the real fakes: a stub would answer the "how many times"
+    question and lose the "with what" one, which is the assertion that stops a
+    deferred field being a field wired to nothing.
+    """
+
+    def __init__(
+        self,
+        *,
+        watch_states: WatchStateRepository,
+        embeddings: TitleEmbeddingRepository,
+        titles: TitleRepository,
+        taste: TasteRepository,
+        embedder: Embedder | None,
+        now: Callable[[], AwareDatetime],
+    ) -> None:
+        super().__init__(
+            watch_states=watch_states,
+            embeddings=embeddings,
+            titles=titles,
+            taste=taste,
+            embedder=embedder,
+            now=now,
+        )
+        self.affinity_reads = 0
+
+    async def genre_affinity(self, user_id: uuid.UUID) -> list[GenreAffinity]:
+        self.affinity_reads += 1
+        return await super().genre_affinity(user_id)
 
 
 class _Seeded:
@@ -169,9 +212,15 @@ async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -
     first draft of this docstring dismissed -- it is derived from
     `dataclasses.fields(ctx)`, so it grows with the dataclass and there is
     nothing to keep in step. Nothing on the real context is legitimately
-    `None`: `affinities` is `()` when no genre cleared the floors and `now` is
-    a callable. It kills all ten, including the two the behavioural half
-    cannot see.
+    `None`: `now` is a callable, and so is `affinities` since the screen-cache
+    finding deferred it -- **which is the shape this scan has to keep working
+    against**, because "a field that is a callable" and "a field wired to
+    nothing" are one keystroke apart and only one of them is legal. A callable
+    is not `None`, so a plant there still dies here; what this scan cannot see
+    is a callable that answers `[]` forever, which is why
+    `test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_it`
+    asserts a *genre* off the real one. It kills all ten, including the two the
+    behavioural half cannot see.
 
     The behavioural half is kept anyway, and it is the half with the *reason*
     in it: a scan proves the field is populated, and `propose()` proves it is
@@ -213,6 +262,79 @@ async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -
         assert await provider.propose(ctx) == [], (
             f"{type(provider).__name__} could not read the context the route builds"
         )
+
+
+async def test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_it() -> None:
+    """**The genre-affinity read used to happen before the screen cache could
+    answer**, because `RowContext.affinities` was a value this dependency
+    computed rather than a callable a provider awaits.
+
+    FastAPI resolves the whole dependency graph before the handler runs, and
+    `HomeService.compose_report` only looks in the cache once it has a context
+    -- so every `GET /home`, hit or miss, paid `list_recent(50)` +
+    `list_by_ids(50)` + the library-wide `unnest(genres) GROUP BY` for a value
+    exactly one of the ten providers reads. On the measured 1,271,570-title
+    catalog those are the three most expensive statements a *cached* screen
+    could possibly issue.
+
+    Three assertions, and each rules out a different wrong shape:
+
+    - **nothing is read while the context is assembled** -- the finding;
+    - **the first await returns the real answer** -- which is what stops the
+      repair being the failure `.claude/rules/testing-discipline.md` records
+      for this exact dependency, a field wired to something that reads as
+      populated and delivers nothing (`affinities=lambda: []` would satisfy the
+      count assertion alone, so the *genre* is asserted);
+    - **the second await costs nothing more**, because two providers reading it
+      one day must not be two reads.
+
+    The other half of the finding -- that a screen the cache answers never
+    awaits it at all -- is
+    `test_services_home.py::test_a_screen_the_cache_can_answer_reads_no_taste_
+    at_all`, because it is the composer that decides.
+    """
+    library = Library()
+    # Four owned-and-finished westerns against twenty owned dramas: support
+    # clears `_MIN_SUPPORT` and lift clears `_MIN_LIFT` by a factor of six, so
+    # the affinity this route delivers is a real one rather than `()`.
+    for index in range(4):
+        watched = await library.title(f"Western {index}", genres=("Western",))
+        await library.finished(watched, at=days_ago(index + 1))
+    for index in range(20):
+        await library.title(f"Drama {index}", genres=("Drama",))
+    taste = _CountingTaste(
+        watch_states=library.watch_states,
+        embeddings=FakeTitleEmbeddingRepository(),
+        titles=library.titles,
+        taste=FakeTasteRepository(
+            library.watch_states, titles=library.titles, media_items=library.media_items
+        ),
+        embedder=None,
+        now=lambda: datetime.now(UTC),
+    )
+
+    ctx = await get_row_context(
+        user=USER,
+        titles=library.titles,
+        media_items=library.media_items,
+        watch_states=library.watch_states,
+        episodes=library.episodes,
+        neighbors=library.neighbors,
+        people=library.people,
+        credits=library.credits,
+        collections=library.collections,
+        curated=library.curated_rows,
+        taste=taste,
+    )
+
+    assert taste.affinity_reads == 0, "the route read the household's taste to build a context"
+
+    first = await ctx.affinities()
+    second = await ctx.affinities()
+
+    assert [one.genre for one in first] == ["Western"], "the deferred field delivered nothing"
+    assert list(second) == list(first)
+    assert taste.affinity_reads == 1, "the deferred field was not memoised for the request"
 
 
 async def test_the_screen_is_rows_in_the_order_the_server_composed_them(

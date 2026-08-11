@@ -65,9 +65,19 @@ class Library:
     expects at position 0 without reaching back into the fakes.
     """
 
-    def __init__(self) -> None:
-        self.titles = FakeTitleRepository()
-        self.media_items = FakeMediaItemRepository()
+    def __init__(
+        self,
+        *,
+        titles: FakeTitleRepository | None = None,
+        media_items: FakeMediaItemRepository | None = None,
+    ) -> None:
+        # Both are injectable so a case can count the *statements* a row costs
+        # rather than only the cards it produces. They are wired into three
+        # other fakes below (`FakeCreditRepository`, the collections catalog,
+        # `available_copies`), which is why a case substitutes them here rather
+        # than assigning over the attributes afterwards.
+        self.titles = FakeTitleRepository() if titles is None else titles
+        self.media_items = FakeMediaItemRepository() if media_items is None else media_items
         self.watch_states = FakeWatchStateRepository()
         # **The fake *copies* the mapping it is constructed with**, so seeding
         # into a dict handed to the constructor reaches nothing -- and
@@ -425,6 +435,20 @@ class Library:
         affinities: Sequence[GenreAffinity] = (),
         now: datetime = NOW,
     ) -> RowContext:
+        """The wiring `api/deps.py` builds per request, over this household.
+
+        **`affinities` is taken as the sequence and wrapped here**, because
+        every case in every `test_rows_*.py` file is about what a provider does
+        with the affinities it is handed and none of them is about the field's
+        laziness. The two cases that *are* about it -- the route not reading
+        the household's taste to build a context, and a screen the cache can
+        answer reading none at all -- build their own callable so it can count.
+        """
+        held = tuple(affinities)
+
+        async def affinities_of() -> Sequence[GenreAffinity]:
+            return held
+
         return RowContext(
             user=USER,
             # Bound at call time rather than read from the module: a
@@ -441,5 +465,5 @@ class Library:
             credits=self.credits,
             collections=self.collections,
             curated=self.curated_rows,
-            affinities=tuple(affinities),
+            affinities=affinities_of,
         )

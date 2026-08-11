@@ -95,8 +95,9 @@ _PROVIDERS = {
     # unit test overriding `get_row_context` can see. This comment read
     # "twelfth", which is `RowContext`'s *field* count: that includes `now` and
     # `affinities`, and neither is a `Depends` (the clock is a lambda the
-    # function closes over, the affinities are awaited off `taste`). Two counts
-    # of two different things, one sentence.
+    # function closes over, and the affinities are a callable closing over the
+    # `taste` service, awaited later by the one provider that reads them). Two
+    # counts of two different things, one sentence.
     "curated_rows": get_curated_row_repository,
     "taste_repository": get_taste_repository,
     "default_user": get_default_user,

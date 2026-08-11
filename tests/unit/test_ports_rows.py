@@ -13,6 +13,7 @@ import ast
 import dataclasses
 import inspect
 import pathlib
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pytest
@@ -28,9 +29,19 @@ from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.rows import BuiltRow
-from usher.domain.taste import Centroid
+from usher.domain.taste import Centroid, GenreAffinity
 from usher.domain.watch import User
 from usher.ports.rows import Row, RowContext, RowProvider, ScoredRow
+
+
+async def _no_affinities() -> Sequence[GenreAffinity]:
+    """The field as the route hands it over: awaited, not held.
+
+    Empty because nothing in this file is about the affinity itself -- `[]` is
+    the common real answer (no genre cleared `_MIN_LIFT` and `_MIN_SUPPORT`)
+    and never a stand-in for "nothing computed this".
+    """
+    return ()
 
 
 def _context(*, taste: Centroid | None = None) -> RowContext:
@@ -46,7 +57,7 @@ def _context(*, taste: Centroid | None = None) -> RowContext:
         credits=FakeCreditRepository(),
         collections=FakeCollectionRepository(),
         curated=FakeCuratedRowRepository(),
-        affinities=(),
+        affinities=_no_affinities,
     )
 
 

@@ -51,7 +51,7 @@ why, and note that the count in `domain/rows.py` moves with it.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -180,6 +180,37 @@ class RowContext:
     sit beside it. A deployment without an embedder gets a home screen with
     **fewer rows, not worse rows**.
 
+    **And it is *awaited* rather than held, which is the one shape change this
+    dataclass has taken since M7.** It was `Sequence[GenreAffinity]`, computed
+    while the dependency graph resolved -- and FastAPI resolves that graph
+    before the handler runs, while `HomeService.compose_report` can only look
+    in the ~30 s screen cache once it has a context. So every `GET /home`,
+    hit or miss, paid `list_recent(50)` + `list_by_ids(50)` + a library-wide
+    `unnest(genres) GROUP BY` over 1.27M titles to fill a field that exactly
+    one of the ten providers reads, and a cache hit -- most requests -- paid
+    the most expensive thing on the path before it could answer for free.
+    The two available shapes were this and moving the cache lookup in front of
+    the context; this one is chosen because the other puts a *stale-by-design*
+    read in a dependency (the entry can expire or be invalidated between the
+    lookup and the compose, and the screen composed from the empty affinity
+    that follows is then cached for another 30 s -- a silently wrong screen
+    bought to save a read), and because a lazy field costs nothing on the miss
+    path it was already correct on.
+
+    **A callable here is not a licence for more of them.** The other eleven
+    are ports, a user and the clock -- and the clock is a callable for a
+    different reason entirely (a fixture has to be able to say what time it
+    is), not because reading it costs anything. This is the only field whose
+    *value* is the product of three statements, which is the whole of why it
+    is the only one deferred and the test of whether a twelfth should be. A
+    second lazily-awaited field would want the same argument made again, in
+    writing, and a context of callables is a context that has stopped saying
+    what a row may reach and started saying what it may run.
+    `test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_it`
+    pins the deferral and
+    `test_a_screen_the_cache_can_answer_reads_no_taste_at_all` pins what it
+    bought.
+
     **`curated` is the twelfth and it arrived with its reader**, which is the
     shape the two deleted fields did not have. M8's Task 15 adds it and
     `CuratedProvider` in one commit; the port
@@ -215,8 +246,11 @@ class RowContext:
     # The thirteenth, argued above. A `Sequence` rather than a `tuple` for the
     # reason `propose` returns one: a provider must not mutate what the
     # composer handed it, and the composer must not have to copy a list to
-    # hand it over.
-    affinities: Sequence[GenreAffinity]
+    # hand it over -- and a callable rather than the sequence itself, so a
+    # screen the cache can answer never pays for it. The composition root owns
+    # the memo, because "once per request" is a fact about the request and not
+    # about any row.
+    affinities: Callable[[], Awaitable[Sequence[GenreAffinity]]]
     # M8's one, and the fourteenth by that same historical count. It lands with
     # `CuratedProvider` (Task 15) rather than with the port and the table it
     # reads (Task 9), which is the discipline `search` and `taste` did not

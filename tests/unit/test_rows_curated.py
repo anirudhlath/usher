@@ -77,16 +77,20 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from tests.unit.rows import USER, Library
+from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.title_repository import FakeTitleRepository
+from tests.unit.rows import NOW, USER, Library
 from usher.domain.curation import SLUG_PREFIX, CuratedRow
 from usher.domain.ids import new_id
 from usher.domain.rows import DisplayHint, RowFamily
+from usher.domain.title import Title
 
 # The composer's own ordering, imported rather than re-spelled -- see
 # `test_one_score_for_the_whole_generation...`. Private to `services/home.py`
 # because nothing in `src/` may sort candidates but the composer; a test that
 # asserts the composer's order has to name the composer's order.
-from usher.services.home import _Candidate, _ranking
+from usher.services.home import HomeService, _Candidate, _ranking
+from usher.services.rows.cache import RowCache
 from usher.services.rows.curated import CURATED_SCORE, MAX_CURATED_ROWS, CuratedProvider, LLMRow
 
 # The instant a generation ran. A fixed literal rather than `datetime.now`:
@@ -779,3 +783,161 @@ def _without_prose(tree: ast.Module) -> ast.Module:
         ):
             node.body = node.body[1:] or [ast.Pass()]
     return tree
+
+
+# -- what a family of shelves costs to hydrate ------------------------------
+
+
+class _CountingTitles(FakeTitleRepository):
+    """`FakeTitleRepository` with a tally on the catalog read `hydrate` makes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.catalog_reads = 0
+        self.asked_for: list[list[uuid.UUID]] = []
+
+    async def list_by_ids(self, title_ids: Sequence[uuid.UUID]) -> list[Title]:
+        self.catalog_reads += 1
+        self.asked_for.append(list(title_ids))
+        return await super().list_by_ids(title_ids)
+
+
+class _CountingCopies(FakeMediaItemRepository):
+    """`FakeMediaItemRepository` with a tally on the ownership read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ownership_reads = 0
+
+    async def owned_title_ids(self, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        self.ownership_reads += 1
+        return await super().owned_title_ids(title_ids)
+
+
+async def _counted() -> tuple[Library, _CountingTitles, _CountingCopies]:
+    catalog = _CountingTitles()
+    copies = _CountingCopies()
+    return Library(titles=catalog, media_items=copies), catalog, copies
+
+
+async def _shelf(library: Library, position: int, cards: int) -> CuratedRow:
+    """One shelf of `cards` distinct titles, seeded at `position`."""
+    return await library.curated(
+        [await library.title(f"{_HEADINGS[position]} {index}") for index in range(cards)],
+        position=position,
+        title=_HEADINGS[position],
+    )
+
+
+async def test_a_family_of_shelves_hydrates_in_two_statements_rather_than_two_per_shelf() -> None:
+    """**One generation, one read of each kind -- the finding, as a count.**
+
+    `propose` returns up to five shelves from a *single* `list_for_user`, so
+    every card id in the family is already in hand before anything builds; and
+    `HomeService._MAX_PER_FAMILY` is 4, so four of them are built. Each
+    `BaseRow.build` issued its own `list_by_ids` and its own `owned_title_ids`
+    -- **eight round trips for the ~22 distinct ids one generation names**, all
+    of them inside one request, on a screen whose whole budget is 400 ms.
+
+    Measured before the shared read landed: `catalog_reads == 4` and
+    `ownership_reads == 4`.
+
+    **The count is not the whole assertion, and the other half is the one that
+    could go silently wrong.** A shared read hands every shelf the *union*, so
+    the failure mode a count cannot see is a shelf rendering the family's cards
+    instead of its own -- twenty-two cards on a four-card shelf, ordered by
+    whatever the union was read in, which is a populated row nobody would call
+    broken by looking at it. So each row's cards are asserted to be exactly its
+    own stored ids, in its own stored order, which is the property this whole
+    module exists for: the ordering *is* the artefact.
+    """
+    library, catalog, copies = await _counted()
+    stored = [await _shelf(library, position, cards=4) for position in range(4)]
+    by_position = sorted(stored, key=lambda one: one.position)
+    ctx = library.context()
+
+    proposed = await CuratedProvider().propose(ctx)
+    built = [await one.row.build(ctx) for one in proposed]
+
+    assert catalog.catalog_reads == 1, "the family read the catalog once per shelf"
+    assert copies.ownership_reads == 1, "the family read ownership once per shelf"
+    assert [row.slug for row in built] == [one.slug for one in by_position]
+    for row, one in zip(built, by_position, strict=True):
+        assert [card.title_id for card in row.cards] == list(one.card_title_ids), (
+            "a shelf rendered the family's cards rather than its own"
+        )
+
+
+async def test_a_shelf_the_composer_never_builds_costs_nothing() -> None:
+    """**At build time, not at propose time**, which is the difference between
+    a shared read and a read for rows nobody sees.
+
+    `propose` is the cheap phase (`services/home.py`), and the composer builds
+    at most `_MAX_PER_FAMILY` of the five shelves this provider may return --
+    so a family read taken while proposing would hydrate a shelf the per-family
+    cap is about to discard, every time a generation produced five. That is the
+    one-phase design ADR-0023 rejected, arriving inside one provider.
+
+    The premise is the second half: the same fixture, one shelf built, and the
+    reads appear. Without it `0 == 0` is also what a provider that never reads
+    anything produces.
+    """
+    library, catalog, copies = await _counted()
+    for position in range(5):
+        await _shelf(library, position, cards=4)
+    ctx = library.context()
+
+    proposed = await CuratedProvider().propose(ctx)
+
+    assert len(proposed) == MAX_CURATED_ROWS
+    assert catalog.catalog_reads == 0, "proposing hydrated shelves nobody has asked for"
+    assert copies.ownership_reads == 0
+
+    await proposed[0].row.build(ctx)
+
+    assert catalog.catalog_reads == 1
+    assert copies.ownership_reads == 1
+
+
+async def test_a_shelf_served_from_the_row_cache_reads_nothing_at_all() -> None:
+    """**A cached row skips the shared read, because it skips `build`.**
+
+    `HomeService._build` returns `RowCache.get_row`'s hit *before* touching the
+    row, so the family memo is never consulted -- it is per-`propose`, and a
+    second composition mints new `LLMRow`s over a fresh one. That has to stay
+    true in both directions: a cache hit must not pay for a read, and a memo
+    must not keep a shelf alive past its own TTL.
+
+    The clock steps 60 s: past `_SCREEN_TTL` (30 s), so the screen is
+    recomposed and every provider re-proposes, and well inside `LLMRow`'s
+    5-minute row TTL, so the shelves themselves are hits. That gap is the only
+    state in which this question is askable at all -- `RowCache.invalidate`
+    drops both halves together, and a shorter step is a screen hit that never
+    reaches a provider.
+    """
+    library, catalog, copies = await _counted()
+    for position in range(4):
+        await _shelf(library, position, cards=4)
+    ctx = library.context()
+    clock = NOW
+    cache = RowCache(clock=lambda: clock)
+    service = HomeService(providers=[CuratedProvider()], cache=cache)
+
+    first = await service.compose(ctx)
+
+    assert catalog.catalog_reads == 1
+    assert copies.ownership_reads == 1
+
+    clock = NOW + timedelta(seconds=60)
+    second = await service.compose(ctx)
+
+    assert catalog.catalog_reads == 1, "a shelf served from the row cache was hydrated again"
+    assert copies.ownership_reads == 1
+    # The premise, both halves: the screen really did expire (so this is not a
+    # screen hit that never reached the provider), and the rows really were
+    # served from the cache rather than rebuilt.
+    assert cache.get_row(USER.id, first[0].slug) is not None
+    assert [row.slug for row in second] == [row.slug for row in first]
+    assert [[card.title_id for card in row.cards] for row in second] == [
+        [card.title_id for card in row.cards] for row in first
+    ]

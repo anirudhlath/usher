@@ -8,7 +8,7 @@ direct naming of a *concrete* adapter, which is why the factory below is
 """
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, cast
 
@@ -36,6 +36,7 @@ from usher.db.repositories.taste import PostgresTasteRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import default_user, ensure_default_user
+from usher.domain.taste import GenreAffinity
 from usher.domain.watch import User
 from usher.ports.events import EventPublisher
 from usher.ports.jobs import JobQueue
@@ -586,6 +587,48 @@ def get_taste_service(
     )
 
 
+class _Affinities:
+    """This household's genre affinities, read on demand and then remembered.
+
+    **The whole point is that `__call__` may never run.** `RowContext`'s field
+    used to be the awaited *value*, which put three statements --
+    `list_recent(50)`, `list_by_ids(50)` and a library-wide `unnest(genres)
+    GROUP BY` over 1.27M titles -- in front of `HomeService.compose_report`'s
+    look in the ~30 s screen cache, on every request including the ones that
+    hit. Deferred, a hit costs nothing and a miss costs exactly what it did.
+
+    **Memoised because the field is a promise about the request, not about the
+    reader.** `GenreAffinityProvider` is the only thing that awaits it today
+    and awaits it once; a second reader tomorrow must not be a second read, and
+    a provider cannot arrange that for itself because a context is frozen
+    precisely so nothing can stash state on it between `propose` and `build`.
+    One request, one answer, at most one read.
+
+    **`_answer is None` is the miss test rather than falsiness**, because `[]`
+    is the *common* real answer -- no genre cleared `_MIN_LIFT` and
+    `_MIN_SUPPORT`, which is what most households produce -- and a memo that
+    read falsiness would re-read on every ask for exactly the households with
+    nothing to find. Same shape as `TasteService._engaged`'s own memo, one
+    layer down, and stated in both places because both are one keystroke from
+    the version that quietly does nothing.
+
+    Not a closure, so the memo has a name a reader can find and the docstring
+    has somewhere to live; `__slots__` because one is built per request.
+    """
+
+    __slots__ = ("_answer", "_taste", "_user_id")
+
+    def __init__(self, taste: TasteService, user_id: uuid.UUID) -> None:
+        self._taste = taste
+        self._user_id = user_id
+        self._answer: Sequence[GenreAffinity] | None = None
+
+    async def __call__(self) -> Sequence[GenreAffinity]:
+        if self._answer is None:
+            self._answer = await self._taste.genre_affinity(self._user_id)
+        return self._answer
+
+
 async def get_row_context(
     user: Annotated[User, Depends(get_default_user)],
     titles: Annotated[TitleRepository, Depends(get_title_repository)],
@@ -606,6 +649,15 @@ async def get_row_context(
     `TasteService` cannot appear on the context -- and recomputing the affinity
     inside a provider would need a `TasteRepository` field *and* a second copy
     of the lift arithmetic. `ports/rows.py` argues it at length.
+
+    **It is handed over as a callable, and nothing in this function reads the
+    household's taste.** `await taste.genre_affinity(user.id)` was evaluated
+    here, which is *before* `HomeService.compose_report` can look in the screen
+    cache -- FastAPI resolves the dependency graph and only then calls the
+    handler -- so a 30 s cache hit, which is most requests, had already paid
+    the three most expensive statements on the path. `_Affinities` defers them
+    to `GenreAffinityProvider`'s own `await` and memoises the answer for the
+    request.
 
     **`search` and `taste` used to be here and are not.** No provider read
     either, and `taste` cost a `user_taste` read on every request to deliver a
@@ -639,7 +691,7 @@ async def get_row_context(
         people=people,
         credits=credits,
         collections=collections,
-        affinities=await taste.genre_affinity(user.id),
+        affinities=_Affinities(taste, user.id),
         curated=curated,
     )
 

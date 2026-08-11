@@ -88,6 +88,7 @@ from opentelemetry import trace
 
 from usher.domain.curation import SLUG_PREFIX, CuratedRow
 from usher.domain.rows import DisplayHint, RowFamily
+from usher.domain.title import Title
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.services.rows.base import BaseRow
 
@@ -109,6 +110,69 @@ from usher.services.rows.base import BaseRow
 _TTL = timedelta(minutes=5)
 
 
+class _Family:
+    """One generation's cards, read once for whichever shelf builds first.
+
+    **This is the only thing in `services/rows/` that knows two rows can share
+    a read, and it exists because only this provider mints two rows from one
+    read.** `propose` returns up to `MAX_CURATED_ROWS` shelves out of a single
+    `list_for_user`, so every card id in the family is in hand before anything
+    builds; the composer then builds `HomeService._MAX_PER_FAMILY` of them, and
+    each `BaseRow.build` was issuing its own catalog read and its own ownership
+    read -- **eight statements for the ~22 distinct ids one generation names**,
+    inside one request, on a screen whose whole budget is 400 ms.
+
+    **Nothing is read here until a shelf asks.** Constructed in `propose` and
+    populated by the first `build`, which is what keeps a shelf the per-family
+    cap discards free: hydrating at propose time would read for rows nobody
+    sees, which is the one-phase design ADR-0023 rejected arriving inside a
+    single provider.
+
+    **The union is over what was proposed, not over what is built**, so the
+    first shelf to build pays for at most one cut shelf's ids as well -- `IN
+    (...)` over ~27 ids instead of ~22, against seven statements saved. The
+    first builder cannot know which of its siblings the composer will reach,
+    and a memo filled per builder is the eight statements again.
+
+    **A cached row never touches this.** `HomeService._build` returns
+    `RowCache.get_row`'s hit before calling `build`, so the memo is simply not
+    consulted; and a second composition re-proposes, minting new rows over a
+    new `_Family`. There is no path by which this outlives the `propose` that
+    made it, which is what keeps it off the frozen context and out of the row
+    cache's lifetime.
+    """
+
+    __slots__ = ("_known", "_owned", "_title_ids")
+
+    def __init__(self, title_ids: Sequence[uuid.UUID]) -> None:
+        # `dict.fromkeys` rather than `set`: two shelves naming one film is
+        # ordinary, so the dedup is not optional -- and this spelling keeps the
+        # model's own ordering in the `IN (...)` list, where `set` would
+        # substitute its hash table's. Nothing downstream reads that order
+        # (`hydrate` looks each id up), which is exactly why the cheap
+        # order-preserving spelling is the one to use: the day something does,
+        # it will be the generation's order rather than an arbitrary one.
+        self._title_ids = list(dict.fromkeys(title_ids))
+        self._known: dict[uuid.UUID, Title] | None = None
+        self._owned: set[uuid.UUID] | None = None
+
+    async def known(self, ctx: RowContext) -> dict[uuid.UUID, Title]:
+        if self._known is None:
+            rows = await ctx.titles.list_by_ids(self._title_ids)
+            self._known = {title.id: title for title in rows}
+        return self._known
+
+    async def owned(self, ctx: RowContext) -> set[uuid.UUID]:
+        # `is None` and not falsiness on both of these: a generation whose
+        # every title was merged away reads back `{}` and a household that owns
+        # none of them reads back `set()`, and both are answers rather than
+        # misses. Falsiness here would re-read once per shelf for exactly the
+        # households the reads are least useful to.
+        if self._owned is None:
+            self._owned = await ctx.media_items.owned_title_ids(self._title_ids)
+        return self._owned
+
+
 class LLMRow(BaseRow):
     """One stored `curated_rows` record, ready to render.
 
@@ -119,10 +183,20 @@ class LLMRow(BaseRow):
     renders -- `curated_row_repository_contract.py` makes the same argument
     about its own fixture. It also keeps `generation_id` and `model_name`
     reachable for anything that later wants to say which night a shelf is from.
+
+    **`family` is the generation's shared hydration, and it is optional
+    because a shelf on its own is still a shelf.** `propose` hands one
+    `_Family` to every row it returns; a row built without one gets a `_Family`
+    over its own ids, which is exactly the two statements `BaseRow` would have
+    issued. The invariant the sharing rests on is structural rather than
+    checked: `propose` is the only site that passes one, and it builds it from
+    the union of the very rows it passes it to, so a shelf's own ids are always
+    inside it.
     """
 
-    def __init__(self, row: CuratedRow) -> None:
+    def __init__(self, row: CuratedRow, *, family: _Family | None = None) -> None:
         self._row = row
+        self._family = _Family(row.card_title_ids) if family is None else family
 
     @property
     def slug(self) -> str:
@@ -168,6 +242,24 @@ class LLMRow(BaseRow):
         the card.
         """
         return self._row.card_title_ids
+
+    async def _known(
+        self, ctx: RowContext, title_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, Title]:
+        # `title_ids` is deliberately ignored: the family's map is a superset
+        # of this shelf's ids by construction (see `__init__`), and `hydrate`
+        # looks each id up rather than iterating what came back, so the extra
+        # entries are unreachable from this row. Narrowing it here would cost a
+        # dict comprehension per shelf to hide nothing.
+        return await self._family.known(ctx)
+
+    async def _ownership(self, ctx: RowContext, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        # The same superset, for the same reason -- `hydrate` asks
+        # `title_id in owned` about this shelf's ids and no others. Named
+        # `_ownership` because `FranchiseRow._owned` is an attribute and a
+        # method of that name is shadowed by it; `base.py` records the
+        # measurement.
+        return await self._family.owned(ctx)
 
 
 # **0.85, flat, and the two things it has to be are different kinds of fact.**
@@ -334,7 +426,16 @@ class CuratedProvider(RowProvider):
         trace.get_current_span().set_attribute(
             "usher.home.curated.discarded", len(stored) - len(kept)
         )
-        return [ScoredRow(row=LLMRow(row), score=CURATED_SCORE) for row in kept]
+        # **One hydration for the family, built here and read at `build`
+        # time.** Every card id in the generation arrived in the read above, so
+        # the shelves that survive the composer's cap can share two statements
+        # instead of paying two each -- and because `_Family` reads nothing
+        # until asked, a shelf the cap discards still costs exactly nothing.
+        # Over the ids of `kept` rather than of `stored`: a shelf that is not
+        # proposed cannot be built, and widening the `IN (...)` on its behalf
+        # would be paying for the discard this method just counted.
+        family = _Family([title_id for row in kept for title_id in row.card_title_ids])
+        return [ScoredRow(row=LLMRow(row, family=family), score=CURATED_SCORE) for row in kept]
 
 
 __all__ = ["CURATED_SCORE", "MAX_CURATED_ROWS", "CuratedProvider", "LLMRow"]

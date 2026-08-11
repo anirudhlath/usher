@@ -156,11 +156,7 @@ class BaseRow(Row):
         if not title_ids:
             return ()
         known = await self._known(ctx, title_ids)
-        # `owned_title_ids` rather than `list_for_title` per card: one statement
-        # for the whole shelf, and its own bound (`episode_id IS NULL`, no
-        # availability filter) is decided once on that port rather than nine
-        # times here.
-        owned = await ctx.media_items.owned_title_ids(title_ids)
+        owned = await self._ownership(ctx, title_ids)
         seen: set[uuid.UUID] = set()
         cards: list[RowCard] = []
         for title_id in title_ids:
@@ -193,8 +189,46 @@ class BaseRow(Row):
     async def _known(
         self, ctx: RowContext, title_ids: Sequence[uuid.UUID]
     ) -> dict[uuid.UUID, Title]:
+        """This shelf's titles, by id. One statement, whatever the length.
+
+        **Overridable, and `LLMRow` is the one row that overrides it.** Four
+        curated shelves come out of a single `list_for_user`, so the family's
+        card ids are all in hand before any of them builds and four separate
+        `IN (...)`s is four round trips for one set. A row whose ids arrive one
+        shelf at a time -- every other provider here -- has nothing to share
+        and inherits this.
+
+        The answer may legitimately be a *superset* of `title_ids`: `hydrate`
+        looks each id up rather than iterating what came back, so a shared read
+        over a family is indistinguishable from a private read over one shelf.
+        What it may never be is a subset, which is why the seam is a method on
+        the row rather than a mutable field on the context (`RowContext` is
+        frozen precisely so `propose` cannot leave state for `build`).
+        """
         rows = await ctx.titles.list_by_ids(list(title_ids))
         return {title.id: title for title in rows}
+
+    async def _ownership(self, ctx: RowContext, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        """Which of them this household has a copy of. One statement, always.
+
+        `owned_title_ids` rather than `list_for_title` per card: one statement
+        for the whole shelf, and its own bound (`episode_id IS NULL`, no
+        availability filter) is decided once on that port rather than ten times
+        here. Overridable on `_known`'s exact terms, and by the same one row --
+        the two reads are a pair, and sharing one without the other would halve
+        a saving while doubling the number of places a family's ids are
+        assembled.
+
+        **`_ownership` and not `_owned`, which is not a style preference.**
+        `FranchiseRow` already carries `self._owned`, a tuple of the collection
+        members it was proposed with, so a base-class *method* of that name is
+        shadowed by a subclass *attribute* -- and the failure is
+        `TypeError: 'tuple' object is not callable` from inside `hydrate`, on
+        one provider out of ten, at render time. Measured: naming it `_owned`
+        failed 12 cases across three files. A shared hook's name has to be free
+        in every subclass, and `grep` over `services/rows/` is the check.
+        """
+        return await ctx.media_items.owned_title_ids(list(title_ids))
 
     def empty(self) -> BuiltRow:
         """This row with no cards.
