@@ -155,9 +155,16 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
 @pytest.mark.parametrize(
     "port,methods",
     [
+        # `get` is here as of M9's `GET /people/{id}`, which is the caller
+        # Task 6 said the absence was waiting for -- "nothing in M7 reads one
+        # person by id and `GET /people/{id}` is M9's". So the deliberate gap
+        # closes because its route arrived, not because a fake wanted a
+        # read-back: the suite still reads a stored person through
+        # `PersonHistorySeeder.stored`, which is what keeps that seam off the
+        # shipped surface.
         (
             PersonRepository,
-            {"upsert_many", "resolve_tmdb_ids", "list_recurring_for_user", "count"},
+            {"get", "upsert_many", "resolve_tmdb_ids", "list_recurring_for_user", "count"},
         ),
         (
             CreditRepository,
@@ -224,6 +231,9 @@ def test_the_new_repository_ports_declare_exactly_these_abstract_methods(
     deliberately-absent ones -- `PersonRepository.get`,
     `CollectionRepository.get`, `list_members`, and any `rebuild` -- cannot
     be added without this list moving and someone reading the reason.
+    **`PersonRepository.get` is now present**, and it arrived with the route
+    Task 6 named as the caller it was waiting for. The other three are still
+    absent and still deliberate.
 
     It moved once, and this is the record of it: M7's `usher derive` report
     added `PersonRepository.count`, `CollectionRepository.count` and

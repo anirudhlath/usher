@@ -543,6 +543,16 @@ def get_collection_repository(session: SessionDep) -> CollectionRepository:
     return PostgresCollectionRepository(session)
 
 
+# M9's `GET /people/{id}` reads the first two directly rather than through a
+# service (`api/routers/people.py` says why), so the two repositories that were
+# `RowContext` fields only now have route-facing annotations as well. Declared
+# here beside their providers rather than at the bottom of the module: the
+# aliases are what a router imports, and a reader following `PersonRepositoryDep`
+# lands on the function that builds it.
+PersonRepositoryDep = Annotated[PersonRepository, Depends(get_person_repository)]
+CreditRepositoryDep = Annotated[CreditRepository, Depends(get_credit_repository)]
+
+
 def get_taste_repository(session: SessionDep) -> TasteRepository:
     return PostgresTasteRepository(session)
 

@@ -109,14 +109,37 @@ class PersonRepository(ABC):
     Same session ownership as every other repository here: methods flush so
     conflicts surface immediately, none commits.
 
-    **No `get(person_id)`.** Nothing in M7 reads one person by id --
-    `GET /people/{id}` is M9's (PRD 07's endpoint table, boundary call 6) --
-    and the only thing a row needs is a name, which `RecurringPerson`
-    carries. `SearchIndex`' settled argument applies unchanged: *"A port
+    **`get(person_id)` exists as of M9 and the reason it did not is worth
+    keeping.** M7 declined it on `SearchIndex`' settled argument -- *"A port
     method whose only test is its own test is a liability, and the failure
     mode of a rare path is that it has rotted by the time somebody needs
-    it."*
+    it"* -- because nothing then read one person by id and a row needs only a
+    name, which `RecurringPerson` carries. `GET /people/{id}` is the caller
+    that argument was waiting for, so the method arrives with a route rather
+    than ahead of one.
     """
+
+    @abstractmethod
+    async def get(self, person_id: uuid.UUID) -> Person | None:
+        """One person by id, or `None` when the catalog does not hold them.
+
+        `None` rather than a raise, on `TitleRepository.get`'s terms: an id a
+        client supplied naming no row is an ordinary request, and the route
+        above turns it into a 404 with a `code` from the vocabulary. An
+        implementation that raised would make it a 500.
+
+        **Scoped to the id, which is the thing worth asserting.** A `WHERE`
+        that lost its predicate returns a `Person` -- populated, correctly
+        typed, and about somebody else -- and `GET /people/{id}` renders that
+        person's filmography under the requested person's name. The contract
+        case seeds two people for exactly that reason.
+
+        `imdb_id`, `birth_year`, `death_year` and `biography` are **not**
+        carried, because `Person` does not have them: they live on TMDb's
+        `/person/{id}`, one request per person, and are still unassigned
+        (PRD 09's M7 named orphan). This method returns the stored row, so
+        the route's answer is narrow rather than null-padded.
+        """
 
     @abstractmethod
     async def upsert_many(self, people: Sequence[Person]) -> BulkWriteResult:

@@ -116,6 +116,16 @@ class FakePersonRepository(PersonRepository):
                 return person
         raise KeyError(person_id)
 
+    async def get(self, person_id: uuid.UUID) -> Person | None:
+        self.calls += 1
+        # Both stores, because a person with a NULL `tmdb_id` lives in
+        # `_anonymous` and is just as gettable -- the partial index is about
+        # identity resolution, not about visibility.
+        for person in (*self._by_tmdb_id.values(), *self._anonymous.values()):
+            if person.id == person_id:
+                return person
+        return None
+
     async def upsert_many(self, people: Sequence[Person]) -> BulkWriteResult:
         self.calls += 1
         inserted = updated = 0
