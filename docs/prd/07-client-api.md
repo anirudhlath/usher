@@ -356,7 +356,17 @@ breaking changes get `/v2`.
 
 Cursor-based (opaque, encodes sort position). Offset paging is not offered —
 it degrades badly over a 1.3M-row catalog and produces duplicates under
-concurrent writes.
+concurrent writes. Measured: `list_unmatched`'s `OFFSET` is 43.7 ms at offset 0
+and 388.9 ms at offset 1,126,574 (see [10](10-telemetry-and-dashboards.md)).
+
+A paged response is `{"items": [...], "next_cursor": "…"}` — no `total`, and
+`next_cursor` is `null` on the last page rather than absent. The cursor is
+opaque: a client hands it back unread. It carries a **sort position and nothing
+else** — no user, no grant, no offset — which is why it is unsigned, and **no
+port ever takes one**; repositories take typed keyset values. A cursor that
+does not match the query it is replayed against is a `400 invalid_cursor`. See
+[ADR-0034](decisions/0034-the-cursor-carries-a-position.md), which also carries
+the `(key IS NOT NULL, key, id)` predicate every paged route spells.
 
 ### Errors
 
