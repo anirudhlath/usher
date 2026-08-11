@@ -58,10 +58,22 @@ already names -- tier 1 scans `titles` only and `title_search_names` is
 reachable from tier 2 alone.
 
 Tolerances, fixed before the run: bar (3)'s +/-10% is 30.24 ms <= p50 <=
-36.96 ms; "the split is unchanged" is each share within +/-5 points of
-63.6/36.4/0.0/0.0 with **both zeros required to stay 0.0% exactly**, since a
-zero that moves at all is a different finding. Bar (4)'s "stays at 1.9%" is
-1.6%-2.2%.
+36.96 ms; "the split is unchanged" is each share within +/-5 points, with
+**both zeros required to stay 0.0% exactly**, since a zero that moves at all is
+a different finding. Bar (4)'s "stays at 1.9%" is 1.6%-2.2%.
+
+**Bar (3)'s two halves name two different configurations and the plan pairs
+them wrongly** -- found while building this harness, settled here, and settled
+*before* the run rather than after seeing a number. ADR-0002's miss-diagnosis
+table has a `GIN % @0.3 cap 200` row at **63.6/0/0/36.4** with p50 33.3 ms, and
+a `GIN % @0.3 cap 200 + vote tiebreak` row -- the one that ships -- at
+**82.8/0/0/17.2** with p50 **33.6 ms**. The bar quotes the tiebreak row's
+latency and the other row's split, and `_SUGGEST` ships the tiebreak, so no
+single run can satisfy both as written. The split is therefore **scored against
+82.8/17.2 and reported against both**, with the plan's literal 63.6/36.4
+printed beside it every time. `.claude/rules/search-and-embeddings.md` carries
+the same mispairing in prose -- *"at the shipped configuration 63.6% fell below
+the `%` floor"* -- and is corrected in the same commit as the number.
 
 ================================================================================
 THE TYPO SET, AND WHY IT IS THE GATE'S OWN
@@ -885,18 +897,39 @@ def _verdicts(log: RunLog) -> dict[str, Any]:
     if tier2:
         p50 = tier2["latency"]["p50"]
         shares = tier2["miss_split"]["shares"]
-        split_ok = (
-            abs(shares["below_floor"] - 0.636) <= 0.05
-            and abs(shares["out_ranked"] - 0.364) <= 0.05
-            and shares["truncated_by_cap"] == 0.0
-            and shares["dropped_by_rerank"] == 0.0
-        )
+
+        def _split(below: float, ranked: float) -> bool:
+            return (
+                abs(shares["below_floor"] - below) <= 0.05
+                and abs(shares["out_ranked"] - ranked) <= 0.05
+                and shares["truncated_by_cap"] == 0.0
+                and shares["dropped_by_rerank"] == 0.0
+            )
+
+        # **Bar (3)'s two halves name two different configurations, which the
+        # plan pairs wrongly, and the reconciliation is decided here rather
+        # than after seeing a number.** ADR-0002's table has a `@0.3 cap 200`
+        # row at 63.6/36.4 and p50 33.3 ms, and a `@0.3 cap 200 + vote
+        # tiebreak` row at 82.8/17.2 and p50 **33.6 ms**. The plan quotes the
+        # tiebreak row's p50 and the other row's split. `_SUGGEST` ships the
+        # tiebreak, so the split it can reproduce is 82.8/17.2 -- scored on
+        # that, reported against both, and the plan's literal figure printed
+        # beside it every time so the reader can see which one was matched.
+        # `.claude/rules/search-and-embeddings.md` carries the same pairing in
+        # prose and is corrected in the same commit as this number.
+        split_shipped = _split(0.828, 0.172)
+        split_plan = _split(0.636, 0.364)
         out["bar3_tier2"] = {
             "p50_ms": round(p50, 3),
+            "split_scored_against": "GIN % @0.3 cap 200 + vote tiebreak (82.8/0/0/17.2)",
+            "split_verdict_vs_shipped": "PASS" if split_shipped else "FAIL",
+            "split_verdict_vs_plans_literal_63_6": "PASS" if split_plan else "FAIL",
+            "zeros_hold": shares["truncated_by_cap"] == 0.0 and shares["dropped_by_rerank"] == 0.0,
             "window_ms": [30.24, 36.96],
             "p50_verdict": "PASS" if 30.24 <= p50 <= 36.96 else "FAIL",
             "shares": shares,
-            "split_verdict": "PASS" if split_ok else "FAIL",
+            "split_verdict": "PASS" if split_shipped else "FAIL",
+            "tier2_recall_at_5": tier2["recall_at_5"],
         }
     recall = log.tier1.get("recall", {})
     if recall:
