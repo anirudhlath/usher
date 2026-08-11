@@ -541,3 +541,48 @@ against the real ini from a unit test would reconfigure logging for every case
 after it, which is the defect rather than a way to observe it. Full evidence
 and the companion repair in `configure_logging`:
 `.claude/rules/api-telemetry-and-lanes.md`.
+
+## Review fixes, 2026-08-10
+
+**A "this is one pass now" claim needs `EXPLAIN`, not a reading of the SQL.**
+`_LIST_FOR_USER` found the newest generation with a correlated subquery and then
+scanned `curated_rows` again filtered on `generation_id` — two probes per home
+build, and the second is not covered by `ix_curated_rows_user_newest`. Rewritten
+with `first_value(generation_id) OVER (PARTITION BY user_id ORDER BY
+generated_at DESC, generation_id DESC)`. The case that pins it runs `EXPLAIN
+(FORMAT JSON)` over the statement and walks the plan tree counting scan nodes on
+`curated_rows`; it read `['curated_rows', 'curated_rows']` before and one after.
+**An assertion about the query text would have passed against either spelling** —
+the plan is the artefact, so ask the planner. The same case caught a bug in its
+own fixture on the first green run (a `generation_id` minted per *row* rather
+than per generation), which is the shape `testing-discipline.md` records as
+"two predicates, one selectivity" arriving from the fixture side.
+
+**Rank on a narrow projection, then join the entity back — and project the sort
+keys *through* the subquery rather than re-deriving them outside.**
+`list_unwatched_candidates` put 32 of `titles`' 33 columns through a
+whole-catalog join and top-N sort to return four fields anybody reads. The
+two-stage rewrite is ordinary; the trap is the outer `ORDER BY`. Re-stating
+`owned` outside means re-joining `owned_titles`, i.e. a *second* `DISTINCT` over
+`media_items` — so the keys are carried out of the ranking stage and the outer
+order sorts the same values rather than re-evaluating the same expressions.
+
+**And the outer `ORDER BY` is load-bearing, which was guessed wrong before it
+was measured.** A `LIMIT` subquery's ordering is not inherited by the join above
+it. The docstring first said the contract cases "could ratify a missing outer
+`ORDER BY` by luck"; planting the deletion fails the new case **plus nine of the
+thirteen** `TitleRepositoryCandidateContract` cases on the Postgres arm. The
+guess was corrected to the measurement rather than shipped beside it.
+
+**`raiseload=True` is right for a column no `Title` can carry and wrong for one
+with a sanctioned reader.** Both members of `DERIVED_COLUMNS` are now deferred on
+all three entity reads (`credit_names` was being selected, detoasted, transferred
+and dropped by `_to_domain` on every read). `search_document` keeps
+`raiseload=True` — it is a `TSVECTOR` and any access is a bug. `credit_names`
+gets plain `defer` — `credit_names_for` reads it deliberately one method down, so
+a stray access is a routing mistake, and `raiseload` would convert one small
+query into an `InvalidRequestError` inside the nightly curation job. Verified
+before choosing: `raiseload=True` was set temporarily and the **full** unit and
+integration suites run green, then reverted. **The deferral loops over
+`DERIVED_COLUMNS` rather than naming the two columns**, so a future derived
+column that nobody defers fails the case that exists for it.

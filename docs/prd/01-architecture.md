@@ -216,7 +216,8 @@ usher/
 │   │                home.py, taste.py, derive.py, similar.py, search.py,
 │   │                matching.py, ingest.py, enrich.py, push.py, jobs.py,
 │   │                curation.py, curation_pool.py, curation_prompt.py,
-│   │                curation_validate.py, query_expansion.py
+│   │                curation_validate.py, query_expansion.py,
+│   │                llm_ledger.py (the one `llm_calls` writer)
 │   ├── jobs/        queue.py, scheduler.py, tasks/
 │   ├── db/          models/ (… people.py, collection.py, taste.py,
 │   │                curation.py),

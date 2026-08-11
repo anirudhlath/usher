@@ -194,3 +194,66 @@ consequence for PRD 10 is that on the shipped default `llm_calls` is **100%
 `curation`** and every `generation_id` is non-NULL, so the partial index on
 `generation_id IS NOT NULL` is right under both populations rather than because
 expansion rows are a majority.
+
+## Review findings, 2026-08-10
+
+**`json.loads` raises `RecursionError`, which is not a `ValueError` and was not
+a `UsherPortError` either.** `OpenAICompatibleClient._decode` and `_parse` both
+caught `ValueError` only. Measured on CPython 3.13 at the default recursion
+limit of 1,000: **nesting depth 9,998 parses and 9,999 raises** — the C scanner
+has its own budget an order of magnitude past `sys.getrecursionlimit()`, so the
+obvious guess of "a bit over 1,000" does not reach it and a case built on that
+guess passes against the unfixed code. `RecursionError` subclasses
+`RuntimeError`, so it escaped the port, escaped `CurationService`'s
+`except UsherPortError`, and would take the worker down instead of parking one
+job — the identical failure `_content`'s own comment about `json.loads(None)`'s
+`TypeError` exists to prevent, one method over.
+
+**The two halves are not equally exposed, and the reporting reversed them.**
+`_parse`'s subject is bounded by `max_output_tokens` *and* shielded by
+`_content`, which refuses `finish_reason == "length"` **before** anything is
+parsed — and a model that ran away into 10,000 open brackets hits the token
+ceiling first, which is the shape this file already measured (`1,2,3,4,3,1,2…`
+to the ceiling under an unsatisfiable bound). The **envelope** has no token
+bound and no truncation guard: it is whatever the endpoint, or a proxy in front
+of it, put on the wire. So `_decode` is the live half and `_parse` is the
+defensive one. **Ask which side of a guard the untrusted bytes are on before
+ranking two instances of one defect.**
+
+**`curation.generate`'s span published a sum this repository documents three
+times as meaningless.** `_measure` added all five `DropReason` counts into one
+`usher.curation.dropped` attribute, while `curation_validate`'s module
+docstring, ADR-0028 and `_rows_dropped`'s own comment each say two of the five
+count rows and three count cards. **The case that should have caught it could
+not**: its fixture drops exactly one card, so a sum of one unit is
+indistinguishable from a correct total of either. Same family as the
+`NULLS LAST` and `media_items.available` findings in `testing-discipline.md` —
+*a fixture holding one kind of thing cannot tell a mixed total from a pure
+one.* Split into `dropped_rows`/`dropped_cards`, derived from the `row_` prefix
+rather than from a second list, so a sixth reason cannot be added to one and
+forgotten in the other.
+
+**The ledger rule was down to one spelling inside `CurationService` and back to
+two across the codebase.** `testing-discipline.md` records the sweep that made
+`_settle` exist — *"a rule spelled three times is a rule one deletion is
+invisible in"* — and `QueryExpansionService` then carried a verbatim copy of
+`_settle`/`_ledger_row`/`_record`, differing only in the purpose constant and
+the generation id. Five invariants were each argued and pinned twice. Now
+`services/llm_ledger.py`, held by both spenders, with an `ast` walk (not a
+substring scan — both modules discuss `LLMCall` at length in prose) asserting
+neither service mints a row of its own. **The general form: when a sweep's
+repair is "collapse the copies", ask whether the collapse was scoped to the
+class or to the codebase.**
+
+**A cost warning had to be gated on the credential, not on the price.**
+`llm_price_*_per_mtok` both default to `Decimal(0)`, so `cost_usd` reads
+`0.00000000` for an operator who never set them — which is the *honest* value
+for the self-hosted vLLM this milestone was verified against, and invisible
+billing on a paid endpoint. Warning on price alone breaks the rule
+`test_a_configured_llm_is_built_and_says_nothing` states: *a warning every
+correctly-configured deployment sees is a warning nobody reads*, and the
+zero-price self-hosted deployment is the shipped shape. An `llm_api_key` is
+what separates the populations — a hosted provider requires one, the local
+endpoint needs none — so the warning is gated on it and reaches only the
+deployment it is about. In `composition.llm_client` for the reason the TMDb
+line moved there: once per process, never once per pass.

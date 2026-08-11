@@ -59,7 +59,8 @@ titles: TitleRepository             media_items: MediaItemRepository
 watch_states: WatchStateRepository  episodes: EpisodeRepository
 neighbors: TitleNeighborRepository  people: PersonRepository
 credits: CreditRepository           collections: CollectionRepository
-affinities: Sequence[GenreAffinity]  curated: CuratedRowRepository
+curated: CuratedRowRepository
+affinities: Callable[[], Awaitable[Sequence[GenreAffinity]]]
 ```
 
 - **No `AsyncSession`, and that is checked rather than commented.**
@@ -100,6 +101,21 @@ affinities: Sequence[GenreAffinity]  curated: CuratedRowRepository
   optional and off by default (ADR-0022). It fires on lift over the owned
   library instead — counts over `titles.genres`, no embedder required. Fewer
   rows, not worse rows.
+- ✅ **`affinities` is awaited rather than held, so a cached screen costs
+  nothing.** It shipped as the sequence, computed while FastAPI resolved the
+  dependency graph — which happens *before* the handler runs, and therefore
+  before `HomeService` can look in the ~30 s screen cache. So every
+  `GET /home`, hit or miss, paid `list_recent(50)` + `list_by_ids(50)` + a
+  library-wide `unnest(genres) GROUP BY` over 1.27M titles to fill the one
+  field of twelve that a single provider reads. Deferring it to
+  `GenreAffinityProvider`'s own `await` makes the hit — which is most requests
+  — free, and leaves the miss costing exactly what it did. The alternative,
+  looking in the cache before assembling the context, was declined: the entry
+  can expire or be invalidated between the lookup and the compose, and the
+  screen composed from the empty affinity that follows would then be cached
+  for another 30 s. It is the only field of the twelve that is a callable
+  besides the clock, and it is the only one whose value is the product of
+  three statements.
 
 So rows are pure functions of context and trivially testable with fakes.
 
@@ -155,6 +171,16 @@ slug-keyed rule would couple the composer to the catalog.
 
 `LLMRow.build()` only *hydrates* stored output. Generation happens in a
 background job — never in the request path.
+
+✅ **And the shelves of one generation hydrate together.** `CuratedProvider`
+returns up to five rows from a *single* `list_for_user`, so every card id in
+the family is in hand before anything builds; the composer's per-family cap
+then builds four of them, and one catalog read plus one ownership read each
+was **eight statements for the ~22 distinct ids one generation names**. The
+first shelf to build now reads the union for all of them and the rest read from
+it — at build time, not propose time, so a shelf the cap discards still costs
+nothing, and a shelf served from the row cache never reaches the memo at all
+because `HomeService` returns the cached row before calling `build`.
 
 > **Three surfaces reach that job and only one of them reports what it did.**
 > `POST /admin/rows/regenerate` enqueues a `curate` job and answers 202 with
@@ -949,7 +975,7 @@ ran); and no hosted provider was touched at all.
 | **Neighbour tables** | ⚠️ **Not rebuilt on anything.** This row was false in M6 and is false now; what changed is that half of it is finally *observable* — see below |
 | Curated rows | ✅ **M8** — 5 min per built row, in-process, on `CuratedProvider`'s rows out of `curated_rows`. Not "until regenerated": the artefact is immutable until a generation replaces it, and this number is how long a household keeps seeing last night's shelf after tonight's replaced it, because the job runs in another process |
 | Taste centroid | ⏳ **Recomputed when the household's `max(watch_states.updated_at)` moves** — a fingerprint, not an event |
-| Genre affinity | ⏳ **Not cached at all** |
+| Genre affinity | ✅ **Nothing stored, and memoised for the life of one request** — no artefact, no fingerprint, no invalidation to get wrong; the memo is on the request-scoped `TasteService` and dies with it |
 
 Rows are recomputed lazily and served stale while refreshing, so the home screen
 never blocks on a slow row.
@@ -1033,15 +1059,33 @@ row that no longer exists forever; and a *cleared* history makes the aggregate
 `NULL`, where `stored < NULL` is `NULL` and therefore never true. The merge
 path publishes nothing and does not know `user_taste` exists.
 
-⏳ **Genre affinity is not cached, and sharing the centroid's row would be
+⏳ **Genre affinity is not *stored*, and sharing the centroid's row would be
 wrong rather than merely wasteful.** That row is invalidated on `model_name IS
 DISTINCT FROM`; genre affinity has no model. Sharing it would make an
 embedding-checkpoint swap invalidate a count no model touched, and — the worse
 half — would require a deployment with **no embedder** to write a `model_name`
 for a model it does not have. There is no honest value for that column. A
-*separate* cache would cost more than the answer: the affinity is a count over
-≤ 50 `text[]` values plus one library-wide aggregate, and the validity check
-guarding it would itself be the `max(updated_at)` read.
+*separate* stored cache would cost more than the answer: the affinity is a
+count over ≤ 50 `text[]` values plus one library-wide aggregate, and the
+validity check guarding it would itself be the `max(updated_at)` read.
+
+✅ **What it does have is two memos inside `TasteService`, both dying with the
+service** — one request on the route, one unit of work in the CLI and the
+worker. Neither is an artefact and neither needs a fingerprint, which is the
+whole difference from the paragraph above:
+
+- **the engaged window** (`WatchStateRepository.list_recent(50)`), which both
+  public methods open with, so one `CandidatePoolService.for_user` on a
+  deployment with an embedder read the household's history twice per
+  generation. Keyed by `user_id` — a memo on a per-user read is the one
+  optimisation whose failure mode is a data leak — and re-read whenever a
+  caller presents a `max(watch_states.updated_at)` that disagrees with the one
+  the memo was filled at, which is free because `centroid` reads that
+  watermark anyway;
+- **the library-wide genre counts** (`unnest(genres) GROUP BY` over 1.27M
+  titles), which take no `user_id` at all, are the denominator of every lift,
+  and were paid once per generation *and* once per home-screen build for a
+  number that changes only when the library does.
 
 ## Alfred
 

@@ -862,3 +862,25 @@ other top-level directory in turn, which located this in two runs. And
 it**: the regression here disables the logger itself and so fails on
 `pytest tests/unit/test_telemetry.py` alone, because a case that only fails in
 a particular whole-suite order is a case the next person deletes as flaky.
+
+**A permutation that is its own inverse cannot say which list supplied the
+write positions.** Found 2026-08-10 refactoring `CandidatePoolService._reranked`,
+by planting the mis-refactor before making the change rather than after.
+`_reranked` writes `reranked[slot] = pool[rank]`, and the obvious tidy-up —
+zipping `scored` against `ordered` — has an equally plausible inverted spelling
+that applies the permutation backwards. **The inverted spelling passed all 20
+cases in `test_services_curation_pool.py`**, because every re-rank case in the
+file asserts a **transposition**: two candidates swap, and a transposition *is
+its own inverse*, so the two spellings agree on every fixture the file had. The
+case that closes it seeds a **3-cycle** (`top, middle, bottom` →
+`middle, bottom, top`) and carries the premise that the expected order is not
+its own inverse; re-planted, it fails alone out of 21.
+
+**The general form is the identity-element family one level up.** The existing
+entries are about a fixture whose *origin* is the identity element (a clock at
+zero for a subtraction, insertion order for a sort); this is a fixture whose
+*shape* is self-inverse for the operation under test. Ask of any test over a
+reordering, a mapping or an involution — a swap, a negation, a transpose, a
+two-element rotation — whether the expected value is distinguishable from the
+value the inverse operation produces, and if it is not, seed the smallest case
+that is. For a permutation that is a 3-cycle; two elements will never do it.

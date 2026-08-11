@@ -378,7 +378,8 @@ one until 2026-08-07.** It said `OpenAICompatibleClient` *"translates every
 **transport** failure into `PortUnavailable`/`PortAuthFailed`/
 `PortRateLimited`"* — right about which three families the widening needed,
 wrong about where they come from, and silent about a fourth. `_send`'s `except
-_UNTRANSLATED_FAILURES` is the **transport** mechanism and it raises
+usher.adapters.http.UNTRANSLATED_FAILURES` (shared by all three adapters
+since 2026-08-10; `_send`'s own copy is gone) is the **transport** mechanism and it raises
 `PortUnavailable` **and nothing else**; `PortAuthFailed` and `PortRateLimited`
 are decided by **status code** in `_decode`, and so is the family that was
 missing. Measured 2026-08-07 by driving `complete_json` over

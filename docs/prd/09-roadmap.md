@@ -788,6 +788,34 @@ suspicion.
   pool gets **zero rows every time, at full price** — and filtering on ownership
   makes small pools more common. A product decision (filter, or correct the
   prompt's claim), not a defect to patch. **M9**, with the other row work.
+- **`ports/repository.py` is 3,434 lines holding 19 ABCs, and it is the one
+  layer that does not mirror `db/repositories/`** — found by M8's review
+  2026-08-10, measured rather than estimated: 19 `(ABC)` classes and 107
+  `@abstractmethod`s in one module, against **19 sibling modules in
+  `src/usher/db/repositories/`**, one per aggregate. The implementations already
+  split at exactly the granularity the ports do not. 474 lines survive an
+  `ast.unparse` of the docstring-stripped tree, so roughly 86% of the file is
+  the prose this project wants — the complaint is the packaging, not the
+  writing. **99 files import from it**, so every service that wants one port
+  imports a module holding eighteen others, and it is where new ports go because
+  it is where ports are: M8 added 626 lines to it for about 30 lines of
+  signature.
+  **The ports themselves are correctly sized and this is not a request to
+  redesign them.** M8's two new ABCs are 2 methods and 1 method; the review
+  looked for a pair worth merging and found none. The change is
+  `ports/repository/` as a package, one module per aggregate mirroring
+  `db/repositories/`, with `__init__.py` re-exporting everything — **zero call
+  sites change and the `import-linter` contracts are unaffected**, because they
+  are stated at `usher.ports`.
+  **That is also exactly why it keeps not happening**, and why it is filed here
+  rather than attached to a milestone: it is pure churn with no behavioural
+  claim, so it never competes with work that has one, while the file grows by a
+  few hundred lines every milestone. Two honest counter-arguments: a large
+  no-op diff is expensive to review, and `git log --follow` gets worse for a
+  file with a decade of reasoning in it. **Owned by whoever adds the next
+  port** — the split is cheapest at the moment somebody is already opening the
+  file, and doing it *before* that port means the new one lands in its own
+  module instead of being appended to a twentieth.
 
 ## Post-v1 candidates
 

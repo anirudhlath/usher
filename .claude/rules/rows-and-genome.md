@@ -87,3 +87,56 @@ pass; and it needs its own control, because deleting the recorder's
 case AST-scans `services/home.py` for `gather`/`TaskGroup`/`create_task`/`wait`,
 walking `ast.Import` **and** `ast.ImportFrom` and matching the bare name as
 well as the attribute.
+**Four reads on the home path that nothing needed, found 2026-08-10 by
+counting statements against fakes rather than by timing anything.** Each is
+recorded as a before/after count, because a count is the only assertion a fake
+can carry honestly -- a timing assertion against an in-memory dict measures the
+dict.
+
+- **The engaged window was read once per public method.** `genre_affinity` and
+  `centroid` both open with `TasteService._engaged`, so one
+  `CandidatePoolService.for_user` on a deployment with an embedder issued
+  `list_recent(50)` **twice** per generation for a window that cannot move
+  between them (one job, one transaction). Memoised per `(service, user_id)`:
+  **2 -> 1**.
+- **`library_genre_counts()` was read once per answer.** It takes no `user_id`
+  -- an `unnest(genres) GROUP BY` over the whole owned library, 1.27M titles,
+  identical for every household -- and was paid per generation *and* per
+  home-screen build. Memoised per service: **3 -> 1** over two households and
+  three asks.
+- **`GET /home` paid the whole genre-affinity read before the screen cache
+  could answer.** `get_row_context` is a FastAPI dependency and FastAPI
+  resolves the graph before the handler runs, so `HomeService.compose_report`'s
+  `get_screen` check came *after* `list_recent(50)` + `list_by_ids(50)` +
+  the library aggregate had already run. `RowContext.affinities` is now
+  `Callable[[], Awaitable[Sequence[GenreAffinity]]]`, awaited by the one
+  provider that reads it: a 30 s cache hit costs **1 -> 0**.
+- **Four curated shelves hydrated independently.** `CuratedProvider.propose`
+  mints up to five `LLMRow`s from one `list_for_user`, `_MAX_PER_FAMILY` is 4,
+  and each `BaseRow.build` issued its own `list_by_ids` + `owned_title_ids`:
+  **8 statements for ~22 ids**, in one request. A shared per-`propose`
+  hydration read at *build* time makes it **4 -> 1** of each.
+
+**And the trap that cost twelve cases: a new hook on `BaseRow` is shadowed by
+any subclass attribute of the same name.** The ownership read was extracted as
+`BaseRow._owned(ctx, title_ids)` so `LLMRow` could share it -- and
+`FranchiseRow` already carries `self._owned`, a tuple of its collection's
+members. A subclass *attribute* shadows a base-class *method*, so `hydrate`
+raised `TypeError: 'tuple' object is not callable` on one provider in ten, at
+render time. Measured: 12 failures across three files, all from one name. The
+hook is `_ownership`; **grep `services/rows/` for a hook's name before adding
+one**, because the failure is invisible in the class that declares it.
+
+**A memo on a per-user read needs its key asserted, not just its count.** The
+`_engaged` memo is keyed by `user_id`, and the case that says so asserts *two*
+reads for two households **and** the genre each one got: a count alone is
+satisfied by a memo that re-reads and then hands back the wrong entry anyway,
+and the failure mode of the unkeyed version is one household's watch history
+deciding another's affinity, centroid, candidate pool and paid-for shelves --
+rendered perfectly, raising nothing. Its lifetime is argued rather than assumed
+(`api/deps.py` builds one `TasteService` per request; `composition.
+build_pipeline` builds one per unit of work), and it re-reads on a disagreeing
+`max(watch_states.updated_at)` so the argument is not load-bearing: two
+existing cases hold one service across a merge and require the second read to
+see it, and **both failed against the first draft of the memo**, which is how
+the watermark check got written.

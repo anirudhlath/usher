@@ -233,6 +233,15 @@ that looks like in production. Four things a dashboard query has to know:
   screen with opposite fixes.
 - **Two of the five count rows and three count cards**, which is what the
   `row_` prefix says out loud: summing across the label is meaningless.
+
+  🔴 **`curation.generate`'s span summed them anyway until 2026-08-10**, into a
+  single `usher.curation.dropped` attribute — so a generation that lost three
+  cards out of a shelf it kept and two shelves entire published `5`, a number
+  that is neither five cards nor five shelves. The span now carries
+  `usher.curation.dropped_rows` and `usher.curation.dropped_cards`, split on
+  the same `row_` prefix this bullet names, and the per-reason attributes are
+  unchanged. The **counter** was never wrong: `reason` is a label, and it is
+  the roll-up across it that had no unit.
 - **Every reason is exported on every generation, zeros included.** A reason
   absent from the export is indistinguishable from a reason nobody counts,
   which is this pair's own subject one level up.

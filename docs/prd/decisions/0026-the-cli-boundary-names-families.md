@@ -189,7 +189,7 @@ does not name, on the most likely runtime failure of a cron'd `usher curate`.
 **Why `httpx.HTTPError` did not cover it, which is the part worth keeping.**
 Reproduced 2026-08-07 against a loopback port with nothing bound:
 `OpenAICompatibleClient._send` wraps its only `httpx` call in
-`_UNTRANSLATED_FAILURES` → `PortUnavailable`, and a `response.json()` failure
+`usher.adapters.http.UNTRANSLATED_FAILURES` → `PortUnavailable`, and a `decode_json` failure
 lands as `ValueError` → `PortDataMalformed`. Translating before the boundary is
 what the taxonomy is *for* ([09](0009-repositories-are-ports.md), PRD 01), so
 **`httpx.HTTPError` is unreachable behind any port in this project** — and
