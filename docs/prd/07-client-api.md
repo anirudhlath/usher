@@ -169,11 +169,24 @@ be added if a client turns out to need flexible field selection.
 > `usher derive` fills them; adding a `credits` key here is a DTO, a hydration
 > read and a shape decision (how many, in what order, cast and crew together or
 > apart) that no M7 task makes. **Owner: M9**, with the rest of this route's
-> unbuilt surface. `Image` is unchanged and still M9's from both ends. **`GET /titles/{id}/similar` is M9's, not M6's** — this sentence said
-> "M6's" until M6 ran and added no HTTP route at all
-> ([09](09-roadmap.md)'s M6 boundary call 1). M6 built the
-> `SimilarityService` and the precomputed `title_neighbors` table that route
-> will read, and delivered the capability through `usher similar`.
+> unbuilt surface. `Image` is unchanged and still M9's from both ends.
+>
+> **`GET /titles/{id}/similar` is M9's, and it now ships.** ✅ This sentence
+> said "M6's" until M6 ran and added no HTTP route at all
+> ([09](09-roadmap.md)'s M6 boundary call 1) — M6 built `SimilarityService`
+> and the precomputed `title_neighbors` table this route reads, and delivered
+> the capability only through `usher similar`. The route is a thin read over
+> `neighbors_of`: the body carries neighbours in the *stored* order (never
+> re-sorted on `score`), a title with none is `200` with an empty list, and
+> an unknown title is `404`. Freshness is **reported, not implied** — the
+> honest half this milestone can deliver, because nothing schedules `usher
+> similar --rebuild`. `computed_at` is the whole-artefact age (`null` means
+> never computed, a different fact from an empty list); `stale` is
+> `count_stale(blend_fingerprint(), title_id=…)` scoped to this seed, true
+> when the row's weights, stored count or candidate pool have since changed.
+> Neither subsumes the other: some third title being embedded into a seed's
+> neighbourhood since the last rebuild is undecidable per row, and a `stale:
+> false` seed can still be missing exactly that neighbour.
 >
 > **`availability` is one badge per copy of the title, never per episode.** An
 > episode's `MediaItem` carries its series' `title_id` as well as its own

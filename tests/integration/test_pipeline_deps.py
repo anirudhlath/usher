@@ -42,6 +42,7 @@ from usher.api.deps import (
     get_reconcile_service,
     get_row_cache,
     get_row_context,
+    get_similarity_service,
     get_source_repository,
     get_sync_run_repository,
     get_taste_repository,
@@ -105,6 +106,12 @@ _PROVIDERS = {
     "row_context": get_row_context,
     "row_cache": get_row_cache,
     "home_service": get_home_service,
+    # M9's `GET /titles/{id}/similar`, over finished M6 wiring. Resolved
+    # through FastAPI's own graph for the reason every provider above is:
+    # `get_similarity_service` takes `session.commit` as a bound method, which
+    # only exists once `SessionDep` has resolved a real session, and a plain
+    # call cannot reach that failure mode.
+    "similarity_service": get_similarity_service,
 }
 
 
@@ -155,6 +162,7 @@ async def test_every_pipeline_provider_resolves_in_a_request(probe: AsyncClient)
                 "Home",
                 "Taste",
                 "User",
+                "Similarity",
             )
         )
 

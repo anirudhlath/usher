@@ -70,6 +70,7 @@ from usher.services.playback import PlaybackService
 from usher.services.playback_ticket import build_ticket_cipher, mint
 from usher.services.reconcile import ReconcileService
 from usher.services.rows.cache import RefreshQueue, RowCache
+from usher.services.similar import SimilarityService
 from usher.services.sources import SourceService
 from usher.services.taste import TasteService
 from usher.services.titles import TitleReadService
@@ -784,6 +785,34 @@ def get_home_service(
 
 
 HomeServiceDep = Annotated[HomeService, Depends(get_home_service)]
+
+
+# ---------------------------------------------------------------------------
+# Similarity (M9). `GET /titles/{id}/similar` is a thin read over
+# `SimilarityService` and the `title_neighbors` artefact M6 built and shipped
+# no route for (boundary call 1).
+# ---------------------------------------------------------------------------
+
+
+def get_similarity_service(
+    session: SessionDep,
+    embeddings: Annotated[TitleEmbeddingRepository, Depends(get_title_embedding_repository)],
+    neighbors: Annotated[TitleNeighborRepository, Depends(get_title_neighbor_repository)],
+    titles: Annotated[TitleRepository, Depends(get_title_repository)],
+) -> SimilarityService:
+    """`commit` is `session.commit`, the same callable `get_session` calls at
+    the end of a successful request -- and `SimilarityService.rebuild` is the
+    only method that ever calls it. **The route built over this provider only
+    reads** (`neighbors_of`, `computed_at`, `stale_neighbors`), so nothing on
+    this path commits; the wiring exists because the service's fourth
+    constructor argument is not optional, not because a write is reachable
+    here. `usher similar --rebuild` is `rebuild`'s only caller, and nothing
+    schedules it -- it is an operator's command or a cron entry.
+    """
+    return SimilarityService(embeddings, neighbors, titles, session.commit)
+
+
+SimilarityServiceDep = Annotated[SimilarityService, Depends(get_similarity_service)]
 
 
 # ---------------------------------------------------------------------------
