@@ -34,7 +34,7 @@ and is accounted for in the table below.
 | 5 | The changes window's inclusivity and its 14-day cap | **confirmed, and it is the boundary** | `start == end` is a valid one-day window (4,278 results); `[d, d+1]` covers both days deduplicated; `[today-14, today]` → 200; `[today-15, today]` → **422**, `"Invalid date range: Should be a range no longer than 14 days."` The shipped clamp sits exactly on it with nothing spare. |
 | 6 | `credits` is a valid TV append namespace | **confirmed** | Present with 14 cast entries. `aggregate_credits` is *also* valid — a second view, not a replacement. |
 | 7 | `append_to_response=season/N` works | **confirmed, and shipped — see below** | It does, and it collapses a series from 1+N requests to 1. `TmdbMetadataProvider.fetch` has issued the blind window since M9's T1. |
-| 8 | A season the series lists that 404s on its own route | **still unverified** | 320 listed seasons across 30 series, **zero** absent. The propagate-and-park branch has still never met a real occurrence. Sample skews popular, so it is weak evidence of absence. |
+| 8 | A season the series lists that 404s on its own route | **still unverified** | 320 listed seasons across 30 series, **zero** absent. The propagate-and-park branch has still never met a real occurrence. Sample skews popular, so it is weak evidence of absence. **Widened 2026-08-11 to 626 listed seasons over 44 series, still zero — see T2's run below, which also scanned the append-layer form of the same question.** |
 | 9 | Search orders by relevance with the obvious answer first | **confirmed** | 263 of 266 confident resolutions were TMDb's **first** result (max rank 3; series 126/126 at rank 0), and the top result was an exact normalised name match on 269 of 320 probes. |
 | 10 | `spoken_languages[].iso_639_1` and `origin_country` are well-formed | **confirmed** | Zero anomalies over 59 detail payloads; `origin_country` present on 29/29 movies and 30/30 series, always a list of strings. |
 **Two things live TMDb contradicted, both now fixed with a failing test
@@ -220,6 +220,111 @@ the blind window costs one follow-up too, whether it sits outside the window
 or TMDb simply omitted it. Guess 8 above is still unverified — zero absent
 seasons in 320 — so the second case has never been observed at all, and the
 follow-up is bounded at one attempt per fetch either way.
+**The last clause is right about *seasons* and was read as a claim about
+*requests*, which the live run below refutes: one attempt per season is
+`ceil(len(missing)/20)` requests, and five were observed on one series.**
+**The shipped append path against the live API, 2026-08-11 (M9 T2): 393
+requests, and the refutation is a sentence this project had written in three
+places.** The bar — eleven guesses and what would count as done — was written
+to `/tmp/m9-exec/T2/bar.md` **before the first request**, and the driver
+(`/tmp/m9-exec/T2/run.py`) ran outside the working tree reading the operator's
+own `.env`. Sample: **14 series carrying 306 listed seasons, plus 2 movies as
+a control**, each fetched down *both* paths — the shipped
+`TmdbMetadataProvider.fetch` and a verbatim re-spelling of the pre-T1 `1+N`
+path (`git show e38ccb5^`) — sequentially through one shipped `TmdbClient`
+token bucket. Status distribution: **392 × 200 and 1 × 400**, the 400 being
+the deliberate ceiling probe. **No 429 and no 5xx**, and no `retry-after` on
+the 400 either; none was provoked and the absence is not offered as evidence.
+Window **2026-08-11 21:15:51Z → 21:18:01Z**, and **the key was idle from
+21:18:01Z**. The second window this pairing needs — group S's priority-tier
+enrichment — **does not exist yet**: S3 had not started when this ended, which
+is the whole point of the ordering, and S3 states its own window when it runs.
+Two windows are wanted here and only one can honestly be written today.
+
+**Refuted: "a series with more than 14 seasons needs a second request; a small
+tail."** The count is `1 + ceil(|listed \ {0..13}| / 20)` and it **has no
+ceiling** — the arithmetic above already said the bound is the size of the
+upstream `seasons[]` array, and the PRD said "a second request" and "one
+follow-up" anyway. Measured, and the formula predicted every one of the 14
+exactly:
+
+| listed seasons | append path | `1+N` path |
+|---|---|---|
+| 2, 6, 6, 8, 9, 10, 10, 11 | 1 | 3, 7, 7, 9, 10, 11, 11, 12 |
+| **14** (numbers 0–13 — the exact window boundary) | **1** | 15 |
+| 24 | 2 | 25 |
+| 30 | 2 | 31 |
+| 39 | **3** | 40 |
+| 63 | **4** | 64 |
+| 74 | **5** | 75 |
+
+**Refuted, and it was this run's own prediction rather than the repository's:
+there is no top-level volatility between the two paths.** The bar predicted
+`popularity`/`vote_average`/`vote_count` would differ, because the two arms are
+two separate detail requests made seconds apart. **All 14 composed payloads
+were equal field for field — zero differences, nothing to report field by
+field.** So the identity `test_the_composed_payload_equals_what_the_per_season_
+path_produced` asserts on fixtures holds *exactly* against the live API, not
+"modulo volatile fields". Bounded claim: seconds apart, not hours.
+
+**And the equality was planted against, because a differ that cannot see a
+difference is a check that cannot fail.** One series re-fetched down both
+paths, baseline confirmed at 0 diffs, then five perturbations planted into a
+copy of the `1+N` payload — a season's `episodes` dropped, one episode's
+`name` changed, one episode removed, a whole season entry removed, a season
+entry's top-level `id` removed. Each was caught and each named its own field
+path (`.seasons[0].episodes`, `.seasons[0].episodes[0].name`,
+`.seasons[0].episodes[len]` 6→5, `.seasons[len]` 2→1, `.seasons[0].id`).
+
+**Not refuted, still unverified, and this is the one the diff exists for.**
+Guess 8's shape at the request layer — a season the series lists, *inside* the
+blind window, whose block is silently omitted while its own route answers
+`200`, i.e. the append is not a substitute for the season route — occurred
+**0 times in 306 listed seasons**, and no listed season's own route answered
+anything but `200`. Combined with 2026-08-01 that is **626 listed seasons over
+44 series, zero absent**. Still weak evidence of absence: the sample skews to
+series TMDb curates well, though it deliberately reached past the popular end
+(Panorama's 74 seasons, Horizon's 63, Bergerac's 10 — long-tail BBC catalogue
+entries, not a second helping of prestige drama). Every one of the 14 listed
+its seasons contiguously and every miss was a number ≥ 14, so the reconcile's
+"TMDb permits any integer season number" branch **also** has still never met a
+real occurrence.
+
+**Confirmed, each against today's API:** 21 append items is still a **400,
+`status_code: 27`**, *"Too many append to response objects: The maximum number
+of remote calls is 20"*, and 20 items is still a `200` — so the derivation of
+`SERIES_SEASON_SLOTS` is measured on both sides of the boundary, not just
+below it. `season/0` was asked for on all 14 and arrived on **12**; the other
+two (ids whose `seasons[]` begins at 1) got the silent omission, which
+re-confirms the unlisted-number rule the whole blind window rests on. An
+appended block still differs from the season route's own response **by the
+top-level `id` and by nothing else** — that was three seasons on one series in
+2026-08-01 and is now **306 seasons over 14**. A movie still costs exactly 1
+request, carries `title` and no `name`, and no season machinery touches it.
+
+**The ~10× restated on this sample, and the sample stated rather than
+laundered.** These 14 series have a **median of 10.5 listed seasons and a mean
+of 21.86**, against the **median of 9** over the 30 popular series the ~324k
+figure rests on. In aggregate the run cost **25 requests against 320, i.e.
+12.8×**. ⚠️ **That is not a better constant and must not be quoted as one:
+this sample is deliberately tail-heavy** — 5 of the 14 were chosen *because*
+they have more than 20 seasons, to exercise the follow-up branch at all — so
+its median is an artefact of the selection even more than the 30-series median
+is an artefact of popularity. What the run does add is the **form** of the
+arithmetic, which is wrong in both terms and roughly cancels: a catalog total
+for the `1+N` path is `Σ(1 + N)`, which needs the **mean** season count and
+not the median, and the append side is `32,409 + Σ ceil(|listed \ {0..13}|/20)`
+and not `32,409`. Season counts are right-skewed (mean 21.86 against median
+10.5 even here), so the median understates the first and the missing follow-up
+term understates the second. ~10× survives as an order-of-magnitude claim;
+neither leg survives as a request budget.
+
+**One number for whoever prices the crawl, with the caveat that makes it
+usable.** The measure phase ran **347 requests in 24.0 s = 14.5 rps** against
+a token bucket set to 30 — so the bucket was **not** the binding constraint;
+downloading season blocks was. **This is not a movie-fetch rate and the
+~130,806-detail-fetch crawl must not use it as one**: the two movie fetches in
+this run took **0.064 s and 0.118 s** of wall time each.
 **TMDb's movie/TV divergence runs through three layers of its API, not
 one, and all three are now measured rather than read.** The field-name and
 endpoint rows were read from `developer.themoviedb.org` on 2026-07-31 and

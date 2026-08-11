@@ -614,7 +614,7 @@ successful.
 | Kind | Request |
 |---|---|
 | movie | `GET /movie/{id}?append_to_response=credits,keywords,images,videos,external_ids,release_dates` |
-| series | `GET /tv/{id}?append_to_response=credits,keywords,images,videos,external_ids,content_ratings,season/0,…,season/13` — one request, seasons and episodes included; a listed season outside that window costs one follow-up carrying only `season/N` items |
+| series | `GET /tv/{id}?append_to_response=credits,keywords,images,videos,external_ids,content_ratings,season/0,…,season/13` — one request, seasons and episodes included; listed seasons outside that window cost `ceil(n/20)` follow-ups carrying only `season/N` items, so a series costs `1 + ceil(n/20)` requests and **not** a flat two |
 
 Two facts about that second row, both measured live on 2026-08-01 and both
 consequential enough to state here rather than in an adapter docstring:
@@ -634,11 +634,31 @@ consequential enough to state here rather than in an adapter docstring:
   already carries. **Taken, and this row is it.** TMDb permits any integer
   season number, so the blind window is reconciled against the `seasons[]`
   summary the same response carries and any listed number it missed is
-  fetched by a follow-up; that follow-up spends no slot on a namespace, so it
+  fetched by a follow-up; a follow-up spends no slot on a namespace, so it
   gets all twenty. Identity with the `1+N` payload is the contract — the
   block is merged over the summary exactly as the per-season response was,
   and no `season/N` key survives into `raw_payloads`. The request-budget
   arithmetic is in [04](04-catalog-bootstrap.md).
+
+**The shipped path was verified against the live API on 2026-08-11, and it
+refuted the follow-up count this section used to state.** 14 series carrying
+306 listed seasons, plus 2 movies as a control, each fetched down both the
+shipped path and the `1+N` path it replaced. Identity held **exactly** — all
+14 composed payloads equal field for field — so the property the whole change
+rests on is now measured against TMDb and not only against fixtures. But *"a
+follow-up"* was singular in two places here and *"a second request"* is how
+[04](04-catalog-bootstrap.md) put it, and the real count is
+**`1 + ceil(n/20)`, where `n` is the listed seasons numbered 14 and up**: 1, 2,
+3, 4 and 5 requests were all observed, five of them on a 74-season series, and
+the only bound is the size of the upstream `seasons[]` array. Confirmed
+unchanged by the same run: the 20-item ceiling (21 is a 400, 20 is a 200), the
+silent omission of an unlisted season number, and an appended block differing
+from the season route's own response by the top-level `id` and nothing else —
+now over 306 seasons rather than three.
+`.claude/rules/tmdb-and-enrichment.md` carries the run guess by guess,
+including the two questions it could **not** settle: no listed season was ever
+omitted from the append (0 in 306, 626 with the earlier run) and none was ever
+refused by its own route, so both stay unverified rather than confirmed.
 
 The same divergence runs through the field names (`title`/`name`,
 `release_date`/`first_air_date`, `keywords.keywords`/`keywords.results`, a
