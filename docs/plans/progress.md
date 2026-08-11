@@ -1949,3 +1949,72 @@ failure that PRD 05 cites it for; PRD 10 argued its partial index from a majorit
 does not produce; `.claude/rules/milestone-boundary-calls.md` pointed at *"the M6 live-verification
 section below"*, which has never existed in that file; and this file's own status table had said
 "IN PROGRESS" for M3 and "not planned" for M4–M7 since M3.
+
+---
+
+### ✅ M9 Task G1 — the SSE-in-transaction reading, settled before anything is repaired (2026-08-11)
+
+**The bar was written down before the first run**, and the refutations come first.
+
+**PRD 09's consequential claim is refuted.** *"A client is told an event landed before the
+transaction that produced it committed"* is **false at all five `events.publish` sites in `src/`**,
+each driven against a **committing** session with a second connection reading the event's own
+subject inside `publish`: `enrich.py:289` sees `enrichment_state='enriched'` (committed :208);
+`push.py:209` and `:244` see the merged `watch_states` row (committed :170); `push.py:278` sees the
+`media_items` row (committed :275); `reconcile.py:267` sees `sync_runs.items_seen` at 2 then 4
+(committed :245). The entry was written from one site, which is the error it was recording.
+
+**The literal claim survives and is materially smaller than the roadmap's sentence.** The open
+transaction at the instant of an `enrich` frame is `JobWorker`'s, not `EnrichService`'s, and it does
+not hold the title. Measured at the same instant on the same connection, the only visible `jobs` row
+is `('enrich', 'running')`; the two `BACKFILL` requests staged at `enrich.py:270–277` appear as
+`('derive','pending'), ('index','pending')` only after `complete(job.id)` + `_commit()`
+(`jobs.py:143–147`). **That pair plus the completing `DELETE` is the entire residual window**, so a
+rollback there costs two enqueues and one duplicate `title.updated` on the `requeue_running` re-run.
+Not a lie to a client.
+
+**The verdict, in [ADR-0033](../prd/decisions/0033-an-event-is-a-statement-about-committed-state.md):
+the ordering is worth enforcing structurally, and what it buys is *ordering, not durability*.** It
+needs no outbox and no table. The arm not taken — *leave it, the convention stands* — is written out
+with its own argument, and the single reason it is not taken is that the failure mode deferral adds
+is not new: an event dropped by a crashing lane and an event published twice by a re-running job are
+the same crash, and `requeue_running` is already the recovery for it.
+
+**`xmin` is not evidence of an uncommitted read.** The flake sighting circulating on this milestone —
+`assert '745' is None` — was relayed three times as *"a row a transaction has not committed is
+visible"*. Postgres shows no such thing. Measured at the failure: `xmin='745', status='running'`
+against the reader's own `pg_current_snapshot() = '749:749:'`, an **empty** in-progress list, so 745
+is settled and committed. It is the *claim's* `UPDATE` still current because the `DELETE` has not
+committed.
+
+**The flake reproduced deterministically, which is what a rate could not do.** Unplanted on this tree
+at load average 7–9: **6 failures in 13 runs**, every one on `_job_xmin` and every one reporting the
+identical row state. With `await asyncio.sleep(0.25)` planted in `JobWorker._run` between the handler
+returning and `complete(job.id)`: **5 of 5**, on `_job_xmin` and no other line, with `probe.seen` and
+the refetch both passing — which is what separates *"the assertion races the completing commit"* from
+*"the client was told too early"*. Three implementers reported 5/5, 3/9 and "green"; all three are
+consistent, and none distinguishes a defect from a scheduling window, because **a rate is not a
+mechanism**. Every plant took a `cp` backup and every restore was verified by `md5sum` and by reading
+the file back.
+
+**A probe that never ran records nothing.** The `push._apply_items` harness first recorded `[]` —
+the fixture seeded no title the match ladder could find, and that path publishes only for an outcome
+carrying a `title_id`. Read as a result it says *"the availability event publishes nothing"*.
+`test_sse_end_to_end.py` now asserts `probe.seen` non-empty before any claim is read out of it.
+
+**Found stale and corrected:** `ports/events.py`:22–23 named `EnrichService`,
+**`WatchStateSyncService`** and the push lane as the three publishers. `WatchStateSyncService` holds
+no `EventPublisher` at all; the third is `ReconcileService`, which `services/events.py`'s module
+docstring and [ADR-0019](../prd/decisions/0019-the-client-event-channel-is-a-port.md) both already
+said — one file disagreeing with two.
+
+**Left recorded, not fixed, and out of scope here:** `JobWorker._run`'s `try` wraps the handler only,
+so an exception from the completing commit at `jobs.py:147` propagates past the `else` and leaves the
+job `running` until the next `startup()`. Pre-existing, affects every kind, belongs with whoever owns
+`requeue_running`'s cadence.
+
+**Zero behaviour change:** `git diff --stat src/` is a docstring-only edit to `ports/events.py`.
+`tests/integration/test_sse_end_to_end.py` gains the generalised probe, the positive control, an
+assertion pinning today's residual window (**which G2 flips** — planted, it fails on its own message
+with `[('derive','pending'),('enrich','running'),('index','pending')]`), and a **bounded** poll in
+place of the load-dependent immediate read.
