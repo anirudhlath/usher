@@ -422,30 +422,23 @@ def build_pipeline(
             commit=session.commit,
             batch_size=settings.sync_batch_size,
         ),
-        # The two indexes are built here rather than being fields on the
-        # pipeline, because nothing outside this service has any business
-        # holding a `SearchIndex`: PRD 05's split is retrieve-then-rank, and a
-        # caller that could reach the generator directly would get unranked
-        # hits with no `owned` flag and no `SearchAnswer` to say what ran.
-        search=SearchService(
-            PostgresSearchIndex(
-                session,
-                ef_search=settings.search_hnsw_ef_search,
-                rrf_k=settings.search_rrf_k,
-            ),
-            PostgresSuggestIndex(
-                session,
-                threshold=settings.search_trigram_threshold,
-                candidates=settings.search_suggest_candidates,
-            ),
-            titles,
-            media_items,
-            result_limit=settings.search_result_limit,
+        # **Delegated to `build_search_service` rather than spelled here**, so
+        # this deployment's search tuning has exactly one assembly. M9 gave
+        # `GET /search` a request-scoped `SearchService` that never wants the
+        # ingest graph around it; assembled twice, the two would be two chances
+        # for `search_result_limit`, `search_rrf_k` or the ef_search GUC to
+        # reach one caller and not the other -- and the drift would be silent,
+        # because both spellings return a working `SearchService`.
+        #
+        # The **expander** is built here and passed down, because it is the one
+        # collaborator that is not a function of `settings` alone: an expansion
+        # is billed to `llm_calls` and committed, both of which are
+        # per-session, while the client is per-process. This function is the
+        # only place that holds one of each.
+        search=build_search_service(
+            session,
+            settings,
             embedder=embedder,
-            # **Built here rather than passed in, and the ledger is the
-            # reason.** An expansion is billed to `llm_calls` and committed,
-            # both of which are per-session; the client is per-process. This
-            # function is the only place that holds one of each.
             expander=(
                 None
                 if llm is None or not settings.query_expansion_enabled
@@ -512,6 +505,67 @@ def build_pipeline(
         ),
         events=publisher,
         commit=session.commit,
+    )
+
+
+def build_search_service(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    embedder: Embedder | None = None,
+    expander: QueryExpansionService | None = None,
+) -> SearchService:
+    """PRD 05's read path on one session, and nothing else.
+
+    **Narrow on purpose.** `GET /search` needs a `SearchService` per request
+    and needs none of the ingest graph, so a route reaching `build_pipeline`
+    would construct a matcher, a reconciler, a watch-state syncer, a
+    similarity service, ten row providers and a candidate pool -- for every
+    keystroke-adjacent request -- to reach one field of the result. This
+    builds four objects.
+
+    **The two indexes are built here rather than being handed in**, for the
+    reason `build_pipeline` gave when it held this code: nothing outside
+    `SearchService` has any business holding a `SearchIndex`. PRD 05's split
+    is retrieve-then-rank, and a caller that could reach the generator
+    directly would get unranked hits with no `owned` flag and no
+    `SearchAnswer` to say what ran.
+
+    `embedder` is `None` for every caller but `usher search --mode
+    semantic|fused`, and that is ADR-0022 at the wiring layer rather than an
+    omission. It is a once-per-*process* resource -- a 65 MB ONNX session and
+    a ~4.8 s cold load -- and this function runs once per session, so it is
+    never built here. **On the API that has a consequence a client can see**:
+    `create_app`'s lifespan builds a model only when `worker_enabled` and does
+    not expose it, so `api/deps.get_search_service` passes `None` and
+    `?mode=semantic` cannot succeed on an API-only deployment. Flagged in
+    `/openapi.json` and in PRD 07; resolving it is a new capability rather
+    than a route (M9 group B's open question 4).
+
+    `expander` is passed rather than built for the reason above it: it needs a
+    `LLMCallRepository` and a commit on *this* session plus an `LLMClient`
+    that outlives the session, and only `build_pipeline` holds both. Every
+    other caller gets `None` and every line of the search path is M6's --
+    which is also the shipped default twice over (`USHER_LLM_ENABLED` is
+    `false`, and `USHER_QUERY_EXPANSION_ENABLED` is `false` even when it is
+    not, because expansion measured *worse*: MRR 0.733 -> 0.373, PRD 05).
+    """
+    return SearchService(
+        PostgresSearchIndex(
+            session,
+            ef_search=settings.search_hnsw_ef_search,
+            rrf_k=settings.search_rrf_k,
+        ),
+        PostgresSuggestIndex(
+            session,
+            threshold=settings.search_trigram_threshold,
+            candidates=settings.search_suggest_candidates,
+        ),
+        PostgresTitleRepository(session),
+        PostgresMediaItemRepository(session),
+        result_limit=settings.search_result_limit,
+        embedder=embedder,
+        expander=expander,
     )
 
 

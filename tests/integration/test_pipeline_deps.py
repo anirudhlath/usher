@@ -43,6 +43,7 @@ from usher.api.deps import (
     get_row_cache,
     get_row_context,
     get_similarity_service,
+    get_search_service,
     get_source_repository,
     get_sync_run_repository,
     get_taste_repository,
@@ -112,6 +113,14 @@ _PROVIDERS = {
     # only exists once `SessionDep` has resolved a real session, and a plain
     # call cannot reach that failure mode.
     "similarity_service": get_similarity_service,
+    # M9's `GET /search`, and the first provider here that reaches its
+    # collaborators through `usher.composition` rather than naming them: the
+    # import-linter contract that keeps `PostgresSearchIndex` inside its
+    # package lists `usher.api` whole, so `api/deps.py` cannot construct one.
+    # That indirection is exactly the shape this file exists for -- a factory
+    # whose signature drifted would still import cleanly and would 500 at
+    # request time.
+    "search_service": get_search_service,
 }
 
 
@@ -160,6 +169,7 @@ async def test_every_pipeline_provider_resolves_in_a_request(probe: AsyncClient)
                 "Title",
                 "Row",
                 "Home",
+                "Search",
                 "Taste",
                 "User",
                 "Similarity",

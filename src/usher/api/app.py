@@ -14,7 +14,17 @@ from usher.api.errors import (
     validation_error_without_the_request_body,
 )
 from usher.api.lanes import LaneSupervisor
-from usher.api.routers import events, health, home, meta, playback, rows, sources, titles
+from usher.api.routers import (
+    events,
+    health,
+    home,
+    meta,
+    playback,
+    rows,
+    search,
+    sources,
+    titles,
+)
 from usher.composition import (
     DefaultUserId,
     embedder,
@@ -188,6 +198,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(meta.router)
     app.include_router(playback.router)
     app.include_router(rows.router)
+    app.include_router(search.router)
     app.include_router(sources.router)
     app.include_router(titles.router)
     return app
