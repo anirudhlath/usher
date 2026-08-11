@@ -1839,3 +1839,102 @@ one scan this task adds parses `adapters/bulk/imdb.py` for module-level
 
 Gate green before and after on the fully restored tree (`md5sum`-verified
 byte-identical to the pre-sweep digest).
+
+## M9 Task V1 — the problem-code vocabulary, and a harness that invalidated its own controls
+
+**10 plants over the vocabulary's closure — 10 killed, 2 equivalent-mutant
+controls surviving all five gate steps, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0
+DID-NOT-RUN.** Run 2026-08-11 in place over `src/usher/api/dto/problem.py`,
+`src/usher/api/errors.py`, `src/usher/api/routers/playback.py`,
+`src/usher/api/routers/health.py`, `src/usher/api/dto/health.py` and ADR-0030
+itself, with the expected verdict written down first, `PYTHONDONTWRITEBYTECODE=1`
+and a `__pycache__` sweep under **both** `src/` and `tests/` in force, every
+plant asserted present by an exact anchor count (`count(anchor) == 1`) and every
+restore verified by `md5sum` against a pre-plant digest.
+
+🔴 **The harness lived in the working tree, and that made every gate-step
+control read FAIL.** `.plants.py` at the repo root plus a `.plant-backups/`
+directory holding `.py` copies of the mutated files are **inside** what
+`uv run ruff check .` and `uv run ruff format --check .` walk — ruff does not
+skip a dotfile with a `.py` extension, and it certainly does not skip a
+dot-*directory* full of them. The first run of both controls reported
+`ruff check FAIL` / `ruff format --check FAIL` with `mypy`, `lint-imports` and
+`pytest` passing, and the write-up that was one keystroke from being committed
+said *"both controls fail the two ruff steps"* — a statement about the harness
+rendered as a statement about the code. Moving the harness to `/tmp` with an
+absolute `ROOT` and re-running gave PASS on all five for both.
+
+**This is a new spelling of a family this file already holds and none of the
+existing entries covers it.** The recorded members are all *a run that ran
+against the wrong code* (the `.pyc` collision, the `cp -a` venv shebang,
+`sitecustomize` off `PYTHONPATH`). This one is **a gate step that ran against
+the right code and extra files** — the tool did exactly what it was asked, over
+a corpus the sweep created. Two things follow, and the second is the
+generalisation:
+
+- **A control has to be measured against the gate, and the gate is
+  whole-repository.** `pytest` takes a selection and the four static steps take
+  `.`, so a harness that is invisible to a scoped pytest run is fully visible to
+  `ruff check .` and `mypy src tests`. **Put the harness outside the tree**, or
+  measure the four static steps on a clean tree first and subtract — the first
+  is cheaper and cannot drift.
+- **The tell is that every control fails the same steps and no plant does.** A
+  suite of controls that were chosen precisely because nothing can observe them
+  does not suddenly acquire a common failure mode; when one appears, suspect the
+  corpus before suspecting the controls.
+
+**The plant the plan named lands on the premise, and the careful spelling of the
+same defect is what lands on the assertion.** V1's acceptance names
+*"`/health/ready` answering a problem document → the exemption case fails on its
+own assertion line, not on a neighbouring one"*. Spelled the loud way — the
+handler raising `ProblemException(503)` — the case fails on
+`assert body["status"] == "degraded"` (`assert 503 == 'degraded'`), because a
+problem document has an integer `status`. That is a real detection and it is not
+the absence assertion. Spelled the careful way — `ReadinessResponse` growing
+`type` and `code` fields while keeping `status` and `checks`, i.e. the change
+somebody makes "for consistency" — it fails on `assert "type" not in body`,
+exactly as required. **Both were run. The general form: when an acceptance
+criterion asks for a plant to fail a *named* assertion, the plant that does so is
+usually the one that preserves everything the case checks first — a loud plant
+trips the premise and reports a kill the criterion was not asking about.**
+
+| plant | verdict | dies on |
+|---|---|---|
+| a — `routers/playback.py` names `ProblemCode.TITLE_NOT_FOUND` | KILLED | ``emits codes the vocabulary does not hold: ['title_not_found']`` |
+| c — `RATE_LIMITED` added to the enum, not to the ADR | KILLED | ``members ADR-0030 does not declare: ['rate_limited']`` |
+| f — a `rate_limited` row added to the ADR, not to the enum | KILLED | ``declares codes `ProblemCode` does not have: ['rate_limited']`` |
+| d — `title_not_found` added to **both** (the careless per-resource 404) | KILLED | ``per-resource 404 codes: ['title_not_found']`` |
+| e — `no_such_title` added to **both** (the careful one) | KILLED | ``404 codes naming a collection the path already names: {'no_such_title': ['title']}`` |
+| g — `NOT_PLAYABLE` raised with 404 as well as 409 | KILLED | ``raised with a status ADR-0030 does not give it: {('not_playable', 404): 409}`` |
+| h — `_CODE_FOR_STATUS` learns `503` | KILLED | ``_CODE_FOR_STATUS covers [404, 405, 422, 503]`` |
+| i — `TICKET_INVALID = "invalid_ticket"` | KILLED | ``TICKET_INVALID puts 'invalid_ticket' on the wire`` |
+| j — `/home` joins `PROBLEM_EXEMPTIONS` | KILLED | ``{'/events', '/health/ready', '/home'} == {'/events', '/health/ready'}`` |
+| b2 — `ReadinessResponse` grows `type`/`code` | KILLED | ``assert 'type' not in {…}`` |
+
+**d and e are the pair that matters and they were run against the same three
+cases.** `d` dies on the `_not_found`-suffix case; `e` **passes** it and dies
+only on the collection-noun case, which is the measurement behind the claim that
+the two together hold both spellings. Verified by node id: under `e`, only
+`test_no_404_code_names_a_collection_the_route_table_already_names` failed out of
+the file's eight.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| `_CODE_FOR_STATUS`'s `404` and `405` entries swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,244 / 4 skipped) |
+| `PROBLEM_EXEMPTIONS`' two entries swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,244 / 4 skipped) |
+
+Both are facts about the *code* rather than about what the tools look at: each
+is a dict literal with two distinct, independent keys, read only by key lookup
+(`_CODE_FOR_STATUS.get(status)`) or as a set (`frozenset(PROBLEM_EXEMPTIONS)`),
+and neither entry's value references the other. Neither is an `__all__` reorder,
+which is the control `ruff`'s `RUF022` rejects — checked rather than assumed,
+after the A1 entry above recorded an import reorder being rejected for the same
+family of reason.
+
+**And the `-q`/`-qq` trap fired again, in its cheapest form.** `uv run pytest
+tests/unit | grep -E "passed|failed"` printed nothing: `pyproject.toml`'s
+`addopts` already carries `-q`, so the extra one made it `-qq` and suppressed
+the summary line on a green run. Costless here because it was an interactive
+baseline rather than a harness verdict — recorded because the harness rule
+("pass no verbosity flag at all") is usually stated about harnesses and the
+habit is formed at the shell.

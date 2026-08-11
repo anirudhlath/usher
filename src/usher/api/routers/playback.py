@@ -9,12 +9,13 @@ spelling.
 down".** `services/titles.py` says the opposite about itself in as many words,
 and PRD 07 deferred its RFC 9457 envelope four times on exactly that
 structural ground -- no `SourceAdapter`, no 503, no `code` to give it. Group A
-shipped the envelope's *shape*; this route produces the first genuine
-`503 source_unavailable` against a real unreachable source, and ADR-0030 (the
-vocabulary-design task) is what closes the `code` list. **This route emits
-codes and does not freeze them.** `api/dto/problem.py` records which three
-members D4 minted, the test each had to pass, and the two the plan named that
-were deliberately not minted.
+shipped the envelope's *shape*; this route produced the first genuine
+`503 source_unavailable` against a real unreachable source, and
+[ADR-0030](../../../../docs/prd/decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
+was designed against it rather than against a guess. **All three codes this
+route emits are ratified there**, including the two calls it left open: the
+409 over `200 {"targets": []}` (ruling 3), and whether `_CODE_FOR_STATUS`
+should learn 409 and 503 (ruling 4 -- it should not).
 
 **`GET /stream/{ticket}` answers `302` and nothing else.** Usher never proxies
 bytes -- PRD 07's constraint is untouched, and group C's image proxy is a
@@ -164,9 +165,10 @@ async def play_title(
     that reason.
     """
     if await titles.get(title_id) is None:
-        # Generic `not_found`, provisionally and on purpose -- the same call
-        # `api/routers/titles.py` makes, so this tree ships one 404 convention
-        # rather than two. See `api/dto/problem.py`.
+        # Generic `not_found`, and ADR-0030 ruling 1 is why: RFC 9457's
+        # `instance` already carries `/titles/{id}/play`, so `title_not_found`
+        # would be a second spelling of what the document says. The same call
+        # `api/routers/titles.py` makes -- one 404 convention, not two.
         raise ProblemException(
             status_code=status.HTTP_404_NOT_FOUND,
             code=ProblemCode.NOT_FOUND,
@@ -268,11 +270,13 @@ def _answer(resolution: PlaybackResolution) -> PlayResponse:
             detail=resolution.detail or _SOURCE_UNAVAILABLE_DETAIL,
         )
     if resolution.status is PlaybackStatus.NOT_PLAYABLE:
-        # 409 rather than `200 {"targets": []}`, and it is one of the calls
-        # ADR-0030 ratifies. The empty list is defensible -- the port calls
-        # `[]` a value rather than a failure -- and is rejected here because
-        # the client behaviour differs: a 200 invites a player to render an
-        # empty picker, where a 4xx is the signal to say so.
+        # 409 rather than `200 {"targets": []}`, ratified by ADR-0030 ruling
+        # 3. The empty list is defensible -- the port calls `[]` a value
+        # rather than a failure -- and is rejected because the client
+        # behaviour differs: a 200 invites a player to render an empty
+        # picker, where a 4xx is the signal to say so. RFC 9110 §15.5.10 is
+        # the fit: a conflict with the current state of the target resource,
+        # which is exactly "you own this and no copy of it can be played".
         raise ProblemException(
             status_code=status.HTTP_409_CONFLICT,
             code=ProblemCode.NOT_PLAYABLE,

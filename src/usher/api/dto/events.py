@@ -5,10 +5,14 @@ that split has one immediate job: `SseEventKind` is the vocabulary a client
 matches on, so renaming `ClientEventKind.TITLE_UPDATED` internally is a mypy
 error at the mapping below rather than a silent wire break.
 
-**This enum is the SSE analogue of PRD 07's deferred RFC 9457 envelope, and
-it is not a substitute for one.** RFC 9457 formats a response *body*; once
-`GET /events` has answered `200 text/event-stream` there is no status code
-left, and every later failure is an event or a closed connection. PRD 07
+**This enum is the SSE analogue of PRD 07's RFC 9457 envelope (M9,
+`api/dto/problem.py` and ADR-0030), and it is not a substitute for one.** RFC
+9457 formats a response *body*; once `GET /events` has answered `200
+text/event-stream` there is no status code left, and every later failure is
+an event or a closed connection. That is why `/events` is one of the two
+routes in `PROBLEM_EXEMPTIONS`, and ADR-0030 **preserves** M5's reason as a
+standing rule rather than discharging it -- the envelope landing changes
+nothing here. PRD 07
 already names the in-stream failure it cares about -- "on buffer overflow the
 server emits `resync_required` rather than silently skipping events" -- so
 that vocabulary is pinned here, versioned independently of the internal one,

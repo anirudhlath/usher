@@ -45,8 +45,16 @@ own code; an ordinary `HTTPException` -- including the 404 and 405 Starlette
 raises from the router itself, before any handler runs -- is translated
 through `_CODE_FOR_STATUS`. A status with no member in that table is handed
 to FastAPI's own handler untranslated rather than given an invented code:
-the vocabulary is ADR-0030's to grow, and a handler that guessed would be
-the seventeen-code sprawl the two-pass split exists to prevent.
+ADR-0030 owns the vocabulary, and a handler that guessed would be the
+seventeen-code sprawl the two-pass split exists to prevent.
+
+**Adopting the *status* is not enough, and the cost is named rather than
+hidden.** A route raising a bare `HTTPException(503)` is delegated below and
+answers `{"detail": …}` at `application/json`, which is indistinguishable
+from the pre-envelope shape -- measured while the playback route was being
+built, where it presented as `KeyError: 'code'`. ADR-0030 ruling 4 decides
+that the answer is *not* to widen `_CODE_FOR_STATUS`; it is group H's "every
+route that can fail declares its problem responses" scan.
 """
 
 from collections.abc import Mapping
@@ -72,10 +80,20 @@ _VALIDATION_DETAIL: Final = (
     "The request did not pass validation. See the errors member for the fields that were rejected."
 )
 
-# The whole vocabulary the shipped surface needs, and deliberately no more.
-# `ProblemCode.INVALID_CURSOR` is absent because no *status* implies it --
-# the cursor codec raises `ProblemException` and names it directly, which is
-# the mechanism every later route with a code of its own uses.
+# **Three entries, and ADR-0030 ruling 4 is the rule that decides which:**
+# this table exists for statuses raised by machinery Usher does not control.
+# Starlette's router raises 404 for an unrouted path and 405 for a method a
+# route does not have; FastAPI raises 422 for a rejected request. Every
+# status Usher's own code raises names its code at the raise site through
+# `ProblemException`.
+#
+# So `400 invalid_cursor`, `409 not_playable` and `503 source_unavailable`
+# are all absent on purpose, and not because nobody got round to them. An
+# entry for one of them would be a member of a lookup nothing looks up --
+# and worse, a guess about intent from a status alone, so the next 503 that
+# is not "the source is down" would silently answer `source_unavailable`.
+# `tests/unit/test_api_problem_vocabulary.py` pins the key set with that
+# reason attached.
 _CODE_FOR_STATUS: Final[Mapping[int, ProblemCode]] = {
     404: ProblemCode.NOT_FOUND,
     405: ProblemCode.METHOD_NOT_ALLOWED,
@@ -184,8 +202,9 @@ async def http_error_as_a_problem_document(request: Request, exc: Exception) -> 
     code = exc.code if isinstance(exc, ProblemException) else _CODE_FOR_STATUS.get(exc.status_code)
     if code is None:
         # No member for this status, and inventing one here is precisely
-        # what group V's ADR-0030 exists to stop. FastAPI's default shape,
-        # unchanged, until the vocabulary grows a name for it.
+        # what ADR-0030 exists to stop. FastAPI's default shape, unchanged,
+        # until the vocabulary grows a name for it -- which is an amendment
+        # to a decision record, not an edit here.
         return await http_exception_handler(request, exc)
     return problem_response(
         request,
