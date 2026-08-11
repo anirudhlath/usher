@@ -28,6 +28,7 @@ from usher.api.app import create_app
 from usher.api.deps import get_home_service, get_row_cache, get_row_context
 from usher.api.dto.home import RowResponse
 from usher.config import Settings
+from usher.domain.enums import ImageKind
 from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
 from usher.domain.taste import GenreAffinity
 from usher.ports.embedding import Embedder
@@ -88,6 +89,11 @@ class _Seeded:
         self.resuming: uuid.UUID | None = None
         self.arrived: uuid.UUID | None = None
         self.collection: uuid.UUID | None = None
+        # The two artwork ids the resuming title carries, so a case can assert
+        # *which* one reached the card rather than that one did.
+        self.resuming_poster: uuid.UUID | None = None
+        self.resuming_backdrop: uuid.UUID | None = None
+        self.arrived_poster: uuid.UUID | None = None
 
 
 async def _household() -> _Seeded:
@@ -105,11 +111,20 @@ async def _household() -> _Seeded:
     `franchise-<id>` sorts *before* `recently-added`. The screen is therefore
     `[continue-watching, recently-added, franchise-<id>]` by score and
     `[continue-watching, franchise-<id>, recently-added]` by slug.
+
+    **The resuming title carries both kinds of artwork**, deliberately. It is
+    the only title on this screen that appears on a `landscape` row, so it is
+    the only one whose card can tell a poster from a backdrop -- and a fixture
+    seeding one kind would make the swap invisible, because a single kind
+    answers whichever question is asked.
     """
     library = Library()
     seeded = _Seeded(library)
     seeded.resuming = await library.title("A Film Half Watched", added=days_ago(200))
     seeded.arrived = await library.title("A Film That Just Arrived", added=days_ago(1))
+    seeded.resuming_poster = await library.artwork(seeded.resuming, kind=ImageKind.POSTER)
+    seeded.resuming_backdrop = await library.artwork(seeded.resuming, kind=ImageKind.BACKDROP)
+    seeded.arrived_poster = await library.artwork(seeded.arrived, kind=ImageKind.POSTER)
     await library.in_progress(seeded.resuming, at=days_ago(2))
     saga = [await library.title(f"A Saga Film {index}", added=days_ago(200)) for index in range(3)]
     seeded.collection = await library.collection("A Saga", saga)
@@ -196,6 +211,14 @@ async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -
     green -- because `NextUpProvider` reads it at hydration time and no case
     composes a real context over a household with an unfinished series.
 
+    **M9's C6 makes it eleven**, and the new one behaves like `titles` rather
+    than like the eight: `images=None` is read by `BaseRow.hydrate`, so it needs
+    a household that gets as far as *building* a row, which `propose()` against
+    an empty one never does. Measured 2026-08-11 -- the plant survives the
+    behavioural assertion and dies on the scan below, and dies again in
+    `tests/integration/test_home_artwork.py`, which drives a real `GET /home`
+    over real Postgres with no overrides at all.
+
     **Two assertions, because the behavioural one alone does not generalise.**
     Measured 2026-08-07, planting `None` into each of `get_row_context`'s ten
     repository/user arguments in turn and running the whole unit suite against
@@ -248,10 +271,11 @@ async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -
         credits=library.credits,
         collections=library.collections,
         curated=library.curated_rows,
+        images=library.images,
         taste=taste,
     )
 
-    assert len(dataclasses.fields(ctx)) >= 12, "the context lost fields, so this proves nothing"
+    assert len(dataclasses.fields(ctx)) >= 13, "the context lost fields, so this proves nothing"
     assert len(ROW_PROVIDERS) == 10, "the registry shrank, so this proves nothing"
 
     assert [one.name for one in dataclasses.fields(ctx) if getattr(ctx, one.name) is None] == [], (
@@ -324,6 +348,7 @@ async def test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_i
         credits=library.credits,
         collections=library.collections,
         curated=library.curated_rows,
+        images=library.images,
         taste=taste,
     )
 
@@ -419,19 +444,70 @@ def test_a_row_with_nothing_to_explain_carries_a_null_reason_and_not_an_empty_st
     assert RowResponse.of(row).model_dump()["reason"] is None
 
 
-async def test_a_card_carries_no_artwork_field_at_all_rather_than_a_null_one(
-    client: httpx.AsyncClient,
+async def test_a_card_carries_the_artwork_the_row_asked_for_and_not_the_other_kind(
+    client: httpx.AsyncClient, seeded: _Seeded
 ) -> None:
-    """Boundary call 3, and M5 settled the identical question one route over:
-    "an empty list would be indistinguishable from a film with no cast". A card
-    with `"artwork": null` on every card of every row is a client-side branch
-    that never takes its other arm, and the day M9 fills it every client that
-    shipped against the null already renders without it."""
-    card = (await client.get("/home")).json()["rows"][0]["cards"][0]
+    """**M7's boundary call 3, on the day it named.** The field arrives
+    populated because C2 built the table and C3 filled it; the refusal was
+    conditional on there being nothing to put in it.
 
-    assert "artwork" not in card
-    assert "images" not in card
-    assert "poster" not in card
+    Asserted end to end through the route, over the one title on this screen
+    that appears on a `landscape` row *and* carries both kinds -- so the plant
+    this kills (the `display_hint` mapping with poster and backdrop swapped) is
+    visible as a *different id* rather than as a missing one. Both premises are
+    stated, because with `poster == backdrop` or with either `None` the case
+    would pass against an implementation that answers a constant.
+
+    The `recently-added` arm is the other half: a `portrait` row over a title
+    with only a poster, which is what almost every card on a real screen is.
+
+    Kills a wire field spelled `poster`/`image_url`/`images` as well -- the id
+    is the contract, and a URL on this surface would bake the CDN base and
+    ADR-0032's ladder rung into a screen a client caches for thirty seconds.
+    """
+    body = (await client.get("/home")).json()
+    rows = {row["slug"]: row for row in body["rows"]}
+
+    assert seeded.resuming_poster != seeded.resuming_backdrop, "the premise: two kinds, two rows"
+    assert seeded.resuming_backdrop is not None, "the premise: the fixture minted a backdrop"
+    assert rows["continue-watching"]["display_hint"] == "landscape"
+    assert rows["recently-added"]["display_hint"] == "portrait"
+
+    resuming = rows["continue-watching"]["cards"][0]
+    arrived = rows["recently-added"]["cards"][0]
+
+    assert resuming["title_id"] == str(seeded.resuming)
+    assert resuming["artwork"] == str(seeded.resuming_backdrop)
+    assert arrived["title_id"] == str(seeded.arrived)
+    assert arrived["artwork"] == str(seeded.arrived_poster)
+    assert "poster" not in resuming
+    assert "images" not in resuming
+
+
+async def test_a_card_for_a_title_with_no_artwork_carries_null(
+    empty_client: httpx.AsyncClient,
+) -> None:
+    """The other arm, and on a real screen it is the common one: a catalog that
+    has been synced and never derived holds no `images` row at all.
+
+    Written against a household whose titles have no artwork rather than
+    against a missing key, because `null` and absent are the distinction this
+    field's whole history is about -- M7 shipped absent on the grounds that
+    null had no other arm, and this case is the other arm existing.
+    """
+    library = Library()
+    await library.title("A Film Nobody Derived", added=days_ago(1))
+    app = _app(library.context())
+    async with LifespanManager(app) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as connected:
+            body = (await connected.get("/home")).json()
+
+    card = body["rows"][0]["cards"][0]
+
+    assert card["name"] == "A Film Nobody Derived", "the premise: the screen really painted it"
+    assert "artwork" in card, "the key is present and null, not absent"
+    assert card["artwork"] is None
 
 
 async def test_the_response_carries_no_cursor(client: httpx.AsyncClient) -> None:

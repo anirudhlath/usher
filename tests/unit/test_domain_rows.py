@@ -1,11 +1,17 @@
 """The row DTOs, and the three things about them that are load-bearing.
 
-Two of the cases below assert on the *absence* of a field. That reads as a
-style test until you notice what each absence is standing in for: `artwork`
-is M9's image table arriving early as an always-null field, and a `progress`
-float is a division by an unknown runtime. Both are the kind of field that
-gets added in a five-line diff by someone who read PRD 06's "artwork refs,
-year, rating, progress" and treated it as a schema.
+One of the cases below asserts on the *absence* of a field. That reads as a
+style test until you notice what the absence is standing in for: a `progress`
+float is a division by an unknown runtime. It is the kind of field that gets
+added in a five-line diff by someone who read PRD 06's "artwork refs, year,
+rating, progress" and treated it as a schema.
+
+**`artwork` used to be the second such case and is now the first field on the
+card.** M7 refused it rather than shipping it null, with the day it would be
+filled named in the refusal; M9's C2/C3 built the table and the derivation, so
+the case that asserted its absence became the case that asserts its shape. The
+`None` arm is still the common one -- a catalog that has never been derived has
+no artwork at all -- which is why the default is asserted beside the value.
 
 One case pins a *name* rather than a behaviour, which is unusual enough to
 say why: the milestone plan calls the diversity key `RowKind` in Task 1's
@@ -14,12 +20,14 @@ one concept. Two spellings of one vocabulary is a second source of truth,
 and the composer that has to read it is twenty-eight tasks away.
 """
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
 
+import usher.domain.rows
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.rows import BuiltRow, DisplayHint, RowCard, RowFamily
 from usher.domain.taste import Centroid
@@ -40,23 +48,71 @@ def _card(**overrides: object) -> RowCard:
     return RowCard(**(fields | overrides))
 
 
-def test_a_row_card_has_no_artwork_field_and_refuses_one() -> None:
-    """**Boundary call 3, as a refusal rather than a convention.**
+def test_a_card_carries_one_artwork_reference_and_defaults_to_none() -> None:
+    """**Boundary call 3's other day.** M7 refused this field rather than
+    shipping it null, on the grounds that there was no `Image` table, no
+    `images` column and no `poster_path` on `titles`. M9's C2 and C3 build all
+    three, so the field arrives *populated* and its `None` is a fact rather
+    than a placeholder for a table that does not exist.
 
-    There is no `Image` table, no `images` column and no `poster_path` on
-    `titles`; M9 owns all three. The choice was between an always-null field
-    and no field, and M5 settled the identical question one route over for
-    `GET /titles/{id}`'s absent `images` key: "an empty list would be
-    indistinguishable from a film with no cast."
+    **One id, not a list and not a URL.** A list would put the poster/backdrop
+    choice back on the client, which is the composition ADR-0006 puts on the
+    server -- and the choice is per *row*, keyed on `display_hint`, which no
+    client can make because no client knows the row's hint means a 2:3 slot. A
+    URL would bake the CDN base and the ladder rung into a cached screen;
+    `GET /images/{id}` is the one place either is decided.
 
-    Kills the five-line diff that adds `artwork: str | None = None` after
-    reading PRD 06's "artwork refs". The second assertion is the
-    load-bearing one -- `extra="forbid"` is what makes the absence a runtime
-    refusal instead of a field somebody can pass anyway and have dropped.
+    Kills `artwork: str` (a path, which is provider vocabulary a client would
+    have to build a URL from) and `artwork: uuid.UUID` with no default, which
+    would make a household whose catalog has never been derived unrenderable.
+
+    The last assertion is the one that survives: `extra="forbid"` still holds,
+    so a *second* artwork spelling arriving beside this one is a runtime
+    refusal rather than a field pydantic silently drops.
     """
-    assert "artwork" not in RowCard.model_fields
+    assert RowCard.model_fields["artwork"].annotation == uuid.UUID | None
+    assert _card().artwork is None
+
+    chosen = uuid.uuid4()
+    assert _card(artwork=chosen).artwork == chosen
+
     with pytest.raises(ValidationError):
-        _card(artwork=None)
+        _card(poster_path="/a.jpg")
+
+
+def test_the_adr_0014_enumeration_is_numbered_against_itself() -> None:
+    """**The list is the count, and an ordinal read out of a plan is not.**
+
+    `usher.domain.rows`' module docstring enumerates ADR-0014's sites, and it
+    exists because the ordinals were being incremented by guesswork -- a list
+    that can only grow is a list that lies the first time something is deleted,
+    which is exactly what happened when `RowContext.taste` was removed and
+    every ordinal below it moved up.
+
+    So the numbering is checked against itself: contiguous from 1, in order,
+    with no gaps. Kills a site inserted mid-list without renumbering, and kills
+    a `10.` appended after a deletion left the list at eight.
+
+    **`artwork` is deliberately not on it**, and the reason is worth stating
+    where somebody will look for it. ADR-0014 is *absence is not zero*: a site
+    is a field where a falsy value would be read as a measurement. `artwork`
+    has no zero -- there is no UUID that means "no artwork" -- so `None` is the
+    only spelling available and nothing is standing in for anything. The
+    sharpest site on the list (`NeighborCandidate.tags`) is there precisely
+    because `0.0` is a value real data cannot produce; artwork's absence
+    produces no value at all.
+    """
+    enumeration = usher.domain.rows.__doc__ or ""
+    ordinals = [int(one) for one in re.findall(r"^(\d+)\. ", enumeration, re.MULTILINE)]
+    entries = re.split(r"^\d+\. ", enumeration, flags=re.MULTILINE)[1:]
+
+    assert ordinals, "the enumeration scan found nothing, so it proves nothing"
+    assert ordinals == list(range(1, len(ordinals) + 1)), (
+        f"the ADR-0014 enumeration is not numbered against itself: {ordinals}"
+    )
+    assert not [one for one in entries if "artwork" in one.lower()], (
+        "artwork was added to the ADR-0014 site list; it has no zero to be mistaken for"
+    )
 
 
 def test_a_row_card_carries_the_raw_progress_pair_rather_than_a_fraction() -> None:

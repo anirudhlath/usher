@@ -2216,3 +2216,154 @@ rather than assumed, by grepping `getsource|getdoc|__doc__|ast.unparse` across
 the whole suite, which lists `tests/unit/test_ports_metadata.py` (it scans
 `usher.ports.metadata` for surviving 🔶 markers) and no file that reads this
 module.
+
+## M9 Task C6 — `RowCard.artwork`, and a memo whose key was unreachable
+
+**16 plants over `services/rows/base.py`, `services/rows/curated.py`,
+`api/dto/home.py` and `api/deps.py` — 13 behavioural targets of which 11 were
+killed on the first pass and **2 were real survivors since closed**, plus 3
+equivalent-mutant controls surviving all five gate steps. 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-RUN, 0 HUNG.** Run 2026-08-11 in place with the
+plant list and its **expected verdict** written down first, the harness at
+`/tmp/m9-exec/C6/` (V1's finding — a harness at the repo root is inside what
+`ruff check .` and `mypy src tests` walk, and every gate-step control then
+reads FAIL), `PYTHONDONTWRITEBYTECODE=1` with `__pycache__` swept under **both**
+`src/` and `tests/` before every run, `compile()` as the dry run, the anchor
+asserted exactly once before each plant, the landing check spelled
+`old not in landed and new in landed`, no second `-q`, and every restore
+verified by `md5sum` against a pre-plant digest of all four files. The
+three-way split is the one that says something: "13 killed" would hide the
+round's whole yield.
+
+**Selection:** the whole `tests/unit` plus
+`tests/integration/test_home_artwork.py` and
+`tests/integration/test_pipeline_deps.py` — 3,497 cases, ~44 s a run, green
+before and after. `tests/unit` is taken **whole** rather than scoped because
+`domain/rows.py` and `services/rows/base.py` are imported by all ten providers
+and by the route; the rest of `tests/integration` is excluded for B2's and D4's
+reason, `test_sse_end_to_end.py` being intermittent on this tree and predating
+M9, and a sweep scored on "did the run fail" cannot run against a suite holding
+a flaky case.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 poster/backdrop swapped in `ARTWORK_FOR_HINT` (the headline) | KILLED | 11 |
+| T2 the batched read passed only the shelf's first id | KILLED | 4 |
+| T3 `LLMRow._artwork` deleted | KILLED | **1** |
+| T4 every card's `artwork` forced to `None` | KILLED | 12 |
+| T5 the DTO drops the value (`artwork=None` in `RowCardResponse.of`) | KILLED | 3 |
+| T6 the artwork read moved in front of `hydrate`'s early return | KILLED | 1 |
+| T7 `_artwork` uses a constant kind rather than the row's hint | KILLED | 4 |
+| T8 `_Family`'s artwork memo is one slot, not keyed by kind | **SURVIVED, then closed** | 0, then 1 |
+| T9 `_artwork` spelled as `list_for_title` per card (the N+1) | KILLED | 5 |
+| T10 `artwork.get(title_id)` → `artwork[title_id]` | KILLED | 83 |
+| T11 `SQUARE` alone mapped to `BACKDROP` (the careful spelling of T1) | KILLED | **1** |
+| T12 the memo tests its answer for truth rather than for membership | **SURVIVED, then closed** | 0, then 1 |
+| T13 `images=None` wired into `get_row_context` | KILLED | 3 |
+
+**T3 is the plan's own prediction and it held exactly.** The acceptance
+criterion says *"`LLMRow`'s override deleted — it should survive
+**behaviourally** and be caught by the statement count, which is the difference
+between 'the suite holds it' and 'the gate holds it' and must be written up as
+such."* Measured: it is killed by **one case out of 3,497**, and that case is
+`test_a_family_of_shelves_reads_artwork_once_rather_than_once_per_shelf`, which
+is a count. Every card in every shelf still carries the right id in the right
+order under the mutant, because `_Family` holds the *union* and `hydrate` looks
+each id up — so *"the suite holds it"* is true only because a case was written
+to make it true, and the wording the plan asked for is the wording this entry
+uses. Note the plan's phrasing is one word loose and the measurement corrects
+it: the **gate** does not hold it at all (ruff, format, mypy and lint-imports
+all pass on the mutant), so the real contrast is *"the suite holds it, and only
+through a count"* against *"no behavioural assertion anywhere can"*.
+
+**T1 and T11 are the same defect at two blast radii, and the pair is the
+argument for parametrising over the enum rather than over the providers.**
+Swapping both mappings fails 11 cases; moving `SQUARE` alone fails **exactly
+one**, `test_every_hint_in_the_vocabulary_takes_the_kind_it_was_given[square-poster]`
+— because `square` has **no emitter in `services/rows/`**, so no provider case,
+no route case and no integration case can reach it. `wide` is the same. A
+mapping written from the ten registered providers would be complete-looking and
+would `KeyError` inside `hydrate` on the first row that used either, which is a
+500 on a home screen; the parametrisation is over `DisplayHint` and there is a
+separate structural case asserting `set(ARTWORK_FOR_HINT) == set(DisplayHint)`.
+
+**Both survivors are in `_Family`'s memo, and they fail this file's own test for
+equivalence in opposite ways.**
+
+- **T12 is an ordinary coverage gap and the fixture's fault.** Memoising on
+  `if not self._artwork.get(kind)` rather than on membership survived all 3,497
+  cases, because **every artwork case in the round seeded a poster for every
+  card**, so the empty answer was a state the suite had never been in. It is
+  not equivalent: `{}` is the *default* state of the whole `images` table
+  before `usher derive` has ever run, so the households the memo saves most for
+  are exactly the ones a falsy check charges four times.
+  `_Family.owned` already states the rule (`is None`, never falsiness) for the
+  same reason one read over. Closed by
+  `test_a_generation_whose_titles_have_no_artwork_is_still_read_only_once`;
+  re-planted, it fails **that case alone**. *"Has any fixture, anywhere, ever
+  set this to the other value?"* arriving at an empty mapping.
+- **T8 is the more interesting one: a defect the shipped code cannot reach,
+  closed anyway, and the reason is that the collaborator is a parameter.**
+  Collapsing the memo to a single slot survived, correctly —
+  `LLMRow.display_hint` is a hard-coded `PORTRAIT`, so every shelf in a
+  generation asks the same question and the two spellings are one program. By
+  the "which collaborator could falsify the promise this guard defends, and is
+  one already injected" test, the answer is `kind` **itself**: it is an
+  argument to `_Family.artwork`, so the case costs four lines and is a test of
+  the method's stated contract rather than of a reachable screen. Closed by
+  `test_the_family_memo_is_keyed_by_kind_and_not_by_whether_it_has_read`, which
+  asserts **which ids** come back and not merely a count — a single-slot memo
+  answers a full, correctly-shaped mapping either way. Re-planted, it fails
+  that case alone. **The general form, which this file has the mirror of but
+  not this side: a survivor whose defect is unreachable through the shipped
+  callers is an equivalent mutant only if nothing can construct the reaching
+  state; when the reaching state is a *parameter value*, the port's own
+  signature has already made it constructible and the survivor is coverage.**
+  Contrast B6's OFFSET plant, where the type signature made the defect
+  *inexpressible* and the survivor really was a design result.
+
+**T10's blast radius is the one worth knowing about for a different reason.**
+`artwork.get(title_id)` → `artwork[title_id]` fails **83** cases, because a
+`KeyError` inside `hydrate` takes every screen with any underived title on it —
+which is nearly every fixture in the suite. It is the loudest plant in the
+round and the least informative: a defect that breaks a third of the suite is
+one no reviewer needs a case for. The `None`-arm cases earn their keep against
+T4 and T5, which are quiet.
+
+**T13 was measured twice, because the claim written into a docstring was about
+*which assertion*.** `images=None` in `get_row_context` fails 3 cases: both
+integration cases in `test_home_artwork.py` and, in the unit suite,
+`test_the_route_hands_every_provider_a_context_it_can_actually_read` — on its
+**`None` scan**, reporting `assert ['images'] == []`, with the behavioural loop
+below it never reached. Re-run with the scan removed so the behavioural half
+was measured alone: **SURVIVED**. So `images` behaves like `titles` and
+`episodes` rather than like the eight — `propose()` against an empty household
+never hydrates, and hydration is where this field is read. That is the
+2026-08-07 finding holding for an eleventh field, confirmed rather than assumed.
+
+**The three controls, each against every gate step separately, all five PASS:**
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `ARTWORK_FOR_HINT`'s `PORTRAIT` and `SQUARE` entries swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,499) |
+| C2 one sentence of `BaseRow._artwork`'s docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (3,499) |
+| C3 `_Family.__init__`'s `_known` and `_owned` writes swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,499) |
+
+C1 and C3 are facts about the *code* rather than about what the tools look at:
+`ARTWORK_FOR_HINT` is a dict literal whose two swapped keys are distinct and
+independent, read only by `ARTWORK_FOR_HINT[hint]` and compared as a **set**,
+so insertion order is unobservable — the `_CODE_FOR_STATUS`/`_PLAY_FAILURES`
+precedent, and deliberately **not** an `__all__` reorder, which `RUF022` would
+have rejected; and `_known`/`_owned` are two disjoint attribute writes on a
+freshly constructed object from two `None` literals, neither able to observe
+the other. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/` — the nineteen
+files it finds scan `ports/`, `services/home.py`, `services/rows/curated.py`
+(via `ast.unparse` of a **docstring-stripped** tree), `adapters/`, `api/` and,
+new in this task, `usher.domain.rows`' module docstring; **none of them reads
+`services/rows/base.py`'s prose**. The `domain/rows.py` scan is this task's own
+and is why the docstring control was placed in `base.py` rather than there.
+
+Gate green before and after on the fully restored tree, `md5sum`-verified
+byte-identical to the pre-sweep digest of all four mutated files, with
+`git status` clean.

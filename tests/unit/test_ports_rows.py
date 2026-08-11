@@ -22,6 +22,7 @@ from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.curated_row_repository import FakeCuratedRowRepository
 from tests.fakes.episode_repository import FakeEpisodeRepository
+from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.row_provider import FakeRow, FakeRowProvider
@@ -58,6 +59,7 @@ def _context(*, taste: Centroid | None = None) -> RowContext:
         collections=FakeCollectionRepository(),
         curated=FakeCuratedRowRepository(),
         affinities=_no_affinities,
+        images=FakeImageRepository(),
     )
 
 
@@ -179,6 +181,33 @@ def test_a_row_context_carries_no_centroid_at_all() -> None:
     assert "search" not in annotations
     assert not any("Centroid" in str(annotation) for annotation in annotations.values())
     assert "affinities" in annotations
+
+
+def test_the_context_carries_the_image_repository_and_never_the_proxys_two_ports() -> None:
+    """**A row names artwork; it does not fetch it.**
+
+    M9 ships three image ports and only one of them belongs here.
+    `ImageRepository` answers *which* image, out of this deployment's own
+    database; `ImageFetcher` and `ImageBlobStore` are the proxy's, and they
+    open a socket to a CDN and write bytes to disk respectively. A row holding
+    either would put a network round trip and a filesystem write inside
+    `GET /home`, ten times a screen, behind a thirty-second cache -- the exact
+    shape `services/rows/curated.py` spends a paragraph refusing for
+    `LLMClient`, one port family over.
+
+    Structural rather than behavioural, for that module's reason: a fetcher a
+    row holds and never calls is a fetcher the next change calls. Read as
+    **text**, because a string annotation needs no import and `__name__` is
+    absent on one -- the mutation
+    `test_reading_a_title_never_touches_a_source` measured surviving the
+    obvious spelling.
+    """
+    annotations = inspect.get_annotations(RowContext)
+    assert annotations, "the annotation scan found nothing, so it proves nothing"
+    assert "ImageRepository" in str(annotations["images"])
+    for name, annotation in annotations.items():
+        assert "ImageFetcher" not in str(annotation), f"{name} reaches the proxy's fetcher"
+        assert "ImageBlobStore" not in str(annotation), f"{name} reaches the proxy's blob store"
 
 
 async def test_a_provider_with_nothing_to_say_proposes_nothing() -> None:

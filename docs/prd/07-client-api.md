@@ -58,10 +58,28 @@ be added if a client turns out to need flexible field selection.
 > curated row arrives in the same envelope as the other nine, which is what
 > shipping the family whole was for.
 >
-> **A card carries no artwork**, absent rather than null, for the reason
-> `GET /titles/{id}` carries no `images` key: there is no `Image` table and no
-> `poster_path`, M9 owns the proxy, and an always-null field is a client-side
-> branch that never takes its other arm.
+> ✅ **A card carries `artwork` since M9** — one `images.id`, or `null`. This
+> read *"a card carries no artwork, absent rather than null"* while there was
+> no `Image` table, no `poster_path` and no proxy; M9 built all three, and the
+> refusal named exactly this day as the one it was waiting for. The field is
+> **additive**: a client that shipped against its absence is untouched.
+>
+> **The id and nothing else.** Never a URL — that would bake this deployment's
+> CDN base and [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)'s
+> ladder rung into a screen a client caches — and never a provider path. A
+> client renders it by asking `GET /images/{id}`, which is the one place the
+> base, the rung and the cache headers are decided.
+>
+> **One id, chosen server-side against the row's own `display_hint`**: a poster
+> for `portrait`/`square`, a backdrop for `landscape`/`wide`. A list would be
+> the client re-deciding a question ADR-0006 puts on the server, and it could
+> not decide it anyway — the hint is a property of the *row*, one level above
+> the card. Correspondingly a card is never handed a **logo**, which is why
+> ADR-0032's refusal of `image/svg+xml` needs no discriminator on this surface.
+>
+> **`null` means the catalog holds no image of that kind for the title**, which
+> is the ordinary state of a title nothing has derived yet, and it is the answer
+> for every card on a library that has been synced and never enriched.
 >
 > **`display_hint` is a hint and never a layout** —
 > `portrait | landscape | wide | square`, ADR-0006's only concrete vocabulary,

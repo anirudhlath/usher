@@ -24,6 +24,7 @@ from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.episode import PostgresEpisodeRepository
+from usher.db.repositories.image import PostgresImageRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
@@ -48,6 +49,7 @@ from usher.ports.repository import (
     CreditRepository,
     CuratedRowRepository,
     EpisodeRepository,
+    ImageRepository,
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
@@ -563,6 +565,21 @@ def get_curated_row_repository(session: SessionDep) -> CuratedRowRepository:
     return PostgresCuratedRowRepository(session)
 
 
+def get_image_repository(session: SessionDep) -> ImageRepository:
+    """Artwork references for the request that is rendering them.
+
+    The read half only, on `get_curated_row_repository`'s terms and for the
+    same reason: `replace_for_titles` is a *derivation* -- a scoped delete plus
+    an upsert over a title's whole artwork set -- and it belongs to
+    `usher derive` under `JobKind.DERIVE`. The port is handed over whole
+    because splitting a repository in two to express which half a caller uses
+    is a second port for one table; what keeps the write off this path is that
+    `BaseRow.hydrate` is the only thing here that holds one and it calls
+    `primary_for_titles`.
+    """
+    return PostgresImageRepository(session)
+
+
 async def get_default_user(session: SessionDep) -> User:
     """The singleton default user as a **model**, not just an id.
 
@@ -662,9 +679,10 @@ async def get_row_context(
     credits: Annotated[CreditRepository, Depends(get_credit_repository)],
     collections: Annotated[CollectionRepository, Depends(get_collection_repository)],
     curated: Annotated[CuratedRowRepository, Depends(get_curated_row_repository)],
+    images: Annotated[ImageRepository, Depends(get_image_repository)],
     taste: Annotated[TasteService, Depends(get_taste_service)],
 ) -> RowContext:
-    """The twelve values a row may reach, for one request, for one user.
+    """The thirteen values a row may reach, for one request, for one user.
 
     **`affinities` is a value the composer hands over, not a service a
     provider reaches.** A provider may import only `domain/` and `ports/`, so
@@ -694,6 +712,15 @@ async def get_row_context(
     `USHER_LLM_ENABLED=false` reads an empty table and gets a home screen with
     fewer rows -- the same shape as a deployment with no embedder.
 
+    **`images` is M9's, and it is the one field here whose reader is
+    `BaseRow.hydrate` rather than a named provider.** A card's artwork is
+    chosen against the *row's* `display_hint`, so the poster/backdrop decision
+    belongs to the shelf and the read is one statement per shelf
+    (`ImageRepository.primary_for_titles` takes a sequence precisely so the
+    per-card shape cannot be expressed). It is the read half only, on
+    `curated`'s terms: `replace_for_titles` is `usher derive`'s, and nothing on
+    this path writes artwork.
+
     **No `AsyncSession` here either**, which is the structural half of trap 4:
     a row holding repositories has no session to share, so there is nothing for
     a `gather` to interleave. That the repositories underneath share one is the
@@ -715,6 +742,7 @@ async def get_row_context(
         collections=collections,
         affinities=_Affinities(taste, user.id),
         curated=curated,
+        images=images,
     )
 
 
