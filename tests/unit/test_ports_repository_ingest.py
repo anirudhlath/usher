@@ -69,6 +69,13 @@ def test_watch_state_repository_surface() -> None:
     assert WatchStateRepository.__abstractmethods__ == frozenset(
         {
             "merge_from_source",
+            # M9's local watch write, and the reason it is named here rather
+            # than trusted to the type checker alone: dropped from the ABC,
+            # every implementation could stop providing it and still
+            # type-check, and the four action routes D7 builds on top of it
+            # would have nothing to call -- a silent absence, not a wrong
+            # answer.
+            "set_from_client",
             "list_needing_history",
             "get_for_title",
             "get_for_episode",
