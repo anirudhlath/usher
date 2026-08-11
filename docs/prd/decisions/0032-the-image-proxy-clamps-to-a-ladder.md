@@ -162,72 +162,100 @@ dead config wearing a control's name — the same rule that document already
 applies to a typo, applied to a knob.
 
 **`Cache-Control: immutable` is honest only if an image id survives
-re-derivation, and 🔴 as shipped it does not.** This ADR claimed until
-2026-08-11 that the id was stable *"because"* of a unique key over
+re-derivation.** ✅ **It does, as of `m09c`, and the header may ship.**
+
+The history matters and is kept, because it is the reason the spelling below is
+written out rather than left to a reader. This ADR claimed until 2026-08-11
+that the id was stable *"because"* of a unique key over
 `(title_id, provider, provider_path)` *"requested of `m09a`"*. **`m09a` had
-already merged** — commit `1bd94c2`, before this ADR — and it carries no such
-key. Verified in `src/usher/db/migrations/versions/m09a_api_surface_tables.py`
-and `src/usher/db/models/image.py`: `images` has a primary key on `id`, **five**
-CHECK constraints (`ck_images_exactly_one_owner`, `..._provider_not_empty`,
-`..._remote_url_not_empty`, `..._width_positive`, `..._height_positive`), three
-**non-unique** indexes on the owner columns, and **no unique constraint of any
-kind**. The column is **`remote_url`**, not `provider_path`, and there is no
-`sort_order`.
+already merged** — commit `1bd94c2`, before this ADR — carrying a primary key on
+`id`, **five** CHECK constraints, three **non-unique** owner indexes and **no
+unique constraint of any kind**, over a column called `remote_url`. So for one
+day the header had nothing underneath it, and this section said so and told the
+route to send a long `max-age` **without** `immutable` in the meantime. That
+interim is over.
 
-So the two are still one argument, and the honest statement of it is a
-**dependency, not a consequence**: the header this ADR specifies is
-**conditional on a key that does not exist yet**. Without it, every
-`usher derive` re-run mints fresh UUIDv7s for unchanged artwork, every client's
-cached reference is invalidated, and `immutable` becomes a lie the first time a
-title is re-derived. **Until the key lands, `GET /images/{id}` must not send
-`Cache-Control: immutable`** — a long `max-age` without `immutable` is the
-honest interim, because it lets a client revalidate.
+### Granted: `m09c`
 
-### The request: `m09c`, for C2 to mint
+**C2 minted `m09c` (`Revises: m09a`) and it carries the key:**
 
-`m09a`'s own docstring says *"`m09c` is spare and must be requested, never
-minted"*, and this is the request. It is written out because the spelling is
-**not** the obvious one and the obvious one fails silently — measured below.
+```sql
+ALTER TABLE images ADD CONSTRAINT uq_images_owner_provider_path
+    UNIQUE NULLS NOT DISTINCT (title_id, episode_id, person_id, provider, provider_path);
+```
 
-1. **The key, spelled `NULLS NOT DISTINCT` over the whole owner triple:**
+Verified by reading
+`src/usher/db/migrations/versions/m09c_image_natural_key.py` rather than by
+report. Three things it settles:
 
-   ```sql
-   ALTER TABLE images ADD CONSTRAINT uq_images_owner_provider_path
-       UNIQUE NULLS NOT DISTINCT (title_id, episode_id, person_id, provider, <path column>);
-   ```
+- **`remote_url` is *renamed* to `provider_path`**, not duplicated beside it,
+  and `ck_images_remote_url_not_empty` is renamed with it. C2 took the argument
+  this ADR left open — the ladder is `{base}{rung}{path}`, so a stored URL makes
+  rung selection string surgery on a URL this project did not mint, and a
+  CDN-base change a data migration across 1.27M titles — and the table was empty
+  on every deployment, so there was nothing to backfill. **The proxy therefore
+  concatenates; it does not parse.**
+- **`op.execute`, not `op.create_unique_constraint`**, because alembic's
+  operation has no parameter for `NULLS NOT DISTINCT` and would have silently
+  emitted the default — which is the exact defect the revision exists to fix,
+  arriving through the tooling.
+- **`sort_order` is deliberately not carried**, as this ADR's request asked;
+  the read order is `(is_primary DESC, id)` until whoever owns it says
+  otherwise.
 
-   **Not** `UNIQUE (title_id, provider, <path>)`, which is what the plan's
-   wording invites and what a reviewer would wave through. Postgres defaults to
-   `NULLS DISTINCT`, so on a table whose owner is one of three nullable columns
-   that constraint is **inert for two of the three owner kinds** — an
-   episode-owned or person-owned duplicate has `title_id IS NULL` and never
-   conflicts. Measured on `pgvector/pgvector:pg17` (PostgreSQL 17.10), the
-   version this project deploys: the obvious spelling admitted **2** rows where
-   1 was correct, and the `NULLS NOT DISTINCT` spelling refused it. `NULLS NOT
-   DISTINCT` needs PostgreSQL ≥ 15 and is therefore available; the fallback on an
-   older server would be three partial unique indexes, which is three objects and
-   an owner-kind-specific `ON CONFLICT` predicate in the writer.
-2. **The write becomes an upsert on that constraint**, which is the whole point:
-   `ON CONFLICT (title_id, episode_id, person_id, provider, <path>) DO UPDATE`
-   infers the constraint and **returns the id the row was first inserted with** —
-   demonstrated below, same UUID before and after. That is the property the
-   header depends on, and it is a property of the *write*, not of the table.
-3. **A path column is a separate, smaller request, and it is this ADR's
-   mechanism that wants it.** The ladder is `{base}{rung}{path}`, so with a full
-   `remote_url` stored, selecting a rung means finding and replacing the
-   `/t/p/{size}` segment of a URL this project did not mint — string surgery on
-   somebody else's URL, on every request. A `provider_path` column makes rung
-   selection concatenation. If C2 prefers to keep `remote_url` and parse, the key
-   above works unchanged over `remote_url`; the cost is that parse, plus a CDN
-   base change becoming a data migration across 1.27M titles. **Either is
-   implementable; only the first is cheap, and this ADR does not decide it for
-   C2.**
-4. **`sort_order` is out of scope here** — it is the read-order requirement from
-   group C's preamble, it belongs to whoever reads images rather than to the
-   proxy, and bundling it into this request would hide it.
+**C2 re-ran the measurement below independently before writing the migration**
+and reproduced it: the three-column spelling admits 2 person-owned rows where 1
+is correct, and `ON CONFLICT` on the five-column constraint returns the id the
+row was first inserted with. Two independent runs, which is more than this
+decision needed and exactly what it should have.
+
+### Why the obvious spelling would not have supported the header
+
+Kept in full, because it is the part a later reader will otherwise re-derive —
+and because a constraint that looks right and is inert is the worst available
+outcome here.
+
+**The obvious spelling is `UNIQUE (title_id, provider, provider_path)`** — three
+columns, which is what this ADR's own first draft asked for and what a reviewer
+would wave through. `images` has **three** nullable owner columns under
+`ck_images_exactly_one_owner`, and Postgres defaults a unique constraint to
+`NULLS DISTINCT`. So that constraint covers title-owned rows and **nothing
+else**: an episode- or person-owned duplicate indexes `(NULL, 'tmdb', '/x.jpg')`
+on its first column, and a NULL never collides with a NULL.
+
+Measured on a throwaway `pgvector/pgvector:pg17` (PostgreSQL **17.10**, the
+version this project deploys) with the owner columns and the CHECK reproduced
+and the foreign keys omitted — then **re-run independently by C2** before the
+migration was written:
+
+| spelling | title-owned duplicate | person-owned duplicate (`title_id IS NULL`) |
+|---|---|---|
+| `UNIQUE (title_id, provider, provider_path)` | rejected ✅ | **admitted — 2 rows where 1 is correct** 🔴 |
+| `UNIQUE NULLS NOT DISTINCT` over all three owners | rejected ✅ | rejected ✅ |
+
+**It is not merely stricter**: two *different* titles referencing one path are
+still two rows, which is right, since the same artwork can legitimately be
+referenced twice.
+
+**And the property the header actually rests on is a property of the write, not
+of the table.** `ON CONFLICT (title_id, episode_id, person_id, provider,
+provider_path) DO UPDATE` infers this constraint and **returns the id the row
+was first inserted with** — the same UUID before and after a re-derive, measured
+in both runs. A key that is inert for two owner kinds still *looks* like it
+supports `immutable`, because the one owner kind M9 writes is the one it
+covers — which is exactly why this is recorded rather than left to be
+rediscovered when episode stills or person headshots arrive.
+
+`NULLS NOT DISTINCT` needs PostgreSQL ≥ 15. The fallback on an older server is
+three partial unique indexes, which is three objects plus an owner-kind-specific
+`WHERE` repeated in every writer's `ON CONFLICT`; C2 also rejected
+`UNIQUE (coalesce(title_id, episode_id, person_id), ...)`, because the
+`coalesce` is non-null only *because* of a CHECK on a different column set, so
+loosening that CHECK later would make the index quietly leaky rather than loudly
+wrong.
 
 If the header is ever softened, the key stops being load-bearing; if the key is
-never built, the header must not ship.
+ever dropped, the header must go with it.
 
 ## Consequences
 
@@ -250,6 +278,42 @@ never built, the header must not ship.
 - **The cache is bounded by construction at four entries per image**, and the
   bound is a tuple in `src/`, so it is reviewable and it is the same on every
   deployment.
+
+**Consequently, the fetcher's media type is a closed set and `image/svg+xml`
+is not in it** (C4 owns `SUPPORTED_MEDIA_TYPES`; the reason belongs here,
+because it follows from two decisions above and because reopening it is
+reopening this ADR). 🔴 **The premise this refusal was first written on is
+wrong, and measurement is what says so.** The stated reason was that the CDN
+rasterises SVG logos at every sized rung, so an SVG arriving at a rung means
+something other than the measured CDN answered. Measured 2026-08-11 against
+three real `.svg` logos found across 51 popular and top-rated titles:
+
+| rung requested | returned |
+|---|---|
+| `w154`, `w342`, `w500` | `image/svg+xml` |
+| `original` | `image/svg+xml` |
+
+A `GET` at `w342` returns **10,216 bytes of raw SVG XML, byte-for-byte the size
+of `original`.** So **the CDN ignores the ladder entirely for this type** — the
+rung is not honoured, not refused, just disregarded. That makes the refusal
+*more* justified and for a better reason:
+
+- **Nothing the proxy does can bound an SVG.** The clamp is the whole mechanism
+  of this ADR, and it has no effect on this media type. Four rungs would cache
+  four identical copies of one file.
+- **It is active content on an internet-facing origin under a year-long
+  `max-age`.** SVG may carry script; the sample checked carried none, which is a
+  fact about three files and not about the format. The no-decoder decision means
+  the proxy cannot sanitise it either — it stores bytes verbatim.
+- **It is normal, not anomalous.** Roughly one title in seventeen in the sample
+  has an SVG logo, so the refusal fires on ordinary catalog data and must be an
+  ordinary, quiet outcome rather than an alarm.
+
+**The degradation is therefore stated rather than discovered:** logos the
+provider stores as SVG are **not servable by this proxy at all**. That is a real
+gap in `RowCard.artwork` and in `GET /titles/{id}`'s `images` for a minority of
+titles, and it is the honest price of not shipping a rasteriser — which is the
+decoder this ADR declined.
 
 **Given up:**
 
@@ -516,15 +580,25 @@ withdrawn from a kind arrives as an HTTP 400 on fetch, which by M4's taxonomy is
 right failure, and still a failure. A periodic re-read of `/configuration` would
 catch a narrowing before a client did; nothing does that today.
 
-🔴 **One decision here is unmet rather than uncertain, and it is the one a
-reader is most likely to assume is done.** `Cache-Control: immutable` has no key
-underneath it: `m09a` merged without one, the request to C2 is written out in
-the Decision as `m09c`, and **until it lands the header must not ship**. This
-is the only part of this ADR that another task has to build before the ADR is
-true of the running system, which is why it is repeated here rather than left in
-the Decision alone. The failure it prevents is silent — a re-derive invalidating
-every client's artwork cache, visible only as artwork that reloads for no
-reason.
+✅ **The one decision here that was unmet is now met.** `Cache-Control:
+immutable` had no key underneath it for a day — `m09a` merged without one — and
+this section said so and told the route to ship a long `max-age` without
+`immutable` in the meantime. **C2's `m09c` landed `uq_images_owner_provider_path`
+and the header may ship.** Kept as a paragraph rather than deleted because the
+interim is what a reader will find if they check out any commit between
+`1bd94c2` and `m09c`, and because the sequence — header specified, key absent,
+key requested, key granted — is the argument for why the two are recorded
+together in the Decision at all.
+
+⚠️ **SVG logos are unserved and there is no ticket for them.** The measurement
+above closes the *decision* — the refusal is right — and leaves a real gap: a
+minority of titles have a logo this proxy will never return. Nobody has decided
+whether a client should be told the difference between "no logo" and "a logo we
+will not serve", and `GET /titles/{id}`'s `images` key has no vocabulary for it.
+A **real SVG appearing at a rung is not a reopening** — measured, that is the
+ordinary CDN answer — but *a household needing those logos rendered* is, and the
+answer would be a rasteriser, which is the decoder arm 1 of the bar priced and
+arm 2 declined.
 
 ⚠️ **No live end-to-end run stands behind the proxy itself**, because the proxy
 is not built here — C4 builds its ports and adapters and C5 puts it on the wire.
