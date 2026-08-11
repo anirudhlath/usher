@@ -146,6 +146,78 @@ class ImdbAka:
 
 
 @dataclass(frozen=True, slots=True)
+class ImdbName:
+    """One usable row of IMDb's `name.basics.tsv.gz`: a person and their name.
+
+    **Two fields out of six, and the four that are dropped are dropped
+    because there is nowhere to put them.** M9's T3 measured the `people` +
+    `credits` entity design at **2,701,697,024 B (2.702 GB) against a 2.0 GB
+    ceiling** and it was refused, so no `people` row is bulk-loaded from IMDb
+    at all -- `birthYear`, `deathYear`, `primaryProfession` and
+    `knownForTitles` have no column to land in. What survives the refusal is
+    the *name text*, which is the only part of a person weight class B of
+    `search_document` ever indexed.
+
+    `imdb_id` is an **nconst**, not a tconst. Every other record on this port
+    keys on a title, so the field means something different here and the
+    sibling `ImdbPrincipal` carries both -- which is why that one spells the
+    person's id `person_imdb_id` rather than repeating this name.
+
+    Measured over the pinned `name.basics.tsv.gz`
+    (`"a3b9681921c92e5917182d1ecc05bd2d-37"`, 15,563,615 data rows,
+    2026-08-11): **89 rows carry no `primaryName`** and the parser drops
+    them, the longest name is **105** characters, and **138 names contain a
+    literal `"` of which 7 open with one.**
+    """
+
+    imdb_id: str
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImdbPrincipal:
+    """One row of IMDb's `title.principals.tsv.gz`: a person on a title.
+
+    **`category`, `job` and `characters` are read and dropped**, the way
+    `ImdbAka` reads and drops `types` and `attributes`: nothing downstream of
+    this record has a column for a role, because there is no `credits` row.
+    The 13 categories are measured in `usher.adapters.bulk.imdb` and none is
+    filtered on.
+
+    `ordering` is IMDb's own 1-based per-title rank, carried unconverted --
+    there is no `billing_order` to re-base it onto. It is the only ranking the
+    dump supplies and it is what orders `titles.credit_names`, whose order
+    *is* the ranking. Measured over the pinned `title.principals.tsv.gz`
+    (`"08ce60665889cb40c7371e1eab44a1f2-93"`, 101,151,422 data rows,
+    2026-08-11): present and integral on every row, min 1, max 75, and
+    ascending within every one of the 11,491,032 titles.
+    """
+
+    imdb_id: str
+    ordering: int
+    person_imdb_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImdbCreditNames:
+    """Every name IMDb credits on one title, resolved and in rank order.
+
+    **The join of `title.principals` and `name.basics`, done in the adapter
+    because there is nowhere else to do it.** With no `people` table the
+    right-hand side of that join has no home in the database, so
+    `IMDbCreditNamesDataset` resolves it against an in-memory index and this
+    record is what crosses the port -- already ordered, already deduplicated,
+    and never empty. A title whose principals all name people `name.basics`
+    does not hold yields no record at all rather than an empty one, because
+    the writer *sets* `titles.credit_names` and an empty tuple would blank an
+    array some other source filled.
+    """
+
+    imdb_id: str
+    names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class TmdbId:
     """One line of TMDb's daily ID export.
 

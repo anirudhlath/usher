@@ -9,6 +9,7 @@ import pytest
 from usher.ports.repository import (
     BulkCatalogRepository,
     BulkWriteResult,
+    CreditNamesFillResult,
     CrosswalkLinkResult,
     ImportRunRepository,
 )
@@ -27,6 +28,7 @@ def test_bulk_catalog_repository_surface() -> None:
             "bulk_load_window",
             "upsert_titles",
             "apply_ratings",
+            "fill_credit_names",
             "upsert_tmdb_ids",
             "upsert_crosswalk",
             "link_crosswalk",
@@ -51,7 +53,12 @@ def test_bulk_load_window_is_not_a_coroutine_function() -> None:
 
 
 @pytest.mark.parametrize(
-    "result", [BulkWriteResult(inserted=0, updated=0), CrosswalkLinkResult(0, 0, 0)]
+    "result",
+    [
+        BulkWriteResult(inserted=0, updated=0),
+        CrosswalkLinkResult(0, 0, 0),
+        CreditNamesFillResult(filled=0, unmatched=0, deferred=0),
+    ],
 )
 def test_results_are_frozen(result: object) -> None:
     # is_dataclass() is a TypeGuard: without it mypy strict rejects

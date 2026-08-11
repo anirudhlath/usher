@@ -8,15 +8,61 @@ from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 
-from usher.ports.bulk import GenomeTag, GenomeVector, IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
+from usher.ports.bulk import (
+    GenomeTag,
+    GenomeVector,
+    IdCrosswalkPair,
+    ImdbCreditNames,
+    ImdbRating,
+    ImdbTitle,
+    TmdbId,
+)
 from usher.ports.repository._results import BulkWriteResult
 
 __all__ = [
     "BulkCatalogRepository",
+    "CreditNamesFillResult",
     "CrosswalkLinkResult",
     "GenomeCoverage",
     "GenomeWriteResult",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class CreditNamesFillResult:
+    """What one batch of IMDb credit names actually changed.
+
+    Three fields, and the third is the one that is not obvious.
+
+    `filled` counts titles whose `credit_names` genuinely changed, not titles
+    seen — the same rule `apply_ratings` reports on, and for the same reason:
+    `titles` carries two GIN indexes and a stored generated column, so a
+    replay that rewrote every row would be expensive and would also make "did
+    this phase do anything" unanswerable.
+
+    `unmatched` counts staged rows whose `imdb_id` is in no title, mirroring
+    `GenomeWriteResult.unmatched` and `CrosswalkLinkResult.unmatched`.
+    Expected to be large rather than zero: `title.principals` covers
+    **11,491,032 titles** and the retained catalog holds ~1.27M of them, so
+    roughly nine rows in ten match nothing. What is not acceptable is a join
+    that matched almost nothing looking identical to one that matched
+    everything.
+
+    **`deferred` counts titles this source is not allowed to touch**, and it
+    is the count that makes the two-writer rule auditable. `credit_names` has
+    a second writer — `CreditRepository.replace_for_titles`, which writes it
+    from the TMDb-derived `credits` in the same statement as the table itself
+    — and this port writes no `credits` row at all. So TMDb owns every title
+    it has reached and IMDb owns the rest; a title in the first set is
+    counted here rather than written. On a catalog whose whole population is
+    `skeleton` this is 0, and it grows with every enrichment: an operator
+    watching it grow is watching the second source recede, which is correct
+    and worth being able to see.
+    """
+
+    filled: int
+    unmatched: int
+    deferred: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +240,57 @@ class BulkCatalogRepository(ABC):
         this milestone drops, and a rating with no title is not a catalog
         entry. Rows whose values already match are left alone, for the same
         trigger reason as `upsert_titles`.
+        """
+
+    @abstractmethod
+    async def fill_credit_names(self, rows: Sequence[ImdbCreditNames]) -> CreditNamesFillResult:
+        """Fill `titles.credit_names` from IMDb, for titles TMDb has not
+        reached. Never creates a title, and never writes a person or a credit.
+
+        **This method exists because an entity design was refused, and the
+        refusal is the whole of its shape.** M9's T3 loaded IMDb's
+        `name.basics` and `title.principals` against a real 1,271,138-title
+        catalog and measured the `people` + `credits` design at
+        **2,701,697,024 B (2.702 GB) against a 2.0 GB ceiling** — 2.395 GB
+        even stripped to five columns and three indexes. Two further findings
+        made it unrepairable rather than merely large: `credits`' only unique
+        key is `tmdb_credit_id`, which is NULL on every IMDb row, so an IMDb
+        load **cannot be deduplicated at all** (`(title_id, person_id, kind)`
+        cannot be UNIQUE — 1,341,798 collisions); and TMDb's credits carry no
+        `nconst`, so people cannot be merged across the two sources on an id.
+        What survives is the name *text*, which is the only part of a person
+        weight class B of `search_document` ever indexed — so the names are
+        written straight into the column and no entity is invented to hold
+        them.
+
+        **Precedence: a title TMDb has reached is TMDb's, and every other
+        title is IMDb's.** `CreditRepository.replace_for_titles` writes
+        `credit_names` in the same statement and the same transaction as
+        `credits`, because *"the array and the table are two spellings of one
+        fact ... split them across two calls or two transactions and they
+        diverge, and the symptom is a full-text hit on a name `credits` no
+        longer holds"*. This call cannot join that transaction, so it must
+        leave that path's titles alone; a title it declines is reported as
+        `deferred` rather than silently skipped.
+
+        An implementation states the predicate it uses for "TMDb has reached
+        this title" in its own docstring. It must be at least as strong as
+        "the column is empty", because a title TMDb enriched and derived *no
+        cast for* legitimately has an empty array that is still TMDb's
+        answer.
+
+        **The write is a set, not a merge**, so a caller must supply a
+        title's names whole. A row carrying an empty `names` would therefore
+        blank the column; `ImdbCreditNames` promises it never is.
+
+        Order is the ranking, top-billed first, and is preserved — it is what
+        makes the class-B lexemes the ones a viewer would search for.
+
+        A batch naming the same `imdb_id` twice keeps one deterministically
+        rather than failing, exactly as `upsert_titles` does and for the same
+        Postgres reason. Idempotent, and a replay reports `filled = 0`: an
+        unchanged row is not rewritten, so the `set_updated_at` trigger, two
+        GIN indexes and a stored generated column are not paid for nothing.
         """
 
     @abstractmethod
