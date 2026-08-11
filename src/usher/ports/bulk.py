@@ -262,7 +262,30 @@ class BulkDataset[RowT](ABC):
         """The attribution string this dataset's licence requires a client
         to display (PRD 04's hard rule 4). Never empty — a dataset with no
         attribution requirement returns its own name and source URL, so the
-        API surface has something to serve either way."""
+        API surface has something to serve either way.
+
+        **`GET /meta/attribution` does not call this property.** Its scan
+        (`tests/unit/test_api_meta.py`) is a static `ast` walk over
+        module-level `*_ATTRIBUTION` assignments in `usher.adapters` — it
+        never imports or instantiates a `BulkDataset`, because some
+        implementations want an `httpx.AsyncClient` at construction and a
+        route-serving scan has no business opening one. That means the scan
+        is structurally blind to exactly the case this docstring names: "a
+        dataset with no attribution requirement returns its own name and
+        source URL" is a *computed* expression, not a static assignment, so
+        it produces no match and the scan is silent rather than loud about
+        it. A class attribute (`attribution = "..."` in the class body,
+        never a module-level name) and a container
+        (`SOURCE_ATTRIBUTIONS = {...}`, which fails the `_ATTRIBUTION`
+        suffix check before `ast.literal_eval` would even run) are the same
+        miss. **A concrete override that wants to be seen must be a bare
+        `return <NAME>_ATTRIBUTION`, referencing a module-level constant** —
+        every current implementation (`imdb.py`, `movielens.py`,
+        `tmdb_ids.py`, `wikidata.py`) already has that shape, and
+        `test_every_bulkdataset_attribution_property_is_a_bare_scanned_constant`
+        is the canary: it fails if a future override stops matching it,
+        rather than `GET /meta/attribution` silently omitting a required
+        string."""
 
     @abstractmethod
     async def revision(self) -> str:
