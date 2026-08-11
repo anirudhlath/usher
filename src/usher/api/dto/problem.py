@@ -62,12 +62,55 @@ class ProblemCode(StrEnum):
     enum is deliberately not answering is generic-versus-per-resource
     (`not_found` against `title_not_found`), and answering it per route is
     how a four-code budget became a seventeen-code proposal.
+
+    **The three D4 added, and the test each one had to pass to get in.**
+    `api/routers/playback.py` is the first route in Usher whose honest answer
+    is "the source is down", and the bar applied to each candidate was: does
+    an *existing* member already carry this meaning, and would a client
+    branch differently on it? Three passed; two the D4 plan named did not,
+    and that is recorded below rather than left as an absence.
+
+    - `SOURCE_UNAVAILABLE` (503). Unavoidable twice over. PRD 07's worked
+      example of this envelope *is* this code, spelled this way, down to
+      `"type": "https://usher.dev/errors/source-unavailable"` -- and
+      `api/errors.py`'s `_CODE_FOR_STATUS` has no 503 entry, so without a
+      member a `503` is handed to FastAPI's default handler and answers
+      `{"detail": ...}` with no `code` at all. Measured, not assumed: that
+      is the second of the two reds `test_api_playback.py`'s headline case
+      was driven through. ADR-0030 may rename every member here except this
+      one.
+    - `NOT_PLAYABLE` (409). Same mechanism -- no 409 in `_CODE_FOR_STATUS`
+      either -- and no existing member means "your household holds this and
+      no copy of it can be played". `NOT_FOUND` is the nearest and it is
+      wrong in the way that matters to a client: it says *retry somewhere
+      else*, where this says *stop asking*.
+    - `TICKET_INVALID` (404). The one that is genuinely arguable, and it
+      follows `INVALID_CURSOR` rather than starting a new convention. Both
+      are an **opaque codec refusing its own input**; neither is a statement
+      about a resource, so neither touches the generic-versus-per-resource
+      question. A client meeting `not_found` on `GET /stream/{ticket}` cannot
+      tell "your ticket expired, ask `/play` again" -- the whole remedy -- from
+      "there is no such route", and telling those apart without parsing prose
+      is the entire job of a `code`.
+
+    **`title_not_found` and `episode_not_found` were named by the D4 plan and
+    are deliberately NOT here.** `api/routers/titles.py` already answers a
+    missing title with `NOT_FOUND` and its own comment says the per-resource
+    question is "settled once for every route rather than five times".
+    Minting them would have shipped both conventions *simultaneously* in one
+    tree -- which is not an input to ADR-0030, it is the defect ADR-0030
+    exists to prevent. The two `/play` routes reuse `NOT_FOUND`; if V1 rules
+    for per-resource 404s, it changes three call sites instead of unpicking
+    two of them.
     """
 
     NOT_FOUND = "not_found"
     VALIDATION_FAILED = "validation_failed"
     METHOD_NOT_ALLOWED = "method_not_allowed"
     INVALID_CURSOR = "invalid_cursor"
+    SOURCE_UNAVAILABLE = "source_unavailable"
+    NOT_PLAYABLE = "not_playable"
+    TICKET_INVALID = "ticket_invalid"
 
 
 def problem_type(code: ProblemCode) -> str:

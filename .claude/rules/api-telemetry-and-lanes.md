@@ -451,3 +451,45 @@ data** — a body or a query string — and both are still absent, `instance` be
 in this API; `?q=` is a query and is dropped. The narrowed case asserts over
 pydantic's `input` (the field that carried whole request bodies) rather than
 over the whole response text.
+
+**The structural claim four milestones deferred the envelope on is now
+discharged, and the second red is the measurement worth keeping.** The entry
+above ends *"the first route whose honest answer is 'the source is down and I
+cannot serve this from local state' is M9's `POST /titles/{id}/play`"*. It is,
+and it landed 2026-08-11. Two reds on the way, both recorded because the second
+is the one that says something about `api/errors.py`: before the route existed
+the case failed `assert 404 == 503`; against a route raising a **bare**
+`HTTPException(503)` it failed `KeyError: 'code'`. `_CODE_FOR_STATUS` holds 404,
+405 and 422 only, and `http_error_as_a_problem_document` hands an unmapped
+status to FastAPI's own handler rather than inventing a name — so a 503 with no
+`ProblemCode` member answers `{"detail": …}` at `application/json`, which is
+indistinguishable from the pre-envelope shape. **A route with a status nobody
+has minted a code for silently opts out of the envelope**, and the only thing
+that notices is a case asserting `body["code"]`. Adopting the envelope is
+`raise ProblemException(status_code=…, code=…, detail=…)`; adopting the
+*status* is not enough.
+
+**`request.url_for` substitutes a path parameter raw, so the caller owns the
+percent-encoding.** Read from the source and confirmed 2026-08-11:
+`starlette.routing.Route.url_path_for` → `replace_params` →
+`StringConvertor.to_string`, whose whole body is `str(value)` plus two asserts
+(`"/" not in value`, non-empty). Nothing encodes. So
+`api/deps.py`'s `quote(ticket, safe="=")` is not belt-and-braces over a library
+that would have done it — it is the only encoding step on that path. Related
+and measured the same day: **`RedirectResponse` re-quotes the `Location` it is
+given**, with `safe=":/%#?=@[]!$&'()*+,;"`, which leaves a realistic Emby
+direct URL byte-identical (`?api_key=…&DeviceId=…` measured unchanged) and
+escapes only characters illegal in a URI anyway (`a b.mkv?q=1|2` →
+`a%20b.mkv?q=1%7C2`). `%` is in the safe set, so there is no double-encoding
+hazard for a URL that already carries an escape.
+
+**`api/dto/` names every model `…Response`, nested ones included, and that is
+load-bearing.** `tests/unit/test_api_dto.py` discovers response models by
+`name.endswith("Response")` and asserts none declares a credential-shaped field
+or a `SecretStr`. `WatchStateResponse`, `AvailabilityResponse` and
+`RowCardResponse` are all nested and all follow it; the M9 plan spelled the
+playback ones `PlayTarget`/`PlaySource`, under which they would have been the
+only models in the package the scan could not see — and `PlayTargetResponse` is
+the one model in the API that renders a value derived from a credential-bearing
+URL. Shipped as `PlayTargetResponse`/`PlaySourceResponse`, for the reason
+`ProblemResponse`'s own docstring gives for its name.

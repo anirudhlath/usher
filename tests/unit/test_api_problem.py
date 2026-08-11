@@ -424,16 +424,28 @@ def test_type_is_derived_from_code_for_every_member() -> None:
         assert "_" not in problem_type(code).removeprefix("https://usher.dev/errors/")
 
 
-def test_the_vocabulary_is_the_four_members_this_task_ships() -> None:
+def test_the_vocabulary_is_the_members_the_shipped_routes_emit() -> None:
     """A pin, not a design. The names are provisional and the
     generic-vs-per-resource question (`not_found` against `title_not_found`)
-    is group V's ADR-0030 -- this asserts only that A2 did not start the
-    sprawl its own section exists to prevent."""
+    is group V's ADR-0030 -- this asserts only that nobody has started the
+    sprawl `ProblemCode`'s own docstring exists to prevent.
+
+    **Four members were A2's; three are D4's**, and the pin grew rather than
+    being relaxed, so a route adding a fourth still has to come here and say
+    which route emits it. `source_unavailable` is the one PRD 07's worked
+    example already spells and the one ADR-0030 may not rename.
+    `title_not_found`/`episode_not_found` were named by the D4 plan and are
+    deliberately absent -- `api/routers/playback.py`'s two 404s reuse
+    `not_found`, so this tree ships one 404 convention rather than two.
+    """
     assert {code.value for code in ProblemCode} == {
         "not_found",
         "validation_failed",
         "method_not_allowed",
         "invalid_cursor",
+        "source_unavailable",
+        "not_playable",
+        "ticket_invalid",
     }
 
 
