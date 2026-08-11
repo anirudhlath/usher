@@ -2339,3 +2339,70 @@ Gate green before and after on the fully restored tree (`md5sum`-verified
 byte-identical to the pre-sweep digest): **3488 unit passed / 4 skipped** and
 **1067 integration passed / 22 skipped**, `ruff check`, `ruff format --check`,
 `mypy` over 535 files, `lint-imports` 9 kept / 0 broken.
+## M9 Task B12 — the series hierarchy routes (2026-08-11)
+
+**9 plants over `PostgresEpisodeRepository`, `FakeEpisodeRepository` and
+`api/routers/series.py` — 8 targets, all killed; 1 equivalent-mutant control
+surviving all five gate steps; 0 BROKEN-MUTATION, 0 DID-NOT-LAND, 0
+DID-NOT-RUN.** Run in place with the plant list and its **expected verdict**
+written down first, `cp` backups, `compile()` as the dry run, every plant
+asserted *present* by reading the file back, and every restore verified by
+reading the pre-plant fragment back out of the file. Harness at
+`/var/tmp/b12-sweep/` (not `/tmp`, which is tmpfs here).
+
+**Selection:** `tests/unit/test_episode_repository_contract.py`,
+`tests/unit/test_api_series.py`,
+`tests/integration/test_episode_repository.py` and
+`tests/integration/test_series_route.py` — **124 cases**, ~17 s a run against a
+green baseline of `124 passed`. Scoped rather than whole-suite because nothing
+outside these files reads the three new port methods or the new router
+(grepped, not assumed).
+
+| plant | verdict | cases failed |
+|---|---|---|
+| the episodes read loses its season scope (both arms) | KILLED | 12 |
+| the season list excludes season 0 (both arms) | KILLED | 6 |
+| the episodes page orders by `id` instead of `episode_number` (both arms) | KILLED | 2 — the named case on each arm |
+| the keyset tail relaxed `>` → `>=` (both arms) | KILLED | 6 |
+| the route asks for exactly `limit` (ADR-0034's off-by-one) | KILLED | 3 |
+| the cursor digest drops the season it was minted in | KILLED | 1 |
+| the seasons route reads the whole tree (`list_for_title`) | KILLED | 2 |
+| a title with no seasons answers 404 instead of an empty list | KILLED | 4 |
+| **CONTROL** — ADR-0034's refuted row comparison, over two NOT NULL columns | **SURVIVED** all five | 0 |
+
+**The control is the task's own load-bearing claim, measured rather than
+argued.** `db/repositories/episode.py`'s keyset is spelled as ADR-0034's two
+remaining arms — `episode_number > :n OR (episode_number = :n AND id > :i)` —
+with a docstring saying the record's third arm (`key IS NULL`) is *provably
+empty here* rather than forgotten, because `episodes.episode_number` and
+`episodes.season_number` are `nullable=False`. Replacing the two arms with the
+single row comparison `(episode_number, id) > (:n, :i)` — **the exact spelling
+B6 measured as wrong for a nullable key, where Postgres answers NULL rather
+than false and silently drops the whole unkeyed tail** — passes ruff, `ruff
+format --check`, mypy over 533 files, `lint-imports` at 9 kept / 0 broken and
+all 124 cases. That is the evidence for the claim: on this schema the two
+spellings are equivalent, and a reader who finds only two arms is looking at a
+fact about the columns rather than at an omission.
+
+**Every plant that both arms can express was killed on both.** The plan's named
+failing case, `test_a_seasons_episodes_page_excludes_another_seasons`, is the
+*only* case the `ORDER BY id` plant kills — once against
+`FakeEpisodeRepository` and once against Postgres — which is what says the
+ordering premise (`assert by_name["S1E1"] > by_name["S1E3"]`) is carrying its
+weight rather than decorating a case a UUIDv7 would have made pass anyway.
+
+**And the first run of this sweep measured the formatter rather than the
+suite.** All nine plants, control included, reported `format=FAIL` — because
+the *baseline* was not format-clean (`tests/integration/test_series_route.py`
+had been written after the last `ruff format`), so every verdict inherited a
+failure that had nothing to do with the plant, and the control would have been
+recorded as a kill. Two repairs, both kept: the baseline is now green on all
+five steps before a plant lands, and the harness runs `ruff format` on the
+mutated files and **re-checks its witness afterwards** — CLAUDE.md's "a defect
+has a careless spelling and a careful one" arriving at the harness rather than
+at the plant. Two plants also had to be respelled for the same reason: the
+off-by-one as `over_fetch(limit) - 1` rather than `limit` (which orphans the
+import and dies on `F401`), and the season-scope drop as
+`WHERE :season_id IS NOT NULL` rather than deleting the clause (which would
+have left an unused bind — measured harmless for `text()`, but the retained
+bind keeps the plant a statement about the predicate).

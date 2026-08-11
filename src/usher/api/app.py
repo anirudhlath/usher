@@ -24,6 +24,7 @@ from usher.api.routers import (
     playback,
     rows,
     search,
+    series,
     sources,
     titles,
     watch,
@@ -204,6 +205,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(playback.router)
     app.include_router(rows.router)
     app.include_router(search.router)
+    app.include_router(series.router)
     app.include_router(sources.router)
     app.include_router(titles.router)
     app.include_router(watch.router)

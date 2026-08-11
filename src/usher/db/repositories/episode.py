@@ -48,7 +48,7 @@ from usher.db.repositories._errors import constraint_name
 from usher.db.staging import stage_records
 from usher.domain.episode import Episode, Season
 from usher.ports.errors import RepositoryConflict
-from usher.ports.repository import BulkWriteResult, EpisodeRepository
+from usher.ports.repository import BulkWriteResult, EpisodeCursorPosition, EpisodeRepository
 
 # `ordinal` is the row's index within the batch, and it is what makes
 # deduplication deterministic: `ORDER BY ..., ordinal DESC` is literally
@@ -257,6 +257,66 @@ ORDER BY e.title_id, e.season_number, e.episode_number
 """
 
 
+# The two bounded reads the series hierarchy routes take, and the reason they
+# are not `list_for_title`: that method returns the whole tree, measured at
+# 20,001 rows / 22.901 ms / 402 buffers for one pathological series.
+#
+# `_LIST_SEASONS` is unpaged on measurement -- 32,409 series at a median of 9
+# seasons, and a client renders all of them -- and is served by
+# `uq_seasons_title_season_number`, which leads with `title_id` and continues
+# with `season_number`, so the ORDER BY is the index order.
+_LIST_SEASONS = """
+SELECT * FROM seasons
+WHERE title_id = CAST(:title_id AS uuid)
+ORDER BY season_number
+"""
+
+_GET_SEASON = "SELECT * FROM seasons WHERE id = CAST(:season_id AS uuid)"
+
+# ADR-0034's keyset, and the arm it does not carry is the point.
+#
+# That record's predicate has THREE arms -- `key IS NULL`, `key > :after_key`,
+# `key = :after_key AND id > :after_id` -- because a nullable sort column lets
+# a page boundary land inside the unkeyed group, and because the row-comparison
+# spelling it originally shipped evaluates to NULL rather than false there and
+# silently drops the whole unkeyed tail with every page still full. Three of
+# browse's four sorts are nullable, so `db/repositories/title.py`'s
+# `_browse_after` needs all three.
+#
+# Here `episodes.episode_number` and `episodes.season_number` are both
+# `nullable=False` (`db/models/episode.py`), so no row can be in the unkeyed
+# group and the first arm is unreachable rather than forgotten. The same fact
+# is spelled at the type level by `EpisodeCursorPosition.episode_number` being
+# `int` and not `int | None`: the position the missing arm would resume from
+# cannot be constructed. Named because "we did not need it" and "we forgot it"
+# look identical in a diff.
+#
+# The two arms that remain are hand-expanded rather than written as the row
+# comparison `(episode_number, id) > (:n, :i)`. Both are correct on
+# NOT NULL columns and `_NEXT_UP` above deliberately uses the row form for its
+# indexability -- but this statement's ORDER BY is not served by an index
+# anyway (`ix_episodes_season_id` covers `season_id` alone, and a season is a
+# few dozen rows), so the spelling that buys nothing here is the one that
+# reads arm for arm against the record it comes from. The `id` tail is
+# STRICT: relaxed to `>=` the walk re-serves its boundary row at every page
+# break.
+_SEASON_EPISODES = """
+SELECT * FROM episodes
+WHERE season_id = CAST(:season_id AS uuid)
+ORDER BY episode_number, id
+LIMIT :limit
+"""
+
+_SEASON_EPISODES_AFTER = """
+SELECT * FROM episodes
+WHERE season_id = CAST(:season_id AS uuid)
+  AND (episode_number > :after_number
+       OR (episode_number = :after_number AND id > CAST(:after_id AS uuid)))
+ORDER BY episode_number, id
+LIMIT :limit
+"""
+
+
 class PostgresEpisodeRepository(EpisodeRepository):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -434,6 +494,50 @@ class PostgresEpisodeRepository(EpisodeRepository):
                 .all()
             )
         return {row["title_id"]: Episode.model_validate(dict(row)) for row in rows}
+
+    async def list_seasons(self, title_id: uuid.UUID) -> list[Season]:
+        with self._session.no_autoflush:
+            rows = (
+                (await self._session.execute(text(_LIST_SEASONS), {"title_id": title_id}))
+                .mappings()
+                .all()
+            )
+        return [Season.model_validate(dict(row)) for row in rows]
+
+    async def get_season(self, season_id: uuid.UUID) -> Season | None:
+        with self._session.no_autoflush:
+            row = (
+                (await self._session.execute(text(_GET_SEASON), {"season_id": season_id}))
+                .mappings()
+                .one_or_none()
+            )
+        # `None`, never a `Season` with no fields: the route answers 404 for
+        # this and 200-with-an-empty-list for a season that exists and holds
+        # nothing, and it can only tell them apart if this read does.
+        return None if row is None else Season.model_validate(dict(row))
+
+    async def list_season_episodes(
+        self,
+        season_id: uuid.UUID,
+        *,
+        limit: int,
+        after: EpisodeCursorPosition | None = None,
+    ) -> list[Episode]:
+        # One statement for the page, whatever the page holds. The branch is
+        # on whether there is a position to resume from, which the caller
+        # knows before the statement is built -- the same two-branch rendering
+        # ADR-0034 sanctions for `_browse_after`, minus the arm this schema
+        # makes unreachable.
+        parameters: dict[str, object] = {"season_id": season_id, "limit": limit}
+        if after is None:
+            statement = _SEASON_EPISODES
+        else:
+            statement = _SEASON_EPISODES_AFTER
+            parameters["after_number"] = after.episode_number
+            parameters["after_id"] = after.id
+        with self._session.no_autoflush:
+            rows = (await self._session.execute(text(statement), parameters)).mappings().all()
+        return [Episode.model_validate(dict(row)) for row in rows]
 
     async def list_for_title(self, title_id: uuid.UUID) -> tuple[list[Season], list[Episode]]:
         with self._session.no_autoflush:
