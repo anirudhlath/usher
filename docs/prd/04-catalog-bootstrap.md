@@ -400,8 +400,9 @@ Hard rules encoded in the project:
 2. **Never scrape imdb.com** — IMDb's terms permit the published dumps only.
 3. **Honour the TMDb cache ceiling.** `provider_cache_meta` tracks fetch times;
    nothing is retained past 6 months without refresh.
-4. **Render attribution in clients.** The API exposes required attribution
-   strings so every client can display them.
+4. **Render attribution in clients.** `GET /meta/attribution`
+   ([07](07-client-api.md)) serves the four required strings — IMDb, TMDb,
+   MovieLens, Wikidata — so every client can display them.
 5. **Commercial use is out of scope.** Both IMDb and TMDb require separate
    licensing for it, and TMDb explicitly names AI/ML training on their content
    as commercial.

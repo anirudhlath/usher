@@ -312,7 +312,7 @@ be added if a client turns out to need flexible field selection.
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` · `GET /health/ready` | Liveness and readiness |
-| `GET /meta/attribution` | Required IMDb/TMDb attribution strings ([04](04-catalog-bootstrap.md)) |
+| `GET /meta/attribution` | The four required attribution strings — IMDb, TMDb, MovieLens, Wikidata ([04](04-catalog-bootstrap.md)) |
 | `GET /openapi.json` | Schema |
 
 ## Response contracts
