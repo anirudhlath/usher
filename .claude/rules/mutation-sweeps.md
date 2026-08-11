@@ -112,6 +112,15 @@ and three harness findings, one of which defeats the plan's own trap rule.**
   backup is what recovered it — `git checkout --` would have been M5 group F's
   disaster again. A sweep harness needs a signal handler, or the operator needs
   to check `git status` after every interruption.
+  **Recurred 2026-08-11 in M9 A6**, on a sweep whose harness had the `cp`
+  backup and still lost work, because the tree was *uncommitted*: source files
+  were edited while a plant was live, the SIGTERM skipped the `finally`, and
+  the restore would have written back a copy predating those edits. The cheap
+  defence is not a signal handler — it is to **commit before sweeping and
+  re-run against a committed tree, so `git status` is the verification** and
+  every plant, live or leaked, shows up as a modified file that `git diff`
+  explains. A `cp` backup recovers the file the harness took; only a commit
+  recovers the file you changed underneath it.
 - **A mutation must be the change the plan names, not a change that happens to
   break the statement.** "`updated_at = now()` dropped from the `DO UPDATE`
   clause" spelled as a *replacement* with an assignment already in that clause
@@ -1711,3 +1720,25 @@ M4 gave `_ENQUEUE`'s `GREATEST` and M5 gave `_write_push_available`'s guard.
 Gate green before and after on the fully restored tree: `ruff check`,
 `ruff format --check`, `mypy` over 485 files, `lint-imports` 9 kept / 0 broken,
 **3,102 unit / 4 skipped** and **974 integration / 8 skipped**.
+
+### A6, second round — the ETag interaction A4 could not see
+
+Five more plants after `GET /home` grew a conditional GET in the same
+milestone, scored against `tests/unit/test_api_caching.py` alone:
+
+| mutation | verdict | cases |
+|---|---|---|
+| the stale serve schedules nothing | KILLED | 1 |
+| the grace window deleted (`_stale_grace` always zero) | KILLED | 2 |
+| the grace window unbounded (`if grace:` for the `TTL + grace` test) | KILLED | 3 |
+| the ETag hard-coded — A4's own defect, re-checked | KILLED | 3 |
+| stale value served **and** the entry popped | **SURVIVED** | — |
+
+The survivor is the one worth recording, because it corrects a sentence that
+was written into the case's docstring before it was measured. A path that
+serves the stale entry and then drops it damages the **next** read, and this
+file's third request is past the grace window and rebuilding anyway — so the
+304 case cannot see it, and claiming it could would have been a stale
+explanation of why a case works. It dies in
+`test_services_home_stale.py::test_two_reads_over_one_stale_key_schedule_one_refresh`
+instead, and both docstrings now say which file catches it.
