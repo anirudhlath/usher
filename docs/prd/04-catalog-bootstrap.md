@@ -171,9 +171,15 @@ between them — **median 9**. So the series half of a full pass *was* 32,409 ×
 **`append_to_response=season/N` collapses that back to one** — **~32k against
 ~324k, i.e. ~10x** — verified, including the 20-item ceiling that bounds it at
 14 seasons alongside the six namespaces already appended (a series with more
-seasons than that needs a second request; a small tail, which is why the
-figure is ~32k rather than 32,409 exactly), and including that a season the
-series does not have is silently omitted rather than erroring. **Taken**: the
+seasons than that needs **`ceil(n/20)` further requests, not a second one** —
+refuted live 2026-08-11, where 74 listed seasons cost five; a small tail, which
+is why the figure is ~32k rather than 32,409 exactly), and including that a
+season the series does not have is silently omitted rather than erroring. Both
+legs of the ~10x are the wrong *shape* even where the order of magnitude
+holds: `Σ(1 + N)` needs the **mean** season count where this paragraph uses the
+median, and the append side is `32,409 + Σ ceil(n/20)` rather than 32,409.
+[03](03-sources-and-sync.md) and `.claude/rules/tmdb-and-enrichment.md` carry
+the measurement. **Taken**: the
 adapter's `fetch` issues the blind `season/0…season/13` window, reconciles it
 against the `seasons[]` summary the same response carries, and follows up only
 for listed numbers that window missed.
