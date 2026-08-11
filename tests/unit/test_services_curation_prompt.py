@@ -233,23 +233,29 @@ def test_the_opening_line_does_not_claim_the_household_owns_every_candidate() ->
     [ADR-0028](../../docs/prd/decisions/0028-the-pool-is-the-contract.md)'s
     2026-08-11 amendment for why the sentence gave way rather than the pool.
 
-    **Two assertions, because a negative alone is satisfied by renderings that
-    are still wrong.** The first is the whole rendered line, which is what the
-    model reads; the second is the shipped claim's own words, anywhere in the
-    body, so a correction that fixed line 1 and left the assertion somewhere
-    below still fails. A verbatim assertion is a change-detector for a sentence
-    somebody might tune and a *test* for a sentence that has to agree with a
-    `WHERE` clause -- this one is the second kind.
+    **Two narrow assertions, and the whole-line spelling is deliberately not
+    used here.** `.claude/rules/testing-discipline.md` says *"negative
+    assertions about a rendering are satisfied by renderings that are still
+    wrong; assert the line"* -- but that rule was measured on `one_line`, where
+    the **rendering itself** is the artefact under test and every character of
+    it is the defence. Here the artefact is a **claim**, and the wording is the
+    part most likely to be tuned: ADR-0028 measures this sentence at +26 prompt
+    tokens and says so, which makes it a standing candidate for a copy-edit.
+    Pinning all 47 words would fail every future edit that kept the claim
+    intact, for a reason that has nothing to do with what this case is about --
+    the change-detector the two sibling repairs in this file (`_COLD_START`, the
+    `reason` bound) each avoided by pinning a narrow substring or an
+    interpolated constant.
+
+    So: the ownership claim must be **absent**, and an explicit not-all-owned
+    statement must be **present**. Neither is asserted through a module constant
+    on purpose -- an interpolated-constant check is blind to a mutation *of the
+    constant*, which is exactly the inversion this case exists to catch.
     """
     built = _built()
 
-    assert built.splitlines()[0] == (
-        "You are choosing what to put on the home screen of one household's film "
-        "and television library. Some of the candidates below are in that library "
-        "and some are not; a suggestion the household would have to go and find "
-        "is welcome."
-    )
     assert "own film and television library" not in built
+    assert "are in that library and some are not" in built
 
 
 def test_the_candidates_are_numbered_from_one() -> None:

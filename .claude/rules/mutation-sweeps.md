@@ -1265,3 +1265,73 @@ Equivalent because the two are disjoint attributes on a freshly constructed
 object, neither right-hand side reads the other, and nothing runs between
 them — the same shape as the `__all__` reorder and the `SET`-list swap above,
 one layer in. Reported rather than treated as a survivor.
+
+## M9 Task G3 — the curation prompt's ownership claim (2026-08-11)
+
+Seven plants over `services/curation_prompt.py`, **in place, against the whole
+`tests/unit` selection**. Four behavioural targets, all KILLED; three controls,
+all SURVIVED; zero BAD-ANCHOR, BROKEN-MUTATION, DID-NOT-RUN or HUNG. Every
+restore verified by `md5sum` against a pre-plant digest, every plant dry-run
+through `compile()`, the three `.pyc` defences in force.
+
+**A prompt sweep's yield is near 100% because nothing observes a prompt unless
+a case opts in by name**, so the rendered artefact was enumerated before the
+control flow. All four targets are the opening line, which until this task
+asserted the household owned every candidate.
+
+| plant | verdict | dies on |
+|---|---|---|
+| the pre-2026-08-11 opening restored (*"one household's **own** film and television library"*) | KILLED | `"own film and television library" not in built` |
+| the corrective clause merely **deleted** — the false claim gone, the pool's real span unstated | KILLED | `"are in that library and some are not" in built` |
+| the clause **inverted** — *"Every one of the candidates below is already in that library"* | KILLED | `"are in that library and some are not" in built` |
+| the opening line deleted outright | KILLED | `"are in that library and some are not" in built` |
+
+Each fails `test_the_opening_line_does_not_claim_the_household_owns_every_candidate`
+and nothing else, on both runs.
+
+🔴 **The first spelling of that case pinned the whole 47-word rendered line with
+`==`, and a review was right that it was a change-detector.** This file's
+neighbour `testing-discipline.md` says *"negative assertions about a rendering
+are satisfied by renderings that are still wrong; assert the line"* — measured
+on `one_line`, where the **rendering itself** is the artefact and every
+character of it is the defence. **That rule does not transfer to a sentence
+whose subject is a claim.** ADR-0028 measures this sentence at +26 prompt
+tokens and says so, which makes it a standing candidate for cost tuning, so
+`==` would fail every future copy-edit that kept the claim intact — and it made
+the sweep result *coarse*: all four targets died on the same `==`, so the
+verdict could not distinguish the defect from a rewording, and only a human
+reading the diff could.
+
+**Narrowed to two literal substrings — the claim absent, an explicit
+not-all-owned statement present — the same four still die, and now on two
+different axes** (the table above). The control that proves the narrowing is
+real is **C3**, which the `==` spelling would have killed:
+
+| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| **C3 — a harmless copy-edit keeping the membership claim** (*"…and some are not, and something the household would have to go and find is a welcome suggestion."*) | PASS | PASS | PASS | PASS | PASS |
+| C1 — `MIN_ROWS`/`MAX_ROWS` definition order swapped | PASS | PASS | PASS | PASS | PASS |
+| C2 — one sentence of `build_prompt`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+C1 is a fact about the *code* rather than about what the tools look at: two
+module-level `int` assignments referencing neither each other nor anything
+between them, in a module with no import-time side effect — and it is an
+ordering control that is **not** an `__all__` reorder, which ruff's `RUF022`
+would have rejected. C2 was checked first against the docstring-scan grep:
+twelve test files scan source, and the only one touching this module
+(`test_one_whitespace_collapse_defends_both_prompts`) walks `ast.FunctionDef`
+and compares `node.body[-1]`, so a docstring at `body[0]` is outside it.
+
+**Neither pinned assertion goes through a module constant, deliberately.** An
+interpolated-constant check — the idiom the two sibling repairs in that file
+used — is blind to a mutation *of the constant*, which is exactly the inversion
+target 3 is. **The general form: when a rendered sentence is a claim some other
+component has to honour, pin the claim and not the prose; when the rendering
+itself is the defence, pin the line. Ask which of the two the artefact is
+before choosing, because the two rules point opposite ways and this repository
+has now been bitten by each.**
+
+**Re-run three times**: against 3,041 cases, against 3,081 after merging
+`milestone/m9-api-surface`, and against 3,166 after the narrowing. Same
+verdicts, same restored digest — *a survivor is only a survivor of the
+selection it ran against*.
