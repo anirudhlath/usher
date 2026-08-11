@@ -18,12 +18,14 @@ import pytest
 
 from tests.fakes.tmdb_fixtures import load_tmdb_fixture
 from usher.adapters.tmdb.mapping import (
+    images_from_payload,
     kind_of_payload,
     search_candidates,
     seasons_and_episodes,
     title_from_payload,
 )
-from usher.domain.enums import ProductionStatus, TitleKind
+from usher.domain.enums import ImageKind, ProductionStatus, TitleKind
+from usher.domain.image import Image
 from usher.ports.errors import PortDataMalformed
 
 _TITLE_ID = uuid.UUID("0197a5b0-0000-7000-8000-000000000001")
@@ -364,3 +366,250 @@ def test_a_search_result_with_no_id_is_skipped_rather_than_raising() -> None:
     body = load_tmdb_fixture("search_movie")
     body["results"].append({"title": "No id at all"})
     assert len(search_candidates(body, TitleKind.MOVIE)) == 2
+
+
+# -- artwork, and the two sources that decide which one is primary ----------
+
+
+def _images(payload: dict[str, Any]) -> list[Image]:
+    return images_from_payload(payload, _TITLE_ID, provider="tmdb")
+
+
+def test_each_image_array_carries_the_kind_it_was_found_in() -> None:
+    """**The array is the only thing that says what an entry is.** A TMDb
+    image entry carries `file_path`, `width`, `height`, `iso_639_1` and two
+    vote fields, and no field naming its kind -- so a mapper that read one
+    array, or labelled all three the same, is not an error anywhere: it paints
+    a 16:9 backdrop into a 2:3 poster slot, at full resolution, on a screen.
+    """
+    by_path = {one.provider_path: one for one in _images(_movie())}
+
+    assert by_path["/synthetic-poster.jpg"].kind is ImageKind.POSTER
+    assert by_path["/synthetic-backdrop.jpg"].kind is ImageKind.BACKDROP
+    assert by_path["/synthetic-logo.png"].kind is ImageKind.LOGO
+    # Every row is owned by the title it was derived for, and by nothing else
+    # -- `ck_images_exactly_one_owner` is `num_nonnulls(...) = 1`, and M9 has
+    # no writer for the other two owner kinds.
+    assert all(one.title_id == _TITLE_ID for one in by_path.values())
+    assert all(one.episode_id is None and one.person_id is None for one in by_path.values())
+    assert all(one.provider == "tmdb" for one in by_path.values())
+
+
+def test_the_dimensions_and_the_language_travel_with_the_entry() -> None:
+    """A poster's `iso_639_1` is what a language-aware consumer would filter
+    on and its `width`/`height` are what a layout engine reserves space with,
+    so a mapper that kept only the path leaves both unrecoverable without the
+    second network call this whole stage exists to avoid.
+
+    `None` for a language rather than `"en"`: the recorded backdrop's
+    `iso_639_1` is `null`, which means *no* language and is a different fact
+    from English.
+    """
+    by_path = {one.provider_path: one for one in _images(_movie())}
+
+    assert (by_path["/synthetic-poster.jpg"].width, by_path["/synthetic-poster.jpg"].height) == (
+        2000,
+        3000,
+    )
+    assert by_path["/synthetic-poster.jpg"].language == "en"
+    assert by_path["/synthetic-backdrop.jpg"].language is None
+
+
+def test_the_top_level_pair_is_the_only_thing_that_marks_an_image_primary() -> None:
+    """TMDb publishes no primary flag inside `images`, so `poster_path` and
+    `backdrop_path` are the only signal a payload carries about which of a
+    hundred posters is *the* one.
+
+    A derivation that ignored them leaves `is_primary` false on every row, and
+    `ImageRepository.primary_for_titles` then falls back to first-in-read-order
+    -- which is id order, which is the order the arrays happened to arrive in.
+    Every card in the catalog would render whichever language variant TMDb
+    listed first.
+
+    **There is no top-level logo path**, so `logo` is asserted here as the
+    control: the flag comes from those two keys and is not something the mapper
+    invents per kind.
+    """
+    by_path = {one.provider_path: one for one in _images(_movie())}
+
+    assert by_path["/synthetic-poster.jpg"].is_primary is True
+    assert by_path["/synthetic-backdrop.jpg"].is_primary is True
+    assert by_path["/synthetic-logo.png"].is_primary is False
+
+
+def test_a_path_named_by_both_the_pair_and_an_array_is_one_row_that_keeps_its_size() -> None:
+    """The dedupe, and the fixture is the case.
+
+    `uq_images_owner_provider_path` holds `(title_id, episode_id, person_id,
+    provider, provider_path)`, and this call fixes the first four -- so the
+    path is the whole of what can collide, and in a real detail payload it
+    collides on every title: the top-level `poster_path` **is** one of the
+    entries in `images.posters`.
+
+    Two rows for one path do not fail the write -- `replace_for_titles`
+    deduplicates last-wins on the same key, which is measured. What they do is
+    let *emission order* decide `is_primary`, silently, and the array's
+    unflagged copy is the one emitted second. So the primary is folded into the
+    row already built for its path, which is also what keeps the entry's
+    `width`/`height`: a row promoted from the top-level key alone has no
+    dimensions at all.
+    """
+    payload = _movie()
+    # The premise, asserted rather than assumed: this case is about a
+    # collision, and a fixture whose two paths differ cannot have one.
+    assert payload["poster_path"] == payload["images"]["posters"][0]["file_path"]
+
+    posters = [one for one in _images(payload) if one.provider_path == payload["poster_path"]]
+
+    assert len(posters) == 1
+    assert posters[0].is_primary is True
+    assert posters[0].width == 2000
+
+
+def test_one_path_listed_twice_in_a_payload_is_one_row_and_keeps_its_first_kind() -> None:
+    """The dedupe's *other* half, found by mutation: the fold above covers a
+    path named by both the top-level pair and an array, and this covers a path
+    named twice inside the arrays themselves.
+
+    `ImageRepository.replace_for_titles`' own docstring records that *"one
+    derivation pass really does see a payload list a poster twice"* -- so the
+    duplicate is a real shape rather than a hypothetical, and without the guard
+    the **later** sighting wins. Two consequences, and the second is the one
+    that reaches a screen: a path listed in two arrays takes the second array's
+    `kind`, so a logo also filed under `posters` renders in a 2:3 slot; and a
+    duplicate inside one array consumes a slot of the per-kind cap, silently
+    costing the title a poster it does have.
+    """
+    payload = _movie()
+    payload["poster_path"] = None
+    payload["backdrop_path"] = None
+    payload["images"] = {
+        "posters": [
+            {"file_path": "/synthetic-shared.jpg", "width": 2000, "height": 3000},
+            {"file_path": "/synthetic-shared.jpg", "width": 400, "height": 600},
+            {"file_path": "/synthetic-poster-x.jpg", "width": 2000, "height": 3000},
+        ],
+        "backdrops": [{"file_path": "/synthetic-shared.jpg", "width": 3840, "height": 2160}],
+        "logos": [],
+    }
+
+    images = _images(payload)
+    shared = [one for one in images if one.provider_path == "/synthetic-shared.jpg"]
+
+    assert len(shared) == 1
+    assert shared[0].kind is ImageKind.POSTER, "the first sighting decides, not the last"
+    assert shared[0].width == 2000
+    assert len(images) == 2
+
+
+def test_an_empty_images_block_is_the_common_case_and_is_not_a_failure() -> None:
+    """`series.json`'s real shape -- `posters`, `backdrops` and `logos` all
+    `[]` -- and it needs its own named case for the reason
+    `test_an_empty_episode_run_time_is_the_common_case_and_is_not_a_failure`
+    needs one two fields over: the fixture that carries values is the
+    interesting minority, and a suite that only exercised it would be
+    asserting on the exception.
+
+    It is emphatically **not** an empty answer. `poster_path` and
+    `backdrop_path` are top-level detail fields rather than part of the
+    appended `images` namespace, so a title whose arrays are empty still has
+    the two references every consumer in M9 actually renders.
+    """
+    payload = _series()
+    assert payload["images"] == {"backdrops": [], "logos": [], "posters": []}
+
+    images = _images(payload)
+
+    assert [(one.kind, one.provider_path, one.is_primary) for one in images] == [
+        (ImageKind.POSTER, payload["poster_path"], True),
+        (ImageKind.BACKDROP, payload["backdrop_path"], True),
+    ]
+
+
+def test_a_payload_cached_before_images_joined_the_append_list_still_has_its_primaries() -> None:
+    """**The majority shape of any real catalog**, and the reason a live
+    re-derivation writes far fewer images than these fixtures suggest.
+
+    `images` is an `append_to_response` namespace; a payload fetched before it
+    was in the list has no such key at all. The two top-level paths are not in
+    that namespace, so the row an operator's `RowCard.artwork` needs is derived
+    from a payload that predates the appending entirely -- which is the whole
+    of why this stage needs no crawl.
+    """
+    payload = _movie()
+    del payload["images"]
+
+    images = _images(payload)
+
+    assert {one.provider_path for one in images} == {
+        "/synthetic-poster.jpg",
+        "/synthetic-backdrop.jpg",
+    }
+    assert all(one.is_primary for one in images)
+
+
+def test_a_payload_with_no_artwork_at_all_yields_no_images_and_no_error() -> None:
+    """`to_derivation`'s "a payload this provider cannot read yields an empty
+    result, never an error", at the one field where an empty answer is
+    ordinary rather than a sign of anything."""
+    payload = _movie()
+    del payload["images"]
+    payload["poster_path"] = None
+    payload["backdrop_path"] = None
+
+    assert _images(payload) == []
+
+
+def test_only_ten_of_a_kind_are_kept_and_the_primary_is_never_the_one_dropped() -> None:
+    """The per-kind cap, and the ordering between it and the primary fold.
+
+    A popular film's `posters[]` runs to hundreds of language variants of one
+    artwork, which is a distinction no consumer in M9 draws -- so the arrays
+    are capped. The cap runs **first** and the top-level pair is folded in
+    **after**, so TMDb's own pick survives however far down its array it sits:
+    the other order silently drops the one row every card renders, and leaves
+    ten variants nothing points at.
+    """
+    payload = _movie()
+    payload["images"]["posters"] = [
+        {"file_path": f"/synthetic-poster-{index}.jpg", "width": 2000, "height": 3000}
+        for index in range(12)
+    ]
+    # The premise: the primary sits outside the cap, so this case can tell the
+    # two orders apart at all.
+    payload["poster_path"] = "/synthetic-poster-11.jpg"
+
+    posters = [one for one in _images(payload) if one.kind is ImageKind.POSTER]
+
+    assert len(posters) == 11, "ten from the array, plus the primary the cap did not reach"
+    assert [one.provider_path for one in posters if one.is_primary] == ["/synthetic-poster-11.jpg"]
+    assert "/synthetic-poster-10.jpg" not in {one.provider_path for one in posters}
+
+
+def test_nothing_tmdb_can_put_in_an_image_entry_raises() -> None:
+    """`Image` bounds four fields -- `provider` and `provider_path` are
+    `min_length=1`, `width` and `height` are `gt=0` -- and a
+    `pydantic.ValidationError` is **not** a `UsherPortError`, so one odd entry
+    would kill the worker rather than park the job.
+
+    `0` is the value worth naming: it is what a provider sends for "unknown"
+    and it is the one a `ge=0` filter would let through, into a column a
+    layout engine divides by.
+    """
+    payload = _movie()
+    payload["images"]["posters"] = [
+        {"file_path": "", "width": 2000, "height": 3000},
+        {"file_path": None, "width": 2000, "height": 3000},
+        {"file_path": "/synthetic-poster-a.jpg", "width": 0, "height": -1},
+        {"file_path": "/synthetic-poster-b.jpg", "width": "not a number", "height": 3000},
+    ]
+    payload["poster_path"] = None
+
+    posters = [one for one in _images(payload) if one.kind is ImageKind.POSTER]
+
+    assert [one.provider_path for one in posters] == [
+        "/synthetic-poster-a.jpg",
+        "/synthetic-poster-b.jpg",
+    ]
+    assert all(one.width is None for one in posters)
+    assert [one.height for one in posters] == [None, 3000]

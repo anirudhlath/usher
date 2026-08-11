@@ -1,7 +1,7 @@
 """`DeriveService` against fakes: no database, no network, no clock.
 
 Every collaborator is a port, which is the point -- ADR-0016's whole claim is
-that these three entities come out of a payload M4 already cached, and the
+that these four entities come out of a payload M4 already cached, and the
 way that stays true is structural rather than disciplinary.
 
 **The central case is
@@ -19,6 +19,7 @@ import pytest
 
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credit_repository import FakeCreditRepository
+from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
@@ -57,6 +58,7 @@ class _Harness:
         self.people = FakePersonRepository()
         self.credits = FakeCreditRepository(self.people, self.titles)
         self.collections = FakeCollectionRepository()
+        self.images = FakeImageRepository()
         self.commits = 0
         self.service = DeriveService(
             payloads=self.payloads,
@@ -65,6 +67,7 @@ class _Harness:
             people=self.people,
             credits=self.credits,
             collections=self.collections,
+            images=self.images,
             commit=self._commit,
         )
 
@@ -424,6 +427,132 @@ async def test_deriving_makes_no_provider_fetch(harness: _Harness) -> None:
 
     assert harness.provider.fetches == 0
     assert harness.provider.searches == 0
+
+
+async def test_deriving_writes_images_and_makes_no_provider_fetch(harness: _Harness) -> None:
+    """ADR-0016's **fourth** entity, and the positive control comes first.
+
+    `test_deriving_makes_no_provider_fetch` above arms the same fake to raise
+    and asserts `fetches == 0`. That assertion is satisfied by a derivation
+    that did nothing at all, which is exactly what a missing image write looks
+    like -- so `images_written > 0` is asserted **before** the absence, and the
+    stored rows are read back through the port, because a count is satisfied by
+    rows written against the wrong title.
+    """
+    title_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000640)
+    await harness.given_payload(
+        TitleKind.MOVIE,
+        90000640,
+        {
+            "id": 90000640,
+            "title": "The Film",
+            "poster_path": "/synthetic-poster.jpg",
+            "backdrop_path": "/synthetic-backdrop.jpg",
+            "images": {
+                "posters": [{"file_path": "/synthetic-poster.jpg", "width": 2000, "height": 3000}],
+                "backdrops": [],
+                "logos": [{"file_path": "/synthetic-logo.png", "width": 800, "height": 250}],
+            },
+        },
+    )
+    harness.provider.fail_with(PortUnavailable("the provider must not be reached"))
+
+    report = await harness.service.derive_all()
+
+    assert report.images_written == 3
+    stored = await harness.images.list_for_title(title_id)
+    assert {one.provider_path for one in stored} == {
+        "/synthetic-poster.jpg",
+        "/synthetic-backdrop.jpg",
+        "/synthetic-logo.png",
+    }
+    assert harness.provider.fetches == 0
+    assert harness.provider.searches == 0
+
+
+async def test_re_deriving_keeps_every_image_id_so_a_cached_reference_stays_valid(
+    harness: _Harness,
+) -> None:
+    """**The property `Cache-Control: immutable` rests on**, asserted through
+    the whole walk rather than at the repository.
+
+    The mapper mints a fresh UUIDv7 per sighting -- it has to, since an image
+    has no provider integer id to re-point through the way `Person` and
+    `Collection` do -- so *every* derivation hands the repository ids the
+    catalog has never seen. What keeps a client's `/images/{id}` valid is the
+    upsert inferring `uq_images_owner_provider_path` and answering with the id
+    the row was first inserted with, and this case is the one that says the
+    derivation reaches that path rather than a delete-then-insert.
+
+    `PostgresImageRepository`' half of it is measured on a real container by
+    `ImageRepositoryContract.test_a_second_replace_keeps_the_id_of_a_path_that_did_not_change`;
+    what is new here is the walk in front of it. The second payload moves a
+    field on purpose, so this cannot pass by the write being skipped: the ids
+    must be equal *and* the refreshed value must have landed.
+    """
+    title_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000650)
+    await harness.given_payload(
+        TitleKind.MOVIE,
+        90000650,
+        {
+            "id": 90000650,
+            "title": "The Film",
+            "poster_path": "/synthetic-poster.jpg",
+            "images": {"posters": [{"file_path": "/synthetic-poster.jpg", "width": 2000}]},
+        },
+    )
+    await harness.service.derive_all()
+    first = {one.provider_path: one.id for one in await harness.images.list_for_title(title_id)}
+    assert first, "the positive control: there is an id here to keep"
+
+    await harness.given_payload(
+        TitleKind.MOVIE,
+        90000650,
+        {
+            "id": 90000650,
+            "title": "The Film",
+            "poster_path": "/synthetic-poster.jpg",
+            "images": {"posters": [{"file_path": "/synthetic-poster.jpg", "width": 3000}]},
+        },
+    )
+    await harness.service.derive_all()
+
+    stored = await harness.images.list_for_title(title_id)
+    assert {one.provider_path: one.id for one in stored} == first
+    assert [one.width for one in stored] == [3000], "the row was rewritten, not merely left alone"
+
+
+async def test_a_title_whose_artwork_all_disappeared_has_its_images_cleared(
+    harness: _Harness,
+) -> None:
+    """The delete's scope is the page's titles, never the rows being written
+    -- `test_a_title_whose_credits_all_disappeared_is_cleared_not_skipped`'s
+    argument arriving at a third table, and it needs its own case because the
+    two writes take two scopes that a wrong implementation can spell
+    differently.
+
+    A title contributing no image rows is invisible to a scope derived from
+    the batch, so its stale artwork survives every future derivation -- and a
+    stale image row is a `/images/{id}` whose upstream path the CDN has
+    stopped serving, rendered as a broken image with nothing reporting an
+    error. It is the one row shape a re-derivation cannot repair.
+    """
+    title_id = await harness.given_title(kind=TitleKind.MOVIE, tmdb_id=90000660)
+    await harness.given_payload(
+        TitleKind.MOVIE,
+        90000660,
+        {"id": 90000660, "title": "The Film", "poster_path": "/synthetic-poster.jpg"},
+    )
+    await harness.service.derive_all()
+    assert len(await harness.images.list_for_title(title_id)) == 1
+
+    await harness.given_payload(
+        TitleKind.MOVIE, 90000660, {"id": 90000660, "title": "The Film", "images": {"posters": []}}
+    )
+    report = await harness.service.derive_all()
+
+    assert await harness.images.list_for_title(title_id) == []
+    assert report.images_written == 0
 
 
 async def test_deriving_an_empty_cache_writes_nothing_and_reports_zero(

@@ -66,8 +66,9 @@ from datetime import date
 from typing import Any
 
 from usher.domain.collection import Collection
-from usher.domain.enums import ProductionStatus, TitleKind
+from usher.domain.enums import ImageKind, ProductionStatus, TitleKind
 from usher.domain.episode import Episode, Season
+from usher.domain.image import Image
 from usher.domain.people import Credit, CreditKind, Person, person_sort_name
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed
@@ -137,6 +138,52 @@ _CREATOR_DEPARTMENT = "Writing"
 # filmography and changes nothing else. A live run over a real enriched tier
 # is what would turn it into a number.
 _CAST_LIMIT = 50
+
+# Which `images` array maps to which `ImageKind`. **The array a path was found
+# in is the only thing that says what it is** -- an entry carries
+# `file_path`, `width`, `height`, `iso_639_1` and vote counts, and no field
+# naming its kind -- so a mapper that read one array and labelled everything
+# `poster` would paint a 16:9 backdrop into a 2:3 slot with nothing reporting
+# an error. Three of `ImageKind`'s five: `still` hangs off an episode and
+# `profile` off a person, and M9 writes neither (group C's boundary call).
+_IMAGE_ARRAYS: tuple[tuple[str, ImageKind], ...] = (
+    ("posters", ImageKind.POSTER),
+    ("backdrops", ImageKind.BACKDROP),
+    ("logos", ImageKind.LOGO),
+)
+
+# The two top-level paths, which are TMDb's *own* pick and the only primary
+# signal a detail payload carries. `images.posters[]` is a vote-ordered list
+# with no flag on it, so without these two keys nothing in a payload says
+# which poster a card should render.
+#
+# There is no top-level logo path, which is why `logo` never gets a primary
+# from here -- `ImageRepository.primary_for_titles` falls back to the first in
+# read order for exactly that shape.
+_PRIMARY_PATHS: tuple[tuple[str, ImageKind], ...] = (
+    ("poster_path", ImageKind.POSTER),
+    ("backdrop_path", ImageKind.BACKDROP),
+)
+
+# How many entries of each kind become `images` rows, applied to the arrays
+# before the top-level pair is folded in -- so TMDb's own primary is never the
+# row the cap drops, however far down its array it sits.
+#
+# **Ten is chosen, not measured**, on the bargain `services/search.py` states
+# for `_POPULARITY_MIDPOINT` and `_CAST_LIMIT` restates one array over. A
+# popular film's `posters[]` runs to hundreds and is dominated by
+# language variants of one artwork -- the same image with a different title
+# burned in -- which is a distinction no consumer in M9 draws: `RowCard.artwork`
+# renders one poster and `GET /titles/{id}` renders a list nobody paginates. The
+# consequence of a wrong cutoff is bounded and one-directional, because the
+# primary is folded in afterwards: too low drops language variants a client
+# cannot ask for anyway, and too high writes rows nothing reads.
+#
+# What would move it is a consumer that *chooses* by language -- a household
+# locale reaching the proxy -- not an argument. At that point the cap becomes
+# per (kind, language) and this constant is the wrong shape rather than the
+# wrong number.
+_IMAGES_PER_KIND_LIMIT = 10
 
 
 def kind_of_payload(payload: Mapping[str, Any]) -> TitleKind:
@@ -341,6 +388,100 @@ def people_and_credits(
         for one in entries
     ]
     return list(people.values()), credits
+
+
+def images_from_payload(
+    payload: Mapping[str, Any], title_id: uuid.UUID, *, provider: str
+) -> list[Image]:
+    """One TMDb detail response -> that title's artwork references.
+
+    Pure, and a pure function of a payload that may have come out of
+    `raw_payloads` months after the fetch that produced it -- `to_result`'s
+    property, restated because this one is reached the same way and because
+    **most of a real catalog was cached before `images` joined
+    `*_APPEND_TO_RESPONSE`**. Such a payload still carries `poster_path` and
+    `backdrop_path` (they are top-level detail fields, not an appended
+    namespace), so a re-derivation of it yields two rows rather than none --
+    and `series.json`'s shape, three empty arrays, yields the same two.
+
+    **Two sources, and the second decides `is_primary`.** `images.{posters,
+    backdrops,logos}[]` is the catalogue; the top-level `poster_path` and
+    `backdrop_path` are TMDb's own pick out of it. Nothing in the arrays is
+    flagged, so without the second source every card would render whichever
+    language variant sorted first.
+
+    **Deduplicated by `provider_path`, which is the natural key's own
+    spelling** -- `uq_images_owner_provider_path` is
+    `(title_id, episode_id, person_id, provider, provider_path)` and this call
+    holds the first four fixed, so the path is the whole of what can collide.
+    It is required rather than tidy, and the reason is *not* the one this
+    task's plan predicted: `ImageRepository.replace_for_titles` already
+    deduplicates last-wins on the same key, so a duplicate does not fail the
+    batch. What it does is let emission order decide `is_primary` -- in
+    `movie.json` the top-level poster **is** `posters[0]`, so the two rows
+    differ in exactly that flag, and last-wins keeps the array's unflagged
+    copy. Measured, not reasoned: see this task's sweep ledger.
+
+    So the primary is folded into the row already built for its path rather
+    than appended beside it, which keeps the array entry's `width`/`height`/
+    `iso_639_1` -- a bare promotion from the top-level key alone has no
+    dimensions at all, and a layout engine cannot ask for them again.
+
+    **Nothing TMDb can put in a payload may raise**, this module's standing
+    rule, and `Image` bounds four fields: `provider_path` and `provider` are
+    `min_length=1` and `width`/`height` are `gt=0`. An entry with no usable
+    path is dropped; a zero, negative or unparseable dimension becomes `None`,
+    which is the same answer a provider that reports no dimensions gets.
+    """
+    block = payload.get("images")
+    arrays = block if isinstance(block, Mapping) else {}
+
+    # Keyed by path so the fold below finds the row it has to flag, and
+    # insertion-ordered so `Image.id` is minted in first-sighting order -- the
+    # tiebreak `(is_primary DESC, id)` reads, since `m09c` carries no
+    # `sort_order` column.
+    by_path: dict[str, Image] = {}
+    for field, kind in _IMAGE_ARRAYS:
+        taken = 0
+        for entry in _mappings(arrays.get(field)):
+            path = _text(entry.get("file_path"))
+            if path is None or path in by_path:
+                continue
+            by_path[path] = Image(
+                title_id=title_id,
+                kind=kind,
+                provider=provider,
+                provider_path=path,
+                width=_positive_int(entry.get("width")),
+                height=_positive_int(entry.get("height")),
+                # NULL means "no language", which is different from "English".
+                # TMDb spells a language-neutral backdrop `null` here.
+                language=_text(entry.get("iso_639_1")),
+                is_primary=False,
+            )
+            taken += 1
+            if taken == _IMAGES_PER_KIND_LIMIT:
+                break
+
+    for field, kind in _PRIMARY_PATHS:
+        path = _text(payload.get(field))
+        if path is None:
+            continue
+        standing = by_path.get(path)
+        by_path[path] = (
+            # `.evolve()`, never `model_copy(update=)`: the flagged row is
+            # re-validated from scratch.
+            standing.evolve(is_primary=True)
+            if standing is not None
+            else Image(
+                title_id=title_id,
+                kind=kind,
+                provider=provider,
+                provider_path=path,
+                is_primary=True,
+            )
+        )
+    return list(by_path.values())
 
 
 def collection_from_payload(payload: Mapping[str, Any]) -> Collection | None:
@@ -714,6 +855,14 @@ def _as_int(value: Any) -> int | None:
 def _non_negative_int(value: Any) -> int | None:
     number = _as_int(value)
     return number if number is not None and number >= 0 else None
+
+
+def _positive_int(value: Any) -> int | None:
+    """`Image.width`/`height` are `gt=0`, not `ge=0`: a stored `0` is a
+    placeholder a layout engine divides by, and `None` is the honest answer for
+    a dimension the provider did not report."""
+    number = _as_int(value)
+    return number if number is not None and number > 0 else None
 
 
 def _non_negative_float(value: Any) -> float | None:

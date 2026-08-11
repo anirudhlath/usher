@@ -90,6 +90,7 @@ from usher.adapters.tmdb.client import TmdbClient
 from usher.adapters.tmdb.mapping import (
     changed_ids,
     collection_from_payload,
+    images_from_payload,
     people_and_credits,
     search_candidates,
     seasons_and_episodes,
@@ -284,6 +285,11 @@ class TmdbMetadataProvider(MetadataProvider):
             people=tuple(people),
             credits=tuple(credits),
             collection=collection_from_payload(payload),
+            # `provider=PROVIDER_NAME` for `to_result`'s reason: the name is
+            # the adapter's, and `images.provider` is half of the natural key
+            # that keeps an image id across a re-derivation, so a display
+            # string here would collide two providers' `/abc.jpg` into one row.
+            images=tuple(images_from_payload(payload, title_id, provider=PROVIDER_NAME)),
         )
 
     async def changed_since(self, since: AwareDatetime, cursor: str | None = None) -> ChangedPage:

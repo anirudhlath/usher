@@ -45,8 +45,9 @@ from typing import Any
 from pydantic import AwareDatetime
 
 from usher.domain.collection import Collection
-from usher.domain.enums import TitleKind
+from usher.domain.enums import ImageKind, TitleKind
 from usher.domain.episode import Episode, Season
+from usher.domain.image import Image
 from usher.domain.people import Credit, CreditKind, Person, person_sort_name
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, UsherPortError
@@ -285,10 +286,18 @@ class FakeMetadataProvider(MetadataProvider):
         arrays name them, and `billing_order` read from `order` rather than
         from the array index.
 
-        What it does **not** model: the crew job filter and the cast cutoff.
-        Both are `mapping.py`'s and both have their own cases there; a fake
-        that reimplemented them would be a second copy of the rule, which is
-        the thing a fake exists not to be.
+        What it does **not** model: the crew job filter, the cast cutoff and
+        the per-kind image cap. All three are `mapping.py`'s and all three have
+        their own cases there; a fake that reimplemented them would be a second
+        copy of the rule, which is the thing a fake exists not to be.
+
+        **Images are modelled to the same depth**, because two things a service
+        case turns on live here rather than in the mapper: that the top-level
+        `poster_path`/`backdrop_path` pair is what carries `is_primary`, and
+        that a path named by both the pair and an array is **one** row. Without
+        the second, `DeriveService`'s own count would be right for the wrong
+        reason -- `ImageRepository.replace_for_titles` deduplicates on the same
+        key, so the fake would be measuring the repository.
         """
         people: dict[int, Person] = {}
         credits: list[Credit] = []
@@ -332,7 +341,10 @@ class FakeMetadataProvider(MetadataProvider):
             else None
         )
         return DerivationResult(
-            people=tuple(people.values()), credits=tuple(credits), collection=collection
+            people=tuple(people.values()),
+            credits=tuple(credits),
+            collection=collection,
+            images=tuple(_images(payload, title_id)),
         )
 
     async def changed_since(self, since: AwareDatetime, cursor: str | None = None) -> ChangedPage:
@@ -346,3 +358,51 @@ class FakeMetadataProvider(MetadataProvider):
     def _raise_if_failing(self) -> None:
         if self._failure is not None:
             raise self._failure
+
+
+def _images(payload: dict[str, Any], title_id: uuid.UUID) -> list[Image]:
+    """A seeded payload's artwork, keyed by path so a path named twice is one
+    row.
+
+    A module function rather than a method for the same reason the credit
+    reader is inline: nothing here reads the provider's state, and a helper
+    outside the class is what stops a future arm reaching for `self`.
+    """
+    block = payload.get("images") or {}
+    by_path: dict[str, Image] = {}
+    for field, kind in (
+        ("posters", ImageKind.POSTER),
+        ("backdrops", ImageKind.BACKDROP),
+        ("logos", ImageKind.LOGO),
+    ):
+        for entry in block.get(field) or []:
+            path = entry.get("file_path")
+            if not path or path in by_path:
+                continue
+            by_path[path] = Image(
+                title_id=title_id,
+                kind=kind,
+                provider="tmdb",
+                provider_path=path,
+                width=entry.get("width"),
+                height=entry.get("height"),
+                language=entry.get("iso_639_1"),
+                is_primary=False,
+            )
+    for field, kind in (("poster_path", ImageKind.POSTER), ("backdrop_path", ImageKind.BACKDROP)):
+        path = payload.get(field)
+        if not path:
+            continue
+        standing = by_path.get(path)
+        by_path[path] = (
+            standing.evolve(is_primary=True)
+            if standing is not None
+            else Image(
+                title_id=title_id,
+                kind=kind,
+                provider="tmdb",
+                provider_path=path,
+                is_primary=True,
+            )
+        )
+    return list(by_path.values())

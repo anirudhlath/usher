@@ -14,10 +14,12 @@ import pytest
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from usher.domain.enums import TitleKind
 from usher.domain.episode import Episode, Season
+from usher.domain.image import Image
 from usher.domain.title import Title
 from usher.ports.ingest import ProviderRef
 from usher.ports.metadata import (
     ChangedPage,
+    DerivationResult,
     EnrichmentResult,
     MetadataCandidate,
     MetadataProvider,
@@ -177,6 +179,41 @@ def test_to_result_takes_the_title_id_it_must_not_invent() -> None:
     signature = inspect.signature(MetadataProvider.to_result)
     assert list(signature.parameters) == ["self", "payload", "title_id"]
     assert signature.parameters["title_id"].annotation is uuid.UUID
+
+
+def test_a_derivation_carries_the_fourth_entity_and_a_provider_cannot_forget_it() -> None:
+    """ADR-0016 kept `raw_payloads` so four entities could be re-derived from
+    it; M7 cashed three and `images` is the fourth.
+
+    **The field has no default, deliberately**, which is what this case is
+    really about. `DerivationResult`'s other three have none either, so a
+    second `MetadataProvider` cannot construct one that silently carries no
+    artwork -- and the failure mode of a default would be a provider whose
+    titles quietly have no posters, with every count in `usher derive`'s
+    report still reading correctly.
+    """
+    hints = get_type_hints(DerivationResult)
+    assert hints["images"] == tuple[Image, ...]
+
+    with pytest.raises(TypeError, match="images"):
+        DerivationResult(  # type: ignore[call-arg]  # the point of the case
+            people=(), credits=(), collection=None
+        )
+
+
+def test_to_derivation_is_synchronous_and_pure_for_all_four_entities() -> None:
+    """The clause the whole stage rests on, and `images` is the field where a
+    reader would most expect it to be broken -- artwork is the one of the four
+    whose *bytes* really do need a request, which is `GET /images/{id}`'s job
+    and not this one's.
+
+    Asserted on the signature rather than on the prose: `async def` is how a
+    provider that wanted to fetch would have to spell it.
+    """
+    assert not inspect.iscoroutinefunction(MetadataProvider.to_derivation)
+    signature = inspect.signature(MetadataProvider.to_derivation)
+    assert list(signature.parameters) == ["self", "payload", "title_id"]
+    assert signature.return_annotation is DerivationResult
 
 
 def test_a_complete_metadata_provider_implementation_instantiates() -> None:

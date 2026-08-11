@@ -66,6 +66,7 @@ from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.episode import PostgresEpisodeRepository
+from usher.db.repositories.image import PostgresImageRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.llm_call import PostgresLLMCallRepository
 from usher.db.repositories.matching import PostgresTitleMatchRepository
@@ -94,6 +95,7 @@ from usher.ports.repository import (
     CreditRepository,
     CuratedRowRepository,
     EpisodeRepository,
+    ImageRepository,
     LLMCallRepository,
     MediaItemRepository,
     PersonRepository,
@@ -216,6 +218,12 @@ class Pipeline:
     people: PersonRepository
     credits: CreditRepository
     collections: CollectionRepository
+    # M9's table, and the only writer is `DeriveService` -- artwork is
+    # re-derived from `raw_payloads` on the same walk as people and credits
+    # (M4's boundary call 2), and the serve path reads it back through
+    # `get`/`primary_for_titles`. One object per session, for the reason
+    # every port on this dataclass is here: `services/` may not import `db/`.
+    images: ImageRepository
     adapters: SourceAdapterFactory
     matcher: MatchService
     ingest: IngestService
@@ -341,6 +349,7 @@ def build_pipeline(
     people = PostgresPersonRepository(session)
     credits = PostgresCreditRepository(session)
     collections = PostgresCollectionRepository(session)
+    images = PostgresImageRepository(session)
     matcher = MatchService(titles=titles, matching=matching, queue=queue, provider=provider)
     ingest = IngestService(
         matcher=matcher,
@@ -384,6 +393,7 @@ def build_pipeline(
         people=people,
         credits=credits,
         collections=collections,
+        images=images,
         adapters=adapter_factory(settings),
         matcher=matcher,
         ingest=ingest,
@@ -666,6 +676,7 @@ def build_derive_service(pipeline: Pipeline, provider: MetadataProvider) -> Deri
         people=pipeline.people,
         credits=pipeline.credits,
         collections=pipeline.collections,
+        images=pipeline.images,
         commit=pipeline.commit,
     )
 
