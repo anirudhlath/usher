@@ -1522,7 +1522,7 @@ deferred to M9 (a real enriched tier), cheap and detectable via `blend_fingerpri
 | 1 | ~23% of `--phase all` carries a popularity | confirmed | 22.9% |
 | 4 | lost recall is out-ranked, not floor | confirmed | R2 recovers exactly the 38 marginal misses |
 | 7 | enriched-tier genome coverage ≫ 1.82% | confirmed | 10.68% of owned |
-| 8 | pair rate above `coverage²` | confirmed | 1.81% vs 1.14% |
+| 8 | pair rate above `coverage²` | confirmed | 1.81% vs 1.14%, over 5,020 owned seeds |
 
 **Source corrections in the same task:** `adapters/search/postgres.py`'s stale `_SUGGEST` comment and
 `SearchService._popularity_term`'s "most of 1,271,138 rows" both fixed and scoped to the phase each
@@ -1949,3 +1949,85 @@ failure that PRD 05 cites it for; PRD 10 argued its partial index from a majorit
 does not produce; `.claude/rules/milestone-boundary-calls.md` pointed at *"the M6 live-verification
 section below"*, which has never existed in that file; and this file's own status table had said
 "IN PROGRESS" for M3 and "not planned" for M4–M7 since M3.
+
+## ✅ M9 Task S1 — M7's 1.81% was measured over 5,020 owned seeds, settled before anything in M9 quotes it (2026-08-11)
+
+**Refutation first: the two populations differ, so 1.81% — a floor over 5,020 owned seeds — is NOT a
+baseline for M9's run, and saying so is the deliverable.** `/tmp/m9-gate/BAR.md`'s open question — M7
+measured a candidate-pair rate, which requires a populated `title_embeddings`, and M8's live
+verification recorded `title_embeddings = 0` — is not a contradiction at all. The two sentences
+describe **different databases**, and M7's no longer exists. No number is changed here; S7
+re-measures the value.
+
+**The arithmetic is the load-bearing half, and it is exact.** `SimilarityService.rebuild` accumulates
+`candidate_pairs` as `sum(len(pool))` over `self._embeddings.nearest_for(…, limit=_CANDIDATE_POOL)`,
+and `_CANDIDATE_POOL` is **100** — so **502,000 / 100 = 5,020 seeds, exactly**, with every seed
+drawing a full pool (which any embedded population above 101 produces). This file's own M7 Task 36
+entry already said the counters were read *"over a 5,020-title owned population"*, and PRD 04 calls
+it *"a real household's 5,020 owned copies"*; the division is what makes those two sentences one fact
+rather than a coincidence. Two further checks against the same run agree: `seeds_with_genome / seeds` =
+10.68% is 536/5,020, and `rows` = 125,500 is 5,020 × `_NEIGHBORS_PER_TITLE` (25).
+
+**And the primary artefact survived, so this is not an inference.** `/tmp/m7-gate/` was committed to
+nothing and is still on the host. `step8_pairrate.py` drove the **shipped** `IndexService` and
+`SimilarityService` against a scratch database `m7gate` (1,271,570 titles) on port 55432, and
+`step8_pairrate.out` is the run: `promoted 5020 owned titles to the enriched tier`, `seeds : 5020`,
+`candidate pairs : 502000`, `pairs with a tags cos : 9069`, `PAIR RATE : 1.81%`, `BAR C (>= 10%) :
+FAIL` — the 5,020 seeds and the rate printed by one counter, in one run, ten lines apart. The
+promotion is one statement, quoted rather than paraphrased:
+
+    UPDATE titles SET enrichment_state = 'enriched'
+    WHERE EXISTS (SELECT 1 FROM media_items m WHERE m.title_id = titles.id AND m.available)
+
+**It moved the tier label and not the document, which is the whole finding.**
+`db/repositories/search.py`'s `_POPULATION` is `t.enrichment_state <> 'skeleton'`, so that `UPDATE` is
+the only thing that made those 5,020 eligible to be embedded; `search_document` is a generated column
+over `titles`, and with no TMDb key nothing had written `overview`, `tagline` or `keywords`. Weight
+classes C and D were empty and B was unfilled, so the pool `nearest_for` drew was selected by **name**
+similarity. The script's own docstring states this as its one deviation and calls the result a
+conservative reading. *(One honest detail: the surviving `.out` prints `stale titles to embed: 0` /
+`embedded 0 titles` above a 5,020-seed rebuild, so it is a **re-run** whose embeddings were already
+current from an earlier pass of the same script. It changes no number.)*
+
+**The two live counts, read-only 2026-08-11 — corroboration, not proof, which is why the arithmetic
+leads.**
+
+| container | titles | `title_embeddings` | `title_neighbors` | `genome_scores` | `media_items` | non-skeleton |
+|---|---|---|---|---|---|---|
+| `usher-m9-pg` (:55432) | 1,272,367 | 0 | 0 | 15,565 | 0 | 0 |
+| `usher-postgres-1` | 1,271,138 | 0 | 0 | 0 | 0 | 0 |
+
+Neither is M7's catalog — that was **1,271,570** titles, a third number — and `pg_database` on
+`usher-postgres-1` lists only `usher`, so `m7gate` and `m7home` are gone. **`media_items = 0` is a
+sharper tell than `title_embeddings = 0`**: neither survivor holds the household whose ownership
+*defined* the population, so neither could reproduce the measurement even after an index backfill.
+
+**The conclusion, in the sentence every quoting paragraph now carries: 1.81% is a floor measured over
+5,020 owned, name-shaped, pre-TMDb seeds, and it is not a baseline for a ~130,806-seed enriched-movie
+population.** All three inputs to a pair rate change between the two runs — the seed set (one
+household's ownership → `kind = 'movie' AND vote_count >= 100` with a `tmdb_id`, 26× larger), the
+document (classes C and D go from empty to filled), and therefore the pool. **S7's number is a second
+measurement, never a delta**, and any write-up placing the two side by side has to say so.
+
+**Two claims in the task's own draft are false against the tree and are recorded rather than
+propagated.** *"Five files quote the rate and none names the population in the same paragraph"* is
+wrong: PRD 04's Task-36 paragraph and PRD 05's `### Similarity` bullet each already carry `5,020` and
+`1.81%` in one block and are untouched. The measured red set was exactly five blocks — PRD 04's ⏳
+paragraph, PRD 06's re-rank bullet, PRD 09's *"coverage promise finally has denominators"* bullet,
+ADR-0024's `## Uncertainty`, and this file's M7 guess table — and the scan is measured rather than
+asserted. Second, a scan globbing all of `docs/` hits `docs/specs/2026-08-10-m9-api-surface-design.md`
+twice, and `.claude/rules/prd-maintenance.md` forbids editing an old spec to match, so a guard scoped
+that way could only be satisfied by breaking that rule.
+
+**The guard:** `tests/unit/test_genome_baseline_carries_its_population.py` — every Markdown block
+(consecutive non-blank lines, so a table is one block) in `docs/prd/**/*.md` plus this file that
+carries the literal `1.81` must also carry `5,020`. Red on the five above before the edits, green
+after. Both controls were planted and both fire on their own `E` line: dropping the PRD glob trips the
+ADR-in-corpus assertion, and globbing `*.markdown` while keeping the ADR trips the hit floor
+(`1 >= 8`). The floor is today's exact count (**eight** blocks over six files), i.e. a tripwire rather
+than slack.
+
+**Found and not fixed, because it is outside the declared paragraph and PRD 04 is also being edited by
+Track 1:** PRD 04 calls the population *"5,020 owned **copies**"* where the measurement's predicate
+counts distinct owned **titles**. `.claude/rules/rows-and-genome.md` and PRD 05 both already say
+"titles". One word, in a paragraph this task did not open.

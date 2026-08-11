@@ -222,7 +222,30 @@ class SearchIndex(ABC):
 
 
 class SuggestIndex(ABC):
-    """Typo-tolerant type-ahead over names. One method, and no write path.
+    """Type-ahead over names. One method, and no write path.
+
+    **This opened *"Typo-tolerant* type-ahead over names" until M9, and that
+    became false the moment a second implementation existed.** ADR-0002's
+    typo-tolerance gate ran on 2026-08-03 against 1,271,138 real names and
+    failed both halves of a bar written down first -- 27.8% recall on a
+    2-4-character name against 0.75, and no configuration within 6x of a 50 ms
+    keystroke budget -- so what ships is two tiers, and **only one of them is
+    typo-tolerant**:
+
+    - `PostgresPrefixSuggestIndex` (`adapters/search/prefix.py`) is the btree
+      `lower(name) text_pattern_ops` probe. p50 0.6 ms, and **1.9% typo
+      recall** -- it finds nothing at all for a misspelt prefix. That is the
+      whole design, not a shortfall: it is the only configuration measured that
+      fits inside a keystroke, and it runs on every one.
+    - `PostgresSuggestIndex` (`adapters/search/postgres.py`) is the trigram +
+      `levenshtein_less_equal` path that carries the tolerance, at 33.3 ms p50,
+      **debounced** behind the first.
+
+    The contract suite splits the same way: `SuggestIndexContract` holds what
+    both owe and `TypoTolerantSuggestIndexContract` holds the three cases that
+    are claims about `pg_trgm`. A port docstring promising tolerance would have
+    made the prefix tier read as a defective implementation of this interface
+    rather than as half of the answer to the gate.
 
     **Settled in M6** -- `SearchIndex.suggest` used to carry a 🔶 asking
     whether the type-ahead box was its own port. It is, and the argument
@@ -246,6 +269,13 @@ class SuggestIndex(ABC):
     method is how the dual write gets paid for by accident. The day a second
     implementation needs them is the day that cost becomes real and gets
     paid for on purpose.
+
+    **That day arrived in M9 and the cost is still not owed.**
+    `PostgresPrefixSuggestIndex` is the second implementation, and it reads
+    `titles` and `title_search_names` through two btrees and maintains no
+    artefact of its own either -- so the sentence above is now a measurement
+    rather than a prediction. Meilisearch remains the case that would change
+    the answer, exactly as ADR-0002 scopes it.
 
     `SearchIndex` keeps `index_many`/`remove` because the semantic half
     genuinely is a written artefact.

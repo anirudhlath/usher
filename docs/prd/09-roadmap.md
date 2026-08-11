@@ -723,12 +723,15 @@ paragraph above needs to find out what happened to it.
   not the one anyone quoted.** [05](05-search-and-similarity.md)'s *"~7%"* was
   roughly right about the ≥100-vote priority tier (**7.61%** measured) and
   wrong about everything else: **1.22%** of all titles, **10.68%** of a real
-  household's owned library. The figure that decides whether the term does
-  anything is the **candidate-pair** rate — both sides of a pair need a vector
-  — measured at **1.81%**, never squared. That is **below the 10% floor the
-  weight assumes**, so the term ships at 0.25 with the pool-vs-revert choice
-  deferred to M9 and the reason recorded rather than the number quietly
-  absorbed.
+  household's **5,020**-title owned library. The figure that decides whether
+  the term does anything is the **candidate-pair** rate — both sides of a pair
+  need a vector — measured at **1.81%** over those same 5,020 seeds, never
+  squared. That is **below the 10% floor the weight assumes**, so the term
+  ships at 0.25 with the pool-vs-revert choice deferred to M9 and the reason
+  recorded rather than the number quietly absorbed. **The seed count travels
+  with the rate**, because 1.81% is a floor over one household's owned,
+  name-shaped titles and is not a baseline any differently-selected population
+  can be compared against.
 - **And "one weighted term in `SimilarityService`'s existing signal list" was
   wrong in the two ways above**, which is why the cost line is corrected in
   place rather than quoted approvingly.

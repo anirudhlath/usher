@@ -30,7 +30,7 @@ from tests.contract.watch_state_repository_contract import (
 )
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
-from usher.domain.enums import TitleKind
+from usher.domain.enums import TitleKind, WatchStateOrigin
 from usher.domain.ids import new_id
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
@@ -232,6 +232,12 @@ async def test_a_client_write_stamps_a_fresh_updated_at_over_a_backdated_row(
     This is the `ON CONFLICT ... DO UPDATE` path specifically, which nothing
     else in this file drives through the trigger: proof that the exotic
     statement shape still fires it rather than silently bypassing it.
+
+    `origin` is asserted here too and not only in the contract's own DO
+    UPDATE case: the row is seeded `origin='source'` directly, by raw SQL
+    rather than through `merge_from_source`, so this is a second, differently
+    constructed row proving a dropped `origin = 'api'` in that branch's `SET`
+    clause is caught regardless of how the pre-existing row got there.
     """
     long_ago = WALK_AT - timedelta(days=365)
     await session.execute(
@@ -247,6 +253,7 @@ async def test_a_client_write_stamps_a_fresh_updated_at_over_a_backdated_row(
 
     assert result.updated_at > long_ago
     assert result.position_seconds == 999
+    assert result.origin is WatchStateOrigin.API, "the DO UPDATE branch must promote it too"
 
 
 async def test_the_update_trigger_owns_updated_at(

@@ -312,7 +312,7 @@ be added if a client turns out to need flexible field selection.
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` · `GET /health/ready` | Liveness and readiness |
-| `GET /meta/attribution` | Required IMDb/TMDb attribution strings ([04](04-catalog-bootstrap.md)) |
+| `GET /meta/attribution` | The four required attribution strings — IMDb, TMDb, MovieLens, Wikidata ([04](04-catalog-bootstrap.md)) |
 | `GET /openapi.json` | Schema |
 
 ## Response contracts
@@ -578,16 +578,23 @@ proxies that mangle upgrades, and it reconnects natively in browsers.
 
 `GET /images/{image_id}?w=` — the caching proxy from [02](02-data-model.md).
 Fetches a provider **rung** on first request, stores the bytes on disk, and
-serves them with immutable cache headers thereafter. It does not decode and does
-not re-encode: nothing in Usher's runtime can read an image, and nothing needs
-to. See [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md).
+serves them with a long-lived cache header thereafter. It does not decode and
+does not re-encode: nothing in Usher's runtime can read an image, and nothing
+needs to. See [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md).
+
+⏳ **`Cache-Control: immutable` is conditional and is not yet earned.** It is
+honest only if an image id survives re-derivation, and the `images` table
+shipped in `m09a` with no unique key to make that true — so until the key lands
+(requested as `m09c`, specified in ADR-0032) this route sends a long `max-age`
+**without** `immutable`, which lets a client revalidate.
 
 Clients never see provider image URLs and never need a provider key. `w` is
 clamped **up** to a closed ladder of four widths — `154 342 780 1280`, a code
 constant — with `342` when it is omitted and a 422 for anything that is not a
-positive integer. There is no `original` rung: a provider's original is 4× to
-12× the top rung (median ~1 MB, measured maximum 4.7 MB), and serving it is the
-disk-and-bandwidth hazard the clamp exists to prevent.
+positive integer. There is no `original` rung: it is the one size with no width
+bound at all, measured at 173 KB to 4.7 MB across kinds (1.5× a poster's top
+rung, 8.1× a backdrop's), and serving it is the disk-and-bandwidth hazard the
+clamp exists to prevent.
 
 🔴 **This section promised `?w=&h=&fmt=` until 2026-08-11 and two of those three
 are withdrawn**, because the mechanism turned out not to support them and a
@@ -667,6 +674,35 @@ by hand in the Home Assistant card moves here, where it is testable.
 > working until Emby prunes the session or an operator revokes it. See
 > [03](03-sources-and-sync.md) for the cache and ADR-0012 for the risks
 > accepted with it.
+
+> **Settled in M9 — the playback ticket.** ADR-0012's successor is decided and
+> its cipher is built:
+> [ADR-0029](decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md).
+> A **ticket** is a Fernet token over an HKDF-SHA256 subkey of
+> `USHER_SECRET_KEY`, domain-separated from the source-credential subkey with
+> `info=b"usher.playback-ticket.v1"`, carrying the source URL as its
+> plaintext. `POST /titles/{id}/play` hands the client a ticket instead of the
+> source URL and `GET /stream/{ticket}` redeems one into a `302` — so Usher
+> still never proxies bytes, and the block quote above's JSON example shows the
+> pre-ticket shape until the route lands.
+>
+> **Encrypted rather than merely signed**, because the payload *is* the URL
+> carrying `api_key`: a signed-but-readable token would publish the credential
+> it exists to hide. **Stateless** — there is no ticket table, so no revocation
+> before expiry; rotating `USHER_SECRET_KEY` is the coarse revocation that
+> exists. **Expired and forged are deliberately indistinguishable**, and
+> redemption raises nothing rather than building an error message a URL could
+> leak into.
+>
+> **What it changes is the artifact, not the grant.** The `302`'s `Location` is
+> the real URL, so the token still reaches the client that follows it; what
+> stops being a working credential is what the client stores, renders, caches
+> or pastes. The reduction is **weakest for the `deep_link` target**, which
+> hands the ticket to a third-party player that follows the redirect and then
+> holds the real URL exactly as it does today. There is deliberately no
+> `USHER_PLAYBACK_TICKET_TTL_SECONDS` — the TTL is a named constant at the one
+> place that mints, because nobody has yet measured how long a client sits
+> between receiving a target and following it.
 
 ## Authentication seam
 

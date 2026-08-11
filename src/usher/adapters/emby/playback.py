@@ -14,7 +14,12 @@ Two targets per playable item, ranked:
    Emby 4.9.5.0 server on 2026-07-31: a range request against a URL this
    module built answered 206 with `video/x-matroska` content.
 2. **deep_link** -- `infuse://x-callback-url/play?url=<the direct URL,
-   percent-encoded>`.
+   percent-encoded>`, built by `usher.ports.source.wrap_deep_link`. The
+   wrapper itself does not live here (M9, D2): a custom scheme is not
+   something a playback ticket's HTTP redirect can produce, so whatever
+   mints the ticket has to be able to call it too, and `usher.services`/
+   `usher.api` may not import this module (import contract 6). See that
+   function's docstring for the full reasoning; this module only calls it.
 
 Direct first, because a client that *can* play the container should: a deep
 link hands playback to another application, which is a fallback rather than
@@ -64,9 +69,7 @@ from usher.adapters.emby.mapping import (
     runtime_seconds,
     stream_of,
 )
-from usher.ports.source import StreamTarget, StreamTargetKind
-
-INFUSE_SCHEME = "infuse"
+from usher.ports.source import INFUSE_SCHEME, StreamTarget, StreamTargetKind, wrap_deep_link
 
 
 def build_stream_targets(
@@ -135,7 +138,7 @@ def build_stream_targets(
         ),
         StreamTarget(
             kind=StreamTargetKind.DEEP_LINK,
-            url=f"{INFUSE_SCHEME}://x-callback-url/play?url={quote(url, safe='')}",
+            url=wrap_deep_link(url),
             scheme=INFUSE_SCHEME,
         ),
     ]
