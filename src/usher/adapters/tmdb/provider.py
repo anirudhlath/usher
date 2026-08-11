@@ -157,8 +157,22 @@ def _append_for(kind: TitleKind) -> str:
 
     A series' list is the six TV namespaces plus the blind season window --
     exactly the 20-item ceiling, and assembled here rather than stored as a
-    constant so `SERIES_APPEND_TO_RESPONSE` stays the thing PRD 03's request
-    table names and `scripts/capture_tmdb_fixture.py` records a shape with.
+    constant so `SERIES_APPEND_TO_RESPONSE` stays the plain namespace list
+    that PRD 03's request table names.
+
+    **The consequence, stated because it is a real loss and the first
+    explanation given for it was wrong.** `scripts/capture_tmdb_fixture.py
+    --kind series` sends `SERIES_APPEND_TO_RESPONSE` alone, so it no longer
+    reproduces the first request this provider issues -- it used to match it
+    byte for byte, and a shape diff that drifts from the shipped request is
+    worth less than one that does not. Left alone deliberately: the season
+    blocks are popped before `fetch` returns, so capturing them would record
+    shapes nothing ever reads, and `season.json` already records the season
+    shape from its own route. It is *not* true that the namespace-only
+    capture is "exactly the shape `raw_payloads` holds" -- `raw_payloads`'
+    `seasons[]` entries carry merged episode data that no bare
+    `SERIES_APPEND_TO_RESPONSE` response has ever contained, which was
+    equally true of the `1+N` path this replaced.
     """
     if kind is not TitleKind.SERIES:
         return MOVIE_APPEND_TO_RESPONSE
