@@ -99,16 +99,59 @@ the rest of it with nothing to say so.
 
 **Three groups write keyset SQL independently this milestone, and the predicate
 is not shared even though the codec is.** So the spelling is written down here,
-where all three will read it. For a nullable sort column, NULL sorts last and
-the predicate is:
+where all three will read it. For a nullable sort column, NULL sorts last, the
+key is `(key IS NOT NULL, key, id)`, and the comparison is **strict**:
 
 ```sql
-ORDER BY (key IS NOT NULL), key, id
-WHERE  ((key IS NOT NULL), key, id) > ((:after_key IS NOT NULL), :after_key, :after_id)
+ORDER BY (key IS NOT NULL) DESC, key <ASC|DESC>, id ASC
+
+-- resuming from a keyed position
+WHERE key IS NULL                                   -- NULLs sort last
+   OR key <  :after_key                             -- `>` for an ASC sort
+   OR (key  = :after_key AND id > :after_id)
+
+-- resuming from an unkeyed position: only the rest of that group can follow
+WHERE key IS NULL AND id > :after_id
 ```
 
-Note the comparison is **strict** `>`. Relaxed to `>=` it re-serves one row at
-every page boundary — and a test whose pages do not abut cannot see it.
+Relaxed from `>` to `>=` on the tail, it re-serves one row at every page
+boundary — and a test whose pages do not abut cannot see it.
+
+> ⚠️ **Corrected 2026-08-11 by measurement, and the spelling this replaces is
+> the one a reader reaches for first.** This section shipped the predicate as
+> a single row comparison:
+>
+> ```sql
+> ORDER BY (key IS NOT NULL), key, id
+> WHERE  ((key IS NOT NULL), key, id) > ((:after_key IS NOT NULL), :after_key, :after_id)
+> ```
+>
+> It is wrong for a nullable key, and quietly. Postgres evaluates a row
+> comparison element-wise and answers **NULL** — not false — when the first
+> differing pair involves one, so resuming from an *unkeyed* boundary drops
+> the whole rest of the unkeyed group while every page served looks full.
+> Measured on `pgvector/pgvector:pg17`, five rows of which three have a NULL
+> key, resuming from the first of those (`id = 1`):
+>
+> | spelling | rows returned |
+> |---|---|
+> | the row comparison above | `(5, id=4)`, `(7, id=5)` — **both keyed rows, neither remaining unkeyed one** |
+> | the three-arm predicate | `(NULL, id=2)`, `(NULL, id=3)` |
+>
+> That is not an edge case on this schema: `titles.year`, `titles.popularity`
+> and `titles.vote_count` are all nullable and `popularity` was measured NULL
+> on **all 1,271,138 rows** of a bootstrap-only catalog, so the unkeyed group
+> is most of the catalog on a fresh install. The ascending leading term is
+> corrected with it — `(key IS NOT NULL)` ascending puts NULLs *first*, which
+> contradicted this section's own opening sentence.
+>
+> The three arms are `IS NOT DISTINCT FROM` spelled out, and a two-branch
+> Python helper is a legitimate rendering of them: the branch is on whether
+> `:after_key` is NULL, which the caller knows before it builds the statement.
+> `db/repositories/title.py`'s `_browse_after` is the worked example, and
+> `TitleRepositoryBrowseContract::test_a_page_boundary_inside_the_unkeyed_
+> group_does_not_drop_the_rest_of_it` is what holds it, on both arms and for
+> all three nullable sorts.
 
 ### The page envelope carries no `total`
 
@@ -170,9 +213,28 @@ is missing" and "there is no next page" would otherwise be the same bytes.
 
 ## Uncertainty
 
-**The Postgres arm of PRD 07's own claim is not tested by this task.**
-*"Offset produces duplicates under concurrent writes and keyset does not"* is
-the stated reason for the whole design, and it needs a real database with a row
-inserted between page 1 and page 2 — which needs a repository that exposes a
-wire-paged read, and none does yet. **It must ride with group B's first paged
-route.** If B skips it, the argument for this ADR ships untested.
+**~~The Postgres arm of PRD 07's own claim is not tested by this task.~~
+Closed 2026-08-11 by B6, the first repository to expose a wire-paged read.**
+The debt was: *"offset produces duplicates under concurrent writes and keyset
+does not"* is the stated reason for the whole design, it needs a real database
+with a row inserted between page 1 and page 2, and no repository could serve
+one. `TitleRepository.browse` can, and
+`tests/integration/test_title_repository.py::
+test_offset_duplicates_a_row_a_concurrent_insert_pushed_down_and_the_keyset_does_not`
+runs both spellings over the same table with the same `ORDER BY`, against a
+real `pgvector/pgvector:pg17`.
+
+Measured: five rows, page size three, one row committed between the two
+requests that sorts **into the page already served** (the case asserts that
+premise — a row after the cursor is a page-2 row under both spellings and
+would make the comparison vacuous). The keyset serves the pre-insert
+population once, in order. `OFFSET 3` serves `Charlie` twice, because every
+row after the insert moved one place down and the second request counted from
+a total that had changed under it.
+
+**One correction to the claim while verifying it: an insert duplicates and
+does not drop.** The population grew by one, so the window that slid by one
+still reaches the last row — nothing is lost, one row is repeated. The mirror
+damage, a row *never* served, needs a concurrent **delete**. PRD 07 says
+"produces duplicates", which is precisely what this measures; neither document
+now claims the other half.
