@@ -1938,3 +1938,127 @@ the summary line on a green run. Costless here because it was an interactive
 baseline rather than a harness verdict — recorded because the harness rule
 ("pass no verbosity flag at all") is usually stated about harnesses and the
 habit is formed at the shell.
+
+## M9 Task C4 — the image proxy's two ports and their adapters (2026-08-11)
+
+**35 plants over `ports/images.py`, `adapters/images/provider.py`,
+`adapters/images/disk.py`, `services/images.py` and two fakes — 32 behavioural
+targets of which 31 were killed on the first pass and **1 was a real survivor
+since closed**, plus 3 equivalent-mutant controls surviving all five gate
+steps. 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN, 0 HUNG.** Run in place
+with the plant list and its **expected verdict** written down first,
+`PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under **both** `src/` and
+`tests/` before every run, `compile()` rather than `ast.parse` as the dry run,
+every plant asserted present by an exact anchor count (`count(old) == 1`), and
+every restore verified by `md5sum` against a pre-plant digest.
+
+**Selection**, stated because a survivor list is only true of the selection it
+was measured against: `tests/unit/test_adapters_images.py`,
+`test_services_images.py`, `test_config.py`, `test_ports.py` and
+`test_deployment_config.py` — 310 cases, ~1 s a run, green before and after.
+Scoped rather than whole-suite for two reasons, both checked rather than
+assumed: `grep -rln "ports.images\|adapters.images\|services.images"` finds
+nothing outside this task's own files plus `config.py` and `composition.py`,
+neither of which any other case drives through the new factory; and
+`tests/integration/test_sse_end_to_end.py` is intermittent on this tree and
+predates M9, so **a sweep scored on "did the run fail" cannot include it** —
+every plant inherits the flake's failure rate as a false kill.
+
+🔴 **31 of 32 killed on the first pass is the weakest-looking split in this
+file and the entry has to say why: the plants and the cases were written by the
+same author in the same session against the same 400 lines.** That is the
+condition under which a sweep measures its author's consistency rather than the
+suite's reach. What makes it evidence anyway is the one plant whose verdict was
+written down as **`?`** rather than as a prediction, and it is the whole yield.
+
+**The survivor: `await asyncio.to_thread(path.read_bytes)` spelled
+`path.read_bytes()`.** It survived all 310 cases, and it is **not** an
+equivalent mutant — this store is read from an ASGI request handler, so a
+synchronous read of up to `USHER_IMAGE_MAX_BYTES` stalls the event loop and one
+slow disk becomes everybody's slow disk. **No behavioural assertion anywhere in
+this repository can see it**: the value returned is byte-identical and the only
+difference is which thread was blocked while it was produced. Telling the two
+apart behaviourally needs a loop-latency harness this project does not have and
+should not grow for one module. Closed **structurally** instead, by
+`test_no_filesystem_call_in_the_disk_store_blocks_the_event_loop`, which parses
+the module and asserts that every member of a closed set of blocking
+filesystem operations appears as an attribute *reference* handed to
+`asyncio.to_thread` and never as a call — with a premise guard that the scan
+found any blocking operation at all, because a scan that globs nothing passes
+exactly like a scan that passes. Re-planted, that mutation and a second
+spelling of it (`scratch.replace(final)`) each fail **that case alone**.
+
+**The general form, which is new to this file: when a defect's only symptom is
+*which thread ran*, a behavioural suite is not merely missing a case — it has
+no expressible one, and the honest repair is a structural assertion rather than
+a timing test.** Nearest relative is
+`test_the_curated_module_holds_no_llm_client_and_cannot_complete_anything`,
+which makes the same move for a defect whose symptom is *which object was
+held*; the difference is that there a behavioural case is possible and merely
+weak, and here there is none.
+
+**A second result worth carrying, about a bound chosen well by accident.**
+`test_a_body_past_the_ceiling_is_refused_while_it_streams` asserts
+`sum(delivered) <= 20` over a source generator yielding four 10-byte chunks
+against a ceiling of 10 — the number is what makes it a *streaming* assertion
+rather than an "eventually refused" one. Two independent plants land on it:
+buffering the whole body first, and `seen += len(chunk)` moved *after* the
+check (an off-by-one that lets 20 bytes through a 10-byte ceiling). Both die on
+that arithmetic and neither would die on a `pytest.raises` alone. **When a
+ceiling is enforced during a stream, the assertion is how much arrived before
+the refusal, not that a refusal happened.**
+
+**And one plant that changed the code before the sweep ran, which the plant
+list found rather than the run.** `ImageCacheKey.digest()` separates its two
+terms with a NUL. Writing down "the separator dropped" and asking which case
+would catch it found only
+`test_the_cache_path_is_a_hash_and_two_levels_deep`, which recomputes the
+digest literally — a real kill, and a kill by *mirroring the implementation*.
+`test_the_two_terms_of_the_digest_cannot_run_into_each_other` states the
+property instead (`("tmdb", "/a.jpg")` and `("tmdb/", "a.jpg")` concatenate
+identically, with that stated as its own premise), so it keeps saying something
+if the digest is ever spelled another way. Both now fail on the plant.
+
+The other thirty targets and what each cost, grouped: the clamp returned
+unclamped fails 6 and the clamp made strict fails 4 (both through the
+*fetcher's* recorded width, so the ladder guard is what makes an unclamped
+width loud rather than a CDN 400); the default rung fails 1; the non-positive
+guard fails 1; **the service never asking the store fails exactly the case the
+plan names**; the key's `provider` term fails 2 and its separator 2; the shard
+depth fails 1 and the rung in the filename 3; the in-place write fails 14, the
+scratch cleanup 4, the `fsync` 1, the sibling sweep 1 (and *widening* it to
+unlink the entry just written fails 14); `get` trying one extension fails 1;
+the byte ceiling made `>=` fails 1, deleted 2, and respelled as a
+`Content-Length` check 1; collapsing the 4xx/429 split fails 6; the media-type
+refusal moved past the body fails 3 and removed entirely 5; parameters not
+stripped fails 2; the off-ladder guard fails 8 on each arm independently; the
+`w` prefix fails 4; a defaulted `Content-Type` fails 2; a missing row treated
+as present fails 1; and the fake store writing before it consumes fails 9.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| `ProviderCdnImageFetcher.__init__`'s `_base_url`/`_max_bytes` writes swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,362 / 4 skipped) |
+| one sentence of `services/images.py`'s module docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (3,362 / 4 skipped) |
+| `IMAGE_LADDER` and `DEFAULT_IMAGE_WIDTH` defined in the other order | PASS | PASS | PASS | PASS (9/0) | PASS (3,362 / 4 skipped) |
+
+The first and third are facts about the *code* rather than about what the tools
+look at: two disjoint attribute writes on a freshly constructed object, neither
+right-hand side reading the other and nothing running between them; and two
+module-level assignments referencing neither each other nor anything between
+them, in a module with no import-time side effect. **The third is an ordering
+control that is deliberately not an `__all__` reorder** — `RUF022` would have
+rejected that, which this file records as the reason such a control
+demonstrates nothing about the gate. The docstring reword was checked first
+against `grep -rn "getdoc\|__doc__\|ast.unparse\|getsource" tests/`: the scans
+it finds cover `ports/`, `services/rows/`, `api/` and — new in this task —
+`adapters/images/`, and **none of them reads `services/images.py`**, which is
+why the docstring control was put there rather than in `disk.py`, whose prose
+*is* scanned by `test_nothing_in_the_package_logs`.
+
+**The ninth import contract was verified in both directions rather than
+assumed**, because adding a module to a `forbidden` list is exactly the edit
+that reads as bookkeeping: `from usher.adapters.images.provider import
+ProviderCdnImageFetcher` planted in `adapters/http.py` **in its isort
+position** (so the careful spelling of the defect is what was measured, not the
+careless one `ruff check` catches as `F401`) reports **8 kept, 1 broken**,
+naming the new module; restored, 9 kept, 0 broken, `md5sum`-verified.

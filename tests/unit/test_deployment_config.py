@@ -69,8 +69,32 @@ _DATABASE_URL = "postgresql+asyncpg://usher:usher@localhost:5432/usher"
 #                       `docker compose up` with a sentence, rather than as a
 #                       container that starts and crashes on validation.
 #
+# **The fifth entry arrived in M9 and this list grew deliberately rather than
+# silently**, which is the whole reason `test_compose_overrides_only_what_the_
+# topology_owns` is written to fail when it changes:
+#
+#   USHER_IMAGE_CACHE_DIR  the container side of `volumes:`'s
+#                          `./data/images:/data/images`. A bind-mount path is
+#                          a topology fact in exactly the way the four above
+#                          are -- `.env`'s `data/images` is right for a dev
+#                          shell and inside a container whose WORKDIR is
+#                          `/app` it would put the image cache in the image's
+#                          own writable layer, where it survives no rebuild
+#                          and appears in no `du` against the mount. The other
+#                          three `USHER_IMAGE_*` settings (the byte ceiling,
+#                          the fetch timeout and the CDN base URL) are the
+#                          operator's and are deliberately not here.
+#
 # Anything else an operator sets in `.env` must reach the container unaltered.
-_TOPOLOGY_OWNED = frozenset({"USHER_DATABASE_URL", "USHER_HOST", "USHER_PORT", "USHER_SECRET_KEY"})
+_TOPOLOGY_OWNED = frozenset(
+    {
+        "USHER_DATABASE_URL",
+        "USHER_HOST",
+        "USHER_PORT",
+        "USHER_SECRET_KEY",
+        "USHER_IMAGE_CACHE_DIR",
+    }
+)
 
 
 def _env_file(directory: Path, body: str) -> Path:

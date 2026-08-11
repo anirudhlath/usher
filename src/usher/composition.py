@@ -58,6 +58,7 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
+from usher.adapters.images import DiskImageBlobStore, ProviderCdnImageFetcher
 from usher.adapters.llm import OpenAICompatibleClient
 from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestIndex
 from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
@@ -87,6 +88,7 @@ from usher.domain.watch import User
 from usher.ports.credentials import CredentialStore
 from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher, NullEventPublisher
+from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
 from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
@@ -95,6 +97,7 @@ from usher.ports.repository import (
     CreditRepository,
     CuratedRowRepository,
     EpisodeRepository,
+    ImageRepository,
     LLMCallRepository,
     MediaItemRepository,
     PersonRepository,
@@ -123,6 +126,7 @@ from usher.services.handlers import (
     match_handler,
     watch_history_handler,
 )
+from usher.services.images import ImageProxyService
 from usher.services.index import IndexService
 from usher.services.ingest import IngestService
 from usher.services.jobs import JobWorker
@@ -948,6 +952,63 @@ async def llm_client(
         price_out_per_mtok=settings.llm_price_out_per_mtok,
     )
     return built, built.aclose
+
+
+def image_proxy(
+    settings: Settings,
+) -> tuple[ImageFetcher, ImageBlobStore, Callable[[], Awaitable[None]]]:
+    """The image proxy's two process-scoped halves, and the callable that
+    closes the fetcher's transport.
+
+    **Deliberately not the `(None, no-op)` shape `llm_client`, `embedder` and
+    `metadata_provider` share, and the difference is the point.** Those three
+    answer `None` because a deployment without a model, an embedder or a TMDb
+    key is *narrowed* rather than broken. There is no switch here and nothing
+    to be missing: the proxy needs no credential (ADR-0032 — the CDN is
+    unauthenticated), takes no dependency this project did not already have,
+    and its only inputs are a directory and a URL that both have defaults. A
+    nullable return would be a degradation nothing can cause.
+
+    **One `httpx.AsyncClient` per process**, for `metadata_provider`'s reason
+    one layer over: a client per request is a connection pool per request, and
+    the pool is the entire benefit of keeping one. Its timeout is
+    `image_fetch_timeout_seconds` — an order of magnitude below the LLM's,
+    because this one is on a request path.
+
+    **No throttle, unlike `TmdbClient`.** The image CDN publishes no rate limit
+    and is not the API the ~40 rps ceiling is about; a token bucket here would
+    be a limiter invented against a number nobody has measured. The real bound
+    is the cache: after the first request per `(image, rung)` there is no
+    outbound traffic at all.
+
+    The store is returned rather than built per request because
+    `DiskImageBlobStore` holds a `Path` and nothing else — but it is returned
+    *here*, beside the fetcher, so a deployment cannot end up with a cache
+    directory the fetcher's byte ceiling was never told about.
+    """
+    client = httpx.AsyncClient(timeout=settings.image_fetch_timeout_seconds)
+    fetcher = ProviderCdnImageFetcher(
+        client,
+        base_url=settings.image_cdn_base_url,
+        max_bytes=settings.image_max_bytes,
+    )
+    return fetcher, DiskImageBlobStore(settings.image_cache_dir), client.aclose
+
+
+def build_image_proxy_service(
+    images: ImageRepository, fetcher: ImageFetcher, store: ImageBlobStore
+) -> ImageProxyService:
+    """One request's `ImageRepository` plus the process's fetcher and store.
+
+    **The same asymmetry `build_index_service` and `build_curation_service`
+    have**, and it is why this takes an `ImageRepository` rather than a
+    `Pipeline`: the repository is session-scoped and the other two are not.
+    It takes the repository directly rather than the pipeline because
+    `GET /images/{id}` is a *read* of one row and needs none of the other
+    twenty-odd fields — a route that was handed the whole pipeline could reach
+    the job queue from a request path, and this one has no business doing so.
+    """
+    return ImageProxyService(images=images, fetcher=fetcher, store=store)
 
 
 def _load_embedder(settings: Settings) -> Embedder:

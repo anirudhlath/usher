@@ -21,7 +21,20 @@ cannot discover and a documented key that is not a setting are both test
 failures (`tests/unit/test_deployment_config.py`). M6 added nine of them,
 four `USHER_EMBEDDING_*` and five `USHER_SEARCH_*`. **M8 added eight
 `USHER_LLM_*` plus `USHER_CURATION_POOL_SIZE` and
-`USHER_QUERY_EXPANSION_ENABLED`** — ten. That last one arrived on 2026-08-07
+`USHER_QUERY_EXPANSION_ENABLED`** — ten. **M9 adds four `USHER_IMAGE_*`** —
+`_CACHE_DIR`, `_MAX_BYTES`, `_FETCH_TIMEOUT_SECONDS` and `_CDN_BASE_URL` —
+and the interesting one is the fifth it does **not** add: the width ladder is a
+code constant, for the reason the middle row above now carries
+([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)).
+`USHER_IMAGE_CDN_BASE_URL` is a setting for `USHER_TMDB_BASE_URL`'s reason (a
+household behind a restrictive network puts a proxy in front) and is *also* the
+answer to a question that would otherwise be a network call: resolving the
+provider's `secure_base_url` per cold image is a second round trip, against an
+authenticated endpoint, for a value that changes approximately never. And
+`USHER_IMAGE_CACHE_DIR` is the **fifth** entry in `compose.yml`'s
+`environment:` block, which had held four since M5 — a bind-mount path is a
+topology fact in exactly the way a database hostname is, and the other three
+are the operator's. That last one arrived on 2026-08-07
 and is the one place this project ships **two** switches over one dependency:
 `USHER_LLM_ENABLED` builds the client, and query expansion is off even when it
 is on, because the retrieval measurement in
