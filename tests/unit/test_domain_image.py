@@ -28,7 +28,6 @@ def _image(**changes: object) -> Image:
         "provider": "tmdb",
         "provider_path": "/an-invented-path.jpg",
         "is_primary": True,
-        "sort_order": 0,
     }
     fields.update(changes)
     return Image.model_validate(fields)
@@ -87,7 +86,7 @@ def test_an_image_is_frozen_and_evolves_with_revalidation() -> None:
     image = _image()
     with pytest.raises(ValidationError):
         image.evolve(person_id=new_id())
-    assert image.evolve(sort_order=3).sort_order == 3
+    assert image.evolve(is_primary=False).is_primary is False
 
 
 @pytest.mark.parametrize(
@@ -97,16 +96,15 @@ def test_an_image_is_frozen_and_evolves_with_revalidation() -> None:
         ("provider_path", ""),
         ("width", 0),
         ("height", 0),
-        ("sort_order", -1),
     ],
 )
 def test_every_check_on_the_row_is_mirrored_as_a_field_bound(field: str, value: object) -> None:
     """This schema mirrors every Pydantic bound as a CHECK and the mirror runs
-    both ways: `ck_images_provider_not_empty`, `ck_images_provider_path_not_
-    empty`, `ck_images_width_positive`, `ck_images_height_positive` and
-    `ck_images_sort_order_non_negative` each have a field bound here, so the
-    row a derivation assembles is refused at construction rather than by a
-    constraint violation that takes its whole batch with it."""
+    both ways: `ck_images_provider_not_empty`,
+    `ck_images_provider_path_not_empty`, `ck_images_width_positive` and
+    `ck_images_height_positive` each have a field bound here, so the row a
+    derivation assembles is refused at construction rather than by a constraint
+    violation that takes its whole batch with it."""
     with pytest.raises(ValidationError):
         _image(**{field: value})
 

@@ -5,11 +5,13 @@ the one entity on that document's Relationships diagram that had no table.
 `m09c`.** `m09a` shipped this file with no `Image` model and no
 `ImageRepository`, deliberately, because behaviour belongs to the consumer
 task — and it also shipped without the three DDL facts that task had asked for.
-`m09c` carries them: the column below is `provider_path` rather than
-`remote_url`, `sort_order` exists, and the natural key
-`(the one owner, provider, provider_path)` is enforced by three partial unique
-indexes. That migration's docstring holds the argument for each; this one
-records the shape.
+`m09c` carries the two ADR-0032 asked for: the column below is `provider_path`
+rather than `remote_url`, and the natural key
+`(the one owner, provider, provider_path)` is enforced by
+`uq_images_owner_provider_path`, spelled `UNIQUE NULLS NOT DISTINCT`. There is
+still no `sort_order` — that request was deliberately left out of `m09c` and
+`ImageRepository` records what its absence costs. That migration's docstring
+holds the measurements; this one records the shape.
 
 **Artwork is referenced, never mirrored.** PRD 02 prices mirroring posters for
 a 1.2M-title catalog at ~120 GB; what is stored here is a provider path and the
@@ -37,7 +39,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Text,
-    text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -104,13 +106,6 @@ class ImageRow(Base):
     # language", which is different from "English".
     language: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    # `m09c`. The read order is `(is_primary DESC, sort_order, id)`, and this
-    # is the only key of the three a *second* derivation can move: `id` is
-    # first-sighting order and `is_primary` is one bit. `NOT NULL` with no
-    # server default -- the default `m09c` adds exists only to make the column
-    # addable and is dropped in the same migration, because an insert that
-    # forgets this column silently sorts every image equal.
-    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
 
     __table_args__ = (
         # What a single `NOT NULL` would have been. `= 1`, not `>= 1`: an
@@ -131,7 +126,6 @@ class ImageRow(Base):
         # the one who thinks the column is NOT NULL.
         CheckConstraint("width IS NULL OR width > 0", name="ck_images_width_positive"),
         CheckConstraint("height IS NULL OR height > 0", name="ck_images_height_positive"),
-        CheckConstraint("sort_order >= 0", name="ck_images_sort_order_non_negative"),
         # The three cascades' own lookups. Postgres implements ON DELETE
         # CASCADE by finding referencing rows *by that column*, so without
         # these every title, episode or person deletion sequentially scans
@@ -143,40 +137,41 @@ class ImageRow(Base):
         Index("ix_images_title_id", "title_id"),
         Index("ix_images_episode_id", "episode_id"),
         Index("ix_images_person_id", "person_id"),
-        # **The natural key, `m09c`, and it is three indexes because the owner
-        # is a disjunction rather than a column.** An image has no provider
-        # integer id, so `(the one owner, provider, provider_path)` is what
-        # makes a re-derivation an upsert instead of a fresh UUIDv7 per
-        # sighting -- which is the whole of what ADR-0032's
+        # **The natural key, `m09c`, and the obvious spelling of it is inert.**
+        # An image has no provider integer id, so `(the one owner, provider,
+        # provider_path)` is what makes a re-derivation an upsert rather than a
+        # fresh UUIDv7 per sighting -- which is the whole of what ADR-0032's
         # `Cache-Control: immutable` rests on.
         #
-        # Spelled per owner rather than as
-        # `UNIQUE (coalesce(title_id, episode_id, person_id), provider,
-        # provider_path)` because each of these derives its non-nullity from
-        # its **own** predicate: inside `uq_images_title_provider_path` the
-        # owner is non-null by the `WHERE`, and `provider`/`provider_path` by
-        # their columns. The `coalesce` spelling borrows that from
-        # `ck_images_exactly_one_owner` above, so loosening that CHECK would
-        # make the index quietly leaky rather than loudly wrong. And a
-        # single-column `UNIQUE (title_id, provider, provider_path)` -- which
-        # is literally what was requested -- covers *nothing* for an
-        # episode- or person-owned row, since NULL never collides with NULL in
-        # SQL: a unique index that silently exempts two thirds of a table is
-        # worse than none.
+        # `UNIQUE (title_id, provider, provider_path)` is what the request's
+        # own wording invites and what a reviewer waves through. Postgres
+        # defaults to `NULLS DISTINCT`, so on a table whose owner is one of
+        # three nullable columns that constraint covers title-owned rows and
+        # **nothing else**: an episode- or person-owned duplicate has
+        # `title_id IS NULL` and never conflicts. Measured on
+        # `pgvector/pgvector:pg17` (17.10) -- it admitted 2 person-owned rows
+        # where 1 is correct, and this spelling refused it. A unique constraint
+        # that silently exempts two owner kinds in three is worse than none,
+        # because the guarantee reads as present.
         #
-        # `ck_images_exactly_one_owner` puts every row in exactly one of the
-        # three, so the three together hold one entry per row. Three indexes
-        # cost what one would.
-        *(
-            Index(
-                f"uq_images_{owner.removesuffix('_id')}_provider_path",
-                owner,
-                "provider",
-                "provider_path",
-                unique=True,
-                postgresql_where=text(f"{owner} IS NOT NULL"),
-            )
-            for owner in ("title_id", "episode_id", "person_id")
+        # `NULLS NOT DISTINCT` over the whole owner triple needs no help from
+        # `ck_images_exactly_one_owner`: it makes the NULLs themselves
+        # comparable, so two person-owned rows collide on
+        # `(NULL, NULL, person, provider, path)`. It is also not merely
+        # stricter -- two different titles referencing one path are still two
+        # rows, verified in the same run.
+        #
+        # **A constraint, not a bare `Index(..., unique=True)`**, so
+        # `pg_get_constraintdef` reports it back as
+        # `UNIQUE NULLS NOT DISTINCT (...)` and it survives a schema dump.
+        UniqueConstraint(
+            "title_id",
+            "episode_id",
+            "person_id",
+            "provider",
+            "provider_path",
+            name="uq_images_owner_provider_path",
+            postgresql_nulls_not_distinct=True,
         ),
         # **No unique index on "one primary per owner per kind".** It is a
         # tempting invariant and the write model makes it unnecessary: an

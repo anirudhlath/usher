@@ -300,17 +300,44 @@ class Image(BaseModel):
     id: UUID
     title_id: UUID | None; episode_id: UUID | None; person_id: UUID | None
     kind: ImageKind                      # poster | backdrop | logo | still | profile
-    provider: str; remote_url: str
+    provider: str; provider_path: str
     width: int | None; height: int | None
     language: str | None
     is_primary: bool
 ```
 
-🔶 **The table exists as of `m09a`; the model above does not.** M9 ships
-`images` with exactly these eleven fields, a SQLAlchemy row (`ImageRow`), and
-**no `Image` domain model, no port and no repository** — those belong with
-`GET /images/{id}`, and writing "Image landed" here before they exist would be
-the stale "verified" fact worse than none.
+✅ **The table landed in `m09a`, the model, the port and the repository in
+`m09c`.** `usher.domain.image.Image`, `usher.ports.repository.image.
+ImageRepository` and `usher.db.repositories.image.PostgresImageRepository`
+exist and are 1:1 with `ImageRow` by field name
+(`tests/unit/test_domain_image.py`). `GET /images/{id}` itself is still to
+come, and so is the writer that fills the table.
+
+🔴 **`provider_path`, not `remote_url` — corrected 2026-08-11 and the sketch
+above moved with it.** [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)
+settled the proxy on `{base}{rung}{path}`, so a stored full URL would make
+choosing a rung a find-and-replace inside a URL Usher did not mint, on every
+request, and would turn a CDN-base change into a data migration across 1.27M
+titles. `m09c` renamed the column and its CHECK; the table was empty on every
+deployment, so nothing was backfilled.
+
+**An image id survives a re-derivation, and that is a constraint rather than a
+hope.** `uq_images_owner_provider_path` is
+`UNIQUE NULLS NOT DISTINCT (title_id, episode_id, person_id, provider,
+provider_path)`, and the write is an upsert on it, so a second `usher derive`
+returns the id the row was first inserted with. **The obvious spelling of that
+key does not work**: `UNIQUE (title_id, provider, provider_path)` is what the
+request said and it is inert for two owner kinds in three, because Postgres
+defaults to `NULLS DISTINCT` and an episode- or person-owned row has
+`title_id IS NULL`. Measured on PostgreSQL 17.10 — it admitted 2 rows where 1
+is correct. ADR-0032 depends on this: without the key its
+`Cache-Control: immutable` is a lie the first time a title is re-derived.
+
+⏳ **There is no `sort_order`, so the read order is `(is_primary DESC, id)`.**
+`id` is first-sighting order, which means a provider that re-ranks a title's
+posters can move exactly one thing in Usher's answer — which of them is
+primary. Recorded as a limit rather than a defect: `m09c` was authorised for
+the key, and ADR-0032's request puts the read order with whoever reads images.
 
 Three things the table settles that this sketch leaves open. The three owner
 columns are constrained by `ck_images_exactly_one_owner`
@@ -729,16 +756,22 @@ exists — a curated row names three to eight titles, in order — but it is a
 and will neither check nor cascade it. `llm_calls` appears on no line at all:
 it references nothing, by the same argument.
 
-🔶 **`Title 1─* Image` is a third of the way real.** `m09a` gives `Image` a
-table and a SQLAlchemy row; it still has **no domain model and no port
-anywhere in `src/`**, and nothing writes it. The rows are re-derived from
-`raw_payloads` with no second network call ([09](09-roadmap.md)'s M4 boundary
-call 2) by the M9 task that serves them.
+🔶 **`Title 1─* Image` is real everywhere except the writer.** `m09a` gave
+`Image` a table and a SQLAlchemy row and `m09c` gave it a domain model, a port
+and a Postgres repository — `ImageRepository.replace_for_titles` is the write
+and `list_for_title` the read. **Nothing calls the write yet.** The rows are
+re-derived from `raw_payloads` with no second network call
+([09](09-roadmap.md)'s M4 boundary call 2) by the M9 task that fills them.
 
 The diagram line understates the table by one edge, deliberately: `images` can
 hang off an *episode* or a *person* as well as a title (`still` and `profile`
 are two of the five `ImageKind` members), which is three foreign keys and one
-CHECK rather than the single parent the `1─*` notation can draw.
+CHECK rather than the single parent the `1─*` notation can draw. **The natural
+key covers all three owners and the port covers one**: M9's two artwork
+consumers are both title-shaped, so `ImageRepository` has no
+`replace_for_episodes` and no `replace_for_people`, while
+`uq_images_owner_provider_path` constrains an episode still and a person
+headshot exactly as it constrains a poster.
 
 `Collection`, `Person` and `Credit` **landed in M7** (`fd7c3a5b9e12`), which
 also gave `titles.collection_id` — a bare nullable UUID with no foreign key

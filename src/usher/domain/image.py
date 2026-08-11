@@ -16,11 +16,19 @@ making [ADR-0032](../../../docs/prd/decisions/0032-the-image-proxy-clamps-to-a-l
 `Cache-Control: immutable` a lie the first time a title is re-derived.
 
 **`provider_path`, not `remote_url`, and `m09c` renamed the column to match.**
-A full URL duplicates a deployment constant across a 1.27M-title catalog and,
-worse, bakes a *rung* into the identity: ADR-0032's mechanism is
-`{base}{rung}{path}`, so a stored URL turns rung selection into string surgery
-on somebody else's URL and makes a CDN-base change churn every image id in the
-catalog. The base is a setting the proxy holds; the path is the row.
+ADR-0032 leaves this one to C2 — *"either is implementable; only the first is
+cheap"* — and the choice is made here, on its argument: the ladder is
+`{base}{rung}{path}`, so a stored full URL turns rung selection into finding
+and replacing the `/t/p/{size}` segment of a URL this project did not mint, on
+every request, and a CDN-base change becomes a data migration across 1.27M
+titles. The base is a setting the proxy holds; the path is the row.
+
+**`m09c` spells the key `UNIQUE NULLS NOT DISTINCT (title_id, episode_id,
+person_id, provider, provider_path)`, and the obvious spelling is a trap** —
+`UNIQUE (title_id, provider, provider_path)` is inert for two owner kinds in
+three, because Postgres defaults to `NULLS DISTINCT` and an episode- or
+person-owned row has `title_id IS NULL`. Measured; that migration carries the
+numbers.
 
 ## Three owner columns, and this model mirrors the CHECK rather than the shape
 
@@ -61,9 +69,9 @@ class Image(DomainModel):
     person.
 
     Field bounds mirror `images`' CHECKs one for one — `provider <> ''`,
-    `provider_path <> ''`, `width IS NULL OR width > 0`, the same for `height`,
-    and `sort_order >= 0`. That mirroring is this schema's house rule, and here
-    it also decides *which layer refuses a bad batch*.
+    `provider_path <> ''`, `width IS NULL OR width > 0` and the same for
+    `height`. That mirroring is this schema's house rule, and here it also
+    decides *which layer refuses a bad batch*.
     """
 
     id: uuid.UUID = Field(default_factory=new_id)
@@ -92,14 +100,15 @@ class Image(DomainModel):
     # NULL means "no language", which is different from "English".
     language: str | None = None
 
+    # **The whole of the read order, and `ImageRepository` records what that
+    # costs.** The order is `(is_primary DESC, id)`; there is no `sort_order`
+    # column, because ADR-0032's request deliberately left it out (*"it belongs
+    # to whoever reads images rather than to the proxy"*) and this task did not
+    # smuggle it into a migration authorised for the key. The consequence is
+    # real and is stated rather than discovered: `id` is first-sighting order,
+    # so a provider that re-ranks a title's posters can move exactly one thing
+    # in Usher's answer — which of them is primary.
     is_primary: bool
-    # **The read order, and it must be refreshable by a re-derivation.** With
-    # the id as the only tiebreak, `ORDER BY id` and `ORDER BY <the real key>`
-    # agree by accident under UUIDv7 -- which cost M7 five untested orderings
-    # -- and, worse, id order is *first-sighting* order, so a provider that
-    # re-ranks a title's posters could never move them. `sort_order` is what a
-    # second derivation can change; `id` is what stays.
-    sort_order: int = Field(ge=0)
 
     @model_validator(mode="after")
     def _exactly_one_owner(self) -> Self:

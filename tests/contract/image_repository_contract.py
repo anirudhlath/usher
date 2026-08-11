@@ -17,11 +17,16 @@ Subclass and provide `repository` and `seeder`. The seeder writes the one thing
 this port cannot — a `titles` row for the foreign key to point at — and its
 `ABC` shape is ADR-0001's argument applied to a test double: a `Protocol` would
 let a subclass drift out of the suite silently.
+
+**Every ordering case here turns on `is_primary`, and that is a consequence of
+`m09c` carrying no `sort_order`.** The order is `(is_primary DESC, id)`, so
+there is exactly one key a re-derivation can move and one tiebreak it cannot.
+Cases that would have exercised a middle key are not written as if they pass;
+`ImageRepository`'s docstring states the limit.
 """
 
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 
 from usher.domain.enums import ImageKind
 from usher.domain.image import Image
@@ -34,8 +39,8 @@ def image(title_id: uuid.UUID, path: str, **changes: object) -> Image:
     Title-owned because that is the only owner M9 writes: the group's boundary
     call puts episode stills and person headshots outside this milestone, and a
     contract suite that seeded them would be asserting behaviour no caller can
-    reach. The *key* covers all three owners (`m09c` ships an index each); the
-    cases here exercise the arm that has a writer.
+    reach through this port. The *key* covers all three owners; the *methods*
+    cover the one with a writer.
     """
     fields: dict[str, object] = {
         "title_id": title_id,
@@ -43,7 +48,6 @@ def image(title_id: uuid.UUID, path: str, **changes: object) -> Image:
         "provider": "tmdb",
         "provider_path": path,
         "is_primary": False,
-        "sort_order": 0,
     }
     fields.update(changes)
     return Image.model_validate(fields)
@@ -69,32 +73,34 @@ class ImageRepositoryContract:
         every `usher derive` and `Cache-Control: immutable` becomes a promise
         the catalog breaks nightly.
 
-        The premise is asserted first because *"the id did not change"* is also
-        what a second call that never ran produces — a `replace_for_titles`
-        that returns early on a batch it has already seen would pass a
-        weaker version of this case. `sort_order` is the field moved because it
-        is the one a re-derivation legitimately changes: a provider re-ranking
-        a title's posters is the ordinary event, not the exotic one.
+        **Two premises, and both are load-bearing.** The second derivation must
+        actually change something, or an implementation that recognised the
+        batch and returned early would pass — `is_primary` is the field moved
+        because with no `sort_order` column it is the only ordering key a
+        re-derivation can move, so it is the ordinary event rather than a
+        contrived one. And the incoming row must carry a *different* id from
+        the stored one, or "the id did not change" would be the caller's doing
+        rather than the port's.
         """
         title_id = await seeder.title()
-        first = image(title_id, "/an-invented-path.jpg", sort_order=0)
+        first = image(title_id, "/an-invented-path.jpg", is_primary=False)
         await repository.replace_for_titles([title_id], [first])
         stored_first = (await repository.list_for_title(title_id))[0]
 
-        second = image(title_id, "/an-invented-path.jpg", sort_order=3)
-        assert second.sort_order != first.sort_order, (
-            "the premise: the second derivation must change something, or "
-            "an implementation that skipped the write would pass this case"
+        second = image(title_id, "/an-invented-path.jpg", is_primary=True)
+        assert second.is_primary != first.is_primary, (
+            "the premise: the second derivation must change something, or an "
+            "implementation that skipped the write would pass this case"
         )
-        assert second.id != first.id, (
+        assert second.id != stored_first.id, (
             "the premise: the derivation mints a fresh UUIDv7 per sighting, so "
-            "the id being stable is the port's doing and not the caller's"
+            "a stable id is the port's doing and not the caller's"
         )
         await repository.replace_for_titles([title_id], [second])
 
         stored_second = (await repository.list_for_title(title_id))[0]
         assert stored_second.id == stored_first.id
-        assert stored_second.sort_order == 3
+        assert stored_second.is_primary is True
 
     async def test_a_second_replace_refreshes_every_field_the_provider_moved(
         self, repository: ImageRepository, seeder: ImageSeeder
@@ -109,6 +115,11 @@ class ImageRepositoryContract:
         because every read succeeds. Every mutable column is moved at once and
         every one is asserted, so a `SET` list missing one name fails here
         rather than in whichever milestone first reads that column.
+
+        `language` moves to `None`, deliberately: an assignment written as
+        `COALESCE(excluded.language, images.language)` — the defensive-looking
+        spelling — passes every other assertion in this case and makes a
+        language a provider *removed* unremovable.
         """
         title_id = await seeder.title()
         await repository.replace_for_titles(
@@ -122,7 +133,6 @@ class ImageRepositoryContract:
                     height=750,
                     language="en",
                     is_primary=False,
-                    sort_order=0,
                 )
             ],
         )
@@ -137,7 +147,6 @@ class ImageRepositoryContract:
                     height=720,
                     language=None,
                     is_primary=True,
-                    sort_order=4,
                 )
             ],
         )
@@ -147,7 +156,6 @@ class ImageRepositoryContract:
         assert (stored.width, stored.height) == (1280, 720)
         assert stored.language is None
         assert stored.is_primary is True
-        assert stored.sort_order == 4
 
     async def test_an_image_the_provider_stopped_publishing_is_removed(
         self, repository: ImageRepository, seeder: ImageSeeder
@@ -156,12 +164,12 @@ class ImageRepositoryContract:
 
         An upsert can express every change a provider makes to a title's
         artwork except the one that leaves a permanently wrong row — a poster
-        withdrawn upstream. `list_for_title` would keep serving it forever, and
+        withdrawn upstream. `list_for_title` would keep serving it forever and
         the proxy would keep fetching a path the CDN has stopped serving, so
         the symptom is a broken image on a screen with nothing anywhere
         reporting an error.
 
-        The surviving image is asserted too, and it is what separates this from
+        The surviving image is asserted too, which is what separates this from
         an implementation that simply deletes everything.
         """
         title_id = await seeder.title()
@@ -226,10 +234,10 @@ class ImageRepositoryContract:
 
         Two providers publishing `/abc.jpg` is not exotic — a path is a
         provider-local name, and `provider` is on the row precisely so a
-        catalog holding two providers' artwork stays legible. Under the
-        narrower key the second provider's image silently overwrites the
-        first's and the row's `provider` column starts lying about where its
-        path can be fetched from.
+        catalog holding two providers' artwork stays legible after either is
+        turned off. Under the narrower key the second provider's image silently
+        overwrites the first's and the row's `provider` column starts lying
+        about where its path can be fetched from.
         """
         title_id = await seeder.title()
         await repository.replace_for_titles(
@@ -243,13 +251,31 @@ class ImageRepositoryContract:
         stored = await repository.list_for_title(title_id)
         assert {one.provider for one in stored} == {"tmdb", "an-invented-provider"}
 
+    async def test_two_titles_may_reference_one_path(
+        self, repository: ImageRepository, seeder: ImageSeeder
+    ) -> None:
+        """The other side of the key, and the reason it is not simply
+        "stricter": the same artwork legitimately belongs to two titles — a
+        film and its re-release, a series and its miniseries cut — so a key
+        that collapsed them would silently give one title the other's poster
+        id. Measured against the real constraint when `m09c` was written: two
+        rows, which is right."""
+        first = await seeder.title()
+        second = await seeder.title()
+        await repository.replace_for_titles(
+            [first, second], [image(first, "/shared.jpg"), image(second, "/shared.jpg")]
+        )
+
+        assert len(await repository.list_for_title(first)) == 1
+        assert len(await repository.list_for_title(second)) == 1
+
     async def test_a_duplicate_path_inside_one_batch_is_tolerated_and_the_last_wins(
         self, repository: ImageRepository, seeder: ImageSeeder
     ) -> None:
         """Required rather than defensive, and the real implementation says so
         loudly: without a `SELECT DISTINCT ON` over the conflict target,
         Postgres answers `CardinalityViolationError: ON CONFLICT DO UPDATE
-        command cannot affect row a second time` and the whole derivation batch
+        command cannot affect row a second time` and a whole derivation batch
         fails on a payload that merely listed one poster twice.
 
         Last-wins is asserted rather than left to whichever row survived: "one
@@ -260,42 +286,49 @@ class ImageRepositoryContract:
         written = await repository.replace_for_titles(
             [title_id],
             [
-                image(title_id, "/twice.jpg", sort_order=1),
-                image(title_id, "/twice.jpg", sort_order=7),
+                image(title_id, "/twice.jpg", width=100),
+                image(title_id, "/twice.jpg", width=900),
             ],
         )
 
         stored = await repository.list_for_title(title_id)
-        assert [one.sort_order for one in stored] == [7]
+        assert [one.width for one in stored] == [900]
         assert written == 1
 
-    async def test_list_for_title_puts_the_primary_first_then_sort_order(
+    async def test_list_for_title_puts_the_primary_first(
         self, repository: ImageRepository, seeder: ImageSeeder
     ) -> None:
-        """`(is_primary DESC, sort_order, id)`, with `id` as a tiebreak only.
+        """`(is_primary DESC, id)`, with `id` as a tiebreak only.
 
         **The fixture makes id order disagree with the answer**, which is the
         whole reason this case can fail at all: every id here is a UUIDv7
-        minted in construction order, so a fixture seeded in the expected order
-        would let `ORDER BY id` pass — the trap that cost M7 five untested
-        orderings. Both premises are asserted, because a later edit that
-        re-aligns the two orders would silently delete this case's teeth.
+        minted in construction order, so a fixture whose primary happened to be
+        seeded first would let a bare `ORDER BY id` pass — the trap that cost
+        M7 five untested orderings. Both premises are asserted, because a later
+        edit that re-aligned the two orders would silently delete this case's
+        teeth.
         """
         title_id = await seeder.title()
-        last = image(title_id, "/last.jpg", sort_order=2, is_primary=False)
-        middle = image(title_id, "/middle.jpg", sort_order=0, is_primary=False)
-        first = image(title_id, "/first.jpg", sort_order=9, is_primary=True)
-        assert [last.id, middle.id, first.id] == sorted([last.id, middle.id, first.id]), (
-            "the premise: ids ascend in seeding order, so id order is a real "
-            "alternative answer this case has to rule out"
+        ordinary = image(title_id, "/ordinary.jpg", is_primary=False)
+        also_ordinary = image(title_id, "/also-ordinary.jpg", is_primary=False)
+        primary = image(title_id, "/primary.jpg", is_primary=True)
+        seeded = [ordinary, also_ordinary, primary]
+        assert [one.id for one in seeded] == sorted(one.id for one in seeded), (
+            "the premise: ids ascend in construction order, so id order is a "
+            "real alternative answer this case has to rule out"
         )
-        assert [first.id, middle.id, last.id] != sorted([last.id, middle.id, first.id]), (
-            "the premise: the expected order is not id order"
+        assert primary.id != min(one.id for one in seeded), (
+            "the premise: the primary is not also the lowest id, so ORDER BY id "
+            "cannot answer correctly by accident"
         )
-        await repository.replace_for_titles([title_id], [last, middle, first])
+        await repository.replace_for_titles([title_id], seeded)
 
         stored = await repository.list_for_title(title_id)
-        assert [one.provider_path for one in stored] == ["/first.jpg", "/middle.jpg", "/last.jpg"]
+        assert [one.provider_path for one in stored] == [
+            "/primary.jpg",
+            "/ordinary.jpg",
+            "/also-ordinary.jpg",
+        ]
 
     async def test_list_for_title_is_scoped_to_its_title(
         self, repository: ImageRepository, seeder: ImageSeeder
@@ -321,9 +354,9 @@ class ImageRepositoryContract:
 
         It has the property that makes this milestone dangerous — the answer is
         populated, correctly shaped and about the wrong artwork, so a row card
-        renders a 16:9 backdrop into a 2:3 poster slot and nothing reports an
-        error. The backdrop is seeded *first* so the ignoring implementation
-        answers with it rather than with nothing.
+        paints a 16:9 backdrop into a 2:3 poster slot and nothing reports an
+        error. The backdrop is seeded *first* and flagged, so the ignoring
+        implementation answers with it rather than with nothing.
         """
         title_id = await seeder.title()
         await repository.replace_for_titles(
@@ -341,18 +374,17 @@ class ImageRepositoryContract:
         self, repository: ImageRepository, seeder: ImageSeeder
     ) -> None:
         """`is_primary DESC` leading the order, and the wrong implementation is
-        an ordering that starts at `sort_order`.
+        one that takes whatever row came back first.
 
-        The flagged image is seeded with the *higher* `sort_order` and the
-        *later* id, so the two plausible wrong answers — "lowest sort_order"
-        and "first inserted" — both name the other row.
+        The flagged image is constructed *second*, so it carries the later id
+        and "first inserted" names the other row.
         """
         title_id = await seeder.title()
-        ordinary = image(title_id, "/ordinary.jpg", sort_order=0, is_primary=False)
-        flagged = image(title_id, "/flagged.jpg", sort_order=5, is_primary=True)
+        ordinary = image(title_id, "/ordinary.jpg", is_primary=False)
+        flagged = image(title_id, "/flagged.jpg", is_primary=True)
         assert ordinary.id < flagged.id, (
             "the premise: the flagged image is not also the first by id, so "
-            "neither wrong ordering can answer correctly by accident"
+            "an id-ordered read cannot answer correctly by accident"
         )
         await repository.replace_for_titles([title_id], [ordinary, flagged])
 
@@ -368,20 +400,17 @@ class ImageRepositoryContract:
         title its artwork.
 
         The wrong implementation this kills is `WHERE is_primary`, which
-        answers with an empty shelf on a title that has three perfectly good
-        posters. Seeded so the fallback is not the lowest id either.
+        answers with an empty shelf on a title holding three perfectly good
+        posters.
         """
         title_id = await seeder.title()
-        later = image(title_id, "/later.jpg", sort_order=1, is_primary=False)
-        earlier = image(title_id, "/earlier.jpg", sort_order=0, is_primary=False)
-        assert later.id < earlier.id, (
-            "the premise: sort_order order and id order disagree, so the "
-            "fallback is a real ordering rather than insertion order"
-        )
-        await repository.replace_for_titles([title_id], [later, earlier])
+        earliest = image(title_id, "/earliest.jpg", is_primary=False)
+        later = image(title_id, "/later.jpg", is_primary=False)
+        assert earliest.id < later.id, "the premise: the expected answer is the lower id"
+        await repository.replace_for_titles([title_id], [earliest, later])
 
         found = await repository.primary_for_titles([title_id], ImageKind.POSTER)
-        assert found[title_id].provider_path == "/earlier.jpg"
+        assert found[title_id].provider_path == "/earliest.jpg"
 
     async def test_primary_for_titles_omits_a_title_it_has_nothing_for(
         self, repository: ImageRepository, seeder: ImageSeeder
@@ -404,17 +433,18 @@ class ImageRepositoryContract:
         self, repository: ImageRepository, seeder: ImageSeeder
     ) -> None:
         """The N+1 this port exists in this shape to prevent: a shelf is up to
-        thirty cards, and `GET /home` composes ten shelves, so a read per card
+        thirty cards and `GET /home` composes ten shelves, so a read per card
         is three hundred round trips a screen.
 
-        A membership assertion is what this case can make; the *statement
+        Membership is what a shared contract case can assert; the *statement
         count* is asserted against the fake in `tests/unit/`, counted rather
         than timed — a timing assertion against an in-memory dict measures the
         dict.
         """
         titles = [await seeder.title() for _ in range(12)]
         await repository.replace_for_titles(
-            titles, [image(one, f"/card-{index}.jpg", is_primary=True) for index, one in enumerate(titles)]
+            titles,
+            [image(one, f"/card-{index}.jpg", is_primary=True) for index, one in enumerate(titles)],
         )
 
         found = await repository.primary_for_titles(titles, ImageKind.POSTER)
@@ -425,7 +455,7 @@ class ImageRepositoryContract:
     ) -> None:
         """The serve path's resolve: `GET /images/{id}` holds an id and nothing
         else, and needs the provider and the path to build a fetch URL. A
-        second title's image is stored alongside so a `get` that returns
+        second title's image is stored alongside, so a `get` that returns
         whatever it found first fails here."""
         title_id = await seeder.title()
         other = await seeder.title()
@@ -463,7 +493,7 @@ class ImageRepositoryContract:
     async def test_an_empty_call_is_a_no_op(self, repository: ImageRepository) -> None:
         """No titles and no rows is a batch the derivation legitimately
         assembles — a page of skeleton titles nobody has enriched — and it must
-        not be a statement, an error, or a delete of anything."""
+        not be an error or a delete of anything."""
         assert await repository.replace_for_titles([], []) == 0
 
     async def test_a_scope_with_no_rows_still_empties_its_titles(
@@ -480,7 +510,3 @@ class ImageRepositoryContract:
 
         assert await repository.replace_for_titles([title_id], []) == 0
         assert await repository.list_for_title(title_id) == []
-
-    def _unused(self, images: Sequence[Image]) -> None:  # pragma: no cover - typing anchor
-        """`Sequence` is imported for the signatures the subclasses see; this
-        keeps the import honest without a `noqa`."""
