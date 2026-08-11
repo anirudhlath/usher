@@ -8,6 +8,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from typing import Any
+from urllib.parse import quote
 
 from pydantic import AwareDatetime
 
@@ -227,6 +228,40 @@ def redact_query(url: str) -> str:
     """
     cut = min((index for index in (url.find("?"), url.find("#")) if index != -1), default=-1)
     return url if cut < 0 else f"{url[:cut]}<redacted>"
+
+
+# The scheme a deep-link target opens the client with. Kept under this exact
+# name across the move D2 made -- see `wrap_deep_link` below -- because a
+# second spelling of one constant is exactly what the move exists to
+# prevent, and an earlier draft of this task's own plan used two names for
+# it in two paragraphs.
+INFUSE_SCHEME = "infuse"
+
+
+def wrap_deep_link(inner_url: str) -> str:
+    """Wrap a URL as an Infuse `x-callback-url` deep link.
+
+    Moved here from `usher.adapters.emby.playback` in M9 (D2), ahead of the
+    playback ticket ADR-0012 names as its M9 successor. That ticket is
+    handed to "a third-party player that follows the redirect" -- a custom
+    scheme is not something an HTTP `302` can produce, so whatever wraps a
+    URL for Infuse has to run *after* the ticket exists, on the ticket's own
+    URL, rather than on the source's direct-play one. The function that
+    mints a ticket is therefore what has to call this, and that rules out
+    `usher.adapters.emby.playback`: import contract 6 forbids
+    `usher.services`/`usher.api` naming `usher.adapters.emby`, so a wrapper
+    only that module offered would be unreachable from the code that mints
+    the ticket.
+
+    Lives beside `redact_query` for the identical reason that one is here
+    rather than in a utility package: it is a property of this port's DTOs
+    -- the string this returns is exactly `StreamTargetKind.DEEP_LINK`'s
+    `url` -- and adapters may import `ports`. **It is a move, not a
+    rewrite**: `build_stream_targets` calls this on the direct target's
+    `url` and the result is unchanged, byte for byte, from what it built
+    when the string was assembled inline.
+    """
+    return f"{INFUSE_SCHEME}://x-callback-url/play?url={quote(inner_url, safe='')}"
 
 
 # `repr=False` is load-bearing, not stylistic -- see `__repr__` below.
