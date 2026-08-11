@@ -14,7 +14,7 @@ non-streaming route does.
 """
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -23,16 +23,20 @@ import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 
+from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.app import create_app
 from usher.api.deps import get_default_user_id, get_title_read_service
+from usher.api.dto.title import TitleResponse
 from usher.config import Settings
 from usher.domain.enums import EnrichmentState, HdrFormat, SourceKind, TitleKind
 from usher.domain.jobs import JobKind
+from usher.domain.people import Credit, CreditKind, Person, person_sort_name
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
@@ -78,12 +82,27 @@ def queue() -> FakeJobQueue:
 
 
 @pytest.fixture
+def people() -> FakePersonRepository:
+    return FakePersonRepository()
+
+
+@pytest.fixture
+def credits(people: FakePersonRepository, titles: FakeTitleRepository) -> FakeCreditRepository:
+    """Wired to the *same* `people` and `titles` stores the assertions read
+    through. `CreditedPerson` carries a name that the port joins in, so a fake
+    inventing one would make a cast list render correctly against an
+    implementation whose join is missing."""
+    return FakeCreditRepository(people, titles)
+
+
+@pytest.fixture
 def service(
     titles: FakeTitleRepository,
     media_items: FakeMediaItemRepository,
     sources: FakeSourceRepository,
     watch_states: FakeWatchStateRepository,
     queue: FakeJobQueue,
+    credits: FakeCreditRepository,
 ) -> TitleReadService:
     """The **real** service over fakes, not a stub.
 
@@ -91,7 +110,7 @@ def service(
     alone; this way the route, the DTO and the service's own narrowing all sit
     on the same path a request takes.
     """
-    return TitleReadService(titles, media_items, sources, watch_states, queue)
+    return TitleReadService(titles, media_items, sources, watch_states, queue, credits)
 
 
 @pytest.fixture
@@ -180,6 +199,31 @@ async def _seed_copy(
     )
 
 
+async def _seed_person(people: FakePersonRepository, name: str) -> Person:
+    person = Person(name=name, sort_name=person_sort_name(name))
+    await people.upsert_many([person])
+    return person
+
+
+async def _seed_credits(
+    credits: FakeCreditRepository,
+    people: FakePersonRepository,
+    title_id: uuid.UUID,
+    entries: Sequence[Credit],
+) -> None:
+    """One `replace_for_titles`, the way `usher derive` writes it.
+
+    `credit_names` travels because the port writes `titles.credit_names` and
+    the `person` half of `title_search_names` in the same call, and a caller
+    that omitted it would be emptying two things this route does not read but
+    `GET /search` does."""
+    await credits.replace_for_titles(
+        [title_id],
+        entries,
+        credit_names={title_id: [people.stored(one.person_id).name for one in entries]},
+    )
+
+
 @pytest.fixture
 async def seeded(
     titles: FakeTitleRepository,
@@ -251,17 +295,287 @@ async def test_a_title_renders_its_metadata_and_availability(
     ]
 
 
-async def test_four_fields_prd_07_shows_are_absent_rather_than_empty(
+async def test_the_fields_prd_07_shows_that_are_still_unbuilt_are_absent(
     client: httpx.AsyncClient, seeded: Seeded
 ) -> None:
-    """`credits` land with M7, `images` with M9, `similar` with M6 and its own
-    route, and the season hierarchy with M9's `GET /series/{id}/seasons`
+    """`images` lands with M9's proxy, `similar` with M6's neighbours and its
+    own route, and the season hierarchy with M9's `GET /series/{id}/seasons`
     (PRD 09's boundary call 2). An empty list would be worse than an absent
     field: a client cannot tell "not derived yet" from "this film has no
     cast", which is the response-shaped version of the empty-dashboard-panel
-    problem."""
+    problem.
+
+    **`credits` is off this list and `credits` is not a key.** M9 answers
+    PRD 07's outstanding shape decision as two keys, `cast` and `crew`, and
+    the same absence rule holds for each of them -- but its meaning changes
+    from "this milestone has not built it" to "this title has no derived
+    credits", which is
+    `test_a_title_with_no_derived_credits_carries_neither_key` and is a
+    different case with a different docstring. Asserting a key nobody will
+    ever emit would be an assertion that cannot fail."""
     body = (await client.get(f"/titles/{seeded.title_id}")).json()
     assert not {"credits", "images", "similar", "seasons"} & set(body)
+
+
+async def test_a_titles_cast_is_top_billed_first_and_crew_is_a_separate_key(
+    client: httpx.AsyncClient,
+    credits: FakeCreditRepository,
+    people: FakePersonRepository,
+    seeded: Seeded,
+) -> None:
+    """PRD 07's outstanding shape decision, answered: how many, in what order,
+    cast and crew apart.
+
+    **The order is `billing_order`, and the premise is what makes this an
+    ordering test.** The bit-part actor is seeded *first*, so their UUIDv7
+    `person_id` is the lower one -- and `person_id` is the tiebreak the real
+    `ORDER BY billing_order ASC NULLS LAST, c.person_id` falls back to. An
+    implementation that dropped `billing_order` and let provider-JSON order
+    (or `ORDER BY person_id`) stand in therefore answers `Bit Player` first
+    and fails here, which is the whole point: dropping that key is *usually*
+    right and is invisible until it is not.
+
+    **And `crew` is its own key.** An implementation that ignored the `kind`
+    filter answers a populated, correctly shaped list about the wrong people,
+    which is the failure mode this milestone is most exposed to.
+    """
+    bit_player = await _seed_person(people, "Bit Player")
+    lead = await _seed_person(people, "The Lead")
+    director = await _seed_person(people, "The Director")
+    assert bit_player.id < lead.id, (
+        "the premise: the low-billed actor's id sorts *below* the lead's, so "
+        "an ordering that fell back on id would answer Bit Player first"
+    )
+    await _seed_credits(
+        credits,
+        people,
+        seeded.title_id,
+        [
+            Credit(
+                person_id=bit_player.id,
+                title_id=seeded.title_id,
+                kind=CreditKind.CAST,
+                character="Waiter",
+                billing_order=9,
+            ),
+            Credit(
+                person_id=lead.id,
+                title_id=seeded.title_id,
+                kind=CreditKind.CAST,
+                character="Ada Vane",
+                billing_order=0,
+            ),
+            Credit(
+                person_id=director.id,
+                title_id=seeded.title_id,
+                kind=CreditKind.CREW,
+                job="Director",
+                department="Directing",
+            ),
+        ],
+    )
+
+    body = (await client.get(f"/titles/{seeded.title_id}")).json()
+
+    assert [entry["name"] for entry in body["cast"]] == ["The Lead", "Bit Player"]
+    assert [entry["name"] for entry in body["crew"]] == ["The Director"]
+
+
+async def test_a_title_with_no_derived_credits_carries_neither_key(
+    client: httpx.AsyncClient, seeded: Seeded
+) -> None:
+    """Absent, never `[]`, and the assertion is on the **wire**: a missing
+    field and a field serialised as `null` or `[]` are three different bodies
+    and only two of them are distinguishable on the object.
+
+    What this buys is that the response never *claims* a film has no cast. A
+    client renders no cast section in both the underived and the genuinely
+    uncredited case, which is correct in both -- and the residual is that the
+    two stay indistinguishable, recorded in PRD 07 rather than papered over
+    with a `credits_derived` flag nothing writes. T6 makes that residual the
+    ordinary case rather than a corner: it fills `titles.credit_names` from
+    IMDb for ~93.8% of the catalog with no `people` or `credits` rows at all,
+    so a title can be searchable by a credited name and answer this route with
+    neither key."""
+    body = (await client.get(f"/titles/{seeded.title_id}")).json()
+    assert "cast" not in body
+    assert "crew" not in body
+
+
+async def test_a_title_with_only_crew_carries_crew_and_not_an_empty_cast(
+    client: httpx.AsyncClient,
+    credits: FakeCreditRepository,
+    people: FakePersonRepository,
+    seeded: Seeded,
+) -> None:
+    """The two keys are absent *independently*. A documentary credited to one
+    director and nobody else is the shape that tells a per-key rule from a
+    whole-block one -- an implementation emitting both keys whenever either is
+    populated passes every other case in this file."""
+    director = await _seed_person(people, "The Director")
+    await _seed_credits(
+        credits,
+        people,
+        seeded.title_id,
+        [
+            Credit(
+                person_id=director.id,
+                title_id=seeded.title_id,
+                kind=CreditKind.CREW,
+                job="Director",
+            )
+        ],
+    )
+
+    body = (await client.get(f"/titles/{seeded.title_id}")).json()
+
+    assert "cast" not in body
+    assert [entry["name"] for entry in body["crew"]] == ["The Director"]
+
+
+async def test_a_credit_carries_the_role_and_no_provider_identifier(
+    client: httpx.AsyncClient,
+    credits: FakeCreditRepository,
+    people: FakePersonRepository,
+    seeded: Seeded,
+) -> None:
+    """`person_id`, `name`, `character`, `job` -- and `null` rather than an
+    absent key for the half of the pair a credit does not carry, because a
+    cast entry with no `character` and a crew entry with no `job` are both
+    real rows and a client renders the difference.
+
+    **`billing_order` and `department` are on `CreditedPerson` and are
+    deliberately not on the wire**, which is a choice rather than a
+    consequence -- the plan's own acceptance said `CreditedPerson` had no
+    `department` field and it has one. `billing_order` *is* the list order,
+    already spent; handing it to a client invites a client-side re-sort, and
+    the tempting `billing_order or 0` spelling of that puts an unbilled crew
+    member above the lead. `department` is a coarser grouping than the shape
+    decision PRD 07 records here uses.
+
+    `tmdb_id` is absent for ADR-0003's reason: identity in this contract is
+    Usher's own UUIDv7 and a provider id is an indexed attribute."""
+    lead = await _seed_person(people, "The Lead")
+    director = await _seed_person(people, "The Director")
+    await _seed_credits(
+        credits,
+        people,
+        seeded.title_id,
+        [
+            Credit(
+                person_id=lead.id,
+                title_id=seeded.title_id,
+                kind=CreditKind.CAST,
+                character="Ada Vane",
+                billing_order=0,
+            ),
+            Credit(
+                person_id=director.id,
+                title_id=seeded.title_id,
+                kind=CreditKind.CREW,
+                job="Director",
+                department="Directing",
+                tmdb_credit_id="52fe4250c3a36847f8014a11",
+            ),
+        ],
+    )
+
+    body = (await client.get(f"/titles/{seeded.title_id}")).json()
+
+    assert body["cast"] == [
+        {
+            "person_id": str(lead.id),
+            "name": "The Lead",
+            "character": "Ada Vane",
+            "job": None,
+        }
+    ]
+    assert body["crew"] == [
+        {
+            "person_id": str(director.id),
+            "name": "The Director",
+            "character": None,
+            "job": "Director",
+        }
+    ]
+
+
+async def test_the_response_carries_every_field_of_its_own_model(
+    client: httpx.AsyncClient,
+    credits: FakeCreditRepository,
+    people: FakePersonRepository,
+    seeded: Seeded,
+) -> None:
+    """The guard that makes the absence *mechanism* safe.
+
+    `cast` and `crew` are absent because `TitleResponse.of` does not set them
+    and the route serialises with `exclude_unset`, which is a rule about every
+    field rather than about those two. So a field added to the model and
+    forgotten in `of` would vanish from the wire silently, and this is what
+    notices: with credits seeded the body carries the model's whole field set,
+    and without them it carries exactly that set less the two.
+
+    Derived from `model_fields` rather than written out, so it grows with the
+    model and there is no list to keep in step."""
+    every = set(TitleResponse.model_fields)
+    assert {"cast", "crew"} < every, "the premise: the two absent-when-empty keys are model fields"
+
+    without = (await client.get(f"/titles/{seeded.title_id}")).json()
+    assert set(without) == every - {"cast", "crew"}
+
+    lead = await _seed_person(people, "The Lead")
+    await _seed_credits(
+        credits,
+        people,
+        seeded.title_id,
+        [
+            Credit(
+                person_id=lead.id,
+                title_id=seeded.title_id,
+                kind=CreditKind.CAST,
+                character="Ada Vane",
+                billing_order=0,
+            ),
+            Credit(
+                person_id=lead.id,
+                title_id=seeded.title_id,
+                kind=CreditKind.CREW,
+                job="Producer",
+            ),
+        ],
+    )
+    with_both = (await client.get(f"/titles/{seeded.title_id}")).json()
+    assert set(with_both) == every
+
+
+async def test_the_absent_keys_are_still_described_in_the_schema_and_never_as_null(
+    app: FastAPI,
+) -> None:
+    """A key that is absent on the wire is still part of the contract, and the
+    schema is where a generated client learns its shape.
+
+    **Measured, because the obvious mechanism destroys this.** A pydantic
+    `@model_serializer(mode="wrap")` that pops the key is the natural way to
+    spell "absent rather than null" and pydantic derives the *serialization*
+    schema from such a serializer's return annotation -- so with `-> dict[str,
+    Any]` the whole response becomes `{"type": "object",
+    "additionalProperties": true}` and `GET /titles/{id}` stops describing any
+    field at all. FastAPI generates response schemas in serialization mode, so
+    the damage reaches `/openapi.json` in full. Confirmed directly before
+    `exclude_unset` was chosen instead.
+
+    And the declared type is `array`, never `array | null`: absence is the
+    only empty this route emits, so a schema admitting `null` would document a
+    body no version of this code can produce."""
+    schema = app.openapi()["components"]["schemas"]["TitleResponse"]
+    properties = schema["properties"]
+    assert {"id", "name", "availability", "watch_state"} <= set(properties), (
+        "the premise: the response schema still describes its own fields"
+    )
+    for key in ("cast", "crew"):
+        assert properties[key]["type"] == "array"
+        assert key not in schema["required"]
+        assert "anyOf" not in properties[key]
 
 
 async def test_an_unknown_title_is_a_404_in_prd_07s_envelope(

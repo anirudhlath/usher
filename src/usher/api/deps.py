@@ -489,14 +489,23 @@ WatchStateSyncServiceDep = Annotated[WatchStateSyncService, Depends(get_watch_st
 # ---------------------------------------------------------------------------
 
 
+# Declared here rather than beside the other M7 repositories below, because
+# this is now its first user -- `Depends(...)` is evaluated when the `def`
+# under it executes, so a provider appended after its consumer is a
+# `NameError` at import of this module. `get_row_context` is its second.
+def get_credit_repository(session: SessionDep) -> CreditRepository:
+    return PostgresCreditRepository(session)
+
+
 def get_title_read_service(
     titles: Annotated[TitleRepository, Depends(get_title_repository)],
     media_items: MediaItemRepositoryDep,
     sources: Annotated[SourceRepository, Depends(get_source_repository)],
     watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
     queue: JobQueueDep,
+    credits: Annotated[CreditRepository, Depends(get_credit_repository)],
 ) -> TitleReadService:
-    """Four repositories and the queue, and deliberately no adapter factory.
+    """Five repositories and the queue, and deliberately no adapter factory.
 
     The absence is the design (PRD 08: "a degraded subsystem narrows
     functionality; it never fails a request local state can answer"), not an
@@ -505,8 +514,13 @@ def get_title_read_service(
     and therefore no 503 for M5 to invent an error `code` for.
     `tests/unit/test_services_titles.py` asserts it on the service's own
     imports so that adding one here would fail rather than pass review.
+
+    **`CreditRepository` is the fifth and it does not weaken that.** It is a
+    read of a table `usher derive` fills from `raw_payloads` with no second
+    network call, so it adds no way for this route to depend on anything being
+    up. It was four repositories until M9's `credits` key.
     """
-    return TitleReadService(titles, media_items, sources, watch_states, queue)
+    return TitleReadService(titles, media_items, sources, watch_states, queue, credits)
 
 
 TitleReadServiceDep = Annotated[TitleReadService, Depends(get_title_read_service)]
@@ -534,10 +548,6 @@ def get_title_embedding_repository(session: SessionDep) -> TitleEmbeddingReposit
 
 def get_person_repository(session: SessionDep) -> PersonRepository:
     return PostgresPersonRepository(session)
-
-
-def get_credit_repository(session: SessionDep) -> CreditRepository:
-    return PostgresCreditRepository(session)
 
 
 def get_collection_repository(session: SessionDep) -> CollectionRepository:

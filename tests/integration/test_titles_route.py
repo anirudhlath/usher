@@ -380,12 +380,13 @@ async def test_a_title_read_costs_the_same_statements_however_many_copies_it_has
 ) -> None:
     """**The shape that would catch a quadratic, on the read path.**
 
-    `TitleReadService.detail` is four reads and a promotion, and none of
-    them may be per copy or per source: a household's detail screen is the
-    request a client makes most, and a film on three servers must not cost
-    three round trips. One copy on one source against five copies on three
-    sources, and the statement counts have to be *equal* -- not "small",
-    which a per-copy read of a title with two copies also satisfies.
+    `TitleReadService.detail` is six reads and a promotion, and none of
+    them may be per copy, per source, per credit or per person: a household's
+    detail screen is the request a client makes most, and a film on three
+    servers must not cost three round trips. One copy on one source against
+    five copies on three sources, and the statement counts have to be *equal*
+    -- not "small", which a per-copy read of a title with two copies also
+    satisfies.
 
     Captured off `before_cursor_execute`, so what is counted is what the
     repositories sent rather than what this file believes they send. Both
@@ -427,12 +428,18 @@ async def test_a_title_read_costs_the_same_statements_however_many_copies_it_has
         "three -- something on this read costs a statement per copy or per source"
     )
     # **And the absolute level, because flatness alone would not have shown
-    # what this measurement found.** Ten, not the service's four: one
-    # `ensure_default_user` read, the four reads `detail` documents, and
+    # what this measurement found.** Twelve, not the service's six: one
+    # `ensure_default_user` read, the six reads `detail` documents, and
     # **five for the promotion** -- `SAVEPOINT`, `DROP TABLE IF EXISTS
     # pg_temp.stg_jobs`, `CREATE TEMP TABLE stg_jobs`, the `INSERT ...
     # SELECT`, `RELEASE SAVEPOINT` -- plus a `COPY` on the raw asyncpg
     # connection that this counter cannot see at all.
+    #
+    # It was ten against four service reads until M9's `credits` key, which
+    # adds one `list_for_title` per `CreditKind`. **Both numbers moved by the
+    # same two and the flatness assertion above is untouched**, which is the
+    # distinction this bound exists to draw: two more statements *per request*
+    # is a cost, and one more *per copy* would be a defect.
     # `PostgresJobQueue.enqueue` is M4's bulk path, and PRD 03's demand
     # promotion is the first caller that invokes it **once per client
     # request** rather than once per batch of a walk. The count is unchanged
@@ -443,7 +450,7 @@ async def test_a_title_read_costs_the_same_statements_however_many_copies_it_has
     # nothing shared to lock, which is why five statements per request is now
     # a cost rather than a contention point --
     # `tests/integration/test_staging_lock.py` is where that is asserted.
-    assert small <= 10, f"one title read issued {small} statements: {statement_counter}"
+    assert small <= 12, f"one title read issued {small} statements: {statement_counter}"
 
 
 async def test_the_route_answers_with_the_source_down(

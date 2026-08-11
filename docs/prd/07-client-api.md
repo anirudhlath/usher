@@ -162,14 +162,38 @@ be added if a client turns out to need flexible field selection.
 > call 2), and an empty list would be indistinguishable from a film with no
 > cast.
 >
-> **M7 landed `Person`, `Credit` and `Collection` and this route still carries
-> none of them**, which is the distinction between a table and a wire field and
-> is stated rather than left for a reader to infer from a milestone number.
-> `people`, `credits` and `collections` are real ([02](02-data-model.md)) and
-> `usher derive` fills them; adding a `credits` key here is a DTO, a hydration
-> read and a shape decision (how many, in what order, cast and crew together or
-> apart) that no M7 task makes. **Owner: M9**, with the rest of this route's
-> unbuilt surface. `Image` is unchanged and still M9's from both ends.
+> **M9 answered the credits shape decision, and the answer is two keys.** ✅
+> M7 landed `Person`, `Credit` and `Collection` as tables and this route
+> carried none of them — the distinction between a table and a wire field —
+> and the outstanding question was *how many, in what order, cast and crew
+> together or apart*. It is now: **`cast` and `crew` are separate keys, each
+> capped at 20, each ordered `billing_order` ascending with unbilled credits
+> last, and each present only when it has members.** Two reads rather than
+> one, because `CreditRepository.list_for_title` applies its cap to the
+> *ordered* result and a single 20-wide read spends the whole budget on a
+> well-billed cast and answers a film with no crew. The 20s are **chosen, not
+> measured**, on the bargain `adapters/tmdb/mapping._CAST_LIMIT` states for
+> its own 50 — a wrong cutoff drops the 21st-billed actor from one screen and
+> changes nothing else. An entry carries `person_id`, `name`, `character` and
+> `job`; `billing_order` is deliberately absent because it *is* the list
+> order, and handing it over invites a client-side re-sort whose obvious
+> spelling (`billing_order or 0`) puts an unbilled crew member above the lead.
+> `department` is absent for the weaker reason that this shape does not group
+> by it, and adding a field later is additive where removing one is not.
+> `Image` is unchanged and still M9's from both ends.
+>
+> ⚠️ **An underived title and a genuinely uncredited one are indistinguishable
+> on this route, and that is a recorded residual rather than a fix.** Both
+> answer with neither key, which is the correct render in both cases — a
+> client shows no cast section — and it is exactly what the absent-rather-than-
+> empty rule buys. What it does not buy is telling the two apart, because
+> nothing stores a per-title credits-derived-at. **It is the ordinary case, not
+> a corner**: the IMDb principals loader fills `titles.credit_names` for
+> ~93.8% of the catalog with no `people` or `credits` rows behind it, so a
+> title can be *searchable by a credited name* and answer this route with
+> nothing. Closing it is a column, a migration and a writer that M9 does not
+> contain; a `credits_derived` flag that nothing sets would be worse than the
+> silence.
 >
 > **`GET /titles/{id}/similar` is M9's, and it now ships.** ✅ This sentence
 > said "M6's" until M6 ran and added no HTTP route at all
@@ -376,9 +400,10 @@ does not carry a `failed` tier.
   "year": 2021,
   "enrichment_state": "stub",     // overview not yet fetched
   "overview": null,
-  // no "images" key and no "credits" key -- absent, never null.
+  // no "images" key, and no "cast" or "crew" -- absent, never null.
   // The earlier draft of this example carried "images": {"poster": null},
-  // which is the exact shape the paragraph above refuses.
+  // which is the exact shape the paragraph above refuses. "credits" is not
+  // a key at all: M9 answered that shape decision as two separate keys.
   "availability": [ { "source": "Emby", "quality": "2160p HDR10" } ],
   "watch_state": { "position_seconds": 1840, "played": false }
 }
