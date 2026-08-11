@@ -55,8 +55,12 @@ prediction, and both of which the redirect route inherits:**
 - A ticket's alphabet is url-safe base64 *plus `=`*, and `=` is an RFC 3986
   sub-delim, hence a legal `pchar`: a ticket needs no encoding step to sit in a
   path segment. But `quote(ticket, safe="")` is **not** a no-op in general --
-  it re-encodes `=` to `%3D`, and only 32% of plaintext lengths mint an
-  unpadded token. `quote(ticket, safe="=")` is a no-op at every length.
+  it re-encodes `=` to `%3D`, and only 192 of the 599 plaintext lengths 1--599
+  mint an unpadded token (200 mint one `=`, 207 mint two), so that spelling
+  holds for under a third of them. `quote(ticket, safe="=")` is a no-op at
+  every length. Those three tallies are **asserted** over that exact range by
+  `test_a_ticket_is_a_legal_path_segment_but_quote_safe_empty_is_not_a_no_op`,
+  not merely recorded here.
 """
 
 import base64

@@ -181,15 +181,31 @@ class _CommittedStateProbe(EventPublisher):
     own session** -- a different connection, in a different transaction --
     cannot see an uncommitted write, so the wrong order is a recorded
     `stub` rather than a flaky refetch.
+
+    **It records the rows the handler *wrote*, not only the row the event is
+    about**, and the two answer different questions.
+    `titles.enrichment_state` answers *"was the client told too early?"* --
+    it is the subject of the frame, and the whole `?titles=` contract is that
+    a client may refetch it. The `jobs` rows answer *"what is still open at
+    the instant of the frame?"*, which is
+    [ADR-0033](../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)'s
+    subject: the enrich handler stages two `BACKFILL` requests
+    (`enrich.py:270-277`) into a transaction that is `JobWorker`'s rather
+    than its own, and that transaction does not close until
+    `complete(job.id)` + `_commit()` (`jobs.py:143-147`). A second connection
+    therefore cannot see them yet, and the difference between the two
+    recordings is the residual window itself.
     """
 
     def __init__(self, inner: EventPublisher, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._inner = inner
         self._sessions = sessions
         self.seen: list[tuple[ClientEventKind, str | None]] = []
+        self.jobs_seen: list[list[tuple[str, str]]] = []
 
     async def publish(self, event: ClientEvent) -> None:
         committed: str | None = None
+        jobs: list[tuple[str, str]] = []
         if event.title_id is not None:
             async with self._sessions() as session:
                 committed = (
@@ -198,7 +214,17 @@ class _CommittedStateProbe(EventPublisher):
                         {"id": event.title_id},
                     )
                 ).scalar_one_or_none()
+                jobs = [
+                    (row[0], row[1])
+                    for row in (
+                        await session.execute(
+                            text("SELECT kind, status FROM jobs WHERE key = :key ORDER BY kind"),
+                            {"key": str(event.title_id)},
+                        )
+                    ).all()
+                ]
         self.seen.append((event.kind, committed))
+        self.jobs_seen.append(jobs)
         await self._inner.publish(event)
 
 
@@ -270,6 +296,38 @@ async def _wait_for_subscriber(bus: InMemoryEventBus) -> None:
             return
         await asyncio.sleep(0.005)
     raise AssertionError("no subscriber appeared on the bus; this case would measure nothing")
+
+
+async def _job_xmin_settles(
+    sessions: async_sessionmaker[AsyncSession], key: uuid.UUID
+) -> str | None:
+    """`_job_xmin`, polled until the row is gone or `BOUND` elapses.
+
+    **The wait is ADR-0033's residual window and nothing else, so it is
+    bounded rather than removed**
+    (`docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md`).
+    The property this case wants is *"the job completed rather than parked"*,
+    which is true only once `JobWorker._run` reaches `complete(job.id)` and
+    `_commit()` (`jobs.py:143-147`) -- and the client was told at
+    `enrich.py:289`, which is strictly earlier. Asserted immediately, this is
+    not a test of completion at all but of whether the worker task was
+    scheduled before the reader: measured 2026-08-11 on this tree it failed
+    **6 of 13** runs at load average 7-9, and **5 of 5** with a 0.25 s delay
+    planted between the handler returning and `complete()`. Every failure
+    reported the identical row -- `xmin='745', status='running'`, against a
+    reader snapshot of `'749:749:'` -- so it is the *claim's* committed
+    version still being current, never an uncommitted row (Postgres shows no
+    such thing; `xmin` names the writer of the version the reader can see).
+
+    G2 makes the ordering structural, at which point the frame arrives after
+    the commit and this poll can go back to being a single read.
+    """
+    for _ in range(int(BOUND / 0.02)):
+        settled = await _job_xmin(sessions, key)
+        if settled is None:
+            return None
+        await asyncio.sleep(0.02)
+    return await _job_xmin(sessions, key)
 
 
 async def _job_xmin(sessions: async_sessionmaker[AsyncSession], key: uuid.UUID) -> str | None:
@@ -345,6 +403,14 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
     # lane between the two, which is an accident of the harness rather than
     # a property of the code. On a host where the commit won that race, the
     # refetch would be green and this line would still be red.
+    # **The positive control, before any claim is read out of the probe.** A
+    # publisher that never ran records nothing, and every assertion about
+    # what it saw then passes vacuously -- `[] == []`. Measured while writing
+    # ADR-0033: the sibling harness for `push._apply_items` recorded exactly
+    # that, because the fixture had seeded no title the match ladder could
+    # find, and read as a result it would have said "the availability event
+    # publishes nothing".
+    assert probe.seen, "the probe recorded no publish at all; nothing below measures anything"
     assert probe.seen == [(ClientEventKind.TITLE_UPDATED, "enriched")], (
         "at the instant of the publish, another connection could not yet see the "
         "enrichment -- the publish is happening before the commit"
@@ -352,10 +418,26 @@ async def test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands(
     assert refetched.json()["enrichment_state"] == "enriched", (
         "the client was told before the enrichment committed"
     )
+    # **The residual window, pinned as it is today.** ADR-0033: the title
+    # committed at `enrich.py:208` and is safe, but the two `BACKFILL`
+    # requests staged at `enrich.py:270-277` are in `JobWorker`'s transaction,
+    # which does not close until `complete(job.id)` + `_commit()`. So at the
+    # instant the client is told, a second connection sees the handler's own
+    # claim and neither of the jobs it just enqueued -- which is exactly what
+    # a rollback in that window would cost, and all it would cost.
+    #
+    # **G2 flips this line**, and that is deliberate: with the frame offered
+    # after the job's own commit, the same read answers
+    # `[("derive", "pending"), ("index", "pending")]`.
+    assert probe.jobs_seen == [[("enrich", "running")]], (
+        "at the instant of the frame the only committed job row should be this "
+        "handler's own claim -- the two BACKFILL enqueues are still uncommitted"
+    )
     # And the job is gone rather than parked: a lane that "completed" by
     # failing would still have published nothing, but a lane that published
     # and then parked would leave a client told about work that did not land.
-    assert await _job_xmin(sessions, stub.id) is None
+    # Bounded rather than immediate -- see `_job_xmin_settles`.
+    assert await _job_xmin_settles(sessions, stub.id) is None
 
 
 async def test_a_second_open_writes_no_row(

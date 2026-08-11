@@ -55,6 +55,30 @@ name-shaped and the pool is name-selected, which weakens exactly the
 correlation being measured), and `blend_fingerprint` makes reverting cheap and
 detectable. The genome is **movies-only and frozen at 2023-07-20**, so coverage
 of anything newer is structurally zero and decays.
+⚠️ **And the population is half of that number — settled 2026-08-11 by M9 Task
+S1, before anything in M9 quoted the rate as a baseline.** The arithmetic is
+the load-bearing half: 502,000 candidate pairs over `_CANDIDATE_POOL` (100) is
+exactly **5,020 seeds**, and `SimilarityService.rebuild`'s seeds are
+`list_embedded`, i.e. rows of `title_embeddings` with a non-NULL vector. Those
+5,020 were **one household's owned titles** — the measurement script's own
+predicate is `UPDATE titles SET enrichment_state = 'enriched' WHERE EXISTS
+(SELECT 1 FROM media_items m WHERE m.title_id = titles.id AND m.available)`,
+printing *"promoted 5020 owned titles to the enriched tier"* — so the run moved
+the **tier label** and not the **document**: `search_document`'s weight classes
+C and D (overview, tagline, keywords) were empty, exactly as the script's own
+docstring says. Corroborating counts, both read-only 2026-08-11: `usher-m9-pg`
+holds 1,272,367 titles / **0** embeddings / 0 neighbours / 0 `media_items`, and
+`usher-postgres-1` holds 1,271,138 / 0 / 0 / 0. Neither is M7's catalog, which
+was **1,271,570** titles in a scratch database (`m7gate`) that no longer
+exists — three distinct catalogs, and the absent `media_items` is the stronger
+tell, because neither survivor even holds the household that defined the
+population. **So 1.81% is a floor over 5,020 owned, name-shaped, pre-TMDb seeds
+and is not a baseline for the population M9 measures** — M9 enriches and embeds
+movies with a TMDb id in the ≥100-vote tier, ~130,806 of them, and every input
+to the pair rate changes: the seed set (26× larger, selected by votes rather
+than by ownership), the document (classes C and D filled), and therefore the
+pool `nearest_for` draws. A later number placed beside this one is a second
+measurement, never a delta.
 **The sequential row build's cost, so boundary call 8 is a decision rather than
 a preference.** Measured 2026-08-04 via `usher home --repeat 5` against a real
 **1,271,570**-title catalog with a synthetic household (5,200 owned copies, 360

@@ -278,7 +278,13 @@ does to the term's weight.
 ⏳ **Still not measured: coverage against a genuinely *enriched* tier.** That
 run had no TMDb key, so its "owned" titles are name-shaped skeletons and its
 candidate pools are name-selected — which weakens exactly the correlation being
-measured, making 1.81% a conservative floor rather than an estimate.
+measured, making 1.81% a conservative floor rather than an estimate. **The
+population is half the number and the arithmetic recovers it**: 502,000
+candidate pairs over a 100-title pool is exactly **5,020 seeds**, and those
+5,020 were the household's owned titles, moved onto the enriched tier by a
+direct `UPDATE` that changed the label and not the document. So 1.81% is a
+floor over 5,020 owned, name-shaped seeds and is **not a baseline** for a run
+over a larger or differently-selected population.
 
 **Two physical properties of this snapshot the importer verifies rather than
 assumes.** Both were measured for M7 and neither is documented by GroupLens

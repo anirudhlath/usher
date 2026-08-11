@@ -20,11 +20,30 @@ a browser tab.
 **A port with one implementation, deliberately** -- the shape
 [ADR-0001](../../../docs/prd/decisions/0001-abc-over-protocol.md) warns
 about spending effort on. What buys it back is that three services publish
-(`EnrichService`, `WatchStateSyncService` and the push lane) and all three
+(`EnrichService`, `PushApplyService` and `ReconcileService`) and all three
 may depend only on `domain/` and `ports/`
 ([ADR-0009](../../../docs/prd/decisions/0009-repositories-are-ports.md)), so
 without a port the bus would be a bare callable injected into three
 signatures with no shared contract.
+
+*This list read `EnrichService`, `WatchStateSyncService` and the push lane
+until 2026-08-11, and `WatchStateSyncService` holds no `EventPublisher` at
+all -- `grep` finds none in `services/watch_sync.py`, its own docstring at
+:332 says the nightly walk "invalidates no rows and publishes no
+`row.invalidated`", and PRD 07 says the same. `services/events.py`'s module
+docstring and
+[ADR-0019](../../../docs/prd/decisions/0019-the-client-event-channel-is-a-port.md)
+both already named the right three, so this was one file disagreeing with
+two.*
+
+**Every one of the three publishes only after its own subject has
+committed, and that is now a recorded decision rather than three separate
+acts of care** --
+[ADR-0033](../../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md),
+which measured all five publish sites from a second connection at the
+instant of the publish. What the rule buys is **ordering, not durability**:
+this bus is in-process and lossy by design, and an outbox table is the
+answer to a different question.
 """
 
 import uuid
