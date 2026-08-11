@@ -185,7 +185,7 @@ Every one of these must be green before a commit lands:
 uv run ruff check .              # lint
 uv run ruff format --check .     # formatting
 uv run mypy src tests            # strict, including tests/
-uv run lint-imports              # architecture contracts — 8 kept, 0 broken
+uv run lint-imports              # architecture contracts — 9 kept, 0 broken
 uv run pytest                    # full suite; tests/integration/ needs Docker
 ```
 

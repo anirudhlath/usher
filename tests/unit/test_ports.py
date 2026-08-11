@@ -249,6 +249,22 @@ def test_every_port_abc_is_registered_in_all_ports() -> None:
     passes -- the failure mode `tests/unit/test_no_third_party_data.py`
     carries the same guard against, and the one this case's own mutation
     sweep found: emptying `pkgutil.iter_modules(...)` broke nothing.
+
+    **`walk_packages`, not `iter_modules`, and M9 is what that is for.**
+    `iter_modules` does not descend into a subpackage, and the filter below
+    keeps a class only when `value.__module__ == namespace.__name__` -- so
+    the moment `ports/repository.py` became `ports/repository/`, every one
+    of its re-exported ABCs carried `usher.ports.repository.title` against a
+    namespace called `usher.ports.repository` and stopped matching.
+    Measured both ways at the split: `iter_modules` finds **13** ports and
+    `walk_packages` finds **32**, so the naive spelling dropped all
+    **nineteen** repository ports at once -- and both of this case's own
+    controls survive that, because `declared` is still full and `SearchIndex`
+    is still in it. Demonstrated rather than reasoned about: with
+    `TitleRepository` deleted from `ALL_PORTS`, the `iter_modules` spelling
+    passes and this one fails naming it. That is the cheapest false green in
+    the milestone -- a scan whose *subject* narrowed while every guard on it
+    stayed true.
     """
     import importlib
     import pkgutil
@@ -256,8 +272,8 @@ def test_every_port_abc_is_registered_in_all_ports() -> None:
     import usher.ports
 
     declared: set[type[ABC]] = set()
-    for module in pkgutil.iter_modules(usher.ports.__path__):
-        namespace = importlib.import_module(f"usher.ports.{module.name}")
+    for module in pkgutil.walk_packages(usher.ports.__path__, prefix="usher.ports."):
+        namespace = importlib.import_module(module.name)
         for value in vars(namespace).values():
             if (
                 isinstance(value, type)

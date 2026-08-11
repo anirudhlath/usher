@@ -708,3 +708,60 @@ And the repaired assertions were planted against, not just reasoned about: the
 match-path case fails on its own `E` line under the defect it names (the plan
 becomes `Hash Join` over a `Seq Scan`, `Hash Cond: ((t.name = lower(p.name)) …)`),
 with the restore md5-verified.
+
+**M9 Task A1's sweep: 5 plants over the new `usher.ports.repository` package —
+2 targets killed, 3 equivalent-mutant controls of which only 2 pass all five
+gate steps, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in
+place with the plant list and its **expected verdict** written down first, the
+three `.pyc` defences in force, and every restore verified by `md5sum` against a
+pre-plant digest of all 18 files. Baseline green on a clean tree first: **2,986
+unit / 4 skipped**, **927 integration / 8 skipped**, mypy over 465 files,
+`lint-imports` 9 kept / 0 broken over 177 analysed files. A five-plant sweep is
+small because the change is a *move* — the real proof that nothing was lost is
+`inspect.getsource` of all 38 public objects compared byte for byte against
+`git show HEAD:src/usher/ports/repository.py`, not a mutation.
+
+| plant | `ruff check` | `format --check` | `mypy` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| P1 `"TitleRepository"` deleted from `__init__.__all__` | **rc=1 `F401`** | PASS | **rc=1** ×99 | PASS | **1 failed** |
+| P2 `_results.py` inverted into `bulk.py` | PASS | PASS | PASS | PASS | **1 failed** |
+| C1 two independent dataclasses swapped in `bulk.py` | PASS | PASS | PASS | PASS | PASS |
+| C2 two independent import blocks reordered in `__init__.py` | **rc=1 `I001`** | PASS | PASS | PASS | PASS |
+| C3 one sentence of `title.py`'s module docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+**Both targets falsified the plan's own prediction about which check catches
+them, in opposite directions, and that is the whole yield of the sweep.**
+
+- **P1 was predicted to fail "the mirror case and mypy". The mirror case does
+  not fail** — `test_every_postgres_repository_module_has_a_port_module_of_the_
+  same_name` reads `port.__module__`, which a missing `__all__` entry does not
+  move. What fails is `test_the_package_re_exports_every_public_object_its_
+  modules_declare`, which is in the file for exactly this and would not be there
+  if the prediction had been believed. mypy fails as predicted, at all 99 call
+  sites (`Module "usher.ports.repository" does not explicitly export attribute`),
+  and `ruff` fails too, on the now-unused import — the careless spelling.
+- **P2 was predicted to "raise at load time as a cycle". It does not raise at
+  all**, and the plan's own risk paragraph one page later says so (*"resolves
+  today and drags the bulk port into every consumer tomorrow"*) — two sentences
+  in one document predicting opposite outcomes, of which the sweep settles the
+  pessimistic one. Moving `BulkWriteResult` out of the private `_results.py` into
+  `bulk.py` and re-pointing its five other consumers there passes **ruff, format,
+  mypy and all nine import contracts**; the only thing in the repository that
+  sees it is `test_no_aggregate_module_imports_another_aggregate_module`, and the
+  damage it prevents is architectural rather than a failure — five aggregates
+  importing the bulk-load port for a two-field dataclass. **A structural
+  invariant with no runtime symptom needs a structural test, and "it would be a
+  cycle" is the reasoning that stops one being written.**
+- **C2 is the control the plan names and it is not a gate control**, for the
+  reason the `__all__`-reorder entry above records: `I` is in `[tool.ruff.lint]
+  select`, so an import reorder is `I001`. It remains a valid control *on the
+  suite* (pytest cannot kill it, which is what proves the harness is not scoring
+  every run as a kill) and the write-up has to say "survived the suite", never
+  "nothing catches it". **C1 and C3 are the two that pass all five**, and C1's
+  equivalence is a fact about the code rather than about what the tools look at:
+  `GenomeWriteResult` and `GenomeCoverage` are `@dataclass` bodies that reference
+  neither each other nor anything defined between them, and no module in this
+  package has an import-time side effect. C3 was checked first against the
+  docstring-scan grep this file records — the ten test files it finds scan
+  `ports/embedding.py`, `ports/metadata.py`, `services/` and `api/`, and **none
+  of them scans `ports/repository`**.

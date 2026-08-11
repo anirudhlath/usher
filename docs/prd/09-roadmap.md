@@ -818,34 +818,49 @@ suspicion.
   pool gets **zero rows every time, at full price** — and filtering on ownership
   makes small pools more common. A product decision (filter, or correct the
   prompt's claim), not a defect to patch. **M9**, with the other row work.
-- **`ports/repository.py` is 3,434 lines holding 19 ABCs, and it is the one
-  layer that does not mirror `db/repositories/`** — found by M8's review
-  2026-08-10, measured rather than estimated: 19 `(ABC)` classes and 107
-  `@abstractmethod`s in one module, against **19 sibling modules in
-  `src/usher/db/repositories/`**, one per aggregate. The implementations already
-  split at exactly the granularity the ports do not. 474 lines survive an
-  `ast.unparse` of the docstring-stripped tree, so roughly 86% of the file is
-  the prose this project wants — the complaint is the packaging, not the
-  writing. **99 files import from it**, so every service that wants one port
-  imports a module holding eighteen others, and it is where new ports go because
-  it is where ports are: M8 added 626 lines to it for about 30 lines of
-  signature.
-  **The ports themselves are correctly sized and this is not a request to
-  redesign them.** M8's two new ABCs are 2 methods and 1 method; the review
-  looked for a pair worth merging and found none. The change is
-  `ports/repository/` as a package, one module per aggregate mirroring
-  `db/repositories/`, with `__init__.py` re-exporting everything — **zero call
-  sites change and the `import-linter` contracts are unaffected**, because they
-  are stated at `usher.ports`.
-  **That is also exactly why it keeps not happening**, and why it is filed here
-  rather than attached to a milestone: it is pure churn with no behavioural
-  claim, so it never competes with work that has one, while the file grows by a
-  few hundred lines every milestone. Two honest counter-arguments: a large
-  no-op diff is expensive to review, and `git log --follow` gets worse for a
-  file with a decade of reasoning in it. **Owned by whoever adds the next
-  port** — the split is cheapest at the moment somebody is already opening the
-  file, and doing it *before* that port means the new one lands in its own
-  module instead of being appended to a twentieth.
+- ✅ **`ports/repository.py` was 3,434 lines holding 19 ABCs, and it was the one
+  layer that did not mirror `db/repositories/`** — found by M8's review
+  2026-08-10, **paid by M9 Task A1 on 2026-08-11**, which is the entry this list
+  exists to produce. Measured rather than estimated: 19 `(ABC)` classes, 107
+  `@abstractmethod`s and 19 supporting dataclasses in one module. **99 files
+  imported it**, so every service that wanted one port imported a module holding
+  eighteen others, and it was where new ports went because it was where ports
+  were: M8 added **616 insertions** to it (`git diff --numstat
+  milestone/m7-rows..HEAD`) for about 30 lines of signature.
+  **Two of this entry's own numbers were wrong and the split is what measured
+  them.** *"19 sibling modules in `src/usher/db/repositories/`, one per
+  aggregate"* implied a 19-to-19 mapping and **there is none**: of those 19
+  modules, `credentials.py` implements `CredentialStore` and `jobs.py`
+  implements `JobQueue` — declared in `ports/credentials.py` and `ports/jobs.py`,
+  neither ever in this file — `_errors.py` is a helper, and three modules hold
+  two repository ABCs each (`people.py`, `search.py`, `sync.py`). The real shape
+  is **19 ports across 16 modules**, which is what shipped, plus one private
+  `_results.py` for `BulkWriteResult`, the single type six ports across six
+  modules return. And *"474 lines survive an `ast.unparse` of the
+  docstring-stripped tree, so roughly 86% of the file is prose"* is **619 of
+  3,434**, i.e. 82% — still the point it was making, and still the reason the
+  move's only real proof was comparing `inspect.getsource` of all 38 public
+  objects against `git show HEAD:` byte for byte.
+  **The ports themselves were correctly sized and this was not a redesign.**
+  Every class, docstring and signature crossed verbatim, `__init__.py`
+  re-exports the lot, and **not one of the 99 importers changed** — the
+  `import-linter` contracts are stated at `usher.ports` and still report 9 kept,
+  0 broken (the analysed-file count rises 160 → 177).
+  **What made it finally happen is the part worth keeping**, because "owned by
+  whoever adds the next port" had been true and inert for a milestone: pure
+  churn with no behavioural claim never competes with work that has one. Four M9
+  groups each add a port, so the split stopped being churn and became the thing
+  that decides whether they collide. The invariant is therefore a **test**, not
+  a convention —
+  `tests/unit/test_ports_repository_package.py::test_every_postgres_repository_module_has_a_port_module_of_the_same_name`
+  fails if a port lands anywhere but the module named for its aggregate, so a
+  new port is a new file plus one import and one `__all__` entry, and nobody has
+  to decide anything. ⚠️ One trap the split left behind, recorded because it is
+  cheap to re-introduce: a `pkgutil.iter_modules` scan of `usher.ports` does not
+  descend into a subpackage, so it silently stopped seeing all 19 repository
+  ports (13 found against 32) while every control on it stayed green.
+  `test_ports.py::test_every_port_abc_is_registered_in_all_ports` uses
+  `walk_packages` for that reason.
 
 ## Post-v1 candidates
 
