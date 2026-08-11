@@ -2197,3 +2197,136 @@ import-time side effect — and it is an ordering control that is **not** an `__
 docstring-scan grep: twelve test files scan source, and the only one touching this module
 (`test_one_whitespace_collapse_defends_both_prompts`) walks `ast.FunctionDef` and compares
 `node.body[-1]`, so a docstring at `body[0]` is outside it.
+
+### ✅ M9 Task G4 — a pool that cannot fill one row buys no completion (2026-08-11)
+
+**The other half of the carried-debt entry G3 settled, and the half that was arithmetic rather than
+a decision.** `curation_validate._row` discards a row carrying fewer than `min_cards` **distinct**
+cards and `_cards` de-duplicates by title id, so a pool below the floor cannot produce one surviving
+row however good the completion is: every row is `row_too_short`, `validate_curation` rejects,
+`llm_calls` records `ok = false` with real tokens and a real cost, and the household paid for a
+guaranteed-empty answer.
+
+**The change is one inequality.** `CurationService.generate`'s `if not candidates:` — sited in front
+of `complete_json` precisely so an empty pool buys nothing — becomes
+`if len(candidates) < self._min_cards:`. Same raise, same site, same `PortDataMalformed`, so
+`curate_handler`'s *"Nothing is caught here"* is intact and **`git diff src/usher/cli.py` is empty**:
+`_curate`'s existing `except PortDataMalformed` already renders the sentence and appends *"(the
+household's previous rows still stand)"*. No new setting — `min_cards` crosses the prompt, the JSON
+schema and the validator from `curation_validate.DEFAULT_MIN_CARDS`, and `config.py` and
+`composition.py` each already record that `USHER_CURATION_MIN_CARDS` was planned and never shipped.
+
+**The disposition follows G3's verdict rather than a preference, and G3 shipped arm 2.** The pool
+does not honour an ownership claim, so it is `min(catalog_unwatched, USHER_CURATION_POOL_SIZE)` and
+a small *library* does not make a small pool — only a catalog whose whole unwatched set is below the
+floor reaches the guard. That is the empty catalog's shape, which is an operator's problem and does
+not improve on a backoff, so the guard **shares the empty pool's raise and parks**. Had G3 shipped
+arm 1 the same guard would have fired on ordinary small households, a park would have been a
+permanent block on a transient condition, and `cli.py` and `services/handlers.py` would have joined
+the file list.
+
+⚠️ **Priced honestly: this is rare, not nightly, and the write-up says so because a guard sold as
+protecting a common case when it protects a rare one is a claim this repository would rather have
+measured.** What it is worth is the completion it declines on the run where it fires — an
+`llm_calls` row with real tokens and a real cost against a screen that could not have changed. The
+general form, recorded in `.claude/rules/curation-and-llm.md`: *a guard's value is what it prevents
+times how often the state it fires on is reachable, and the second factor is a property of the read
+it sits behind, not of the guard.*
+
+**Two sentences from one guard**, because they are two diagnoses. A pool of zero keeps *"the
+candidate pool is empty; there is nothing to curate"* word for word — two cases and a nine-line
+comment argue about that string, and it carries no household id for reasons dated 2026-08-07. A pool
+below the floor reads *"the candidate pool holds 4 candidates and a row needs at least 5; there is
+nothing to curate"*, which is the count and the floor and nothing an operator cannot look up.
+
+**Three cases, and each one's premise is the half that makes its negative assertion mean anything.**
+`calls == []` is also what a fixture that never reached the service produces, and
+`tests/fakes/llm_client.py` repeats its last scripted response forever, so no count is constrained
+unless a case constrains it.
+
+- `test_a_pool_below_the_card_floor_buys_no_completion` (unit) exercises `min_cards - 1`,
+  `min_cards` and `min_cards + 1` **in one case** — the inputs where the arithmetic changes — and
+  ends on `bought == {4: 0, 5: 1, 6: 1}`. Its below-floor arm reads the pool back through
+  `CandidatePoolService` first and asserts it is **non-empty**, because the shipped `not candidates`
+  guard already buys nothing at zero: without that premise the case would go green against the
+  unwidened inequality the moment a fixture stopped seeding.
+- `test_curate_says_a_pool_below_the_card_floor_cannot_fill_one_row` (integration) drives the real
+  pool, the real guard and the real rendering with only the client substituted, asserts the sentence,
+  `calls == []` and `SELECT count(*) FROM llm_calls = 0` — **then seeds a fifth title and runs
+  again**, where the same fixture buys exactly one completion. The scripted response is in place for
+  both arms deliberately: a fixture that only became answerable for the second arm would be
+  asserting an empty deque rather than a guard.
+- `test_work_parks_a_curate_job_whose_pool_cannot_fill_one_row` (integration) reads `jobs` back after
+  the handler and pins `parked`, then pins that **a later `enqueue` at the same priority writes zero
+  rows** — `_ENQUEUE`'s `WHERE jobs.status <> 'parked'` — which is what makes *"until a human
+  releases it"* a fact rather than a warning.
+
+**Every one of the three was verified red before the fix**, against the shipped `if not candidates:`
+restored by hand under a `cp` backup: the unit case on `assert client.calls == []` with a
+`RecordedCall` in the list, the `usher curate` case on `'4 candidates' in "…no row survived
+validation of 1 returned (not_in_pool=1, row_too_short=1)"`, and the `usher work` case on
+`assert 1 == 0` for the billed row. **The park assertion is not what fails there** — the unwidened
+code parks too, on `PortDataMalformed(outcome.error)` from the far side of a paid-for completion —
+which is exactly why the billing assertion carries that case and the disposition assertion is a pin
+rather than the test. The CLI case's own teeth were measured separately by narrowing `_curate`'s
+`except PortDataMalformed` to `except PortRateLimited`: it fails, everything else passes.
+
+**Mutation sweep — 7 plants: 4 targets killed, 1 target measured as an equivalent mutant and
+reported rather than replaced, 2 equivalent-mutant controls surviving as designed. 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-RUN, and every verdict matched the expectation written down first.** Run
+2026-08-11 in place over `src/usher/services/curation.py` and `src/usher/services/handlers.py`, with
+the three `.pyc` defences in force (`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept under **`src/`
+and `tests/`** before every run, an equivalent-mutant control), `compile()` rather than `ast.parse`
+as the dry run, and every restore verified by `md5sum` against a pre-plant digest. Selection, stated
+because a survivor list is only true of the selection it was measured against: **`tests/unit` plus
+`tests/integration/test_cli_pipeline.py`** — 3,113 passed / 4 skipped, 32–41 s a run. Not the whole
+integration directory, for the reason B2's ledger records: this tree carries a flaky
+`test_sse_end_to_end` case and a sweep scored on *did the run fail* cannot run against a suite
+holding one.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the guard spelled `<=` instead of `<` | KILLED | 2 — the unit boundary case and the `usher curate` case, both on the `min_cards` arm |
+| P2 the guard sited after `complete_json` instead of before it | KILLED | 7 — every case in the project that asserts a refusal bought nothing |
+| P3 the guard reading `len(handles)` instead of `len(candidates)`, the map hoisted above it | **SURVIVED** | — |
+| P4 the guard's raise swallowed into a completed job (`curate_handler`) | KILLED | 5 |
+| P5 `_nothing_to_curate`'s two arms swapped | KILLED | 4 |
+
+**P3 is a genuine equivalent mutant and is reported with its reason rather than replaced by a plant
+that dies.** `handles` is `{index: title.id for index, title in enumerate(candidates, start=1)}`, so
+`enumerate` is injective on the key and `len(handles) == len(candidates)` for every input the type
+system permits — the two programs cannot differ. It is still worth naming as a target, because the
+hoist it requires moves the map's construction in front of a guard whose whole point is that nothing
+happens before it; that is a structural claim, and the way to hold it would be a structural
+assertion, not a behavioural one. **Before writing a survivor up as a coverage gap, check whether the
+mutant and the original differ on any state the system can be in.**
+
+**P1's blast radius is the number worth carrying.** Two cases in 3,113, and both are this task's —
+the boundary at exactly `min_cards` exists nowhere else in the repository, so an off-by-one in the
+one inequality this task ships is invisible to every case written before it. That is the measurement
+behind the acceptance's insistence that the boundary be exercised at `min_cards - 1`, `min_cards`
+**and** `min_cards + 1` rather than at a comfortably small pool.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| `CurationService.__init__`'s `self._min_cards` / `self._now` writes swapped | PASS | PASS | PASS | PASS | PASS (3,113) |
+| one sentence of `_nothing_to_curate`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (3,113) |
+
+The first is a fact about the *code* rather than about what the tools look at: two attribute writes
+from two distinct parameters, neither expression reading the other's target, so no layer below the
+constructor can observe the order — the `SearchService.__init__` control's shape, one service over.
+Neither control is an `__all__` reorder or an import reorder, which `ruff` would have rejected. The
+docstring reword was checked first against the docstring-scan grep: fourteen test files scan source,
+and the two that touch this module (`test_services_curation.py`'s import walk and
+`test_services_llm_ledger.py`'s `ast.Call` walk for `LLMCall`) both read **nodes**, not prose.
+
+**Where it landed.** `CurationService.generate`'s guard and its raise-site comment; a new private
+`_nothing_to_curate`; the module docstring's *"the one path that records nothing"* paragraph, which
+said *"an empty candidate pool"* and is now wider; PRD 06's third live-run limit and the sentence
+introducing that list (one settled bullet became two); PRD 09's carried-debt bullet, the ⚠️ half G3
+left open; and `.claude/rules/curation-and-llm.md`'s matching bullet. `src/usher/cli.py` and
+`src/usher/services/handlers.py` are unchanged.
+
+**Gate:** ruff, `ruff format --check` (508 files), `mypy` over 483 files, `lint-imports` 9 kept / 0
+broken, **3,083 unit / 4 skipped** (from 3,081) and **969 integration / 8 skipped** (from 967), PRD
+link check `OK`.

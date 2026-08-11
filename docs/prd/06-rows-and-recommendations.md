@@ -942,8 +942,8 @@ curated rows are additive, [08](08-operations.md)'s *"Home composes without
 them"* holds, and a duplicated genre shelf is a disappointment rather than a
 defect.
 
-**Four limits the run named, recorded rather than fixed — the first has since
-been settled, on 2026-08-11, and its bullet says how:**
+**Four limits the run named, recorded rather than fixed — the first and the
+third have since been settled, both on 2026-08-11, and each bullet says how:**
 
 - ✅ **The pool had no ownership *filter* and the prompt said it did — settled
   2026-08-11 by correcting the prompt.** `TitleRepository.list_unwatched_candidates`
@@ -975,14 +975,32 @@ been settled, on 2026-08-11, and its bullet says how:**
   prompt's *"Do not use the same candidate in more than one row"* is the only
   defence, and a prompt rule is not a guarantee — the same thing this section
   says one level up about the grouping instruction.
-- ⚠️ **`min_cards = 5` means a small unwatched pool yields zero rows, every
-  time, at full price.** Rows carried 5–6 cards at pool 200 and **2–3 at pool 5
-  and pool 8**, so every row was discarded as `row_too_short` and the
-  generation was billed and produced nothing. That is
+- ✅ **`min_cards = 5` meant a small unwatched pool yielded zero rows, every
+  time, at full price — settled 2026-08-11 by refusing before the spend.**
+  Rows carried 5–6 cards at pool 200 and **2–3 at pool 5 and pool 8**, so every
+  row was discarded as `row_too_short` and the generation was billed and
+  produced nothing. That is
   [ADR-0014](decisions/0014-absence-is-not-zero.md) working — a padded row
-  would be a fabricated recommendation — and it is also a household that pays a
+  would be a fabricated recommendation — and it was also a household paying a
   completion a night for a permanently empty shelf, with nothing warning the
-  operator before the money.
+  operator before the money. **M9 Task G4 widened the guard
+  `CurationService.generate` already carried for an empty pool**, from
+  `len(pool) == 0` to `len(pool) < min_cards`. That a pool below the floor
+  cannot produce one surviving row is arithmetic rather than a judgement —
+  `_row` discards a row of fewer than `min_cards` *distinct* cards and `_cards`
+  de-duplicates by title id — so the refusal sits in front of `complete_json`,
+  writes no `llm_calls` row, and gives the operator a sentence naming how many
+  candidates were found and what the floor is. `PortDataMalformed` parks the
+  job, exactly as the empty pool has always done, and no setting was added:
+  `min_cards` crosses the prompt, the schema and the validator from one
+  definition. ⚠️ **Priced honestly, this is rare rather than nightly.** The pool
+  is `min(catalog_unwatched, USHER_CURATION_POOL_SIZE)` and ownership is a sort
+  key rather than a filter (the first bullet above), so only a catalog whose
+  *whole* unwatched set is below five ever reaches the guard. Had the ownership
+  filter shipped instead, the same guard would have fired for ordinary small
+  libraries — and a park, which blocks every later enqueue for that household
+  until a human releases it, would have been the wrong disposition for a
+  condition the next sync fixes.
 - ⚠️ **Four of the five `DropReason` members never fired in 20 generations**,
   and under a provider honouring `strict: true` three of them are close to
   unreachable: `unparseable` and `row_unusable` are shape failures guided

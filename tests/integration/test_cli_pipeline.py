@@ -1152,3 +1152,156 @@ async def test_curate_says_what_it_dropped_when_nothing_survived(
     assert len(ledger) == 1, "the call was billed and the ledger has to say so"
     assert ledger[0].ok is False
     assert f"{DropReason.NOT_IN_POOL.value}={_CARDS}" in ledger[0].error
+
+
+async def test_curate_says_a_pool_below_the_card_floor_cannot_fill_one_row(
+    cli_settings: Settings,
+    clean_slate: None,
+    clean_curation: None,
+    scripted_llm: FakeLLMClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """**M9 Task G4, end to end and with nothing between the guard and the
+    screen.** `curation_validate._row` discards a row carrying fewer than
+    `DEFAULT_MIN_CARDS` *distinct* cards, so a catalog of four cannot produce
+    one surviving row however good the completion is -- and before this guard
+    the household paid a completion to find that out, every night.
+
+    **The premise is the second arm, and it is why `calls == []` means
+    anything.** A fake with nothing scripted, a household that never reached
+    the service, and a catalog of zero all produce an empty `calls` list;
+    what distinguishes the guard is that the *same* fixture, one title richer,
+    buys exactly one completion. So this case seeds four, asserts the refusal
+    bought nothing and was billed nothing, then seeds a fifth and asserts the
+    call it declined to make a moment ago now happens.
+
+    The scripted response is left in place across both arms deliberately: on
+    the first the client is never asked for it, on the second it is, and a
+    fixture that only became answerable for the second arm would be asserting
+    an empty deque rather than a guard.
+    """
+    scripted_llm.responses.append(_completion(range(1, _CARDS + 1)))
+    seeded = await _seed_candidates(cli_settings, _CARDS - 1)
+    async with _session_for(cli_settings) as session:
+        household = await ensure_default_user(session)
+        await session.commit()
+        pool = await build_pipeline(session, cli_settings).titles.list_unwatched_candidates(
+            household, limit=cli_settings.curation_pool_size
+        )
+    assert len(pool) == len(seeded) == _CARDS - 1, (
+        "the premise: the pool this command will read holds four candidates, so it is "
+        f"the card floor and not the empty-pool guard that refuses ({len(pool)})"
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        await _curate(cli_settings)
+
+    message = str(exit_info.value)
+    assert f"{_CARDS - 1} candidates" in message, message
+    assert f"at least {_CARDS}" in message, message
+    # The empty pool is the other arm of the same guard and has its own
+    # sentence; reading this one as that one would hide the count entirely.
+    assert "empty" not in message, message
+    assert "previous rows still stand" in message, message
+    assert "Traceback" not in message, message
+    assert re.search(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", message) is None, message
+    assert scripted_llm.calls == [], "a pool that cannot fill one row bought a completion"
+    assert capsys.readouterr().out == "", "a refused generation printed a report"
+    async with _session_for(cli_settings) as session:
+        billed = (await session.execute(text("SELECT count(*) FROM llm_calls"))).scalar_one()
+    assert int(billed) == 0, "a pool that cannot fill one row was billed for a completion"
+
+    await _seed_candidates(cli_settings, 1)
+    await _curate(cli_settings)
+
+    assert len(scripted_llm.calls) == 1, (
+        "the premise: this fixture can buy a completion, so the empty list above "
+        "is the guard and not the harness"
+    )
+    assert f"pool: {_CARDS} candidates" in capsys.readouterr().out
+
+
+async def test_work_parks_a_curate_job_whose_pool_cannot_fill_one_row(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_slate: None,
+    clean_curation: None,
+    cli_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """**The disposition, asserted rather than described.** With this file's
+    seeding helpers, which is why a `usher work` case lives in the `usher
+    curate` section.
+
+    `PortDataMalformed` **parks**, and
+    `test_work_parks_a_curate_job_it_cannot_serve_and_buys_nothing` above
+    asserts that for a catalog of nothing. This asserts it for a catalog of
+    four -- the arm the widened inequality added, and the only one where a
+    completion was previously bought.
+
+    **Parking is a permanent block, and this pins it as one.** `_ENQUEUE`
+    carries `WHERE jobs.status <> 'parked'`, so every later enqueue for this
+    household writes **zero** rows until a human releases the job. That is what
+    makes *"until a human releases it"* a fact rather than a warning, and it is
+    why the disposition had to follow M9 Task G3's verdict rather than a
+    preference: G3 measured that ownership is an `ORDER BY` key and not a
+    filter, so the pool is `min(catalog_unwatched, USHER_CURATION_POOL_SIZE)`
+    and only a *catalog* below the floor reaches here. That is the empty
+    catalog's shape -- an operator's problem, not a transient one that the next
+    sync fixes -- and a park is right for it. Had the pool honoured an
+    ownership claim, this would fire for an ordinary small library and a park
+    would be a permanent block on a condition that grows out of itself.
+
+    Its own settings rather than the shared fixture, for the reason the case
+    above gives: `USHER_LLM_ENABLED` is what makes this root build a curate
+    handler at all, and no socket is opened because the guard answers in front
+    of the client.
+    """
+    seeded = await _seed_candidates(cli_settings, _CARDS - 1)
+    monkeypatch.setenv("USHER_DATABASE_URL", postgres_url)
+    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
+    monkeypatch.setenv("USHER_LLM_ENABLED", "true")
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.llm_enabled is True, "the premise: the fixture really turned it on"
+    household = new_id()
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        pool = await pipeline.titles.list_unwatched_candidates(
+            household, limit=settings.curation_pool_size
+        )
+        assert len(pool) == len(seeded) == _CARDS - 1, (
+            "the premise: the pool this handler will read holds four candidates, so it "
+            f"is the card floor and not the empty-pool guard that refuses ({len(pool)})"
+        )
+        await pipeline.queue.enqueue(
+            [JobRequest(kind=JobKind.CURATE, key=str(household), priority=JobPriority.BACKFILL)]
+        )
+        await session.commit()
+
+    await _work(settings, once=True)
+
+    assert "1 jobs" in capsys.readouterr().out
+    async with _session_for(settings) as session:
+        status = (
+            await session.execute(
+                text("SELECT status FROM jobs WHERE kind = 'curate' AND key = :k"),
+                {"k": str(household)},
+            )
+        ).scalar_one()
+        # The whole table: `llm_calls` carries no `user_id` -- `generation_id`
+        # is its only correlation key -- and the purge fixtures empty it either
+        # side.
+        billed = (await session.execute(text("SELECT count(*) FROM llm_calls"))).scalar_one()
+        written = (await session.execute(text("SELECT count(*) FROM curated_rows"))).scalar_one()
+    assert status == "parked", "a pool below the card floor did not park"
+    assert int(billed) == 0, "a pool that cannot fill one row was billed for a completion"
+    assert int(written) == 0
+
+    async with _session_for(settings) as session:
+        again = await build_pipeline(session, settings).queue.enqueue(
+            [JobRequest(kind=JobKind.CURATE, key=str(household), priority=JobPriority.BACKFILL)]
+        )
+        await session.commit()
+    assert again == 0, "a parked curate job is not the permanent block this case claims"
+    get_settings.cache_clear()

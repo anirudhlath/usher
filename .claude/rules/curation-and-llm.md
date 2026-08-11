@@ -147,12 +147,25 @@ queue, because a reader of PRD 06 is the person who needs it.
 - **`_cards` de-duplicates within a row only.** A title on two shelves of one
   generation is not counted `duplicate` and is not prevented; the prompt's rule
   7 is the only defence, and a prompt rule is not a guarantee.
-- **`min_cards = 5` means a small unwatched pool yields zero rows, every time,
-  at full price.** Rows carried 5–6 cards at pool 200 and **2–3 at pool 5 and
-  pool 8**, so every row was `row_too_short` and the generation was billed for
-  nothing. That is ADR-0014 working as designed *and* a household paying a
-  completion a night for a permanently empty shelf, with nothing warning the
-  operator before the money.
+- ✅ **`min_cards = 5` meant a small unwatched pool yielded zero rows, every
+  time, at full price — settled 2026-08-11 (M9 Task G4).** Rows carried 5–6
+  cards at pool 200 and **2–3 at pool 5 and pool 8**, so every row was
+  `row_too_short` and the generation was billed for nothing. That is ADR-0014
+  working as designed *and* a household paying a completion a night for a
+  permanently empty shelf, with nothing warning the operator before the money.
+  `CurationService.generate`'s empty-pool guard is now
+  `len(candidates) < self._min_cards` rather than `not candidates`, so the
+  refusal is in front of `complete_json` and nothing is billed. ⚠️ **Quote the
+  frequency with the fix:** the pool is
+  `min(catalog_unwatched, USHER_CURATION_POOL_SIZE)` and ownership is a sort
+  key, not a filter (the section below), so only a catalog whose whole
+  unwatched set is below five reaches the guard — **rare, not nightly**. The
+  general form, which is the transferable half: *a guard's value is the product
+  of what it prevents and how often the state it fires on is reachable, and the
+  second factor is a property of the read it sits behind rather than of the
+  guard. Measure the read before pricing the guard.* Here the same guard would
+  have been a nightly saving under the filtered pool G3 declined, and the
+  arithmetic it rests on would have been identical.
 - **Four of the five `DropReason` members never fired in 20 generations**, and
   under a provider honouring `strict: true` three are close to unreachable —
   `unparseable` and `row_unusable` are shape failures guided decoding prevents,

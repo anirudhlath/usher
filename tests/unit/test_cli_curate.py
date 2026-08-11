@@ -14,10 +14,16 @@ What is here is what needs no database at all:
   operator reads are worth asserting without seeding a household, a pool and
   a scripted completion per assertion, and
 - **the disabled deployment**, which is the one arm that must answer *before*
-  a connection is opened, because there is nothing to connect for.
+  a connection is opened, because there is nothing to connect for, and
+- **the raise this command renders rather than re-raises.** That one is not an
+  exception to the split above: its subject is `_curate`'s own `except
+  PortDataMalformed`, not what `generate()` did to produce one, so the service
+  and its pipeline are substituted rather than driven.
 """
 
+import contextlib
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -27,9 +33,11 @@ from loguru import logger
 from usher.cli import _curate, _print_curation_report, build_parser, main, parse_args
 from usher.config import Settings
 from usher.domain.curation import CuratedRow
+from usher.ports.errors import PortDataMalformed
 from usher.ports.llm import LLMUsage
+from usher.services import curation
 from usher.services.curation import CurationReport
-from usher.services.curation_validate import DropReason
+from usher.services.curation_validate import DEFAULT_MIN_CARDS, DropReason
 
 _USER = uuid.UUID("00000000-0000-7000-8000-0000000000aa")
 _GENERATION = uuid.UUID("00000000-0000-7000-8000-0000000000cc")
@@ -416,3 +424,76 @@ async def test_a_deployment_with_no_llm_says_so_instead_of_curating_nothing(
     # warning is a JSON envelope printed in front of a command's answer, and
     # it is what `_search` had to turn off for exactly this reason.
     assert sink == [], f"the disabled path logged instead of printing: {sink}"
+
+
+async def test_a_pool_too_small_for_one_row_reaches_the_operator_as_a_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**`git diff src/usher/cli.py` is empty for M9 Task G4, and this is what
+    makes that a claim rather than an omission.**
+
+    The guard that refuses a pool below `min_cards` raises the *same*
+    `PortDataMalformed` the empty pool has always raised, from the same place --
+    in front of `complete_json` -- so `_curate`'s existing handler renders it
+    with no new `except`. A guard needing one would be a guard raising something
+    this command does not model, and the operator would get sixty frames
+    instead of a sentence.
+
+    **The sentence is the shipped one, not a plausible one.** It comes from
+    `curation._nothing_to_curate`, which is the function `generate` raises
+    through, so a reworded guard fails here rather than quietly leaving this
+    case asserting a string nothing produces. What the *service* owes the
+    sentence -- the count, the floor, no household id -- is pinned beside the
+    service in `test_services_curation.py`; what the *command* owes it is that
+    it arrives whole, with the reassurance appended and no traceback.
+
+    The four substitutions are the four collaborators between `_curate` and the
+    raise. This file's split still holds: nothing here asks what `generate()`
+    does with a real pipeline, only what the command does with what it raised.
+    """
+    sentence = curation._nothing_to_curate(DEFAULT_MIN_CARDS - 1, DEFAULT_MIN_CARDS)
+    assert str(DEFAULT_MIN_CARDS) in sentence, sentence
+    released: list[str] = []
+
+    async def _aclose() -> None:
+        released.append("client")
+
+    async def _factory(settings: Settings, *, report: bool = True) -> tuple[object, object]:
+        return object(), _aclose
+
+    @contextlib.asynccontextmanager
+    async def _session(settings: Settings) -> AsyncIterator[object]:
+        yield object()
+
+    class _RefusesTheFloor:
+        async def generate(self, user_id: uuid.UUID) -> CurationReport:
+            raise PortDataMalformed(sentence)
+
+    async def _user(session: object) -> uuid.UUID:
+        return _USER
+
+    monkeypatch.setattr("usher.cli.llm_client", _factory)
+    monkeypatch.setattr("usher.cli._session_for", _session)
+    monkeypatch.setattr("usher.cli.build_pipeline", lambda session, settings: object())
+    monkeypatch.setattr(
+        "usher.cli.build_curation_service",
+        lambda pipeline, settings, client: _RefusesTheFloor(),
+    )
+    monkeypatch.setattr("usher.cli.ensure_default_user", _user)
+
+    settings = Settings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/usher",
+        secret_key="0" * 32,
+        llm_enabled=True,
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        await _curate(settings)
+
+    message = str(exit_info.value)
+    assert isinstance(exit_info.value.code, str), "a sentence, not an exit status nobody can read"
+    assert sentence in message, message
+    assert "previous rows still stand" in message, message
+    assert "Traceback" not in message, message
+    # The command built a process resource before it learned there was nothing
+    # to curate, and this raise leaves through a `finally` rather than past it.
+    assert released == ["client"], "the command did not release the client it built"
