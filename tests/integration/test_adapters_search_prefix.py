@@ -60,6 +60,15 @@ from usher.ports.search import SuggestIndex
 # The tier-1 index `m09a` builds on `titles`, and the near-miss beside it.
 # Both spelled once here so a case asserts the name rather than a substring
 # that happens to appear in a plan.
+#
+# **`ix_titles_name_lower_prefix` is the shipped name, and the M9 plan's own
+# acceptance for this task calls it `ix_titles_name_prefix`.** The drift is
+# recorded here rather than left for the next reader to re-derive, because of
+# what it sits next to: `ix_titles_name_lower_year` differs from the real index
+# by a single token in `_SUSPENDABLE_INDEXES` (the opclass), and it is a plain
+# btree that cannot answer a prefix at all. Three names one token apart, one of
+# which appears only in a plan document -- a half-remembered spelling is one
+# search-and-replace away from a green suite asserting over the wrong index.
 _TIER_ONE_INDEX = "ix_titles_name_lower_prefix"
 _NEAR_MISS_INDEX = "ix_titles_name_lower_year"
 _TIER_TWO_INDEX = "ix_titles_name_trgm"
