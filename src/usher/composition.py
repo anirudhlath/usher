@@ -745,10 +745,10 @@ async def metadata_provider(
     """The TMDb provider and the callable that closes its transport.
 
     Returns `(None, no-op)` when no key is configured, rather than raising:
-    **four of the six job kinds need no provider at all** -- `match`,
-    `watch_history`, `index` and `curate` -- so a worker that refused to
-    start without a TMDb key would take four working kinds down with the two
-    that need one. (`derive` is the second: `build_worker` registers it under
+    **five of the seven job kinds need no provider at all** -- `match`,
+    `watch_history`, `index`, `curate` and `watch_writeback` -- so a worker
+    that refused to start without a TMDb key would take five working kinds
+    down with the two that need one. (`derive` is the second: `build_worker` registers it under
     the same `provider is not None` guard as `enrich`, because a derivation
     reads the payload that enrichment cached.)
 

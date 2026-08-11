@@ -213,6 +213,44 @@ be added if a client turns out to need flexible field selection.
 | `PUT /watch/titles/{id}` · `PUT /watch/episodes/{id}` | Set position / played |
 | `POST /watch/titles/{id}/played` · `DELETE …` | Mark played / unplayed |
 
+> **Built in M9: the four watch-write rows.** ✅ They answer, and the service
+> behind them does four things in a fixed order — **write locally, invalidate
+> this household's watch-state rows, publish, enqueue the write-back**. The
+> write is stamped `origin = api`, which is what stops the next sync mistaking
+> Usher's own write for the source's truth and round-tripping it back.
+>
+> **The request never reaches a source.** [03](03-sources-and-sync.md)'s
+> *best-effort* write-back describes the caller, not the adapter, whose
+> `push_watch_state` raises by contract — so the guarantee that a client's
+> write never blocks or fails on a down server holds only because the request
+> does not make the call. It enqueues a `watch_writeback` job per source
+> **copy** instead, at `VISIBLE` priority, and a worker carries it with
+> backoff. A title the household owns no copy of still writes locally and
+> enqueues nothing: watch state attaches to the canonical Title, so it
+> survives adding, changing or losing a source.
+>
+> **`watchstate.updated` is published for the client's own write**, so a
+> multi-device household stays in step — the frame carries the title (or
+> episode) id, so a client can ignore its own echo rather than re-rendering on
+> it. It is the identical payload the push lane builds for a change that
+> arrived from the source, and it goes out with one `row.invalidated` per slug,
+> both **only when the stored row actually changed**: a repeat write of
+> identical state publishes nothing, or a full recompose runs per second of
+> playback. Both are offered only after the write has committed
+> ([ADR-0033](decisions/0033-an-event-is-a-statement-about-committed-state.md)).
+>
+> **`DELETE …/played` clears the played flag and nothing else** — not the
+> resume position, not `play_count`, not `last_played_at`. Emby's own
+> `DELETE /Users/{u}/PlayedItems/{item}` clears all three, measured against
+> 4.9.5.0, and the adapter already declines to use it; the local write must not
+> do at the database what the adapter declines to do at the source.
+>
+> **Episodes get `PUT` and no `/played` pair**, which is this table read
+> literally. It is an odd asymmetry at a library that is 999,927 episodes
+> ([03](03-sources-and-sync.md)) — marking an episode played is reachable only
+> through a full `PUT` body — and it is recorded here as an open question
+> rather than answered by a route nobody asked for.
+
 ### Admin
 
 | Endpoint | Purpose |

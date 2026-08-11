@@ -77,11 +77,16 @@ class JobWorker:
 
         A read-only view rather than a test reaching into `_handlers`, and
         the property that assertion needs is the one `run_once` relies on:
-        **four of the six kinds are registered conditionally** by
+        **four of the seven kinds are registered conditionally** by
         `composition.build_worker` -- `ENRICH` and `DERIVE` on a TMDb key,
         `INDEX` on an embedder, `CURATE` on an `LLMClient` -- so "this
         deployment cannot run that kind" is wiring a test has to be able to
-        see, and only `MATCH` and `WATCH_HISTORY` are in every build. A
+        see, and only `MATCH` and `WATCH_HISTORY` are in every build.
+        🔴 `WATCH_WRITEBACK` is in **no** build: M9's D7 minted the member so
+        its four routes could enqueue, and D8 -- which depends on D7 -- adds
+        the handler and the unconditional registration. Whoever lands D8
+        strikes this paragraph and adds `WATCH_WRITEBACK` to the list of
+        kinds in every build; the conditional four do not change. A
         mutable dict handed out would let a caller register a handler the
         worker never knew about, which is the same silent gap the other way
         round.

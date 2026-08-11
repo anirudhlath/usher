@@ -74,6 +74,7 @@ from usher.services.sources import SourceService
 from usher.services.taste import TasteService
 from usher.services.titles import TitleReadService
 from usher.services.watch_sync import WatchStateSyncService
+from usher.services.watch_write import WatchWriteService
 
 
 def get_app_settings(request: Request) -> Settings:
@@ -827,3 +828,49 @@ def get_playback_service(
 
 
 PlaybackServiceDep = Annotated[PlaybackService, Depends(get_playback_service)]
+
+
+# ---------------------------------------------------------------------------
+# The watch-write actions (M9). `PUT /watch/titles/{id}`,
+# `PUT /watch/episodes/{id}` and the two `/played` routes -- the first routes
+# in this API that write a `watch_states` row, and therefore the first writer
+# of `origin = api`.
+# ---------------------------------------------------------------------------
+
+
+def get_watch_write_service(
+    session: SessionDep,
+    watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
+    media_items: MediaItemRepositoryDep,
+    queue: JobQueueDep,
+    events: EventPublisherDep,
+    cache: Annotated[RowCache, Depends(get_row_cache)],
+) -> WatchWriteService:
+    """`WatchWriteService`, holding no source adapter and no factory.
+
+    **`commit` is `session.commit`, and unlike `get_reconcile_service`'s it is
+    the whole point rather than a shared-wiring accident.** ADR-0033: an event
+    is a statement about *committed* state. This service commits its own write
+    before it publishes, so a subscriber told a position landed and refetching
+    through a second connection finds it -- which is exactly what a route that
+    left the commit to `get_session` could not promise. `get_session` still
+    commits when the handler returns, and that second commit is what carries
+    the enqueued write-back job.
+
+    **The cache is the app's one `RowCache`, never a request-scoped one.** A
+    request-scoped cache caches nothing, and an invalidation against one would
+    drop entries nobody could ever have read -- leaving the household's real
+    screen warm and stale, which is the subtle half of the bug
+    `RowCache.invalidate` documents.
+    """
+    return WatchWriteService(
+        watch_states=watch_states,
+        media_items=media_items,
+        queue=queue,
+        events=events,
+        commit=session.commit,
+        cache=cache,
+    )
+
+
+WatchWriteServiceDep = Annotated[WatchWriteService, Depends(get_watch_write_service)]
