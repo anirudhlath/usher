@@ -136,6 +136,24 @@ class JobKind(StrEnum):
     `depth()`, which promises a key per kind so PRD 10's `usher.jobs.queued`
     never stops reporting a series.
 
+    `watch_writeback` carries PRD 03's outbound write back to the source a
+    client's own watch write is about. **Its key is the source's own
+    `external_id`** -- the third kind to spell a key that way, alongside
+    `match` and `watch_history` -- and it carries **no payload at all**, which
+    is the whole design rather than an economy. The handler re-reads the
+    household's current local row at run time and pushes that, so five `PUT`s
+    during one minute of playback coalesce into **one** row (`(kind, key)` is
+    unique) and the write that lands is the newest, and a retry is idempotent
+    because it replays nothing. A job carrying the state it was enqueued with
+    would have neither property: the queue would hold five stale positions and
+    a backoff would eventually push an old one over a newer one.
+
+    One job per source *copy*, never per file: a title write reads
+    `media_items` with `episode_id IS NULL`, because an episode's row carries
+    its series' `title_id` too and 999,927 of the one measured library's
+    1,126,789 items are episodes -- so the unbounded read would put 20,000
+    jobs on the queue for one press of a 20,000-episode series.
+
     **Adding a member here needs no migration**, verified rather than
     assumed: `db/models/jobs.py` declares `kind` through `enum_column`, whose
     `native_enum=False` compiles to a plain `VARCHAR(32)` and whose
@@ -150,6 +168,7 @@ class JobKind(StrEnum):
     INDEX = "index"
     DERIVE = "derive"
     CURATE = "curate"
+    WATCH_WRITEBACK = "watch_writeback"
 
 
 class JobStatus(StrEnum):
@@ -192,9 +211,10 @@ class Job(DomainModel):
 
     `key` is the kind's own identifier for the work, and it is **one column,
     three kinds of identifier**: a `Title.id` for `enrich`, `index` and
-    `derive`; a source's own `external_id` for `match` and `watch_history`; a
-    `User.id` for `curate`. All three as a string, so one column serves every
-    kind without a polymorphic payload. `(kind, key)` is unique; enqueueing
+    `derive`; a source's own `external_id` for `match`, `watch_history` and
+    `watch_writeback`; a `User.id` for `curate`. All three as a string, so one
+    column serves every kind without a polymorphic payload. `(kind, key)` is
+    unique; enqueueing
     the same work twice promotes rather than duplicates.
     `usher.services.handlers` is where a key is converted back, and
     `_uuid_key` takes the expected thing as an argument precisely because
@@ -203,12 +223,15 @@ class Job(DomainModel):
     source item**, which is why `(kind, key)` does this milestone's cost work
     rather than merely tidying the queue -- see `JobKind.CURATE`.
 
-    **The two source-scoped kinds key on the source's id for the item, not
+    **The three source-scoped kinds key on the source's id for the item, not
     on `MediaItem.id`, and that is a deliberate trade with a known cost.**
-    Every enqueue site is inside a walk, which holds the source's own id and
-    would need a round trip per item to turn it into a `MediaItem.id` --
-    1,126,674 of them a walk, which is the shape of defect this whole
-    pipeline is built to avoid. The cost is that `(kind, key)` is unique
+    Two of the three enqueue sites are inside a walk, which holds the source's
+    own id and would need a round trip per item to turn it into a
+    `MediaItem.id` -- 1,126,674 of them a walk, which is the shape of defect
+    this whole pipeline is built to avoid. `watch_writeback`'s is not: it is
+    one press, and it has already read the rows in order to find the copies at
+    all, so it pays the same spelling for consistency rather than for cost.
+    The cost is that `(kind, key)` is unique
     across *sources*: two servers that address different items by the same
     string collapse into one job, and the second item's work is skipped
     until something re-enqueues it. Emby and Jellyfin both mint per-server

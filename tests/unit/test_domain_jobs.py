@@ -70,7 +70,7 @@ def test_an_empty_key_is_rejected() -> None:
         Job(kind=JobKind.MATCH, key="")
 
 
-def test_the_six_kinds_m8_ships() -> None:
+def test_the_seven_kinds_this_tree_ships() -> None:
     """Each kind arrives with the artefacts it maintains, not before.
 
     M4's version asserted three members and explained the absence: "a job
@@ -87,7 +87,17 @@ def test_the_six_kinds_m8_ships() -> None:
     with no `LLMClient`, exactly as it withholds `index` from one with no
     embedder. What M4 forbade was a member with no handler anywhere.
 
-    An exact set rather than a membership check, so a seventh kind cannot be
+    🔴 **`watch_writeback` is the first member to break that rule, and it is
+    broken for exactly one commit.** M9's D7 owns the enqueue -- the four
+    watch-write routes cannot enqueue a kind that does not exist -- and D8,
+    which depends on D7, owns the handler and the unconditional registration.
+    Until D8 lands, a client's watch write puts a job on the queue that no
+    worker claims: precisely the queue that grows forever, so this is a state
+    to pass through rather than a state to release from. Whoever lands D8
+    deletes this paragraph, and if D8 is dropped the member must be dropped
+    with it.
+
+    An exact set rather than a membership check, so an eighth kind cannot be
     added without this list moving and someone reading that rule.
     """
     assert set(JobKind) == {
@@ -97,6 +107,7 @@ def test_the_six_kinds_m8_ships() -> None:
         JobKind.INDEX,
         JobKind.DERIVE,
         JobKind.CURATE,
+        JobKind.WATCH_WRITEBACK,
     }
 
 
@@ -119,6 +130,7 @@ def test_every_member_of_every_enum_is_its_stored_value() -> None:
         "index",
         "derive",
         "curate",
+        "watch_writeback",
     }
     assert {s.value for s in JobStatus} == {"pending", "running", "parked"}
 

@@ -26,6 +26,7 @@ from usher.api.routers import (
     search,
     sources,
     titles,
+    watch,
 )
 from usher.composition import (
     DefaultUserId,
@@ -205,4 +206,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(search.router)
     app.include_router(sources.router)
     app.include_router(titles.router)
+    app.include_router(watch.router)
     return app
