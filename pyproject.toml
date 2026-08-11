@@ -359,10 +359,26 @@ allow_indirect_imports = true
 name = "the shared http helpers import no concrete adapter"
 type = "forbidden"
 source_modules = ["usher.adapters.http"]
+#
+# **`usher.adapters.images` joined this list in M9 and the list is the whole
+# contract**, which is why adding a package here is not bookkeeping: this is a
+# `forbidden` contract, so a seventh adapter package left out is a package the
+# contract silently stops covering — the gate still reports 9 kept, 0 broken
+# and the newest adapter is the one thing nothing constrains. The image fetcher
+# is a fifth consumer of `adapters/http.py` (it takes `UNTRANSLATED_FAILURES`
+# and `port_error_for`), so it is exactly the shape this edge exists for.
+#
+# It deliberately does **not** join the contract above. That one's name is
+# about search, embedding and LLM implementations — the two classes ADR-0002
+# and ADR-0022 name as swappable and the one ADR-0027 does — and adding an
+# image adapter to it would make the name false. Contract 2 (*adapters are
+# driven, not driving*) covers the new package for free. So M9 adds a
+# forbidden module, not a tenth contract.
 forbidden_modules = [
     "usher.adapters.bulk",
     "usher.adapters.embedding",
     "usher.adapters.emby",
+    "usher.adapters.images",
     "usher.adapters.llm",
     "usher.adapters.search",
     "usher.adapters.tmdb",

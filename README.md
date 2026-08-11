@@ -75,6 +75,7 @@ from the command line — see below.
 ```bash
 cp .env.example .env
 openssl rand -hex 32          # paste this into USHER_SECRET_KEY= in .env
+mkdir -p data/images && sudo chown 1000:1000 data/images
 docker compose up -d --build
 
 curl -sf http://localhost:8100/health        # {"status":"ok"}
@@ -99,14 +100,28 @@ application never sees it. `USHER_COMPOSE_*` is the one namespace reserved for
 variables like that; every other `USHER_*` key is a real setting, and an
 unknown one is refused at startup rather than ignored, so a typo is loud.
 
+The `chown` is the one line that is not obvious, and it is the image proxy's.
+`./data/images` is bind-mounted to `/data/images` and is where
+`GET /images/{id}` caches artwork it has fetched. **Docker creates a missing
+bind-mount source as `root`**, the container runs as uid 1000, and a bind
+mount's host-side ownership wins over the `chown` in the Dockerfile — so
+without this the proxy answers 500 on every cold image and nothing else in the
+stack notices. Skip it if `data/images` already exists and you own it. There is
+no eviction and none is wanted: the width ladder bounds the cache at four
+entries per image, and reclaiming space is `rm -rf data/images`, which costs a
+re-fetch and nothing else.
+
 **Every key in `.env` reaches the container**, because compose hands it the
-whole file (`env_file:`). The four exceptions are marked `[compose-owned]` in
+whole file (`env_file:`). The five exceptions are marked `[compose-owned]` in
 `.env.example` and listed in `compose.yml`'s `environment:` block with the
 reason each belongs to the container topology rather than to you:
 `USHER_DATABASE_URL` (the hostname on the compose network),
 `USHER_HOST`/`USHER_PORT` (what the published port, the `EXPOSE` and the
-healthcheck all assume) and `USHER_SECRET_KEY` (substituted so a missing one
-fails at `docker compose up` rather than in a container log).
+healthcheck all assume), `USHER_SECRET_KEY` (substituted so a missing one
+fails at `docker compose up` rather than in a container log) and
+`USHER_IMAGE_CACHE_DIR` (the container side of the bind mount above — the
+`.env` value is a relative path, which inside the container would put the
+cache in the image's own writable layer).
 
 Migrations run automatically on container start.
 
