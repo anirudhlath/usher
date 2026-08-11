@@ -75,6 +75,10 @@ from usher.ports.repository.search import (
     TitleEmbeddingUpsert,
     TitleNeighborRepository,
 )
+from usher.ports.repository.search_query import (
+    SearchQueryRecord,
+    SearchQueryRepository,
+)
 from usher.ports.repository.source import (
     SourceRepository,
 )
@@ -125,6 +129,8 @@ __all__ = [
     "RecurringPerson",
     "RowProviderSettingsRepository",
     "ScoredNeighbor",
+    "SearchQueryRecord",
+    "SearchQueryRepository",
     "SourceRepository",
     "StoredEmbedding",
     "StoredTaste",

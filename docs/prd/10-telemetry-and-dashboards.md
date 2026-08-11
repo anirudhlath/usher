@@ -526,10 +526,10 @@ are better evidence than a synthetic typo set.
 **It was assigned to no milestone, and M6 assigns it to M9 whole.** Its
 columns split cleanly in two:
 
-| Columns | Nature | Fillable in M6? |
-|---|---|---|
-| `at`, `query`, `mode`, `result_count`, `latency_ms` | retrieval-side — everything `SearchService` already knows | yes |
-| `user_id`, `clicked_title_id`, `played` | outcome attribution — a click and a play are things a *client* does | **no.** Needs an HTTP surface, which is M9's (M6 adds no route, boundary call 1), and a real `user_id`, which is the authentication seam [01](01-architecture.md) leaves open |
+| Columns | Nature | Fillable in M6? | Writer |
+|---|---|---|---|
+| `at`, `query`, `mode`, `result_count`, `latency_ms` | retrieval-side — everything `SearchService` already knows | yes | **F2** |
+| `user_id`, `clicked_title_id`, `played` | outcome attribution — a click and a play are things a *client* does | **no.** Needs an HTTP surface, which is M9's (M6 adds no route, boundary call 1), and a real `user_id`, which is the authentication seam [01](01-architecture.md) leaves open | **F3** for `clicked_title_id`/`played`; **F2** for `user_id` — see below |
 
 Creating it in M6 would ship a table three of whose seven columns nothing ever
 fills. **This document's own first principle is that a documented thing
@@ -541,6 +541,20 @@ exactly the signal the column exists to carry. The whole point of this table
 is the sentence above it: it turns the gate into a live measurement. **A
 no-click rate computed over a column nothing writes is not better evidence
 than anything.** So the table lands with the surface that can fill it: **M9**.
+The **"Fillable in M6?" column is left standing as the historical record it
+is** — it answers a question M6 was actually asked, not a question about M9's
+task split, which is what the **Writer** column is for.
+
+🔶 **F1's divergence, recorded rather than smoothed over.** The row above
+groups `user_id` with the outcome half because an authenticated deployment
+needs the seam [01](01-architecture.md) leaves open. M9 ships no
+authentication (group F's boundary calls) — `user_id` is the singleton
+default user — so on the seam this milestone actually has, `user_id` is
+already known at the moment a search answers, and it costs nothing to write
+it early rather than wait for the attribution call that fills the other two.
+`SearchQueryRepository.record` (F2) therefore writes `user_id` alongside the
+five retrieval-side columns, and `record_outcome` (F3) writes only
+`clicked_title_id` and `played`.
 
 **M6's contribution is the two histograms** — `usher.search.duration` and
 `usher.search.results`, both labelled by mode — which answer latency and
