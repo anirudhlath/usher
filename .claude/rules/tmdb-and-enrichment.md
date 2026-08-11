@@ -33,7 +33,7 @@ and is accounted for in the table below.
 | 4 | A v4 read access token is JWT-shaped | **unverifiable here, cost bounded** | The configured credential is a classic 32-hex v3 key; `_is_v4_token` correctly says no. A false positive was measured instead: the v3 key sent as `Authorization: Bearer` answers **401** (`status_code: 7`), i.e. loud and immediate, never a wrong answer. |
 | 5 | The changes window's inclusivity and its 14-day cap | **confirmed, and it is the boundary** | `start == end` is a valid one-day window (4,278 results); `[d, d+1]` covers both days deduplicated; `[today-14, today]` → 200; `[today-15, today]` → **422**, `"Invalid date range: Should be a range no longer than 14 days."` The shipped clamp sits exactly on it with nothing spare. |
 | 6 | `credits` is a valid TV append namespace | **confirmed** | Present with 14 cast entries. `aggregate_credits` is *also* valid — a second view, not a replacement. |
-| 7 | `append_to_response=season/N` works | **confirmed — see below** | It does, and it collapses a series from 1+N requests to 1. |
+| 7 | `append_to_response=season/N` works | **confirmed, and shipped — see below** | It does, and it collapses a series from 1+N requests to 1. `TmdbMetadataProvider.fetch` has issued the blind window since M9's T1. |
 | 8 | A season the series lists that 404s on its own route | **still unverified** | 320 listed seasons across 30 series, **zero** absent. The propagate-and-park branch has still never met a real occurrence. Sample skews popular, so it is weak evidence of absence. |
 | 9 | Search orders by relevance with the obvious answer first | **confirmed** | 263 of 266 confident resolutions were TMDb's **first** result (max rank 3; series 126/126 at rank 0), and the top result was an exact normalised name match on 269 of 320 probes. |
 | 10 | `spoken_languages[].iso_639_1` and `origin_country` are well-formed | **confirmed** | Zero anomalies over 59 detail payloads; `origin_country` present on 29/29 movies and 30/30 series, always a list of strings. |
@@ -92,13 +92,63 @@ measured because the change rests on it:
   summary carries that same id (3627/3624/107971 on GoT, byte-identical to
   the season route's). So `_compose_seasons`' existing merge-over-the-summary
   would lose nothing.
-**Not implemented.** It changes PRD 03's request table, PRD 04's crawl
-arithmetic and `TmdbMetadataProvider.fetch`, and belongs in its own change
-rather than folded into a verification run.
+**Implemented 2026-08-11 (M9 T1), against fixtures only — no live call was
+made by that change.** `TmdbMetadataProvider.fetch` asks for
+`season/0…season/13` blind alongside the six namespaces, pops every
+`season/N` block off the payload before returning it, reconciles the blind
+window against the `seasons[]` summary the *same* response carries, and
+follows up for any listed number the window missed; a follow-up carries no
+namespaces so it gets all twenty slots. **Identity with the `1+N` payload is
+the contract and the request count is only the benefit** —
+`mapping.seasons_and_episodes`, `EnrichService._store_hierarchy` and
+`DeriveService` all read `raw_payloads` rows written months earlier, so a
+divergence is invisible until a derivation much later returns nothing, and
+`test_the_composed_payload_equals_what_the_per_season_path_produced` is the
+case that holds it. **Three things that case had to be given to have teeth**,
+each of which a first draft got wrong:
+
+- **The two spellings must reach different endpoints or the equality is a
+  tautology.** The fake serves the season route and the appended blocks
+  independently and each arm has one of them turned off, so the assertion is
+  between two transports rather than between one and itself.
+- **The fake's season-route response has to carry the summary's own `id`.**
+  The committed fixture is one `season.json` reused for every number, so
+  before this change the fake answered `id: 96000001` for season 0 as well —
+  a disagreement the live run measured the real API not to have, and one that
+  would have failed the identity case on the fake rather than on the provider.
+- **On faithful data the merge *direction* is unobservable**, because the
+  block and the summary agree on every shared key, so block-over-summary and
+  summary-over-block produce the identical dict. The fake keeps
+  `season.json`'s prose whatever the number, which makes season 0's block
+  disagree with the Specials summary on `name`/`air_date`/`poster_path`, and
+  that disagreement is the only thing in the suite that can see the
+  direction. Recorded as a deliberate fake affordance, not as fidelity.
+
+**And one property the `1+N` shape had that the appended one cannot have:
+a missing season used to be loud.** The old `fetch` let a season's own 404
+propagate and park the job, arguing that "a catalog that says a show has
+seven seasons when it has eight is wrong with no signal anywhere, and a
+parked job is at least visible". `append_to_response` cannot express that: a
+season the series does not have and a season TMDb declines to serve are the
+**same 200 with the key absent**, so the two are indistinguishable at the
+request layer and a listed season whose block never arrives now yields a
+`Season` row with no episodes rather than a parked job. The reconcile still
+spends one follow-up on it, so the case is paid for even though it is not
+reported. Traded knowingly, and the trade is cheap only because guess 8 is
+what it is — 320 listed seasons over 30 series, zero absent, still
+unverified rather than confirmed.
+
+Four plants, each run against the whole `tests/unit` selection: the merge
+direction inverted and a surviving `season/N` key each fail the identity case
+**alone**; the reconcile-against-`seasons[]` loop deleted fails 3; and the
+slot arithmetic loosened by one (a 21st item assembled) fails 3. One
+equivalent-mutant control — the two literal `*_APPEND_TO_RESPONSE` constants
+swapped — passes all five gate steps.
 **The arithmetic, corrected 2026-08-01 — it was internally inconsistent
 when first recorded, and the wrong number was the headline one.** The
-shipped path costs `1 + N` requests for a series (one detail, one per
-season); the appended path costs 1. At **32,409 series** and a **median of
+path shipped until M9's T1 cost `1 + N` requests for a series (one detail,
+one per season); the appended path, which is the shipped one now, costs 1.
+At **32,409 series** and a **median of
 9 seasons** that is 32,409 × 10 = **~324k requests** against **~32k**, i.e.
 **~10x** — not the "~190k → ~35k, ~5x" first written here. `~190k` was
 [PRD 04](../../docs/prd/04-catalog-bootstrap.md)'s Phase-3 tier-1 line, "~189k
@@ -119,7 +169,13 @@ series is 32,409 exactly. Six namespaces leave 14 season slots, so a series
 with more than 14 seasons needs a second request; that is a small tail, so
 ~32k is the figure and ~35k a generous allowance for it. Both are the same
 number to one significant figure; the ~10x is what matters and it holds
-either way.
+either way. **The shipped fetch has a second source of follow-ups the
+arithmetic above does not price**, and it is the same small tail seen from
+the other side: a season the series lists whose block never arrives inside
+the blind window costs one follow-up too, whether it sits outside the window
+or TMDb simply omitted it. Guess 8 above is still unverified — zero absent
+seasons in 320 — so the second case has never been observed at all, and the
+follow-up is bounded at one attempt per fetch either way.
 **TMDb's movie/TV divergence runs through three layers of its API, not
 one, and all three are now measured rather than read.** The field-name and
 endpoint rows were read from `developer.themoviedb.org` on 2026-07-31 and

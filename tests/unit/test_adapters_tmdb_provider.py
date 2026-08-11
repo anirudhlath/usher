@@ -19,8 +19,11 @@ from pydantic import SecretStr
 from tests.fakes.tmdb_fixtures import load_tmdb_fixture
 from usher.adapters.tmdb.client import TmdbClient
 from usher.adapters.tmdb.provider import (
+    APPEND_TO_RESPONSE_CEILING,
+    BLIND_SEASON_WINDOW,
     MOVIE_APPEND_TO_RESPONSE,
     SERIES_APPEND_TO_RESPONSE,
+    SERIES_SEASON_SLOTS,
     TmdbMetadataProvider,
 )
 from usher.domain.enums import EnrichmentState, TitleKind
@@ -31,6 +34,55 @@ _KEY = SecretStr("0123456789abcdef0123456789abcdef")
 _TITLE_ID = uuid.UUID("0197a5b0-0000-7000-8000-000000000002")
 _MOVIE_REF = ProviderRef(provider="tmdb", value="90000550", kind=TitleKind.MOVIE)
 _SERIES_REF = ProviderRef(provider="tmdb", value="90001399", kind=TitleKind.SERIES)
+
+# The season numbers the committed `series.json` lists, and the base its two
+# `seasons[].id` values are allocated from -- 96000000 and 96000001, so
+# `_SEASON_TMDB_ID + number` reproduces the fixture exactly for both.
+_FIXTURE_SEASON_NUMBERS = (0, 1)
+_SEASON_TMDB_ID = 96000000
+
+# The body shape TMDb really answers a missing resource with, recorded live
+# 2026-08-01 on `/movie`, `/tv` and `/tv/{id}/season/{n}` alike.
+_NOT_FOUND = {
+    "success": False,
+    "status_code": 34,
+    "status_message": "The resource you requested could not be found.",
+}
+
+
+def _season_summary(number: int) -> dict[str, Any]:
+    """One `seasons[]` entry for a season the committed fixture does not
+    carry, shaped exactly like the two it does."""
+    entry = dict(load_tmdb_fixture("series")["seasons"][1])
+    entry["season_number"] = number
+    entry["id"] = _SEASON_TMDB_ID + number
+    entry["name"] = f"Season {number}"
+    return entry
+
+
+def _season_detail(number: int) -> dict[str, Any]:
+    """What `GET /tv/{id}/season/{n}` answers for this series.
+
+    `id` is re-keyed off the season number because the live run measured the
+    season route's own `id` **byte-identical** to the one the series'
+    `seasons[]` summary carries (3627/3624/107971 on Game of Thrones). Without
+    that this fake would manufacture a disagreement the real API does not
+    have, and the identity case below would fail on the fake rather than on
+    the provider.
+
+    Everything else stays as the one committed `season.json` spells it,
+    whatever the number is -- so this response disagrees with the summary's
+    `name`, `air_date`, `poster_path` and `vote_average` for every number but
+    1. That is a deliberate affordance rather than fidelity: on faithful data
+    the block and the summary agree on every shared key, so merging the block
+    *over* the summary and the summary *over* the block produce the identical
+    dict and the direction of the merge is unobservable. This is the only
+    thing in the suite that can see it.
+    """
+    season = load_tmdb_fixture("season")
+    season["season_number"] = number
+    season["id"] = _SEASON_TMDB_ID + number
+    return season
 
 
 class _Server:
@@ -49,6 +101,19 @@ class _Server:
         # And this one is the same endpoint simply knowing nothing, with or
         # without a year.
         self.search_finds_nothing = False
+        # The seasons this series lists, or the committed fixture's own two.
+        self.season_numbers: tuple[int, ...] | None = None
+        # TMDb serves a season through *both* transports. Turning one of them
+        # off is not fidelity, it is how a case pins which transport the
+        # provider actually used -- an equality between two spellings that
+        # both reached the same endpoint would be a tautology.
+        self.serves_the_season_route = True
+        self.serves_appended_seasons = True
+        # A season the series lists whose block never arrives on either
+        # transport. Guess 8 of the 2026-08-01 run -- still unverified live,
+        # zero occurrences in 320 listed seasons -- so this is the branch
+        # standing in for it.
+        self.season_blocks_withheld: frozenset[int] = frozenset()
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -71,14 +136,48 @@ class _Server:
         if path == "/3/search/tv":
             return httpx.Response(200, json=load_tmdb_fixture("search_tv"))
         if path.startswith("/3/tv/") and "/season/" in path:
-            season = load_tmdb_fixture("season")
-            season["season_number"] = int(path.rsplit("/", 1)[-1])
-            return httpx.Response(200, json=season)
+            number = int(path.rsplit("/", 1)[-1])
+            if not self.serves_the_season_route or not self._holds(number):
+                return httpx.Response(404, json=_NOT_FOUND)
+            return httpx.Response(200, json=_season_detail(number))
         if path.startswith("/3/movie/"):
             return httpx.Response(200, json=load_tmdb_fixture("movie"))
         if path.startswith("/3/tv/"):
-            return httpx.Response(200, json=load_tmdb_fixture("series"))
+            return httpx.Response(200, json=self._series(request))
         return httpx.Response(404, json={})
+
+    def listed(self) -> tuple[int, ...]:
+        return _FIXTURE_SEASON_NUMBERS if self.season_numbers is None else self.season_numbers
+
+    def _holds(self, number: int) -> bool:
+        return number in self.listed() and number not in self.season_blocks_withheld
+
+    def _series(self, request: httpx.Request) -> dict[str, Any]:
+        series = load_tmdb_fixture("series")
+        if self.season_numbers is not None:
+            series["seasons"] = [_season_summary(one) for one in self.season_numbers]
+        if not self.serves_appended_seasons:
+            return series
+        for number in self._season_slots(request):
+            if not self._holds(number):
+                # Live 2026-08-01: a season number the series does not have
+                # is **silently omitted**, not an error.
+                continue
+            block = _season_detail(number)
+            # "...identical to the season's own detail response but for a
+            # missing top-level `id`", which the summary already carries.
+            del block["id"]
+            series[f"season/{number}"] = block
+        return series
+
+    @staticmethod
+    def _season_slots(request: httpx.Request) -> list[int]:
+        appended = request.url.params.get("append_to_response", "")
+        return [
+            int(one.removeprefix("season/"))
+            for one in appended.split(",")
+            if one.startswith("season/")
+        ]
 
     @staticmethod
     def _dated(request: httpx.Request) -> bool:
@@ -106,6 +205,28 @@ def _provider(server: _Server, **kwargs: Any) -> tuple[TmdbMetadataProvider, htt
     http = httpx.AsyncClient(transport=httpx.MockTransport(server))
     client = TmdbClient(http, _KEY, requests_per_second=1000.0)
     return TmdbMetadataProvider(client, **kwargs), http
+
+
+async def _per_season_composition(server: _Server, ref: ProviderRef) -> dict[str, Any]:
+    """The `1+N` spelling, kept here as a reference implementation.
+
+    This is what `TmdbMetadataProvider.fetch` did until the appended spelling
+    replaced it, transcribed rather than imported because the shipped copy is
+    gone. `mapping.seasons_and_episodes`, `EnrichService._store_hierarchy` and
+    `DeriveService` all read payloads written months before they run, so
+    **identity with this output is the contract and the request count is only
+    the benefit** -- a divergence here is invisible until a derivation months
+    later returns nothing.
+    """
+    http = httpx.AsyncClient(transport=httpx.MockTransport(server))
+    client = TmdbClient(http, _KEY, requests_per_second=1000.0)
+    async with http:
+        payload = await client.get(
+            f"/tv/{ref.value}", {"append_to_response": SERIES_APPEND_TO_RESPONSE}
+        )
+        for entry in payload["seasons"]:
+            entry.update(await client.get(f"/tv/{ref.value}/season/{entry['season_number']}"))
+    return payload
 
 
 # -- one request per title, with the right append vocabulary ---------------
@@ -141,27 +262,180 @@ async def test_a_series_asks_for_content_ratings_and_never_release_dates() -> No
     provider, http = _provider(server)
     async with http:
         await provider.fetch(_SERIES_REF)
-    appended = server.requests[0].url.params["append_to_response"]
-    assert appended == SERIES_APPEND_TO_RESPONSE
-    assert "content_ratings" in appended.split(",")
-    assert "release_dates" not in appended.split(",")
+    appended = server.requests[0].url.params["append_to_response"].split(",")
+    namespaces = appended[: len(SERIES_APPEND_TO_RESPONSE.split(","))]
+    assert namespaces == SERIES_APPEND_TO_RESPONSE.split(",")
+    assert "content_ratings" in namespaces
+    assert "release_dates" not in appended
 
 
 async def test_a_series_fetch_composes_its_seasons_own_responses() -> None:
-    """TMDb's series detail lists seasons but carries no episodes, so the
-    hierarchy costs one request per season -- and `to_result` is a pure
-    function of one payload, so those responses have to be composed into it
-    rather than fetched again later."""
+    """TMDb's series detail lists seasons and carries no episodes, so the
+    hierarchy has to be composed into the detail payload -- `to_result` is a
+    pure function of one document, so a season response fetched later has
+    nowhere to go."""
     server = _Server()
     provider, http = _provider(server)
     async with http:
         payload = await provider.fetch(_SERIES_REF)
-    assert server.paths() == [
+    assert server.paths() == ["/3/tv/90001399"]
+    assert [len(one["episodes"]) for one in payload["seasons"]] == [2, 2]
+
+
+# -- the whole hierarchy in one request ------------------------------------
+
+
+async def test_the_composed_payload_equals_what_the_per_season_path_produced() -> None:
+    """The contract, and the request count is only the benefit.
+
+    Verified live 2026-08-01: an appended `season/N` block is identical to
+    the season route's own response **but for a missing top-level `id`**, and
+    the series' `seasons[]` summary carries that same id byte-identically
+    (3627/3624/107971 on Game of Thrones), so merging the block over the
+    summary loses nothing. Everything downstream --
+    `mapping.seasons_and_episodes`, `EnrichService._store_hierarchy`,
+    `DeriveService` -- reads `raw_payloads` rows written months earlier, so a
+    difference here surfaces as a derivation that quietly returns nothing.
+
+    Each server serves exactly one of the two transports, so the equality is
+    between two genuinely different request shapes rather than between one
+    request shape and itself.
+    """
+    per_season = _Server()
+    per_season.serves_appended_seasons = False
+    expected = await _per_season_composition(per_season, _SERIES_REF)
+    assert per_season.paths() == [
         "/3/tv/90001399",
         "/3/tv/90001399/season/0",
         "/3/tv/90001399/season/1",
+    ], "the premise: the reference really did pay one request per season"
+
+    server = _Server()
+    server.serves_the_season_route = False
+    provider, http = _provider(server)
+    async with http:
+        payload = await provider.fetch(_SERIES_REF)
+
+    assert payload == expected
+    assert [one for one in payload if one.startswith("season/")] == [], (
+        "a surviving `season/N` key stores every episode twice in `raw_payloads`"
+    )
+
+
+def test_the_blind_window_is_what_the_twenty_item_ceiling_leaves() -> None:
+    """Derived, never a literal 14.
+
+    The ceiling is enforced -- 21 items is a **400** carrying
+    `status_code: 27`, *"the maximum number of remote calls is 20"*, measured
+    live 2026-08-01. Six namespaces already appended leave exactly fourteen
+    season slots, so a seventh namespace has to cost a season slot rather
+    than silently cost the whole request.
+    """
+    namespaces = SERIES_APPEND_TO_RESPONSE.split(",")
+    assert APPEND_TO_RESPONSE_CEILING == 20
+    assert len(namespaces) + SERIES_SEASON_SLOTS == APPEND_TO_RESPONSE_CEILING
+    assert len(BLIND_SEASON_WINDOW) == SERIES_SEASON_SLOTS
+    assert list(BLIND_SEASON_WINDOW) == list(range(SERIES_SEASON_SLOTS))
+
+
+async def test_a_series_costs_one_request_carrying_fourteen_season_slots() -> None:
+    """Nine seasons cost ten requests before this change and one after it.
+
+    At 32,409 series and a median of 9 listed seasons -- 320 seasons over the
+    30 series the 2026-08-01 run walked, a popular-skewed sample and so an
+    upper bound on the measurement rather than a prediction -- that is ~324k
+    requests against ~32k on the series half of the enrichment crawl.
+    """
+    server = _Server()
+    server.season_numbers = tuple(range(9))
+    provider, http = _provider(server)
+    async with http:
+        payload = await provider.fetch(_SERIES_REF)
+    assert len(server.requests) == 1
+    appended = server.requests[0].url.params["append_to_response"].split(",")
+    assert len(appended) == APPEND_TO_RESPONSE_CEILING
+    assert appended == [
+        *SERIES_APPEND_TO_RESPONSE.split(","),
+        *(f"season/{one}" for one in BLIND_SEASON_WINDOW),
     ]
-    assert [len(one["episodes"]) for one in payload["seasons"]] == [2, 2]
+    assert [len(one["episodes"]) for one in payload["seasons"]] == [2] * 9
+
+
+async def test_a_series_listing_twenty_seasons_costs_two_and_never_asks_for_a_twenty_first() -> (
+    None
+):
+    """The follow-up carries no namespaces, so it gets all twenty slots.
+
+    A request assembling 21 items is a 400 (`status_code: 27`) that no retry
+    can turn into an answer, so the bound is on the *assembly* rather than on
+    the error handling.
+    """
+    server = _Server()
+    server.season_numbers = tuple(range(20))
+    provider, http = _provider(server)
+    async with http:
+        payload = await provider.fetch(_SERIES_REF)
+    assert len(server.requests) == 2
+    assembled = [one.url.params["append_to_response"].split(",") for one in server.requests]
+    assert [len(one) for one in assembled] == [APPEND_TO_RESPONSE_CEILING, 6]
+    assert max(len(one) for one in assembled) <= APPEND_TO_RESPONSE_CEILING
+    assert all(one.startswith("season/") for one in assembled[1]), (
+        "a follow-up spends no slot on a namespace the first request already carried"
+    )
+    assert assembled[1] == [f"season/{one}" for one in range(14, 20)]
+    assert [len(one["episodes"]) for one in payload["seasons"]] == [2] * 20
+
+
+async def test_a_season_listed_outside_the_blind_window_is_fetched_by_a_follow_up() -> None:
+    """The reconcile against `seasons[]` is what makes a blind window safe.
+
+    TMDb permits any integer season number; the window assumes small ones.
+    Deleting the reconcile is silent under-fetching rather than an error,
+    because an unlisted number is omitted without complaint.
+    """
+    server = _Server()
+    server.season_numbers = (0, 1, 20)
+    provider, http = _provider(server)
+    async with http:
+        payload = await provider.fetch(_SERIES_REF)
+    assert 20 not in BLIND_SEASON_WINDOW, "the premise: 20 is outside the blind window"
+    assert server.paths() == ["/3/tv/90001399", "/3/tv/90001399"]
+    assert server.requests[1].url.params["append_to_response"] == "season/20"
+    assert [len(one["episodes"]) for one in payload["seasons"]] == [2, 2, 2]
+
+
+async def test_a_window_number_the_series_does_not_have_is_absent_and_not_an_error() -> None:
+    """Measured live 2026-08-01: an unlisted season number appends nothing
+    and the response is still a 200. That is what lets the window be blind."""
+    server = _Server()
+    provider, http = _provider(server)
+    async with http:
+        payload = await provider.fetch(_SERIES_REF)
+    asked = server.requests[0].url.params["append_to_response"].split(",")
+    assert "season/13" in asked
+    assert 13 not in server.listed(), "the premise: the series does not have that season"
+    assert len(server.requests) == 1
+    assert [one["season_number"] for one in payload["seasons"]] == [0, 1]
+
+
+async def test_a_season_whose_block_never_arrives_still_produces_its_row() -> None:
+    """`_compose_seasons`' existing rule, and it survives the collapse.
+
+    Losing the `Season` row as well would leave its episodes unattachable
+    when a later run does fetch them. The follow-up is bounded at one attempt
+    per fetch: a block withheld twice is not asked for a third time.
+    """
+    server = _Server()
+    server.season_blocks_withheld = frozenset({1})
+    provider, http = _provider(server)
+    async with http:
+        payload = await provider.fetch(_SERIES_REF)
+    assert len(server.requests) == 2, "one blind window, one bounded follow-up, then stop"
+    assert "episodes" in payload["seasons"][0]
+    assert "episodes" not in payload["seasons"][1]
+    result = provider.to_result(payload, _TITLE_ID)
+    assert [one.season_number for one in result.seasons] == [0, 1]
+    assert {one.season_number for one in result.episodes} == {0}
 
 
 async def test_the_composed_payload_still_carries_what_later_milestones_read() -> None:
