@@ -18,6 +18,7 @@ from usher.ports.bulk import (
     BulkCursor,
     BulkDataset,
     IdCrosswalkPair,
+    ImdbAka,
     ImdbRating,
     ImdbTitle,
     TmdbId,
@@ -44,6 +45,13 @@ _SAMPLES: tuple[object, ...] = (
     BulkBatch[ImdbTitle](rows=(_TITLE,), cursor=_CURSOR),
     _TITLE,
     ImdbRating(imdb_id="tt99000020", community_rating=7.4, vote_count=12_345),
+    ImdbAka(
+        imdb_id="tt99000020",
+        ordering=2,
+        name="Un Long Métrage Synthétique",
+        region="FR",
+        language="fr",
+    ),
     TmdbId(
         tmdb_id=90000020,
         kind=TitleKind.MOVIE,
@@ -107,6 +115,19 @@ def test_imdb_title_genres_default_to_an_empty_tuple() -> None:
         runtime_minutes=None,
     )
     assert title.genres == ()
+
+
+def test_an_akas_region_and_language_are_independently_optional() -> None:
+    r"""Measured over the whole pinned `title.akas.tsv.gz`: 12,748,984 rows
+    carry no `region` and 19,243,152 carry no `language`, and they are not the
+    same rows -- so a record with one and not the other is the ordinary case,
+    not a partially-constructed error. NULL means "not specific to a region",
+    which is a different fact from any code."""
+    aka = ImdbAka(
+        imdb_id="tt99000020", ordering=3, name="A Synthetic Alias", region="GB", language=None
+    )
+    assert aka.region == "GB"
+    assert aka.language is None
 
 
 def test_crosswalk_pair_columns_are_independently_optional() -> None:

@@ -105,6 +105,47 @@ class ImdbRating:
 
 
 @dataclass(frozen=True, slots=True)
+class ImdbAka:
+    """One retained row of IMDb's `title.akas.tsv.gz`: a localised alias.
+
+    **Five fields for a five-column table, and the two that are not obvious
+    are the two that justify the table's shape.** `region` and `language` are
+    carried rather than dropped because `title_search_names` has columns for
+    them, and without them a French and a Brazilian alias of one film are
+    indistinguishable rows. Both are independently optional and NULL means
+    "not specific to a region", which is a different fact from any code:
+    measured over the whole pinned `title.akas.tsv.gz`
+    (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`, 58,906,368 data rows),
+    **12,748,984 rows carry no `region` and 19,243,152 carry no `language`**,
+    and the two sets are not the same rows.
+
+    **`ordering` is IMDb's own 1-based per-title sequence, carried
+    unconverted**, and the DTO says so because the sibling parser this task
+    did not build would have converted one: `title.principals`' `ordering`
+    was to be re-based onto `Credit.billing_order`, which is 0-based. Nothing
+    downstream of *this* record is 0-based -- `title_search_names` has no rank
+    column at all -- so the value is IMDb's, unchanged, and the first row of a
+    title is 1 (measured min 1, max 300). It is carried because a writer
+    deduplicating on `(title_id, casefold(name))` has to choose *which* of two
+    rows differing only in `region`/`language` to keep, and this is the only
+    per-title ordering the dump supplies.
+
+    **There is no `is_original_title` field, deliberately.** The parser drops
+    the rows IMDb flags with `isOriginalTitle = 1` -- see
+    `usher.adapters.bulk.imdb.parse_akas_row` for the measurement -- so a flag
+    carried here would be `False` on every instance that can exist. Nor are
+    `types` and `attributes` carried: 23 and 185 distinct values respectively
+    in that snapshot, no column to put either in, and no reader.
+    """
+
+    imdb_id: str
+    ordering: int
+    name: str
+    region: str | None
+    language: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class TmdbId:
     """One line of TMDb's daily ID export.
 
@@ -243,10 +284,10 @@ class BulkDataset[RowT](ABC):
     """A third-party bulk dataset, streamed as resumable batches.
 
     Implementations: `IMDbTitleDataset`, `IMDbRatingDataset`,
-    `TMDbIdDataset`, `WikidataCrosswalkDataset`, `MovieLensGenomeDataset`
-    (`usher.adapters.bulk`). Port named for the role, implementations for
-    the service — the same split as `SourceAdapter`/`EmbyAdapter`
-    (ADR-0009).
+    `IMDbAkaDataset`, `TMDbIdDataset`, `WikidataCrosswalkDataset`,
+    `MovieLensGenomeDataset` (`usher.adapters.bulk`). Port named for the
+    role, implementations for the service — the same split as
+    `SourceAdapter`/`EmbyAdapter` (ADR-0009).
     """
 
     @property

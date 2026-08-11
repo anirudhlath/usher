@@ -101,6 +101,30 @@ Pruning that keeps this sane: retain `movie`, `tvMovie`, `tvSeries`, and
 > its people/episode modelling in M4). Retaining exactly the four `titleType`s
 > above is what yields the 1,127,975 figure this section already cites.
 
+> **Half of that correction has itself been overtaken, 2026-08-11 (M9).**
+> **`title.akas` now has somewhere to land** — `m09a` created
+> `title_search_names`, with a `region` and a `language` column — and
+> `usher.adapters.bulk.imdb.parse_akas_row` plus `IMDbAkaDataset` are the
+> parser and the dataset for it. Nothing in `usher.cli` constructs that
+> dataset yet, so no bootstrap phase reads the file and no operator pays its
+> **486.5 MiB** today; the phase is a separate change.
+>
+> **The other half hardened rather than lifted.** `title.principals` and
+> `name.basics` are now refused on a *measurement* rather than on a missing
+> table: loaded against a real 1,271,138-title catalog, the `people` +
+> `credits` design measured **2.702 GB against a 2.0 GB ceiling** — 2.395 GB
+> stripped to five columns and three indexes — so **no `people` or `credits`
+> row is bulk-loaded from IMDb at all**, and the two sources never own one
+> entity. `title.crew` and `title.episode` keep the status the paragraph above
+> describes. Full evidence, with its bar written before the download, is in
+> `.claude/rules/bootstrap-and-datasets.md`.
+>
+> The akas retention policy, and what each clause was measured to cost, is on
+> `parse_akas_row` itself. In one line: every row whose `title` can be stored
+> is kept, the rows IMDb flags `isOriginalTitle = 1` are dropped (21.6% of the
+> file, costing **7 aliases in 1,663,330**), and nothing is filtered on
+> `region`, `language`, `types` or `attributes`.
+
 **Index handling during Phase 0 — measured, decided.** `ix_titles_sort_name`
 and `ix_titles_name_lower_year` are dropped before the load and rebuilt
 after, **but only when `titles` is empty** — a first bootstrap has nothing to

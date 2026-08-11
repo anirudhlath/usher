@@ -1645,3 +1645,100 @@ writing the plant and before restoring**, leaving the tree mutated; the `cp`
 backup is what recovered it, exactly as the SIGTERM entry above predicts.
 Spell the landing check as `old not in landed and new in landed`, which is what
 the check actually means and is immune to the substring.
+
+**M9 Task T5's sweep: 16 plants over `adapters/bulk/imdb.py`'s `title.akas`
+parser — 13 targets all killed, 3 equivalent-mutant controls surviving all
+five gate steps, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run
+2026-08-11 in place with the plant list and its **expected verdict** written
+down first, `PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under `src/`
+**and** `tests/` before every run, `compile()` as the dry run, the landing
+check spelled `old not in landed and new in landed` (the substring-immune form
+B6's entry above arrived at), and every restore verified by `md5sum` against a
+pre-plant digest.
+
+**Selection:** `test_adapters_bulk_imdb_akas.py`, `test_adapters_bulk_imdb.py`,
+`test_ports_bulk.py`, `test_no_third_party_data.py` and `test_api_meta.py` —
+91 cases, ~2.5 s a run. Scoped rather than whole-suite because nothing outside
+this task's own files imports `parse_akas_row` or `IMDbAkaDataset` (grepped,
+not assumed: `usher.cli` constructs the title and rating datasets only, and T8
+is the change that will alter that), and because the intermittent
+`test_sse_end_to_end` case recorded above lives in `tests/integration` and
+would give every plant a false-kill rate. The last two files are in the
+selection because this task commits a **fixture**, and the guard that reads it
+is the one that would notice a real IMDb row arriving with it.
+
+**Thirteen of thirteen killed is a weak-looking split and this entry says why,
+as B2's does: the plants and the cases were written by the same author in the
+same session.** What makes it evidence anyway is the two plants whose expected
+verdict was written down *because the case did not exist yet* — T7 and T11 —
+and one of the two produced the finding below.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 `_AKAS_COLUMNS` 8 -> 9 | KILLED | 15 |
+| T2 the header guard reads `tconst` | KILLED | 8 |
+| T3 the `isOriginalTitle` drop deleted | KILLED | 4 |
+| T4 the `isOriginalTitle` sense inverted | KILLED | 13 |
+| T5 the length bound relaxed `>` -> `>=` | KILLED | 1 |
+| T6 the length clause deleted | KILLED | 1 |
+| T7 `AKAS_NAME_MAX_CHARS = SEARCH_NAME_MAX_CHARS` -> `= 512` | KILLED | 1, and only the structural one |
+| T8 `region`/`language` read each other's column | KILLED | 1 |
+| T9 `_required_int`'s refusal -> `return 0` | KILLED | 1 |
+| T10 `_optional` not applied to the title | KILLED | 4 |
+| T11 the column-count error's `detail` becomes the whole line | KILLED | 2 |
+| T12 the dataset's `import_runs` key | KILLED | 1 |
+| T13 the dataset's filename | KILLED | 4 |
+
+**T7 is the one worth carrying, and it is the `__all__`-control family
+inverted: a mutation that is behaviourally identical *today* and is exactly
+the defect the constant exists to prevent.** `AKAS_NAME_MAX_CHARS` is bound to
+`SEARCH_NAME_MAX_CHARS`, imported from `usher.db.models.search`, because the
+parser's length filter is only worth anything if it is the *same* 512 the
+table's `ck_title_search_names_name_within_btree_bound` is spelled with.
+Re-spelling it as a literal passes every behavioural assertion in the
+selection — the two numbers are equal, so every filtered and every kept row is
+the same row — and the damage is entirely in the future: the day the CHECK
+moves, the parser keeps filtering at the old bound and starts handing the
+writer rows the database refuses, silently, in the direction that fails a
+whole batch. **Only reading the binding can tell the two apart**, so the case
+that kills it parses the module and asserts the assignment's value node is an
+`ast.Name` reading `SEARCH_NAME_MAX_CHARS`, alongside the ordinary equality
+assertion which cannot fail. Same family as
+`test_the_curated_module_holds_no_llm_client_and_cannot_complete_anything` and
+as A2's `status_code=document.status` plant, which also failed **exactly one
+case, the structural one**. The general form: *when a constant's whole purpose
+is that it is the same object as another one, equality is not the assertion —
+the binding is.*
+
+**T4's blast radius is 13 and T3's is 4, for the same clause, which is the
+other thing worth noting.** Deleting the `isOriginalTitle` drop lets two extra
+rows through and fails the four cases that count or order the slice's kept
+rows. *Inverting* it keeps only those two and drops everything else, so it
+also takes every case that reads a specific alias out of the fixture — a
+reminder that a survivor count is a property of which direction the mutation
+went, not of the clause.
+
+The three controls, each against every gate step separately:
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `ImdbAka(...)`'s `region=`/`language=` keyword arguments' written order swapped | PASS | PASS | PASS | PASS | PASS (91) |
+| C2 one sentence of `parse_akas_row`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (91) |
+| C3 `_BASICS_COLUMNS`/`_RATINGS_COLUMNS` definition order swapped | PASS | PASS | PASS | PASS | PASS (91) |
+
+C1 and C3 are facts about the *code* rather than about what the tools look at:
+keyword arguments are evaluated in written order and both expressions are
+side-effect-free `_optional` calls on two distinct locals, so neither can
+observe the other; and two adjacent module-level integer assignments reference
+neither each other nor anything between them, in a module with no import-time
+side effect. C3 is an ordering control that is **not** an `__all__` reorder,
+which `RUF022` would have rejected — the reason that was checked rather than
+assumed is the entry near the top of this file. C2 was checked first against
+the docstring-scan grep: the files it finds scan `ports/embedding.py`,
+`ports/metadata.py`, `ports/repository`, `services/`, `api/` and
+`adapters/search/prefix.py`, and **none of them reads `adapters/bulk/`**; the
+one scan this task adds parses `adapters/bulk/imdb.py` for module-level
+`ast.Assign` nodes, which a function's docstring is not.
+
+Gate green before and after on the fully restored tree (`md5sum`-verified
+byte-identical to the pre-sweep digest).
