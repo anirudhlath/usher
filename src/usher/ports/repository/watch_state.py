@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pydantic import AwareDatetime
 
 from usher.domain.watch import WatchState
-from usher.ports.ingest import WatchStateMerge
+from usher.ports.ingest import WatchStateMerge, WatchStateWrite
 
 __all__ = [
     "RecentWatch",
@@ -90,6 +90,57 @@ class WatchStateRepository(ABC):
         implementation that splits a batch into a title branch and an
         episode branch would otherwise write a both-targets merge *twice*,
         as two half-rows.
+        """
+
+    @abstractmethod
+    async def set_from_client(self, write: WatchStateWrite) -> WatchState:
+        """Write one user's own report of their progress, and win.
+
+        The other side of the conflict rule `merge_from_source` documents
+        above. That method exists to *lose* to a client -- a stored row
+        newer than the walk's `observed_at` is left alone -- and this one
+        exists to *be* that newer write. `trg_watch_states_set_updated_at`
+        is the entire mechanism: it is a `BEFORE UPDATE` trigger that
+        assigns `now()` unconditionally, so a client write is automatically
+        newer than any walk that started before it. This method therefore
+        needs no `observed_at` of its own, and no `COALESCE` against a
+        possibly-absent value -- both fields it writes are always given.
+
+        - `origin = WatchStateOrigin.API`, always. `WatchState.origin` has
+          no default deliberately -- a sync path that forgets it must fail
+          loudly rather than mislabel source-pushed state as
+          user-originated -- and this is the path the member was invented
+          for.
+        - `position_seconds` and `played` are written exactly as given, on
+          every call, whether or not `played` is changing.
+        - Marking played (`played=True`) advances `play_count` to
+          `GREATEST(play_count, 1)` and stamps `last_played_at` to the
+          write instant, **once** -- matching Emby's own
+          `POST /PlayedItems`, which M3 measured as advancing to 1
+          idempotently rather than incrementing
+          (`adapters/emby/adapter.py:623-625`). Marking an already-played
+          title played again must not advance `play_count` a second time,
+          or the write-back round trip diverges on the second press.
+        - Marking unplayed (`played=False`) leaves `play_count` and
+          `last_played_at` exactly as stored, and does **not** clear
+          `position_seconds`. M3's live run found
+          `DELETE /Users/{u}/PlayedItems/{item}` destructive well beyond
+          its name -- it clears `PlayCount`, `LastPlayedDate` *and* a
+          non-zero resume position -- and `EmbyAdapter.push_watch_state`
+          already refuses to use it (`adapter.py:614-619`). This method
+          must not do at the database what the adapter deliberately
+          declines to do at the source.
+
+        A write naming neither a `title_id` nor an `episode_id`, or naming
+        both, raises `PortDataMalformed` -- the same answer
+        `merge_from_source` gives, for the same reason:
+        `num_nonnulls(title_id, episode_id) = 1` is a CHECK
+        (`db/models/watch.py:169`) and a caller must not receive it as a
+        raw storage exception.
+
+        Returns the stored row rather than a count: the caller is a single
+        action route answering with the new state, not a batch walk
+        counting what changed.
         """
 
     @abstractmethod

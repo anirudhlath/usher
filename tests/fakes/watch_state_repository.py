@@ -50,11 +50,28 @@ what actually closes:
   the SQL decides -- and deciding it silently is how this fake would ratify
   the exact bug `test_a_state_with_no_last_played_at_does_not_outrank_one_
   that_has_one` exists to catch.
+- **`set_from_client`'s "write, and win" restated, for a different reason
+  than `merge_from_source`'s.** There the divergence is that this fake
+  stores `observed_at` as `updated_at` where a trigger owns that column on
+  the real arm; here there is no trigger to diverge from at all --
+  `set_from_client` stamps `datetime.now(UTC)` in Python where the real
+  arm's `now()` is a single, transaction-frozen SQL read. Both answer "the
+  write instant", so no case in the shared contract can tell them apart; a
+  test that called this method twice inside one Postgres transaction and
+  asserted the two `updated_at` values *differ* would, and this file has no
+  such case because nothing needs the two writes to disagree.
+- **No column width.** `position_seconds = 2**31` is accepted here --
+  `WatchState.position_seconds` is `Field(default=0, ge=0)` with no
+  ceiling -- and refused by Postgres's `integer` column, client-side, by
+  asyncpg's own encoder. Same divergence class as "no CHECK constraints"
+  above, restated because `set_from_client` is the second write path this
+  fake has and the first one measured through `pgvector/pgvector:pg17`
+  rather than assumed.
 """
 
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pydantic import AwareDatetime
 
@@ -62,7 +79,7 @@ from usher.domain.enums import WatchStateOrigin
 from usher.domain.ids import new_id
 from usher.domain.watch import WatchState
 from usher.ports.errors import PortDataMalformed
-from usher.ports.ingest import WatchStateMerge
+from usher.ports.ingest import WatchStateMerge, WatchStateWrite
 from usher.ports.repository import RecentWatch, WatchStateRepository
 
 _Key = tuple[uuid.UUID, uuid.UUID | None, uuid.UUID | None]
@@ -186,6 +203,54 @@ class FakeWatchStateRepository(WatchStateRepository):
             )
             changed += 1
         return changed
+
+    async def set_from_client(self, write: WatchStateWrite) -> WatchState:
+        # Same guard, same reasoning, as `merge_from_source` above.
+        if (write.title_id is None) == (write.episode_id is None):
+            raise PortDataMalformed(
+                "a watch state must name exactly one of title_id or episode_id",
+                detail=f"user_id={write.user_id}",
+            )
+        key = (write.user_id, write.title_id, write.episode_id)
+        stored = self._states.get(key)
+        # This fake's `now()`: one Python read, not a transaction-frozen SQL
+        # one. See the divergence noted in the module docstring.
+        now = datetime.now(UTC)
+        if stored is None:
+            result = WatchState(
+                id=new_id(),
+                user_id=write.user_id,
+                title_id=write.title_id,
+                episode_id=write.episode_id,
+                position_seconds=write.position_seconds,
+                # No runtime_seconds: `WatchStateWrite` does not carry one --
+                # a client reports a position, never a duration.
+                runtime_seconds=None,
+                played=write.played,
+                play_count=1 if write.played else 0,
+                last_played_at=now if write.played else None,
+                updated_at=now,
+                origin=WatchStateOrigin.API,
+            )
+        else:
+            result = stored.evolve(
+                position_seconds=write.position_seconds,
+                played=write.played,
+                # `GREATEST(play_count, 1)`, spelled for Python: a client
+                # marking an already-counted title played again must not
+                # advance it a second time, and must not lower a real
+                # history a backfill already recorded.
+                play_count=max(stored.play_count, 1) if write.played else stored.play_count,
+                # Unmarking played leaves this alone -- the local write must
+                # not do what `DELETE /Users/{u}/PlayedItems/{item}` does at
+                # the source (M3's live run: it clears PlayCount,
+                # LastPlayedDate *and* a non-zero resume position).
+                last_played_at=now if write.played else stored.last_played_at,
+                updated_at=now,
+                origin=WatchStateOrigin.API,
+            )
+        self._states[key] = result
+        return result
 
     async def list_in_progress(self, user_id: uuid.UUID, *, limit: int = 20) -> list[WatchState]:
         rows = [

@@ -12,6 +12,14 @@ Every dataclass here is `frozen=True` and therefore hashable, deliberately:
 `MatchService` turns a batch of source items into sets of `ProviderRef` and
 `NameYearProbe`, issues one query per set, and joins the answers back by
 dict lookup. At 1,126,674 items the alternative is 1,126,674 round trips.
+
+**Not only inbound, despite the module's name.** `WatchStateWrite`, beside
+`WatchStateMerge` below, travels the opposite direction -- from a client
+action route, through `WatchStateRepository.set_from_client`, rather than
+from a source walk. It lives here anyway: this module is not "DTOs from a
+source", it is every DTO that crosses into a repository this package owns,
+and splitting the one client-originated member out into a module of its own
+would be a distinction with no reader.
 """
 
 import uuid
@@ -191,6 +199,33 @@ class WatchStateMerge:
     observed_at: AwareDatetime
     play_count: int | None = None
     last_played_at: AwareDatetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WatchStateWrite:
+    """One client-originated watch write, on its way to
+    `WatchStateRepository.set_from_client`.
+
+    The other direction from `WatchStateMerge`, immediately above. No
+    `observed_at`: `merge_from_source`'s conflict rule exists to answer "did
+    the walk that produced this see something newer than what's stored",
+    and a client write is never asked that question -- `origin = api`
+    always wins, because `trg_watch_states_set_updated_at` (a
+    `BEFORE UPDATE` trigger assigning `now()` unconditionally) stamps every
+    write with the instant it actually happened, which is by construction
+    later than any walk that started before it.
+
+    No `play_count`, no `last_played_at`, no `runtime_seconds`: a client
+    reports what it did -- seek to a position, mark played, mark unplayed --
+    not a play count or a duration, and `set_from_client` derives the two
+    former from `played` itself. See its docstring.
+    """
+
+    user_id: uuid.UUID
+    title_id: uuid.UUID | None
+    episode_id: uuid.UUID | None
+    position_seconds: int
+    played: bool
 
 
 @dataclass(frozen=True, slots=True)
