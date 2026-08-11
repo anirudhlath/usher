@@ -25,6 +25,65 @@ streaming_asgi_transport.py` is the replacement: the app runs in a task,
 — `StreamingResponse.__call__` only runs `listen_for_disconnect` below spec
 2.4, so at 2.4+ a client going away would not cancel the body iterator and
 the route's `finally` would never run.
+**All five `events.publish` sites commit before they publish, and the open
+transaction at the instant of an `enrich` frame is `JobWorker`'s rather than
+the handler's.** Measured 2026-08-11 (M9 G1) against real Postgres 17, each
+site driven on a **committing** session with a second connection reading the
+event's own subject inside `publish`. `enrich.py:289` sees
+`enrichment_state='enriched'` (committed :208); `push.py:209` and `:244` see
+the merged `watch_states` row (committed :170); `push.py:278` sees the
+`media_items` row (committed :275); `reconcile.py:267` sees
+`sync_runs.items_seen` at 2 then 4 (committed :245). So PRD 09's carried-debt
+sentence — *"a client is told an event landed before the transaction that
+produced it committed"* — is **false of the event's subject at every site**,
+and is corrected there and in
+`docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md`.
+
+What survives is smaller and one layer up. At the same instant, the only
+`jobs` row visible for that key is `('enrich', 'running')`; the two `BACKFILL`
+requests staged at `enrich.py:270–277` become
+`('derive','pending'), ('index','pending')` only after `JobWorker._run`
+reaches `complete(job.id)` + `_commit()` (`jobs.py:143–147`). **That pair, plus
+the `DELETE` that completes the job, is the entire content of the residual
+window** — so a rollback there costs two enqueues and one duplicate
+`title.updated` on the `requeue_running` re-run, not a lie to a client. **The
+property G2 buys is ordering, not durability, and it needs no outbox table.**
+
+**`xmin` is not evidence of an uncommitted read, and a whole milestone's worth
+of agents read it as one.** `test_sse_end_to_end.py`'s
+`assert await _job_xmin(...) is None` failing as `assert '745' is None` was
+relayed three times as *"a row a transaction has not committed is visible"*.
+Postgres never shows an uncommitted row version to another connection; `xmin`
+names the transaction that wrote the version the reader **can** see. Measured
+at the failure: `xmin='745', status='running', attempts=0`, against the
+reader's own `pg_current_snapshot() = '749:749:'` — an **empty** in-progress
+list — so 745 is settled and committed. It is the *claim's* `UPDATE`
+(`run_once`'s commit at `jobs.py:118–124`) still being current because the
+`DELETE` has not committed. **Before reading an `xmin` as a visibility
+anomaly, read `pg_current_snapshot()` beside it: if the writer is below the
+snapshot's xmin and absent from its in-progress list, nothing anomalous
+happened and what you are looking at is an ordering window.**
+
+**The same case's flakiness is that window, and the control three separate
+reports got wrong was the variable, not the count.** Unplanted on one tree at
+load average 7–9: **6 failures in 13 runs**, every one on `_job_xmin` and every
+one reporting the identical row state. With `await asyncio.sleep(0.25)`
+planted in `JobWorker._run` between the handler returning and
+`complete(job.id)`: **5 of 5**, still on `_job_xmin`, with `probe.seen` and the
+refetch both passing — which is what separates *"the assertion races the
+completing commit"* from *"the client was told too early"*. Three
+implementers reported 5/5, 3/9 and "green, 927 integration passing" on the same
+base; all three are consistent with a load-sensitive race and **none of them
+distinguishes a defect from a scheduling window, because a rate is not a
+mechanism.** A planted delay is, and it costs one line.
+
+**A probe that never ran records nothing, and every absence claim over it
+passes.** The G1 harness for `push._apply_items` first recorded `[]` — the
+fixture had seeded no title the match ladder could find, and `_apply_items`
+publishes only for an outcome carrying a `title_id`. Read as a result it says
+*"the availability event publishes nothing"*. `test_sse_end_to_end.py` now
+asserts `probe.seen` non-empty before any claim is read out of it.
+
 **A replay ring and a per-subscriber queue are fed by the same `publish`
 calls, so a lazily-resolved replay duplicates.** `InMemoryEventBus.subscribe`
 snapshots the ring *before* it adds the subscriber, with no `await` in
@@ -360,3 +419,35 @@ costs nothing. And the defect was invisible to every assertion in the suite but
 one: **an intercepted-record path is asserted almost entirely by what must not
 arrive**, so the single case requiring a stdlib record to arrive is what caught
 a total mute. Both arms, or a "nothing reached the sink" fix passes.
+
+**`app.routes` on FastAPI 0.140 does not contain the app's routes, and a walk
+over it reads as a passing sweep.** Measured 2026-08-11 building A2's "every
+route answers a problem document" case. `include_router` appends **one opaque
+`fastapi.routing._IncludedRouter`** per router rather than flattening its
+routes into the app, so `[r for r in create_app().routes if isinstance(r,
+APIRoute)]` finds **zero** of Usher's fourteen routes — and four of FastAPI's
+own (`/openapi.json`, `/docs`, `/docs/oauth2-redirect`, `/redoc`), which are
+plain Starlette `Route`s and are not even `APIRoute`s, so the same walk
+filtered on `APIRoute` returns an empty list that a `for` loop iterates
+happily. Descend through `route.original_router.routes` recursively, and carry
+a premise guard that the descent found a known path: this is the "a run that
+did not run is not a pass" family arriving in a route walk, and it is the shape
+every "every route declares X" scan in this milestone is built on. Note also
+that `/admin/sources` is **two** `APIRoute` objects (one per method), so any
+per-path assertion has to group by `route.path` first — and Starlette's 405
+carries the `Allow` header of the *first* partial match only, so
+`PUT /admin/sources` answers `Allow: POST` rather than `GET, POST`.
+
+**RFC 9457's `instance` is the request path, so a 422 for a malformed *path
+parameter* does echo the value it rejected, and there is no spelling that
+avoids it.** Found 2026-08-11 landing the envelope: `GET /titles/not-a-uuid`
+now answers `"instance": "/titles/not-a-uuid"`, which failed M5's
+`test_a_malformed_id_is_a_422_that_does_not_echo_it` on its blanket
+`"not-a-uuid" not in response.text`. The credential rule is untouched and the
+distinction is worth stating precisely, because the next reader will reach for
+the blanket assertion again: PRD 08 is about what a client **submitted as
+data** — a body or a query string — and both are still absent, `instance` being
+`request.url.path` and **never** `request.url`. No credential is ever in a path
+in this API; `?q=` is a query and is dropped. The narrowed case asserts over
+pydantic's `input` (the field that carried whole request bodies) rather than
+over the whole response text.

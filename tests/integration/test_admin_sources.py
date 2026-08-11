@@ -436,8 +436,19 @@ async def test_status_renders_an_undecryptable_credential(
 
 
 async def test_status_of_an_unknown_source_is_404(client: AsyncClient) -> None:
+    """404 in PRD 07's RFC 9457 envelope since M9, against the real route
+    rather than only against the unit app that overrides its service."""
     response = await client.get("/admin/sources/01936f2a-0000-7000-8000-000000000000/status")
     assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json() == {
+        "type": "https://usher.dev/errors/not-found",
+        "title": "Not found",
+        "status": 404,
+        "code": "not_found",
+        "detail": "source not found",
+        "instance": "/admin/sources/01936f2a-0000-7000-8000-000000000000/status",
+    }
 
 
 async def test_deleting_a_source_removes_its_credential_row(
@@ -502,16 +513,30 @@ async def test_a_rejected_request_does_not_echo_the_credential_it_carried(
     Two shapes are checked, because they fail differently: a *missing*
     field echoes its siblings, and a *wrong-typed* field echoes only
     itself.
+
+    **M9 wrapped PRD 07's RFC 9457 envelope around that handler and this
+    case moved with it, in the same commit.** The stripped error list is now
+    the `errors` extension member; `detail` is a fixed sentence. Each half
+    keeps its positive control -- the request really carried the credential
+    and the route really rejected it -- because a body that never contained
+    the value is also what a handler that never ran produces, and the
+    envelope is exactly the kind of change that could make a handler stop
+    running.
     """
     incomplete = _payload()
     del incomplete["base_url"]
+    assert PASSWORD in str(incomplete), "the positive control never submitted a password"
     response = await client.post("/admin/sources", json=incomplete)
-    assert response.status_code == 422
+    assert response.status_code == 422, "the route accepted a body it should have rejected"
+    assert response.headers["content-type"] == "application/problem+json"
+    assert [error["loc"] for error in response.json()["errors"]] == [["body", "base_url"]]
     assert_carries_no_credential(response.text, where="the 422 for a missing field")
 
     wrong_type = dict(_payload(), password={"nested": PASSWORD})
+    assert PASSWORD in str(wrong_type), "the positive control never submitted a password"
     response = await client.post("/admin/sources", json=wrong_type)
-    assert response.status_code == 422
+    assert response.status_code == 422, "the route accepted a body it should have rejected"
+    assert [error["loc"] for error in response.json()["errors"]] == [["body", "password"]]
     assert_carries_no_credential(response.text, where="the 422 for a wrong-typed password")
 
 

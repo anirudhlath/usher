@@ -35,6 +35,14 @@ def test_media_item_repository_surface() -> None:
             # would let a stale implementation type-check while
             # `GET /titles/{id}` lost its badges.
             "list_for_title",
+            # M9's episode-keyed counterpart (D2), for `POST /episodes/{id}
+            # /play`: `list_for_title` carries `AND episode_id IS NULL`,
+            # which is exactly what makes it useless for an episode's own
+            # copies. Named here for the same reason `list_for_title` is --
+            # dropped from the ABC, every implementation could stop
+            # providing it and still type-check, and the episode play route
+            # would silently rank against zero targets forever.
+            "list_for_episode",
             "list_unmatched",
             "attach_title",
             # M7's episode-keyed ownership read, and it is named here rather

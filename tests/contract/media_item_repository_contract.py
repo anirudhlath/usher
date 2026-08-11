@@ -782,6 +782,194 @@ class MediaItemRepositoryContract:
         row."""
         assert await repository.list_for_title(new_id()) == []
 
+    # -- what an episode's own detail screen renders as `availability` ------
+
+    async def test_list_for_episode_is_keyed_by_episode_id_not_by_title_id(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        other_title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """`list_for_title`'s counterpart, for `POST /episodes/{id}/play` --
+        `list_for_title` carries `AND episode_id IS NULL`, which is exactly
+        what makes it useless for an episode's own copies.
+
+        **The episode row's own `title_id` deliberately names a *different*
+        series (`other_title_id`) than the one under test (`title_id`)
+        here.** An implementation that resolved the row by reading
+        `title_id` instead of `episode_id` -- whether by copying
+        `list_for_title`'s statement and renaming the bind parameter without
+        changing the column, or by re-deriving the episode's series and
+        filtering on that -- finds nothing for `other_title_id`, or finds
+        the wrong series' rows for `title_id`, rather than happening to pass
+        because both point at the same title.
+
+        **The sibling premise -- `list_for_title` on the series under test
+        still returns its own row and not the episode's -- is asserted in
+        the same case**, because each half alone is satisfied by a wrong
+        implementation: a version that filtered `list_for_episode` on
+        `episode_id` alone with the `episode_id IS NULL` exclusion missing
+        from `list_for_title` would pass the first assertion and fail only
+        the second.
+        """
+        await repository.upsert_many(
+            [
+                item(source_id, "series-row", title_id=title_id),
+                item(source_id, "episode-row", title_id=other_title_id, episode_id=episode_id),
+            ]
+        )
+        by_episode = await repository.list_for_episode(episode_id)
+        assert [row.external_id for row in by_episode] == ["episode-row"]
+        by_title = await repository.list_for_title(title_id)
+        assert [row.external_id for row in by_title] == ["series-row"]
+
+    async def test_list_for_episode_orders_available_copies_before_retracted_ones(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """Same ordering property `list_for_title` pins, on the statement
+        that answers an episode's own copies -- an unordered read makes an
+        episode's detail screen shuffle its badges between refreshes for no
+        reason a user can see.
+
+        The retracted copy (`stale`) is the *fresher* of the two, so
+        `available DESC` is the only key that can put the available one
+        first -- with `last_seen_at DESC` alone the answer reverses. Both
+        rows are swept (their `last_seen_at`s both predate the cutoff), then
+        `fresh` alone is re-upserted, which is what makes it available
+        again without changing which of the two Postgres saw more recently.
+        """
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    "stale",
+                    title_id=title_id,
+                    episode_id=episode_id,
+                    last_seen_at=RUN_AT,
+                )
+            ]
+        )
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    "fresh",
+                    title_id=title_id,
+                    episode_id=episode_id,
+                    last_seen_at=EARLIER,
+                )
+            ]
+        )
+        await repository.mark_unseen_unavailable(
+            source_id, seen_since=RUN_AT + timedelta(days=1), max_retract_fraction=1.0
+        )
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    "fresh",
+                    title_id=title_id,
+                    episode_id=episode_id,
+                    last_seen_at=EARLIER,
+                )
+            ]
+        )
+        listed = await repository.list_for_episode(episode_id)
+        assert [(row.external_id, row.available) for row in listed] == [
+            ("fresh", True),
+            ("stale", False),
+        ]
+
+    async def test_list_for_episode_puts_the_freshest_available_copy_first(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """The second key, on its own rows -- `list_for_title`'s sibling case,
+        one statement over. Two *available* copies is the ordinary shape for
+        an episode too (a 4K and an HD file of one episode file), and the
+        case above cannot see `last_seen_at DESC` at all, because its two
+        rows already differ on `available`. Stored oldest-first, so
+        insertion order and the answer disagree.
+        """
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    "old",
+                    title_id=title_id,
+                    episode_id=episode_id,
+                    last_seen_at=EARLIER,
+                )
+            ]
+        )
+        await repository.upsert_many(
+            [item(source_id, "new", title_id=title_id, episode_id=episode_id)]
+        )
+        listed = await repository.list_for_episode(episode_id)
+        assert [row.external_id for row in listed] == ["new", "old"]
+
+    async def test_list_for_episode_breaks_ties_on_id(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        title_id: uuid.UUID,
+        episode_id: uuid.UUID,
+    ) -> None:
+        """Same non-HOT-update mechanism as `list_for_title`'s sibling case --
+        see that case's docstring for the full reasoning. `copy-a` is
+        re-upserted last and its `last_seen_at` has to *change* (dropped here,
+        so it defaults back to `RUN_AT` off `EARLIER`), which moves it in
+        `ix_media_items_sweep`'s key and forces a new index entry; without
+        that, Postgres keeps the original one and the read stays in insertion
+        order, where a missing `id` tiebreak is unobservable either way.
+
+        Unobservable for the fake regardless, for the same reason
+        `list_for_title`'s case names: that fake mints ids in insertion order
+        and its dict preserves that order across an update, so its id order
+        and its storage order are the same sequence and no seeding can
+        separate them. Only the Postgres run can fail this.
+        """
+        await repository.upsert_many(
+            [
+                item(
+                    source_id,
+                    "copy-a",
+                    title_id=title_id,
+                    episode_id=episode_id,
+                    last_seen_at=EARLIER,
+                )
+            ]
+        )
+        await repository.upsert_many(
+            [item(source_id, "copy-b", title_id=title_id, episode_id=episode_id)]
+        )
+        await repository.upsert_many(
+            [item(source_id, "copy-c", title_id=title_id, episode_id=episode_id)]
+        )
+        await repository.upsert_many(
+            [item(source_id, "copy-a", title_id=title_id, episode_id=episode_id)]
+        )
+        listed = await repository.list_for_episode(episode_id)
+        assert len(listed) == 3
+        assert [row.id for row in listed] == sorted(row.id for row in listed)
+
+    async def test_list_for_episode_answers_empty_for_an_episode_on_no_source(
+        self, repository: MediaItemRepository
+    ) -> None:
+        """The ordinary answer for an episode with no copy on any configured
+        source, not a missing row -- `list_for_title`'s sibling case, one
+        method over."""
+        assert await repository.list_for_episode(new_id()) == []
+
 
 LONG_AGO = RUN_AT - timedelta(days=730)
 YESTERDAY = RUN_AT - timedelta(days=1)

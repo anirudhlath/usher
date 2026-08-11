@@ -312,7 +312,7 @@ be added if a client turns out to need flexible field selection.
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` · `GET /health/ready` | Liveness and readiness |
-| `GET /meta/attribution` | Required IMDb/TMDb attribution strings ([04](04-catalog-bootstrap.md)) |
+| `GET /meta/attribution` | The four required attribution strings — IMDb, TMDb, MovieLens, Wikidata ([04](04-catalog-bootstrap.md)) |
 | `GET /openapi.json` | Schema |
 
 ## Response contracts
@@ -376,60 +376,74 @@ RFC 9457 problem details, with a machine-readable `code`:
 The principle from [08](08-operations.md) holds at the boundary: a degraded
 subsystem narrows functionality, it never fails a request local state can answer.
 
-> **Not yet built, as of M3.** The admin source routes M3 ships return
-> FastAPI's default shapes — `{"detail": "source not found"}` for a 404 and
-> `{"detail": [ … pydantic errors … ]}` for a 422 — not the envelope above.
-> The envelope is a client contract, and the client-facing surface is
-> [09](09-roadmap.md)'s M9; defining a `code` vocabulary against four admin
-> routes would be guessing at it a milestone early. What M3 *does* enforce
-> is the part of the error path that could not wait: a 422 never echoes the
-> submitted request body, because that body carries a source credential.
-> See [08](08-operations.md)'s secrets rules.
->
-> **Still deferred after M5, and now for a sharper reason.** M5 adds a
-> streaming surface and two client routes, and neither forces the envelope.
-> RFC 9457 is a format for a response *body*; once `GET /events` has answered
-> `200 text/event-stream` there is no further status code to carry a problem
-> document, so the in-stream vocabulary is an SSE event (`resync_required`)
-> rather than a document. And the failure that *would* force it — the worked
-> example above, `503 source_unavailable` — is unreachable on `GET
-> /titles/{id}` by design: the service behind it holds no `SourceAdapter`, so
-> there is no request Usher can be asked to answer and genuinely cannot. The
-> first route whose honest answer is "the source is down and I cannot serve
-> this from local state" is `POST /titles/{id}/play`, in M9, alongside the
-> playback ticket [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)
-> owes. M5's two ordinary failures are the shapes M3 already ships: a 404 for
-> an unknown title and a 422 for a malformed id or `?titles=`.
->
-> **Still deferred after M7, and M7 is the milestone that tested the reason
-> rather than restating it.** M7 adds a client-facing route — `GET /home` —
-> and it does not force the envelope either, for the same structural reason
-> one layer along: every input is local state (watch state, media items,
-> `title_neighbors`, genre affinity, credits, collections), the route holds no
-> `SourceAdapter`, and [08](08-operations.md)'s own degradation table says
-> *"LLM call fails → Home composes without them"* — so the one upstream that
-> could be down is one this route already composes without. **There is no 503
-> here to give a `code` to.** Two client routes now, two milestones, and the
-> deferral has survived both on evidence rather than on inertia; the first
-> route whose honest answer is a domain-level failure is still M9's
-> `POST /titles/{id}/play`.
->
-> **Still deferred after M8, and its route needs a longer argument than M5's
-> and M7's rather than the same one.** Those two turn on holding no
-> `SourceAdapter`, which is a claim about *reads* — `GET /titles/{id}` already
-> writes, and so does `POST /admin/sources`, so "it writes" was never what the
-> envelope hung on. What is new is that `POST /admin/rows/regenerate` writes to
-> a subsystem that can be down while the process is up: the job queue, which is
-> PostgreSQL, and an outage of that is already reported as a 503 by
-> `GET /health/ready` for the whole process — so answering 503 *here* would say
-> "this endpoint is degraded, retry it" about a deployment in which every
-> endpoint is down, and would need the `code` vocabulary a milestone early to
-> say which. The handler therefore catches nothing: a `PortUnavailable` from
-> the queue propagates and becomes an ordinary 500. **A test asserts the
-> translation is absent rather than merely unused**, because "it did not answer
-> 503" is also what a route that swallowed everything would produce — the same
-> reason `TitleReadService`'s missing `SourceAdapter` is asserted on its
-> imports. The deferral has now survived a third milestone.
+**Built in M9, in two passes — the *shape* first, the vocabulary second.** The
+envelope was deferred four times (M3, M5, M7, M8) and each deferral turned on the
+same structural fact: no shipped route had a failure the envelope was *for*. M5's
+`GET /events` has no status code left once it has answered `200
+text/event-stream`; M7's `GET /home` holds no `SourceAdapter`; M8's
+`POST /admin/rows/regenerate` enqueues and returns 202. All three arguments still
+stand. What changed is that M9 stopped waiting for the failure that forces the
+envelope and shipped the envelope for the failures that already exist.
+
+The split is not tidiness. Six drafters designing the `code` vocabulary alongside
+their own routes proposed **seventeen members against a budget of four, under two
+mutually exclusive conventions for the same status** — which is precisely what
+this section declined to guess at four times. So:
+
+| pass | what it is | where |
+|---|---|---|
+| shape | the six members, `application/problem+json`, the two exception handlers, the `type` derivation, the exemptions | `src/usher/api/dto/problem.py`, `src/usher/api/errors.py` |
+| vocabulary | every `code` the surface emits, frozen | ADR-0030 |
+
+`ProblemCode` today is `not_found`, `validation_failed`, `method_not_allowed` and
+`invalid_cursor` — what the shipped surface emits, plus the cursor codec's — and
+**the names are provisional.** Whether a 404 is generic (`not_found`) or
+per-resource (`title_not_found`) is ADR-0030's call, settled once rather than once
+per route.
+
+Four properties of the shape, each of which is a rule rather than a detail:
+
+- **`type` is derived from `code` by one function** —
+  `https://usher.dev/errors/<code-in-kebab-case>` — never hand-written per member,
+  so a code and its type cannot drift apart.
+- **`status` is written once.** The handler builds the document and then builds
+  the response *from* `document.status`, so the body and the status line cannot
+  disagree.
+- **`instance` is the request *path*, never the request URL.** A rejected `?q=`
+  echoed back in `instance` is the same leak the 422 handler exists to prevent,
+  through a different field. Note the corollary, which is inherent to RFC 9457
+  rather than a compromise: a 422 for a malformed *path parameter* does carry
+  that parameter, because there is no `instance` that identifies the occurrence
+  and omits the path. No credential is ever in a path in this API.
+- **The 422 composes with the credential control rather than replacing it.** A
+  422 never echoes the submitted request body, because that body carries a source
+  credential (see [08](08-operations.md)'s secrets rules). The stripped
+  `loc`/`msg`/`type`/`ctx` list rides as RFC 9457's `errors` extension member and
+  `detail` is a **fixed sentence** that interpolates nothing submitted.
+
+**Two routes are exempt, by name, with their reasons recorded in code** — as a
+mapping in `dto/problem.py` that the "every route declares its problem responses"
+check imports rather than re-derives, so a route left alone on purpose does not
+read as one somebody forgot:
+
+- **`GET /health/ready`** keeps `ReadinessResponse` for its 503. Its real
+  consumers — Kubernetes, Docker `healthcheck`, load balancers — gate on the
+  status code and never parse the body, and the body they do not parse says which
+  check failed, which a `code` would not.
+- **`GET /events`** keeps its in-stream vocabulary (`resync_required`) for the
+  reason M5 recorded: RFC 9457 formats a response body, and after `200
+  text/event-stream` there is no status code left to carry one. Its 422 for a
+  malformed `?titles=` is decided before the stream starts and *is* a problem
+  document.
+
+Both exemptions are about what a **handler** answers. A 405 is raised by the
+router before any handler runs, so every route — exempt or not — answers a problem
+document for one.
+
+A status with no member in the vocabulary is **left in FastAPI's default shape**
+rather than given an invented code. That is the two-pass split enforced in the
+handler: growing the vocabulary is ADR-0030's job, and a handler that guessed
+would reintroduce exactly the sprawl the split exists to prevent.
 
 ## Streaming updates (SSE)
 
@@ -562,13 +576,42 @@ proxies that mangle upgrades, and it reconnects natively in browsers.
 
 ## Images
 
-`GET /images/{image_id}?w=&h=&fmt=` — the caching proxy from
-[02](02-data-model.md). Fetches from the provider on first request, resizes,
-stores on disk, serves with immutable cache headers thereafter.
+`GET /images/{image_id}?w=` — the caching proxy from [02](02-data-model.md).
+Fetches a provider **rung** on first request, stores the bytes on disk, and
+serves them with a long-lived cache header thereafter. It does not decode and
+does not re-encode: nothing in Usher's runtime can read an image, and nothing
+needs to. See [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md).
 
-Clients never see provider image URLs and never need a provider key. Requested
-widths are clamped to a fixed ladder so the cache can't be trivially blown up by
-arbitrary dimensions.
+⏳ **`Cache-Control: immutable` is conditional and is not yet earned.** It is
+honest only if an image id survives re-derivation, and the `images` table
+shipped in `m09a` with no unique key to make that true — so until the key lands
+(requested as `m09c`, specified in ADR-0032) this route sends a long `max-age`
+**without** `immutable`, which lets a client revalidate.
+
+Clients never see provider image URLs and never need a provider key. `w` is
+clamped **up** to a closed ladder of four widths — `154 342 780 1280`, a code
+constant — with `342` when it is omitted and a 422 for anything that is not a
+positive integer. There is no `original` rung: it is the one size with no width
+bound at all, measured at 173 KB to 4.7 MB across kinds (1.5× a poster's top
+rung, 8.1× a backdrop's), and serving it is the disk-and-bandwidth hazard the
+clamp exists to prevent.
+
+🔴 **This section promised `?w=&h=&fmt=` until 2026-08-11 and two of those three
+are withdrawn**, because the mechanism turned out not to support them and a
+parameter the server ignores is worse than one it never offered. **`h=`**: the
+provider publishes exactly one height rung, and only for `profile`, a kind M9
+does not emit — and artwork aspect ratio is fixed by kind, so a height is a
+width divided by a constant the client already knows. **`fmt=`**: the provider
+serves what it holds and negotiates format on `Accept`, not on a query string —
+measured, it will re-encode to WebP for a client that asks in the header and
+will not transcode to a format it does not hold. Format negotiation over
+`Accept` is the named successor, it is strictly additive, and it is worth
+roughly a third of the bytes; it is not built here.
+
+The clamp is also **not** what makes the space finite, which this section
+assumed: the provider's own CDN enforces a closed 15-rung allowlist and answers
+HTTP 400 to everything else. The ladder bounds *Usher's* disk cache at four
+entries per image and keeps Usher's API off a provider's vocabulary.
 
 ## Playback
 
@@ -631,6 +674,35 @@ by hand in the Home Assistant card moves here, where it is testable.
 > working until Emby prunes the session or an operator revokes it. See
 > [03](03-sources-and-sync.md) for the cache and ADR-0012 for the risks
 > accepted with it.
+
+> **Settled in M9 — the playback ticket.** ADR-0012's successor is decided and
+> its cipher is built:
+> [ADR-0029](decisions/0029-the-playback-ticket-changes-the-artifact-not-the-grant.md).
+> A **ticket** is a Fernet token over an HKDF-SHA256 subkey of
+> `USHER_SECRET_KEY`, domain-separated from the source-credential subkey with
+> `info=b"usher.playback-ticket.v1"`, carrying the source URL as its
+> plaintext. `POST /titles/{id}/play` hands the client a ticket instead of the
+> source URL and `GET /stream/{ticket}` redeems one into a `302` — so Usher
+> still never proxies bytes, and the block quote above's JSON example shows the
+> pre-ticket shape until the route lands.
+>
+> **Encrypted rather than merely signed**, because the payload *is* the URL
+> carrying `api_key`: a signed-but-readable token would publish the credential
+> it exists to hide. **Stateless** — there is no ticket table, so no revocation
+> before expiry; rotating `USHER_SECRET_KEY` is the coarse revocation that
+> exists. **Expired and forged are deliberately indistinguishable**, and
+> redemption raises nothing rather than building an error message a URL could
+> leak into.
+>
+> **What it changes is the artifact, not the grant.** The `302`'s `Location` is
+> the real URL, so the token still reaches the client that follows it; what
+> stops being a working credential is what the client stores, renders, caches
+> or pastes. The reduction is **weakest for the `deep_link` target**, which
+> hands the ticket to a third-party player that follows the redirect and then
+> holds the real URL exactly as it does today. There is deliberately no
+> `USHER_PLAYBACK_TICKET_TTL_SECONDS` — the TTL is a named constant at the one
+> place that mints, because nobody has yet measured how long a client sits
+> between receiving a target and following it.
 
 ## Authentication seam
 

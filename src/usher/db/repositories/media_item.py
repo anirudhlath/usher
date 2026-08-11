@@ -219,6 +219,20 @@ WHERE title_id = :title_id AND episode_id IS NULL
 ORDER BY available DESC, last_seen_at DESC, id
 """
 
+# `list_for_title`'s counterpart, for `POST /episodes/{id}/play` -- and the
+# reason it needs no `episode_id IS NOT NULL` or title-scoping clause of its
+# own is the same three-valued-logic argument `_RECENTLY_ADDED`'s window
+# relies on: `episode_id = :episode_id` against a non-null parameter is
+# simply not true for a row whose `episode_id` is NULL, so the exclusion is
+# free rather than a second predicate to get right. `ix_media_items_episode_id`
+# (`db/models/source.py:121`) is the same index `_FOR_TITLE`'s `IS NULL`
+# clause reads, from the opposite side.
+_FOR_EPISODE = """
+SELECT * FROM media_items
+WHERE episode_id = :episode_id
+ORDER BY available DESC, last_seen_at DESC, id
+"""
+
 # Which of a search's candidate titles this household holds a copy of. One
 # statement for the whole result set, and the two clauses that are *not* here
 # are the load-bearing part:
@@ -484,6 +498,15 @@ class PostgresMediaItemRepository(MediaItemRepository):
         with self._session.no_autoflush:
             rows = (
                 (await self._session.execute(text(_FOR_TITLE), {"title_id": title_id}))
+                .mappings()
+                .all()
+            )
+        return [MediaItem.model_validate(dict(row)) for row in rows]
+
+    async def list_for_episode(self, episode_id: uuid.UUID) -> list[MediaItem]:
+        with self._session.no_autoflush:
+            rows = (
+                (await self._session.execute(text(_FOR_EPISODE), {"episode_id": episode_id}))
                 .mappings()
                 .all()
             )

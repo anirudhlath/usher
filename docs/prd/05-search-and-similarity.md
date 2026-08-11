@@ -171,9 +171,9 @@ text_pattern_ops` to **both** `titles` and `title_search_names`: p50 0.6 ms,
 p95 1.0 ms, max 10 ms, 44 MB, building in 0.559 s over 1,271,138 rows, against
 the trigram path's 33.3 ms p50 and 734 ms max.
 
-⏳ **The table is empty, and both halves that fill it are still owed.** M6
-deferred this to *"the day M7 lands aliases and people"*. **M7 landed people
-and not aliases**, so `m09a` builds the shape and neither writer — a deferral
+⏳ **`m09a` builds the shape; the two halves that fill it have separate
+writers, and one of them is now built.** M6 deferred this to *"the day M7 lands
+aliases and people"*. **M7 landed people and not aliases** — a deferral
 silently rolled forward is the exact failure [09](09-roadmap.md) names for the
 tag genome (*"an obligation recorded only where it was postponed is one nobody
 plans"*). Both halves, with an owner:
@@ -184,13 +184,28 @@ plans"*). Both halves, with an owner:
   entirely — landing them changes the crawl's *request shape* and re-fetches
   the whole enriched tier. **Unassigned**, and named in PRD 03 rather than
   left implied by this deferral.
-- **The people half belongs with M9's two-tier suggest**, which
-  [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges and
-  which *replaces* the shipped suggest path rather than extending it. **Owner:
-  M9**, together with the two-tier suggest, and it is the writer rather than
-  the schema: `m09a` builds the table as part of the design that replaces the
-  path, which is what removes the "redesigns against a table built for the
-  design it is replacing" objection this bullet used to carry.
+- ✅ **The credited-person half is written by
+  `CreditRepository.replace_for_titles`** — the call that already writes
+  `credits` and `titles.credit_names`, from the same `credit_names` mapping, in
+  the same transaction. **No second writer, no backfill job and no new
+  command**: the array and the table were already two spellings of one fact and
+  this is the third, so splitting the write is what makes them diverge, and the
+  symptom is a *suggest* hit on a name `credits` no longer holds. `kind` is
+  `person`, `region` and `language` are NULL on every such row (a credited
+  person's name has no locale), and the delete is scoped by `title_id` **and**
+  `kind` so the alias loader's rows survive it. The ranking — top ten billed
+  then every stored crew name — is carried by the UUIDv7 primary key, because
+  the table has no rank column and deliberately does not need one for aliases.
+  **A catalog derived before this landed holds no rows here until `usher
+  derive` re-runs over it**, which is worth knowing before timing a query
+  against it.
+
+The suggest path that *reads* the table is M9's, which
+[ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges and
+which *replaces* the shipped path rather than extending it — `m09a` builds the
+table as part of the design that replaces the path, which is what removes the
+"redesigns against a table built for the design it is replacing" objection this
+section used to carry.
 
 Stated honestly: **that call rests on a structural argument, not on a
 latency measurement.** No variant was built and timed against the direct
@@ -868,6 +883,25 @@ inside a keystroke — with the trigram + `levenshtein_less_equal` path
 **debounced behind it**. They are complements: the btree has no typo
 tolerance at all (1.9%) and the trigram path cannot meet a keystroke budget
 at any setting.
+
+✅ **Tier 1 is built.** `PostgresPrefixSuggestIndex`
+(`adapters/search/prefix.py`) is the probe: `lower(name) LIKE 'typed%'` over
+`titles` **and** `title_search_names` as one `UNION`, so a person's name
+reaches their films from the first keystroke, ordered by the same three keys
+tier 2 uses under its distance (`popularity DESC NULLS LAST, vote_count DESC
+NULLS LAST, id ASC`) so the box does not reshuffle when the debounced tier
+arrives behind it. It reads the two `text_pattern_ops` indexes `m09a` ships and
+**writes nothing**, so ADR-0021's dual-write cost is still unpaid by a second
+implementation of that port.
+
+🔶 **What is measured about it here is a probe, not the shipped statement.**
+The 0.6 ms figure above is a prefix probe over 1,271,138 names; the union, the
+de-duplication and the sort above the `LIMIT` are not in it, and Postgres has
+no `LIMIT` pushdown through a sort — so a one-character keystroke over a large
+catalog is the open question. **M9's B3 measures the shipped statement at
+catalog scale against a bar written before the run, and is the task authorised
+to narrow the union on the strength of it.** The route that serves both tiers,
+and the ADR recording the split, are B5's.
 
 **The gate as this section defined it measured the wrong half, and that
 correction stands.** A synthetic dry run over 604 cases first showed it, and

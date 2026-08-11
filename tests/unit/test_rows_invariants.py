@@ -97,6 +97,32 @@ def test_the_registry_holds_every_provider_this_milestone_ships() -> None:
     assert set(BASE_SCORES) == {_named(provider) for provider in ROW_PROVIDERS}
 
 
+def test_every_registered_provider_has_a_distinct_slug_prefix() -> None:
+    """**The key `RowProviderSettingsRepository` rests on** (E1), pinned where
+    the registry lives rather than assumed from the outside.
+
+    `test_the_registry_holds_every_provider_this_milestone_ships` above counts
+    *classes*, so a duplicate **inside** today's ten shrinks
+    `{_named(p) for p in ROW_PROVIDERS}` below ten and fails there -- but an
+    eleventh provider that reuses an existing `slug_prefix` (a class that
+    typo'd its own literal off `FranchiseProvider`'s `"franchise"` rather than
+    declaring one of its own) leaves that set at ten and passes it clean.
+    `test_services_home.py`'s `{p.slug_prefix for p in ROW_PROVIDERS} == {...
+    ten literals ...}` has the identical gap for the same reason: a literal
+    set comparison collapses a duplicate whether the duplicate is a class or a
+    string, and neither case was ever asserting distinctness -- both were
+    asserting *count*, which a reused prefix does not change.
+
+    `RowProviderSettingsRepository.overrides()` is keyed on this string --
+    "declared rather than derived" is the whole argument `ports/rows.py`'s
+    `slug_prefix` docstring makes for it existing at all -- so two providers
+    sharing one collide in that table: disabling either disables both,
+    silently, with no error from the migration, the port, or (until this
+    case) this file.
+    """
+    assert len({p.slug_prefix for p in ROW_PROVIDERS}) == len(ROW_PROVIDERS)
+
+
 async def test_every_proposed_row_carries_its_providers_slug_prefix() -> None:
     """**The property that makes `usher.row.build.duration`'s label provably
     about the rows it measures**, rather than merely alongside them.

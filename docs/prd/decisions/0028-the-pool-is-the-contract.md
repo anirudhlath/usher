@@ -113,6 +113,127 @@ zeros included — a reason absent from a tally is indistinguishable from a
 reason nobody counts, which is this ADR's own subject one level up.
 `src/usher/services/curation_validate.py` holds the one copy of the argument.
 
+🔴 **Amended 2026-08-11 by M9 Task G3: the prompt asserted the pool was the
+household's own library, the pool never was, and the prompt is what gave way.**
+The 2026-08-07 live run recorded the disagreement and filed it as a product
+decision rather than settling it —
+`TitleRepository.list_unwatched_candidates` uses ownership as an `ORDER BY`
+key and never as a filter, deliberately, so
+[06](../06-rows-and-recommendations.md)'s *"the pool spans the whole catalog,
+not just the library, so suggestions can include things to seek out"* stays
+true, while `curation_prompt.build_prompt` opened *"one household's **own**
+film and television library."* Two defensible sentences; exactly one could
+survive.
+
+**The decision rule was written before the sweep ran.** An arm had to make
+the prompt and the pool agree (C1); leave a curated shelf reachable for a
+library smaller than `USHER_CURATION_POOL_SIZE` (C2, operationalised as: the
+filtered arm fails if there is any `U > 0` at which the unfiltered pool can
+fill a row — `len(pool) >= curation_validate.DEFAULT_MIN_CARDS = 5` — and the
+filtered one cannot); and not reintroduce 06's *"it fails in the direction
+hardest to notice"* (C3). C1 discriminates nothing — both arms satisfy it by
+construction — and is recorded so that *"it makes them agree"* cannot be quoted
+as an argument for either.
+
+**Evidence (a), deterministic and model-free.** A pool-composition sweep
+through the real `PostgresTitleRepository` against a `pgvector/pgvector:pg17`
+container built by the real Alembic chain: a 1,000-title catalog, no watch
+history, `limit = 200`, `U` unwatched-and-owned titles chosen with
+`random.Random(20260811)`. The filtered arm is the identical statement with
+`owned` moved from the `ORDER BY` into the `WHERE`.
+
+| `U` | pool, as shipped | of which owned | shipped fills a row | pool, filtered | filtered fills a row |
+|---|---|---|---|---|---|
+| 0 | 200 | 0 — 0.0% | yes | **0** | **no** |
+| 3 | 200 | 3 — 1.5% | yes | **3** | **no** |
+| 5 | 200 | 5 — 2.5% | yes | 5 | yes |
+| 8 | 200 | 8 — 4.0% | yes | 8 | yes |
+| 20 | 200 | 20 — 10.0% | yes | 20 | yes |
+| 200 | 200 | 200 — 100.0% | yes | 200 | yes |
+
+**Arm 1 fails C2 at `U = 3`, and the falsifier written down first was that it
+would pass at every `U > 0`.** It did not.
+
+🔴 **And the sweep refuted something stronger than the rule asked for: the
+filter cannot add a single candidate, because its whole effect is
+subtractive.** `owned DESC` is the first sort key, so the owned titles are a
+*prefix* of the pool — the owned column above is exactly `min(U, 200)` at every
+row, which is to say the shipped read **already returns every unwatched-owned
+title the household has**, at every size measured. At `U = 200` the two arms
+return the identical set. So arm 1 buys the prompt's sentence by deleting the
+tail and nothing else, and below `min_cards` it deletes the generation. The
+band where it does so is wider than the arithmetic: this ADR's own 2026-08-07
+run measured rows of **2–3 cards at pool 5 and pool 8**, all discarded as
+`row_too_short`, so `U = 5` and `U = 8` clear the `>= 5` bar on paper and
+produced nothing live.
+
+**Evidence (b), and it overturns half of the recommendation this task was
+handed.** The plan recommended arm 2 *plus a per-candidate ownership marker*.
+Priced the way the 4,304 above was priced — `usage.prompt_tokens` at
+`max_tokens=1`, **4 completions**, the local vLLM (`gemma-4-26b-a4b`,
+`max_model_len` 16,384), pool 200 sampled from the on-disk IMDb dumps with this
+ADR's own criteria (`titleType = movie`, `numVotes >= 50,000`,
+`random.Random(20260806)`; the dumps have been re-downloaded since, so the
+sample is not identical):
+
+| arm | prompt tokens | delta |
+|---|---|---|
+| the shipped prompt | **4,251** | — (4,304 on 2026-08-07, within 1.2%) |
+| the opening sentence corrected, nothing else | **4,277** | **+26, once** |
+| \+ marker *"in the library"* / *"not in the library"* | 5,257 | +980 → **4.900 tok/candidate** |
+| \+ marker *"owned"* / *"not owned"* | 4,857 | +580 → **2.900 tok/candidate** |
+
+**The bar for the marker was declared before the measurement — at most 2.0
+prompt tokens a candidate, ~10% of the 20.40 tokens/candidate the shipped
+candidate line costs — and the cheapest legible wording missed it by 45%.** So
+**no marker ships.** Two things make that more than a bar being met narrowly.
+The terse marker is **14.2%** on top of every candidate line, on the most
+expensive string this project sends. And it eats the headroom of a pool size
+this ADR has already measured as the reference endpoint's ceiling: pool 600
+works at 12,540 prompt tokens, and at 2.900 tok/candidate a marked pool 600
+would be ~14,280, which with `llm_max_output_tokens = 2048` leaves **56 tokens**
+under `max_model_len` — while the verbose marker's ~15,480 puts it **over**, so
+a working configuration would start answering HTTP 400. *(Derived from this
+ADR's measured 12,540 and the rates above, not separately measured.)* The
+correction ships alone, at +26 tokens once, and the client affordance for the
+other half already exists: `RowCard.owned` defaults `False` and
+[05](../05-search-and-similarity.md) requires unowned results be *"clearly
+marked"*.
+
+**A third design was considered after the numbers came in and deliberately not
+taken:** the pool's owned prefix means one sentence — *"candidates 1–N are in
+the library"* — would carry the same information for ~15 tokens total. It is
+attractive and it is exactly the shape this task was warned against, a
+mechanism chosen because it is cheap and invented after the measurement rather
+than declared before it. It also couples the prompt to the repository's sort
+order, so a later reordering would make the sentence lie silently. Named here
+as an option a later task may take **with its own pre-declared rule**.
+
+**Evidence (c), stated rather than guessed.** The 2026-08-07 live run recorded
+**`media_items = 0`**, so no real ownership distribution has ever been observed
+on this project and *"how often is a household's unwatched-owned set below
+200?"* is unmeasured. This call therefore rests partly on a guessed
+distribution — and it is the arm that is *insensitive* to the guess, because
+the shipped read already returns every owned candidate at every `U` measured,
+so being wrong about `U` costs a longer tail rather than an empty shelf.
+**What would reverse it:** M9's live Emby run, if it shows that the tail is not
+merely unowned but actively unhelpful — a household that reliably ignores
+unowned cards. That is a measurement about *cards clicked*, not about pool
+composition, and nothing in this system records it yet.
+
+**The arm not taken, and its argument, kept rather than deleted.** Filtering
+buys a cheaper statement for a query that runs once per household per night:
+the sort is over the whole catalog and a filter would narrow it to the owned
+library, single-digit thousands instead of 1.27M rows. That is a real cost and
+it is accepted — `list_unwatched_candidates` says so — rather than dismissed.
+Filtering would also have retired a rendered field, since `RowCard.owned` can
+only ever be `False` for a curated card once the pool is the library, and it
+would have made [06](../06-rows-and-recommendations.md)'s
+*"fails in the direction hardest to notice"* true a third time, after
+`GenreAffinityProvider`'s centroid trigger and the pool's centroid pre-filter:
+a shelf that silently stops appearing on exactly the small libraries curation
+is worth most to.
+
 ## Consequences
 
 **Gained:**

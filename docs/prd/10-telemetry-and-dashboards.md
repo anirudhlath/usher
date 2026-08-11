@@ -126,7 +126,7 @@ is maintained rather than aspirational.
 
 | Metric | Type | Labels | Emitted |
 |---|---|---|---|
-| `usher.http.server.duration` | histogram | route, status | M9 |
+| `http.server.duration` | histogram | `http.target`, `http.status_code` | ✅ M9 |
 | `usher.search.duration` | histogram | mode | ✅ M6 |
 | `usher.search.results` | histogram | mode | ✅ M6 |
 | `usher.home.compose.duration` | histogram | — | ✅ M7 |
@@ -150,7 +150,7 @@ is maintained rather than aspirational.
 | `usher.provider.requests` | counter | provider, status | ✅ M4 |
 | `usher.metadata.request.duration` | histogram | status | ✅ M4 |
 | `usher.embedding.duration` | histogram | — | ✅ M6 |
-| `usher.cache.hits` / `.misses` | counter | cache | M9 |
+| `usher.cache.hits` / `.misses` | counter | cache | ✅ M9 |
 | `usher.search.embeddings.stale` | gauge | — | ✅ M6 |
 | `usher.search.embeddings.refused` | gauge | — | ✅ M6 |
 | `usher.similarity.neighbors.stale` | gauge | — | ✅ M7 |
@@ -159,6 +159,28 @@ is maintained rather than aspirational.
 | `usher.bootstrap.batch.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.phase.duration` | histogram | dataset | ✅ M2 |
 | `usher.bootstrap.failures` | counter | dataset, kind | ✅ M2 |
+
+**`http.server.duration` is a correction, not an addition, and carries no
+`usher.` prefix on purpose.** M9 re-measured through a real `create_app()` and
+real requests against an `InMemoryMetricReader`: `FastAPIInstrumentor`
+(wired in `create_app`, `api/app.py:127`) already emits this histogram on
+every request — unit `ms`, scope `opentelemetry.instrumentation.fastapi` —
+with `http.target` set to the **route template**
+(`/titles/{title_id}`, not the raw path, so two distinct title ids collapse
+into one series) and `http.status_code`. That is exactly what this row asked
+for, under OpenTelemetry's own semantic-convention name rather than ours, so
+the row now names what ships instead of asking for a second histogram over
+the same measurement — recording `usher.http.server.duration` alongside it
+would double the export for one relabelled series, the same
+two-vocabularies-under-one-name hazard this document already warns about for
+`provider` below.
+**The semconv opt-in is a named hazard, not a footnote**: setting
+`OTEL_SEMCONV_STABILITY_OPT_IN=http` renames this metric to
+`http.server.request.duration`, changes its unit from `ms` to seconds, and
+swaps `http.target` for `http.route` — any one of which empties a dashboard
+panel built against the names above, silently, with no error anywhere.
+Nothing in this project's config sets that variable; it is recorded here so
+the day someone does, the panel that goes quiet is not a mystery.
 
 **`mode`'s vocabulary is `full_text` / `semantic` / `fused`** — `SearchMode`'s
 own values, lower-case, and written down here because a label whose vocabulary
@@ -212,8 +234,12 @@ written down here for the reason the paragraph above gives — `continue-watchin
   before it opens the timer, deliberately, so this histogram measures the cost
   of *building* a row and not the cost of serving one. The population is
   therefore misses, and the hit rate is not recoverable from it —
-  `usher.cache.hits`/`.misses` is M9's, and until then the cold/warm pair
-  `usher home` prints is the only measurement of the row cache there is.
+  `usher.cache.hits`/`.misses` is what answers that instead (M9), recorded
+  where the read happens (`RowCache.get_row`/`get_screen`), labelled
+  `cache` = `row` / `screen` and, by rule rather than a closed list, whatever
+  value the next cache appends in the commit that ships it. An entry found
+  expired counts as a **miss**, not a hit — it is a rebuild, the same
+  population the histogram above measures.
 
 **`usher.curation.rows` and `usher.curation.dropped` are the milestone's only
 two metrics, and neither is about money.** This document's own first principle
@@ -616,12 +642,14 @@ image proxy hit rate and cache size.
 **Home composition time is backed by real data as of M7**, from both sides:
 `usher.home.compose.duration` for the total and `usher.row.build.duration`'s
 `provider` label for the breakdown, with `home.compose → row.build` spans for
-the drill-down. Three panels on this dashboard are **not** backed: API latency
-by endpoint needs `usher.http.server.duration` (M9), cache hit rates need
-`usher.cache.hits`/`.misses` (M9), and search→play conversion needs
-`search_queries`' outcome columns (M9). And one caveat travels with the home
-panels — the build histogram's population is cache *misses* only, so a p50
-that rises after a deploy may be a colder cache rather than a slower provider.
+the drill-down. **API latency by endpoint and cache hit rates are backed as of
+M9**: the former by `http.server.duration` (no `usher.` prefix — see the
+correction above the metric table), the latter by `usher.cache.hits`/
+`.misses`. One panel on this dashboard is still **not** backed: search→play
+conversion needs `search_queries`' outcome columns (M9, owned elsewhere). And
+one caveat travels with the home panels — the build histogram's population is
+cache *misses* only, so a p50 that rises after a deploy may be a colder cache
+rather than a slower provider.
 
 ### 5 — Cost & Compliance
 

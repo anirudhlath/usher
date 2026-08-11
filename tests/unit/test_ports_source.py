@@ -20,6 +20,7 @@ from usher.domain.enums import HdrFormat
 from usher.ports.credentials import CredentialStore, SourceCredentials
 from usher.ports.source import (
     CANONICAL_PROVIDER_IDS,
+    INFUSE_SCHEME,
     PushProbe,
     SourceAdapter,
     SourceAdapterFactory,
@@ -30,6 +31,7 @@ from usher.ports.source import (
     StreamTarget,
     StreamTargetKind,
     redact_query,
+    wrap_deep_link,
 )
 
 
@@ -189,6 +191,30 @@ def test_redact_query_is_public_and_cuts_at_the_query() -> None:
     )
     assert redact_query("wss://emby.invalid/embywebsocket") == "wss://emby.invalid/embywebsocket"
     assert redact_query("https://emby.invalid/x#api_key=abc") == "https://emby.invalid/x<redacted>"
+
+
+def test_wrap_deep_link_percent_encodes_the_whole_inner_url() -> None:
+    """(D2, part a): moved here, byte for byte, from
+    `usher.adapters.emby.playback.build_stream_targets` -- the format string
+    itself is unchanged, only where it lives. Pinned against the exact
+    literal rather than only against a round trip, so a mutation that
+    happens to be reversible (matching on `api_key=` instead of
+    percent-encoding the whole URL, say) cannot pass by symmetry.
+    """
+    assert wrap_deep_link("https://e/a.mkv?api_key=SEKRIT") == (
+        "infuse://x-callback-url/play?url=https%3A%2F%2Fe%2Fa.mkv%3Fapi_key%3DSEKRIT"
+    )
+
+
+def test_wrap_deep_link_uses_the_one_infuse_scheme_constant() -> None:
+    """`INFUSE_SCHEME` moved beside it -- one name, not two. A wrapper that
+    hard-coded `"infuse"` instead of reading the constant would pass this
+    case today and silently stop agreeing with `StreamTarget.scheme` the
+    moment either was edited alone."""
+    assert INFUSE_SCHEME == "infuse"
+    assert wrap_deep_link("https://e/a.mkv").startswith(
+        f"{INFUSE_SCHEME}://x-callback-url/play?url="
+    )
 
 
 def test_a_stream_target_still_redacts_through_the_shared_rule() -> None:

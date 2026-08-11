@@ -168,9 +168,12 @@ this one produces a complete, plausible, wrong one. Nearest relative is the
 collecting — it collected an error.
 
 Three defences, and the third is what makes the other two checkable: delete
-every `__pycache__` under `src/` before each run, set
+every `__pycache__` under `src/` **and `tests/`** before each run (the `tests/`
+half was missing here until 2026-08-11 — see the entry at the end of this file,
+where a plant in a test file was scored against another plant's bytecode), set
 `PYTHONDONTWRITEBYTECODE=1` in the subprocess environment so none is written
-back, and carry an **equivalent-mutant control** — one mutation that must
+back — that one is the load-bearing defence, measured — and carry an
+**equivalent-mutant control** — one mutation that must
 SURVIVE (reordering `__all__`'s members will do). A sweep reporting every
 mutation killed cannot distinguish a suite with teeth from a harness that
 scores every run as a kill, and the control is the only thing that tells them
@@ -765,3 +768,454 @@ them, in opposite directions, and that is the whole yield of the sweep.**
   docstring-scan grep this file records — the ten test files it finds scan
   `ports/embedding.py`, `ports/metadata.py`, `services/` and `api/`, and **none
   of them scans `ports/repository`**.
+
+**M9 Task A2's sweep: 10 plants over the RFC 9457 envelope — 8 targets of
+which 7 were killed on the first pass and 1 was a real coverage gap since
+closed, plus 2 equivalent-mutant controls surviving as designed. 0 BAD-ANCHOR,
+0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place over
+`src/usher/api/errors.py`, `src/usher/api/dto/problem.py` and
+`src/usher/api/app.py`, against the **whole `tests/unit` selection** (3,008
+cases, ~21 s a run), with the plant list and its expected verdict written down
+first, the three `.pyc` defences in force, and every restore verified by
+`md5sum` against a pre-plant digest. The three-way split is the one that says
+something: "9 killed" would hide the gap the round was for.
+
+**The plan named three sweep targets and the one it listed first is the one
+that survived**, which is the yield. *"The `input` key stripped from only the
+first error rather than all of them"* — spelled
+`if key != _ECHOED_INPUT or index > 0` over `enumerate(errors)` — **survived
+all 3,008 unit cases**, because **every rejected request anywhere in this
+repository produced exactly one validation error**, so a per-item strip and a
+first-item strip were the same program. It is not an equivalent mutant and the
+damage is the exact leak `api/errors.py` exists to stop: a `missing` error's
+`input` is the whole unparsed body, so a `POST /admin/sources` missing three
+fields carries the plaintext password three times and the mutant removes one
+copy. Closed by
+`test_every_error_is_stripped_and_not_only_the_first`, which submits a body
+producing three `missing` errors and asserts `len(errors) >= 2` as its own
+premise; re-planted, the mutation fails **that case alone**. **The general
+form: a per-item transformation is unobservable against a suite whose every
+fixture has one item — before calling a loop covered, ask what the largest N
+any case has ever exercised is.** Nearest relative is *"has any fixture,
+anywhere, ever set this to the other value?"* in `testing-discipline.md`,
+arriving at a collection size instead of a boolean.
+
+The other seven targets and what each cost: `instance` spelled
+`str(request.url)` fails 12; the `HTTPException` handler never registered fails
+10; the problem media type dropped fails 10; `type` derived without the kebab
+substitution fails 3; an unmapped status given `not_found` instead of being
+delegated to FastAPI's handler fails 2; the exemption set built from a literal
+rather than derived from the reasons map fails 1; and
+`status_code=status` in place of `status_code=document.status` fails
+**exactly one case, the structural one** — which is the measurement behind the
+claim that the two spellings are behaviourally identical today and that only an
+`ast` assertion can hold them apart.
+
+| control | `pytest tests/unit` | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `ProblemResponse.of`'s `detail=` / `instance=` keyword arguments swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `api/errors.py`'s module docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first is a fact about the *code* rather than about what the tools look at:
+keyword arguments are evaluated in written order and both expressions are
+side-effect-free reads (a parameter, and `request.url.path` on a Starlette
+`Request` that caches its `URL`). The docstring reword was checked first
+against the docstring-scan grep this file records — the eleven test files it
+finds scan `ports/`, `services/` and `api/routers/rows.py`, and **none of them
+scans `api/errors.py` or `api/dto/`**; the one scan A2 itself adds reads
+`inspect.getsource(problem_response)`, a single function, not the module
+docstring.
+
+**M9 Task A5's first reported equivalent-mutant control was mischaracterised,
+and it is recorded here rather than quietly replaced.** The write-up claimed
+*"swapping `counter.add`'s two keyword arguments' written order"* survived all
+five gate steps, invoking the `_ledger_row`/`_settle`/`cli._search` precedent
+above by name. That precedent's reasoning — binding is by name regardless of
+position, so reordering *already-written* keywords is inert — does not
+transfer: every `counter.add` call in `src/usher/services/rows/cache.py` is
+positional (`_cache_hits.add(1, {"cache": "screen"})`), and a grep for
+keyword-style counter calls across `src/usher` finds none, anywhere. There was
+no written keyword order to swap. Reconstructed from the working log, what was
+actually planted was `_cache_hits.add(1, {"cache": "screen"})` rewritten to
+`_cache_hits.add(attributes={"cache": "screen"}, amount=1)` — a positional call
+*converted* to an equivalent keyword call, correctly bound, not a reordering of
+a pair that already existed. It is genuinely inert (same value to the same
+parameter, spelled two ways), which is why it survived every step measured
+against it, but it is not the control the ledger's bar asks for: it is not a
+plausible mutation at all — no AST-level argument reordering produces a
+positional-to-keyword rewrite — so its survival demonstrates nothing about
+whether the suite would catch a real argument-order defect.
+
+**And the real version of that defect is not inert.** A genuine positional
+swap — `_cache_hits.add({"cache": "screen"}, 1)` — is not an equivalent
+mutant: `opentelemetry.sdk.metrics._internal.instrument.Counter.add` calls
+`math.isfinite(amount)` before anything else, and `math.isfinite` on a `dict`
+raises `TypeError: must be real number, not dict` (confirmed directly). Every
+case in `test_telemetry_cache.py`/`test_services_rows_cache.py` installs a real
+`MeterProvider` (`Counter._is_enabled()` is true), so that swap is a clean
+kill, not a survivor — reporting it as a control would have been the exact
+inversion this file's controls exist to prevent: a kill mistaken for a
+survivor, which hides a broken control rather than a broken suite.
+
+The corrected control — a fact about the *code*, matching `complete_json`'s
+`span.set_attribute` pair above — and measured against every gate step
+separately, because "the gate holds it" and "the suite holds it" are different
+claims:
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| `get_row`'s miss branch: `self._rows.pop(key, None)` and `_cache_misses.add(1, {"cache": "row"})` swapped | PASS | PASS | PASS | PASS | PASS (2992 / 4 skipped) |
+
+`self._rows` (a plain dict) and `_cache_misses` (an OTel counter) are disjoint
+pieces of state; nothing between the two statements reads either, and both run
+unconditionally before the branch's `return None`, so their relative order is
+unobservable — the same shape as the OTel span-attribute pair, one signal over.
+Restored via `cp` backup, verified byte-identical against the pre-plant
+`md5sum` before continuing.
+
+**Unrelated, found the same day and worth carrying because it was first
+misattributed in a report rather than in this file:** `tests/integration/
+test_sse_end_to_end.py::test_opening_a_stub_promotes_it_and_the_client_is_told_
+when_it_lands` failing inside a whole-suite run was first read as host
+contention from concurrent sibling worktrees. A second implementer's 5/5
+reproduction in isolated `git archive` copies, each with its own `uv sync`, at
+three commits including one that is docs-only on the M8 merge, and on a
+default no-extra venv, refutes that: the failure predates M9 and is not
+load-dependent. Recorded here rather than in a chat transcript, which is what
+made it findable the first time.
+
+**M9 Task B2's sweep: 12 plants over `adapters/search/prefix.py` — 10 targets
+all killed, 2 equivalent-mutant controls surviving all five gate steps,
+0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in place with
+the plant list and its **expected verdict** written down first, the three
+`.pyc` defences in force, `compile()` rather than `ast.parse` as the dry run,
+and every restore verified by `md5sum` against a pre-plant digest. **Ten of ten
+killed is the weakest-looking split in this file and the entry has to say why:
+the plants and the cases were written by the same author in the same session
+against the same 40 lines of SQL, which is the condition under which a sweep
+measures its author's consistency rather than the suite's reach.** What makes
+it evidence anyway is the round *before* the run — see the two gaps below,
+which the plant list found and no run against the suite as it then stood could
+have. And the runs then repaid that by **falsifying half the reasoning behind
+one of the two repairs**, which is the part a ledger exists for.
+
+Selection: `tests/integration/test_adapters_search_prefix.py`,
+`tests/integration/test_adapters_search_postgres.py` and
+`tests/unit/test_suggest_index_contract.py` — 56 passed / 2 skipped, 19–29 s a
+run. **Not the whole suite, and the reason is a mechanic worth carrying: this
+tree has a flaky integration case** (the `test_sse_end_to_end` failure recorded
+immediately above, observed here failing **7 of 8** `pytest tests/integration`
+runs and 1 of 2 whole-suite runs, green every time it ran alone). **A sweep
+scored on "did the run fail" cannot run against a
+suite containing a flaky case** — every plant inherits the flake's failure rate
+as a false kill, and a survivor that flaked is silently upgraded to a kill.
+Either narrow the selection to files the flake is not in, as here, or deselect
+the case by node id and say so.
+
+**The two gaps were found by writing the expected verdict down, before any
+plant ran, and each was confirmed afterwards by reconstructing the case as it
+first stood and watching the mutation survive it.** This is the yield, and the
+half that is not a run result is the half that found them:
+
+- **`_LIKE_SPECIALS`' ordering claim was unpinned, and the repair works for a
+  reason the prediction got wrong.** The escape list doubles the backslash
+  *first*, and the comment says why — reversed, the escapes introduced for `%`
+  and `_` are themselves escaped on the next pass and `%` becomes a wildcard
+  again. Working out which case would kill a reordering found that **none
+  would**: with only `Vane Alpha` and `Harbour Lights` seeded, `suggest("%")`,
+  `suggest("_")` and `suggest("\")` all return `[]` under both spellings.
+  Confirmed rather than assumed — the case as first written was reconstructed
+  and the reordering **survived** it. Two repairs went in together, and
+  measuring them apart afterwards is what corrects the prediction:
+
+  | configuration | verdict | fails on |
+  |---|---|---|
+  | the reorder against the shipped four-arm case | KILLED | a `== []` arm |
+  | reorder, `100% Vane` arm removed, `\Vane` row kept | **KILLED** | a `== []` arm |
+  | reorder, `\Vane` row removed, `100% Vane` arm kept | KILLED | the `100%` arm |
+  | reorder, both repairs removed (the case as first written) | **SURVIVED** | — |
+
+  The predicted killer — a prefix holding a metacharacter *and* a backslash,
+  spelled `100%` — does kill it, on its own. **But so does the `\Vane` fixture
+  row, which was added for the backslash arm and has nothing to do with escape
+  ordering**: under the reversed list `suggest("%")` builds `\\%%`, which is a
+  literal backslash followed by wildcards, so it now *matches* `\Vane` and the
+  `== []` arm bites. **A fixture row added to give one arm something to find
+  changes what every other arm in the same case can see** — here in the
+  helpful direction, silently, which is why the entry says which arm fires
+  rather than which arm was designed to. The usual version of this shape in
+  this file is a fixture that makes an assertion vacuous; this is the same
+  coupling running the other way, and it is equally invisible without a plant.
+- **The two-tier ordering fixture agreed with `ORDER BY id` by accident.** With
+  the high-vote row seeded second, deleting the `vote_count DESC NULLS LAST`
+  key left the answer unchanged, because UUIDv7 makes insertion order and id
+  order one sequence — the *exact* trap `CLAUDE.md` names, arrived at through a
+  second column rather than through the obvious one. Fixed by seeding the
+  low-vote row first, which is a one-line change and the difference between a
+  case that tests three sort keys and a case that tests two. Confirmed the same
+  way: the key deleted *and* the original seeding order restored **survives all
+  56 cases**, so the repair is what kills it and not something else in the
+  file. This one the prediction got exactly right, which is why the entry above
+  it is worth as much space as it takes.
+
+The ten targets and what each cost: the outer `ORDER BY` deleted from the
+`LIMIT` fails 3 (an unordered cap is the 66.2% → 48.5% → 2.6% defect one tier
+over); the column not lower-cased fails 9, including the `EXPLAIN` case; the
+prefix not lower-cased fails 1; the `title_search_names` arm dropped from the
+union fails 2; `UNION` → `UNION ALL` fails 1; no escaping at all fails 1; the
+escape list reordered fails 1; the empty-prefix guard deleted fails 1; and the
+`vote_count` key and popularity's `NULLS LAST` each fail exactly the one
+ordering case built for them.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| the two `UNION` arms of `_PREFIX` swapped | PASS | PASS | PASS | PASS | PASS |
+| one sentence of `_pattern`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+The first is a fact about the *code* rather than about what the tools look at,
+and it is a **SQL-text** control rather than a Python one, which is a shape this
+file did not previously hold. Its equivalence has three legs, and the third is
+the one that makes it airtight rather than merely plausible: `UNION` is
+commutative and set-valued; both arms are side-effect-free reads of different
+tables; and the arms sit inside a CTE whose result the outer `ORDER BY` and
+`LIMIT` are applied to **after** it materialises, so there is no path by which
+arm order could reach the returned row order even if the set operation leaked
+one. Independently re-derived by review rather than taken from the sweep alone.
+Neither control is spellable as an argument reorder — the A5 entry above is the
+reason that was checked rather than assumed. The docstring reword
+was checked first against the docstring-scan grep this file records: **none of
+the scanning test files reads `adapters/search/`**, and the one scan B2 itself
+adds parses the module for `ast.Import`/`ast.ImportFrom` nodes, not prose.
+
+**Separately, the four premise guards were each planted against and each failed
+on its own `E ` line** — `message in output` is not the check, because pytest
+prints the failing assertion's surrounding source and a guard's text turns up
+in the traceback of a case that failed elsewhere. **One of the four was dead
+when written and the repair is the finding.** `assert seeded == sorted(seeded)`
+over a list of freshly-minted UUIDv7s reads as a premise guard and is a claim
+about `new_id()`'s monotonicity, which no fixture edit can falsify: the obvious
+defect it appears to guard — seeding popularity descending, so the wanted rows
+become the ones a truncating scan reaches first — leaves it passing while the
+case's real assertion fails. Replaced by a guard derived from the fixture's own
+popularity mapping (`assert set(wanted).isdisjoint(seeded[:3])`), which that
+plant does kill. **A premise guard written against a literal slice guards the
+literal; write it against the same data the expectation is computed from, then
+plant the fixture change and watch it fire.**
+
+**And one plan-drift correction, recorded because the next reader of the
+`EXPLAIN` case will otherwise re-derive it:** the M9 plan's B2 acceptance names
+the tier-1 index `ix_titles_name_prefix`, and `m09a` ships
+`ix_titles_name_lower_prefix`. The case asserts the shipped name. The
+near-miss it asserts *against*, `ix_titles_name_lower_year`, differs from the
+real one by a single token in `_SUSPENDABLE_INDEXES`, so a plan-shaped
+half-memory of either name is one search-and-replace away from a green suite
+over the wrong index.
+
+**M9 Task E1's sweep: 4 plants over `RowProviderSettingsRepository` and its two
+implementations — 4 killed, 1 equivalent-mutant control surviving as designed,
+0 unintended survivors, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run
+2026-08-11 in place, with the plant list and its expected verdict written down
+first (this port's own acceptance section names all four), the three `.pyc`
+defences in force throughout (`__pycache__` swept before every run,
+`PYTHONDONTWRITEBYTECODE=1`, an equivalent-mutant control), and every restore
+verified by `md5sum` against a pre-plant digest of both mutated files. First
+run of this sweep produced a result with no durable record — reported in a
+chat message, nothing in this file, nothing in the commit — which is the
+defect this entry repairs, not a second measurement of a different port.
+
+**Selection, stated because a survivor list is only true of the selection it
+was measured against:** `tests/unit/test_row_provider_settings_repository_
+contract.py` (the fake arm), `tests/integration/test_row_provider_settings_
+repository.py` (the Postgres arm, plus its two Postgres-only cases),
+`tests/unit/test_ports.py` (`ALL_PORTS` registration),
+`tests/unit/test_ports_repository_package.py` (A1's mirror invariant — this
+task adds a module to that package), `tests/unit/test_rows_invariants.py` and
+`tests/unit/test_services_home.py` (the registry's slug-prefix distinctness,
+pinned from both sides). Scoped rather than whole-suite because nothing
+outside this task's own six files imports `RowProviderSettingsRepository` yet
+— grepped before scoping, not assumed — so a defect in either implementation
+has no path to collateral anywhere else in the tree; the route that will
+change that is E2, not yet landed. Baseline green on a clean tree first: **220
+passed in 5.19s**, restored to the identical count after every plant and
+after the sweep.
+
+The four plants, each the acceptance section's own words:
+
+| plant | verdict | cases failed |
+|---|---|---|
+| `ON CONFLICT (slug_prefix) DO UPDATE` deleted from `_SET_ENABLED` (Postgres) | KILLED | 3 — `IntegrityError` on `pk_row_provider_settings`, a re-set slug now a duplicate key rather than an update |
+| fake `overrides()` defaults every known slug to `True` rather than omitting the untouched ones | KILLED | 5 — the whole fake-arm contract, since every case reads through `overrides()` |
+| `enabled` sense inverted in `set_enabled`, fake arm | KILLED | 3 |
+| `enabled` sense inverted in `set_enabled`, Postgres arm | KILLED | 3 |
+| `set_enabled` calls `self._session.commit()` (Postgres) | KILLED | 1 — the new second-session case, `assert 1 == 0` |
+
+(Five rows because "the `enabled` sense inverted" was run on both
+implementations independently, each with its own `set_enabled`; the
+acceptance section names the property once and it is checked once per arm.)
+Every kill was checked against the case it names and nothing else — the
+`DO UPDATE` deletion raises before a row count is reachable, which is the
+louder failure the contract's own upsert case is written to produce rather
+than a silent duplicate.
+
+**The control, measured against every gate step rather than against pytest
+alone** — the check the `__all__`-reorder entry above exists to force:
+
+| control | `pytest` (scoped selection) | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `ON CONFLICT ... DO UPDATE`'s two independent `SET` assignments swapped (`updated_at`/`enabled`) | PASS (220) | PASS | PASS | PASS | PASS |
+
+It is a fact about the code rather than about what the tools look at: both
+right-hand sides read only from `excluded`, which is fixed within the
+statement before either assignment runs, and Postgres's `SET` list is
+simultaneous rather than sequential — there is no intermediate state either
+assignment could observe the other through. Already checked independently
+against a real pgvector/pgvector:pg17 container by a reviewer before this
+entry was written; re-measured here per gate step rather than re-argued.
+
+Gate green before and after, on the fully restored tree: `ruff check`,
+`ruff format --check`, `mypy` over 471 files, `lint-imports` 9 kept / 0
+broken, and the whole-suite baseline unchanged at **2,995 unit / 4 skipped**.
+
+**The `.pyc` collision has a spelling that is reproducible by construction
+rather than by luck, it hits plants in `tests/` as readily as plants in `src/`,
+and it can score a mutant SURVIVED.** Found 2026-08-11 on M9 Task D1's review
+follow-up, planting against a newly-widened padding sweep. Three plants, run
+three times in a row by the same harness with **no defences at all**, gave
+three different sets of answers:
+
+| attempt | T1 `range(1, 200)`, truth `64` | T2 `range(1, 900)`, truth `292` | T3 one-byte reframe in `src`, truth `201` |
+|---|---|---|---|
+| 1 | `64` ✓ | **`64`** — T1's bytecode | `201` ✓ |
+| 2 | **no failure at all** | `292` ✓ | `201` ✓ |
+| 3 | **no failure at all** | `292` ✓ | **`293`** — T2's test bytecode under T3's source plant |
+
+Three things here that the long entry above does not have.
+
+**One: same-length is a property of the plant class, not a coincidence.** That
+entry's two mutants each removed exactly 114 bytes, which reads as bad luck and
+invites a reader to treat the trap as rare. `_PADDING_SWEEP = range(1, 200)`,
+`… range(1, 600)` and `… range(1, 900)` are **30 characters each** — every
+substitution of one numeric literal for another of the same digit count is
+byte-identical in length, so it defeats the size half of CPython's
+`(int(source_mtime), source_size)` check *by construction*. Anyone sweeping
+numeric literals — a TTL, a limit, a batch size, a range bound — hits this on
+every plant, not occasionally.
+
+**Two: a stale run can report a mutant as a survivor, which is the more
+dangerous direction and is not in the record.** Attempts 2 and 3 scored T1 as
+passing. The entry above describes two mutants both scoring KILLED against the
+same case — bad, but it leaves you with a kill you over-trust. A false
+*survivor* is what makes a reviewer write "no case covers this" and then add a
+redundant test, weaken an assertion, or delete a guard as untested. Attempt 3's
+T3 is the same failure crossing file boundaries: a plant in
+`src/usher/services/playback_ticket.py` was scored by a run executing a *test*
+file's stale bytecode, so the number it reported belonged to a different plant
+in a different file.
+
+**Three: the recipe's sweep is scoped to `src/`, and a plant in a test file
+puts its `.pyc` in `tests/**/__pycache__`.** The harness that produced the
+table above was this project's own sweep script, which sweeps `__pycache__`
+under `src/` only — the recipe as written. Widen it to `src/` **and** `tests/`.
+
+**What is load-bearing, measured rather than assumed — and this refutes the
+first write-up of this finding, including the version in commit `c1fe176`'s
+message.** That write-up named the `src/`-only sweep as the cause and
+`-p no:cacheprovider` as part of the fix. Both claims were reasoning, not
+measurement. Re-run over four regimes, three attempts each, nine plant-runs per
+regime, against the reproduction above:
+
+| regime | result |
+|---|---|
+| no defences | unstable — the table above |
+| `PYTHONDONTWRITEBYTECODE=1` alone | 9/9 correct |
+| `+ __pycache__` swept under `src/` (the recorded recipe) | 9/9 correct |
+| `+ __pycache__` swept under `src/` and `tests/` | 9/9 correct |
+| `+ -p no:cacheprovider` | 9/9 correct |
+
+**The environment variable alone closed it**, because nothing is written during
+the sweep and so nothing can collide within it. `-p no:cacheprovider` is
+therefore **not** justified as a defence and is not being added to the recipe —
+it disables `.pytest_cache` (last-failed node ids), not the assertion-rewritten
+bytecode, which pytest already declines to write when `sys.dont_write_bytecode`
+is set. Sweeping `tests/` is still worth doing and the reason is *argued, not
+measured*: the env var stops new `.pyc` files appearing, but CPython still
+*reads* a valid pre-existing one, and a sweep begun after an ordinary
+`uv run pytest` starts with exactly that on disk. Cheap belt, real brace.
+
+The wider rule the first write-up got right: **an ad-hoc plant round gets the
+same defences as a scripted one.** The contaminated result came from a
+hand-rolled three-plant loop written inline to check a review fix, not from the
+sweep harness — a "quick check" of whether an assertion can fail is a mutation
+sweep with the ceremony removed, and it is exactly where a wrong number reads
+as a clean kill.
+
+## M9 Task B1 — `title_search_names`' credited-person half (2026-08-11)
+
+Sixteen plants over `db/repositories/people.py`, `tests/fakes/credit_repository.py`
+and `ports/repository/people.py`, **in place, against the whole suite** minus
+one deselection named below. Twelve behavioural mutations, all KILLED; three
+controls, all SURVIVED; zero BAD-ANCHOR, BROKEN-MUTATION, DID-NOT-RUN or HUNG.
+Each kill was checked against the case it names and nothing else.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| the search-name delete loses its `title_ids` scope | KILLED | 1 — `..._replaces_its_searchable_person_names` |
+| the search-name delete loses its `kind` scope | KILLED | 1 — `..._an_alias_row_..._survives_a_credit_replacement` |
+| the names come from the `credits` sequence, not the mapping | KILLED | 2 |
+| the ordering is dropped (`sorted(set(...))`) | KILLED | 2 |
+| the in-batch duplicate name is stored twice | KILLED | 1 |
+| **the scope keeps a duplicated title id** | **SURVIVED, then closed** | 0, then 1 |
+| the write moves after the `if not records: return 0` | KILLED | 2 |
+| `region`/`language` filled with an enrichment locale | KILLED | 1 |
+| the three `unnest` arrays paired wrongly (ids against names) | KILLED | 8 |
+| the fake stores a duplicated name twice | KILLED | 1 |
+| the fake drops the ordering | KILLED | 2 |
+| the fake leaves an emptied title's names in place | KILLED | 2 |
+
+**The survivor was a reachable defect, not an equivalence, and the caller is
+what settles it.** Iterating `title_ids` rather than `dict.fromkeys(title_ids)`
+passed the whole suite. `DeriveService._resolve` extends its list **once per
+payload** — `resolved.extend((title_id, payload) for payload in payloads)` — so
+a title `raw_payloads` holds two payloads for reaches
+`CreditRepository.replace_for_titles` **twice in one `title_ids`**. Every other
+destination of that call absorbs it and that is why nothing saw it: both
+deletes are `= ANY(...)`, the credits insert dedupes on the natural key, and
+`credit_names` is a mapping whose `UPDATE ... FROM` touches the row once. The
+searchable names are the one write that is per `(title, name)`, so under the
+mutant every credited name is stored once per cached payload and a
+`LIKE 'pre%'` probe answers the same title that many times. Closed with
+`test_a_title_named_twice_in_one_scope_is_written_once` — re-planted, and it
+fails **that case and only that case**. The general shape: *a guard that
+survives on a port taking a `Sequence` is answered by reading the shipped
+caller, not by reasoning about the port* — and here the fake's own `set(title_ids)`
+is what hid it, since only the Postgres arm can tell a per-name write that
+repeats from one that does not.
+
+**The controls, measured against all five gate steps rather than pytest
+alone:**
+
+| control | `pytest` (whole suite) | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| the two search-name statement constants swapped | PASS | PASS | PASS | PASS | PASS |
+| the two independent list appends swapped (`search_title_ids`/`search_names`) | PASS | PASS | PASS | PASS | PASS |
+| one sentence of the port docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+Each is a fact about the code: two module-level string bindings that reference
+nothing and have no import-time side effect; two appends to two different lists
+from two different names, neither of which can observe the other; and a
+docstring whose *wording* nothing checks —
+`test_ports_repository_package.py::test_every_port_and_abstract_method_in_the_package_carries_a_docstring`
+checks a docstring's **presence**, which was verified by reading it before the
+control was chosen rather than after it survived.
+
+**One deselection, and it is named rather than silent.**
+`test_sse_end_to_end.py::test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands`
+is intermittent and predates M9 — measured **red 5/5 at the base commit
+`4e0935b`** with the identical assertion (`assert '745' is None`), in a
+worktree of its own whose `usher.__file__` was checked to be that worktree's.
+It is the `enrich` lane and no plant here can reach it, so leaving it in would
+have scored eleven verdicts on a coin flip. Its mechanism was settled
+separately by G1.
+
+Gate green before and after on the fully restored tree, with all three touched
+files verified by `md5sum` against their pre-sweep digests.

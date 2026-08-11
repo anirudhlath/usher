@@ -63,6 +63,9 @@ from usher.ports.repository.people import (
     PersonRepository,
     RecurringPerson,
 )
+from usher.ports.repository.row_provider_settings import (
+    RowProviderSettingsRepository,
+)
 from usher.ports.repository.search import (
     NeighborCandidate,
     NeighborSeed,
@@ -124,6 +127,7 @@ __all__ = [
     "RawPayloadStore",
     "RecentWatch",
     "RecurringPerson",
+    "RowProviderSettingsRepository",
     "ScoredNeighbor",
     "SearchQueryRecord",
     "SearchQueryRepository",

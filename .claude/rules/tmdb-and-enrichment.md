@@ -120,9 +120,53 @@ each of which a first draft got wrong:
   block and the summary agree on every shared key, so block-over-summary and
   summary-over-block produce the identical dict. The fake keeps
   `season.json`'s prose whatever the number, which makes season 0's block
-  disagree with the Specials summary on `name`/`air_date`/`poster_path`, and
-  that disagreement is the only thing in the suite that can see the
-  direction. Recorded as a deliberate fake affordance, not as fidelity.
+  disagree with the Specials summary on
+  `name`/`overview`/`air_date`/`poster_path`/`vote_average`, and that
+  disagreement is the only thing in the suite that can see the direction.
+  Recorded as a deliberate fake affordance, not as fidelity.
+
+**And that third bullet was written down and then not guarded, which is the
+finding worth carrying past this task.** Found in review 2026-08-11, by
+execution rather than by reading. The entry above correctly identified the
+fixture disagreement as *"the only thing in the suite that can see the
+direction"* — and nothing asserted it. With the inverted merge planted,
+editing **only** `tests/fixtures/tmdb/series.json`'s season-0 entry to agree
+with `season.json` — no code change, a plausible *"make the fixtures
+internally consistent"* cleanup that no reviewer would read as a test change —
+took the file from one red to **32 passed, zero red**. So the whole defence
+between a correct merge and a `seasons[]` written wrong on every enriched
+series in the catalog, across the ~130,806 detail fetches the crawl makes, was
+an unstated coincidence between two JSON files.
+
+Closed by `_assert_the_merge_direction_is_observable`, called by both cases
+that read the disagreement, which fails on its own `E ` line naming every
+field that has stopped disagreeing. Re-verified against the exact scenario:
+inverted merge **plus** the fixture cleanup now fails 2 of 33; the cleanup
+**alone**, with correct code, also fails those 2 — which is the behaviour
+wanted, since the premise is a statement about the fixture and its job is to
+say *"this case can no longer fail"* at the moment that becomes true rather
+than at the next merge bug. A second case,
+`test_a_season_block_is_merged_over_its_summary_and_never_under_it`, now
+asserts the direction on the payload directly, so the property survives the
+identity case being deleted or narrowed.
+
+**One correction to the report of that finding, measured rather than assumed:
+the cleanup has to touch all five shared fields, not four.** With
+`name`/`air_date`/`poster_path`/`vote_average` normalised but `overview` left
+alone, the pre-fix identity case still fails — `overview` is `""` on the
+Specials summary and non-empty in `season.json`. It is the fifth field that
+takes the pre-fix file to 32 green. This does not weaken the finding; it
+sharpens the guard, which is why the premise requires **every** shared field
+to disagree rather than *at least one*. A guard satisfied by one surviving
+disagreement would itself be disarmed by a four-field cleanup.
+
+**The general form:** when a case can only fail because two fixtures
+disagree, the disagreement is a premise and gets asserted like any other —
+`CLAUDE.md`'s ordering-premise rule (`assert far_id < near_id`) in the
+fixture-consistency domain, and `testing-discipline.md`'s *"could this fixture
+also be the row above or below"* asked of two files instead of one. The tell
+is a docstring saying a fixture property is what makes a case able to fail:
+that sentence is either an assertion or it is a comment nobody will re-check.
 
 **And one property the `1+N` shape had that the appended one cannot have:
 a missing season used to be loud.** The old `fetch` let a season's own 404
@@ -289,3 +333,19 @@ records the `/search/movie` shape and never `/search/tv`'s. Fine for a shape
 diff (the two pages are the same shape but for `title`/`name` and
 `release_date`/`first_air_date`), worth knowing before reading its output as
 evidence about TV search.
+
+**And since M9's T1, `--kind series` no longer reproduces the first request
+the provider issues.** The script sends `SERIES_APPEND_TO_RESPONSE` alone;
+`TmdbMetadataProvider.fetch` sends that plus `season/0…season/13`. It used to
+match byte for byte, and that is a genuine loss for a tool whose whole job is
+to diff the shipped request's response against a committed shape. Left alone
+on purpose — the season blocks are popped before `fetch` returns, so
+capturing them would record shapes nothing reads, and `season.json` already
+records the season shape from its own route. **The reason first given for
+leaving it was wrong and is corrected here**: it is *not* that the
+namespace-only capture is "exactly the shape `raw_payloads` holds".
+`raw_payloads`' `seasons[]` entries carry merged episode data no bare
+`SERIES_APPEND_TO_RESPONSE` response has ever contained — true of the `1+N`
+path too, so the fixtures have never recorded a stored payload's shape and
+were never meant to. A wrong reason in a docstring outlives the decision it
+justifies, which is why this is written down rather than quietly fixed.

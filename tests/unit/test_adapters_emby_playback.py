@@ -13,7 +13,10 @@ the DTO's shape, not of every future caller remembering -- see
 of the same guarantee.
 """
 
+import ast
+import inspect
 import logging
+import pathlib
 from urllib.parse import parse_qs, unquote, urlparse
 
 from _pytest.logging import LogCaptureFixture
@@ -22,7 +25,7 @@ from tests.fakes.emby_fixtures import load_emby_fixture
 from usher.adapters.emby.mapping import to_source_item
 from usher.adapters.emby.playback import build_stream_targets
 from usher.domain.enums import HdrFormat
-from usher.ports.source import StreamTarget, StreamTargetKind
+from usher.ports.source import StreamTarget, StreamTargetKind, wrap_deep_link
 
 BASE = "https://emby.invalid"
 TOKEN = "session-token-1"
@@ -105,6 +108,78 @@ def test_the_deep_link_wraps_the_direct_url_intact() -> None:
     # And the wrapper really is encoded, not merely parseable.
     assert "&" not in deep.url
     assert unquote(deep.url.split("url=", 1)[1]) == direct.url
+
+
+def test_the_deep_link_is_the_port_s_one_wrapper_applied_to_the_direct_url() -> None:
+    """(D2, part a): the deep-link wrapper moved to `usher.ports.source`, and
+    this pins the *call edge* rather than the string it produces --
+    `build_stream_targets` reimplementing the identical format by hand would
+    still pass every other case in this file and would still satisfy a
+    literal-string assertion. Comparing against `wrap_deep_link` itself is
+    what a re-spelling cannot survive.
+    """
+    direct, deep = _targets("movie_item")
+    assert deep.url == wrap_deep_link(direct.url)
+
+
+def test_the_adapter_holds_no_scheme_literal_and_no_wrapper_of_its_own() -> None:
+    """The move's other half: a *behaviourally* identical re-spelling --
+    the same string, built by hand instead of through the import -- would
+    pass the case above and reintroduce the exact drift the move exists to
+    prevent (an earlier draft of this task's own plan used two names for the
+    one constant). Asserted structurally, the shape
+    `test_the_curated_module_holds_no_llm_client_and_cannot_complete_anything`
+    (`tests/unit/test_rows_curated.py`) uses: parse the module, strip its
+    docstrings (this one argues at length about why the wrapper moved, and a
+    plain substring scan would fail on the explanation), and look at what is
+    actually built.
+    """
+    source = pathlib.Path(inspect.getfile(build_stream_targets)).read_text()
+    tree = _without_prose(ast.parse(source))
+
+    strings = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "infuse" not in strings, "the adapter still holds the scheme literal"
+    assert not any("x-callback-url" in value for value in strings), (
+        "the adapter still builds the deep-link URL by hand"
+    )
+
+    assigned = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    assert "INFUSE_SCHEME" not in assigned, "the adapter re-defines the constant it only imports"
+
+    imported = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "usher.ports.source"
+        for alias in node.names
+    }
+    assert {"INFUSE_SCHEME", "wrap_deep_link"} <= imported, (
+        "the adapter must import both the constant and the wrapper from the port, unaliased"
+    )
+
+
+def _without_prose(tree: ast.Module) -> ast.Module:
+    """`tree` with every docstring removed, so a name scan reads code only."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        first = node.body[0] if node.body else None
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            node.body = node.body[1:] or [ast.Pass()]
+    return tree
 
 
 def test_the_deep_link_carries_no_quality_facts() -> None:

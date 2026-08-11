@@ -28,18 +28,28 @@ is:**
 - **It cannot fail.** No connection, no lock, no index build cost, no
   timeout, no `PortUnavailable`. Nothing here exercises a single error path.
 
+**`FakeSuggestIndex` doubles for the typo-tolerant tier and there is no
+double for the other one.** M9's two-tier suggest ships a second
+`SuggestIndex` -- `PostgresPrefixSuggestIndex`, a btree prefix probe whose
+measured typo recall is 1.9% -- and this class subclasses
+`TypoTolerantSuggestIndexContract`, i.e. the trigram path's contract. An
+in-memory prefix double would be `str.startswith` asserting against
+`str.startswith`; what that tier's cases are actually about is which index
+Postgres takes, so its arm is integration-only by construction.
+
 **Where `FakeSuggestIndex` is more forgiving, on purpose. Four places:**
 
 - **No candidate cap.** It computes edit distance over its whole dict, so
   the one property the real path exists for is structurally absent -- and its
   typo tolerance is therefore *better* than the real one, which is the
-  dangerous direction. `SuggestIndexContract`'s cap case is skipped here by
-  capability flag rather than passed.
+  dangerous direction. `TypoTolerantSuggestIndexContract`'s cap case is
+  skipped here by capability flag rather than passed.
 - **Levenshtein only**, with no trigram pre-filter and therefore none of
   `pg_trgm`'s similarity threshold or its recall cliff on short names.
 - **`given()` is a test-only writer.** The port has no write method
-  (ADR-0021) and the real implementation writes nothing at all, so the one
-  fact this class *cannot* model is the absence it exists to stand in for.
+  (ADR-0021) and neither real implementation writes anything at all, so the
+  one fact this class *cannot* model is the absence it exists to stand in
+  for.
 - **Python's `casefold()`, not Postgres's `lower()`** and not its collation,
   so nothing here says anything about non-ASCII names.
 """
@@ -246,7 +256,8 @@ def _coverage(population: Sequence[SearchDocument]) -> float:
 
 def _edit_distance(left: str, right: str) -> int:
     """Plain Levenshtein. Not Damerau: a transposition costs 2 here, which
-    is what `SuggestIndexContract`'s transposition case is arranged for."""
+    is what `TypoTolerantSuggestIndexContract`'s transposition case is
+    arranged for."""
     previous = list(range(len(right) + 1))
     for row, one in enumerate(left, start=1):
         current = [row]

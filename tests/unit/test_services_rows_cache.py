@@ -14,8 +14,12 @@ is visible on a screen that looks right.
 
 import datetime as dt
 import uuid
+from collections.abc import Iterator
 
 import pytest
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
 
 from tests.fakes.row_provider import FakeRow, FakeRowProvider
 from tests.unit.rows import Library
@@ -27,6 +31,39 @@ from usher.services.rows.cache import RowCache
 
 _TTL = dt.timedelta(seconds=30)
 _START = dt.datetime(2026, 8, 4, 12, 0, tzinfo=dt.UTC)
+
+
+@pytest.fixture
+def meter_reader() -> Iterator[InMemoryMetricReader]:
+    """`usher.cache.hits`/`.misses`' own file (`test_telemetry_cache.py`) is
+    where the metric is exercised in depth; this fixture is here only for the
+    one boundary case below, so the expiry habit `stale_after` teaches is
+    checked against the metric too, in the same place it is checked against
+    the returned value."""
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    yield reader
+
+
+def _cache_points(reader: InMemoryMetricReader, name: str) -> list[tuple[dict[str, object], float]]:
+    data = reader.get_metrics_data()
+    if data is None:
+        return []
+    found: list[tuple[dict[str, object], float]] = []
+    for resource in data.resource_metrics:
+        for scope in resource.scope_metrics:
+            for metric in scope.metrics:
+                if metric.name != name:
+                    continue
+                for point in metric.data.data_points:
+                    # `usher.cache.hits`/`.misses` are counters (`Sum`), so
+                    # every point reaching this loop is a `NumberDataPoint`
+                    # carrying `.value` -- narrowed rather than asserted, so
+                    # a rename to a histogram fails here on the type rather
+                    # than on an `AttributeError` mid-run.
+                    assert isinstance(point, NumberDataPoint)
+                    found.append((dict(point.attributes or {}), float(point.value)))
+    return found
 
 
 class _Clock:
@@ -123,7 +160,9 @@ def test_an_expired_entry_is_recomputed_rather_than_served(clock: _Clock) -> Non
     assert cache.get_screen(user) is None
 
 
-def test_an_entry_exactly_at_its_expiry_is_expired(clock: _Clock) -> None:
+def test_an_entry_exactly_at_its_expiry_is_expired(
+    clock: _Clock, meter_reader: InMemoryMetricReader
+) -> None:
     """**Steps the clock *onto* the boundary, not past it.**
 
     M5's mutation sweep recorded the `stale_after` `<=` -> `<` mutation
@@ -131,6 +170,12 @@ def test_an_entry_exactly_at_its_expiry_is_expired(clock: _Clock) -> None:
     the boundary rather than onto it, so both spellings agreed on every input
     the suite offered. One second of drift in a 30 s TTL is invisible; the
     habit that hides it is not.
+
+    **And an entry found expired is a `usher.cache.misses` point, not a
+    `usher.cache.hits` one** -- it is a rebuild, not a serve. The wrong
+    implementation this rules out records the miss on `<=` correctly but the
+    *metric* on whether `entry` was found at all, which an expired-but-present
+    entry would still count as a hit.
     """
     cache, user = RowCache(clock=clock), uuid.uuid4()
     cache.put_screen(user, _screen("old"), ttl=_TTL)
@@ -140,6 +185,11 @@ def test_an_entry_exactly_at_its_expiry_is_expired(clock: _Clock) -> None:
 
     assert cache.get_screen(user) is None
     assert cache.get_row(user, "continue-watching") is None
+
+    misses = _cache_points(meter_reader, "usher.cache.misses")
+    hits = _cache_points(meter_reader, "usher.cache.hits")
+    assert {attrs["cache"] for attrs, _ in misses} == {"screen", "row"}
+    assert hits == []
 
 
 def test_a_live_entry_is_served_without_recomputing(clock: _Clock) -> None:
