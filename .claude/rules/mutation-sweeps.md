@@ -880,3 +880,68 @@ three commits including one that is docs-only on the M8 merge, and on a
 default no-extra venv, refutes that: the failure predates M9 and is not
 load-dependent. Recorded here rather than in a chat transcript, which is what
 made it findable the first time.
+
+**M9 Task E1's sweep: 4 plants over `RowProviderSettingsRepository` and its two
+implementations — 4 killed, 1 equivalent-mutant control surviving as designed,
+0 unintended survivors, 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run
+2026-08-11 in place, with the plant list and its expected verdict written down
+first (this port's own acceptance section names all four), the three `.pyc`
+defences in force throughout (`__pycache__` swept before every run,
+`PYTHONDONTWRITEBYTECODE=1`, an equivalent-mutant control), and every restore
+verified by `md5sum` against a pre-plant digest of both mutated files. First
+run of this sweep produced a result with no durable record — reported in a
+chat message, nothing in this file, nothing in the commit — which is the
+defect this entry repairs, not a second measurement of a different port.
+
+**Selection, stated because a survivor list is only true of the selection it
+was measured against:** `tests/unit/test_row_provider_settings_repository_
+contract.py` (the fake arm), `tests/integration/test_row_provider_settings_
+repository.py` (the Postgres arm, plus its two Postgres-only cases),
+`tests/unit/test_ports.py` (`ALL_PORTS` registration),
+`tests/unit/test_ports_repository_package.py` (A1's mirror invariant — this
+task adds a module to that package), `tests/unit/test_rows_invariants.py` and
+`tests/unit/test_services_home.py` (the registry's slug-prefix distinctness,
+pinned from both sides). Scoped rather than whole-suite because nothing
+outside this task's own six files imports `RowProviderSettingsRepository` yet
+— grepped before scoping, not assumed — so a defect in either implementation
+has no path to collateral anywhere else in the tree; the route that will
+change that is E2, not yet landed. Baseline green on a clean tree first: **220
+passed in 5.19s**, restored to the identical count after every plant and
+after the sweep.
+
+The four plants, each the acceptance section's own words:
+
+| plant | verdict | cases failed |
+|---|---|---|
+| `ON CONFLICT (slug_prefix) DO UPDATE` deleted from `_SET_ENABLED` (Postgres) | KILLED | 3 — `IntegrityError` on `pk_row_provider_settings`, a re-set slug now a duplicate key rather than an update |
+| fake `overrides()` defaults every known slug to `True` rather than omitting the untouched ones | KILLED | 5 — the whole fake-arm contract, since every case reads through `overrides()` |
+| `enabled` sense inverted in `set_enabled`, fake arm | KILLED | 3 |
+| `enabled` sense inverted in `set_enabled`, Postgres arm | KILLED | 3 |
+| `set_enabled` calls `self._session.commit()` (Postgres) | KILLED | 1 — the new second-session case, `assert 1 == 0` |
+
+(Five rows because "the `enabled` sense inverted" was run on both
+implementations independently, each with its own `set_enabled`; the
+acceptance section names the property once and it is checked once per arm.)
+Every kill was checked against the case it names and nothing else — the
+`DO UPDATE` deletion raises before a row count is reachable, which is the
+louder failure the contract's own upsert case is written to produce rather
+than a silent duplicate.
+
+**The control, measured against every gate step rather than against pytest
+alone** — the check the `__all__`-reorder entry above exists to force:
+
+| control | `pytest` (scoped selection) | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| `ON CONFLICT ... DO UPDATE`'s two independent `SET` assignments swapped (`updated_at`/`enabled`) | PASS (220) | PASS | PASS | PASS | PASS |
+
+It is a fact about the code rather than about what the tools look at: both
+right-hand sides read only from `excluded`, which is fixed within the
+statement before either assignment runs, and Postgres's `SET` list is
+simultaneous rather than sequential — there is no intermediate state either
+assignment could observe the other through. Already checked independently
+against a real pgvector/pgvector:pg17 container by a reviewer before this
+entry was written; re-measured here per gate step rather than re-argued.
+
+Gate green before and after, on the fully restored tree: `ruff check`,
+`ruff format --check`, `mypy` over 471 files, `lint-imports` 9 kept / 0
+broken, and the whole-suite baseline unchanged at **2,995 unit / 4 skipped**.
