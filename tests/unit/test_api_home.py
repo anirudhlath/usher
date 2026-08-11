@@ -357,6 +357,21 @@ async def test_the_screen_is_rows_in_the_order_the_server_composed_them(
     ]
 
 
+async def test_the_response_carries_an_etag_and_a_private_cache_control_header(
+    client: httpx.AsyncClient,
+) -> None:
+    """The conditional-GET helper (`usher.api.caching`), over the *real*
+    composer rather than over the minimal fixtures `test_api_caching.py`
+    builds its own cases from -- this is what proves the header lands on the
+    screen nine providers actually produced, not only on a one-title stub.
+    """
+    response = await client.get("/home")
+
+    assert response.status_code == 200
+    assert response.headers["etag"].startswith('"')
+    assert response.headers["cache-control"] == "private, max-age=30"
+
+
 async def test_a_row_carries_a_slug_a_title_a_reason_and_a_display_hint(
     client: httpx.AsyncClient, seeded: _Seeded
 ) -> None:

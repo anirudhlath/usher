@@ -82,13 +82,42 @@ be added if a client turns out to need flexible field selection.
 > over `titles.genres`, credits, collections — so
 > [08](08-operations.md)'s "never fails a request
 > local state can answer" is structural here, and there is still no 503 for the
-> RFC 9457 envelope below to describe. The model matters because `create_app`
-> builds one only when a worker runs in the same process; every similarity
-> input this route reads is *precomputed*, which is the same property
-> `usher index` has.
+> RFC 9457 envelope described under Errors below. The model matters
+> because `create_app` builds one only when a worker runs in the same process;
+> every similarity input this route reads is *precomputed*, which is the same
+> property `usher index` has.
 >
-> **Still M9's:** the RFC 9457 envelope, `usher.http.server.duration`,
-> `usher.cache.hits`/`.misses`, HTTP cache headers, and pagination.
+> ✅ **Answers a conditional request.** Every 200 carries an `ETag` — a
+> `sha256` strong tag over the exact serialised bytes, computed once — and
+> `Cache-Control: private, max-age=30`. `private`, never `public`: the screen
+> is composed for one household from a key that carries `user_id`, the same
+> reason `services/rows/cache.py` gives for its own key. `max-age` is
+> `services/home.py`'s own `_SCREEN_TTL`, restated rather than duplicated, so
+> the header and the cache cannot drift apart. A repeat request carrying the
+> returned `ETag` in `If-None-Match` gets back `304` with no body, repeating
+> both headers so the *next* request is conditional again.
+> `usher.api.caching.conditional_response` is the helper — a function the
+> route calls, never a global middleware, because a middleware would have to
+> read `GET /events`'s `StreamingResponse` to completion to hash it.
+> `GET /titles/{id}` does not adopt it: opening an unenriched title promotes
+> its `enrich` job, and a conditional short-circuit decided ahead of that
+> write would silently stop the promotion for exactly the clients that
+> already hold the title.
+>
+> **Still M9's, and everything else in this sentence now ships:** the RFC 9457
+> envelope (✅ shape only — `type`/`title`/`status`/`code`/`detail`/`instance`;
+> the `code` vocabulary itself is group V's ADR-0030 to settle, described under
+> Errors below), `usher.cache.hits`/`.misses` (✅, labelled
+> `cache=screen|row`, an expired entry counts as a miss), cache headers (✅,
+> above) and the opaque cursor (✅ — a codec at the HTTP boundary, described
+> under Pagination below; `/home` itself takes none, since ADR-0006
+> composes a screen rather than a page, and the paged routes that use the codec
+> are group B's). `usher.http.server.duration` was never a metric to add:
+> `FastAPIInstrumentor` already emits it (`ms`,
+> `opentelemetry.instrumentation.fastapi`), labelled with the route template
+> and status code, on every request including this one — PRD 10's row is
+> corrected to name what ships rather than exporting the same measurement
+> twice under a `usher.` prefix.
 
 > ⏳ **`GET /search` and `GET /search/suggest` are M9's.** M6 built everything
 > behind them — `SearchService`, `PostgresSearchIndex`, `PostgresSuggestIndex`,
