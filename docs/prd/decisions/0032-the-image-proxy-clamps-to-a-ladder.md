@@ -1,13 +1,14 @@
 # ADR-0032 — The image proxy clamps to a ladder of provider rungs, and no decoder is taken
 
-**Status:** Accepted — corrects [07](../07-client-api.md) and
-[08](../08-operations.md)
+**Status:** Accepted — corrects [02](../02-data-model.md),
+[07](../07-client-api.md) and [08](../08-operations.md)
 
 ## Context
 
-[02](../02-data-model.md)'s `### Image` sketch says the proxy *"fetches,
-resizes, and stores on first request"* and [07](../07-client-api.md) promises
-`GET /images/{image_id}?w=&h=&fmt=`. Neither names a mechanism, and the
+[02](../02-data-model.md)'s `### Image` sketch said the proxy *"fetches,
+resizes, and stores on first request"* and [07](../07-client-api.md) promised
+`GET /images/{image_id}?w=&h=&fmt=` — both corrected by this ADR, and quoted
+here in the wording that was there. Neither named a mechanism, and the
 mechanism is a **dependency decision**: Usher's runtime is fastapi / uvicorn /
 pydantic / pydantic-settings / sqlalchemy / asyncpg / alembic / pgvector /
 uuid6 / loguru / httpx / websockets / six OTel packages / cryptography, and
@@ -65,7 +66,10 @@ stated degradation, or not at all.
 **No decoder. Pillow is not taken — not as a dependency, not as an extra.**
 `pyproject.toml` and `uv.lock` are unchanged by this ADR. The proxy fetches a
 provider rung, stores the bytes it was given, and serves them; it never decodes
-and never re-encodes. **The first conjunct of the bar passes on all four axes
+and never re-encodes. **[02](../02-data-model.md)'s one-line `### Image` sketch
+is corrected in the same commit**, because *"resize"* is the word this
+measurement refutes and leaving it in one section while striking it from
+another is the silent drift `CLAUDE.md` forbids. **The first conjunct of the bar passes on all four axes
 and the second one fails**, which is the whole finding: the dependency is
 declined for want of a *capability*, not for want of budget.
 
@@ -76,9 +80,21 @@ IMAGE_LADDER = (154, 342, 780, 1280)   # a code constant, not a setting
 ```
 
 - **Clamp up**, to the smallest rung greater than or equal to the requested
-  width; a request above the top rung gets the top rung. Up rather than down
-  because a down-clamp answers a request for detail with something blurrier,
-  and the ladder is what bounds the cache either way.
+  width; a request above the top rung gets the top rung. **This costs bandwidth
+  and the cost is accepted, which is worth stating rather than implying**, since
+  bandwidth is half of what the clamp is defended on elsewhere in this document.
+  Measured over the same 10 titles per kind: a client asking for 512 px gets
+  `w780`, which is **2.0–2.2× the bytes** an exact `w500` would have been
+  (poster 232 KB against 105 KB and logo 129 KB against 65 KB, both 2.2× and
+  2.0×; backdrop 75 KB against 34 KB, 2.2×). The worst case on this ladder is a
+  request of 343, which gets `w780` at **4.3×** what `w342` would have cost for
+  a poster — 4.1× for a backdrop, 3.4× for a logo. Down-clamping
+  reverses that and is worse: it answers a 780-px card with a 342-px image,
+  which is a visible softness on every device rather than an invisible one on
+  fast links — and the party who pays is the user looking at it, not the
+  operator's bill. The ladder bounds the cache either way, so the choice is
+  purely which error to make, and this one is recoverable by asking for the next
+  rung up.
 - **`w` absent → `342`**, the row-card rung. A default that is already on the
   ladder creates no fifth cache entry, and the row card is the surface both of
   M9's two artwork consumers paint.
@@ -86,8 +102,9 @@ IMAGE_LADDER = (154, 342, 780, 1280)   # a code constant, not a setting
   free.
 - **Four rungs, and the reason for each end.** Bottom **154**: a type-ahead or
   search-result thumbnail at 77 CSS px on a 2× display. Below it the provider
-  publishes `w92` and `w45`, which are logo-scale — a poster at `w92` is 5.6 KB
-  and smaller than any card in a `portrait` rail. Top **1280**: the largest card
+  publishes `w92` and `w45`, which are logo-scale — a poster at `w92` has a
+  median of **6,366 bytes** over the 10-title sample in the table below, and is
+  smaller than any card in a `portrait` rail. Top **1280**: the largest card
   any consumer [00](../00-overview.md) names actually paints is the Home
   Assistant panel's full-bleed hero, 640 CSS px at 2×, and `w1280` is
   independently the largest backdrop width the provider publishes. Two arguments
@@ -100,12 +117,28 @@ IMAGE_LADDER = (154, 342, 780, 1280)   # a code constant, not a setting
   provider can withdraw without changing its own contract.
 
 **No `original` rung**, on the wire or on the fetch. It is not expressible
-through `?w=<int>`, and the fetch adapter must never request it either: a
-provider's original is a median **0.86–1.46 MB** and a measured maximum of
-**4.7 MB**, against 232 KB at the top rung — 4× to 12× the largest thing a
-client can ask for, per image, on a disk cache PRD 02 already prices at ~120 GB
-if artwork is mirrored. Serving it is the disk-and-bandwidth hazard the clamp
-exists to prevent.
+through `?w=<int>`, and the fetch adapter must never request it either.
+🔴 **The ratio this rested on was wrong until 2026-08-11** — it read *"4× to
+12× the top rung"* against *"232 KB at the top rung"*, and 232 KB is `w780`,
+one rung below the 1280 this document defines as the top. Recomputed per kind,
+median `original` ÷ median `w1280` over 10 titles each:
+
+| kind | `w1280` median | `original` median | ratio | `original` max |
+|---|---|---|---|---|
+| poster | 563,378 | 864,021 | **1.53×** | 2,200,704 |
+| backdrop | 179,356 | 1,459,462 | **8.14×** | 2,456,955 |
+| logo | 273,344 | 1,387,107 | **5.07×** | 4,731,805 |
+
+**So there is no single ratio, and the poster figure is the one that argues
+against this decision**: a poster's original is only half again its `w1280`,
+because a poster is rarely much wider than 1280 to begin with. What carries all
+three kinds is not the ratio but the **absence of a bound**: `original` is
+whatever the provider happened to store, from 173 KB to 4.7 MB with no ceiling
+the API can state, while every rung on the ladder is bounded by its own width.
+Against the **default** rung a client actually receives — `w342` — the same
+originals are **16×**, **80×** and **36×**. A clamp whose top entry has no
+stated maximum is not a clamp, on a disk cache PRD 02 already prices at ~120 GB
+if artwork is mirrored.
 
 **`fmt=` is refused, and [07](../07-client-api.md) is corrected in the same
 commit.** A provider-ladder proxy cannot honour it — measured, the CDN will
@@ -128,15 +161,73 @@ is corrected to say so. There is no TOML layer, and a setting nothing reads is
 dead config wearing a control's name — the same rule that document already
 applies to a typo, applied to a knob.
 
-**`Cache-Control: immutable` is honest only because an image id survives
-re-derivation**, and that is the unique key over `(title_id, provider,
-provider_path)` requested of `m09a`. The two are **one decision** and are
-recorded together so that a later reader cannot relax one without seeing the
-other: without the key, every `usher derive` re-run mints fresh UUIDv7s, every
-client's cached artwork reference is invalidated, and the immutability promise
-becomes a lie the first time a title is re-derived. If the header is ever
-softened, the key stops being load-bearing; if the key is ever dropped, the
-header must go with it.
+**`Cache-Control: immutable` is honest only if an image id survives
+re-derivation, and 🔴 as shipped it does not.** This ADR claimed until
+2026-08-11 that the id was stable *"because"* of a unique key over
+`(title_id, provider, provider_path)` *"requested of `m09a`"*. **`m09a` had
+already merged** — commit `1bd94c2`, before this ADR — and it carries no such
+key. Verified in `src/usher/db/migrations/versions/m09a_api_surface_tables.py`
+and `src/usher/db/models/image.py`: `images` has a primary key on `id`, **five**
+CHECK constraints (`ck_images_exactly_one_owner`, `..._provider_not_empty`,
+`..._remote_url_not_empty`, `..._width_positive`, `..._height_positive`), three
+**non-unique** indexes on the owner columns, and **no unique constraint of any
+kind**. The column is **`remote_url`**, not `provider_path`, and there is no
+`sort_order`.
+
+So the two are still one argument, and the honest statement of it is a
+**dependency, not a consequence**: the header this ADR specifies is
+**conditional on a key that does not exist yet**. Without it, every
+`usher derive` re-run mints fresh UUIDv7s for unchanged artwork, every client's
+cached reference is invalidated, and `immutable` becomes a lie the first time a
+title is re-derived. **Until the key lands, `GET /images/{id}` must not send
+`Cache-Control: immutable`** — a long `max-age` without `immutable` is the
+honest interim, because it lets a client revalidate.
+
+### The request: `m09c`, for C2 to mint
+
+`m09a`'s own docstring says *"`m09c` is spare and must be requested, never
+minted"*, and this is the request. It is written out because the spelling is
+**not** the obvious one and the obvious one fails silently — measured below.
+
+1. **The key, spelled `NULLS NOT DISTINCT` over the whole owner triple:**
+
+   ```sql
+   ALTER TABLE images ADD CONSTRAINT uq_images_owner_provider_path
+       UNIQUE NULLS NOT DISTINCT (title_id, episode_id, person_id, provider, <path column>);
+   ```
+
+   **Not** `UNIQUE (title_id, provider, <path>)`, which is what the plan's
+   wording invites and what a reviewer would wave through. Postgres defaults to
+   `NULLS DISTINCT`, so on a table whose owner is one of three nullable columns
+   that constraint is **inert for two of the three owner kinds** — an
+   episode-owned or person-owned duplicate has `title_id IS NULL` and never
+   conflicts. Measured on `pgvector/pgvector:pg17` (PostgreSQL 17.10), the
+   version this project deploys: the obvious spelling admitted **2** rows where
+   1 was correct, and the `NULLS NOT DISTINCT` spelling refused it. `NULLS NOT
+   DISTINCT` needs PostgreSQL ≥ 15 and is therefore available; the fallback on an
+   older server would be three partial unique indexes, which is three objects and
+   an owner-kind-specific `ON CONFLICT` predicate in the writer.
+2. **The write becomes an upsert on that constraint**, which is the whole point:
+   `ON CONFLICT (title_id, episode_id, person_id, provider, <path>) DO UPDATE`
+   infers the constraint and **returns the id the row was first inserted with** —
+   demonstrated below, same UUID before and after. That is the property the
+   header depends on, and it is a property of the *write*, not of the table.
+3. **A path column is a separate, smaller request, and it is this ADR's
+   mechanism that wants it.** The ladder is `{base}{rung}{path}`, so with a full
+   `remote_url` stored, selecting a rung means finding and replacing the
+   `/t/p/{size}` segment of a URL this project did not mint — string surgery on
+   somebody else's URL, on every request. A `provider_path` column makes rung
+   selection concatenation. If C2 prefers to keep `remote_url` and parse, the key
+   above works unchanged over `remote_url`; the cost is that parse, plus a CDN
+   base change becoming a data migration across 1.27M titles. **Either is
+   implementable; only the first is cheap, and this ADR does not decide it for
+   C2.**
+4. **`sort_order` is out of scope here** — it is the read-order requirement from
+   group C's preamble, it belongs to whoever reads images rather than to the
+   proxy, and bundling it into this request would hide it.
+
+If the header is ever softened, the key stops being load-bearing; if the key is
+never built, the header must not ship.
 
 ## Consequences
 
@@ -164,7 +255,9 @@ header must go with it.
 
 - **Arbitrary widths.** A client that wants 512 px gets 780 and scales down. On
   a 2× display that is invisible; on a bandwidth-constrained one it is 232 KB
-  where 74 KB would do.
+  where an exact `w500` would have been 105 KB — both poster figures, measured
+  over the same sample. (This line compared a poster against a *backdrop* until
+  2026-08-11, which flattered the ladder by quoting 74 KB.)
 - **A 4K full-bleed backdrop at native width.** The top rung is 1280, so a
   3840-wide hero is upscaled. A decoder would not fix this either — it could
   only downscale from `original`, which is a median 1.46 MB and is frequently
@@ -255,23 +348,58 @@ repository.
 **No width is published for all three kinds M9 emits** — poster ∩ backdrop is
 `{w780}` and adding logo leaves nothing — which is why the shipped ladder rests
 on the measured global allowlist for kind coverage while drawing every rung from
-the published union. All four rungs served **10/10 posters, 10/10 backdrops and
-6/6 logos**, median `Content-Length` in bytes:
+the published union. Every rung served **10/10** in all three kinds — the logo
+sample was 6 until 2026-08-11 and is now the same size as the other two, rather
+than a thinner number reported in the same voice. Median `Content-Length` in
+bytes, with the two rungs this document cites but does not ship (`w92`, `w500`)
+included so that every figure quoted above has a row:
 
-| rung | poster | backdrop | logo |
-|---|---|---|---|
-| `w154` | 14,467 | 5,394 | 10,184 |
-| `w342` | 53,940 | 18,226 | 31,918 |
-| `w780` | 232,311 | 74,871 | 114,146 |
-| `w1280` | 563,378 | 179,356 | 257,566 |
-| *`original`* | *864,021* | *1,459,462* | *1,313,395* |
+| rung | poster | backdrop | logo | on the ladder |
+|---|---|---|---|---|
+| `w92` | 6,366 | 2,603 | 5,989 | no — below the bottom rung |
+| `w154` | 14,218 | 5,394 | 12,661 | **yes** |
+| `w342` | 53,940 | 18,226 | 38,401 | **yes** (the default) |
+| `w500` | 104,993 | 34,491 | 65,302 | no — cited for the clamp-up cost |
+| `w780` | 232,311 | 74,871 | 128,922 | **yes** |
+| `w1280` | 563,378 | 179,356 | 273,344 | **yes** (the top) |
+| *`original`* | *864,021* | *1,459,462* | *1,387,107* | **never** |
 
 **`original` over a wider sample (20 titles from `/movie/popular`):** poster
 min 267,320, median 954,088, max 2,200,704; backdrop min 172,815, median
 1,129,342, max 2,456,955; the largest logo original measured is 4,731,805.
 ⚠️ *"A provider's original backdrop is multi-megabyte"* is true of the tail and
-not of the median — the median is ~1.1 MB — and the honest statement of the
-hazard is the **ratio**: 4× to 12× the top rung, per image, forever.
+not of the median — the median is ~1.1 MB. 🔴 **And the replacement claim was
+wrong too**: this line read *"4× to 12× the top rung"* until 2026-08-11, which
+reconciles with no consistent pairing of kind and statistic in the table above.
+The per-kind ratios are **1.53× / 8.14× / 5.07×** (poster / backdrop / logo,
+median `original` ÷ median `w1280`) and the argument that survives all three is
+stated in the Decision: `original` is the one rung with **no width bound at
+all**, ranging 173 KB to 4.7 MB across this sample, which is what a clamp exists
+to remove.
+
+**The id-stability key, measured rather than specified from the documentation**,
+on a throwaway `pgvector/pgvector:pg17` container (PostgreSQL **17.10**) with
+`images`' three nullable owner columns and its `num_nonnulls(...) = 1` CHECK
+reproduced and its foreign keys omitted:
+
+| spelling | title-owned duplicate | person-owned duplicate (`title_id IS NULL`) |
+|---|---|---|
+| `UNIQUE (title_id, provider, path)` | rejected ✅ | **admitted — 2 rows where 1 is correct** 🔴 |
+| `UNIQUE NULLS NOT DISTINCT (title_id, episode_id, person_id, provider, path)` | rejected ✅ | rejected ✅ |
+
+The second also correctly **admits** two different titles sharing one path (2
+rows for `/x.jpg`, which is right — the same artwork can be referenced by two
+titles), so it is not merely stricter. And the upsert behaves as the header
+needs: `ON CONFLICT (title_id, episode_id, person_id, provider, path) DO UPDATE`
+inferred the constraint and returned `a6517e9c-1f09-41b3-8f65-06c43f404d80`
+both before and after the re-derive — **the same id, which is the entire
+property `immutable` rests on.** `pg_get_constraintdef` reports it back as
+`UNIQUE NULLS NOT DISTINCT (...)`, so it survives a schema dump.
+
+This is the careless-spelling-versus-careful-spelling case from `CLAUDE.md`, in
+DDL: the wrong version passes review, passes a test that only ever inserts
+title-owned rows, and is silently inert for the two owner kinds M9 does not
+write yet — which is precisely when nobody notices.
 
 **The dependency price, measured 2026-08-11 on this host, Python 3.13.14,
 against a default no-extra venv** (`uv sync --frozen --no-dev`: 105 MB, **61
@@ -388,7 +516,18 @@ withdrawn from a kind arrives as an HTTP 400 on fetch, which by M4's taxonomy is
 right failure, and still a failure. A periodic re-read of `/configuration` would
 catch a narrowing before a client did; nothing does that today.
 
+🔴 **One decision here is unmet rather than uncertain, and it is the one a
+reader is most likely to assume is done.** `Cache-Control: immutable` has no key
+underneath it: `m09a` merged without one, the request to C2 is written out in
+the Decision as `m09c`, and **until it lands the header must not ship**. This
+is the only part of this ADR that another task has to build before the ADR is
+true of the running system, which is why it is repeated here rather than left in
+the Decision alone. The failure it prevents is silent — a re-derive invalidating
+every client's artwork cache, visible only as artwork that reloads for no
+reason.
+
 ⚠️ **No live end-to-end run stands behind the proxy itself**, because the proxy
 is not built here — C4 builds its ports and adapters and C5 puts it on the wire.
-Everything above is measured against the provider and against the build, which
-is what a dependency decision needs and is not the same as a working route.
+Everything above is measured against the provider, against a real PostgreSQL 17
+and against the build, which is what a dependency decision needs and is not the
+same as a working route.

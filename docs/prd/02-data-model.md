@@ -290,7 +290,10 @@ backdrop_path}`.
 
 Artwork is referenced, never bulk-mirrored — mirroring posters for a 1.2M-title
 catalog would be ~120 GB. Usher stores references and serves them through a
-caching proxy that fetches, resizes, and stores on first request.
+caching proxy that fetches a provider **rung** and stores the bytes on first
+request — 🔴 it does not resize, which this line claimed until 2026-08-11, and
+nothing in Usher's runtime can decode an image
+([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)).
 
 ```python
 class Image(BaseModel):
