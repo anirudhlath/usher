@@ -2197,3 +2197,50 @@ import-time side effect — and it is an ordering control that is **not** an `__
 docstring-scan grep: twelve test files scan source, and the only one touching this module
 (`test_one_whitespace_collapse_defends_both_prompts`) walks `ast.FunctionDef` and compares
 `node.body[-1]`, so a docstring at `body[0]` is outside it.
+
+## M9 Task S2 — the tier enqueue script, and the live prefix that prices S3 (2026-08-11)
+
+`scripts/enqueue_tier_enrichment.py` walks
+`kind = 'movie' AND vote_count >= 100 AND tmdb_id IS NOT NULL` on a keyset
+cursor and enqueues `JobKind.ENRICH` at `JobPriority.BACKFILL`, **bounded in
+the iterator** — `--limit` is subtracted from the size of the *next page asked
+for*, not trimmed off a drained walk. Three unit arms over the shipped title
+and queue fakes, all three red against a stub first: the predicate one
+conjunct at a time (the NULL-`tmdb_id` arm named for its reason — `_ref_for`
+parks it on attempt one), `--limit 3` against a page size of 2 reading exactly
+two pages of sizes `[2, 1]`, and a page nothing in it clears still advancing
+the cursor. The test loads the module with
+`importlib.util.spec_from_file_location` and says so: `[tool.mypy] files =
+["src", "tests"]` means **mypy does not check `scripts/`**, the status
+`scripts/measure_rows.py` has had since M7, named rather than discovered.
+
+**The number this exists to produce: S3 costs 3.50 h of wall clock on one
+`usher work` process** (130,806 fetches × a mean per-title cycle of 0.0963 s;
+95% CI [3.41, 3.59] h), **~1.0 GiB into `raw_payloads`**, and **261,612
+follow-up `INDEX`/`DERIVE` jobs** the plan does not price — of which the
+130,806 `INDEX` half is claimed by nothing unless `USHER_EMBEDDING_ENABLED` is
+turned on. Measured over a **systematic 1-in-261 sample, 500 titles, 0.38% of
+the tier**, drained through the shipped worker 21:44:00Z → 21:44:48Z; bar
+written to `/tmp/m9-enrich/BAR.md` before the first request; driver and probe
+outside the tree at `/tmp/m9-exec/S2/`. 539 requests across the whole task,
+**499 × 200 and 1 × 404** on the priced segment, no 429 and no 5xx.
+
+**Four plants, four killed, each naming its own case** — the `tmdb_id`
+conjunct dropped, the bound respelled as a post-filter over a drained walk,
+the cursor advanced on the last *enqueued* id (which also takes arm (a) as
+collateral, and which hangs without the page-source ceiling the fake carries
+for exactly that), and the page size no longer bounded by the remaining
+budget. Run in place with `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept
+before every run, the anchor asserted to appear exactly once, and every
+restore verified by `md5sum`.
+
+**The headline refutation is not about speed. Enriching a title can remove it
+from the tier**: `vote_count` is enrichable, the bulk loader writes IMDb
+`numVotes` and TMDb's own `vote_count` overwrites it, so **80 of 537 enriched
+tier movies (14.9%) still satisfy `>= 100`** — median TMDb count 16 against a
+median IMDb 581. The keyset walk is safe (a row leaves the tier only after the
+cursor passed it) and an `OFFSET` walk would not have been. PRD 04's Phase-3
+tier row and PRD 02's `vote_count` line move in this commit. Four further
+refutations, the two-instrument timing table, the flat-cost-across-eras
+measurement that makes the extrapolation linear, and the invalid first cache
+test are in `.claude/rules/tmdb-and-enrichment.md`.
