@@ -12,7 +12,7 @@ for the **abstraction**, and separating the two is what makes both correct:
 
 - `Row(ABC)` here, the shape `HomeService` names when it sorts, caps and
   builds. A service must be able to name what it composes without importing
-  nine provider modules, and `ports/` is precisely the layer where a service
+  ten provider modules, and `ports/` is precisely the layer where a service
   names a shape it does not own.
 - `BaseRow(Row)` in `services/rows/base.py`, carrying the shared `hydrate()`
   and `empty()`. `hydrate(title_ids)` needs a `TitleRepository`, a
@@ -30,12 +30,12 @@ outside both of ADR-0001's checks.
 
 **`RowContext` carries ports and never an `AsyncSession`, and that is checked
 rather than commented.** `AsyncSession` is explicitly not safe for concurrent
-use, so `asyncio.gather` over nine providers sharing a request's session is not
+use, so `asyncio.gather` over ten providers sharing a request's session is not
 a performance choice but a corruption -- and it *usually works*, which is how it
 ships. The defence is structural: a row holding repositories has no session to
 share, so there is nothing for a `gather` to interleave. That the repositories
 underneath share one is the composer's problem, stated once in `HomeService`,
-rather than nine providers' problem stated nowhere.
+rather than ten providers' problem stated nowhere.
 
 `lint-imports` does **not** cover this. The `db is driven, not driving`
 contract forbids `usher.ports -> usher.db`, and no contract in `pyproject.toml`
@@ -51,7 +51,7 @@ why, and note that the count in `domain/rows.py` moves with it.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -63,6 +63,7 @@ from usher.domain.watch import User
 from usher.ports.repository import (
     CollectionRepository,
     CreditRepository,
+    CuratedRowRepository,
     EpisodeRepository,
     MediaItemRepository,
     PersonRepository,
@@ -104,19 +105,20 @@ class RowContext:
     code (boundary call 9) -- they are constructed once, and a per-request
     clock cannot be a constructor argument of a singleton.
 
-    **Eleven fields, and two were removed rather than counted.** Group B built
+    **Twelve fields, and two were removed rather than counted.** Group B built
     `PersonRepository`, `CreditRepository` and `CollectionRepository` and did
     not put them here; nothing in tasks 22-25 read them, so the gap was
     invisible until `FranchiseProvider` and `PeopleProvider` needed them. They
     are added by the task that first reads them, which is what this docstring's
     original promise -- "a field added later is a one-line change every
     existing provider ignores" -- was asserting is cheap. It was: the four
-    providers already shipped are untouched by all three.
+    providers already shipped are untouched by all three, and the nine already
+    shipped are untouched by the twelfth.
 
     The full list:
 
         user, now, titles, media_items, watch_states, episodes, neighbors,
-        people, credits, collections, affinities
+        people, credits, collections, affinities, curated
 
     **`search` and `taste` were here and are gone, and that is the other half
     of the same promise.** Group I/J found by grep that no provider read
@@ -157,7 +159,8 @@ class RowContext:
     - **A constructor argument on the provider.** Providers are enabled by
       registration in code (boundary call 9), so they are constructed once,
       and this is per-request, per-user data. That is the same argument that
-      put the clock on this context rather than on nine constructors.
+      put the clock on this context rather than on one constructor per
+      registered provider.
     - **Recomputing it inside the provider.** Two of `genre_affinity`'s three
       inputs are already here; the third is
       `TasteRepository.library_genre_counts()`. So the provider would need a
@@ -177,7 +180,49 @@ class RowContext:
     sit beside it. A deployment without an embedder gets a home screen with
     **fewer rows, not worse rows**.
 
-    A twelfth field arriving without a task is drift, and
+    **And it is *awaited* rather than held, which is the one shape change this
+    dataclass has taken since M7.** It was `Sequence[GenreAffinity]`, computed
+    while the dependency graph resolved -- and FastAPI resolves that graph
+    before the handler runs, while `HomeService.compose_report` can only look
+    in the ~30 s screen cache once it has a context. So every `GET /home`,
+    hit or miss, paid `list_recent(50)` + `list_by_ids(50)` + a library-wide
+    `unnest(genres) GROUP BY` over 1.27M titles to fill a field that exactly
+    one of the ten providers reads, and a cache hit -- most requests -- paid
+    the most expensive thing on the path before it could answer for free.
+    The two available shapes were this and moving the cache lookup in front of
+    the context; this one is chosen because the other puts a *stale-by-design*
+    read in a dependency (the entry can expire or be invalidated between the
+    lookup and the compose, and the screen composed from the empty affinity
+    that follows is then cached for another 30 s -- a silently wrong screen
+    bought to save a read), and because a lazy field costs nothing on the miss
+    path it was already correct on.
+
+    **A callable here is not a licence for more of them.** The other eleven
+    are ports, a user and the clock -- and the clock is a callable for a
+    different reason entirely (a fixture has to be able to say what time it
+    is), not because reading it costs anything. This is the only field whose
+    *value* is the product of three statements, which is the whole of why it
+    is the only one deferred and the test of whether a twelfth should be. A
+    second lazily-awaited field would want the same argument made again, in
+    writing, and a context of callables is a context that has stopped saying
+    what a row may reach and started saying what it may run.
+    `test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_it`
+    pins the deferral and
+    `test_a_screen_the_cache_can_answer_reads_no_taste_at_all` pins what it
+    bought.
+
+    **`curated` is the twelfth and it arrived with its reader**, which is the
+    shape the two deleted fields did not have. M8's Task 15 adds it and
+    `CuratedProvider` in one commit; the port
+    (`CuratedRowRepository.list_for_user`) and the table had been there since
+    Task 9, which is exactly the pull that put `search` here three groups
+    before anything retrieved. It is a **repository**, not the rows: a
+    provider is constructed once at import (boundary call 9) and a generation
+    is per-household and per-request-fresh, so a `Sequence[CuratedRow]` here
+    would be `affinities`' shape spent on data the composer has no reason to
+    read and every request would pay for it whether or not the provider fired.
+
+    A thirteenth field arriving without a task is drift, and
     `test_every_row_context_field_is_read_by_at_least_one_provider` is what
     now says so -- scanned rather than counted, because the count was correct
     on the day two of the thirteen were decoration.
@@ -201,8 +246,17 @@ class RowContext:
     # The thirteenth, argued above. A `Sequence` rather than a `tuple` for the
     # reason `propose` returns one: a provider must not mutate what the
     # composer handed it, and the composer must not have to copy a list to
-    # hand it over.
-    affinities: Sequence[GenreAffinity]
+    # hand it over -- and a callable rather than the sequence itself, so a
+    # screen the cache can answer never pays for it. The composition root owns
+    # the memo, because "once per request" is a fact about the request and not
+    # about any row.
+    affinities: Callable[[], Awaitable[Sequence[GenreAffinity]]]
+    # M8's one, and the fourteenth by that same historical count. It lands with
+    # `CuratedProvider` (Task 15) rather than with the port and the table it
+    # reads (Task 9), which is the discipline `search` and `taste` did not
+    # have. `list_for_user` answers the newest generation, so the provider
+    # never asks which night it is looking at.
+    curated: CuratedRowRepository
 
 
 class Row(ABC):
@@ -241,9 +295,12 @@ class Row(ABC):
     def reason(self) -> str | None:
         """The subtitle, written to be **spoken aloud** rather than merely
         displayed -- PRD 06's Alfred section states that as a constraint on
-        the field, and it is a real one on the nine providers: "Because you
+        the field, and it is a real one on M7's nine providers: "Because you
         watched Dune" is speakable and "cosine>0.82 seed=a3f9" is not.
-        `None` for a shelf that needs no explaining."""
+        `None` for a shelf that needs no explaining, and **M8's `LLMRow` is
+        the first thing in `src/` to reach that arm** -- it passes the stored
+        `reason` through, `None` included, because `curation_validate` turns a
+        blank one into `None` rather than `""`."""
 
     @property
     @abstractmethod
@@ -319,11 +376,20 @@ class ScoredRow:
     **What is deliberately not constrained: the scale.** Whether a provider
     modulates its base score per proposal (a fresher seed ranking higher) is
     left open, and this port permits it because `score` is a float here rather
-    than a lookup the composer performs. The named risk is nine incomparable
-    scales, which makes the composer's sort meaningless while looking exactly
-    like a sort. Group I asserts the observed range across all registered
-    providers; this port does not, because a bound invented here would be a
-    number nobody measured.
+    than a lookup the composer performs. **The named risk is one incomparable
+    scale per registered provider, which makes the composer's sort meaningless
+    while looking exactly like a sort.** Group I asserts the observed range
+    across all registered providers; this port does not, because a bound
+    invented here would be a number nobody measured.
+
+    This paragraph is the **one** copy of that risk, and it carries no count on
+    purpose. It shipped as "nine incomparable scales" and stayed nine through
+    M8's tenth provider while `services/rows/__init__.py` said ten and
+    `test_rows_invariants.py` said nine -- three live copies of one sentence
+    disagreeing, in a commit whose message offered *"neither score invariant
+    changed a character"* as evidence of stability. A restated number is a
+    number that drifts; the count is `len(BASE_SCORES)` and is derived where it
+    is asserted.
     """
 
     row: Row
@@ -352,12 +418,13 @@ class RowProvider(ABC):
         rule for the wire ("internal refactors don't break clients; wire
         changes are deliberate") applied to telemetry.
 
-        **Bounded at nine, and that is the point.** The tempting label is the
+        **Bounded at ten, and that is the point.** The tempting label is the
         *row's* slug -- but `BecauseYouWatchedProvider` mints one per seed
-        (`because-you-watched-<seed>`), so a slug label's cardinality is the
-        household's watch history and, in time, the catalog. A label whose
-        cardinality grows with the catalog is a metrics-backend outage rather
-        than a dashboard.
+        (`because-you-watched-<seed>`) and `CuratedProvider` one per shelf per
+        generation (`curated-01`, `curated-02`, …), so a slug label's
+        cardinality is the household's watch history, and in time the catalog
+        and every shelf a model has ever proposed. A label whose cardinality
+        grows with either is a metrics-backend outage rather than a dashboard.
 
         Every row a provider proposes carries a slug that **starts with this
         string**, which is what makes the label provably about the rows it

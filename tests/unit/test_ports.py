@@ -4,11 +4,12 @@ must fail at instantiation, not at the call site."""
 from abc import ABC
 from collections.abc import Sequence
 from decimal import Decimal
-from typing import Protocol
+from typing import Protocol, get_type_hints
 
 import pytest
 
 from tests.fakes.title_repository import FakeTitleRepository
+from usher.domain.curation import LLMCall
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import BulkDataset
 from usher.ports.credentials import CredentialStore
@@ -29,9 +30,11 @@ from usher.ports.repository import (
     BulkCatalogRepository,
     CollectionRepository,
     CreditRepository,
+    CuratedRowRepository,
     EpisodeRepository,
     GenomeRepository,
     ImportRunRepository,
+    LLMCallRepository,
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
@@ -74,9 +77,11 @@ ALL_PORTS: list[type[ABC]] = [
     BulkCatalogRepository,
     CollectionRepository,
     CreditRepository,
+    CuratedRowRepository,
     EpisodeRepository,
     GenomeRepository,
     ImportRunRepository,
+    LLMCallRepository,
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
@@ -165,6 +170,31 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
         (
             TitleNeighborRepository,
             {"replace", "list_for", "computed_at", "count_stale"},
+        ),
+        # M8 Task 9, and it is on this list for the reason `count_stale` is:
+        # the surface is where the decisions live. **`replace_for_user` takes
+        # no `generation_id` parameter** -- every `CuratedRow` carries one, so
+        # a third argument would be a second spelling of a fact the rows
+        # already hold, and the delete's scope is `user_id` rather than the
+        # generation (M8's plan names a three-argument signature; the port
+        # docstring carries the argument for departing from it). A parameter
+        # re-added here without that argument being answered moves this set.
+        (
+            CuratedRowRepository,
+            {"replace_for_user", "list_for_user"},
+        ),
+        # M8 Task 10, and the whole content of this entry is the **absence** of
+        # a read. `m08a` ships `llm_calls` with its primary key and no other
+        # index precisely because this port has none, so a `list_since` added
+        # here without that argument being re-opened leaves an index nothing
+        # reads maintained on every write -- `ix_titles_popularity` twice.
+        # `test_the_cost_ledger_has_no_read_method` below is the same claim
+        # spelled as its own case, for the reason `test_suggest_index_has_no_
+        # write_method` is: a surface's deliberate gap is a decision, and a
+        # decision needs something that fails when it is reversed by accident.
+        (
+            LLMCallRepository,
+            {"record"},
         ),
     ],
 )
@@ -259,6 +289,40 @@ def test_suggest_index_has_no_write_method() -> None:
     it without deleting this is a failing test.
     """
     assert SuggestIndex.__abstractmethods__ == frozenset({"suggest"})
+
+
+def test_the_cost_ledger_has_no_read_method() -> None:
+    """**The structural half of `LLMCallRepository`'s central decision**, whose
+    argument lives on that port: `llm_calls` has no reader in `src/`, `m08a`
+    shipped it with its primary key and no other index on the strength of
+    that, and a read here would be the third surface this project has built
+    for a consumer that does not exist.
+
+    Not `test_suggest_index_has_no_write_method`'s shape, despite the
+    similarity — `SuggestIndex` is deliberately *not* in the parametrisation
+    above, so for that port the dedicated case is the only thing asserting a
+    surface at all. Here the parametrised entry already pins the exact set, so
+    what this adds is a name and a reason: a set that moves says only that
+    something changed, and this says which direction was the decision. Adding
+    `list_since` *and* the index it needs, in the milestone that adds the
+    panel reading them, is a decision; adding it without deleting this case is
+    a failing test.
+    """
+    assert LLMCallRepository.__abstractmethods__ == frozenset({"record"})
+
+
+def test_the_cost_ledger_takes_the_domain_model_rather_than_its_parts() -> None:
+    """`LLMCallRepository.record`'s signature is the answer to "what happens
+    when the constructor raises inside an exception handler", and the port's
+    docstring is where that argument is made. Pinned here because a signature
+    is the part of it a later change can undo without reading a word of the
+    reasoning.
+
+    Asserted on the annotation rather than on the parameter count, because a
+    parts-shaped `record(**fields: Any)` has one parameter too.
+    """
+    hints = get_type_hints(LLMCallRepository.record)
+    assert hints == {"call": LLMCall, "return": type(None)}
 
 
 def test_incomplete_implementation_fails_at_instantiation() -> None:

@@ -155,6 +155,42 @@ GENOME_TAG_COUNT = 1128
 
 
 @dataclass(frozen=True, slots=True)
+class GenomeTag:
+    """One row of MovieLens' `genome-tags.csv`: a vector lane and its name.
+
+    **`tag_id` is a lane index, not an identifier**, and that is the whole of
+    why this DTO is a pair rather than a bare name. `GenomeVector.relevance[i]`
+    is the relevance of the tag whose `tag_id` is `i + 1`, so the id is what
+    binds a name to a position; carrying only the names would make the binding
+    the *sequence*'s job, and a sequence that is one element short at position
+    3 is still a well-formed sequence describing every later tag wrongly.
+
+    **Measured against the real member, 2026-08-07** (`ml-latest/
+    genome-tags.csv`, 18,103 bytes, read through `CachedDatasetFile.
+    member_lines`): **1,128 rows**, `tagId` exactly `1…1128` and ascending, no
+    name empty, no name containing a comma, 1,128 distinct names, longest 65
+    characters. The file is CRLF-terminated and `member_lines`' universal-
+    newline decode already removes the `\\r`, so nothing here strips one --
+    pinned by `test_a_crlf_bodied_member_stores_no_carriage_return_in_a_tag_
+    name`, which is a CRLF-bodied fixture because every other one in that file
+    is `"\\n".join(...)` and cannot see the difference.
+
+    **`tag_id` carries no ceiling on this dataclass**, deliberately, and the
+    ceiling it does have is stated where it can be enforced against a whole
+    batch rather than a row at a time: `BulkCatalogRepository.
+    replace_genome_tags` refuses anything that is not exactly `1…n` before it
+    writes, so the largest `tag_id` that can reach a driver is the length of
+    the vocabulary being written. A `le=` here would be a second, weaker copy
+    of that -- it cannot see a *gap*, which is the failure that matters, and a
+    frozen dataclass validating one field in isolation is not where this
+    project puts an invariant over a batch.
+    """
+
+    tag_id: int
+    tag: str
+
+
+@dataclass(frozen=True, slots=True)
 class GenomeVector:
     """One movie's dense MovieLens tag-genome vector.
 

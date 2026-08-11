@@ -13,12 +13,14 @@ import ast
 import dataclasses
 import inspect
 import pathlib
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pytest
 
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credit_repository import FakeCreditRepository
+from tests.fakes.curated_row_repository import FakeCuratedRowRepository
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import FakePersonRepository
@@ -27,9 +29,19 @@ from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.rows import BuiltRow
-from usher.domain.taste import Centroid
+from usher.domain.taste import Centroid, GenreAffinity
 from usher.domain.watch import User
 from usher.ports.rows import Row, RowContext, RowProvider, ScoredRow
+
+
+async def _no_affinities() -> Sequence[GenreAffinity]:
+    """The field as the route hands it over: awaited, not held.
+
+    Empty because nothing in this file is about the affinity itself -- `[]` is
+    the common real answer (no genre cleared `_MIN_LIFT` and `_MIN_SUPPORT`)
+    and never a stand-in for "nothing computed this".
+    """
+    return ()
 
 
 def _context(*, taste: Centroid | None = None) -> RowContext:
@@ -44,7 +56,8 @@ def _context(*, taste: Centroid | None = None) -> RowContext:
         people=FakePersonRepository(),
         credits=FakeCreditRepository(),
         collections=FakeCollectionRepository(),
-        affinities=(),
+        curated=FakeCuratedRowRepository(),
+        affinities=_no_affinities,
     )
 
 
@@ -87,7 +100,7 @@ def test_a_row_context_cannot_reach_a_session() -> None:
     wrong is that it usually works: two short reads interleaved on one
     connection frequently complete, and the failure is an intermittent
     InvalidRequestError under load in production. The defence is not a
-    comment telling nine providers not to gather -- it is a context that has
+    comment telling ten providers not to gather -- it is a context that has
     no session on it, so a provider holding one has nothing to share.
 
     Two spellings, both learned the hard way by
@@ -111,7 +124,7 @@ def test_a_row_context_cannot_reach_a_session() -> None:
         elif isinstance(node, ast.Import):
             imported.update(alias.name for alias in node.names)
     assert not any(name.startswith("sqlalchemy") for name in imported), (
-        "a RowContext holding a session is a RowContext nine providers can "
+        "a RowContext holding a session is a RowContext ten providers can "
         "asyncio.gather over -- trap 4, which usually works"
     )
     assert not any(name.startswith("usher.db") for name in imported)
@@ -285,6 +298,12 @@ def test_every_row_context_field_is_read_by_at_least_one_provider() -> None:
     If a future field is genuinely needed before its reader exists, this case
     is the place to say so out loud and with a reason, rather than letting the
     field arrive unremarked.
+
+    **`curated` is the twelfth field and it arrived with its reader**, in M8
+    Task 15, in the same commit as `CuratedProvider` -- which is the shape this
+    case exists to require and the one `search` and `taste` did not have. It is
+    also the field with the strongest pull towards arriving early: the port and
+    the table landed three tasks before the provider did.
     """
     provider_dir = pathlib.Path(inspect.getfile(RowContext)).parents[1] / "services" / "rows"
     sources = sorted(provider_dir.glob("*.py"))

@@ -249,7 +249,7 @@ allow_indirect_imports = true
 # The last time that step was skipped, five contracts reported KEPT against a
 # violation none of them constrained.
 [[tool.importlinter.contracts]]
-name = "no concrete search or embedding implementation escapes its package"
+name = "no concrete search, embedding or LLM implementation escapes its package"
 type = "forbidden"
 source_modules = [
     "usher.domain",
@@ -258,5 +258,112 @@ source_modules = [
     "usher.api",
     "usher.db",
 ]
-forbidden_modules = ["usher.adapters.search", "usher.adapters.embedding"]
+forbidden_modules = [
+    "usher.adapters.search",
+    "usher.adapters.embedding",
+    # M8. `OpenAICompatibleClient` is exactly the class ADR-0027 says may one
+    # day be joined by a `LiteLLMClient` -- the ADR closes with "cheap to
+    # reverse", and this contract is what makes that true of the code rather
+    # than only of the argument.
+    "usher.adapters.llm",
+]
 allow_indirect_imports = true
+
+# M8. PRD 06's *"Generation happens in a background job -- never in the request
+# path"*, as a property of the import graph rather than of a name list.
+#
+# `tests/unit/test_api_rows.py` and `tests/unit/test_rows_curated.py` already
+# scan their own module for `LLMClient`, `CurationService` and friends, and a
+# name scan is the right shape there -- behaviour cannot distinguish "never
+# reached an LLM" from "reached one and swallowed the failure". But a name scan
+# is only ever as complete as its list, and the list had a reachable hole:
+# `composition.build_curation_service` is the one public factory in `src/`
+# whose entire job is to return a `CurationService` holding an `LLMClient`
+# (`composition.py` calls it exactly that way when it registers the `curate`
+# handler), and it is spelled with none of the forbidden words. A router doing
+#
+#     from usher.composition import build_curation_service
+#
+# was planted and passed every gate step -- ruff, mypy, all seven contracts
+# above, and both suites. `api/deps.py` already imports from
+# `usher.composition`, so that is the door somebody adding in-request
+# generation reaches for, not a hypothetical one. The same hole swallows a
+# rename: the scan catches `CurationServiceDep` only because the string
+# `CurationService` is inside it, and `CuratorDep` would be silent.
+#
+# `usher.composition` is deliberately absent from every contract above (see the
+# comment on the previous one), so nothing constrained this at all. Naming it
+# here closes that for the one package where an in-request completion would
+# actually be bought.
+#
+# `allow_indirect_imports` is load-bearing for the reason it is on the two
+# contracts above, and this contract does not hold without it: every router
+# imports `usher.api.deps`, which is the API's composition root and imports
+# `usher.composition` on purpose, so `usher.api.routers.health ->
+# usher.api.deps -> usher.composition` is an indirect chain a forbidden
+# contract reports by default. Measured: without the flag this contract is
+# BROKEN at HEAD on three chains through `api/deps.py` and `api/lanes.py`,
+# which is the reverse of what it is for. With it, the line drawn is the one
+# that matters -- a router may reach a service through a dependency, and may
+# not *name* the wiring, the curation service or the LLM port itself.
+#
+# Verified in both directions: KEPT at HEAD, and BROKEN on each of the three
+# forbidden modules planted directly (`usher.composition` in
+# `routers/rows.py`; `usher.services.curation` and `usher.ports.llm` in
+# `routers/home.py`, which no name scan in the suite covers at all).
+[[tool.importlinter.contracts]]
+name = "no router names the wiring, the curation service or the LLM port"
+type = "forbidden"
+source_modules = ["usher.api.routers"]
+forbidden_modules = [
+    "usher.composition",
+    "usher.services.curation",
+    "usher.ports.llm",
+]
+allow_indirect_imports = true
+
+# **`adapters/http.py` is now shared by four adapter packages, and nothing kept
+# it a leaf.** Until 2026-08-10 it held one function (`retry_after_seconds`) and
+# its module docstring's claim to be the home for "HTTP helpers shared by every
+# adapter that talks to an upstream over httpx... instead of each reimplementing
+# it" was mostly aspiration -- `decode_json`, the untranslated-failure tuple and
+# the status-code ladder were each written two or three times, once per adapter.
+# That review consolidated them here, so this module now owns the **error
+# taxonomy translation for the whole project**: `bulk`, `emby`, `llm` and `tmdb`
+# all import it, and `ADR-0027`'s "the error taxonomy is ours" is a property of
+# this one file.
+#
+# Which makes the direction of the edge load-bearing for the first time. A
+# shared module that imports one of its own consumers is a cycle, and the
+# failure is quiet rather than loud: the import resolves, the tests pass, and
+# the next adapter to need a helper finds a "shared" module that drags an Emby
+# session or an httpx-mocked TMDb client in behind it. The generalisation
+# argument is the one the previous contract records -- *prefer a graph property
+# wherever one is expressible* -- and the alternative here is a convention in a
+# docstring, which is what the three duplicate copies grew out of.
+#
+# **No `allow_indirect_imports`, deliberately, and it is the opposite call from
+# the three contracts above.** They carry the flag because their sources
+# legitimately reach the forbidden module through a composition root. This one
+# has no such path: `usher.adapters.http` imports `httpx` and the standard
+# library and nothing else in this project, so an *indirect* chain into an
+# adapter is exactly as much a cycle as a direct one and there is no honest
+# reason for either.
+#
+# Verified in both directions rather than asserted: KEPT at HEAD (9 kept, 0
+# broken), and BROKEN on a plant -- `from usher.adapters.emby.session import
+# EmbySession` added to `adapters/http.py` **in its isort position**, so the
+# careful spelling of the defect is what was measured and not the careless one
+# `ruff check` would have caught first.
+[[tool.importlinter.contracts]]
+name = "the shared http helpers import no concrete adapter"
+type = "forbidden"
+source_modules = ["usher.adapters.http"]
+forbidden_modules = [
+    "usher.adapters.bulk",
+    "usher.adapters.embedding",
+    "usher.adapters.emby",
+    "usher.adapters.llm",
+    "usher.adapters.search",
+    "usher.adapters.tmdb",
+]

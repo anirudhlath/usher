@@ -1,11 +1,16 @@
 """Behaviour every `GenomeRepository` implementation must satisfy.
 
-Four cases, and three of them are about a value that is *wrong and
-plausible* rather than about a value that is missing -- which is what this
-milestone's opening section says a genome vector's failures look like. A
-zero vector, a padded missing side, and a cosine taken across two releases
-all produce a number, in range, with nothing to distinguish it from a right
-one.
+Ten cases, and most of them are about a value that is *wrong and plausible*
+rather than about a value that is missing -- which is what M7's opening
+section says a genome vector's failures look like. A zero vector, a padded
+missing side, and a cosine taken across two releases all produce a number, in
+range, with nothing to distinguish it from a right one.
+
+**M8 Task 19 added the vocabulary half, where the same failure is worse.** A
+cosine taken across two releases is a wrong *number*; a lane name taken across
+two releases is a sentence about a household's taste, in prose, on a screen.
+So `get_pair` answers `None` across a mismatch and `vocabulary` raises, and
+the four vocabulary cases below are the argument for that asymmetry.
 
 **This port has no writer**, so the suite seeds through an abstract
 `GenomeSeeder` the two arms implement (a raw `INSERT` for Postgres, a dict
@@ -21,10 +26,12 @@ Subclass and provide `repository` and `seeder`.
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 import pytest
 
 from usher.ports.bulk import GENOME_TAG_COUNT
+from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import GenomeRepository
 
 #: The production width, not a convenient small one. `halfvec(1128)` rejects
@@ -70,6 +77,19 @@ class GenomeSeeder(ABC):
         self, title_id: uuid.UUID, relevance: tuple[float, ...], *, revision: str = RELEASE_A
     ) -> None:
         """Store one vector for an existing title."""
+
+    @abstractmethod
+    async def tags(self, tags: Sequence[tuple[int, str]], *, revision: str = RELEASE_A) -> None:
+        """Store a `genome_tags` vocabulary as raw `(tag_id, tag)` pairs.
+
+        Pairs rather than `GenomeTag`s, and a seeder rather than
+        `BulkCatalogRepository.replace_genome_tags`, because the cases below
+        need to write vocabularies that method refuses outright -- a gap being
+        the point of one of them. Seeding through the shipped writer would
+        make the refusal untestable and would couple this suite to a second
+        port, which is the same reason `vector` above is not `upsert_genome_
+        vectors`.
+        """
 
 
 class GenomeRepositoryContract:
@@ -172,6 +192,96 @@ class GenomeRepositoryContract:
         # than as a comparison of the two would pass one way and not the
         # other.
         assert await repository.get_pair(right, left) is None
+
+    async def test_a_catalog_with_no_vocabulary_reads_as_none_rather_than_raising(
+        self, repository: GenomeRepository, seeder: GenomeSeeder
+    ) -> None:
+        """Absence is a value here and a mismatch is an error, and this is the
+        value half.
+
+        It is not a hypothetical state: `ffa` shipped `genome_scores` with the
+        vocabulary deliberately unstored, so **every catalog bootstrapped
+        before `m08b` is in exactly this state** and stays in it until an
+        operator re-runs the phase. A caller that gets `None` renders no tags,
+        which is PRD 08's "a degraded subsystem narrows functionality; it
+        never fails a request local state can answer". Kills an implementation
+        that treats an empty table as a mismatch, which would park every job
+        that asks on a deployment where nothing is wrong.
+
+        A vector is seeded so the case cannot pass because the whole genome is
+        empty -- the two tables are independent and the wrong implementation
+        this rules out reads the wrong one.
+        """
+        title_id = await seeder.title()
+        await seeder.vector(title_id, lanes(0.5))
+
+        assert await repository.vocabulary(RELEASE_A) is None
+
+    async def test_the_vocabulary_reads_back_in_lane_order_not_in_storage_order(
+        self, repository: GenomeRepository, seeder: GenomeSeeder
+    ) -> None:
+        """`result[i]` names `relevance[i]`, which is the only thing this
+        method is for.
+
+        Seeded **descending** and asserted ascending: storage order and lane
+        order are the same on any fixture that seeds in order, so an
+        implementation with no `ORDER BY` -- or one that keys by insertion --
+        is invisible against the natural fixture. Same family as the UUIDv7
+        `ORDER BY` trap, arriving at a table whose key is not a UUID at all.
+
+        The premise, asserted rather than assumed: the seeding order is not
+        the lane order, so a read that preserved it would answer differently.
+        """
+        seeded = [(3, "melancholy"), (2, "atmospheric"), (1, "zeppelins")]
+        assert [tag_id for tag_id, _ in seeded] != sorted(tag_id for tag_id, _ in seeded)
+        await seeder.tags(seeded)
+
+        assert await repository.vocabulary(RELEASE_A) == ("zeppelins", "atmospheric", "melancholy")
+
+    async def test_the_vocabulary_refuses_a_release_it_was_not_loaded_under(
+        self, repository: GenomeRepository, seeder: GenomeSeeder
+    ) -> None:
+        """The failure this table's third column exists for, and it is worse
+        than the sibling one `get_pair` refuses: a cosine taken across two
+        releases is a wrong number, and a *label* taken across two releases is
+        a sentence about a household's taste, in prose, on a screen, with
+        nothing anywhere reporting an error.
+
+        `PortDataMalformed` rather than a `None`: retrying does not help and
+        `JobWorker` parks it, which is the response an operator's re-import is
+        the fix for. Both revisions are in the message, because "the
+        vocabulary is wrong" without saying *which* release is stored is not
+        something an operator can act on.
+
+        Kills an implementation that answers whatever is stored, and one that
+        answers `None` -- which would be indistinguishable from the
+        legitimately-empty state above.
+        """
+        await seeder.tags([(1, "zeppelins"), (2, "atmospheric")], revision=RELEASE_B)
+
+        with pytest.raises(PortDataMalformed) as exc_info:
+            await repository.vocabulary(RELEASE_A)
+
+        assert RELEASE_A in str(exc_info.value)
+        assert RELEASE_B in str(exc_info.value)
+
+    async def test_a_vocabulary_with_a_gap_is_refused_rather_than_shifting_every_later_lane(
+        self, repository: GenomeRepository, seeder: GenomeSeeder
+    ) -> None:
+        """A read that collected the names in `tag_id` order and handed them
+        back would give lane 2 the name of tag 4 -- and every lane after it
+        the name of the tag one further on -- while returning a
+        perfectly-shaped tuple of the wrong length.
+
+        `replace_genome_tags` refuses to *write* one, so reaching this needs a
+        hand-written `DELETE`; it is three lines in the reader and it is the
+        difference between refusing and answering wrongly. Kills
+        `tuple(name for _, name in rows)`, which is the obvious spelling.
+        """
+        await seeder.tags([(1, "zeppelins"), (2, "atmospheric"), (4, "melancholy")])
+
+        with pytest.raises(PortDataMalformed, match="contiguous"):
+            await repository.vocabulary(RELEASE_A)
 
     async def test_get_pair_of_a_title_with_itself_is_not_a_special_case(
         self, repository: GenomeRepository, seeder: GenomeSeeder

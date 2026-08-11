@@ -15,17 +15,22 @@ to "what does a fake row do", one file away from the one `tests/fakes/` already
 holds.
 """
 
+import dataclasses
+from collections import Counter
 from collections.abc import Sequence
 
 import pytest
 
 from tests.fakes.row_provider import FakeRow, FakeRowProvider
-from tests.unit.rows import Library
+from tests.unit.rows import NOW, Library
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.rows import BuiltRow, RowCard, RowFamily
+from usher.domain.taste import GenreAffinity
 from usher.ports.rows import RowContext, ScoredRow
-from usher.services.home import HomeService
+from usher.services.home import _MAX_PER_FAMILY, HomeService
+from usher.services.rows.cache import RowCache
+from usher.services.rows.genre_affinity import GenreAffinityProvider
 
 
 @pytest.fixture
@@ -318,24 +323,86 @@ async def test_every_provider_is_asked_exactly_once_per_screen(ctx: RowContext) 
 
 async def test_the_screen_is_never_longer_than_the_row_ceiling(ctx: RowContext) -> None:
     """`_MAX_ROWS` bounds what is built as well as what is returned: PRD 06's
-    "builds the top N", so no over-selection and no padding."""
-    service = HomeService(
-        providers=[
-            _stub(f"row-{n:02d}", score=0.9 - n / 100, family=RowFamily.SOURCE) for n in range(3)
-        ]
-        + [
+    "builds the top N", so no over-selection and no padding.
+
+    **The build count is the half with teeth, and it was missing until M8's
+    sweep measured it.** `_order` bounds the returned sequence by the same
+    number, so a `_select` that stopped truncating still returns four rows --
+    having hydrated six -- and this case's own docstring claimed the property
+    it did not check. The ceiling is *injected* here; the case below is the one
+    that reaches the shipped default, which no input could until `RowFamily`
+    had a third member.
+    """
+    providers = [
+        *(_stub(f"row-{n:02d}", score=0.9 - n / 100, family=RowFamily.SOURCE) for n in range(3)),
+        *(
             _stub(f"byw-{n:02d}", score=0.8 - n / 100, family=RowFamily.SIMILARITY)
             for n in range(3)
-        ],
-        max_rows=4,
-        max_per_family=4,
-    )
+        ),
+    ]
+    service = HomeService(providers=providers, max_rows=4, max_per_family=4)
 
     assert len(await service.compose(ctx)) == 4
+    assert sum(_builds(provider) for provider in providers) == 4
 
 
-def test_the_registry_holds_the_nine_providers_m7_ships_under_their_own_names() -> None:
-    """Asserted by **name**, not by count: `len(...) == 9` is satisfied by
+async def test_the_default_row_ceiling_is_reachable_now_that_a_third_family_exists(
+    ctx: RowContext,
+) -> None:
+    """**The branch `RowFamily.CURATED` made reachable**, and the reason
+    `domain/rows.py` declined to pre-declare that member.
+
+    With two families the longest screen this composer could return was
+    **nine** rows -- one pinned plus `_MAX_PER_FAMILY` (4) from each of `SOURCE`
+    and `SIMILARITY` -- and the *registry* could only reach eight of those,
+    since `BecauseYouWatchedProvider` is the only `SIMILARITY` emitter and its
+    `_MAX_SEEDS` is 3. Both are under the default `_MAX_ROWS = 10`, so it
+    truncated nothing at any input, and `services/home.py` said so in its own
+    docstring rather than leaving it to be found. The case above reaches the
+    slice only by *injecting* `max_rows=4`. Three families put thirteen
+    candidates past the cap and the shipped ceiling starts doing work.
+
+    The "one pinned" term is a registry property rather than a composer one --
+    `_select` sets pinned candidates aside before the cap with no bound of its
+    own -- and `test_rows_invariants.py::test_continue_watching_is_the_only_
+    provider_that_pins_and_it_pins_one_row` is where that is asserted.
+
+    **Asserted on what was built, not only on what came back**, and that is the
+    whole of the teeth: `_order` bounds the *returned* sequence by the same
+    `_max_rows`, so deleting `[: self._max_rows]` from `_select` still returns
+    ten rows -- having hydrated thirteen. PRD 06 says "builds the top N", and
+    over-selection is invisible to a length assertion.
+    """
+    pinned = _stub("continue-watching", score=1.0, pinned=True)
+    capped = [
+        *(_stub(f"src-{n}", score=0.90 - n / 100) for n in range(4)),
+        *(_stub(f"curated-{n}", score=0.80 - n / 100, family=RowFamily.CURATED) for n in range(4)),
+        *(_stub(f"byw-{n}", score=0.70 - n / 100, family=RowFamily.SIMILARITY) for n in range(4)),
+    ]
+    providers = [pinned, *capped]
+
+    # The premises, read off the proposals rather than off the literals above:
+    # this case is about the *ceiling*, so the cap must not be what truncates.
+    families = Counter(row.family for provider in capped for row in provider.rows)
+    assert len(families) == 3, "the premise: three families, which is what gets past nine rows"
+    # `_MAX_PER_FAMILY` rather than the literal 4: a table that repeats a value
+    # is a table that can drift from it, and this guard is about the cap.
+    # Measured -- planting `_MAX_PER_FAMILY = 3`, the literal spelling still
+    # passes here and the case fails below on `len(screen) == 10`, which is
+    # about the *ceiling*, so a premise about the cap reports the wrong one.
+    assert max(families.values()) <= _MAX_PER_FAMILY, (
+        "the premise: no family is over the cap, so it drops none"
+    )
+    assert len(providers) > 10, "the premise: more candidates than the ceiling truncates"
+
+    screen = await HomeService(providers=providers).compose(ctx)
+
+    assert len(screen) == 10
+    assert sum(_builds(provider) for provider in providers) == 10
+
+
+def test_the_registry_holds_the_ten_providers_prd_06_specifies_under_their_own_names() -> None:
+    """Asserted by **name**, not by count: `len(...) == 10` is satisfied by
     registering one provider twice, and a provider that is not registered is
     dead code (boundary call 9 -- registration in code *is* the enable switch,
     and there is no `row_providers` table).
@@ -347,10 +414,13 @@ def test_the_registry_holds_the_nine_providers_m7_ships_under_their_own_names() 
     sees, so renaming a class is a refactor and renaming this is a deliberate
     change to something outside the codebase.
 
-    **This case fails when M8 adds `CuratedProvider`, deliberately.** M8
-    updates it in the same commit that registers the tenth; a registry
-    assertion a later milestone can grow past without touching is one that
-    would not have caught a provider left out of the tuple.
+    **This case was written to fail when M8 added `CuratedProvider`, and it
+    did.** M8 Task 15 updates it in the same commit that registers the tenth,
+    which is the whole of what "deliberately" bought: a registry assertion a
+    later milestone can grow past without touching is one that would not have
+    caught a provider left out of the tuple. `curated` is the new member, and
+    it is the label a dashboard will group the one row on this screen that
+    cost money under.
     """
     from usher.services.rows import ROW_PROVIDERS
 
@@ -364,6 +434,7 @@ def test_the_registry_holds_the_nine_providers_m7_ships_under_their_own_names() 
         "seasonal",
         "people",
         "rediscover",
+        "curated",
     }
 
 
@@ -437,3 +508,61 @@ async def test_a_proposal_the_cap_declined_is_selected_zero_rather_than_absent(
     declined = [one for one in report.providers if one.proposed == 1 and one.selected == 0]
     assert len(declined) == 4, "the cap declined nothing, so the case proves nothing"
     assert all(one.built == 0 for one in declined)
+
+
+async def test_a_screen_the_cache_can_answer_reads_no_taste_at_all(ctx: RowContext) -> None:
+    """**PRD 06's ~30 s screen cache is meant to cost nothing, and one
+    dependency was making it cost three statements.**
+
+    `RowContext.affinities` was `await taste.genre_affinity(user.id)` evaluated
+    while FastAPI assembled the context -- i.e. before `compose_report` could
+    look in the cache -- so a screen hit had already paid `list_recent(50)`,
+    `list_by_ids(50)` and the library-wide `unnest(genres) GROUP BY`. On the
+    measured 1,271,570-title catalog that is the most expensive thing a *hit*
+    does, and most requests are hits.
+
+    So the field is a callable, awaited by the one provider that reads it, and
+    this case asserts both halves of what that has to mean:
+
+    - **one** read on a miss, which is what makes the deferral a deferral and
+      not a field quietly wired to nothing (the failure
+      `.claude/rules/testing-discipline.md` records for this exact dependency);
+    - **still one** after a second compose the cache answers, which is the
+      finding.
+
+    **What "before" was, stated exactly, because there is no honest count to
+    quote here.** Against the old shape this case is not expressible at all --
+    the field was the sequence, so a counting callable in it fails inside
+    `GenreAffinityProvider.propose` with `TypeError: 'function' object is not
+    subscriptable`, which is what it did. The before/after *number* belongs to
+    the dependency and is measured there:
+    `test_api_home.py::test_the_route_does_not_read_a_households_taste_until_a_
+    row_asks_for_it` went from 1 read to 0 at context assembly. This case is
+    the other half -- that the read the assembly no longer does is done by the
+    composition that needs it, and by no other.
+    """
+    reads = 0
+
+    async def affinities() -> Sequence[GenreAffinity]:
+        nonlocal reads
+        reads += 1
+        return (GenreAffinity(genre="Western", lift=4.0, support=4),)
+
+    deferred = dataclasses.replace(ctx, affinities=affinities)
+    cache = RowCache(clock=lambda: NOW)
+    service = HomeService(
+        providers=[GenreAffinityProvider(), _stub("alpha", score=0.5)], cache=cache
+    )
+
+    first = await service.compose(deferred)
+
+    assert reads == 1, "the row that reads the affinity never asked for it"
+
+    second = await service.compose(deferred)
+
+    assert reads == 1, "a screen served from the cache still paid for the household's taste"
+    # The premise: the second compose really was a cache hit rather than a
+    # second composition that happened to agree. `_slugs` is the screen, and a
+    # miss here would re-propose and rebuild.
+    assert _slugs(second) == _slugs(first)
+    assert cache.get_screen(ctx.user.id) is not None

@@ -1,10 +1,19 @@
 """One handler per `JobKind`: the thin layer between a `Job` and a service.
 
-`JobWorker` knows nothing about TMDb or about media sources, and the four
-services know nothing about the queue's shape. This module is the only place
-the two vocabularies meet, which is what keeps `usher.services.jobs` a
-generic claim/run/park loop rather than a switch statement over the
-pipeline.
+`JobWorker` knows nothing about TMDb, about media sources or about language
+models, and the six services know nothing about the queue's shape. This
+module is the only place the two vocabularies meet, which is what keeps
+`usher.services.jobs` a generic claim/run/park loop rather than a switch
+statement over the pipeline.
+
+**One column, three kinds of identifier.** `Job.key` is a string so that one
+column serves every kind without a polymorphic payload, and what it names
+depends entirely on the kind: a `Title.id` for `enrich`, `index` and
+`derive`; a source's own `external_id` for `match` and `watch_history`; a
+`User.id` for `curate`. The conversion is what makes that legible, and it is
+why `_uuid_key` takes the *expected* thing as an argument — the failure a
+handler writes into `jobs.last_error` has to say which of the three the key
+failed to be.
 
 **A key that does not parse is `PortDataMalformed`, never a `ValueError`.**
 `uuid.UUID("not-a-uuid")` raises a `ValueError`, and `JobWorker` deliberately
@@ -40,6 +49,7 @@ from usher.domain.source import Source
 from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import MediaItemRepository
 from usher.ports.source import SourceAdapter
+from usher.services.curation import CurationService
 from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
 from usher.services.index import IndexService
@@ -117,6 +127,43 @@ def derive_handler(service: DeriveService) -> Handler:
 
     async def handle(job: Job) -> None:
         await service.derive(_title_id(job))
+
+    return handle
+
+
+def curate_handler(service: CurationService) -> Handler:
+    """`curate` jobs key on a `User.id`, and that is the whole dedup story.
+
+    **The household comes off the key, never off the composition root.**
+    `watch_history_handler` below binds a `user_id` at construction because
+    M4 has one user and a walk's job key is a source's `external_id` with no
+    household in it; curate is the opposite shape. `(kind, key)` is unique,
+    so keying on the household is what makes a second request while a
+    generation is pending write no second row and buy no second completion --
+    PRD 06's *"one modest completion per user per day"*. A handler that
+    curated the root's default user instead would dedup identically, park
+    identically, and put one household's generation on another's screen.
+
+    **Nothing is caught here.** PRD 06's *"failure is non-fatal to the screen
+    and fatal to the job"* is two promises kept in two places:
+    `CurationService.generate` keeps the screen's half by never reaching
+    `replace_for_user` on a failure, and this function keeps the job's half
+    by letting the exception through. `JobWorker` parks `PortDataMalformed`
+    and backs everything else off, and it can only do that with an exception
+    it is allowed to see; a handler that absorbed one would `complete()` the
+    job, delete its row and lose the generation silently.
+
+    **A worker holds this handler only if an `LLMClient` was built.**
+    `composition.build_worker` registers `JobKind.CURATE` under
+    `client is not None`, the way it registers `INDEX` under
+    `embedder is not None`, and `run_once` claims only the kinds it has
+    handlers for -- so a deployment with `USHER_LLM_ENABLED=false` leaves
+    curate jobs for one that can run them rather than parking work whose only
+    problem is the process it was offered to.
+    """
+
+    async def handle(job: Job) -> None:
+        await service.generate(_user_id(job))
 
     return handle
 
@@ -208,23 +255,48 @@ def watch_history_handler(
 
 
 def _title_id(job: Job) -> uuid.UUID:
-    """`job.key` as a `Title.id`, or `PortDataMalformed`.
+    """`job.key` as a `Title.id`, or `PortDataMalformed`."""
+    return _uuid_key(job, "a title id")
+
+
+def _user_id(job: Job) -> uuid.UUID:
+    """`job.key` as a `User.id`, or `PortDataMalformed`.
+
+    A second *name*, not a second converter: `_uuid_key` below is the one
+    place a `ValueError` becomes a `UsherPortError`, and what differs is the
+    sentence an operator reads out of `jobs.last_error`. "job key is not a
+    title id" is a wrong statement about a household, and a wrong sentence in
+    that column is what sends somebody to look at the wrong table.
+    """
+    return _uuid_key(job, "a user id")
+
+
+def _uuid_key(job: Job, expected: str) -> uuid.UUID:
+    """`job.key` as a UUID, or `PortDataMalformed`.
 
     A `ValueError` from `uuid.UUID` is not a `UsherPortError`, and
     `JobWorker` lets those propagate deliberately — so an unparseable key
-    would kill the worker rather than park its one job.
+    would kill the worker rather than park its one job. Every **UUID-keyed**
+    kind's key passes through here -- `enrich`, `index` and `derive` via
+    `_title_id`, `curate` via `_user_id` -- so there is one conversion and one
+    raise rather than four chances for one of them to raise the wrong type.
+    `match` and `watch_history` never reach it: their key is a source's own
+    `external_id`, an opaque string that is handed to the adapter as it
+    stands, which is the module docstring's three-category split arriving at
+    the converter that only serves one of the three.
     """
     try:
         return uuid.UUID(job.key)
     except ValueError as exc:
         raise PortDataMalformed(
-            f"{job.kind.value} job key is not a title id", detail=job.key
+            f"{job.kind.value} job key is not {expected}", detail=job.key
         ) from exc
 
 
 __all__ = [
     "SourceBinding",
     "SourceResolver",
+    "curate_handler",
     "derive_handler",
     "enrich_handler",
     "index_handler",

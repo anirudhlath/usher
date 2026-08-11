@@ -9,7 +9,16 @@ Two consequences worth stating plainly:
 - **Matching becomes local.** Resolving an Emby item to a canonical title is a
   database lookup against 12.7M known titles, not a network round-trip.
 - **Recommendations have a real candidate pool.** Usher can suggest things you
-  *don't* own, because the catalog is far larger than the library.
+  *don't* own, because the catalog is far larger than the library. ✅ **Cashed
+  in M8** as `CandidatePoolService` over
+  `TitleRepository.list_unwatched_candidates`, and the promise is kept
+  *literally*: ownership is an `ORDER BY` key and never a filter, so the pool
+  spans the catalog rather than the library
+  ([06](06-rows-and-recommendations.md),
+  [ADR-0028](decisions/0028-the-pool-is-the-contract.md)). ⚠️ That is also the
+  one place the shipped prompt disagrees with the shipped SQL — it opens *"one
+  household's **own** library"* — which is recorded as a known limit in
+  [06](06-rows-and-recommendations.md) rather than settled here.
 
 All figures below were measured on 2026-07-28.
 
@@ -191,6 +200,32 @@ were wrong. `PHASES` gains `movielens`, `adapters/bulk/movielens.py` reads
 `links.csv`/`genome-tags.csv`/`genome-scores.csv` out of `ml-latest.zip`, and
 `genome_scores` holds one dense `halfvec(1128)` per title
 ([02](02-data-model.md)).
+
+✅ **M8 Task 19 added the tag vocabulary to the same phase**, and it is the
+same three members — no new download and no new phase. `genome-tags.csv` was
+already read on every run, to check that `tagId` is contiguous and that the
+vocabulary is the width `halfvec(1128)` declares; the phase now keeps the
+*names* as well and writes them to `genome_tags` (migration `m08b`,
+[02](02-data-model.md)), stamped with the same archive revision the vectors
+carry. **Measured against the real member on 2026-08-07: 1,128 rows**, `tagId`
+exactly `1…1128` and already ascending, every name non-empty, no name
+containing a comma, longest 65 characters, CRLF-terminated, 8,359 compressed /
+18,103 uncompressed bytes.
+
+Two properties of *when* it is written, both of which an operator can see:
+
+- **After the vector drain and only on a completed run.** A vocabulary
+  explains the vectors and a failed drain has not finished writing them; and
+  loading it before the drain would have to reach the network outside the
+  phase's own `UsherPortError` handling, where an unreachable
+  `files.grouplens.org` is a stack trace rather than a sentence.
+- **A re-run against a completed checkpoint still loads it**, which is the
+  upgrade path for every catalog bootstrapped under M7: those have a completed
+  `movielens.genome` checkpoint and no vocabulary at all, so a run that skips
+  every movie and writes no vector must still write the words.
+  `usher bootstrap --phase movielens` reports the count beside the vector
+  count, and `usher bootstrap-status` reports whether the stored vocabulary
+  can name the lanes of the stored vectors.
 
 **The three corrections, each with its measurement** (streamed and inflated in
 one pass on 2026-08-04; nothing stored):

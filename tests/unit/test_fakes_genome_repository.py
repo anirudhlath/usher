@@ -1,11 +1,13 @@
 """`FakeGenomeRepository` against the shared `GenomeRepository` contract.
 
-No Docker, no database. See tests/fakes/genome_repository.py for the three
+No Docker, no database. See tests/fakes/genome_repository.py for the five
 places this half is more forgiving -- chiefly that there is no `halfvec`
-here, so a vector round-trips bit-exactly where the real column quantises.
+here, so a vector round-trips bit-exactly where the real column quantises,
+and that `genome_tags`' three CHECKs and its primary key are absent.
 """
 
 import uuid
+from collections.abc import Sequence
 
 import pytest
 
@@ -34,6 +36,10 @@ class FakeGenomeSeeder(GenomeSeeder):
         self._repository.vectors[title_id] = GenomeVectorRow(
             title_id=title_id, relevance=relevance, genome_revision=revision
         )
+
+    async def tags(self, tags: Sequence[tuple[int, str]], *, revision: str = RELEASE_A) -> None:
+        for tag_id, tag in tags:
+            self._repository.tags[tag_id] = (tag, revision)
 
 
 class TestFakeGenomeRepository(GenomeRepositoryContract):

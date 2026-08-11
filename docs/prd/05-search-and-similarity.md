@@ -573,12 +573,112 @@ expansion**: one LLM call rewriting an emotional query into narrative language
 before embedding, which measurably improves retrieval — one call per query,
 rather than enriching 1.3M records.
 
-⏳ **Query expansion is not built, and M6 declined it deliberately.**
-`ports/llm.py` declares `LLMClient` and `LLMPurpose.QUERY_EXPANSION`, and
-**there is no implementation of that port anywhere in `src/`** until M8. Adding
-a second unimplemented port dependency to the search path buys nothing M6 can
-measure, so **M6 embeds the query exactly as typed.** The seam is
-`SearchService.search`'s query string, and M8 or M9 wraps it. Boundary call 6.
+🔴 **"Measurably improves retrieval" was the literature's claim and not this
+project's, and on 2026-08-07 this project measured it and got the opposite
+result.** The sentence above is kept because it is what was believed and acted
+on for eight milestones; it is superseded by the run below. Query expansion is
+**built and off by default behind its own setting**, and the two paragraphs
+after this one are the evidence and the decision.
+
+#### The measurement that reversed it
+
+Run 2026-08-07 against the local vLLM serving `gemma-4-26b-a4b`. **5 mood
+queries × 150 real TMDb overviews** for the 150 most-voted catalog titles,
+embedded with the shipped `compose_document` and the shipped
+`FastEmbedEmbedder` (`fastembed:BAAI/bge-small-en-v1.5`). **The targets were
+written down before any cosine was computed.**
+
+| | raw query | expanded |
+|---|---|---|
+| MRR | **0.733** | 0.373 |
+| recall@10 | **0.800** | 0.533 |
+
+The typed query wins **4 of the 5 queries** outright and ties the fifth.
+
+**A label-free control says it is a mechanism rather than a bad draw.**
+Pairwise cosine *between the five queries themselves* rises from **0.5417 to
+0.5975 mean** and **0.6328 to 0.7784 max** after rewriting: five deliberately
+distinct searches come back more alike than they went in. The top hit's
+z-score falls in 3 of 5. The diagnosis follows from that — the rewrites are
+generic critic prose (*"A dramatic exploration of profound isolation and
+psychological survival…"*) which sits near the centre of a corpus of synopses,
+so *Arrival*, *Seven*, *Requiem for a Dream* and *Prisoners* dominate the
+expanded top-5 of **unrelated** queries.
+
+⚠️ **The caveat is real and travels with the numbers: one model, one
+150-document corpus, five queries.** It is thin evidence. It is also the *only*
+evidence there is, against a claim that until now rested on the literature's
+authority alone, so the default follows it. M9's `search_queries` is where a
+real evaluation set — real typed queries, a full catalog, more than one model —
+comes from, and it is what would reverse this back.
+
+✅ **Built in M8, off by default, and reported rather than substituted.**
+M6 declined it deliberately — `ports/llm.py` declared `LLMClient` and
+`LLMPurpose.QUERY_EXPANSION` with no implementation of that port anywhere in
+`src/`, and adding a second unimplemented port dependency to the search path
+bought nothing M6 could measure, so **M6 embedded the query exactly as
+typed** (boundary call 6). M8 supplies the implementation ([ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md))
+and `usher.services.query_expansion.QueryExpansionService` is the wrapper the
+seam was left for.
+
+- **Where the call sits.** In front of `SearchService`'s embed, and nowhere
+  else. So a `full_text` search buys no completion, a deployment with no
+  embedder buys none (there is nothing to embed), a blank query buys none (it
+  is refused before the model), and **`usher suggest` buys none** — type-ahead
+  has no semantic lane, which is what keeps this off the one path a client
+  drives per keystroke. The unit of spend is *one search that was going to
+  embed something*, exactly as curation's is one generation.
+- **Only the vector is computed from the rewrite.** `SearchRequest.query` is
+  still the typed string, so under RRF the lexical lane goes on matching the
+  viewer's own words while the semantic lane matches the paraphrase.
+- **Off by default, behind its own setting.** `USHER_QUERY_EXPANSION_ENABLED`
+  is `false` — including on a deployment that has set `USHER_LLM_ENABLED=true`
+  and is curating happily — so `build_pipeline` builds no expander and the
+  search path is byte for byte M6's. **The two switches are independent because
+  the two spenders have opposite expected values**: curation works, and
+  expansion measured worse (above). M8 Task 20 shipped one switch on the
+  argument that *"a second setting's only honest default is 'follow the
+  first'"*; that was sound while expansion was believed to help, and the
+  measurement replaces it.
+
+  The four combinations, of which three are reachable:
+
+  | `USHER_LLM_ENABLED` | `USHER_QUERY_EXPANSION_ENABLED` | |
+  |---|---|---|
+  | `false` | `false` | The shipped default. No client, no curation, no expander; every search embeds the query as typed. |
+  | `true` | `false` | Curated rows, and searches embedded as typed. `usher search` opens no completion client at all. |
+  | `true` | `true` | Adds one completion per semantic or fused search that has a model to embed with. Opt-in. |
+  | `false` | `true` | **Refused at startup**, naming both variables. With no client there is no completion to put in front of the embed, so this would be a knob that is on and means nothing — [08](08-operations.md)'s dead-config shape. |
+- **Reported, never silently substituted, and the implication runs one way.**
+  `SearchAnswer.expanded_query` is the text that was embedded, `None` when the
+  query was embedded as typed, and `usher search` prints it above the results.
+  A viewer who searched for one thing and got results for another cannot
+  otherwise tell a good expansion from a bad one, and neither can an operator
+  reading their bug report. **A populated field means a completion was bought;
+  an absent one means nothing about spend** — a call answering with the wrong
+  key is billed in full and still leaves the field `None`.
+- **A failure narrows rather than fails** ([08](08-operations.md)): an
+  unreachable endpoint, an unparseable answer or a rewrite that is blank or
+  over `MAX_QUERY_CHARS` all leave the search to run on the typed query. The
+  attempt is still billed — one `llm_calls` row per attempted call, `ok`
+  derived from `error`, `generation_id` null because this purpose produces no
+  rows ([10](10-telemetry-and-dashboards.md)).
+- **Measured, and it is the reason for the setting** — see the run above.
+  *(This bullet read "Not measured. The retrieval improvement above is the
+  literature's, not this project's" until 2026-08-07. It stopped being true the
+  day the measurement ran, and the measurement pointed the other way.)*
+- **Billed on searches the semantic lane cannot serve, and that is open.** The
+  guard is `embedder is None`, not *"anything is embedded"* — so on a
+  deployment with a model and an empty `title_embeddings` (every deployment
+  before its first `usher index --backfill`), a fused search with expansion on
+  buys a completion, prints `expanded: …`, and then reports
+  `semantic_coverage=0.000`: **the warning arrives after the money.**
+  `--mode full_text` correctly buys nothing. The correct predicate — *does any
+  title in the **filtered** population have a vector* — is not answerable
+  before the vector that does the filtering exists, so closing this means a new
+  `TitleEmbeddingRepository` read on the search path answering a weaker
+  question. Recorded rather than fixed; the default above limits it to
+  deployments that opted in.
 
 ## Ranking
 

@@ -10,8 +10,8 @@ Design documentation lives in [`docs/prd/`](docs/prd/README.md).
 ## Status
 
 Pre-release. Milestones M1 (foundation), M2 (catalog bootstrap), M3 (Emby
-adapter), M4 (ingest pipeline), M5 (push and read-through), M6 (search) and
-M7 (rows and recommendations) are complete — see
+adapter), M4 (ingest pipeline), M5 (push and read-through), M6 (search),
+M7 (rows and recommendations) and M8 (LLM curation) are complete — see
 [`docs/plans/`](docs/plans/) for the task breakdowns and
 [`docs/prd/09-roadmap.md`](docs/prd/09-roadmap.md) for what's next.
 
@@ -27,11 +27,28 @@ suggest) has an owner in M9
 **M7 composes a home screen**: nine row providers, scored and diversified
 server-side, plus the taste centroid, the MovieLens tag genome as a third
 similarity signal, and `Person`/`Credit`/`Collection` re-derived from the
-payload cache with no second network call.
+payload cache with no second network call. **M8 adds the tenth provider** —
+`CuratedProvider`, hydrating rows a language model chose from a candidate pool
+this server built, validated against that pool before anything reaches a
+screen.
 
-**The HTTP surface is deliberately small, and M7 is the first milestone since
+**M8's live verification refuted two things this project had written down, and
+both are recorded rather than quietly fixed.** Query expansion — named in the
+PRD as the cheaper, better-evidenced lever for mood queries since M1 — measured
+*worse* (MRR 0.733 → 0.373), so it ships behind its own setting, off by
+default. And **88% of the row headings one live run generated (52 of 59) were
+the genre labels the prompt explicitly forbids**, which means that on the model
+tested, a curated shelf is substantively what the free genre-affinity row
+already produces. One model, one evening — but the design consequence is
+general: **the prompt's grouping instruction is not self-enforcing and nothing
+in the system checks it.** Curated rows are additive, so the home screen is
+correct without them.
+
+**The HTTP surface is deliberately small, and M8 is the second milestone since
 M5 to grow it**: `/health`, `/health/ready`, `/titles/{id}`, **`/home`**,
-`/events` (SSE) and the `/admin/sources` routes. `GET /home` returns the whole
+`/events` (SSE), **`POST /admin/rows/regenerate`** (M8 — enqueues a curation
+job and answers 202, never a synchronous generate) and the `/admin/sources`
+routes. `GET /home` returns the whole
 screen in one response — **no cursor**, which is what
 [ADR-0006](docs/prd/decisions/0006-server-composed-home.md) specifies, and no
 error envelope, because every input is local state and there is no upstream
@@ -110,8 +127,9 @@ uv run usher --traceback <command>   # the full stack, when one line is not enou
 ```
 
 When something an operator can fix goes wrong — the database is not up, a
-`.env` value is wrong, a source is unreachable — every command exits 1 with
-one line rather than a stack:
+`.env` value is wrong, a source or the LLM endpoint is unreachable, a
+credential is rejected, an upstream asks to be backed off — every command
+exits 1 with one line rather than a stack:
 
 ```
 usher bootstrap-status: ConnectionRefusedError: [Errno 111] Connect call failed ('127.0.0.1', 5432)
@@ -139,7 +157,26 @@ uv run usher bootstrap-status              # progress per dataset, and catalog s
 empty catalog: the genome joins `titles` on `imdb_id`, so there is nothing to
 join to until the IMDb phase has run. It downloads `ml-latest.zip` and reads
 three of its seven members — the only archive that has a genome *and* a
-licence permitting redistribution, which is why the phase names it.
+licence permitting redistribution, which is why the phase names it. It stores
+one dense 1,128-lane vector per matched title **and** the 1,128 tag names that
+say what those lanes mean, both stamped with the archive revision they came
+from, so a vocabulary can never label a vector from a different release.
+
+A catalog bootstrapped before the vocabulary shipped just needs the phase
+re-run — it resumes from its completed checkpoint, writes no vector, and loads
+the words. `usher bootstrap-status` says which state a deployment is in:
+
+```text
+titles in catalog: 1271570
+genome vectors: 15565
+genome vocabulary: 1128 tags
+```
+
+All three lines are **one** catalog — the 1,271,570-title bootstrap the genome
+phase was measured against on 2026-08-04. (The 1,271,138 quoted for search
+further up is a different, earlier catalog; both figures carry their date
+wherever they appear, because a terminal block mixing two is a reading no
+single run produces.)
 
 **Sync a source** — walks a registered media server into the catalog
 (matching, ingest, availability sweep), then walks its watch state.
@@ -179,6 +216,15 @@ set).
 uv run usher work --once   # one pass over the queue, then exit
 uv run usher work          # stay up, polling
 ```
+
+**Four of the six job kinds are claimed only by a process configured for
+them**, and a worker that is not simply leaves them for one that is rather
+than failing them: `enrich` and `derive` need `USHER_TMDB_API_KEY`, `index`
+needs the `embedding` extra, and `curate` needs `USHER_LLM_ENABLED=true`.
+Only `match` and `watch_history` are registered in every build.
+The last one is the one to know about before you turn it on — a `curate` job
+is where this project spends money, one completion per household per run,
+against whatever `USHER_LLM_BASE_URL` names.
 
 `usher index` reports how much of the search index is out of date. **The bare
 form only reads**, so it is safe to run on a production box while diagnosing
@@ -243,6 +289,48 @@ model refuses outright rather than narrowing — it is the one question
 full-text cannot answer, so a plausible answer to a different one is worse
 than none.
 
+**Query expansion is built, is off by default, and the default is a
+measurement.** With `USHER_QUERY_EXPANSION_ENABLED=true` (which also needs
+`USHER_LLM_ENABLED=true`, and is refused at startup without it), a semantic or
+fused search first spends one completion rewriting the query into the language
+a synopsis is written in, and prints what it embedded:
+
+```
+$ uv run usher search "movies about isolation in space"
+expanded: a lone crew adrift, silence, deep-space confinement, psychological drift
+  1   0.7000  ...
+mode=fused results=12 semantic_coverage=0.884
+```
+
+🔴 **Measured on 2026-08-07, it made retrieval worse, which is why it is a
+second switch rather than part of the first.** Against a local
+`gemma-4-26b-a4b`, over five mood queries and the 150 most-voted titles' real
+overviews, expansion moved MRR **0.733 → 0.373** and recall@10 **0.800 →
+0.533**; the typed query won four of the five queries and tied the fifth. The
+rewrites drift toward generic critic prose, which sits near the middle of a
+corpus of synopses — measured directly, the five queries became *more like each
+other* after rewriting (mean pairwise cosine 0.5417 → 0.5975). One model, one
+150-document corpus, five queries: thin, and it is the only measurement there
+is. Turn it on to try it against your own model; `llm_calls` grouped by
+`purpose` is what it cost.
+
+The `expanded:` line is not optional decoration — a viewer who searched for one
+thing and got results for another cannot tell a good rewrite from a bad one
+without seeing it. It appears only when a completion actually produced one, so
+on the default deployment the output is unchanged and no completion is bought.
+Neither is one bought by `--mode full_text`, by a blank query, by a deployment
+with no embedding model, or by `usher suggest` — type-ahead has no semantic
+lane, which is what keeps this off the path a client drives per keystroke.
+Every attempt lands in `llm_calls` with `purpose = 'query_expansion'`,
+including the ones that failed; an unreachable endpoint or an unusable answer
+leaves the search to run on the words you typed **and is still billed**, so an
+absent `expanded:` line says nothing about whether money was spent.
+
+⚠️ **Run `usher index --backfill` before turning it on.** The guard in front of
+the completion is *"this deployment has an embedding model"*, not *"anything is
+actually embedded"* — so with a model installed and nothing indexed yet, every
+fused search buys a rewrite and then reports `semantic_coverage=0.000`.
+
 Every `SearchFilters` field has a flag and no filter has two, which is
 deliberate: an engine that cannot express a filter raises rather than ignoring
 it, because an ignored filter returns *more* results and reads as working.
@@ -268,8 +356,9 @@ a property of a request boundary that no command can exhibit, so there the
 route is the deliverable. What the command is for is the rule that every
 operator command works against an empty database, and the arithmetic that rule
 is hunting: the taste centroid is a mean, and the mean of zero embeddings is
-0/0. Against an empty household it exits 0 and prints nine providers that
-proposed nothing.
+0/0. Against an empty household it exits 0 and prints ten providers that
+proposed nothing — ten since M8 registered `CuratedProvider`, which on an empty
+database is a household whose nightly generation has never run.
 
 **Every registered provider gets a line, including the ones that proposed
 nothing** — an absent provider and a silent one are the two states a composed
@@ -285,6 +374,168 @@ rows and 115 cards, slowest provider 34% of build time. The rows build
 command prints the rule for revisiting that (p95 > 400 ms *and* no provider
 ≥ 50% of build time) beside the numbers, so it is read off the output rather
 than recomputed.
+
+`usher curate` runs one LLM generation for the default household and prints
+what it bought.
+
+```bash
+uv run usher curate                # one completion, one generation, one report
+```
+
+```
+generation: 019fdbeb-6858-79b6-9c6e-1d5654baef71
+pool: 200 candidates
+kept: 2 rows, 11 cards
+  curated-1     Slow-burn sci-fi for a rainy night                5 cards
+  curated-2     Quietly devastating, quietly funny                6 cards
+dropped (all five reasons, zeros included -- an absent line and a
+         reason nobody counts read the same):
+  not_in_pool        1 card
+  unparseable        0 cards
+  duplicate          0 cards
+  row_unusable       0 rows
+  row_too_short      0 rows
+tokens: 4812 in, 391 out   cost: $0.00042100   latency: 2314 ms   model: served/qwen3-30b-a3b
+```
+
+**Illustrative, not a measurement**: the layout is a real run's, captured from
+`tests/integration/test_cli_pipeline.py`'s fixtures, with the pool at the
+shipped `USHER_CURATION_POOL_SIZE` default of 200 and a scripted completion
+standing in for a model's. Only the usage line is that fixture's verbatim —
+**the two rows, the eleven cards, the `not_in_pool 1` and the model name are
+invented**, so read the shape and not the numbers.
+
+**The real ones, from the live verification on 2026-08-07** against a local
+vLLM serving `gemma-4-26b-a4b` over a real 1,271,138-title catalog: a pool-200
+prompt is **4,304 tokens cold** and **4,359** with three lines of watch history
+(**~20.4 tokens a candidate**, ~18 a history line), output runs **192–277**
+tokens (median 219.5), latency **1,230–1,787 ms** (median 1,420), and over 20
+generations **not one of 405 identifiers fell outside the pool**. Only
+`row_too_short` ever fired of the five drop reasons — the other four are close
+to unreachable when the endpoint honours the JSON schema, so a report of
+zeros like the one above is the system working. ⚠️ One model, one evening;
+none of those numbers is a property of "an LLM".
+
+It takes no arguments at all. The household is the singleton default user
+that stands in for authentication until M9, so a `--user` flag would be an id
+nobody can look up on a deployment that has exactly one.
+
+**It is one of three surfaces onto the same `CurationService`** — the other
+two are `POST /admin/rows/regenerate`, which enqueues a `curate` job and
+answers 202, and `usher work`, which claims it. This is the only one that
+reports the answer, which is what a command that spends money owes: a 202
+says nothing about what the completion returned.
+
+**All five drop reasons print every time, zeros included.** A reason absent
+from a report is indistinguishable from a reason nobody counts, and at a
+terminal there is no second export to compare against. Two of them count
+*rows* (`row_unusable`, `row_too_short` — the `row_` prefix says so) and
+three count *cards*, so summing across them means nothing. `not_in_pool` and
+`unparseable` produce the same empty screen and have opposite fixes: the
+first is the model inventing a candidate (look at the prompt, the
+temperature, the pool size) and the second is a shape the reader could not
+use at all (look at `response_format` and the schema).
+
+Three things make it exit 1 with a sentence instead of a report, and none of
+them is a stack:
+
+- **`USHER_LLM_ENABLED=false`** — there is no client, so there is no service
+  to build. Unlike `GET /home` (a shorter screen) and `usher work` (five
+  other job kinds), this command has exactly one job, so it says so rather
+  than exiting 0 having done nothing.
+- **An empty candidate pool** — which in practice means an empty catalog.
+  ⚠️ *"A household that has watched everything"* is the other reading and it is
+  a far smaller door than it sounds: the pool is
+  `SELECT … FROM titles WHERE NOT watched`, with no enrichment, ownership or
+  availability filter, so "everything" is every row in `titles` — after
+  `usher bootstrap --phase all`, 1.27M of them. Measured 2026-08-07 against a
+  migrated but empty database: `usher curate` refuses; insert **one** unwatched
+  title and the same command reaches the model instead. Nothing is attempted
+  and **nothing is billed**: this is the one path in the whole milestone that
+  writes no `llm_calls` row.
+- **A generation that validated to nothing** — the call worked, the money is
+  spent, and the message is the tally (`not_in_pool=5, row_too_short=1`).
+  Numbers and label names only; nothing the model wrote reaches the screen.
+
+In all three the household's previous rows still stand, and the two that reach
+the service say so — a curated screen that has not changed since last night
+otherwise looks identical to one that was just replaced. The disabled
+deployment carries no such clause, because it never had a generation to
+replace them with.
+
+**The message does not say "nothing was written", and that is deliberate.**
+Only the empty pool writes nothing at all; the other two are billed, and a
+sentence claiming otherwise would tell an operator they were not charged on
+the one path where they were. What was or was not written to `llm_calls` is a
+question `llm_calls` answers.
+
+An endpoint that is down, rate-limiting or refusing the key is a fourth
+sentence and not a stack, but it comes from the CLI-wide boundary above rather
+than from this command, so it names the endpoint instead of the screen —
+**and it is still billed**, exactly like the other two that reach the model.
+
+### Configuring the model, and running it nightly
+
+Every one of these is in `.env.example` with its own reason. `USHER_LLM_ENABLED`
+is `false` by default, so none of the rest does anything until it is `true`.
+
+```bash
+USHER_LLM_ENABLED=true
+USHER_LLM_BASE_URL=http://localhost:8000/v1    # any OpenAI-compatible endpoint
+USHER_LLM_MODEL=gpt-4o-mini                    # recorded on every llm_calls row
+USHER_LLM_API_KEY=...                          # omit for a local endpoint
+USHER_LLM_MAX_OUTPUT_TOKENS=2048               # a correctness ceiling, not a cost one
+USHER_LLM_TIMEOUT_SECONDS=120
+USHER_LLM_PRICE_IN_PER_MTOK=0                  # dollars per million tokens
+USHER_LLM_PRICE_OUT_PER_MTOK=0                 # 0 is honest for a local model
+USHER_CURATION_POOL_SIZE=200                   # candidates in one prompt
+```
+
+**The two price settings are the ones that silently do the wrong thing.** No
+OpenAI-compatible endpoint reports cost — `usage` carries token counts and
+nothing else — so `cost_usd` is computed from these two and written onto the
+row, which means a later price change cannot rewrite history and an unset price
+gives you a cost dashboard reading zero. The mitigation is that `tokens_in` and
+`tokens_out` are recorded exactly, so spend is recomputable from `llm_calls`
+after the fact.
+
+⚠️ **`USHER_CURATION_POOL_SIZE` and `USHER_LLM_MAX_OUTPUT_TOKENS` spend one
+budget and nothing couples them.** The endpoint's constraint is
+`prompt_tokens + max_output_tokens ≤ its context window`, so raising the
+output ceiling lowers the pool you can actually send — and the failure is an
+HTTP 400 that **parks** the job rather than a warning at startup. Measured
+against a 16k-context model at the shipped defaults: **600 candidates works,
+700 and 1,000 both fail.** The setting's ceiling of 1,000 is a bound on
+arithmetic no endpoint can satisfy, not a promise that your endpoint will serve
+it.
+
+**Nothing schedules the nightly generation.** There is no scheduler in Usher —
+deliberately, the same call `usher similar --rebuild` gets — so it is a cron
+entry:
+
+```cron
+# One curation generation a night, after the queue has drained.
+30 4 * * *  cd /srv/usher && /usr/local/bin/usher curate >> /var/log/usher-curate.log 2>&1
+```
+
+Run it in a process that has the settings above. A generation costs one
+completion per household; `llm_calls` is what it cost and `curated_rows` is
+what you got.
+
+⚠️ **A night that produced no rows exits 1, so cron will mail you about it**,
+and that is deliberate rather than overlooked. Measured 2026-08-07 against a
+migrated but empty database: `home`, `bootstrap-status`, `sync-status`, `derive`
+and `index` all exit **0**, and `curate` exits **1**. The five that exit 0 are
+*reporting* commands in their bare form — `derive` and `index` say so in their
+own docstrings, "the bare form only reads" — and a report of nothing is still a
+report. `curate`'s bare form is the one that writes, and a write command that
+wrote nothing has not succeeded: exiting 0 would tell this cron entry that
+curation is running on a deployment whose catalog was never bootstrapped, which
+is by far the likeliest way to reach an empty pool (see above). If you would
+rather hear only about the failures you intend to act on, that belongs in the
+cron entry — append `|| true`, or filter the log — rather than in the command,
+since the exit code is the only thing a generation that did not happen has to
+say for itself.
 
 **Nothing runs the rebuild for you**, and that is stated rather than implied.
 A title's neighbours go stale when *some other* title gets an embedding, which

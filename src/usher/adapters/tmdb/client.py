@@ -23,6 +23,13 @@ key, which has no header form at all. An operator who pastes their read
 access token instead of their API key closes the exposure with no code
 change.
 
+**The status ladder below the 404 is `usher.adapters.http.port_error_for`**,
+shared with the LLM adapter rather than written twice — the two had the same
+four branches in the same order, and the M4-against-TMDb measurements that
+justify them are recorded there. The 404 arm stays here because it is a real
+divergence: it is a TMDb-specific meaning (a merged-away id), not a different
+opinion about the 4xx range.
+
 **No exception message may carry a URL**, for the same reason.
 `EmbySession` interpolates the httpx exception into its own `PortUnavailable`
 message and says why that is safe there — an Emby URL carries no credential.
@@ -44,19 +51,10 @@ import httpx
 from opentelemetry import metrics, trace
 from pydantic import SecretStr
 
-from usher.adapters.http import retry_after_seconds
-from usher.ports.errors import (
-    PortAuthFailed,
-    PortDataMalformed,
-    PortRateLimited,
-    PortUnavailable,
-)
+from usher.adapters.http import UNTRANSLATED_FAILURES, decode_json, port_error_for
+from usher.ports.errors import PortDataMalformed, PortUnavailable
 
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
-
-# The one 4xx that is a reason to send the request again rather than a
-# statement about the request itself. See `_decode`.
-_REQUEST_TIMEOUT = 408
 
 # TMDb's required attribution wording for non-commercial API use. Restated
 # here rather than imported from `usher.adapters.bulk.tmdb_ids`: that module
@@ -85,18 +83,6 @@ _request_duration = _meter.create_histogram(
 # needs rewriting per provider.
 _requests = _meter.create_counter(
     "usher.provider.requests", unit="1", description="Metadata provider requests, by status"
-)
-
-# Everything a send may raise that a caller written against
-# `usher.ports.errors` cannot catch. The same four `EmbySession` enumerates,
-# and for the same reasons -- `StreamError` subclasses `RuntimeError`,
-# `InvalidURL`/`CookieConflict` subclass `Exception` directly, and a closed
-# `httpx.AsyncClient` raises a bare `RuntimeError`.
-_UNTRANSLATED_FAILURES: tuple[type[BaseException], ...] = (
-    httpx.HTTPError,
-    httpx.InvalidURL,
-    httpx.CookieConflict,
-    RuntimeError,
 )
 
 
@@ -217,56 +203,31 @@ class TmdbClient:
                 "GET", f"{self._base_url}{path}", params=params, headers=dict(headers)
             )
             return await self._client.send(request)
-        except _UNTRANSLATED_FAILURES as exc:
+        except UNTRANSLATED_FAILURES as exc:
             # `type(exc).__name__` and the path, never `exc` and never the
             # URL. httpx's own exception text for several transport failures
             # includes the request URL, which here carries the API key.
             raise PortUnavailable(f"GET {path} failed: {type(exc).__name__}") from exc
 
     def _decode(self, response: httpx.Response, path: str) -> dict[str, Any]:
-        if response.status_code == 429:
-            raise PortRateLimited(retry_after_seconds(response.headers.get("retry-after")))
-        if response.status_code in (401, 403):
-            # No cooldown and no negative cache, unlike `EmbySession`: there
-            # is no re-authentication to storm here (a key is a key), and the
-            # queue's own backoff already spaces the retries out.
-            raise PortAuthFailed("TMDb rejected the configured API key")
         if response.status_code == 404:
-            # Deliberately not `PortUnavailable`. TMDb answers 404 for an id
-            # it has merged away, and the catalog holds 291,737 TMDb ids from
-            # a bulk export that ages -- retrying cannot turn any of them
-            # into an answer, so `JobWorker` parks it on the first attempt
-            # rather than spending five rate-limited ones first.
+            # **The one arm that is genuinely TMDb's and not the shared
+            # ladder's**, so it sits above the shared call rather than inside
+            # it. `port_error_for` would already answer `PortDataMalformed`
+            # here -- the family is the same -- but with the generic "rejected
+            # the request with HTTP 404" sentence, and this status has a
+            # specific meaning worth naming: TMDb answers 404 for an id it has
+            # merged away, and the catalog holds 291,737 TMDb ids from a bulk
+            # export that ages. Retrying cannot turn any of them into an
+            # answer, so `JobWorker` parks on the first attempt rather than
+            # spending five rate-limited ones first.
             raise PortDataMalformed("TMDb has no entity at this reference", detail=path)
-        if 400 <= response.status_code < 500 and response.status_code != _REQUEST_TIMEOUT:
-            # The same argument as the 404 above, generalised to the rest of
-            # the 4xx range -- and generalised because live TMDb was observed
-            # using two more of them on 2026-08-01: **422** for a
-            # `/movie/changes` window longer than 14 days
-            # (`status_code: 20`), and **400** for a 21-item
-            # `append_to_response` (`status_code: 27`, "the maximum number of
-            # remote calls is 20"). Both are permanent properties of the
-            # request, so retrying spends five rate-limited attempts and a
-            # backoff schedule reaching the same answer, then parks the job
-            # with "upstream unavailable" rather than with what was wrong.
-            #
-            # 429 is handled further up and 408 is excluded by the condition
-            # itself: those are the two 4xx codes that really do mean "send
-            # this again". TMDb has never been observed to send a 408, but
-            # `Settings.tmdb_base_url` exists so a household can put a proxy
-            # in front of TMDb, and a proxy that gives up waiting is exactly
-            # what the queue's backoff is for.
-            raise PortDataMalformed(
-                f"TMDb rejected the request with HTTP {response.status_code}", detail=path
-            )
-        if response.status_code >= 400:
-            raise PortUnavailable(f"GET {path} returned HTTP {response.status_code}")
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise PortDataMalformed(f"{path} did not return JSON", detail=path) from exc
-        if not isinstance(body, dict):
-            raise PortDataMalformed(
-                f"{path} returned a {type(body).__name__}, not an object", detail=path
-            )
-        return body
+        # The rest of the ladder is `OpenAICompatibleClient`'s ladder, and the
+        # rationale for each branch lives with it in `usher.adapters.http`.
+        # The path is safe as both `detail` and the outage message's subject
+        # here -- it carries no credential, which the *URL* does, hence
+        # `request_line` being built from the path rather than from `_send`'s.
+        error = port_error_for(response, what="TMDb", request_line=f"GET {path}", detail=path)
+        if error is not None:
+            raise error
+        return decode_json(response, what=path, detail=path)

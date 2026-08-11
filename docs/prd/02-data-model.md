@@ -499,13 +499,15 @@ a failure that is silent under either one alone.
 
 | Table | Purpose |
 |---|---|
-| `curated_rows` | ⏳ Persisted LLM row output ([06](06-rows-and-recommendations.md)). **Does not exist yet** — M8 owns it, along with the `LLMClient` implementation that fills it |
+| `curated_rows` | ✅ Persisted LLM row output ([06](06-rows-and-recommendations.md)): `(id, user_id, slug, title, reason, card_title_ids uuid[], position, model_name, generation_id, generated_at)`. **`card_title_ids` is an ordered array on the row, not a child table** — see below. `reason` is nullable, because a model that returns an empty reason should give a row with no subtitle rather than one with an empty one. **No `created_at`**: `generated_at` is one instant per *generation*, written identically onto every row of it, which is what makes `ORDER BY generated_at DESC` select a whole generation rather than a mixture — so it also carries no `server_default`. `generation_id` is what makes a replacement atomic and a partial write legible. One index, `(user_id, generated_at DESC)`, serving the read, the delete and the `users` cascade. ⚠️ **It is the first table here whose contents no re-run reproduces** — `title_neighbors` can be diffed against a fresh computation and `search_document` has a case asserting the stored value equals a freshly computed one; this has no oracle and is not deterministic. So it is *rebuildable* (one completion) and not *restorable*, which is a distinction [08](08-operations.md)'s backup section now makes explicitly. Migration `m08a` |
+| `llm_calls` | ✅ The cost ledger ([10](10-telemetry-and-dashboards.md)): `(id, at, model, purpose, tokens_in, tokens_out, cost_usd, latency_ms, ok, error, generation_id)`. **No `user_id`, deliberately** — spend is attributed to an outcome by joining `curated_rows` on `generation_id`, which is what dashboard 5's "cost per curated row" *is*. `record()` is called on the failure path too, so `ok` is the discriminator and a ledger of successes alone understates spend by exactly the failures. `cost_usd` is **`NUMERIC(12, 8)`**, never a float: `$3/Mtok × 1,200 tokens` is exactly `0.0036` and at scale 4 a `$0.02/Mtok` call stores as `0.0000` — measured. `generation_id` is nullable (query expansion produces no rows) and carries no foreign key. **No index beyond the primary key**, because every reader is an M10 dashboard; the two that will be right are written into `m08a`'s docstring. ✅ **`cost_usd` verified exact end to end on 2026-08-07**: `0.00000000` against a local model, `0.01658700` with prices configured — exactly `Decimal((4359×3 + 234×15) / 1e6)` — and `SUM()` agrees to 8 decimal places. 🔴 **And it is the one table in this project rebuildable from *nothing*** — not from the catalog, not from `curated_rows` (replaced nightly), and not from any provider, since no OpenAI-compatible endpoint offers a per-key call history. It belongs in [08](08-operations.md)'s *precious* column, where M8 put it. Migration `m08a` |
 | `people` | ✅ Canonical people: `(id, tmdb_id, name, sort_name, known_for_department, created_at, updated_at)`. Identity is a **partial-unique `tmdb_id`** (`WHERE tmdb_id IS NOT NULL`), never `name` — see below |
 | `credits` | ✅ The `people`↔`titles` join, one row per credit: `(id, person_id, title_id, kind, tmdb_credit_id, character, job, department, billing_order, created_at)`. `kind` is the `cast`/`crew` discriminator and `billing_order` is the cast's billing rank. **No `updated_at` and no trigger** — every write is an insert, because a credit is a fact about a payload rather than a mutable row |
 | `collections` | ✅ TMDb franchise grouping: `(id, tmdb_id, name, created_at, updated_at)`, `tmdb_id` partial-unique. `titles.collection_id`'s foreign-key target, at last |
 | `user_taste` | ✅ One centroid per user: `(user_id PK, centroid halfvec(384), model_name, source_watermark, title_count, computed_at)`. `centroid` and `source_watermark` are both **nullable on purpose** — a household below five engaged titles gets a written refusal rather than a skipped row, and a household with no watch state at all has no watermark to record. `(model_name, source_watermark)` together are [ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)'s fingerprint here |
 | `title_neighbors` | Precomputed similarity: `(title_id, neighbor_id, score, rank, blend_fingerprint, computed_at)`. A **batch artefact**, rebuilt rather than repaired. M6 blended the two signals it had data for; M7 makes it three of the four [05](05-search-and-similarity.md) specifies and adds **`blend_fingerprint`** (migration `ffb`), so "was this row computed under the current blend?" stopped being undecidable. `computed_at` stays beside it for the half that is still undecidable per row — *some other title was embedded since* ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)) |
 | `genome_scores` | ✅ One title's MovieLens tag-genome vector: `(title_id, relevance halfvec(1128), genome_revision, computed_at)`. **One dense vector per title, not a tall `(title_id, tag_id, relevance)`** — see below |
+| `genome_tags` | ✅ What each of that vector's 1,128 lanes means: `(tag_id PK, tag, genome_revision)`. **1,128 rows, measured against the real `genome-tags.csv`.** Loaded by the same `bootstrap --phase movielens` that writes the vectors, from a member that phase already read for its width check, and stamped with the same revision — so `GenomeRepository.vocabulary(revision)` can refuse to name one release's lanes with another's. `tag_id` is `integer` rather than `smallint` so a too-wide vocabulary is refused by `ck_genome_tags_tag_id_in_vocabulary` rather than by asyncpg's unnamed encoder — see below. **No index beyond the primary key** and **no `computed_at`**: the only read is the whole table in lane order, and its age is `import_runs`. Migration `m08b` |
 | `sync_runs` | Per-source run bookkeeping: kind, cursor, status, stats. One row per *attempt*, so the availability sweep can say which run last finished cleanly |
 | `jobs` | Priority work queue ([03](03-sources-and-sync.md)). A completed job's row is deleted, so there is no `done` status and the table's size is the outstanding work, not the work ever done |
 | `raw_payloads` | JSONB cache of **provider** responses, so reprocessing never refetches. Its `fetched_at` column is also what enforces TMDb's ≤6-month cache term — see [ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md), which is why there is no separate `provider_cache_meta` table and why source payloads are not stored here |
@@ -575,16 +577,113 @@ other vector, so a title with no genome row would score as *maximally
 dissimilar* from everything. At the measured coverage that is the common case,
 not the edge.
 
-**The tag vocabulary itself is deliberately not stored, and the cost is
-recorded rather than discovered.** Nothing in M7 reads a tag *name*: cosine
-needs the two vectors and the guarantee that their positions mean the same
-thing. `genome-tags.csv` is read by the importer to verify contiguity and
-width, and thrown away. The cost lands on M8 — **an LLM prompt that wants to
-say "atmospheric, thought-provoking" needs the words** — and paying it is a
-1,128-row table plus a loader step in a phase that already reads the file, and
-one migration. What makes that safe rather than a deferral-by-omission is
-`genome_revision`: the vocabulary M8 loads must carry the same revision as the
-vectors it explains, and there is already something to check it against.
+**The tag vocabulary was not stored in M7, and M8 Task 19 stored it in
+`genome_tags`.** M7's argument is why it did not ship a milestone earlier:
+nothing in M7 reads a tag *name*, since cosine needs the two vectors and the
+guarantee that their positions mean the same thing, and `genome-tags.csv` was
+read by the importer to verify contiguity and width and thrown away. The cost
+landed on M8 exactly where it was predicted to — **an LLM prompt that wants to
+say "atmospheric, thought-provoking" needs the words** — and it was paid as
+predicted: a 1,128-row table plus a loader step in a phase that already reads
+the file, and one migration (`m08b`). What made that safe rather than a
+deferral-by-omission is `genome_revision`, which is what the vocabulary's own
+copy of that column is compared against.
+
+### `genome_tags` refuses a release it cannot explain, and the refusal is an error rather than a `None`
+
+`GenomeRepository.vocabulary(revision)` returns the tag names **in lane
+order** — `result[i]` names `relevance[i]` — and has three outcomes, which is
+one more than `get_pair` next to it:
+
+- **`None` when the table is empty.** Every catalog bootstrapped before `m08b`
+  is in that state, so it is a thing to do rather than a fault, and a caller
+  renders no tags — [08](08-operations.md)'s "a degraded subsystem narrows
+  functionality; it never fails a request local state can answer".
+- **`PortDataMalformed` when a vocabulary is stored under a different
+  release.** Here a wrong answer is *available* and plausible: 1,128 names of
+  the right shape, in the right order, for a different release, rendered as
+  prose. Retrying cannot help, so `JobWorker` parks it and the fix is an
+  operator's `usher bootstrap --phase movielens` — the same fix a mixed
+  `genome_scores` takes. The message names both releases.
+- The names, otherwise.
+
+**Why not `None` for both, as `get_pair` does?** Because `get_pair`'s two
+outcomes call for the same response — "no genome signal", which 98.7% of pairs
+already produce — and these two do not: one means *load the vocabulary* and
+the other means *re-import the whole genome*. Collapsing them would hide a
+corrupted table behind a state that is normal on every pre-`m08b` deployment.
+
+**`tag_id` is `integer` and its ceiling is a batch precondition rather than a
+column width.** `BulkCatalogRepository.replace_genome_tags` refuses a
+vocabulary that is not exactly `1…n` before it writes — which is also the only
+check that can see a *gap*, the failure that renames every later lane — so the
+largest `tag_id` reaching the driver is the length of the sequence handed in.
+Measured on `pgvector/pgvector:pg17`: under `smallint` a 32,768-element list
+is refused by asyncpg's own encoder as an **unnamed** `DBAPIError` (SQLSTATE
+`22000`), and under `integer` the same input is refused by
+`ck_genome_tags_tag_id_in_vocabulary` as an `IntegrityError` (`23514`)
+carrying the constraint's name. The write is a plain `INSERT` rather than the
+staging `COPY` for the same reason: through `COPY` an out-of-range integer is
+a bare `OverflowError` with no SQLSTATE at all.
+
+### `curated_rows.card_title_ids` is an ordered array, and the missing foreign key is the price
+
+Both shapes are already precedented in this schema: `titles.genres` is a
+`text[]` on the row, and `title_neighbors` is a child table with an explicit
+`rank` integer. A curated row's cards took the array, for three reasons.
+
+**The ordering is the product.** A curated row *is* an ordering — it is the
+only judgement the completion was bought for, and
+[ADR-0028](decisions/0028-the-pool-is-the-contract.md) says nothing downstream
+may re-sort it. A Postgres array is an ordered container, so the order is the
+storage and there is no `ORDER BY` for a reader to forget. A child table makes
+the order a `rank` column that every read has to sort by — and a UUIDv7
+primary key makes a forgotten `ORDER BY rank` agree with `ORDER BY id` and
+pass every test whose fixture inserted the cards in order. This project has
+paid for that five times over, in M7's five untested provider orderings.
+`title_neighbors` takes the other shape because its order is a *ranking* a
+client may legitimately re-derive; this one is not.
+
+**A shelf is one row, so a replacement is one statement per shelf.**
+`replace_for_user` is delete-then-insert in one transaction. In the child
+shape the same write also moves thirty to fifty card rows and makes a
+partially inserted shelf representable — which is exactly the state
+`CuratedRow`'s `min_length=1` exists to make unconstructible.
+
+**The 1:1 row/model rule stays spellable.** `CuratedRow` has ten fields and
+this table has ten columns, so `PostgresCuratedRowRepository` reads through
+this project's usual shape (a `SELECT *` into an `extra="forbid"` model). A
+child table leaves nine here and puts the tenth where `SELECT *` cannot see
+it. `titles` is the only table in this schema carrying an exception list, and
+it exists for generated columns.
+
+⚠️ **The price is that this column cannot have referential integrity, and it
+is a real consequence rather than a footnote.** PostgreSQL has no foreign key
+over array elements, so deleting a title leaves a dangling id in every curated
+row that mentioned it. Three things follow, in the order they arrive: the
+stored row still validates, because the ids are all still there and the model
+never claims they resolve; `LLMRow`'s hydration loses a card, which is
+[ADR-0014](decisions/0014-absence-is-not-zero.md)'s shape and the same
+degradation the validator already produces, with a shelf that empties entirely
+dropped rather than rendered as a heading with nothing under it; and it
+self-heals at the next generation, because this table holds one generation per
+user and the nightly run replaces it wholesale, so the window is one day.
+
+**The child table would not have bought integrity — it would have bought a
+choice between two worse outcomes.** `ON DELETE CASCADE` on a card's
+`title_id` can empty a curated row *inside the database*, producing the
+heading-with-no-shelf that `min_length=1` refuses, silently and where nothing
+is looking. `ON DELETE RESTRICT` makes a title undeletable because a model
+mentioned it last night, for an artefact that is fully re-derivable — the
+delete that can essentially never succeed, which `title_neighbors` refuses
+RESTRICT for by name.
+
+**One liability the array really does introduce is closed with a CHECK.** A
+`uuid[]` admits a NULL *element*, which a child table's `NOT NULL` column
+could not, and a NULL element reads back as a card that denotes nothing while
+still satisfying "the array is non-empty". `array_position` is `IMMUTABLE` on
+PostgreSQL 17 and does find a NULL element (both verified directly), so
+`ck_curated_rows_cards_have_no_nulls` is what that `NOT NULL` would have been.
 
 ## Relationships
 
@@ -597,9 +696,18 @@ Title      1─* MediaItem *─1 Source
 Title      1─* WatchState *─1 User
 Title      1─1 TitleEmbedding
 Title      1─1 GenomeVector  (sparse — 15,565 of 1,271,570; genome_scores)
+GenomeVector ·· GenomeTag    (1,128 lanes ↔ genome_tags; positional, no FK)
 User       1─1 UserTaste     (nullable centroid; user_taste)
+User       1─* CuratedRow    (curated_rows; replaced per generation, CASCADE)
 Title      *─* Title        (through title_neighbors, directed, precomputed)
 ```
+
+⚠️ **`CuratedRow *─* Title` is deliberately absent from that list**, and its
+absence is the shape decision above rather than an omission. The relationship
+exists — a curated row names three to eight titles, in order — but it is a
+`uuid[]` column rather than a join table, so Postgres does not know about it
+and will neither check nor cascade it. `llm_calls` appears on no line at all:
+it references nothing, by the same argument.
 
 ⏳ **One of those lines still describes a table that does not exist.** `Image`
 has no table, no model and no port anywhere in `src/`, and it lands with M9,

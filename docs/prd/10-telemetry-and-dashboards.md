@@ -52,6 +52,10 @@ index.title                       ← M6, a child of job.index
 home.compose                      ← M7, one per GET /home or usher home
 └── row.build                        one per row actually built
 
+job.curate                        ← M8, a worker's root span like the three
+└── curation.generate                above it; one per generation
+    └── llm.complete                 the one completion it is allowed
+
 bootstrap.import
 ├── bootstrap.batch
 └── bootstrap.link_crosswalk
@@ -93,7 +97,9 @@ reader would assume:
 - **The provider is an *attribute*, not part of the span name.** `row.build`
   carries `usher.row.provider` (the `slug_prefix`), `usher.row.slug` and
   `usher.row.cards`; `home.compose` carries `usher.home.proposed`,
-  `usher.home.built` and `usher.home.rows`. So "find the one slow provider" is
+  `usher.home.built`, `usher.home.rows` and — M8's, set by `CuratedProvider`
+  itself rather than by the composer — `usher.home.curated.discarded`. So
+  "find the one slow provider" is
   a group-by on an attribute, not a scan of span names — which is what keeps
   the name cardinality at two where `because-you-watched-<seed>` would have
   made it catalog-sized. **Dashboard 4 can have its breakdown**, from either
@@ -125,6 +131,8 @@ is maintained rather than aspirational.
 | `usher.search.results` | histogram | mode | ✅ M6 |
 | `usher.home.compose.duration` | histogram | — | ✅ M7 |
 | `usher.row.build.duration` | histogram | provider | ✅ M7 |
+| `usher.curation.rows` | counter | — | ✅ M8 |
+| `usher.curation.dropped` | counter | reason | ✅ M8 |
 | `usher.jobs.queued` | gauge | kind | ✅ M4 |
 | `usher.jobs.duration` | histogram | kind | ✅ M4 |
 | `usher.jobs.parked` | gauge | kind | ✅ M4 |
@@ -179,20 +187,23 @@ dashboard query has to know:
 A blank query is deliberately not a data point: a search box sends one between
 every keystroke.
 
-**`provider`'s vocabulary is the nine `slug_prefix` constants**, and it is
+**`provider`'s vocabulary is the ten `slug_prefix` constants**, and it is
 written down here for the reason the paragraph above gives — `continue-watching`,
 `next-up`, `recently-added`, `rediscover`, `because-you-watched`, `franchise`,
-`genre-affinity`, `seasonal`, `people`. Ten when M8 registers
+`genre-affinity`, `seasonal`, `people`, `curated`. The tenth arrived with M8's
 `CuratedProvider`. Four things a dashboard query has to know:
 
 - **It is the provider's prefix, never the row's slug.** `because-you-watched`
   emits one row *per seed* — `because-you-watched-<title id>` — so a slug-keyed
   label would be bounded by the catalog rather than by the registry. Bounded at
-  nine is the whole reason the label is affordable on a per-request histogram.
+  ten is the whole reason the label is affordable on a per-request histogram,
+  and `curated` is the sharpest instance: its row slugs are `curated-01`,
+  `curated-02`, … per generation, so a slug label there is unbounded in the
+  number of shelves a model has ever proposed.
 - **It is not the class name.** `services/rows/__init__.py` also keys a
   `BASE_SCORES` map by `__name__`; that is a different vocabulary for a
-  different purpose, and confusing the two produces a panel with nine empty
-  series and nine populated ones.
+  different purpose, and confusing the two produces a panel with ten empty
+  series and ten populated ones.
 - **`provider` on this metric and `provider` on `usher.provider.requests` are
   different vocabularies under one label name.** The latter is a *metadata*
   provider (`tmdb`). They never appear on the same series, but a dashboard
@@ -203,6 +214,72 @@ written down here for the reason the paragraph above gives — `continue-watchin
   therefore misses, and the hit rate is not recoverable from it —
   `usher.cache.hits`/`.misses` is M9's, and until then the cold/warm pair
   `usher home` prints is the only measurement of the row cache there is.
+
+**`usher.curation.rows` and `usher.curation.dropped` are the milestone's only
+two metrics, and neither is about money.** This document's own first principle
+puts LLM spend on Postgres — `llm_calls` is the record — so there is no
+`usher.llm.*` series at all. What these two answer is the question no
+`llm_calls` row can: **whether the validator is eating the output.** A call
+that returned 200 and produced nothing usable is a healthy call from the wire's
+side, and
+[ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s 108/108 run is what
+that looks like in production. Four things a dashboard query has to know:
+
+- **`reason`'s vocabulary is closed and is five values** — `not_in_pool`,
+  `unparseable`, `duplicate`, `row_unusable`, `row_too_short` (`DropReason`'s
+  own members, and ADR-0028 carries the argument for each). Closed because a
+  metric dimension built from free-form strings is a cardinality footgun, and
+  because the pair `not_in_pool`/`unparseable` produces the identical empty
+  screen with opposite fixes.
+- **Two of the five count rows and three count cards**, which is what the
+  `row_` prefix says out loud: summing across the label is meaningless.
+
+  🔴 **`curation.generate`'s span summed them anyway until 2026-08-10**, into a
+  single `usher.curation.dropped` attribute — so a generation that lost three
+  cards out of a shelf it kept and two shelves entire published `5`, a number
+  that is neither five cards nor five shelves. The span now carries
+  `usher.curation.dropped_rows` and `usher.curation.dropped_cards`, split on
+  the same `row_` prefix this bullet names, and the per-reason attributes are
+  unchanged. The **counter** was never wrong: `reason` is a label, and it is
+  the roll-up across it that had no unit.
+- **Every reason is exported on every generation, zeros included.** A reason
+  absent from the export is indistinguishable from a reason nobody counts,
+  which is this pair's own subject one level up.
+
+  ⚠️ **Expect most of those zeros to be permanent, and know it before reading
+  the panel.** Measured over 20 live generations on 2026-08-07
+  ([06](06-rows-and-recommendations.md)): **four of the five members never
+  fired**, and only `row_too_short` did. Under a provider honouring
+  `strict: true` three of the four are close to *unreachable* by construction —
+  `unparseable` and `row_unusable` are shape failures guided decoding prevents,
+  and `not_in_pool` is a range violation the schema's `minimum`/`maximum`
+  prevents (0 out of pool over 405 identifiers, and 0 integers above a declared
+  `maximum` over 2,048 output tokens). A dashboard of flat zeros here is the
+  system working, not a broken counter — and it is exactly why they are still
+  exported: the day a `base_url` change puts a provider that ignores the schema
+  behind this port, `unparseable` going from a permanent 0 to a spike is the
+  *only* signal that anything changed, because the call still returns 200.
+- **Counters, not histograms, and the pair is the point.** One generation per
+  household per night is far too sparse a population for a distribution to say
+  anything; what an operator reads is the ratio of the two. "How many rows did
+  *this* generation produce" is on `curation.generate`'s span, attached to the
+  generation that produced it.
+
+**`usher.home.curated.discarded` is the third drop, and it is a span attribute
+for the same reason.** The validator's two counters answer *"is the validator
+eating the output"*; this one answers *"is the screen eating it"*.
+`CuratedProvider` cuts the stored generation to PRD 06's `0-5 rows` and
+`services.curation_validate` deliberately caps nothing, so a model that ignores
+the prompt's row range has its excess shelves bought, validated, stored — and
+then dropped on the request path with nothing else recording it.
+`ComposeReport`'s `ProviderReport` structurally cannot: its `proposed` is the
+**post**-cut count, so a seven-shelf generation reads `proposed 5` and the two
+discards are invisible. This is dashboard 5's *"spend with no screen to show
+for it"* made countable, so it belongs beside the composition that discarded
+them rather than in a third counter — the same call this section's last bullet
+makes for "how many rows did this generation produce". **Set on every
+composition, zeros included**, for the reason every drop reason is exported
+every time.
 
 `usher.home.compose.duration` carries **no labels**, and that is a decision:
 the natural one would be the row count or the user, and the first is an
@@ -334,10 +411,11 @@ They are domain records, not telemetry exhaust — durable, queryable, exact.
 
 ```sql
 llm_calls(
-  id, at, model, purpose,           -- purpose: curation | query_expansion | …
+  id, at, model, purpose,           -- purpose: curation | query_expansion
   tokens_in, tokens_out, cost_usd,
-  latency_ms, ok, error
-)
+  latency_ms, ok, error,
+  generation_id                     -- ✅ M8. NULL for a purpose that produces
+)                                   --    no rows. See below
 
 search_queries(                       -- M9, whole. Not built in M6; see below
   id, at, user_id, query, mode,
@@ -346,8 +424,54 @@ search_queries(                       -- M9, whole. Not built in M6; see below
 )
 ```
 
-`litellm` reports per-call cost natively, so cost analysis is exact SQL rather
-than estimated counters.
+🔴 **This paragraph read *"`litellm` reports per-call cost natively, so cost
+analysis is exact SQL rather than estimated counters"* and its premise is
+false — independently of M8's decision not to take that dependency.** Measured
+2026-08-06 against a live OpenAI-compatible endpoint: `usage` carries
+`prompt_tokens`, `completion_tokens` and `total_tokens` and **no cost field at
+all**. litellm does not *report* cost, it *computes* it, from a price table it
+bundles. So "exact SQL rather than estimated counters" was describing a lookup
+either way; the only question was whose table it is and how it ages.
+
+✅ **`generation_id` is new to this sketch and it is what makes dashboard 5 a
+join.** This column list had ten entries and no way to connect a completion to
+what it produced, so "cost per curated row" would have been a correlation on
+timestamps — two tables written milliseconds apart, matched by proximity, with
+no way to tell two users' concurrent generations apart. `curated_rows` carries
+the same `generation_id` on every row of one generation, so the panel is
+`llm_calls JOIN curated_rows USING (generation_id)` and nothing else.
+
+**It is also *why* this table has no `user_id`.** Spend is attributed to an
+outcome through that join rather than by denormalising a household onto a cost
+row, which is what keeps this a spend ledger rather than a second copy of the
+curation record. `NULL` for a purpose that produces no rows at all — query
+expansion is one, **shipped in M8 and writing `NULL` here on every row**
+([05](05-search-and-similarity.md)), so on a deployment that both curates and
+searches those rows are the majority of the table, which is why the index that
+eventually serves this join is partial on
+`generation_id IS NOT NULL`. ⚠️ **That majority is a property of a
+configuration almost nobody will be in, corrected 2026-08-07.** Query expansion
+ships behind its own switch, `USHER_QUERY_EXPANSION_ENABLED`, default `false`
+*even where `USHER_LLM_ENABLED` is true*, because the retrieval measurement in
+[05](05-search-and-similarity.md) put its effect the wrong way round. So on the
+shipped default this table is **100% `curation`**, every `generation_id` is
+non-NULL, and the partial index degenerates to a full one. The partial spelling
+is still the right one — it costs nothing on that population and is what stops
+the index inverting on the day an operator opts in — but the sentence above
+argued for it from a majority the default does not produce, and the honest
+argument is that it is correct under both. **No foreign key**, in either direction: a
+generation is three to five `curated_rows` rows, so that column is not unique
+and must not become so; and any foreign key would make a ledger row deletable
+by a cascade from the thing whose cost it records, when a curated row is
+replaced nightly and the money was still spent. Migration `m08a`.
+
+`cost_usd` is therefore computed from two configured per-million-token prices
+and **written onto the row**, so a later price change cannot rewrite history.
+Both default to `0`, which is the honest value for a local model and the wrong
+one for a hosted model an operator forgot to price — and the mitigation is that
+`tokens_in`/`tokens_out` are recorded exactly, so spend is recomputable from
+the ledger after the fact.
+[ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md).
 
 `search_queries` does something more useful than reporting: **it turns the
 Meilisearch gate in [ADR-0002](decisions/0002-postgres-first-search.md) into a
@@ -479,6 +603,21 @@ by table with a disk-exhaustion projection.
 Data freshness is backed by real data as of M2: `import_runs.heartbeat_at`
 (updated every committed batch) and `finished_at` (set on completion or
 failure) are its source, one row per bulk dataset.
+
+✅ **Half of the LLM half is backed by real data as of M8, and the split is
+worth stating because these two panels sit in one sentence above.** *Spend by
+model and purpose*, *tokens in/out* and **cost per curated row** are
+`llm_calls` and `llm_calls ⋈ curated_rows USING (generation_id)`, both of which
+exist and were verified live on 2026-08-07: `cost_usd` is `0.00000000` against
+a local model — the honest value — and `0.01658700` with prices 3/15 per Mtok
+configured, exactly `Decimal((4359×3 + 234×15) / 1e6)`, with the column
+`numeric` and `SUM()` agreeing to 8 decimal places. **Cost per play attributed
+to an LLM row is still unbacked** and stays ⏳ M9: it needs `search_queries`'
+`played`, which needs a client. So the panel that answers *"did this cost
+anything"* is live and the one that answers *"was it worth it"* is not — which
+is the same asymmetry [06](06-rows-and-recommendations.md) records at the
+product level, where 88% of one live run's headings were the genre labels the
+prompt forbids and nothing in this stack could have told an operator so.
 
 ## Where the stack lives
 

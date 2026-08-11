@@ -29,14 +29,32 @@ because an adjacency rule is about what a person sees -- and applying it at
 selection ships a real, invisible defect: `[S, X, S, S]` selected, `X` builds
 empty, `[S, S, S]` returned, nothing raised and nothing logged.
 
-**A consequence of the two numbers, recorded because it is not obvious.** With
-`_MAX_PER_FAMILY = 4` and two families, the longest screen this composer can
-return today is **nine** rows -- one pinned plus four `SOURCE` plus four
-`SIMILARITY` -- and not `_MAX_ROWS`. `_MAX_ROWS` becomes reachable when M8
-registers `CuratedProvider` and `RowFamily` grows its third member. The
-ceiling stays 10 rather than 9 deliberately: it bounds the *screen*, and a
-bound that happened to equal today's arithmetic would silently stop bounding
-anything the day a family is added.
+**A consequence of the two numbers, and M8 is where it stopped being
+hypothetical.** With `_MAX_PER_FAMILY = 4` and *two* families the longest
+screen this composer could return was **nine** rows -- one pinned plus four
+`SOURCE` plus four `SIMILARITY` -- and the registry could only reach **eight**
+of those, because `BecauseYouWatchedProvider` is the only `SIMILARITY` emitter
+and its `_MAX_SEEDS` is 3. Both are under `_MAX_ROWS`, so it truncated nothing
+at any input, and the only case reaching that slice injected a smaller
+`max_rows`. `RowFamily` grew `CURATED` alongside the `LLMRow` that emits it
+(M8 task 14), thirteen candidates now get past the cap, and the ceiling does
+the work its name claims. `test_the_default_row_ceiling_is_reachable_now_that_
+a_third_family_exists` pins it, on what was **built** rather than on what came
+back: `_order` bounds the returned sequence by the same number, so deleting
+`_select`'s slice still returns ten rows -- having hydrated thirteen. The
+ceiling stayed 10 rather than 9 for exactly this reason: a bound that happened
+to equal the day's arithmetic would silently stop bounding anything the day a
+family was added.
+
+**And the "one pinned" term in that arithmetic is the registry's property, not
+this module's.** `_select` sets every pinned candidate aside *before* the cap
+with no bound of its own -- deliberately, since a positional guarantee a
+crowded family could take away is not one -- so nine is an upper bound only
+while `ContinueWatchingProvider` is the sole pinning provider and proposes one
+row. Nothing said so until M8:
+`tests/unit/test_rows_invariants.py::test_continue_watching_is_the_only_
+provider_that_pins_and_it_pins_one_row` is the assertion, and it is what keeps
+the paragraph above from going quiet the day a second provider pins.
 
 **The build loop is a `for`, and that is a decision rather than an accident.**
 `AsyncSession` is not safe for concurrent use, so `asyncio.gather` over
@@ -76,8 +94,11 @@ _compose_duration = _meter.create_histogram(
 # provider" -- and `BecauseYouWatchedProvider` mints one slug per seed, so a
 # slug label's cardinality is the household's watch history and, in time, the
 # catalog. A label whose cardinality grows with the catalog is a metrics-backend
-# outage rather than a dashboard. Bounded at nine here; ten when M8 registers
-# `CuratedProvider`.
+# outage rather than a dashboard. **Bounded at ten**, which is the whole
+# registry: M8 task 15 registered `CuratedProvider` and `curated` is the tenth
+# label. The sharpest instance of the rule is that provider's own -- its row
+# slugs are `curated-01`, `curated-02`, … per generation, so a slug label there
+# is unbounded in the number of shelves a model has ever proposed.
 _row_build_duration = _meter.create_histogram(
     "usher.row.build.duration", unit="s", description="Wall time to build one row, by provider"
 )
@@ -233,7 +254,7 @@ class HomeService:
         cached = None if self._cache is None else self._cache.get_screen(ctx.user.id)
         if cached is not None:
             # A screen hit does not re-propose. `propose` is the cheap phase,
-            # not the free one -- nine bounded reads is still nine round trips
+            # not the free one -- ten bounded reads is still ten round trips
             # for an answer already on hand. The report is empty of providers
             # for the same reason: none of them ran.
             return ComposeReport(rows=cached, providers=(), duration_seconds=0.0)

@@ -6,7 +6,7 @@ Three layers, split by what changes and when:
 
 | Layer | Holds | Changes |
 |---|---|---|
-| **Environment** | `DATABASE_URL`, port, log level, embedding model, `USHER_SECRET_KEY`, TMDb key | Deploy time |
+| **Environment** | `DATABASE_URL`, port, log level, embedding model, `USHER_SECRET_KEY`, TMDb key, ✅ the LLM endpoint, model and key (M8) | Deploy time |
 | **Config file** (TOML) | Rate limits, TTLs, enrichment tier, image cache ladder | Restart |
 | **Database** | Sources, users, ⏳ row provider enable/disable (**M9** — see below) | Runtime, via admin API |
 
@@ -19,7 +19,33 @@ environment setting on `usher.config.Settings` and is documented in
 `.env.example` — completeness in both directions, so a setting an operator
 cannot discover and a documented key that is not a setting are both test
 failures (`tests/unit/test_deployment_config.py`). M6 added nine of them,
-four `USHER_EMBEDDING_*` and five `USHER_SEARCH_*`. **M7 added none**, and
+four `USHER_EMBEDDING_*` and five `USHER_SEARCH_*`. **M8 added eight
+`USHER_LLM_*` plus `USHER_CURATION_POOL_SIZE` and
+`USHER_QUERY_EXPANSION_ENABLED`** — ten. That last one arrived on 2026-08-07
+and is the one place this project ships **two** switches over one dependency:
+`USHER_LLM_ENABLED` builds the client, and query expansion is off even when it
+is on, because the retrieval measurement in
+[05](05-search-and-similarity.md) put expansion's effect the wrong way round
+(MRR 0.733 → 0.373). Setting it true with no client is refused at startup
+rather than ignored, which is this document's dead-config rule applied to a
+*state* rather than to a typo. `USHER_CURATION_POOL_SIZE` is worth
+its own line because it looks like the "row weights" case below and is not:
+the pool is assembled, sent and discarded, so there is no half-computed
+artefact, and what the number is really about is the *context window of
+whatever model `USHER_LLM_BASE_URL` names* — a deployment fact, measured at
+**~20.4 prompt tokens a candidate**
+([ADR-0028](decisions/0028-the-pool-is-the-contract.md)), which an operator
+must be able to change without editing code. **Its sibling is
+`USHER_LLM_MAX_OUTPUT_TOKENS`, not the row scores — and 🔶 nothing couples
+them, which is a live gap.** The endpoint's constraint is
+`prompt_tokens + llm_max_output_tokens ≤ max_model_len`, so raising the output
+ceiling silently lowers the workable pool, and the failure arrives as a parked
+job rather than as a startup refusal. That is the one place this document's own
+`_query_expansion_needs_a_client` shape — refuse an impossible *state* at
+startup — is **not** applied, because `max_model_len` is a property of the
+endpoint that no setting in this file knows. ⚠️ `le=1000` is a ceiling the
+reference endpoint cannot serve: measured 2026-08-07, pool 1,000 and 700 both
+return HTTP 400 and 600 works at 12,540 prompt tokens. **M7 added none**, and
 that is recorded so the count reads as a current statement rather than as a
 tally somebody stopped keeping: every M7 constant that could have been a
 setting is deliberately code — the similarity weights and pool sizes
@@ -63,11 +89,12 @@ The bottom row claims it is available *"runtime, via admin API"*, and the admin
 API is M9's; M6 added no route and M7 added exactly one, `GET /home`. So the
 mechanism is missing on the same principle the concurrency bullet states:
 
-> A `row_providers` table with nine rows all reading `enabled = true` is
+> A `row_providers` table with ten rows all reading `enabled = true` is
 > indistinguishable from no table, right up until an operator finds it and
 > expects toggling it to do something. **Providers are enabled by registration
-> in code in M7** — `services/rows/__init__.py`'s `ROW_PROVIDERS` is the
-> composition point — and the runtime control lands with the admin API that can
+> in code** — `services/rows/__init__.py`'s `ROW_PROVIDERS` is the
+> composition point, nine entries in M7 and **ten since M8 registered
+> `CuratedProvider`** — and the runtime control lands with the admin API that can
 > write it. **M9**, and [09](09-roadmap.md)'s M7 boundary call 9.
 
 This is the same argument [10](10-telemetry-and-dashboards.md) makes about
@@ -191,9 +218,17 @@ Rules:
   minted per request — the session token is cached in memory for the adapter's
   lifetime and re-minted only on a 401 ([03](03-sources-and-sync.md)), so
   there is no rotation and the grant outlives the response that carried it.
-- At the config layer, `database_url`, `secret_key`, and `tmdb_api_key` are
-  held as `pydantic.SecretStr` and unwrapped only at the point of use, so the
-  rules above are enforced by the type system, not just convention.
+- At the config layer, `database_url`, `secret_key`, `tmdb_api_key` and — ✅
+  since M8 — `llm_api_key` are held as `pydantic.SecretStr` and unwrapped only
+  at the point of use, so the rules above are enforced by the type system, not
+  just convention. **`llm_api_key` is the first credential this project hands
+  to a third party it did not choose**: `USHER_LLM_BASE_URL` is a setting, so
+  the upstream is whatever an operator points it at. It travels in an
+  `Authorization: Bearer` header and never in a URL — `HTTPXClientInstrumentor`
+  records the full URL as a span attribute, which is the same reason
+  `TmdbClient` prefers a bearer token — and no exception message in
+  `adapters/llm/` carries a URL or a request body, because the request body
+  here *is* the prompt and the prompt carries the household's watch history.
 - **"Never logged" has to cover libraries Usher hands a credential to, not
   just Usher's own log lines.** From M5 the source token is also the query
   string of a `websockets` URL, and that client debug-logs its own request
@@ -219,7 +254,8 @@ local state can answer.**
 | Push socket drops | Backoff reconnect; delta reconcile on reconnect; after N failures mark `supports_push = false` and lean on the nightly walk. **The failure counter resets on delivery, not on connection** — a proxy that upgrades and then buffers connects perfectly every time, so a counter reset by connecting never reaches the ceiling and this row silently never fires ([ADR-0018](decisions/0018-push-health-is-a-message-ledger.md)). |
 | TMDb 429 or down | Enrichment retries with jittered backoff. Stubs stay stubs; every other subsystem is unaffected. |
 | TMDb key missing | Bootstrap Phase 3 skipped. Skeleton catalog and full-text search still work; semantic search degrades. |
-| LLM call fails | Previous curated rows persist. Home composes without them. |
+| LLM call fails | Previous curated rows persist. Home composes without them. ✅ M8: the failure is fatal to the *job* and never to the screen — a failed generation never reaches `replace_for_user`, so this row is a property of the control flow rather than of a transaction. **Only the failures that translate to `PortDataMalformed` park the job** rather than retrying into the same answer: a 4xx that is none of 429, 401/403 or 408 (so 400, 402, 404, 409, 422), a 200 whose body does not conform, and a generation that validated to zero rows. The other three families **back off** — `JobWorker` parks on `PortDataMalformed` alone and marks every other `UsherPortError` retryable (`services/jobs.py`, `JobWorker._run`), so 429 (`PortRateLimited`), 401/403 (`PortAuthFailed`) and 408 or any 5xx (`PortUnavailable`) all retry with jittered backoff. *(This sentence read "a 4xx that is not 429 parks the job" until 2026-08-07, which over-parked three families; measured against the adapter's `_decode` and `JobWorker`'s two `except` arms.)* |
+| LLM call fails during a **search** (query expansion) | ✅ M8: the search runs on the query the user typed and `expanded_query` is absent. **The attempt is still billed** — one `llm_calls` row per attempted call — so the warning arrives after the money. Off by default ([05](05-search-and-similarity.md)), which is why this is a narrower row than the one above. |
 | Embedder unavailable | Semantic search falls back to full-text, flagged in the response. |
 | Meilisearch down (if enabled) | Fall back to the Postgres index. It is never the only index. |
 | Postgres down | Total outage. The one hard dependency, deliberately. |
@@ -375,14 +411,31 @@ unreachable.
   — it does not start a multi-hour download unprompted.
 - Bootstrap is resumable and checkpointed; a restart mid-import continues.
 - **The operator trigger is `usher` (also `python -m usher`), and it exists
-  before the HTTP surface does.** `bootstrap` / `bootstrap-status` (M2) and
-  `sync` / `sync-status` / `unmatched` / `work` (M4) are the CLI composition
-  root, documented command by command in `README.md`;
-  [07](07-client-api.md)'s `POST /admin/sources/{id}/sync` and the two
-  `/admin/unmatched` routes are M9's and are built over the same services.
+  before the HTTP surface does.** `serve` (M1), `bootstrap` /
+  `bootstrap-status` (M2), `sync` / `sync-status` / `unmatched` / `work`
+  (M4), `push` (M5), `index` / `search` / `suggest` / `similar` (M6),
+  `derive` / `home` (M7) and `curate` (M8) — all fifteen the parser
+  advertises — are the CLI composition root, documented command by command in
+  `README.md`; [07](07-client-api.md)'s `POST /admin/sources/{id}/sync` and
+  the two `/admin/unmatched` routes are M9's and are built over the same
+  services. **The list above was four milestones stale**, naming six of the
+  fifteen, and is restated here in full rather than extended by one.
   Every one of them has to work against an *empty* database — a command an
   operator can only run after a successful sync is no use for diagnosing
-  why the sync did not happen.
+  why the sync did not happen. `curate` is where that rule costs something,
+  because an empty catalog is an empty candidate pool and there is no
+  generation to run: it says so and exits 1 rather than buying a completion
+  with a guaranteed empty answer, and it is the one path in
+  [06](06-rows-and-recommendations.md)'s curation that writes no `llm_calls`
+  row at all.
+- **A command whose only job needs a subsystem this deployment does not have
+  says so and exits 1.** `usher curate` with `USHER_LLM_ENABLED=false` has no
+  `LLMClient` and therefore no `CurationService` to build — the composition
+  root, not the service, is what knows that. Unlike `GET /home` (nine of ten
+  row providers need no model, so the screen is shorter) and `usher work`
+  (five of six job kinds need none, so `curate` is simply left unclaimed),
+  there is nothing here to narrow to, and a run that printed an empty report
+  and exited 0 would tell a cron entry that curation is running.
 - **`--allow-full-retraction` is the only way past ADR-0015's ceiling**, and
   it is a flag rather than a configuration default because it is the one
   input that can mark a whole library unavailable.
@@ -392,18 +445,25 @@ unreachable.
   frames whose only operator-facing content was the last one. `main` has a
   single `try` around the whole dispatch which names the families an operator
   can act on — `OSError`, `SQLAlchemyError`, `httpx.HTTPError`,
-  `ValidationError` — and answers each with one line and exit 1;
-  `usher --traceback <command>` re-raises. **`Exception` is deliberately not
-  among them**, so a bug still gets its full traceback, and Ctrl-C exits 130
-  rather than printing one. Why those families and not `Exception`, and why
-  the settings case is redacted, are
+  `ValidationError`, and since M8 the port taxonomy's transport half
+  (`PortUnavailable`, `PortAuthFailed`, `PortRateLimited`) — and answers each
+  with one line and exit 1; `usher --traceback <command>` re-raises.
+  **`Exception` is deliberately not among them**, so a bug still gets its full
+  traceback, and Ctrl-C exits 130 rather than printing one. Neither is
+  `UsherPortError` itself: an adapter translates its transport's failures
+  before they cross, so `httpx.HTTPError` is unreachable behind a port and the
+  three transport members had to be named — but `RepositoryConflict`,
+  `RepositoryNotFound` and `PortDataMalformed` keep their stacks, because
+  several of their raise sites are deliberate tripwires for bugs in Usher's
+  own code. Why those families and not `Exception`, why the settings case is
+  redacted, and the per-family evidence for the M8 widening are
   [ADR-0026](decisions/0026-the-cli-boundary-names-families.md).
 
 ### Backup — the asymmetry is the point
 
 | Rebuildable from importers | Precious |
 |---|---|
-| Catalog, embeddings, search index, neighbour tables, cached images, curated rows | **Watch state**, users, source config, manual unmatched resolutions |
+| Catalog, embeddings, search index, neighbour tables, cached images, curated rows | **Watch state**, users, source config, manual unmatched resolutions, ✅ **`llm_calls`** (M8 — see below; it is rebuildable from nothing) |
 
 The precious set is a handful of small tables. A documented `pg_dump` of those
 turns disaster recovery into a short restore plus a background rebuild, instead
@@ -427,6 +487,23 @@ recreation depends on a third party still serving a file. It is not in the
 precious column either, because a dump of it is a redistribution of MovieLens
 data — permitted by `ml-latest`'s licence ([04](04-catalog-bootstrap.md)) and
 still not something this project's own rule 1 does.
+
+🔴 **M8 added three tables and one of them is the first thing in this project
+that is not rebuildable from anything, at any price.**
+
+| Table | Rebuildable? | From what, at what cost |
+|---|---|---|
+| `curated_rows` | **yes, and cheaply — but not to the same rows** | `usher curate`, one completion per household. Already covered by the left column above. ⚠️ It is the **first table in this project whose contents no re-run reproduces**: `title_neighbors` can be diffed against a fresh computation and `search_document` has a case asserting the stored value equals a freshly computed one; a curated row has no oracle and is not even deterministic at `temperature > 0`. So "rebuildable" here means *a screen appears*, not *the screen comes back* |
+| `genome_tags` | **yes, but only from upstream** | the same `ml-latest.zip` and the same `bootstrap --phase movielens` as `genome_scores`, with the same caveat and the same third party. The two are written by one phase and share a `genome_revision`, so they are restored together or not at all — a vocabulary from one release over vectors from another mislabels 1,128 lanes, which is why `GenomeRepository.vocabulary` refuses a mismatch rather than answering `None` |
+| **`llm_calls`** | **NO. From nothing.** | It is a **spend ledger**, and the only record that money was spent. It cannot be recomputed from the catalog, from `curated_rows` (which is replaced nightly, so last month's generations have no surviving rows), or from the provider — no OpenAI-compatible endpoint offers a per-key call history this project could read, and the price applied is a *setting at the time of the call* that a later price change would silently rewrite. Losing it loses the answer to "what did this cost", permanently |
+
+**So the precious column has a fourth member as of M8: `llm_calls`.** It is
+small — one row per generation per household per night, plus one per expanded
+search — and it is append-only, which makes it the cheapest thing in the
+precious set to back up and the most complete loss if nobody does. The
+left-hand column's *"curated rows"* entry stays where it is and is correct;
+the ledger beside it is not the same kind of object and was previously in
+neither column.
 
 ⚠️ **`user_taste` is the one M7 table with no writer on the request path, and
 that is a property of M7 rather than of backup.** `RowContext.taste` was

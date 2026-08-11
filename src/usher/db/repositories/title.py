@@ -66,15 +66,17 @@ autoflush fails.
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import Text, exists, func, nulls_last, select
+from sqlalchemy import Text, exists, func, literal, nulls_last, select
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 
+from usher.db.models.episode import EpisodeRow
 from usher.db.models.source import MediaItemRow
 from usher.db.models.title import DERIVED_COLUMNS, TitleRow
+from usher.db.models.watch import WatchStateRow
 from usher.db.repositories._errors import constraint_name
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.title import Title
@@ -110,6 +112,41 @@ _NOT_UPDATABLE = {"id", "created_at", "updated_at"} | DERIVED_COLUMNS
 # The four ARRAY(Text) columns -- see the module docstring's note on
 # ARRAY(Text) always reading back as a list, never a tuple.
 _ARRAY_FIELDS = ("genres", "keywords", "spoken_languages", "origin_countries")
+
+
+# **One deferral per member of `DERIVED_COLUMNS`, which is what makes
+# `_to_domain`'s filter cost nothing.** That filter runs after the row has
+# arrived: every derived column it drops was selected, detoasted, serialised
+# and put on the wire first. `titles` holds a tsvector roughly the size of the
+# document it indexes and up to ten cast names per title, and a ranked result
+# set, an owned-by-tag shelf and a 200-title candidate pool have no use for
+# either -- so the two sets must stay in step, and a derived column added to
+# one and not the other is a column paid for on every entity read forever.
+# `tests/integration/test_title_repository.py::
+# test_no_entity_read_ships_credit_names_over_the_wire` iterates
+# `DERIVED_COLUMNS` rather than naming these two, so that is what fails.
+#
+# **`raiseload` on one and not the other, and the asymmetry is the decision
+# rather than an oversight.** `search_document` is a `TSVECTOR`: `Title` is
+# `extra="forbid"` and could not carry it if it wanted to, every consumer of it
+# is SQL-side, and there is therefore no access that is not a bug -- so raising
+# costs nothing and closes an N+1 that would answer correctly and be invisible.
+# `credit_names` is a `text[]` with a live, sanctioned reader one method down
+# (`credit_names_for`) and a real meaning to a caller, so a future
+# `row.credit_names` off a loaded entity is a mistake about *routing* rather
+# than a nonsense access -- and `raiseload` would convert it into an
+# `InvalidRequestError` inside the nightly curation job, where plain deferral
+# costs one small extra query for ten short strings. Prefer the failure that
+# degrades. Verified rather than assumed before choosing either: no reader in
+# `src/` reaches `credit_names` through a loaded `TitleRow` -- `credit_names_for`
+# selects the column explicitly (a column read, which an entity load's options
+# do not touch), `people.py` writes it in raw SQL and `search.py` reads it in
+# raw SQL -- and the whole suite was additionally run with `raiseload=True`
+# here to prove no untested path does either.
+_WITHOUT_DERIVED_COLUMNS = (
+    defer(TitleRow.search_document, raiseload=True),
+    defer(TitleRow.credit_names),
+)
 
 
 def _to_row(title: Title) -> TitleRow:
@@ -313,14 +350,12 @@ class PostgresTitleRepository(TitleRepository):
         # was introduced to delete from `SearchIndex`, arriving from the other
         # direction.
         #
-        # `defer(search_document, raiseload=True)` for the reason `list_stale`
-        # carries it: `titles` holds a tsvector roughly the size of the
-        # document it indexes and a ranked result set has no use for it, so
-        # without the deferral every search ships one per hit for nothing.
-        # `raiseload` turns a stray attribute access into a raise rather than
-        # into one extra query per row -- an N+1 that answers correctly and is
-        # therefore invisible. `_to_domain` filters `DERIVED_COLUMNS` before
-        # touching it, so nothing legitimate trips it.
+        # `_WITHOUT_DERIVED_COLUMNS` for the reason `list_stale` carries its
+        # own deferral: `titles` holds a tsvector roughly the size of the
+        # document it indexes, and a ranked result set has no use for it or for
+        # the cast names beside it, so without the deferrals every search ships
+        # both per hit for nothing. `_to_domain` filters `DERIVED_COLUMNS`
+        # before touching either, so nothing legitimate trips the `raiseload`.
         #
         # An id naming no row is simply absent from the answer; the port says
         # so, and the caller re-orders by its own ranking anyway.
@@ -332,7 +367,7 @@ class PostgresTitleRepository(TitleRepository):
         with self._session.no_autoflush:  # see get()'s comment
             result = await self._session.execute(
                 select(TitleRow)
-                .options(defer(TitleRow.search_document, raiseload=True))
+                .options(*_WITHOUT_DERIVED_COLUMNS)
                 .where(TitleRow.id.in_(list(title_ids)))
             )
         return [_to_domain(row) for row in result.scalars().all()]
@@ -365,9 +400,7 @@ class PostgresTitleRepository(TitleRepository):
             MediaItemRow.title_id == TitleRow.id,
             MediaItemRow.available.is_(True),
         )
-        statement = (
-            select(TitleRow).options(defer(TitleRow.search_document, raiseload=True)).where(owned)
-        )
+        statement = select(TitleRow).options(*_WITHOUT_DERIVED_COLUMNS).where(owned)
         # `@>` written out, because `ARRAY.contains()` raises
         # `NotImplementedError` on the *generic* `ARRAY` these columns are
         # declared with -- only the dialect-specific type implements it, and
@@ -396,6 +429,135 @@ class PostgresTitleRepository(TitleRepository):
             nulls_last(TitleRow.vote_count.desc()),
             TitleRow.id,
         ).limit(limit)
+        with self._session.no_autoflush:  # see get()'s comment
+            result = await self._session.execute(statement)
+        return [_to_domain(row) for row in result.scalars().all()]
+
+    async def list_unwatched_candidates(
+        self,
+        user_id: uuid.UUID,
+        *,
+        genres: Sequence[str] = (),
+        limit: int,
+    ) -> list[Title]:
+        # **Ownership is a LEFT JOIN here and an `EXISTS` in
+        # `list_owned_by_tag`, and the difference is where it sits in the
+        # statement.** There it is a `WHERE` predicate over an already-narrow
+        # candidate set, which Postgres plans as a semi-join and which
+        # short-circuits. Here it is a *sort key* over the whole catalog, and
+        # a correlated subquery in an `ORDER BY` cannot be turned into a join
+        # at all -- it is one SubPlan execution per candidate row, which at
+        # 1.27M rows is the difference between a nightly job and a nightly
+        # incident. Reasoned from the planner's own rules rather than measured
+        # at scale; what is *not* a guess is that the two spellings agree, and
+        # the contract suite is what says so on both arms.
+        #
+        # `DISTINCT`, so a 20,000-episode series contributes one row rather
+        # than 20,000 and the join cannot multiply the catalog out. No
+        # `episode_id IS NULL` bound, deliberately and exactly as
+        # `list_owned_by_tag` has none: a series owned only through its
+        # episode files is owned, which is the normal case on a library that
+        # is 89% episodes.
+        owned_titles = (
+            select(MediaItemRow.title_id)
+            .where(MediaItemRow.available.is_(True), MediaItemRow.title_id.is_not(None))
+            .distinct()
+            .subquery("owned_titles")
+        )
+        owned = owned_titles.c.title_id.is_not(None)
+        # The exclusion, and it is `played_title_ids`' predicate: `played`
+        # rather than "has a watch state", and `COALESCE(ws.title_id,
+        # e.title_id)` so a watched episode takes its series with it. A
+        # correlated `NOT EXISTS` is what Postgres plans as an anti-join,
+        # which is why this one *is* a subquery where the ownership key above
+        # is not.
+        watched = (
+            select(literal(1))
+            .select_from(WatchStateRow)
+            .outerjoin(EpisodeRow, EpisodeRow.id == WatchStateRow.episode_id)
+            .where(
+                WatchStateRow.user_id == user_id,
+                WatchStateRow.played.is_(True),
+                func.coalesce(WatchStateRow.title_id, EpisodeRow.title_id) == TitleRow.id,
+            )
+            .exists()
+        )
+        # `&&` written out for the reason `list_owned_by_tag` writes `@>` out:
+        # the generic `ARRAY` these columns are declared with implements
+        # neither operator through SQLAlchemy's own helpers, and the model
+        # declares the generic one deliberately. An empty `genres` is a real
+        # and common argument -- a household with no history has no
+        # affinities -- and `genres && '{}'` is false for every row, which
+        # leaves the remaining keys deciding the whole order.
+        affine = TitleRow.genres.bool_op("&&")(sql_cast(list(genres), PG_ARRAY(Text)))
+        # **The sort is over the whole catalog, so what enters it is the key
+        # and not the row.** This statement outer-joins 1,271,138 titles to a
+        # `DISTINCT` over `media_items`, anti-joins `watch_states`, orders on
+        # four expressions and keeps `limit` of them -- and selecting the
+        # entity here put thirty-two of the table's thirty-three columns into
+        # that sort's working set, `overview`, `keywords` and
+        # `field_provenance` included, to answer a caller that reads `name`,
+        # `year`, `genres` and `id`. Ranking on
+        # `titles.id` and joining the entity back onto the survivors is the
+        # same answer over ~200 rows of payload instead of the catalog's text.
+        #
+        # **The three sort keys are projected alongside the id rather than
+        # recomputed outside**, which is what keeps the order *identical*
+        # rather than merely similar: the outer `ORDER BY` reads back the same
+        # values the ranking stage sorted on, so there is no second evaluation
+        # to disagree. Re-stating the expressions outside would also mean
+        # re-joining `owned_titles`, i.e. a second `DISTINCT` over
+        # `media_items` -- paying twice for the thing this change is about.
+        ranked = (
+            select(
+                TitleRow.id.label("id"),
+                owned.label("owned"),
+                affine.label("affine"),
+                TitleRow.vote_count.label("vote_count"),
+            )
+            .outerjoin(owned_titles, owned_titles.c.title_id == TitleRow.id)
+            .where(~watched)
+            .order_by(
+                owned.desc(),
+                affine.desc(),
+                # `nulls_last` spelled out: Postgres defaults a DESC sort to
+                # NULLS FIRST, and on a bootstrap-only catalog every row's
+                # `vote_count` can be NULL -- so the default would put the
+                # unknown population above the known one and then let the
+                # `id` tail decide the pool.
+                nulls_last(TitleRow.vote_count.desc()),
+                # ADR-0028's stability, and the only reason two reads of one
+                # unchanged catalog agree about what index 7 names.
+                TitleRow.id,
+            )
+            .limit(limit)
+            .subquery("ranked")
+        )
+        statement = (
+            select(TitleRow)
+            .options(*_WITHOUT_DERIVED_COLUMNS)
+            # An inner join, and it neither adds nor drops a row: `ranked.id`
+            # is `titles.id`, so it is unique and every value in it named a
+            # title a moment ago. The ownership join stays a `LEFT JOIN` inside
+            # `ranked` because there it is a *key* -- an inner join there would
+            # silently make the pool the library.
+            .join(ranked, ranked.c.id == TitleRow.id)
+            # **Repeated, because a join promises no order** -- and this is a
+            # measurement rather than the caution it was written as. Deleting
+            # these four keys fails **nine of the thirteen** candidate contract
+            # cases on the Postgres arm and the shape case beside them, so on
+            # this fixture the join really does emit the survivors in an order
+            # of its own. What the fixture cannot promise is that it always
+            # will, at any row count and under any plan, which is why the shape
+            # case asserts the clause is *there* rather than only asserting the
+            # order it produces.
+            .order_by(
+                ranked.c.owned.desc(),
+                ranked.c.affine.desc(),
+                nulls_last(ranked.c.vote_count.desc()),
+                ranked.c.id,
+            )
+        )
         with self._session.no_autoflush:  # see get()'s comment
             result = await self._session.execute(statement)
         return [_to_domain(row) for row in result.scalars().all()]

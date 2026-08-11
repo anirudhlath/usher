@@ -58,13 +58,16 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
+from usher.adapters.llm import OpenAICompatibleClient
 from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestIndex
 from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
 from usher.config import Settings
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
+from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
+from usher.db.repositories.llm_call import PostgresLLMCallRepository
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
@@ -84,11 +87,14 @@ from usher.ports.credentials import CredentialStore
 from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher, NullEventPublisher
 from usher.ports.jobs import JobQueue
+from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
 from usher.ports.repository import (
     CollectionRepository,
     CreditRepository,
+    CuratedRowRepository,
     EpisodeRepository,
+    LLMCallRepository,
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
@@ -103,10 +109,13 @@ from usher.ports.repository import (
 )
 from usher.ports.rows import RowProvider
 from usher.ports.source import SourceAdapter, SourceAdapterFactory
+from usher.services.curation import CurationService
+from usher.services.curation_pool import CandidatePoolService
 from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
 from usher.services.handlers import (
     SourceBinding,
+    curate_handler,
     derive_handler,
     enrich_handler,
     index_handler,
@@ -118,6 +127,7 @@ from usher.services.ingest import IngestService
 from usher.services.jobs import JobWorker
 from usher.services.matching import MatchService
 from usher.services.push import PushApplyService
+from usher.services.query_expansion import QueryExpansionService
 from usher.services.reconcile import ReconcileService
 from usher.services.rows import row_providers
 from usher.services.rows.cache import RowCache
@@ -188,6 +198,21 @@ class Pipeline:
     embeddings: TitleEmbeddingRepository
     neighbors: TitleNeighborRepository
     taste_rows: TasteRepository
+    # M8's table, and the field is here because `usher home` assembles a
+    # `RowContext` from this pipeline exactly as `api/deps.py` assembles one
+    # from its request-scoped dependencies -- `CuratedProvider` reads
+    # `list_for_user` through the context and a CLI that could not fill that
+    # field would compose a screen the route does not. `build_curation_service`
+    # is the *write* half, and it reaches this same field: one table, one
+    # object, which is what stops a generation landing somewhere nothing serves
+    # from.
+    curated_rows: CuratedRowRepository
+    # M8's cost ledger. Write-only from here -- nothing in `src/` reads it
+    # back, and PRD 10's spend dashboards are SQL against the table -- so it
+    # is on the pipeline for the reason every other port is: `services/` may
+    # not import `db/` (ADR-0009), and a `CurationService` handed a ledger of
+    # its own would attribute a real charge to an object nobody reads.
+    llm_calls: LLMCallRepository
     people: PersonRepository
     credits: CreditRepository
     collections: CollectionRepository
@@ -199,6 +224,10 @@ class Pipeline:
     search: SearchService
     similar: SimilarityService
     taste: TasteService
+    # M8's candidate pool. A *service* rather than a port, unlike every field
+    # above it except the other five services: it composes two repository
+    # reads and `TasteService`, and `CurationService` is what will hold it.
+    pool: CandidatePoolService
     # The registry itself, not a list assembled here. A provider enabled by
     # *registration in code* is boundary call 9, and a list a composition
     # root builds by hand is a list the tenth provider is forgotten from --
@@ -234,6 +263,7 @@ def build_pipeline(
     max_retract_fraction: float | None = None,
     provider: MetadataProvider | None = None,
     embedder: Embedder | None = None,
+    llm: LLMClient | None = None,
 ) -> Pipeline:
     """Wire one session into the whole ingest pipeline.
 
@@ -262,6 +292,31 @@ def build_pipeline(
     every other caller passes nothing and gets a `SearchService` whose
     full-text and trigram lanes work exactly as well. That is the whole of
     ADR-0022's "the embedder is optional" at the wiring layer.
+
+    `llm` is `None` on the same terms, and is `None` by default twice over:
+    `USHER_LLM_ENABLED` is `false`, so `composition.llm_client` answers
+    `(None, no-op)` even for a caller that asks.
+
+    **A client is necessary and not sufficient**, which is the whole of the two
+    switches at the wiring layer. `USHER_QUERY_EXPANSION_ENABLED` is `false`
+    even on a deployment that has turned the LLM on, because the measurement
+    behind it is about retrieval quality rather than about cost (PRD 05), so an
+    operator who wants curated rows does not thereby want their queries
+    rewritten. Both conditions are live: a client is absent on every default
+    deployment, and it is *present and unused here* on every deployment that
+    curates without expanding -- which is the ordinary M8 shape. Given both,
+    this builds the `QueryExpansionService` that sits in front of
+    `SearchService`'s embed, over **this session's** `llm_calls` and **this
+    session's** commit, because a ledger row written through anything else is
+    spend recorded in a transaction nobody commits. Given either one missing,
+    `SearchService` gets no expander and every line of the search path is what
+    M6 shipped.
+
+    **The client reaches nothing else from here.** The other consumer of a
+    completion is `CurationService`, which `build_curation_service` composes
+    from this pipeline *plus* the client -- deliberately a second factory,
+    because everything on a pipeline is rebuilt per worker pass and the client
+    is not.
     """
     publisher = NullEventPublisher() if events is None else events
     sources = PostgresSourceRepository(session)
@@ -276,6 +331,8 @@ def build_pipeline(
     embeddings = PostgresTitleEmbeddingRepository(session)
     neighbors = PostgresTitleNeighborRepository(session)
     taste_rows = PostgresTasteRepository(session)
+    curated_rows = PostgresCuratedRowRepository(session)
+    llm_calls = PostgresLLMCallRepository(session)
     queue = PostgresJobQueue(
         session,
         max_attempts=settings.job_max_attempts,
@@ -292,6 +349,22 @@ def build_pipeline(
         episodes=episodes,
         queue=queue,
     )
+    # **The embedder is passed here too and may be `None`, which is the shipped
+    # default.** `CandidatePoolService` then gets `None` from
+    # `TasteService.centroid` and returns the base order whole -- M8's boundary
+    # call 5, and the reason the pool is built from signals that need no model.
+    # Built as a local rather than inline for one reason: `Pipeline.taste` and
+    # `CandidatePoolService.taste` must be the *same* service, or a household
+    # would have two definitions of its own taste and the stored centroid would
+    # be written twice per generation.
+    taste = TasteService(
+        watch_states=watch_states,
+        embeddings=embeddings,
+        titles=titles,
+        taste=taste_rows,
+        embedder=embedder,
+        now=lambda: datetime.now(UTC),
+    )
     return Pipeline(
         sources=sources,
         credentials=credentials,
@@ -306,6 +379,8 @@ def build_pipeline(
         embeddings=embeddings,
         neighbors=neighbors,
         taste_rows=taste_rows,
+        curated_rows=curated_rows,
+        llm_calls=llm_calls,
         people=people,
         credits=credits,
         collections=collections,
@@ -353,6 +428,20 @@ def build_pipeline(
             media_items,
             result_limit=settings.search_result_limit,
             embedder=embedder,
+            # **Built here rather than passed in, and the ledger is the
+            # reason.** An expansion is billed to `llm_calls` and committed,
+            # both of which are per-session; the client is per-process. This
+            # function is the only place that holds one of each.
+            expander=(
+                None
+                if llm is None or not settings.query_expansion_enabled
+                else QueryExpansionService(
+                    client=llm,
+                    ledger=llm_calls,
+                    commit=session.commit,
+                    model=settings.llm_model,
+                )
+            ),
         ),
         # **No embedder here, in either form.** The rebuild reads stored
         # vectors and never embeds anything, which is why `usher similar`
@@ -373,13 +462,23 @@ def build_pipeline(
         # term rather than zeroing it), so "Because you watched Dune" is a
         # causal claim nothing computed and the sentence softens.
         row_providers=row_providers(semantic=embedder is not None),
-        taste=TasteService(
-            watch_states=watch_states,
-            embeddings=embeddings,
+        taste=taste,
+        # The pool is the whole of M8's retrieval half, and its size is the
+        # prompt's token budget -- **~20.4 prompt tokens a candidate**,
+        # measured 2026-08-07 against the *shipped* prompt at four pool sizes:
+        # the marginal cost is 20.40 tokens/candidate from 8 -> 200 and 20.45
+        # from 200 -> 600. This comment read *"~14.6, measured"* until then,
+        # which was ADR-0028's 2,924-token figure divided by 200 -- a *total*
+        # divided by a count, taken from a probe prompt that rendered a
+        # candidate as name and year. The shipped line adds the genre list
+        # (`curation_prompt._genres`), which is the whole +40%. One model, one
+        # tokenizer, one evening: `gemma-4-26b-a4b`. This is
+        # `USHER_CURATION_POOL_SIZE`'s one reader.
+        pool=CandidatePoolService(
             titles=titles,
-            taste=taste_rows,
-            embedder=embedder,
-            now=lambda: datetime.now(UTC),
+            embeddings=embeddings,
+            taste=taste,
+            size=settings.curation_pool_size,
         ),
         events=publisher,
         commit=session.commit,
@@ -473,6 +572,7 @@ def build_worker(
     *,
     provider: MetadataProvider | None,
     embedder: Embedder | None,
+    client: LLMClient | None,
     resolve: Callable[[str], Awaitable[SourceBinding | None]],
     user_id: uuid.UUID,
 ) -> JobWorker:
@@ -518,6 +618,19 @@ def build_worker(
     # broken.
     if embedder is not None:
         worker.register(JobKind.INDEX, index_handler(build_index_service(pipeline, embedder)))
+    # Guarded exactly as INDEX is, on the client this deployment either has or
+    # does not, and the guard is a `mypy` fact rather than a convention:
+    # `CurationService` spells its client `LLMClient`, never `LLMClient | None`,
+    # so "no client, no curation" cannot be spelled any other way from here.
+    # The *member* `JobKind.CURATE` is unconditional -- two things outside the
+    # worker need the vocabulary, the enqueue site and `depth()`'s promise of a
+    # key per kind -- and only the registration moves, which is what leaves
+    # curate work pending for a process that can run it rather than parking
+    # work whose only problem was the process it was offered to.
+    if client is not None:
+        worker.register(
+            JobKind.CURATE, curate_handler(build_curation_service(pipeline, settings, client))
+        )
     return worker
 
 
@@ -541,6 +654,61 @@ def build_derive_service(pipeline: Pipeline, provider: MetadataProvider) -> Deri
     )
 
 
+def build_curation_service(
+    pipeline: Pipeline, settings: Settings, client: LLMClient
+) -> CurationService:
+    """One session's repositories plus the process's completion client.
+
+    **The same asymmetry `build_index_service` has**, and for the same reason:
+    everything on `pipeline` is rebuilt per worker pass and the `client` is
+    not. `llm_client` builds one per *process* -- an `httpx.AsyncClient` with
+    its own connection pool, rebuilt every 5 s by `lanes._run_worker`
+    otherwise -- exactly as `embedder` does for a 65 MB ONNX session.
+
+    **`client` is `LLMClient`, never `LLMClient | None`**, which is the whole
+    of why this factory is reached only from `build_worker`'s guard.
+    `composition.llm_client` already answers `(None, no-op)` with a warning
+    for `USHER_LLM_ENABLED=false`, so the composition root is the one layer
+    that can know a deployment has no model -- and spelling the parameter
+    non-optional makes "no client, no curation" something `mypy` enforces
+    there instead of a `self._client is None` branch unreachable from `src/`.
+
+    **`model` is `settings.llm_model` and is not defaulted.** It is the same
+    string `OpenAICompatibleClient` was built with a few lines up, and it is
+    the only honest value for `llm_calls.model` on the path where no response
+    came back to read one from. A default here would be a second value that
+    silently disagrees with the client's.
+
+    `min_cards` is deliberately **not** wired to a setting.
+    `USHER_CURATION_MIN_CARDS` was planned and never shipped;
+    `curation_validate.DEFAULT_MIN_CARDS` is the one definition, and it
+    crosses the prompt, the schema and the validator, so a second copy on
+    `Settings` would be a fourth place for the three to disagree. The day an
+    operator needs it, it lands with a reader and an `.env.example` line in
+    the same commit.
+    """
+    return CurationService(
+        pool=pipeline.pool,
+        # The *same* `WatchStateRepository` and `TitleRepository` the pool
+        # reads from. This is what a composition root is for: `services/` may
+        # not import `db/` (ADR-0009), so nothing below here can discover that
+        # the household's history and its candidate pool are two sides of one
+        # table -- and a second pair would let the prompt recommend what the
+        # household just finished.
+        watch_states=pipeline.watch_states,
+        titles=pipeline.titles,
+        client=client,
+        rows=pipeline.curated_rows,
+        ledger=pipeline.llm_calls,
+        # One commit per generation, covering `replace_for_user` *and* the
+        # ledger row: PRD 10's dashboard 5 is `llm_calls JOIN curated_rows
+        # USING (generation_id)`, so a commit between them is a window in
+        # which a screen exists with no cost attributed to it.
+        commit=pipeline.commit,
+        model=settings.llm_model,
+    )
+
+
 def build_index_service(pipeline: Pipeline, embedder: Embedder) -> IndexService:
     """One session's repositories plus the process's model.
 
@@ -561,9 +729,12 @@ async def metadata_provider(
     """The TMDb provider and the callable that closes its transport.
 
     Returns `(None, no-op)` when no key is configured, rather than raising:
-    `match` and `watch_history` jobs need no provider at all, and a worker
-    that refused to start without a TMDb key would take two working lanes
-    down with the third.
+    **four of the six job kinds need no provider at all** -- `match`,
+    `watch_history`, `index` and `curate` -- so a worker that refused to
+    start without a TMDb key would take four working kinds down with the two
+    that need one. (`derive` is the second: `build_worker` registers it under
+    the same `provider is not None` guard as `enrich`, because a derivation
+    reads the payload that enrichment cached.)
 
     One client per *process*, not per job or per pass, because the token
     bucket that keeps this deployment under TMDb's ~40 rps ceiling lives on
@@ -581,7 +752,10 @@ async def metadata_provider(
     jobs to leave unclaimed.
     """
     if settings.tmdb_api_key is None:
-        logger.warning("no TMDb API key configured; enrich jobs will not be claimed")
+        # Both kinds named, not just `enrich`: `derive` has been registered
+        # under this same guard since M7 and this sentence still promised an
+        # operator that one kind would go unclaimed while two did.
+        logger.warning("no TMDb API key configured; enrich and derive jobs will not be claimed")
         return None, nothing
     client = httpx.AsyncClient(timeout=settings.source_timeout_seconds)
     provider = TmdbMetadataProvider(
@@ -611,10 +785,11 @@ async def embedder(
     the logs saying so. The precedent is on record in this repository at
     ~17,280 log lines a day for a *string*; a model is not a string.
 
-    *`(None, no-op)` rather than a raise.* `match`, `enrich` and
-    `watch_history` need no model, and PRD 05's catalog-lookup tier -- the one
-    serving 1.27M titles -- needs none either. A worker refusing to start
-    without one would take three working lanes down with the fourth, and a
+    *`(None, no-op)` rather than a raise.* **`index` is the only one of the
+    six job kinds that needs a model**; `match`, `watch_history`, `enrich`,
+    `derive` and `curate` need none, and PRD 05's catalog-lookup tier -- the
+    one serving 1.27M titles -- needs none either. A worker refusing to start
+    without one would take five working kinds down with the sixth, and a
     `create_app` that did would turn a missing extra into a server that will
     not boot.
 
@@ -628,9 +803,12 @@ async def embedder(
     below is about a *lane* -- "index jobs will not be claimed" -- which is
     exactly right for `usher work`, the server's worker lane and `usher push`,
     and is wrong twice over for `usher search`: it advises about work that
-    process does not do, and `cli.py:153-154`'s rule says an operator's report
-    is printed rather than logged, so with `USHER_LOG_JSON=true` (the default)
-    it is a JSON envelope in front of the search results. `_search` prints its
+    process does not do, and `cli._print_home_report`'s rule says an operator's
+    report is printed rather than logged, so with `USHER_LOG_JSON=true` (the
+    default) it is a JSON envelope in front of the search results. That rule
+    was cited as `cli.py:153-154` in two places until 2026-08-07, by which
+    point those lines held an `httpx.AsyncClient` construction inside
+    `_bootstrap`. `_search` prints its
     own line, which names the setting and the extra instead of a lane, so the
     information is not lost -- it is better. Pinned by
     `tests/integration/test_cli_pipeline.py::
@@ -677,6 +855,81 @@ async def embedder(
                 "embedding model unavailable; index jobs will not be claimed: {e}", e=exc
             )
         return None, nothing
+    return built, built.aclose
+
+
+async def llm_client(
+    settings: Settings, *, report: bool = True
+) -> tuple[LLMClient | None, Callable[[], Awaitable[None]]]:
+    """The completion client and the callable that releases it.
+
+    **Deliberately the same shape as `embedder` and `metadata_provider`
+    above**, down to the return type, and for the same reasons: one per
+    process rather than per worker pass, `(None, no-op)` rather than a raise
+    so a deployment without an LLM is *narrowed* rather than unstartable, and
+    this is the one place the degradation is reported.
+
+    **Off by default is the honest default twice over here.** Nine of ten row
+    providers need no model, so `GET /home` is a shorter screen rather than a
+    broken one -- that is `embedding_enabled`'s argument. The second reason is
+    this project's only one of its kind: turning this on sends the household's
+    watch history to whatever `USHER_LLM_BASE_URL` names, which may be a
+    machine the household does not own. A default that curated out of the box
+    would make that something an operator discovers rather than chooses.
+
+    **No lazy import and no extra**, unlike the embedder. There is nothing to
+    import lazily -- the client is httpx, which every entry point already
+    loads -- which is the whole of ADR-0027 arriving as an absence.
+    """
+    if not settings.llm_enabled:
+        if report:
+            logger.warning("no LLM configured; curate jobs will not be claimed")
+        return None, nothing
+
+    if (
+        report
+        and settings.llm_api_key is not None
+        and not settings.llm_price_in_per_mtok
+        and not settings.llm_price_out_per_mtok
+    ):
+        # **Both prices default to zero, so `cost_usd` reads `0.00000000` for
+        # an operator who never set them** -- a number that looks like a
+        # measurement and is an absence. For the local vLLM this milestone was
+        # verified against, zero *is* the honest value; on a paid endpoint it
+        # is spend billing invisibly, and PRD 10's spend dashboard is flat in
+        # both cases.
+        #
+        # **Gated on the credential, and that gate is the whole design of this
+        # warning.** `test_a_configured_llm_is_built_and_says_nothing` states
+        # the rule it would otherwise break: *a warning every
+        # correctly-configured deployment sees is a warning nobody reads*, and
+        # a self-hosted endpoint with no prices is correctly configured -- it
+        # is the shipped shape of this milestone. An `llm_api_key` is what
+        # separates the two populations: a hosted provider requires one and
+        # the local vLLM this was measured against needs none. So the sentence
+        # only reaches the deployment it is actually about.
+        #
+        # A warning and not a refusal, because zero is legitimate. Here rather
+        # than in a `Settings` validator for the reason the TMDb line above
+        # moved here: this function is where the decision is *made*, and each
+        # of the three composition roots calls it exactly once per *process*
+        # -- which is what keeps a per-process fact out of a per-pass log at
+        # 17,280 lines a day.
+        logger.warning(
+            "an LLM credential is configured and USHER_LLM_PRICE_IN_PER_MTOK and "
+            "USHER_LLM_PRICE_OUT_PER_MTOK are both unset; llm_calls.cost_usd will "
+            "record 0 for every call and PRD 10's spend panel will read flat"
+        )
+
+    built = OpenAICompatibleClient(
+        model=settings.llm_model,
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        max_output_tokens=settings.llm_max_output_tokens,
+        timeout_seconds=settings.llm_timeout_seconds,
+        price_in_per_mtok=settings.llm_price_in_per_mtok,
+        price_out_per_mtok=settings.llm_price_out_per_mtok,
+    )
     return built, built.aclose
 
 
@@ -897,12 +1150,14 @@ __all__ = [
     "SearchGauges",
     "SourceRegistry",
     "adapter_factory",
+    "build_curation_service",
     "build_enrich_service",
     "build_index_service",
     "build_pipeline",
     "build_push_applier",
     "build_worker",
     "embedder",
+    "llm_client",
     "metadata_provider",
     "nothing",
     "open_adapter",

@@ -26,10 +26,14 @@ existed before this docstring paragraph was added.
 
 import dataclasses
 import uuid
+from collections.abc import Sequence
+
+import pytest
 
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import (
     GENOME_TAG_COUNT,
+    GenomeTag,
     GenomeVector,
     IdCrosswalkPair,
     ImdbRating,
@@ -101,6 +105,19 @@ def _genome(movie_id: int, imdb_id: str, lead: float) -> GenomeVector:
         tmdb_id=None,
         relevance=(lead,) + (0.0,) * (GENOME_TAG_COUNT - 1),
     )
+
+
+def _vocabulary(*names: str) -> tuple[GenomeTag, ...]:
+    """A contiguous vocabulary of `len(names)` tags, `tag_id` 1-based.
+
+    Deliberately **not** 1,128 wide, unlike `_genome` above: `halfvec(1128)`
+    forces a vector's width and nothing forces a vocabulary's, so a short one
+    is storable on both arms and keeps every assertion here readable. The
+    production width is checked where it is enforced --
+    `MovieLensGenomeDataset._vocabulary` against `genome-tags.csv`, and
+    `ck_genome_tags_tag_id_in_vocabulary` against the column.
+    """
+    return tuple(GenomeTag(tag_id=index, tag=name) for index, name in enumerate(names, start=1))
 
 
 class BulkCatalogRepositoryContract:
@@ -637,6 +654,185 @@ class BulkCatalogRepositoryContract:
             _EMPTY_GENOME_RESULT
         )
 
+    # ---- the tag vocabulary (m08b) -------------------------------------
+
+    async def test_the_vocabulary_is_stored_lane_by_lane_under_the_revision_it_was_given(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """The ordinary path, and the control every refusal case below needs:
+        without it an implementation that writes nothing at all passes each of
+        them.
+
+        Asserted with asymmetric names in a deliberately non-alphabetical
+        order, because both of the wrong implementations here produce a
+        well-formed vocabulary of the right length: one that stores the names
+        sorted, and one that stores them under the row's *ordinal* rather than
+        its `tag_id`. Neither raises, and against an already-ascending fixture
+        neither is visible.
+        """
+        written = await repo.replace_genome_tags(
+            _vocabulary("zeppelins", "atmospheric", "melancholy"), revision=GENOME_RELEASE_A
+        )
+
+        assert written == 3
+        assert await self.genome_tags_of(repo) == (
+            (1, "zeppelins", GENOME_RELEASE_A),
+            (2, "atmospheric", GENOME_RELEASE_A),
+            (3, "melancholy", GENOME_RELEASE_A),
+        )
+
+    async def test_a_second_release_replaces_the_first_rather_than_merging_with_it(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """A replace, not an upsert, and this is the case that says why.
+
+        `upsert_genome_vectors` is deliberately an upsert: a half-migrated
+        *vector* table is a real, countable, recoverable state. A vocabulary
+        has no such state -- it is one artefact read whole. Under an upsert a
+        shorter release leaves the previous one's tail behind, still carrying
+        the previous revision, and the result looks exactly like a complete
+        vocabulary that happens to be mixed: `vocabulary()` would then answer
+        for whichever release the *first* row it read came from, with the tail
+        naming lanes that release does not have.
+
+        Kills `ON CONFLICT (tag_id) DO UPDATE`, which is the natural spelling
+        and the one every sibling method on this port uses.
+        """
+        await repo.replace_genome_tags(
+            _vocabulary("zeppelins", "atmospheric", "melancholy"), revision=GENOME_RELEASE_A
+        )
+
+        written = await repo.replace_genome_tags(
+            _vocabulary("zeppelins", "wistful"), revision=GENOME_RELEASE_B
+        )
+
+        assert written == 2
+        assert await self.genome_tags_of(repo) == (
+            (1, "zeppelins", GENOME_RELEASE_B),
+            (2, "wistful", GENOME_RELEASE_B),
+        )
+
+    @pytest.mark.parametrize(
+        ("tags", "why"),
+        [
+            pytest.param(
+                (GenomeTag(tag_id=1, tag="a"), GenomeTag(tag_id=3, tag="c")),
+                "a gap",
+                id="a-gap",
+            ),
+            pytest.param(
+                (GenomeTag(tag_id=0, tag="a"), GenomeTag(tag_id=1, tag="b")),
+                "zero-based",
+                id="zero-based",
+            ),
+            pytest.param(
+                (GenomeTag(tag_id=1, tag="a"), GenomeTag(tag_id=1, tag="b")),
+                "a duplicate",
+                id="a-duplicate",
+            ),
+        ],
+    )
+    async def test_a_vocabulary_that_is_not_one_to_n_is_refused_before_anything_is_written(
+        self, repo: BulkCatalogRepository, tags: Sequence[GenomeTag], why: str
+    ) -> None:
+        """`tag_id` is a lane index and the vector is built **by index**, so a
+        gap does not lose one name -- it moves every later one, permanently,
+        on the one table whose entire purpose is to say what a lane means.
+
+        Its control is the case immediately below, which is where a *set*
+        check and a *sequence* check come apart. Without it, "refuses anything
+        that did not arrive already sorted" passes all three of these arms and
+        is a different, wrong implementation.
+
+        `ValueError`, not `RepositoryConflict`: nothing has been sent to
+        Postgres and `ck_genome_tags_tag_id_in_vocabulary` would not refuse a
+        gap anyway. `CuratedRowRepository.replace_for_user` is the precedent.
+        """
+        with pytest.raises(ValueError, match=r"tags 1\.\.\."):
+            await repo.replace_genome_tags(tags, revision=GENOME_RELEASE_A)
+
+    async def test_a_complete_vocabulary_that_arrived_unsorted_is_stored_rather_than_refused(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """The control for the case above, and a behaviour in its own right.
+
+        `MovieLensGenomeDataset._vocabulary` checks the *set* and sorts,
+        rather than demanding the file arrive in order, and it says why: the
+        vector is built by index, so within-batch order genuinely does not
+        matter, and enforcing it would make that property unprovable. The
+        writer has to make the same call, or a well-formed vocabulary is
+        refused for the shape of the list it came in.
+
+        Kills `[tag.tag_id for tag in tags] != list(range(...))` -- the
+        sequence spelling, which is one `sorted()` away from the right one and
+        passes every arm of the parametrised case above.
+        """
+        written = await repo.replace_genome_tags(
+            (GenomeTag(tag_id=2, tag="atmospheric"), GenomeTag(tag_id=1, tag="zeppelins")),
+            revision=GENOME_RELEASE_A,
+        )
+
+        assert written == 2
+        assert await self.genome_tags_of(repo) == (
+            (1, "zeppelins", GENOME_RELEASE_A),
+            (2, "atmospheric", GENOME_RELEASE_A),
+        )
+
+    @pytest.mark.parametrize(
+        ("tags", "revision"),
+        [
+            pytest.param((), GENOME_RELEASE_A, id="no-tags"),
+            pytest.param(_vocabulary("atmospheric", ""), GENOME_RELEASE_A, id="an-empty-name"),
+            pytest.param(_vocabulary("atmospheric"), "", id="an-empty-revision"),
+        ],
+    )
+    async def test_three_more_vocabularies_that_cannot_mean_anything_are_refused(
+        self, repo: BulkCatalogRepository, tags: Sequence[GenomeTag], revision: str
+    ) -> None:
+        """Each has its own damage and none of them raises anywhere else:
+
+        - **No tags at all** would make an empty table mean two things --
+          never loaded, and loaded as nothing -- and `vocabulary()` answers
+          `None` for the first, which is a legitimate deployment state.
+        - **An empty name** is a lane that reads as labelled and says nothing,
+          which is worse than a missing row because a missing row is what the
+          contiguity check catches.
+        - **An empty revision** matches no `genome_scores` row, so the whole
+          vocabulary would be stored and permanently unreadable.
+
+        The Postgres arm has a CHECK behind the last two and the fake has
+        neither, so the assertion is on the `ValueError` both arms raise:
+        a refusal that only one implementation makes is not a contract.
+        """
+        with pytest.raises(ValueError):
+            await repo.replace_genome_tags(tags, revision=revision)
+
+    async def test_a_refused_vocabulary_leaves_the_stored_one_intact(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """ "Before writing anything" is a claim about the `DELETE`, and it is
+        the reason the check is not simply at the top of the `INSERT`.
+
+        **Observable on the fake arm only, and that is recorded rather than
+        claimed away.** `PostgresBulkCatalogRepository` wraps the delete and
+        the insert in one SAVEPOINT, so moving the check inside it would roll
+        the delete back with the raise and this case would stay green there --
+        `.claude/rules/testing-discipline.md` has the same finding against
+        `replace_for_user`, where the identical mutation survived the whole
+        integration file and failed two unit cases. An implementation with no
+        transaction really does empty the vocabulary and then decline to
+        refill it, and that is the arm this case is for.
+        """
+        await repo.replace_genome_tags(_vocabulary("zeppelins"), revision=GENOME_RELEASE_A)
+
+        with pytest.raises(ValueError):
+            await repo.replace_genome_tags(
+                (GenomeTag(tag_id=1, tag="a"), GenomeTag(tag_id=3, tag="c")),
+                revision=GENOME_RELEASE_B,
+            )
+
+        assert await self.genome_tags_of(repo) == ((1, "zeppelins", GENOME_RELEASE_A),)
+
     async def test_genome_coverage_counts_the_enriched_tier_separately(
         self, repo: BulkCatalogRepository
     ) -> None:
@@ -739,4 +935,17 @@ class BulkCatalogRepositoryContract:
     async def indexes_intact(self, repo: BulkCatalogRepository) -> bool:
         """Whether whatever `bulk_load_window` suspended is back. Trivially
         True for a fake that suspends nothing."""
+        raise NotImplementedError
+
+    async def genome_tags_of(self, repo: BulkCatalogRepository) -> tuple[tuple[int, str, str], ...]:
+        """The whole stored vocabulary as `(tag_id, tag, genome_revision)`,
+        ascending by `tag_id`.
+
+        A hook rather than `GenomeRepository.vocabulary`, for two reasons that
+        both matter here. That method is on a *different port*, so using it
+        would make every write case above pass or fail on a second
+        implementation's correctness; and it deliberately hands back names
+        alone, so it cannot see a row stored under the wrong `tag_id` or the
+        wrong revision, which is what half these cases are about.
+        """
         raise NotImplementedError

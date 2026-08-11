@@ -119,10 +119,46 @@ def configure_logging(settings: Settings) -> None:
     # propagate=True is what makes redirecting the root logger below
     # actually catch everything, instead of records printing twice: once
     # from a library's own handler, once forwarded through root.
-    for name in logging.root.manager.loggerDict:
-        logging.getLogger(name).handlers = []
-        logging.getLogger(name).propagate = True
+    #
+    # `.disabled` belongs to the same reclaim and was missing until 2026-08-10:
+    # `logging.config.fileConfig`/`dictConfig` default `disable_existing_loggers`
+    # to True and set it on every logger their own config does not name, and
+    # `Logger.handle` checks it *below* both the level check and the handler
+    # walk -- so a logger left disabled is unreachable no matter what this
+    # function does to handlers, levels or sinks. Reached here through
+    # `db/migrations/env.py`'s `fileConfig` call (alembic.ini names only root,
+    # sqlalchemy and alembic), which is why the whole test suite could not see
+    # an httpx WARNING after it migrated in-process. Snapshot the keys: a
+    # `getLogger` on a `PlaceHolder` entry can insert parent placeholders, and
+    # that would be a mutation during iteration.
+    for name in list(logging.root.manager.loggerDict):
+        stdlib_logger = logging.getLogger(name)
+        stdlib_logger.handlers = []
+        stdlib_logger.propagate = True
+        stdlib_logger.disabled = False
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+
+    # **`httpx` logs one INFO line per request, and the redirect above is what
+    # made it visible.** Measured 2026-08-07 on the shipped defaults
+    # (`USHER_LOG_JSON=true`, `USHER_LOG_LEVEL=INFO`, sink `sys.stdout`): a
+    # single request prints a ~900-character JSON envelope reading
+    # `httpx._client:_send_single_request - HTTP Request: POST … "HTTP/1.0
+    # 200 OK"` on **stdout**, which is where every CLI command puts its
+    # answer. `usher curate` therefore opened with a log record about its own
+    # completion before printing the report -- exactly the interleaving
+    # `_print_home_report`'s printed-not-logged rule exists to prevent, and
+    # the reason `usher search` and `usher curate` pass `report=False` to
+    # their factories in the first place. That call turns off *Usher's* line
+    # and could do nothing about this one.
+    #
+    # WARNING and above still arrive, so a real failure is not silenced. And
+    # nothing is lost that PRD 10 depends on: `configure_tracing` instruments
+    # `httpx` unconditionally, so every one of these requests is already a
+    # client span carrying method, URL and status -- this line was a second,
+    # unstructured copy of a fact the trace holds better. Verified no test or
+    # script in this repository reads it (`grep -rn "HTTP Request"` finds
+    # nothing outside `httpx` itself).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def configure_tracing(settings: Settings) -> None:

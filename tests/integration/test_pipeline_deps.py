@@ -28,6 +28,7 @@ from usher.api.app import create_app
 from usher.api.deps import (
     get_collection_repository,
     get_credit_repository,
+    get_curated_row_repository,
     get_default_user,
     get_default_user_id,
     get_episode_repository,
@@ -86,6 +87,18 @@ _PROVIDERS = {
     "people": get_person_repository,
     "credits": get_credit_repository,
     "collections": get_collection_repository,
+    # M8's, and it is here for this file's own reason rather than for
+    # symmetry: `get_row_context` grew a **tenth** `Depends` when
+    # `CuratedProvider` was registered -- measured, `inspect.signature` has 11
+    # parameters and `curated` is the 10th -- and a dependency annotated
+    # without `Depends` raises `FastAPIError` at route registration, which no
+    # unit test overriding `get_row_context` can see. This comment read
+    # "twelfth", which is `RowContext`'s *field* count: that includes `now` and
+    # `affinities`, and neither is a `Depends` (the clock is a lambda the
+    # function closes over, and the affinities are a callable closing over the
+    # `taste` service, awaited later by the one provider that reads them). Two
+    # counts of two different things, one sentence.
+    "curated_rows": get_curated_row_repository,
     "taste_repository": get_taste_repository,
     "default_user": get_default_user,
     "taste_service": get_taste_service,

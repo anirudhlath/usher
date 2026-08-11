@@ -1,5 +1,7 @@
+import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import cast
 
@@ -9,11 +11,12 @@ from sqlalchemy import Table, event, insert, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from tests.contract.title_repository_contract import (
+    TitleRepositoryCandidateContract,
     TitleRepositoryContract,
     TitleRepositoryOwnedContract,
 )
 from usher.db.models.source import MediaItemRow
-from usher.db.models.title import TitleRow
+from usher.db.models.title import DERIVED_COLUMNS, TitleRow
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
@@ -280,6 +283,195 @@ async def test_update_translates_integrity_error_from_its_own_lookup(
         await repo.update(incoming)
 
 
+@contextmanager
+def _capturing_sql(session: AsyncSession) -> Iterator[list[str]]:
+    """Every statement this session's connection actually sends, verbatim.
+
+    `before_cursor_execute` is the only place the *emitted* text is visible:
+    what a repository builds is a SQLAlchemy construct, and the two are not the
+    same claim -- a `defer()` that never reached the statement, or a projection
+    that widened, is invisible from the construct's own API and plain in the
+    string. Shared by the three cases below rather than re-declared per case,
+    which is how the first of them shipped.
+    """
+    statements: list[str] = []
+
+    def _capture(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    sync_conn = cast(AsyncConnection, session.bind).sync_connection
+    assert sync_conn is not None
+    event.listen(sync_conn, "before_cursor_execute", _capture)
+    try:
+        yield statements
+    finally:
+        event.remove(sync_conn, "before_cursor_execute", _capture)
+
+
+def _entity_reads_of_titles(statements: Sequence[str]) -> list[str]:
+    """The captured statements that read `titles` as an *entity* -- i.e. that
+    project the wide column list `_to_domain` consumes.
+
+    A filter rather than "the only statement", because a session flush or a
+    fixture's own write can share the capture window, and a case that indexed
+    `statements[0]` would silently start asserting about whichever statement
+    arrived first.
+    """
+    return [
+        statement
+        for statement in statements
+        if statement.lstrip().startswith("SELECT") and "titles.overview" in statement
+    ]
+
+
+def _projections_over_titles(statement: str) -> list[str]:
+    """Every `SELECT <projection> FROM titles` stage in one statement, in the
+    order they appear in the text.
+
+    Only stages reading `titles` itself: the ownership subquery selects from
+    `media_items` and the exclusion from `watch_states`, so neither is matched
+    and the count is the number of times this statement projects the catalog.
+    """
+    return re.findall(r"SELECT (.+?)\s*\nFROM titles", statement, flags=re.S)
+
+
+#: Columns no consumer of these three reads touches and every one of them used
+#: to carry. `CandidatePoolService` renders `name`, `year` and `genres` into a
+#: prompt and keeps `id`; `SearchService` re-orders `list_by_ids`' answer by its
+#: own ranking. Named individually rather than as "everything but four" so that
+#: a column added to `titles` does not silently join the list.
+_COLUMNS_NO_CONSUMER_READS = (
+    "overview",
+    "tagline",
+    "keywords",
+    "field_provenance",
+    "origin_countries",
+    "enrichment_error",
+)
+
+
+async def test_no_entity_read_ships_credit_names_over_the_wire(
+    repo: PostgresTitleRepository, session: AsyncSession
+) -> None:
+    """`credit_names` is in `DERIVED_COLUMNS`, so `_to_domain` drops it from
+    every row it builds -- after Postgres has detoasted up to ten cast names
+    per title, serialised them and put them on the wire.
+
+    **The three reads that select the whole entity are the whole population**,
+    and they are asserted together because the deferral is per statement: two
+    of them shipped one `defer()` and the third the same one, so a fix applied
+    to the read that prompted it would leave the other two paying.
+
+    `search_document` is asserted beside it although that half already held.
+    Not decoration: the two are one `options()` call, and a rewrite that drops
+    the deferral drops both -- pinning only the new one would let the tsvector
+    come back with nothing to notice.
+
+    Verified by reading every consumer rather than by this case alone: nothing
+    reaches `credit_names` through a loaded `TitleRow`. `credit_names_for`
+    selects the column explicitly (a column read, unaffected by an entity
+    load's options), `db/repositories/people.py` writes it in raw SQL and
+    `db/repositories/search.py` reads it in raw SQL inside the document
+    fingerprint.
+    """
+    title = Title(
+        kind=TitleKind.MOVIE, name="Dune", sort_name="Dune", genres=("Sci-Fi",), year=2021
+    )
+    await repo.add(title)
+
+    with _capturing_sql(session) as statements:
+        await repo.list_by_ids([title.id])
+        await repo.list_owned_by_tag(genre="Sci-Fi", limit=20)
+        await repo.list_unwatched_candidates(new_id(), genres=("Sci-Fi",), limit=200)
+
+    reads = _entity_reads_of_titles(statements)
+    assert len(reads) == 3, (
+        "the three entity reads did not all reach the wire, so this case would "
+        f"pass on a statement it never saw: {statements}"
+    )
+    assert "credit_names" in DERIVED_COLUMNS, (
+        "the premise: this case is a loop over DERIVED_COLUMNS, so it says "
+        "nothing about the column it was written for unless that column is in it"
+    )
+    for read in reads:
+        for column in DERIVED_COLUMNS:
+            assert f"titles.{column}" not in read, (
+                f"an entity read still selects the derived column {column} and "
+                f"drops it in `_to_domain`: {read}"
+            )
+
+
+async def test_the_candidate_pool_ranks_on_a_narrow_projection(
+    repo: PostgresTitleRepository, session: AsyncSession
+) -> None:
+    """**The sort is over the whole catalog and the projection it carried was
+    the whole row.** `list_unwatched_candidates` outer-joins 1,271,138 titles
+    to a `DISTINCT` over `media_items`, anti-joins `watch_states`, sorts on
+    four keys and keeps 200 -- and every row entering that sort carried all
+    thirty-one columns, including `overview`, `keywords` and
+    `field_provenance`, so the sort's working set is the catalog's text rather
+    than its keys. Its consumers read four fields.
+
+    The shape asserted here is: rank on `titles.id` plus the sort keys, then
+    join the entity back onto the ~200 survivors. Three assertions, and each
+    names a different way the rewrite can be wrong:
+
+    - **Two stages project `titles`, not one.** Before, there is one stage and
+      it is the wide one; a rewrite that merely reordered the clauses still has
+      one.
+    - **The ranking stage names none of the columns nobody reads.** A "narrow"
+      projection that kept the entity is the defect wearing the fix's shape.
+    - **The final `ORDER BY` follows the `LIMIT` in the text**, which is what
+      says the surviving rows are re-ordered rather than handed back in
+      whatever order the join produced. Measured rather than assumed: deleting
+      that clause fails this case *and* nine of the thirteen cases in
+      `TitleRepositoryCandidateContract` on this arm, so the fixture is not
+      resting on luck today. It is asserted here anyway because what those nine
+      observe is one planner's output order at four rows, and ADR-0028's
+      stability is a claim about 1,271,138.
+
+    The ordering *contract* is unchanged and stays where it lives -- thirteen
+    positional cases on both arms. This case is about the shape those cases
+    cannot see.
+    """
+    title = Title(kind=TitleKind.MOVIE, name="Dune", sort_name="Dune")
+    await repo.add(title)
+
+    with _capturing_sql(session) as statements:
+        rows = await repo.list_unwatched_candidates(new_id(), genres=("Western",), limit=200)
+
+    assert [row.id for row in rows] == [title.id], "the premise: the read answered at all"
+    reads = _entity_reads_of_titles(statements)
+    assert len(reads) == 1, f"expected exactly one entity read to capture: {statements}"
+    statement = reads[0]
+
+    projections = _projections_over_titles(statement)
+    assert len(projections) == 2, (
+        "the catalog is projected once, so the sort is still carrying the whole "
+        f"entity: {statement}"
+    )
+    outer, ranking = projections
+    assert "titles.overview" in outer, (
+        "the premise: the outer stage is the entity read, so `ranking` below is "
+        f"the stage the LIMIT applies to: {statement}"
+    )
+    for column in _COLUMNS_NO_CONSUMER_READS:
+        assert f"titles.{column}" not in ranking, (
+            f"the ranking stage still drags titles.{column} through the sort: {ranking}"
+        )
+    assert statement.rindex("ORDER BY") > statement.rindex("LIMIT"), (
+        "nothing re-orders the rows the LIMIT kept, so the answer's order is "
+        f"whatever the join emitted: {statement}"
+    )
+
+
 # --- Regression coverage for update() rewriting unchanged ARRAY columns --
 # see tests/unit/test_title_repository.py's
 # test_to_row_emits_lists_not_tuples_for_array_columns for the necessary-
@@ -321,25 +513,8 @@ async def test_update_does_not_rewrite_unchanged_columns(
     fetched = await repo.get(title.id)
     assert fetched is not None
 
-    statements: list[str] = []
-
-    def _capture(
-        conn: object,
-        cursor: object,
-        statement: str,
-        parameters: object,
-        context: object,
-        executemany: bool,
-    ) -> None:
-        statements.append(statement)
-
-    sync_conn = cast(AsyncConnection, session.bind).sync_connection
-    assert sync_conn is not None
-    event.listen(sync_conn, "before_cursor_execute", _capture)
-    try:
+    with _capturing_sql(session) as statements:
         await repo.update(fetched)  # same data just read back -- a true no-op
-    finally:
-        event.remove(sync_conn, "before_cursor_execute", _capture)
 
     assert not any(statement.strip().upper().startswith("UPDATE") for statement in statements), (
         f"update() issued an UPDATE for a no-op call: {statements}"
@@ -438,3 +613,195 @@ class TestPostgresTitleRepositoryOwned(TitleRepositoryOwnedContract):
             )
 
         return _own
+
+
+class TestPostgresTitleRepositoryCandidates(TitleRepositoryCandidateContract):
+    """`list_unwatched_candidates` against real Postgres, which is where its
+    three Postgres-shaped halves can fail.
+
+    The `NOT EXISTS` roll-up through `episodes.title_id` is the one that
+    matters: the fake reproduces it as a dict lookup, which is naturally the
+    right shape, and only a real `LEFT JOIN episodes` can be written the wrong
+    way round. The other two are `NULLS LAST` under a descending sort -- whose
+    default is the opposite of what the read wants -- and the `&&` operator on
+    a generic `ARRAY(Text)` column, which `list_owned_by_tag` already records
+    raising `NotImplementedError` for its sibling `@>`.
+
+    Real `users` rows too: `watch_states.user_id` is a foreign key, so the
+    fake's bare ids would be a different test.
+    """
+
+    @pytest.fixture
+    def repo(self, session: AsyncSession) -> PostgresTitleRepository:
+        return PostgresTitleRepository(session)
+
+    @pytest_asyncio.fixture
+    async def owning_source_id(self, session: AsyncSession) -> uuid.UUID:
+        source = Source(
+            kind=SourceKind.EMBY,
+            name=f"Candidate Contract Source {new_id()}",
+            base_url="https://emby.invalid",
+            credentials_ref=f"ref-{new_id()}",
+            device_id=str(new_id()),
+        )
+        await PostgresSourceRepository(session).add(source)
+        return source.id
+
+    @pytest_asyncio.fixture
+    async def user_id(self, session: AsyncSession) -> uuid.UUID:
+        return await _add_user(session)
+
+    @pytest_asyncio.fixture
+    async def other_user_id(self, session: AsyncSession) -> uuid.UUID:
+        """A second household member, so the read's `user_id` predicate has
+        something to exclude. On a single-household deployment a lost
+        `WHERE user_id` is invisible."""
+        return await _add_user(session)
+
+    @pytest.fixture
+    def own(
+        self, session: AsyncSession, owning_source_id: uuid.UUID
+    ) -> Callable[..., Awaitable[None]]:
+        async def _own(
+            title_id: uuid.UUID, *, episode: bool = False, available: bool = True
+        ) -> None:
+            # **`episode=True` writes a real `episode_id`, and
+            # `TitleRepositoryOwnedContract.own` deliberately does not.** That
+            # fixture leaves it NULL because `episodes` needs a `seasons` row
+            # and a `titles` row and it has no helper for either; this class
+            # does, so the excuse does not transfer -- and copying it made the
+            # case vacuous. Measured: with `episode_id` left NULL, adding
+            # `MediaItemRow.episode_id.is_(None)` to the ownership subquery
+            # gives **12 passed, 0 failed** here, so the bound the case exists
+            # to rule out was unobservable on the only arm that has it.
+            #
+            # Both ids together is also the production shape rather than a
+            # test convenience: `ports/ingest.py`'s `MediaItemTarget` records
+            # that an episode's row holds **both**, because `IngestService`
+            # writes `title_id` (the series' canonical title) alongside
+            # `episode_id` for a client browsing a season. So a semi-join
+            # carrying `episode_id IS NULL` reports every series in a real
+            # library as unowned, which on 999,827 episodes of 1,126,674 items
+            # is most of it.
+            #
+            # `available=False` writes a real retracted row -- what
+            # `mark_unseen_unavailable` leaves behind -- which the fake cannot
+            # express and which is the only way the read's own `available`
+            # predicate is observable at all.
+            await session.execute(
+                insert(cast(Table, MediaItemRow.__table__)).values(
+                    id=new_id(),
+                    source_id=owning_source_id,
+                    external_id=str(new_id()),
+                    title_id=title_id,
+                    episode_id=await _add_episode(session, title_id) if episode else None,
+                    available=available,
+                    last_seen_at=datetime.now(UTC),
+                )
+            )
+
+        return _own
+
+    @pytest.fixture
+    def watch(self, session: AsyncSession) -> Callable[..., Awaitable[None]]:
+        async def _watch(
+            user_id: uuid.UUID,
+            *,
+            title_id: uuid.UUID | None = None,
+            episode_id: uuid.UUID | None = None,
+            played: bool = True,
+        ) -> None:
+            # Raw, rather than through `merge_from_source`: that path is a
+            # two-statement upsert with its own dedup and its own conflict
+            # rule, and a fixture that went through it would be testing that
+            # instead. `ck_watch_states_exactly_one_target` still applies,
+            # which is what makes a case naming neither target impossible to
+            # write by accident.
+            await session.execute(
+                text(
+                    "INSERT INTO watch_states "
+                    "  (id, user_id, title_id, episode_id, position_seconds, played, origin) "
+                    "VALUES (CAST(:id AS uuid), CAST(:user_id AS uuid), "
+                    "        CAST(:title_id AS uuid), CAST(:episode_id AS uuid), "
+                    "        :position_seconds, :played, 'source')"
+                ),
+                {
+                    "id": new_id(),
+                    "user_id": user_id,
+                    "title_id": title_id,
+                    "episode_id": episode_id,
+                    # A real position on the abandoned case, so "has a state"
+                    # and "played" are two different rows rather than two
+                    # readings of one blank one.
+                    "position_seconds": 0 if played else 720,
+                    "played": played,
+                },
+            )
+
+        return _watch
+
+    @pytest.fixture
+    def episode_of(self, session: AsyncSession) -> Callable[[uuid.UUID], Awaitable[uuid.UUID]]:
+        async def _episode_of(series_id: uuid.UUID) -> uuid.UUID:
+            return await _add_episode(session, series_id)
+
+        return _episode_of
+
+
+async def _add_user(session: AsyncSession) -> uuid.UUID:
+    identifier = new_id()
+    await session.execute(
+        text("INSERT INTO users (id, name) VALUES (CAST(:id AS uuid), :name)"),
+        {"id": identifier, "name": f"viewer-{identifier}"},
+    )
+    return identifier
+
+
+async def _add_episode(session: AsyncSession, series_id: uuid.UUID) -> uuid.UUID:
+    """One real episode of `series_id`'s season 1, minting the season once.
+
+    `episodes.season_id` and `episodes.title_id` are both NOT NULL with
+    `ON DELETE CASCADE`, so neither can be invented -- the season is what makes
+    the watched roll-up a real two-table join rather than a self-join on a
+    column that happens to be there.
+
+    **The season is reused rather than re-inserted**, because
+    `uq_seasons_title_season_number` refuses a second season 1 for one title
+    and both callers here -- `own(episode=True)` and `episode_of` -- can reach
+    the same series in one case. `episode_number` counts the rows already
+    present for the same reason: `uq_episodes_season_episode_number` refuses a
+    duplicate, and a fixture that raised on its second call would fail the case
+    for a reason no implementation could cause.
+    """
+    season_id = (
+        await session.execute(
+            text("SELECT id FROM seasons WHERE title_id = CAST(:t AS uuid) AND season_number = 1"),
+            {"t": series_id},
+        )
+    ).scalar_one_or_none()
+    if season_id is None:
+        season_id = new_id()
+        await session.execute(
+            text(
+                "INSERT INTO seasons (id, title_id, season_number) "
+                "VALUES (CAST(:id AS uuid), CAST(:title_id AS uuid), 1)"
+            ),
+            {"id": season_id, "title_id": series_id},
+        )
+    number = (
+        await session.execute(
+            text("SELECT count(*) FROM episodes WHERE season_id = CAST(:s AS uuid)"),
+            {"s": season_id},
+        )
+    ).scalar_one() + 1
+    episode_id = new_id()
+    await session.execute(
+        text(
+            "INSERT INTO episodes "
+            "  (id, title_id, season_id, season_number, episode_number) "
+            "VALUES (CAST(:id AS uuid), CAST(:title_id AS uuid), "
+            "        CAST(:season_id AS uuid), 1, :number)"
+        ),
+        {"id": episode_id, "title_id": series_id, "season_id": season_id, "number": number},
+    )
+    return episode_id

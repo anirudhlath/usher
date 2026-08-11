@@ -67,6 +67,35 @@ class RepositoryConflict(UsherPortError):
     both raise the identical exception otherwise, and the message alone
     is prose, not something a service should parse to recover the
     distinction.
+
+    **M8 widened what this member covers, and the paragraphs above are now
+    the common case rather than the whole of it.** It also carries "the
+    backing store refused this row's *values*" — which is not a uniqueness
+    conflict, is not a constraint at all, and in one measured instance never
+    reached the server. Two shapes, both found in M8 and both reachable from a
+    **validly constructed** domain model, because in each the column is
+    narrower than the field feeding it: `llm_calls.cost_usd` is
+    `NUMERIC(12, 8)` against a `Decimal` bounded by `ge=0` and nothing above,
+    so a large enough call is `numeric field overflow` server-side; and
+    `curated_rows."position"` is `integer` against `Field(ge=0)`, so `2**31`
+    is refused client-side by asyncpg's own encoder. Neither is an
+    `IntegrityError`; `usher.db.repositories._errors.is_row_refusal` is what
+    both implementations filter on.
+
+    **The reuse is deliberate and this paragraph is the record of it, because
+    the alternative is worse.** No existing member fits — `PortDataMalformed`
+    is about an *upstream payload* this project parsed, not about a row this
+    project assembled — and a new member would fork every `except
+    RepositoryConflict` in `services/` to catch two things that call for the
+    same response: the write cannot succeed as given, a retry will not help,
+    and the caller's own state is what is wrong. What the widening costs is
+    that **`constraint = None` now means two different things**: "a constraint
+    fired and the implementation could not name it" and "no constraint fired
+    at all". A caller branching on a *specific* constraint name is unaffected,
+    since that is still exact; a caller treating `None` as "some constraint,
+    unknown" would be wrong, and none does. The alternative — leaving these
+    untranslated — is a raw `sqlalchemy.exc.DBAPIError` at a service, which
+    ADR-0009 forbids outright.
     """
 
     def __init__(self, message: str, *, constraint: str | None = None) -> None:

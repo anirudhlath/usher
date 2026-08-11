@@ -75,6 +75,7 @@ from usher.ports.search import (
     SearchRequest,
     SuggestIndex,
 )
+from usher.services.query_expansion import QueryExpansionService
 
 _meter = metrics.get_meter("usher.search")
 
@@ -255,12 +256,31 @@ class SearchAnswer:
     search over a catalog with no embeddings reports. Two different problems
     with two different fixes (install the extra; run `usher index`) that would
     otherwise present identically.
+
+    **`expanded_query` is the substitution made visible**, and it is the same
+    argument one field over. When an LLM rewrote the query, this is exactly the
+    text the semantic lane embedded; `None` means the vector came from what the
+    caller passed. Without it a viewer searches for one thing and gets results
+    for another with nothing to say so -- and cannot tell a good expansion from
+    a bad one, which is also the first thing an operator reading their bug
+    report needs. It is `None` on every path that embedded the query **as
+    typed**: the shipped default with expansion off, a `full_text` search, a
+    blank query, a deployment with no embedder, and an expansion that failed or
+    came back unusable.
+
+    **That last item bought a completion, which is why the framing is "embedded
+    as typed" rather than "bought no completion".** A call that answered with
+    the wrong key is billed in full -- real tokens, a real cost, one `llm_calls`
+    row with `ok = false` -- and still leaves this field `None`. So the
+    implication runs one way only: a populated `expanded_query` means a
+    completion was bought, and an absent one means nothing about spend.
     """
 
     results: tuple[SearchResult, ...] = ()
     requested_mode: SearchMode = SearchMode.FULL_TEXT
     mode: SearchMode = SearchMode.FULL_TEXT
     semantic_coverage: float = 0.0
+    expanded_query: str | None = None
 
     @property
     def degraded(self) -> bool:
@@ -279,12 +299,39 @@ class SearchService:
 
     **Applies no instruction prefix, ever** (ADR-0022). This checkpoint needs
     none: the documented BGE query prefix moves MRR -0.0028 and applying it to
-    both sides is -0.0663, against a power control of -0.2497.
+    both sides is -0.0663, against a power control of -0.2497. **An LLM
+    rewrite is not a prefix and is not covered by that measurement** -- a
+    prefix is a fixed string this project prepends to every query on one side
+    of an asymmetric pair, and a rewrite is a different query. Whatever
+    `expander` hands back is embedded on its own, still with no prefix.
 
     `result_limit` rather than a `Settings`: `services/` may import only
     `domain/` and `ports/` (ADR-0009). `composition.build_pipeline` passes
     `settings.search_result_limit`, which is also what satisfies
     `test_every_setting_is_read_by_something`.
+
+    **Two optional collaborators, and the optionality is a fact about this
+    class rather than a habit.** M8's shape everywhere else is that a caller
+    holding an `LLMClient` is *built or not built* -- `CurationService` spells
+    its client `LLMClient`, never `LLMClient | None`, because
+    `composition.llm_client` answers `(None, no-op)` when the LLM is off and
+    the composition root simply declines to construct the service. That works
+    because a deployment with no LLM runs no curation at all.
+
+    It does not transfer here: **a deployment with no LLM still searches**, so
+    a `SearchService` is built on every deployment there is, and "built or not
+    built" has no state left to express. The choice is therefore between an
+    optional collaborator and a second `SearchService` class, and the second is
+    the one this project has never needed for `embedder`, which is the same
+    shape one parameter over -- which is the precedent that settles it.
+    (ADR-0022 argues the embedder is optional; it does not consider a second
+    class, so this is a precedent by absence rather than by refusal.)
+    `expander` is the same kind of thing as
+    `embedder`, one layer up: a capability an operator may not have installed,
+    on a service that must work without it, checked in exactly one place. The
+    `LLMClient | None` branch M8 argues against lives on `QueryExpansionService`
+    and is absent there for M8's reason; what is optional here is the *service*,
+    not the client.
     """
 
     def __init__(
@@ -296,6 +343,7 @@ class SearchService:
         *,
         result_limit: int,
         embedder: Embedder | None = None,
+        expander: QueryExpansionService | None = None,
     ) -> None:
         self._index = index
         self._suggestions = suggestions
@@ -306,6 +354,13 @@ class SearchService:
         # trigram are PRD 05's catalog-lookup tier and serve all 1,271,138
         # titles with no model at all.
         self._embedder = embedder
+        # Optional on the same terms and off by default **twice**:
+        # `USHER_LLM_ENABLED` is `false`, so `composition.build_pipeline` is
+        # handed no client; and `USHER_QUERY_EXPANSION_ENABLED` is `false` even
+        # when it is handed one, because PRD 05's 2026-08-07 measurement put
+        # expansion's effect on retrieval the wrong way round. With this absent
+        # every line below is M6's.
+        self._expander = expander
 
     async def search(
         self,
@@ -346,6 +401,7 @@ class SearchService:
 
         started = time.perf_counter()
         vector: tuple[float, ...] | None = None
+        expanded: str | None = None
         if mode is not SearchMode.FULL_TEXT:
             if self._embedder is None:
                 if mode is SearchMode.SEMANTIC:
@@ -360,10 +416,31 @@ class SearchService:
                 # The narrowing is carried in the answer, not hidden in it.
                 mode = SearchMode.FULL_TEXT
             else:
-                vector = tuple((await self._embedder.embed([query]))[0])
+                # **One completion, immediately in front of the embed, and its
+                # position is the cost argument.** Inside this `else` it is
+                # bought only by a search that was going to embed something --
+                # so `full_text` pays nothing, a deployment with no model pays
+                # nothing, a blank query pays nothing (the guard above returned
+                # already) and `suggest`, which a client drives per keystroke,
+                # has no embed at all and so has no call in front of one. The
+                # unit of spend is one search, exactly as curation's is one
+                # generation. `expand` never raises: PRD 08 says a degraded
+                # subsystem narrows, and a search with no rewrite is a complete,
+                # correct search.
+                expanded = None if self._expander is None else await self._expander.expand(query)
+                vector = tuple(
+                    (await self._embedder.embed([query if expanded is None else expanded]))[0]
+                )
 
         outcome = await self._index.search(
             SearchRequest(
+                # **The typed words, never the rewrite.** Only the vector is
+                # computed from an expansion, so under RRF the lexical lane
+                # goes on matching what the viewer actually wrote while the
+                # semantic lane matches the paraphrase. Substituting here too
+                # would leave no lane holding the original, and a rewrite that
+                # drifted would turn an exact-title search into a search for
+                # something else with nothing left to notice.
                 query=query,
                 # A ceiling, not a default: every candidate becomes a hydrated
                 # row in application code, so an unclamped limit is a scan.
@@ -382,6 +459,12 @@ class SearchService:
             # would read 1.0 whenever every returned hit had one, which is
             # exactly the case a green test seeds.
             semantic_coverage=outcome.semantic_coverage,
+            # **Reported, never silently substituted.** This is the string that
+            # was embedded whenever it is not `None`, so a caller can print it
+            # beside the results; `usher search` does. A field that echoed the
+            # typed query when nothing was expanded would put a line on every
+            # search of every deployment and mean nothing.
+            expanded_query=expanded,
         )
         # After the rank, not around the retrieval alone: PRD 05 splits the two
         # stages and an operator asking "why is search slow" is asking about

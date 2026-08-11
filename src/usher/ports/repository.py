@@ -17,6 +17,7 @@ from pydantic import AwareDatetime
 
 from usher.domain.bootstrap import ImportRun
 from usher.domain.collection import Collection
+from usher.domain.curation import CuratedRow, LLMCall
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.episode import Episode, Season
 from usher.domain.people import Credit, CreditKind, Person
@@ -24,7 +25,14 @@ from usher.domain.source import MediaItem, Source
 from usher.domain.sync import SyncRun, SyncRunKind
 from usher.domain.title import Title
 from usher.domain.watch import WatchState
-from usher.ports.bulk import GenomeVector, IdCrosswalkPair, ImdbRating, ImdbTitle, TmdbId
+from usher.ports.bulk import (
+    GenomeTag,
+    GenomeVector,
+    IdCrosswalkPair,
+    ImdbRating,
+    ImdbTitle,
+    TmdbId,
+)
 from usher.ports.ingest import (
     MediaItemTarget,
     MediaItemUpsert,
@@ -268,6 +276,161 @@ class TitleRepository(ABC):
         that, over the ids this returns, because the two questions have
         different bounds and folding them together would make the limit mean
         something different on every household.
+
+        ⚠️ **`list_unwatched_candidates` below deliberately does the opposite,
+        and this cross-reference exists so neither sentence is read as the
+        rule.** The argument in the paragraph above is about *this* `limit`,
+        which is a candidate budget feeding a 20-card row; there `limit` **is**
+        the answer's size, so a watched-filter applied after it shrinks the
+        result most for the household with the most history, and a caller
+        cannot repair that without an unbounded over-read. Same two questions,
+        opposite correct answers, because the two limits mean different things.
+        """
+
+    @abstractmethod
+    async def list_unwatched_candidates(
+        self,
+        user_id: uuid.UUID,
+        *,
+        genres: Sequence[str] = (),
+        limit: int,
+    ) -> list[Title]:
+        """The curation pool: titles this household has not seen, best first.
+
+        **`limit` has no default, and that is a decision rather than an
+        omission.** It shipped as `= 200` in three signatures -- here, the
+        Postgres implementation and the fake -- and nothing made those three
+        agree: measured, changing the fake's to `5` left the whole unit suite
+        green and changing `PostgresTitleRepository`'s to `5` left the whole
+        integration suite green, because no contract case called without it
+        while seeding more than five candidates. Two implementation defaults
+        free to disagree with each other and with the port is the exact
+        failure a contract suite exists to prevent, and asserting three
+        literals are equal would be a check that runs *after* the drift. So
+        there is one definition and no copies, which is `DERIVED_COLUMNS`' and
+        `_PROVIDER_ID_CONSTRAINTS`' shape.
+
+        The second reason is layering: 200 is a *curation policy* number --
+        `USHER_CURATION_POOL_SIZE`, argued from a prompt's token budget -- and
+        a persistence port has no business carrying a default for it.
+        `CandidatePoolService.for_user` is the only caller in `src/` and
+        always passes `limit=self._size`.
+
+        **The whole of `CandidatePoolService`'s retrieval, and the substrate
+        of [ADR-0028](../../../docs/prd/decisions/0028-the-pool-is-the-contract.md).**
+        The prompt addresses candidates by a small integer index, so this
+        answer's *size*, *order* and *stability* are what the index means. A
+        pool that comes back short, or in a different order on a second read
+        of an unchanged catalog, is a prompt whose handles denote something
+        else than they did an hour ago.
+
+        **Membership is "unwatched", and nothing else.** Ownership and
+        popularity are ranking keys rather than filters, because PRD 06 says
+        the pool *"spans the whole catalog, not just the library, so
+        suggestions can include things to seek out"* -- and because a
+        popularity floor is a constant nobody measured that would empty the
+        pool on a catalog with no vote counts.
+
+        **Ordered `owned DESC, carries an affinity genre DESC, vote_count
+        DESC NULLS LAST, id`**, which is M8 boundary call 5's own enumeration
+        of the signals that need no model -- *"unwatched, owned or popular,
+        genre affinity, `titles.vote_count`"* -- read as the order it is
+        written in:
+
+        - **Owned first**, because a shelf the household can play tonight is
+          worth more than one it has to go and find, and an unowned card
+          renders with `RowCard.owned = False` rather than being unreachable.
+          The two are strata rather than a blend: there is no measured
+          exchange rate between "in the library" and "half a million votes",
+          and inventing one would be a number this project could not defend.
+        - **Then genre affinity**, the only household-shaped signal in the
+          base order. `genres` is `TasteService.genre_affinity`'s answer
+          projected to names, and **empty is the common case rather than a
+          degenerate one**: it is what a household with no watch history
+          produces, and what every household produces before its first sync.
+          So it is a sort key and never a predicate -- as a predicate it would
+          hand an empty pool to exactly those households, which is
+          `GenreAffinityProvider`'s corrected failure arriving one layer down.
+        - **Then `vote_count`, and deliberately not `popularity`.**
+          `list_owned_by_tag` leads with `popularity` and this read does not,
+          which is a divergence rather than an oversight: `titles.popularity`
+          was measured NULL on all **1,271,138** rows of a `--phase imdb`
+          catalog (M6, 2026-08-03) and is `NOT NULL DEFAULT 0` in `tmdb_ids`,
+          so on a partially-linked catalog a crosswalk-linked skeleton at
+          `0.0` outranks an unlinked title with half a million votes. That
+          hazard is bounded there -- the read is scoped to owned titles,
+          single-digit thousands -- and unbounded here, where the candidate
+          set is the whole catalog and the skeletons are most of it.
+
+          ⚠️ **That total and the one below it are four lines apart and
+          differ, which is deliberate and is why both carry their date.**
+          1,271,138 is M6's `--phase imdb` catalog; 1,271,570 is M7 Task 36's
+          `--phase all` one, measured 2026-08-05 after `link_crosswalk` ran
+          and 432 more titles had landed. Two measurements of two catalogs, a
+          milestone apart — not one number restated wrongly, which is exactly
+          the failure the next bullet exists to record.
+        - **Then `id`, and it decides *membership* rather than merely order.**
+          This is the canonical statement of the tiebreak's argument; the
+          contract case and PRD 06 point here rather than restating it.
+
+          The two keys above `vote_count` are **booleans**, so they partition
+          rather than order, and `vote_count` itself is NULL on **732,220 of a
+          measured 1,271,570-title catalog** -- the bootstrap writes it on
+          539,350 through `BulkCatalogRepository.apply_ratings` (measured
+          2026-08-05, M7 Task 36; the number is recorded in
+          `adapters/search/postgres.py`). So the ordinary shape of this answer
+          is four strata whose tails are one large tie, and `limit` falls
+          inside one of them: with no total order, two reads of one unchanged
+          household return different **sets**, not merely different orders,
+          and ADR-0028's index->UUID map is then a map of a pool that no
+          longer exists. This repository has been bitten by an `ORDER BY` with
+          no `id` tail twice (`list_owned_by_tag` records one, `UPDATE …
+          RETURNING` the other).
+
+          ⚠️ **Not the argument `list_owned_by_tag` makes for its own `id`
+          tail, and an earlier draft of this docstring made that one by
+          swapping the column into it.** It claimed `vote_count` is NULL on
+          *every* row of a bootstrap-only catalog, which the same measurement
+          refutes: under `NULLS LAST` the 539,350 voted rows sort **above**
+          every unvoted one, so on exactly that catalog `vote_count` is what
+          orders the head of the pool. The `popularity` sentence above is the
+          one that survives being read that way, because `popularity` really
+          is NULL until `link_crosswalk` runs.
+
+        **"Unwatched" is `played`, rolled up through `episodes.title_id`, and
+        it is the same predicate `played_title_ids` spells.** Both halves are
+        needed and each rules out a different populated answer: `played`
+        rather than "has a watch state", because a walk writes a row per item
+        it observed and that predicate is the owned library -- so the pool
+        would become everything the household does *not* own; and the
+        roll-up, because a watched episode's row carries `episode_id` with a
+        NULL `title_id`, so a title-keyed exclusion offers back every series
+        the household is midway through, on a library that is 89% episodes.
+
+        **It is inside the statement rather than subtracted afterwards, which
+        is this port's one real departure from `list_owned_by_tag`'s recorded
+        position.** That method says *"nothing about watched is expressed
+        here … folding them together would make the limit mean something
+        different on every household"*, and for a 60-candidate budget feeding
+        a 20-card row that is right. Here it is exactly backwards: `limit`
+        **is** the pool size, ADR-0028's measurements are scoped to 200, and a
+        filter applied after a `LIMIT` shrinks the pool most for the household
+        with the most history -- the household curation is worth the most to.
+        A caller cannot repair that without an unbounded over-read.
+
+        `limit` rows at most, fewer only when the catalog holds fewer. An
+        empty answer means the household has seen everything in a catalog this
+        small, which is a real state on a fresh install and not an error.
+
+        **The cost is a scan and a top-N sort of the whole catalog, and that
+        is accepted rather than indexed.** No index can serve this order --
+        two of its four keys are computed, and `ffc` already dropped
+        `ix_titles_popularity` after measuring that a plain descending btree
+        does not serve `DESC NULLS LAST` anyway -- and adding one for a
+        statement that runs once per household per night would be
+        `ix_titles_popularity`'s mistake repeated. M8's boundary call 2 is
+        what makes that affordable: generation is a background job and is
+        never on a request path.
         """
 
     @abstractmethod
@@ -565,6 +728,51 @@ class BulkCatalogRepository(ABC):
         batch is an upsert, never a duplicate. Unlike `upsert_titles`, a
         replay is *not* invisible — it reports `updated`, which is the honest
         answer and the one an operator re-running the phase is asking for.
+        """
+
+    @abstractmethod
+    async def replace_genome_tags(self, tags: Sequence[GenomeTag], *, revision: str) -> int:
+        """Replace the whole genome tag vocabulary with `tags` at `revision`,
+        returning how many rows it wrote.
+
+        **A replace, not an upsert, and that is the difference between this
+        and `upsert_genome_vectors` two methods up.** A vector table is
+        legitimately half-migrated — a killed re-import against a new upload
+        leaves rows of two releases, which `genome_revision` exists to make
+        countable and `get_pair` refuses to blend across. A *vocabulary* has
+        no such state: it is one artefact of 1,128 rows, read whole, and an
+        upsert over a release with fewer tags would leave the tail of the
+        previous one behind, still labelled with the previous revision,
+        looking exactly like a complete vocabulary that happens to be mixed.
+        So the old vocabulary goes and the new one lands, in one transaction,
+        and the table holds exactly one release by construction.
+
+        **Refuses, with `ValueError` and before writing anything, a `tags`
+        that is not a whole vocabulary.** Three preconditions, and the
+        precedent for the exception type is `CuratedRowRepository.
+        replace_for_user`, which refuses a batch disagreeing with its scope
+        the same way: this is a caller-assembly mistake, not an upstream
+        payload and not a backing store refusing a row, so it is neither
+        `PortDataMalformed` nor `RepositoryConflict`.
+
+        - `tags` is empty. A vocabulary of no tags is not a vocabulary, and
+          storing one would make "the table is empty" mean two things — never
+          loaded, and loaded as nothing. Same argument as
+          `ck_curated_rows_cards_not_empty` one table over.
+        - `tag_id`s are not exactly `1…len(tags)`. The vector is built **by
+          index**, so a gap does not lose one name, it moves every later one:
+          lane 3 would be labelled with tag 4's word, permanently, on the one
+          table whose entire purpose is to say what a lane means. It is also
+          **what bounds `tag_id` above** — see `db/models/taste.py` for why
+          that bound lives here rather than as a field constraint.
+        - any `tag` is empty. A lane named by the empty string reads as
+          labelled and says nothing.
+
+        `revision` is the run's own resolved dataset revision — the same value
+        `upsert_genome_vectors` stamps onto every vector, resolved once by the
+        caller so the two cannot disagree across an upstream re-upload. Empty
+        is refused for the same reason: it matches no `genome_scores` row, so
+        it would leave the table stored and permanently unreadable.
         """
 
     @abstractmethod
@@ -2776,15 +2984,26 @@ class GenomeVectorRow:
 
 
 class GenomeRepository(ABC):
-    """Read access to the stored MovieLens tag-genome vectors.
+    """Read access to the stored MovieLens tag genome — the per-title vectors
+    (`genome_scores`) and the vocabulary that names their lanes
+    (`genome_tags`).
 
-    **Read-only in M7, and that is a boundary rather than an omission.** The
-    writer is `BulkCatalogRepository.upsert_genome_vectors`: writing this
-    table is a staged, `COPY`-scale, set-based join from `imdb_id` to
-    `titles.id`, which is exactly the path `BulkCatalogRepository`'s docstring
-    reserves. A `put()` here to make test seeding convenient would be a port
-    method nothing in `src/` calls, which this project has already shipped
-    once; the contract suite seeds through an abstract seeder instead.
+    **Read-only, and that is a boundary rather than an omission.** The writers
+    are `BulkCatalogRepository.upsert_genome_vectors` and
+    `.replace_genome_tags`: both are bulk-import paths, one of them a staged,
+    `COPY`-scale, set-based join from `imdb_id` to `titles.id`, which is
+    exactly what `BulkCatalogRepository`'s docstring reserves. A `put()` here
+    to make test seeding convenient would be a port method nothing in `src/`
+    calls, which this project has already shipped once; the contract suite
+    seeds through an abstract seeder instead.
+
+    **Two tables on one port because they are one artefact.** A vector whose
+    lanes cannot be named and a vocabulary with no vectors to explain are each
+    useless alone, and the only invariant either has is a comparison *between*
+    them — `genome_scores.genome_revision` against
+    `genome_tags.genome_revision`. Splitting them would put the two halves of
+    that comparison behind two ports and give a caller a way to hold one
+    without the other.
 
     **Coverage is 1.82% of movies and 1.29% of all titles**, so "this title
     has no vector" is the common case rather than the edge, and every method
@@ -2825,4 +3044,391 @@ class GenomeRepository(ABC):
         One call rather than two `get`s because this is the access pattern:
         a similarity blend scores a candidate *pair* it already holds. It is
         also why there is no HNSW index -- see `GenomeScoreRow`.
+        """
+
+    @abstractmethod
+    async def vocabulary(self, revision: str) -> tuple[str, ...] | None:
+        """The tag names in lane order for `revision` — `result[i]` names
+        `GenomeVectorRow.relevance[i]` — or `None` if no vocabulary is stored
+        at all.
+
+        **Names positionally, not `(tag_id, tag)` pairs**, because the
+        positional alignment with the vector *is* the product. Handing back
+        pairs would leave every caller to do the alignment, and a caller that
+        indexed by `tag_id` rather than `tag_id - 1` would be off by one on
+        every lane with nothing to say so.
+
+        **Absence is a value and a mismatch is an error, and the split is the
+        whole design of this method.**
+
+        - `None` when the table is empty. That is a state a real deployment is
+          legitimately in: `ffa` shipped vectors with no vocabulary and every
+          catalog bootstrapped before `m08b` has exactly this. There is no
+          wrong answer to be had from it — a caller renders no tags, which is
+          PRD 08's "a degraded subsystem narrows functionality". It is also
+          `PortUnavailable`'s own stated distinction ("the requested thing
+          does not exist" is a `None` return, see `SourceAdapter.get_item`)
+          and `RepositoryNotFound`'s, whose docstring says outright that the
+          read-side equivalent of not-found is `None`.
+        - **`PortDataMalformed` when a vocabulary is stored under a different
+          revision.** Here there *is* a wrong answer available and it is
+          plausible: 1,128 names of the right shape, in the right order, for a
+          different release, rendered as prose onto a screen. The taxonomy is
+          organised by what a caller must do, and this is exactly
+          `PortDataMalformed`'s clause — *"retrying does not help, so a caller
+          parks the work"*. `JobWorker` parks it immediately rather than
+          spending five retries on a table that cannot change on its own; the
+          fix is an operator's `usher bootstrap --phase movielens`, which is
+          also `get_pair`'s documented fix for the sibling condition.
+          `detail` carries both revisions, which is what an operator needs and
+          is neither a credential nor a payload.
+
+        **Why not `None` for both, as `get_pair` does?** Because `get_pair`'s
+        two outcomes call for the same response and these two do not. There,
+        "no vector" and "two releases" both mean *no genome signal*, the
+        caller has a documented fallback, and 98.7% of pairs already answer
+        `None` — so collapsing them costs nothing. Here they mean "load the
+        vocabulary" and "re-import the whole genome", and the second is a
+        corrupted table that collapsing would hide behind a state that is
+        normal on every pre-`m08b` deployment.
+
+        Also `PortDataMalformed` for a stored vocabulary whose `tag_id`s are
+        not `1…n`. The read builds by index for `GenomeVector`'s reason — a
+        gap moves every later lane — and `replace_genome_tags` refuses to
+        write one, so reaching this needs a hand-written `DELETE`. It is three
+        lines and it is the difference between refusing and silently shifting
+        every name after the gap.
+        """
+
+
+class CuratedRowRepository(ABC):
+    """`curated_rows` -- what one generation proposed, per household.
+
+    **The only table in this project whose contents no re-run reproduces**
+    (`domain/curation.py`), which decides both methods below. There is no
+    oracle to diff a curated row against and no fixed-temperature re-run that
+    reproduces one, so a write here is either the whole of a generation or
+    none of it, and a read is either a whole generation or nothing.
+
+    **The write is a scoped replace, and the scope is `user_id` -- never the
+    rows being written.** `TitleNeighborRepository.replace` and
+    `CreditRepository.replace_for_titles` make the identical argument for
+    their own scopes and it arrives here at a third table: a generation that
+    validated to *zero* rows contributes nothing to any scope derived from the
+    rows, so such a delete deletes nothing and last night's screen stays up
+    forever, with no future generation able to repair it. Here the argument is
+    sharper than at either of those two, because the artefact is a *screen*: a
+    stale shelf is not a stale number, it is a heading a household reads and
+    believes.
+
+    **Same session ownership as every other repository here: flushes, never
+    commits.** `CurationService` writes the rows and the `llm_calls` ledger
+    entry for the same generation in one transaction (PRD 10's dashboard 5 is
+    that join), so the commit boundary is the caller's.
+    """
+
+    @abstractmethod
+    async def replace_for_user(self, user_id: uuid.UUID, rows: Sequence[CuratedRow]) -> int:
+        """Replace this user's whole screen with `rows`, atomically.
+
+        Delete-then-insert in one transaction, so a generation that fails
+        part-way leaves the *previous* screen intact rather than half of a new
+        one. An implementation that cannot roll the delete back with the
+        insert has not implemented this method: the failure it would produce
+        is an empty home screen for a household whose last generation was
+        fine, and nothing distinguishes that from a household the LLM has
+        never run for.
+
+        **There is no `generation_id` parameter, and M8's plan named one.**
+        The departure is deliberate and this is the record of it. A separate
+        scope argument exists on the two sibling ports because the scope
+        genuinely cannot be recovered from the rows -- `seed_ids` and
+        `title_ids` name things that may contribute *no* rows at all. That
+        argument does not transfer: the scope here is `user_id`, which is
+        already a parameter for exactly that reason, and `generation_id` is
+        not a scope but a *stamp* that every `CuratedRow` already carries as a
+        required field. `TitleNeighborRepository.replace`'s keyword-only
+        `blend_fingerprint` is the near-miss to check this against, and it
+        differs on the one point that matters: `ScoredNeighbor` has no
+        fingerprint field, so passing it is the only way to make "write the
+        rows and stamp them in a second statement" unspellable. Here the stamp
+        is inside the row before the call is made. A third argument could
+        therefore only restate a fact the rows hold -- and a signature that
+        can be handed a `generation_id` disagreeing with its rows is one that
+        eventually will be, which is a defect this shape cannot express.
+
+        What the argument *would* have bought is bought instead by refusing
+        the two disagreements that remain reachable, and both raise
+        `ValueError` **before anything is written**:
+
+        - a row whose `user_id` is not this call's, which would put a shelf on
+          another household's screen and outside this delete's scope; and
+        - rows carrying more than one `generation_id`, which is a half-built
+          generation. Nothing raises on it later: `list_for_user` returns the
+          newest generation, so the screen would simply come back short, which
+          is the one failure this table is least able to make visible.
+
+        `ValueError` rather than `RepositoryConflict`, following
+        `SearchRequest`'s refusal of a fused request with no vector: neither
+        is the backing store rejecting a write, both are a caller assembling a
+        call that cannot mean anything. **The trade-off is that a `ValueError`
+        is not a `UsherPortError`**, so a service catching this project's port
+        taxonomy broadly does not catch these two -- and this is the first
+        repository method here to raise a builtin across the port boundary
+        (`SearchRequest` is a DTO, and `postgres.py`'s three are configuration
+        bounds). That is deliberate rather than an oversight: `usher.ports.
+        errors` exists to keep *storage-specific* exception types away from
+        callers, which a builtin does not violate, and every member of it
+        describes something that happened to a request -- an upstream refused,
+        a row conflicted, a payload was malformed. Neither of these is a
+        failure a caller could degrade around or retry; both are the call
+        itself being wrong, and a service that catches them is a service
+        papering over its own bug.
+
+        **An empty `rows` is a legitimate and meaningful call, not a no-op.**
+        It says "this generation produced nothing", and it must clear the
+        household's screen -- see ADR-0028: a validator that ate the whole
+        completion and a model that had nothing to say produce the same empty
+        result, and both are honestly rendered as no curated shelves rather
+        than as last night's.
+
+        Idempotent by construction (PRD 08's redelivery rule, and
+        `JobWorker.startup()` requeues everything left `running`): the same
+        rows twice leave the same screen and report the same count. That is
+        also why the order is delete-then-insert -- the reverse meets this
+        table's primary key on the very rows it is about to remove.
+
+        Returns the number of rows stored, which is what makes `usher
+        curate`'s report a number rather than a reassurance.
+
+        **Anything the backing store refuses about a row raises
+        `RepositoryConflict`**, and the enumeration is deliberately by
+        outcome rather than by constraint kind, because the first version of
+        it said "a CHECK or a foreign key" and was wrong twice over. It
+        covers a `user_id` naming no household, a row the table's own CHECKs
+        refuse, **a batch naming one row id twice** -- a primary key, which is
+        neither of those, and a reachable caller-assembly mistake this port
+        does not otherwise refuse -- and **a value a column cannot hold at
+        all**, which is not a constraint: `position` is `ge=0` here and
+        `integer` there, so a large enough one is refused by the driver before
+        a statement is sent. An implementation that translates only integrity
+        violations lets that last one cross the boundary raw.
+
+        The session stays usable for the caller's other pending work either
+        way -- the service commits the rows together with the ledger entry
+        that paid for them, and a refused generation must not take the ledger
+        entry with it.
+        """
+
+    @abstractmethod
+    async def list_for_user(self, user_id: uuid.UUID) -> list[CuratedRow]:
+        """This user's newest generation, in the model's own order.
+
+        **Ordered by `position`, and that ordering is the product.**
+        `CuratedRow`'s docstring: a curated row *is* an ordering, it is the
+        only judgement the completion was bought for, and nothing downstream
+        may re-sort it. `position` indexes the list the model returned, so it
+        is the whole of the order; `id` breaks a tie only so that two reads of
+        one generation agree, and no generation should ever produce one.
+        Neither `slug` nor `id` is the key, and **the reason is no longer that
+        the slug sorts wrong.** This paragraph read *"the slugs are minted
+        `curated-1`, `curated-2`, … and sort `curated-1 < curated-10 <
+        curated-2`"*, which was true when it was written and is not true now:
+        M8 Task 13 made `services.curation_validate` -- the only thing that
+        mints a curated slug -- zero-pad it to the width of the generation, so
+        ten rows are `curated-01` … `curated-10` and the lexicographic order
+        *is* the model's order.
+
+        The conclusion is unchanged and the argument is now the stronger one:
+        `position` is the field that **means** the ordering, and a slug that
+        happens to sort correctly is a rendering that agrees with it. Ordering
+        on the rendering would silently become wrong again the day anything
+        else mints one, or the day a slug carries something other than a
+        count. A UUIDv7 primary key is the same mistake without the reprieve:
+        it agrees with insertion order, so it is *right on a small fixture and
+        wrong in production*.
+
+        **Only the newest generation, and the filter defends a state the write
+        path here does not by itself reach.** `replace_for_user` is
+        delete-then-insert in one transaction, so one writer leaves exactly
+        one generation and a failure leaves the previous one whole. The filter
+        is kept anyway, for three reasons in descending order of how much they
+        cost:
+
+        1. **Two writers can reach it.** M8 gives this table two call sites --
+           the nightly `JobKind.CURATE` job and `POST
+           /admin/rows/regenerate` -- and under PostgreSQL's default READ
+           COMMITTED two concurrent generations for one household can both
+           commit: the second transaction's `DELETE` cannot see rows the first
+           has not committed yet, so it removes nothing of them. (Reasoned
+           from the isolation level's own rules rather than measured here; the
+           contract suite constructs the two-generation state through a seeder
+           instead of racing two connections.) The write is atomic per
+           generation, which is not the same promise as one generation
+           existing.
+        2. **The schema was chosen on the strength of this read.** `m08a`
+           declares `ix_curated_rows_user_newest (user_id, generated_at DESC)`
+           for it, and refuses `UNIQUE (user_id, slug)` precisely because
+           that constraint would turn a second generation into a *failed
+           write* where this read turns it into a stale screen stepped over. A
+           read without the filter makes the refused constraint the wrong
+           call in hindsight.
+        3. **Retention.** Keeping the last N generations -- what PRD 10's
+           dashboard 5 wants the day "cost per curated row" is asked over a
+           window -- is a retention policy plus this read, or a retention
+           policy plus a breaking change to it.
+
+        What it costs is one correlated subquery per read, served by the same
+        index as the outer predicate, on a table holding tens of rows per
+        household.
+
+        **Newest is decided by `generated_at` and then resolved to one
+        `generation_id`**, rather than by taking every row sharing the newest
+        timestamp. The two agree whenever the writer stamped one instant onto
+        a whole generation -- which is what `curated_rows.generated_at`
+        carrying no server default exists to guarantee -- and they diverge
+        exactly when it did not, where returning a whole generation is the
+        answer that keeps a screen coherent.
+
+        An empty list for a household with no generation, never `None`: there
+        is no third state to distinguish, and a nullable answer would make
+        every caller branch on the difference between "nothing yet" and
+        "nothing tonight", which this table cannot tell apart either.
+        """
+
+
+class LLMCallRepository(ABC):
+    """`llm_calls` -- PRD 10's cost ledger, one row per *attempted*
+    completion.
+
+    **One method, append-only, and no read at all.** That is the port's
+    central decision and it is a deferral with a date on it: every reader
+    named anywhere in the PRD is a Grafana panel M10 builds, `m08a` shipped
+    this table with its primary key and no other index *on the strength of
+    this port having no read*, and it wrote the two future indexes out as
+    copy-pasteable `CREATE INDEX` statements beside the query each serves. A
+    `list_since()` here would be a method with no caller in `src/`, which this
+    repository has shipped twice: `ix_titles_popularity` was an index nothing
+    read (dropped by `ffc` after a measurement showed its declared direction
+    matched no statement's pathkeys), and `PushHealth.record_reconnect` was a
+    method nothing called, which made PRD 10's reconnect metric a permanent
+    flat zero -- a dashboard reporting a healthy number about a thing that was
+    never measured. The read arrives with the statement that reads it.
+
+    **`record()` is called on both paths and `ok` is the discriminator.** A
+    ledger holding only the successes understates spend by exactly the
+    failures, which are the rows an operator most wants to see -- and `ok` is
+    not "the HTTP call returned 200" but "this generation produced something",
+    the two being allowed to disagree in exactly one direction (ADR-0028: a
+    call that answered perfectly and validated to zero rows is `ok = false`
+    with a reason).
+
+    **There is no `user_id` anywhere on this port**, because there is none on
+    the table. Spend is attributed to an outcome by joining `curated_rows` on
+    `generation_id`, which is what PRD 10's dashboard 5 *is*, rather than by
+    denormalising a household onto a cost row.
+
+    **Same session ownership as every other repository here: flushes, never
+    commits.** `CurationService` writes the rows and the ledger entry for one
+    generation in one transaction -- that join is dashboard 5 -- so the commit
+    boundary is the caller's.
+    """
+
+    @abstractmethod
+    async def record(self, call: LLMCall) -> None:
+        """Append one *attempted* completion to the ledger, whether or not it
+        worked -- and "worked" is not "got an answer".
+
+        **One row per attempt**, which is narrower than one per call and wider
+        than one per answer. A call that never reached the endpoint is a row,
+        with zeroed tokens and the model this deployment asked for; a call that
+        answered perfectly and validated to nothing is a row too, `ok = false`
+        with the real tokens and the real cost. The single path that writes
+        none is the one that attempted nothing at all -- an empty candidate
+        pool raises before the client is touched, and an empty catalog is an
+        operator's problem rather than an event of the LLM subsystem.
+        PRD 06's record rule and
+        [ADR-0028](../../../docs/prd/decisions/0028-the-pool-is-the-contract.md)'s
+        rule 3 are the two halves of that.
+
+        **Takes the domain model, not its eleven parts**, and the reason is
+        not brevity. `LLMCall` already enforces the one invariant this row has
+        -- `ok` and `error` must agree -- so a parts-shaped signature would
+        have to build the identical model and raise the identical
+        `ValidationError` one stack frame deeper, inside a repository, where a
+        caller reading its own failure path cannot see it. The only version
+        that would *not* raise is one that coerced a blank error into a
+        placeholder, and inventing the operator-facing string that says what
+        went wrong is a decision only the layer that knows what went wrong can
+        make. Eleven adjacent parameters -- three of them integers, two of
+        them UUIDs -- is also eleven chances to fill the wrong slot and still
+        store a well-formed row.
+
+        **What that leaves for the caller, stated because the failure path is
+        the one this ledger exists for.** The model is constructed *inside*
+        the `except` handler, and a call that raises there loses precisely the
+        row it was about to write and replaces the original failure with a
+        pydantic error. There is one reachable way to do that: `error` must be
+        non-empty when `ok` is false, and `str(exc)` is `""` for an exception
+        raised with no arguments. So the failure path spells it
+        `error=str(exc) or type(exc).__name__`, never a bare `str(exc)`. Tasks
+        11-13 own that call site; it is recorded here because this is where a
+        reader looks for what `record()` will not do for them.
+
+        **No scope parameter, therefore nothing to refuse.**
+        `CuratedRowRepository.replace_for_user` raises `ValueError` for two
+        caller-assembly mistakes, and both exist because it takes a `user_id`
+        *and* rows that each carry one -- two spellings of one fact, which can
+        disagree. This signature has one argument and no second source for any
+        column, so the analogous refusal has nothing to compare. Nothing here
+        raises `ValueError`.
+
+        **One call, never a batch, and the shape is not provisional.** Both
+        call sites record exactly once: `CurationService` makes one completion
+        per generation, and `QueryExpansionService` makes one per search that
+        embeds -- one per *request*, not a set assembled and flushed later. A
+        batch would also be wrong in kind for the failure path, where the
+        whole value of the row is that it is written at the moment of failure
+        rather than accumulated into something a crash loses. This flushes and
+        does not commit, so a caller that genuinely wants several rows in one
+        transaction already has that; what it does not have is one round trip
+        for all of them, and nothing here is inside a walk.
+
+        Returns nothing. There is exactly one row and the caller already holds
+        its id, so a count would be the constant `1` dressed as a measurement
+        -- unlike `replace_for_user`, whose count is how many shelves a
+        generation actually kept.
+
+        **Raises `RepositoryConflict`, and the reason is not the primary
+        key.** A fresh UUIDv7 makes a duplicate id nearly unreachable (a
+        redelivered job re-runs the generation and mints a new one, which is
+        the honest ledger: the money was spent twice), though it is translated
+        too, since re-recording one object is a caller bug rather than
+        something a retry clears. What makes the translation *load-bearing* is
+        `cost_usd`: the column is `NUMERIC(12, 8)`, so a single call above
+        `$9,999.99999999` raises `numeric field overflow` -- and `LLMCall`
+        bounds that field with `ge=0` and no ceiling, so this is reachable
+        from a **validly constructed** domain model. It is the one
+        misconfiguration that precision was chosen to catch -- a price scaled
+        *up* by a million on the way in, `$36,000` on one 12,000-token call.
+        `usher.db.models.curation`'s module docstring is the one copy of that
+        mechanism and of the two limitations it does not cover; this names it
+        and points there.
+
+        **Without translation it arrives at a service as a bare
+        `sqlalchemy.exc.DBAPIError`** -- measured, and neither of the two
+        exceptions an implementer reaches for: not `sqlalchemy.exc.
+        IntegrityError`, and not `sqlalchemy.exc.DataError` either, so an
+        `except` naming either catches nothing and a raw SQLAlchemy type
+        reaches a service, which ADR-0009 forbids.
+        `usher.db.repositories._errors.ROW_REFUSED_SQLSTATE_CLASSES` holds the
+        one copy of that measurement, the identical shape on
+        `curated_rows."position"`, and the bound on the claim; `is_row_refusal`
+        is the shared filter both repositories use.
+
+        A conflict leaves the session usable for the caller's other pending
+        work, which matters more here than on any sibling port: the caller is
+        typically already inside an exception handler with curated rows it
+        still has to commit, and a poisoned session turns a failed ledger
+        write into a lost generation.
         """

@@ -37,10 +37,12 @@ from usher.composition import (
     QueueGauges,
     SearchGauges,
     SourceRegistry,
+    build_curation_service,
     build_derive_service,
     build_pipeline,
     build_worker,
     embedder,
+    llm_client,
     metadata_provider,
     nothing,
     open_adapter,
@@ -50,23 +52,33 @@ from usher.composition import (
 from usher.config import Settings, get_settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
+from usher.db.repositories.genome import PostgresGenomeRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.users import default_user, ensure_default_user
+from usher.domain.bootstrap import ImportRunStatus
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
 from usher.ports.bulk import GenomeVector, ImdbTitle
+from usher.ports.errors import (
+    PortAuthFailed,
+    PortDataMalformed,
+    PortRateLimited,
+    PortUnavailable,
+)
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
-from usher.ports.repository import BulkCatalogRepository, GenomeCoverage
+from usher.ports.repository import BulkCatalogRepository, GenomeCoverage, GenomeRepository
 from usher.ports.rows import RowContext
 from usher.ports.search import SearchFilters, SearchMode
 from usher.ports.source import SourceAdapter
 from usher.services.bootstrap import BootstrapService
+from usher.services.curation import CurationReport
+from usher.services.curation_validate import DropReason
 from usher.services.home import ComposeReport, HomeService
 from usher.services.rows.cache import RowCache
-from usher.services.search import SemanticSearchUnavailable
+from usher.services.search import SearchAnswer, SemanticSearchUnavailable
 from usher.telemetry import (
     configure_telemetry,
     register_queue_gauges,
@@ -104,6 +116,32 @@ _IDLE_SLEEP_SECONDS = 5.0
 # TCP connection out **unwrapped** -- the exact failure M7's smoke test hit
 # was a bare `ConnectionRefusedError`, and a handler keyed on
 # `SQLAlchemyError` would have missed the one case this boundary exists for.
+#
+# **Three of `UsherPortError`'s nine subclasses are here and six are not**, and
+# that split is the whole of what M8 added (ADR-0026's Amendment, 2026-08-07).
+# `httpx.HTTPError` cannot fire for anything behind a port: an adapter's job is
+# to translate its transport's failures *before* they cross, so `httpx` never
+# reaches this line from `adapters/llm`, `adapters/emby` or `adapters/tmdb` --
+# which left `usher curate` against an unreachable `USHER_LLM_BASE_URL`
+# answering with a stack, ADR-0026's own motivating defect in a family it did
+# not name.
+#
+# The line drawn is *reaching* an upstream against everything else. The three
+# below are conditions an operator acts on. `RepositoryConflict`,
+# `RepositoryNotFound` and `PortDataMalformed` stay out because several of
+# their raise sites are deliberate tripwires for bugs in this project's own
+# code (`title_neighbors`' bounds, the credits delete's scope, a curated batch
+# this project assembled wrong), and a one-line message is exactly what those
+# must not become. `SourceNotSupported`, `FilterNotSupported` and
+# `AvailabilitySweepRefused` -- the three that live beside their own port
+# rather than in `ports/errors.py`, which is why nobody counts them -- stay out
+# for the opposite reason: no measured path reaches this boundary with one, and
+# ADR-0026 asks for evidence per family before the tuple grows.
+#
+# `tests/unit/test_cli_errors.py::
+# test_the_port_taxonomy_is_split_and_the_base_class_is_not_in_the_tuple`
+# reads the set off `__subclasses__()`, so a tenth member cannot arrive
+# without a decision about it.
 OPERATOR_ERRORS: tuple[type[Exception], ...] = (
     # A refused connection, a name that does not resolve, a full disk, a
     # bulk dataset that is not where it was left.
@@ -111,9 +149,23 @@ OPERATOR_ERRORS: tuple[type[Exception], ...] = (
     # Everything the driver does wrap: a missing table (`alembic upgrade
     # head` never ran), a dead pool, a permission the role does not have.
     SQLAlchemyError,
-    # TMDb, Emby, and every bulk download. An unreachable source is the same
-    # class of operator problem as an unreachable database.
+    # TMDb, Emby, and every bulk download that is *not* behind a port -- and
+    # every one of them is behind a port today, which is why the three below
+    # exist. Kept because an adapter is free to let one through and because
+    # nothing else covers a bare `httpx` call added later.
     httpx.HTTPError,
+    # The port taxonomy's transport half. The upstream could not be reached,
+    # or did not answer in time -- start the endpoint, fix the URL, wait for
+    # the model to load. Also the embedding runtime, whose own adapter says a
+    # restart fixes every case it raises this for.
+    PortUnavailable,
+    # The credential was rejected. `USHER_LLM_API_KEY`, `USHER_TMDB_API_KEY`,
+    # a source's stored password -- an operator fixes all three, and none of
+    # them is worth sixty frames.
+    PortAuthFailed,
+    # The upstream asked to be backed off. A CLI has no backoff schedule to
+    # apply, so the honest answer at a terminal is the sentence and exit 1.
+    PortRateLimited,
 )
 # Shorter than this and a rejected value is not a credential, and scrubbing
 # it would mangle the message it appears in ("not 4" -> "not <redacted>").
@@ -191,7 +243,7 @@ async def _bootstrap(settings: Settings, phase: str) -> None:
                 )
                 await service.link_crosswalk()
             if phase in ("movielens", "all"):
-                await _movielens(settings, client, catalog, service)
+                await _movielens(settings, client, catalog, service, session.commit)
             logger.info("catalog now holds {count} titles", count=await catalog.count_titles())
     finally:
         await client.aclose()
@@ -203,9 +255,10 @@ async def _movielens(
     client: httpx.AsyncClient,
     catalog: BulkCatalogRepository,
     service: BootstrapService,
+    commit: Callable[[], Awaitable[None]],
 ) -> None:
-    """The MovieLens tag genome, and the coverage report that is the actual
-    deliverable of this phase.
+    """The MovieLens tag genome, its tag vocabulary, and the coverage report
+    that is the actual deliverable of this phase.
 
     **The precondition is checked before the dataset is constructed, and the
     outcome it prevents is the worst one available here.** Run against an
@@ -251,6 +304,46 @@ async def _movielens(
     the writer is never called. That is correct and is the same shape
     `--phase imdb` already has; the insert-vs-update distinction lives in the
     repository and is covered there, not through a second CLI invocation.
+
+    **The tag vocabulary is written after the drain and only on a COMPLETED
+    run, and both halves are decisions.**
+
+    *After*, because before it would have to `ensure_local` outside
+    `import_dataset`'s `except UsherPortError`. Afterwards the archive is
+    already local and the only failures left are a parse and the database --
+    which still matters, because the parse failure is a `PortDataMalformed`
+    and that family is deliberately **not** in `OPERATOR_ERRORS` (ADR-0026's
+    2026-08-07 amendment put the transport half in and left the content half
+    to keep its stack). The download half of the original argument no longer
+    applies: an unreachable `files.grouplens.org` raises `PortUnavailable`,
+    which is now a sentence wherever it is raised.
+
+    *Only on COMPLETED*, because a vocabulary is what explains the vectors and
+    a failed drain has not finished writing them. The run that eventually
+    completes writes it.
+
+    **This is also the upgrade path, and it is the reason "after" is not a
+    problem.** A catalog bootstrapped under M7 has a *completed*
+    `movielens.genome` checkpoint and no vocabulary at all: re-running the
+    phase resumes from that cursor, yields no batch, writes no vector -- and
+    still reaches this, because the run it returns is `COMPLETED`.
+
+    **`run.rows_written` is the wrong predicate, and not for the reason it
+    looks like.** It is *cumulative across resumes*:
+    `PostgresImportRunRepository.start()` keeps it when the revision has not
+    moved, `BootstrapService._drain` adds each batch's count to the stored
+    one, and an archive that *has* moved resets it to 0 and then re-imports
+    every row. So on the upgrade path above it reads truthy and writes the
+    vocabulary anyway -- measured 2026-08-07, `if run.rows_written:` in place
+    of this line passes all 2,883 unit and all 899 integration cases. The two
+    spellings differ only for a *completed* run that has never written a
+    vector, which is a catalog holding no genome movie at all, and there a
+    vocabulary explains nothing. `COMPLETED` is the honest predicate because
+    "the drain finished" is the question being asked; the defect worth
+    guarding against is a **per-run** tally, which does leave the M7 upgrade
+    without a vocabulary and which
+    `test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_vocabulary`
+    fails on.
     """
     if await catalog.count_titles() == 0:
         print(
@@ -277,8 +370,18 @@ async def _movielens(
         return result.inserted + result.updated
 
     _GENOME_TALLY["unmatched"] = 0
-    await service.import_dataset(dataset, write, revision=revision)
-    _report_coverage(await catalog.genome_coverage(), _GENOME_TALLY["unmatched"])
+    run = await service.import_dataset(dataset, write, revision=revision)
+    tags = 0
+    if run.status is ImportRunStatus.COMPLETED:
+        # The same `revision` the vectors were stamped with, resolved once
+        # above -- which is the whole of what makes `genome_tags` and
+        # `genome_scores` comparable rather than merely both present.
+        vocabulary = await dataset.tag_vocabulary(revision)
+        tags = await catalog.replace_genome_tags(vocabulary, revision=revision)
+        # `import_dataset` commits its own last batch and then returns, so
+        # this write is alone in a fresh transaction and needs its own commit.
+        await commit()
+    _report_coverage(await catalog.genome_coverage(), _GENOME_TALLY["unmatched"], tags)
 
 
 # The `unmatched` count has nowhere else to go: `BootstrapService.import_dataset`
@@ -294,7 +397,7 @@ def _percent(part: int, whole: int) -> str:
     return "n/a (0 titles)" if whole == 0 else f"{100.0 * part / whole:.2f}%"
 
 
-def _report_coverage(coverage: GenomeCoverage, unmatched: int) -> None:
+def _report_coverage(coverage: GenomeCoverage, unmatched: int, tags: int) -> None:
     """Four fractions, the enriched-tier one last because it is the one that
     matters.
 
@@ -302,8 +405,17 @@ def _report_coverage(coverage: GenomeCoverage, unmatched: int) -> None:
     priority tier", and that figure has never had a denominator. Three of
     these are ceilings the *dataset* can reach; the fourth is what the join
     actually did against this operator's catalog.
+
+    `tags` is how many vocabulary rows this run wrote, `0` when the drain did
+    not complete and no vocabulary was loaded. Printed on the same line as the
+    vector count because the two are one artefact and a vocabulary that
+    silently did not land is the thing an operator most needs to see.
+    **Required rather than defaulted to `0`**, so a caller that forgets it is a
+    type error rather than a report that quietly says no vocabulary landed --
+    the `limit: int = 200` finding in `.claude/rules/testing-discipline.md`,
+    one signature over.
     """
-    print(f"movielens: {coverage.with_vector} vectors stored ({unmatched} unmatched)")
+    print(f"movielens: {coverage.with_vector} vectors stored ({unmatched} unmatched), {tags} tags")
     print(f"  {_percent(coverage.with_vector, coverage.titles)} of {coverage.titles} titles")
     print(f"  {_percent(coverage.with_vector, coverage.movies)} of {coverage.movies} movies")
     print(
@@ -320,6 +432,45 @@ def _report_coverage(coverage: GenomeCoverage, unmatched: int) -> None:
             print(f"    {name}: {count}")
 
 
+async def _vocabulary_line(genome: GenomeRepository, coverage: GenomeCoverage) -> str:
+    """One line saying whether the stored tag vocabulary can name the lanes of
+    the stored vectors.
+
+    **This is `GenomeRepository.vocabulary`'s operator surface**, and it is
+    here rather than in `_movielens` because `_movielens` would only be
+    reading back what it had just written. The condition worth reporting is
+    the one that appears *later*: an interrupted re-import against a new
+    upload, or an M7-era catalog whose vectors have no vocabulary at all.
+    It sits beside the `MIXED RELEASES` line `_report_coverage` prints for the
+    sibling condition on `genome_scores`.
+
+    Takes the port rather than a session, so the three branches are unit-
+    testable against `FakeGenomeRepository` -- `_status` itself opens an
+    engine and is not.
+
+    The refusal is *caught and printed*, not raised: `PortDataMalformed` is
+    deliberately not in `OPERATOR_ERRORS` -- the three `UsherPortError`
+    subclasses ADR-0026's amendment added are the transport ones, and this is
+    a content one -- so letting it out of a status command would answer "what
+    state is my genome in?" with a stack trace about the answer being bad.
+    Task 18's `usher curate` makes the same call for the same family.
+    """
+    if not coverage.revisions:
+        return "genome vocabulary: no vectors to name"
+    if len(coverage.revisions) > 1:
+        # `_report_coverage`'s MIXED RELEASES branch is about `genome_scores`
+        # and is not printed here; asking for one of several releases would
+        # report the vocabulary as wrong when what is wrong is the vectors.
+        return "genome vocabulary: not checked -- genome_scores holds more than one release"
+    try:
+        names = await genome.vocabulary(coverage.revisions[0][0])
+    except PortDataMalformed as exc:
+        return f"genome vocabulary: {exc}"
+    if names is None:
+        return "genome vocabulary: not loaded -- run bootstrap --phase movielens"
+    return f"genome vocabulary: {len(names)} tags"
+
+
 async def _status(settings: Settings) -> None:
     engine = build_engine(settings.database_url.get_secret_value())
     factory = build_session_factory(engine)
@@ -331,12 +482,14 @@ async def _status(settings: Settings) -> None:
             # A phase whose deliverable is coverage has to be visible in the
             # command an operator runs to see coverage.
             genome = await catalog.genome_coverage()
+            vocabulary = await _vocabulary_line(PostgresGenomeRepository(session), genome)
     finally:
         await engine.dispose()
     # Printed, not logged: this is a report an operator asked for, and routing
     # it through the JSON log sink would make it unreadable at a terminal.
     print(f"titles in catalog: {catalog_size}")
     print(f"genome vectors: {genome.with_vector}")
+    print(vocabulary)
     if not runs:
         print("no import has been run yet")
         return
@@ -497,7 +650,8 @@ async def _unmatched(
 
 
 async def _work(settings: Settings, *, once: bool) -> None:
-    """Run queued jobs: `match`, `enrich`, `watch_history`, `index`.
+    """Run queued jobs: `match`, `enrich`, `watch_history`, `index`, `derive`,
+    `curate`.
 
     Owns the one `httpx.AsyncClient` behind `TmdbClient`, because the token
     bucket that keeps this deployment under TMDb's ~40 rps ceiling lives on
@@ -520,6 +674,11 @@ async def _work(settings: Settings, *, once: bool) -> None:
         # `build_worker` runs once per pass below, and a load there is 4.84 s
         # cold / 0.13 s warm over 65 MB of ONNX.
         model, aclose_model = await embedder(settings)
+        # And the completion client, on the same terms: one per process, not
+        # one per pass. `USHER_LLM_ENABLED=false` is the shipped default and
+        # answers `(None, no-op)`, which is what leaves `curate` unclaimed
+        # here rather than parked.
+        client, aclose_client = await llm_client(settings)
         pipeline = build_pipeline(session, settings, provider=provider)
         registry = SourceRegistry(pipeline)
         gauges = QueueGauges()
@@ -537,6 +696,7 @@ async def _work(settings: Settings, *, once: bool) -> None:
                 settings,
                 provider=provider,
                 embedder=model,
+                client=client,
                 resolve=registry.resolve,
                 user_id=await ensure_default_user(session),
             )
@@ -560,6 +720,7 @@ async def _work(settings: Settings, *, once: bool) -> None:
             await registry.aclose()
             await aclose()
             await aclose_model()
+            await aclose_client()
 
 
 async def _derive(settings: Settings, *, backfill: bool, limit: int, page_size: int) -> None:
@@ -783,6 +944,32 @@ async def _search(
     request with no vector, so the only object that can construct one is the
     object holding the model -- which is why this passes primitives to
     `SearchService.search` and never a `SearchRequest`.
+
+    **The completion client is built only when a rewrite could actually be
+    bought, and that condition has three parts because the cost has three ways
+    of being wasted.** Query expansion sits in front of the embed, so: a mode
+    with no embed has no call to put in front of one; a deployment whose
+    embedder did not load has no embed either, and `SearchService` narrows to
+    full-text before it ever reaches an expander; and
+    `USHER_QUERY_EXPANSION_ENABLED` is `false` by default even where the LLM is
+    on, so `build_pipeline` would decline to build the expander anyway. In each
+    of the three an `httpx.AsyncClient` and its pool would be opened and closed
+    for nothing -- which is verbatim the cost the `full_text` guard exists for,
+    and the middle one was live until 2026-08-07: `embedder(...)` answering
+    `(None, nothing)` on the line above did not stop the client below it.
+
+    **Spelled as two conjuncts rather than three**, because `model` is built
+    only for a non-`full_text` mode, so `model is not None` already answers the
+    first part -- and a third clause restating it would be a condition no
+    configuration can make false on its own, i.e. exactly the unobservable code
+    this project keeps finding in mutation sweeps.
+
+    The pair reads as one question -- *is there an embed for a completion to
+    sit in front of, and does this deployment want one?* -- and it mirrors
+    `build_pipeline`'s `llm is None or not settings.query_expansion_enabled`
+    rather than duplicating it: that decides whether the *service* exists, this
+    decides whether the *pool* is opened, and only this side can be asked
+    before a pipeline exists.
     """
     requested = SearchMode(mode)
     model, aclose_model = (
@@ -796,9 +983,22 @@ async def _search(
         if requested is not SearchMode.FULL_TEXT
         else (None, nothing)
     )
+    # After the embedder, and reading its answer: `model is None` is the
+    # narrowed deployment, and there is nothing to expand for. `llm_client` is
+    # pure construction and cannot raise, `embedder` is the one that can, so
+    # this order also keeps a failed model load from leaking a pool.
+    # `report=False` for the reason above -- that factory's line is *"curate
+    # jobs will not be claimed"*, which is about a lane this process does not
+    # run. `query_expansion_enabled` implies `llm_enabled` (`config.py` refuses
+    # the other pairing), so the switch is asked about once here.
+    client, aclose_client = (
+        await llm_client(settings, report=False)
+        if model is not None and settings.query_expansion_enabled
+        else (None, nothing)
+    )
     try:
         async with _session_for(settings) as session:
-            pipeline = build_pipeline(session, settings, embedder=model)
+            pipeline = build_pipeline(session, settings, embedder=model, llm=client)
             try:
                 answer = await pipeline.search.search(
                     query, mode=requested, limit=limit, filters=filters
@@ -811,8 +1011,35 @@ async def _search(
                 # treatment `_as_uuid` gives a bad id.
                 raise SystemExit(f"{exc} -- try --mode fused, or run `usher index`") from exc
     finally:
+        await aclose_client()
         await aclose_model()
 
+    _print_search_answer(answer)
+
+
+def _print_search_answer(answer: SearchAnswer) -> None:
+    """The operator's answer. `print`, never `logger` -- `_print_home_report`'s
+    and `_print_curation_report`'s split, and the same reason: a command's
+    answer is stdout.
+
+    A function of its own rather than a tail of `_search`, for
+    `_print_curation_report`'s reason: everything above it needs a database and
+    everything here needs a `SearchAnswer`, and the expanded-query line is the
+    one report in this milestone whose *absence* is the defect.
+    """
+    if answer.expanded_query is not None:
+        # **Before the results, because it is the question they answer.**
+        # Reported on every search that bought a rewrite, not only when it
+        # looks surprising: a viewer who searched for one thing and got results
+        # for another cannot tell a good expansion from a bad one without
+        # seeing it, and neither can an operator reading their bug report.
+        # `expanded_query` is `None` on every path that embedded the query as
+        # typed, so this line never appears on a deployment with expansion off.
+        # **It is not a spend report and must not be read as one**: a call that
+        # answered with the wrong key is billed in full and still leaves this
+        # `None`, so no line here means the query was embedded as typed, never
+        # that nothing was bought. `llm_calls` is where spend is legible.
+        print(f"expanded: {answer.expanded_query}")
     for rank, result in enumerate(answer.results, start=1):
         year = f" ({result.year})" if result.year else ""
         owned = "*" if result.owned else " "
@@ -992,6 +1219,25 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
         # The same wiring `api/deps.py` builds per request, minus the request:
         # `taste` and `affinities` are values the composer hands over, because
         # a provider may import only `domain/` and `ports/`.
+        #
+        # **`affinities` is a callable here for the reason it is one there**
+        # (`ports/rows.py` argues it): the read behind it is three statements,
+        # and only `GenreAffinityProvider` awaits them.
+        #
+        # One consequence is specific to this command and worth naming, since
+        # `--repeat` exists to produce a number somebody quotes. The affinity
+        # read used to happen *once*, before the timed loop, so no repeat paid
+        # for it; it is now inside every run that reaches the provider. Two of
+        # its three statements -- `list_recent` and the library-wide genre
+        # aggregate -- are memoised on `TasteService`, which is one object for
+        # this whole command, so run 1 pays them and runs 2..N do not; the
+        # `list_by_ids` over the window is paid by each. Deliberately *not*
+        # wrapped in the route's per-request memo (`api/deps.py:_Affinities`):
+        # a repeat that skipped the read entirely would report a cold compose
+        # that never happens on the route.
+        #
+        # No lambda-in-a-loop hazard: this closes over `pipeline` and `user`,
+        # both bound once above.
         ctx = RowContext(
             user=user,
             now=lambda: datetime.now(UTC),
@@ -1003,7 +1249,8 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
             people=pipeline.people,
             credits=pipeline.credits,
             collections=pipeline.collections,
-            affinities=await pipeline.taste.genre_affinity(user.id),
+            affinities=lambda: pipeline.taste.genre_affinity(user.id),
+            curated=pipeline.curated_rows,
         )
         cache = RowCache(clock=lambda: datetime.now(UTC))
         service = HomeService(pipeline.row_providers, cache=cache, max_rows=limit)
@@ -1059,8 +1306,8 @@ def _print_home_report(report: ComposeReport, *, cold: Sequence[float], warm: fl
     )
     # **The second half of boundary call 8's rule, computed rather than left to
     # the reader.** If one provider is most of the wall clock, parallelising
-    # nine of them converges on that provider's latency and buys nothing -- the
-    # finding is a query to fix.
+    # the other nine converges on that provider's latency and buys nothing --
+    # the finding is a query to fix.
     total_build = sum(one.build_seconds for one in report.providers)
     if total_build > 0:
         slowest = max(report.providers, key=lambda entry: entry.build_seconds)
@@ -1080,6 +1327,230 @@ def _print_home_report(report: ComposeReport, *, cold: Sequence[float], warm: fl
         "revisit the sequential build only when p95 > 400 ms AND no single provider "
         "is >= 50% of build time"
     )
+
+
+async def _curate(settings: Settings) -> None:
+    """One generation for the default household, at a terminal.
+
+    **Ships alongside `POST /admin/rows/regenerate` and `JobKind.CURATE`
+    rather than instead of them**, which is `usher home`'s relationship to
+    `GET /home`: the route promises a 202 and says nothing about when the
+    work runs, and the job is claimed by whichever worker has a client. This
+    command is the one surface where an operator gets the *answer* -- what
+    the pool was, what survived, what it cost -- in the same breath as the
+    request. PRD 06's "one modest completion per user per day" is a budget
+    this command spends one of, so it prints what it bought.
+
+    ## The disabled deployment answers before anything is opened
+
+    **There is no `CurationService` to build.** `composition.llm_client`
+    answers `(None, no-op)` for `USHER_LLM_ENABLED=false` and
+    `CurationService` spells its client `LLMClient`, never
+    `LLMClient | None`, so "no client, no curation" is a `mypy` fact at the
+    composition root rather than a branch inside the service. Every other
+    surface in this milestone degrades around that: `GET /home` is a shorter
+    screen because nine of ten providers need no model, and `usher work`
+    keeps five job kinds because `build_worker` registers `CURATE` under the
+    same guard `INDEX` sits behind. **This command has exactly one job**, so
+    there is nothing to narrow to, and a run that printed an empty report
+    and exited 0 would tell a cron entry that curation is running.
+
+    So it is `SystemExit` with a sentence -- the convention `_as_uuid`, the
+    semantic-search guard and `similar`'s cross-argument rule already use,
+    and which `main`'s boundary passes through untouched because
+    `SystemExit` is a `BaseException`. Not a new exception type and not a
+    second handler: a deployment configured without a model has not
+    *failed*, it said so once, at startup.
+
+    `report=False` for `usher search`'s reason. `llm_client`'s own warning is
+    *"curate jobs will not be claimed"*, which is right for `usher work` and
+    wrong twice over here -- this process claims no jobs, and
+    `_print_home_report`'s printed-not-logged rule would put a JSON envelope
+    in front of the answer.
+    The sentence below names the two settings instead, which is better
+    information rather than the same information.
+
+    **It took a second fix for that to be true of the run that succeeds**, and
+    the first one was defending an outcome it could not deliver. `report=False`
+    silences Usher's own line; `httpx` was writing one of its own, at INFO,
+    once per request, through `_InterceptHandler` and onto the same stdout --
+    so on the shipped defaults the report opened with a ~900-character JSON
+    envelope about its own completion. Measured 2026-08-07, quieted in
+    `configure_telemetry`, pinned by
+    `test_httpxs_per_request_info_line_does_not_reach_the_sink`. Worth stating
+    here because the equivalent case for this command cannot catch it: the
+    integration fixture substitutes `FakeLLMClient`, which opens no socket, so
+    a `sink == []` assertion over it would be green against a shipped path
+    that logs.
+
+    ## The two conditions that raise, and why one arm covers both
+
+    `generate()` raises `PortDataMalformed` for an **empty candidate pool**
+    (PRD 08's "every command works against an empty database"; the one path
+    that attempts no call and so writes no `llm_calls` row) and for a
+    **generation that validated to zero rows** (ADR-0028's rule 3, carrying
+    `CurationRejected.error`, which is numbers and label names only). The
+    adapter raises the same type for a completion this endpoint could not
+    produce -- a truncated answer, a schema it will not accept, a prompt over
+    the context length -- and every one of those messages is a written
+    sentence that names its own fix.
+
+    **That family is exactly the one `JobWorker` parks**: retrying does not
+    help, so a human has to act, which is ADR-0026's own test for what an
+    operator-facing message is. The CLI's equivalent of parking is a sentence
+    and exit 1. Everything else keeps its stack, exactly as `OPERATOR_ERRORS`
+    leaves everything it does not name.
+
+    **An endpoint that is down, rate-limiting or refusing the key is not this
+    arm's**, and since ADR-0026's 2026-08-07 amendment it is not a stack
+    either -- `PortUnavailable`, `PortRateLimited` and `PortAuthFailed` are in
+    `OPERATOR_ERRORS`, so `main`'s one boundary answers them, one layer out,
+    with the same sentence-and-exit-1 every other command gets. This arm is
+    deliberately not widened to meet them: the boundary already has the
+    families whose fix is "start it, wait, fix the key", and a second handler
+    here would be the per-command shape ADR-0026 exists to refuse. It costs
+    them the screen clause below, which is the honest trade -- `replace_for_user`
+    is unreached on those paths too, but the message an operator needs first is
+    the endpoint's.
+
+    **The arm does not branch on which of the three it was**, and that is a
+    decision rather than an omission. The service's own message is the
+    diagnosis in each case and they read nothing alike; a CLI that wanted to
+    add a per-case next step would have to tell them apart by sniffing the
+    message or by reading `PortDataMalformed.detail`, which is coupling to a
+    field whose documented job is naming an offending record. What the arm
+    *does* add is the one fact none of the three messages carries and every
+    operator asks first: **last night's screen still stands** -- PRD 08's
+    degradation row, true on all three paths because `replace_for_user` is
+    reached on exactly one.
+
+    **It says that and not "nothing was written", and the difference is the
+    money.** Only the empty pool attempts no call. The other two reach
+    `CurationService._settle`, which writes a **committed** `llm_calls` row
+    with `ok = false` and the real token counts -- deliberately, because a
+    failure with zeroed tokens is indistinguishable from a call that never
+    happened. So "nothing was written" was false on two of the three paths,
+    and false in the direction that matters: on a generation that validated
+    to zero rows the operator has been *charged*, which is the exact state
+    ADR-0028's rule 3 exists to make visible. This command's own integration
+    case asserts the contradiction --
+    `test_curate_says_what_it_dropped_when_nothing_survived` requires
+    `len(ledger) == 1`, "the call was billed and the ledger has to say so".
+    The screen is what this sentence is about; the spend is what `llm_calls`
+    is for, and the tokens and cost this command prints on the path that
+    succeeds.
+
+    `--traceback` does not reopen it, for `_settings_problem`'s reason
+    rather than its own: these stacks are this project's own frames raising
+    a message that is already complete, so re-raising adds lines and no
+    diagnosis.
+    """
+    # Built before the session and released in the same `finally` as
+    # `usher search`'s embedder: it is a once-per-process resource
+    # (`composition.llm_client` opens an `httpx.AsyncClient` with its own
+    # pool), which for a command is once.
+    client, aclose_client = await llm_client(settings, report=False)
+    if client is None:
+        # Before the `try`, because there is nothing to release: the factory
+        # hands back `composition.nothing` on this path, and awaiting a
+        # shared module-level no-op would read as cleanup that happened.
+        raise SystemExit(
+            "usher curate: this deployment has no LLM, so there is no generation to run "
+            "(set USHER_LLM_ENABLED=true and point USHER_LLM_BASE_URL at an "
+            "OpenAI-compatible endpoint)"
+        )
+    try:
+        async with _session_for(settings) as session:
+            pipeline = build_pipeline(session, settings)
+            service = build_curation_service(pipeline, settings, client)
+            # `ensure_default_user`, not `default_user`: this command needs an
+            # id and nothing else, and PRD 01's authentication seam is a
+            # singleton row until M9 gives it a request to come from.
+            user_id = await ensure_default_user(session)
+            try:
+                report = await service.generate(user_id)
+            except PortDataMalformed as exc:
+                raise SystemExit(
+                    f"usher curate: {exc}\n(the household's previous rows still stand)"
+                ) from exc
+            _print_curation_report(report)
+    finally:
+        await aclose_client()
+
+
+def _print_curation_report(report: CurationReport) -> None:
+    """The operator's answer. `print`, never `logger` -- `_print_home_report`'s
+    split, and the same reason: a command's answer is stdout.
+
+    Every number here comes off the `CurationReport` rather than being
+    re-derived. **The pool size is the one that could not be re-derived
+    honestly**: asking `CandidatePoolService` again would build a *second*
+    pool -- a second catalog read, a second centroid, and a number equal to
+    the first only by luck of nothing having been watched in between -- and
+    summing the rows that came back cannot see the rows that are missing.
+
+    `cost_usd` is a `Decimal` and stays one all the way to the screen. Eight
+    decimal places because that is what `llm_calls.cost_usd`'s
+    `NUMERIC(12, 8)` stores, so this line and
+    `SELECT sum(cost_usd) FROM llm_calls` show an operator the same digits.
+    """
+    print(f"generation: {report.generation_id}")
+    print(f"pool: {report.pool_size} candidates")
+    kept = len(report.rows)
+    cards = sum(len(row.card_title_ids) for row in report.rows)
+    print(f"kept: {kept} {_unit('row', kept)}, {cards} {_unit('card', cards)}")
+    for row in report.rows:
+        count = len(row.card_title_ids)
+        print(f"  {row.slug:<14}{row.title:<48}{count:>3} {_unit('card', count)}")
+    # **All five, zeros included**, iterating the map the validator built
+    # rather than filtering it: a reason absent from a report is
+    # indistinguishable from a reason nobody counts, which is the tally's own
+    # subject one level up -- and at a terminal there is no second export to
+    # compare against.
+    print("dropped (all five reasons, zeros included -- an absent line and a")
+    print("         reason nobody counts read the same):")
+    for reason, count in report.dropped.items():
+        print(f"  {reason.value:<16}{count:>4} {_unit(_drop_unit(reason), count)}")
+    usage = report.usage
+    print(
+        f"tokens: {usage.tokens_in} in, {usage.tokens_out} out   "
+        # Never `float(...)`: the two disagree below the column's own
+        # precision, which is where a per-token price on a cheap model lands.
+        f"cost: ${usage.cost_usd:.8f}   "
+        f"latency: {usage.latency_ms} ms   "
+        # What answered, not what was asked -- PRD 10 groups spend by model
+        # and a proxy serving a different one is the state
+        # `curated_rows.model_name` exists to make queryable.
+        f"model: {usage.model}"
+    )
+
+
+def _drop_unit(reason: DropReason) -> str:
+    """`row` or `card`, read off the member's own name.
+
+    Two of the five count rows and three count cards, so summing across the
+    label is meaningless -- and the `row_` prefix is what
+    `curation_validate`'s vocabulary uses to say so out loud. Derived rather
+    than tabulated here, because a table is a second copy that a sixth member
+    can arrive without a row in.
+
+    Singular, because the noun and the number that agrees with it are two
+    decisions and only one of them is about the vocabulary. `_unit` makes the
+    other.
+    """
+    return "row" if reason.value.startswith("row_") else "card"
+
+
+def _unit(noun: str, count: int) -> str:
+    """`1 row`, `2 rows` -- the form of the noun `count` agrees with.
+
+    Cosmetic and worth the function anyway: three lines of this report format
+    a count beside a unit (`kept:`, each kept row's cards, each drop reason),
+    so a plural hardcoded at one of them leaves the other two printing
+    `1 cards` -- and a report whose own prose reads unproofed invites the
+    numbers beside it to be read the same way.
+    """
+    return noun if count == 1 else f"{noun}s"
 
 
 async def _push(settings: Settings, *, source_name: str | None, probe: bool) -> None:
@@ -1291,6 +1762,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="cold compositions to time; the cache is cleared before each",
     )
 
+    # **No arguments at all**, and `--user` is the one deliberately absent:
+    # PRD 01 leaves authentication as a seam and `usher.db.users` is what
+    # stands in it, a singleton `is_default` row. A flag naming a household
+    # would be an id an operator has no way to look up on a deployment that
+    # has exactly one -- it lands with the request that carries a user, which
+    # is M9's.
+    sub.add_parser("curate", help="run one LLM generation for the default user")
+
     push = sub.add_parser("push", help="run the push lane, or probe a source's push channel")
     push.add_argument("--source", default=None, help="source name; omit for every enabled source")
     push.add_argument(
@@ -1445,9 +1924,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     credential (see `_settings_problem`).
 
     `SystemExit` is untouched by all of it: it is a `BaseException`, the
-    handlers below name only `Exception` subclasses, and three places in
+    handlers below name only `Exception` subclasses, and five places in
     this module already exit with a message chosen for the failure it
-    describes.
+    describes -- `_as_uuid`, the semantic-search guard, `similar`'s
+    cross-argument rule, and both of `curate`'s (no LLM configured, and a
+    generation that did not happen).
     """
     argv = sys.argv[1:] if argv is None else list(argv)
     args = parse_args(list(argv) if argv else ["serve"])
@@ -1536,6 +2017,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
         )
     elif args.command == "home":
         asyncio.run(_home(settings, limit=args.limit, repeat=args.repeat))
+    elif args.command == "curate":
+        asyncio.run(_curate(settings))
     elif args.command == "push":
         asyncio.run(_push(settings, source_name=args.source, probe=args.probe))
     else:

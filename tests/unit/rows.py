@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 
 from tests.fakes.collection_repository import FakeCollectionRepository, SeededMediaItem
 from tests.fakes.credit_repository import FakeCreditRepository
+from tests.fakes.curated_row_repository import FakeCuratedRowRepository
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import (
@@ -37,6 +38,7 @@ from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.collection import Collection
+from usher.domain.curation import SLUG_PREFIX, CuratedRow
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.episode import Episode, Season
 from usher.domain.ids import new_id
@@ -63,9 +65,19 @@ class Library:
     expects at position 0 without reaching back into the fakes.
     """
 
-    def __init__(self) -> None:
-        self.titles = FakeTitleRepository()
-        self.media_items = FakeMediaItemRepository()
+    def __init__(
+        self,
+        *,
+        titles: FakeTitleRepository | None = None,
+        media_items: FakeMediaItemRepository | None = None,
+    ) -> None:
+        # Both are injectable so a case can count the *statements* a row costs
+        # rather than only the cards it produces. They are wired into three
+        # other fakes below (`FakeCreditRepository`, the collections catalog,
+        # `available_copies`), which is why a case substitutes them here rather
+        # than assigning over the attributes afterwards.
+        self.titles = FakeTitleRepository() if titles is None else titles
+        self.media_items = FakeMediaItemRepository() if media_items is None else media_items
         self.watch_states = FakeWatchStateRepository()
         # **The fake *copies* the mapping it is constructed with**, so seeding
         # into a dict handed to the constructor reaches nothing -- and
@@ -81,11 +93,17 @@ class Library:
         # implementation fail rather than a wrong one pass.
         self.credits = FakeCreditRepository(self.people, self.titles)
         self.collections = FakeCollectionRepository()
+        self.curated_rows = FakeCuratedRowRepository()
         # `replace_for_titles` is a replace, so incremental seeding has to hold
         # the accumulated set per title and re-send it. Keeping the accumulator
         # here rather than reaching into the fake's private list is what makes
         # `credit()` go through the port the way a derivation does.
         self._credits: dict[uuid.UUID, list[Credit]] = {}
+        # `replace_for_user` is the same shape one table over, and it refuses a
+        # batch carrying two `generation_id`s -- so incremental seeding holds
+        # the accumulated generation per household and re-sends it.
+        self._curated: dict[uuid.UUID, list[CuratedRow]] = {}
+        self._generation = new_id()
         self._observed = 0
 
     # -- the catalog ------------------------------------------------------
@@ -348,6 +366,67 @@ class Library:
         await self.collections.attach_titles([(title_id, one.id) for title_id in title_ids])
         return one.id
 
+    # -- what a generation left behind -------------------------------------
+
+    async def curated(
+        self,
+        card_title_ids: Sequence[uuid.UUID],
+        *,
+        position: int,
+        title: str = "A Shelf A Model Named",
+        reason: str | None = "Because you keep finishing the quiet ones.",
+        slug: str | None = None,
+        width: int = 1,
+        user_id: uuid.UUID | None = None,
+        generation_id: uuid.UUID | None = None,
+        generated_at: datetime = NOW,
+    ) -> CuratedRow:
+        """One stored `curated_rows` record, written through the port.
+
+        **`position` is required and `slug` is derived from it**, because the
+        two are one fact in production -- `services.curation_validate` is the
+        only thing that mints a curated slug and it mints it from the row's
+        index. A seeder that let a case set them independently would let a
+        fixture assert an ordering the write path cannot produce.
+
+        `width` is the **generation's** padding width, not this row's: nine
+        rows mint `curated-1` and ten mint `curated-01`, so it is a property of
+        the batch and a case seeding ten rows passes `width=2` to every one of
+        them. That instability is exactly why a curated slug is not a stable
+        name across generations, and why `CuratedProvider` may treat one as
+        unique only within the generation it read.
+        """
+        owner = USER.id if user_id is None else user_id
+        row = CuratedRow(
+            id=new_id(),
+            user_id=owner,
+            slug=f"{SLUG_PREFIX}-{position + 1:0{width}d}" if slug is None else slug,
+            title=title,
+            reason=reason,
+            card_title_ids=tuple(card_title_ids),
+            position=position,
+            model_name="an-invented-model",
+            generation_id=self._generation if generation_id is None else generation_id,
+            generated_at=generated_at,
+        )
+        held = self._curated.setdefault(owner, [])
+        # A second generation for the same household **replaces** the first,
+        # which is what `replace_for_user` is: the accumulator is reset rather
+        # than appended to, so a case seeding "last night's ten and tonight's
+        # nine" gets the write path's own answer instead of a mixture no
+        # generation ever produced.
+        if held and held[0].generation_id != row.generation_id:
+            held = []
+            self._curated[owner] = held
+        held.append(row)
+        await self.curated_rows.replace_for_user(owner, held)
+        return row
+
+    def generation(self) -> uuid.UUID:
+        """A fresh generation stamp, so a case can seed two nights in order."""
+        self._generation = new_id()
+        return self._generation
+
     # -- the context ------------------------------------------------------
 
     def context(
@@ -356,6 +435,20 @@ class Library:
         affinities: Sequence[GenreAffinity] = (),
         now: datetime = NOW,
     ) -> RowContext:
+        """The wiring `api/deps.py` builds per request, over this household.
+
+        **`affinities` is taken as the sequence and wrapped here**, because
+        every case in every `test_rows_*.py` file is about what a provider does
+        with the affinities it is handed and none of them is about the field's
+        laziness. The two cases that *are* about it -- the route not reading
+        the household's taste to build a context, and a screen the cache can
+        answer reading none at all -- build their own callable so it can count.
+        """
+        held = tuple(affinities)
+
+        async def affinities_of() -> Sequence[GenreAffinity]:
+            return held
+
         return RowContext(
             user=USER,
             # Bound at call time rather than read from the module: a
@@ -371,5 +464,6 @@ class Library:
             people=self.people,
             credits=self.credits,
             collections=self.collections,
-            affinities=tuple(affinities),
+            curated=self.curated_rows,
+            affinities=affinities_of,
         )

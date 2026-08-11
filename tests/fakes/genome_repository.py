@@ -1,8 +1,21 @@
 """In-memory `GenomeRepository`.
 
-**Where this is more forgiving than Postgres, on purpose.** Three places,
-each of which the paired `tests/integration/test_genome_repository.py` run
-is what actually closes:
+**Where this is more forgiving than Postgres, on purpose.** Five places, each
+of which the paired `tests/integration/test_genome_repository.py` run is what
+actually closes. The last two are `genome_tags`':
+
+- **No `ck_genome_tags_tag_id_in_vocabulary` and no `ck_genome_tags_tag_not_
+  empty`.** `FakeGenomeSeeder.tags` stores a `tag_id` of `0`, of `2**31`, or a
+  name of `""`; Postgres refuses all three. Nothing in the contract suite
+  depends on which, because the writer that would produce them
+  (`BulkCatalogRepository.replace_genome_tags`) refuses each before either
+  arm is reached -- these are what the CHECKs defend a hand-written `INSERT`
+  against, and only the real arm has them.
+- **No primary key on `tag_id`**, so this dict silently collapses a duplicate
+  lane where Postgres raises. `dict` keying makes the last write win, which is
+  the more forgiving of the two.
+
+And the three `genome_scores` ones, unchanged:
 
 - **No `halfvec` and therefore no quantisation.** A vector round-trips here
   bit-exactly; through `halfvec(1128)` it does not (M6 measured max cosine
@@ -18,13 +31,14 @@ is what actually closes:
   contract case depends on which.
 
 `titles` is a test-double affordance written only by `FakeGenomeSeeder`; the
-port never writes it, and neither will it -- the writer is
-`BulkCatalogRepository.upsert_genome_vectors`.
+port never writes it, and neither will it -- the writers are
+`BulkCatalogRepository.upsert_genome_vectors` and `.replace_genome_tags`.
 """
 
 import uuid
 from dataclasses import dataclass, field
 
+from usher.ports.errors import PortDataMalformed
 from usher.ports.repository import GenomeRepository, GenomeVectorRow
 
 
@@ -41,6 +55,10 @@ class FakeGenomeRepository(GenomeRepository):
 
     vectors: dict[uuid.UUID, GenomeVectorRow] = field(default_factory=dict)
     titles: set[uuid.UUID] = field(default_factory=set)
+    #: `tag_id -> (tag, genome_revision)`, written only by `FakeGenomeSeeder`.
+    #: Independent of `vectors` because the two tables are, which is the whole
+    #: reason `vocabulary` compares a revision instead of joining.
+    tags: dict[int, tuple[str, str]] = field(default_factory=dict)
 
     async def get(self, title_id: uuid.UUID) -> GenomeVectorRow | None:
         return self.vectors.get(title_id)
@@ -62,3 +80,26 @@ class FakeGenomeRepository(GenomeRepository):
             # "compare these two" is that they are not comparable.
             return None
         return first, second
+
+    async def vocabulary(self, revision: str) -> tuple[str, ...] | None:
+        # Sorted by `tag_id` rather than trusting insertion order, which is
+        # what the Postgres arm's `ORDER BY` does and what makes the two
+        # answer alike for a vocabulary seeded out of order.
+        rows = sorted(self.tags.items())
+        if not rows:
+            return None
+        stored = {row_revision for _, (_, row_revision) in rows}
+        if stored != {revision}:
+            raise PortDataMalformed(
+                f"the stored genome vocabulary was loaded from release "
+                f"{'/'.join(sorted(stored))} and cannot name the lanes of a vector from "
+                f"{revision}; re-run bootstrap --phase movielens",
+                detail=revision,
+            )
+        if [tag_id for tag_id, _ in rows] != list(range(1, len(rows) + 1)):
+            raise PortDataMalformed(
+                f"the stored genome vocabulary is not contiguous 1...{len(rows)}; a gap "
+                "moves every later lane's name",
+                detail=revision,
+            )
+        return tuple(tag for _, (tag, _) in rows)

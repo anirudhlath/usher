@@ -84,13 +84,35 @@ class RowFamily(StrEnum):
     convention over slugs -- `because-you-watched-<seed>` is per-seed, so a
     slug-keyed rule couples the composer to the catalog.
 
-    **Two members in M7, not PRD 06's three.** Its family table lists
-    `SourceRow`, `SimilarityRow` and `LLMRow`; boundary call 2 gives the whole
-    `LLMRow`/`CuratedProvider`/`curated_rows` family to M8. `CURATED` is
-    deliberately not pre-declared: a cap on a family with no members is a
+    **Three members, and the third arrived with its emitter rather than ahead
+    of it.** PRD 06's family table lists `SourceRow`, `SimilarityRow` and
+    `LLMRow`; M7's boundary call 2 gave the whole
+    `LLMRow`/`CuratedProvider`/`curated_rows` family to M8, and `CURATED` was
+    deliberately **not** pre-declared -- a cap on a family with no members is a
     branch nothing can reach, so the first thing M8 would discover is whether
-    that branch was ever right. The member costs one line in the diff that
-    adds the provider emitting it.
+    that branch was ever right. It cost one line in the diff that added
+    `services/rows/curated.py:LLMRow`, which is the only thing that emits it.
+
+    **What it turned out to make reachable, because that is the question the
+    deferral was protecting.** Not the per-family cap: the two cases that
+    exercise it -- `test_services_home.py::test_no_family_exceeds_its_cap_even_
+    when_it_proposes_the_top_scores` and `::test_a_proposal_the_cap_declined_is_
+    selected_zero_rather_than_absent` -- have each proposed **eight
+    `SIMILARITY`** rows since M7, and the cap has never cared how many families
+    exist. It is `HomeService`'s `_MAX_ROWS`. With two families the longest
+    screen the composer could return was **nine** rows -- one pinned plus four
+    per family -- and the *registry* could only reach **eight** of those,
+    because `BecauseYouWatchedProvider` is the only `SIMILARITY` emitter and
+    its `_MAX_SEEDS` is 3; both are under the ceiling of ten, so it truncated
+    nothing at any input. With three families, thirteen candidates get past the
+    cap and it truncates three of them. That "one pinned" term is a property of
+    the *registry* and not of the composer -- `_select` sets every pinned
+    candidate aside before the cap with no bound of its own -- and
+    `test_rows_invariants.py::test_continue_watching_is_the_only_provider_that_
+    pins_and_it_pins_one_row` is what holds it. `services/home.py` carries the
+    same note in its **module docstring**, and `test_services_home.py::test_the_
+    default_row_ceiling_is_reachable_now_that_a_third_family_exists` is where
+    the branch is pinned.
 
     Named `RowFamily` and not `RowKind`, and there is exactly one of it. The
     milestone plan used both names for this one concept -- `RowKind` in the
@@ -103,6 +125,7 @@ class RowFamily(StrEnum):
 
     SOURCE = "source"
     SIMILARITY = "similarity"
+    CURATED = "curated"
 
 
 class DisplayHint(StrEnum):
@@ -211,9 +234,11 @@ class BuiltRow(DomainModel):
     slug: str = Field(min_length=1)
     title: str = Field(min_length=1)
     # PRD 06: "the `reason` field is already written to be spoken aloud, not
-    # just displayed" -- Alfred reads it out. That is a real constraint on the
+    # just displayed" -- Alfred reads it out. That is a real constraint on M7's
     # nine providers: "Because you watched Dune" is speakable and
-    # "cosine>0.82 seed=a3f9" is not. `None` when a row needs no explanation.
+    # "cosine>0.82 seed=a3f9" is not. `None` when a row needs no explanation,
+    # and M8's `LLMRow` is the first thing in `src/` to return it -- it hands
+    # the stored `reason` through, `None` included.
     reason: str | None = None
     family: RowFamily
     # On the row, never on the card: a hint describes the shelf, and a card

@@ -9,9 +9,13 @@ the raised exception embeds the raw DSN, password included. See env.py's
 module docstring and `_database_url()`.
 """
 
+import ast
+from pathlib import Path
+
 import pytest
 from alembic.config import Config
 
+import usher.db
 from usher.config import Settings
 
 _PERCENT_DSN = "postgresql+asyncpg://usher:p%40ss%25word@localhost:5432/usher"
@@ -50,3 +54,40 @@ def test_settings_database_url_is_returned_unmangled_regardless_of_percent(
     monkeypatch.setenv("USHER_SECRET_KEY", "0123456789abcdef0123456789abcdef")
     settings = Settings()
     assert settings.database_url.get_secret_value() == _PERCENT_DSN
+
+
+def test_env_py_never_lets_fileconfig_disable_the_loggers_it_did_not_name() -> None:
+    """`fileConfig`'s `disable_existing_loggers` defaults to **True**, which
+    sets `.disabled` on every logger absent from alembic.ini's `[loggers]`
+    (root, sqlalchemy, alembic) -- a migration file silencing modules it has
+    no opinion about, permanently, because nothing in `logging` clears that
+    flag on reconfigure. Measured 2026-08-10: it is why `pytest tests/unit`
+    was green and `pytest tests/integration tests/unit/test_telemetry.py`
+    was not. Companion repair in `usher.telemetry.configure_logging`, which
+    reclaims the flag whoever set it.
+
+    Structural rather than behavioural, deliberately and in both directions.
+    env.py calls this at import under a live alembic context, so a unit test
+    cannot reach the call; and `fileConfig` against the real alembic.ini
+    would reconfigure root logging for every case that ran afterwards, which
+    is the defect rather than a way to observe it. The damage is invisible to
+    assertions in this file in any event -- it lands on *other* modules'
+    logging.
+    """
+    source = (Path(usher.db.__file__).parent / "migrations" / "env.py").read_text()
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "fileConfig"
+    ]
+    assert len(calls) == 1, f"expected exactly one fileConfig call in env.py, found {len(calls)}"
+
+    passed = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+    disable = passed.get("disable_existing_loggers")
+    assert disable is not None, "fileConfig must pass disable_existing_loggers explicitly"
+    assert isinstance(disable, ast.Constant) and disable.value is False, (
+        "disable_existing_loggers must be False; the default silences every "
+        "logger alembic.ini does not name"
+    )

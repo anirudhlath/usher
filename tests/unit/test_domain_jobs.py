@@ -70,7 +70,7 @@ def test_an_empty_key_is_rejected() -> None:
         Job(kind=JobKind.MATCH, key="")
 
 
-def test_the_five_kinds_m7_ships() -> None:
+def test_the_six_kinds_m8_ships() -> None:
     """Each kind arrives with the artefacts it maintains, not before.
 
     M4's version asserted three members and explained the absence: "a job
@@ -80,7 +80,14 @@ def test_the_five_kinds_m7_ships() -> None:
     same for `derive` -- the member, the handler, the enqueue site and
     `usher derive` in one commit.
 
-    An exact set rather than a membership check, so a sixth kind cannot be
+    **`curate` is the first member whose handler is registered
+    conditionally**, which is a different question from the rule above and
+    does not weaken it: the handler exists in every build, and
+    `composition.build_worker` withholds the *registration* from a deployment
+    with no `LLMClient`, exactly as it withholds `index` from one with no
+    embedder. What M4 forbade was a member with no handler anywhere.
+
+    An exact set rather than a membership check, so a seventh kind cannot be
     added without this list moving and someone reading that rule.
     """
     assert set(JobKind) == {
@@ -89,6 +96,7 @@ def test_the_five_kinds_m7_ships() -> None:
         JobKind.WATCH_HISTORY,
         JobKind.INDEX,
         JobKind.DERIVE,
+        JobKind.CURATE,
     }
 
 
@@ -104,7 +112,14 @@ def test_every_member_of_every_enum_is_its_stored_value() -> None:
     a previous release wrote is unclaimable and `claim` reports an empty
     queue rather than an error.
     """
-    assert {k.value for k in JobKind} == {"match", "enrich", "watch_history", "index", "derive"}
+    assert {k.value for k in JobKind} == {
+        "match",
+        "enrich",
+        "watch_history",
+        "index",
+        "derive",
+        "curate",
+    }
     assert {s.value for s in JobStatus} == {"pending", "running", "parked"}
 
 

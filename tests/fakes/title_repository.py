@@ -8,6 +8,7 @@ parametrized tests along with it.
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from usher.domain.enums import EnrichmentState, TitleKind
@@ -66,6 +67,28 @@ def _conflict(title_id: uuid.UUID, constraint: str) -> RepositoryConflict:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class FakeWatchRow:
+    """One `watch_states` row, as much of it as `list_unwatched_candidates`
+    reads.
+
+    **Both targets are modelled rather than collapsed to a title id**, for
+    `available_copies`' reason one table over: the real statement rolls a
+    watched episode up through `episodes.title_id`, and a fake holding
+    already-rolled-up title ids could not tell that implementation from the
+    one that answers films-only on a library that is 89% episodes.
+
+    `played` is a field rather than a filter applied on the way in, because
+    "has a watch state" is the wrong predicate this read has to rule out and a
+    store holding only played rows could not express it.
+    """
+
+    user_id: uuid.UUID
+    title_id: uuid.UUID | None
+    episode_id: uuid.UUID | None
+    played: bool
+
+
 class FakeTitleRepository(TitleRepository):
     """Keyed the same way the real Postgres-backed
     `PostgresTitleRepository` (Task 10) is: by id, with tmdb_id and
@@ -80,6 +103,49 @@ class FakeTitleRepository(TitleRepository):
     a duplicate tmdb_id/imdb_id/tvdb_id under a *different* id — the real
     repository's unique partial indexes reject that too (see
     `_provider_id_conflict`), so this fake does the same.
+
+    **Where `list_unwatched_candidates` here is more forgiving than the
+    statement, on purpose. Seven, each of which the paired
+    `tests/integration/test_title_repository.py` run is what actually closes:**
+
+    - **"No ordering at all" is not expressible.** `list.sort` is stable, so
+      deleting a key -- or the whole `sort` call -- still answers in insertion
+      order here, where the real statement's deleted `ORDER BY` answers in
+      heap order. That is why every ordering case in
+      `TitleRepositoryCandidateContract` is seeded worst-first: with a
+      best-first fixture neither arm would notice.
+    - **The roll-up is a mapping handed in, not a `LEFT JOIN episodes`.** The
+      real one reaches a series through `episodes.title_id`; this has no
+      episodes table, so `episode_series` is seeded by the caller.
+      `FakeWatchStateRepository` records the identical divergence for
+      `list_recent`, and it is the reason the episode case is load-bearing in
+      the integration run and merely available here.
+    - **The genre overlap is a Python set intersection.** `&&` on the generic
+      `ARRAY(Text)` these columns are declared with is exactly the shape
+      `list_owned_by_tag` records raising `NotImplementedError` for its
+      sibling `@>` -- an operator that fails at statement-build time against
+      Postgres and cannot fail at all against a set.
+    - **`NULLS LAST` is a two-part Python key, so the two agree only because
+      both were written to.** Postgres defaults a `DESC` sort to NULLS FIRST
+      and Python raises on comparing `None`; the tempting repair on either
+      side (`or 0`, or the default) is a wrong answer rather than a crash.
+    - **No `users` table and no foreign key**, so a `user_id` naming no
+      household is accepted here and is a `ForeignKeyViolationError` there --
+      which is why the integration arm's `user_id` fixture writes a real row
+      rather than minting a bare id.
+    - **`media_items.available` is not modelled at all.** `available_copies`
+      holds the *available* half by construction, so a retracted copy leaves
+      no trace and the statement's `WHERE available` predicate is unobservable
+      from here. `test_a_copy_the_source_has_retracted_does_not_rank_as_owned`
+      is therefore load-bearing only in the integration run, and the
+      corresponding mutation survived the whole suite until that case existed.
+    - **`available_copies` cannot tell an episode's copy from a title's**, so
+      the divergence from `owned_title_ids` -- no `episode_id IS NULL` bound
+      -- is likewise Postgres-only. The list stores an episode id for the
+      episode case, which records the caller's intent and changes no answer
+      here; only a real `media_items` row carrying **both** ids (the
+      production shape, per `ports/ingest.py`'s `MediaItemTarget`) can fail
+      against a spurious bound.
     """
 
     def __init__(self) -> None:
@@ -105,6 +171,23 @@ class FakeTitleRepository(TitleRepository):
         # episodes is owned, and a fake holding a bare set could not tell that
         # implementation from the one that reports every series unowned.
         self.available_copies: dict[uuid.UUID, list[uuid.UUID | None]] = {}
+        # `watch_states` and `episodes.title_id`, as much of the two as
+        # `list_unwatched_candidates` reads. Public and seeded directly, the
+        # same affordance `available_copies` above is and for the same reason:
+        # this fake models one table and the read anti-joins two others, so
+        # the alternative is a fake that answers "unwatched" for everything
+        # and a set of contract cases that cannot be written.
+        #
+        # A list rather than a dict keyed on the household: the real statement
+        # scans `watch_states` and a per-user dict would make the `user_id`
+        # predicate structurally true here, which is exactly the divergence
+        # that makes a case vacuous.
+        self.watch_states: list[FakeWatchRow] = []
+        # `episodes.title_id` -- the roll-up's other side, and the reason
+        # `FakeWatchStateRepository` takes an `episode_series` mapping too. An
+        # episode absent from this mapping is one whose series row is gone,
+        # which is the state the real statement's `COALESCE` resolves to NULL.
+        self.episode_series: dict[uuid.UUID, uuid.UUID] = {}
 
     async def add(self, title: Title) -> None:
         if title.id in self._titles:
@@ -258,6 +341,50 @@ class FakeTitleRepository(TitleRepository):
             )
         )
         return matching[: max(limit, 0)]
+
+    async def list_unwatched_candidates(
+        self,
+        user_id: uuid.UUID,
+        *,
+        genres: Sequence[str] = (),
+        limit: int,
+    ) -> list[Title]:
+        affine = set(genres)
+        seen = self._played_title_ids(user_id)
+        candidates = [title for title in self._titles.values() if title.id not in seen]
+        # The port's four keys, in order. `NULLS LAST` under a descending
+        # sort is spelled as a two-part key for `list_owned_by_tag`'s reason:
+        # `-(vote_count or 0)` sorts an unknown count above a genuinely
+        # unpopular title, which is a wrong answer rather than a crash.
+        candidates.sort(
+            key=lambda title: (
+                not self.available_copies.get(title.id),
+                not affine.intersection(title.genres),
+                title.vote_count is None,
+                -(title.vote_count or 0),
+                title.id,
+            )
+        )
+        return candidates[: max(limit, 0)]
+
+    def _played_title_ids(self, user_id: uuid.UUID) -> set[uuid.UUID]:
+        """`COALESCE(ws.title_id, e.title_id)` for this household's played
+        rows, as a dict lookup.
+
+        An episode this fake has no `episode_series` entry for resolves to
+        `None` and is dropped, which is what the real statement's `COALESCE`
+        does with an episode whose series row is gone.
+        """
+        played: set[uuid.UUID] = set()
+        for row in self.watch_states:
+            if row.user_id != user_id or not row.played:
+                continue
+            title_id = row.title_id
+            if title_id is None and row.episode_id is not None:
+                title_id = self.episode_series.get(row.episode_id)
+            if title_id is not None:
+                played.add(title_id)
+        return played
 
     async def count_by_state(self) -> dict[EnrichmentState, int]:
         counts: dict[EnrichmentState, int] = dict.fromkeys(EnrichmentState, 0)

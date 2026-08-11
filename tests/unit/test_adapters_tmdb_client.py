@@ -249,6 +249,32 @@ async def test_a_json_array_body_is_malformed() -> None:
             await client.get("/movie/90000550")
 
 
+async def test_a_deeply_nested_body_is_malformed_not_a_recursion_error() -> None:
+    """The defect M8 found and fixed in the LLM adapter, reaching this one --
+    which is the point of `usher.adapters.http.decode_json` being one function
+    rather than three copies.
+
+    `json.loads` raises `RecursionError` past a nesting depth of 9,999 (9,998
+    parses, measured on CPython 3.13 at the default recursion limit), and
+    `RecursionError` subclasses **`RuntimeError`, not `ValueError`** -- so the
+    `except ValueError` this client carried on its own did not see it, it is
+    not a `UsherPortError`, and it escaped the port to take the worker process
+    down instead of parking one job. Same standing as the HTML case above: the
+    body is whatever TMDb, or whatever `Settings.tmdb_base_url` points at, put
+    on the wire.
+    """
+    depth = 12_000
+    nested = ("[" * depth + "]" * depth).encode()
+
+    def deep(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=nested, headers={"content-type": "application/json"})
+
+    client, http = _client(_transport(deep))
+    async with http:
+        with pytest.raises(PortDataMalformed):
+            await client.get("/movie/90000550")
+
+
 # -- the throttle ----------------------------------------------------------
 
 

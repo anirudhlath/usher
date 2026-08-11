@@ -15,14 +15,20 @@ milestone smoke test passes.
 |---|---|---|---|
 | M1 | Foundation | docs/plans/2026-07-28-m1-foundation.md | ✅ MERGED to main (addb28d), 237 tests |
 | M2 | Bootstrap (IMDb/TMDb/Wikidata importers) | docs/plans/2026-07-30-m2-bootstrap.md | ✅ MERGED to main (0192bf6), 467 tests |
-| M3 | Emby adapter + contract suite | docs/plans/2026-07-30-m3-emby-adapter.md | IN PROGRESS on `milestone/m3-emby-adapter` |
-| M4 | Ingest pipeline | — | not planned |
-| M5 | Push + read-through (SSE) | — | not planned |
-| M6 | Search (FTS, embeddings, RRF) | — | not planned |
-| M7 | Rows | — | not planned |
-| M8 | Curation (LLM) | — | not planned |
+| M3 | Emby adapter + contract suite | docs/plans/2026-07-30-m3-emby-adapter.md | ✅ MERGED to main (970d2b6), 865 tests |
+| M4 | Ingest pipeline | docs/plans/2026-07-31-m4-ingest.md | ✅ MERGED to main (1b37799), 1,744 tests / 1 skipped |
+| M5 | Push + read-through (SSE) | docs/plans/2026-08-01-m5-push.md | ✅ MERGED to main (66e0b64), 2,112 passed / 2 skipped |
+| M6 | Search (FTS, embeddings, RRF) | docs/plans/2026-08-02-m6-search.md | ✅ MERGED to main (b0c04e5), 2,433 passed / 5 skipped. ADR-0002's gate ran and **failed** |
+| M7 | Rows | docs/plans/2026-08-03-m7-rows.md | ✅ MERGED to main (6d9b2a1), 3,217 passed / 5 skipped, 7 import contracts |
+| M8 | Curation (LLM) | docs/plans/2026-08-06-m8-curation.md | ✅ complete on `milestone/m8-curation`, 8 import contracts — see the M8 section at the end of this file |
 | M9 | API surface | — | not planned |
 | M10 | Hardening + dashboards | — | not planned |
+
+**This table was stale from M3 down until 2026-08-07** — it said "IN PROGRESS"
+for a milestone merged on 2026-07-31 and "not planned" for four that were built
+and merged. It is the first thing in this file a reader sees, so it was the
+most-read wrong statement in the repository. Rebuilt from the `## ✅ MN MERGED`
+headings below and from `git log main`.
 
 ## M1 task groups → plan line ranges
 Plan file: `docs/plans/2026-07-28-m1-foundation.md` (2470 lines)
@@ -1378,9 +1384,12 @@ prd-maintenance rule fixed at M5, still green with three new ADRs and seven touc
 The gate recorded "`titles.popularity` is NULL on all 1,271,138 rows — **nothing in `src/` writes it
 but TMDb enrichment**", and `adapters/search/postgres.py:752` now ships that sentence. **The second
 clause is REFUTED, measured.** `PostgresBulkCatalogRepository.link_crosswalk`
-(`db/repositories/bulk.py:495`) writes `popularity = COALESCE(m.popularity, t.popularity)` from
-`tmdb_ids`, reached by `usher bootstrap --phase crosswalk|all` (`cli.py:147` →
-`services/bootstrap.py:295`), and `ports/repository.py:318` documents that write explicitly.
+(`db/repositories/bulk.py`) writes `popularity = COALESCE(m.popularity, t.popularity)` from
+`tmdb_ids`, reached by `usher bootstrap --phase crosswalk|all` (`cli._bootstrap`'s `crosswalk` arm →
+`BootstrapService.link_crosswalk`), and `BulkCatalogRepository.link_crosswalk`'s docstring documents
+that write explicitly. *(Symbols rather than line numbers, corrected 2026-08-07 — all four citations
+in this paragraph were line numbers and all four had drifted; `cli.py:147` had left `_bootstrap`
+entirely and landed inside `OPERATOR_ERRORS`.)*
 Reproduced against a real `pgvector/pgvector:pg17` with the shipped statement run verbatim: a
 **skeleton** title went `popularity IS NULL → popularity = 0`. The gate saw 100% NULL because its
 catalog was `title.basics` + `title.ratings` only — **the IMDb phase, not `--phase all`.** M2's own
@@ -1830,3 +1839,113 @@ carrying forward.
 enrichment and therefore no derived credits or collections, no `title_neighbors`, and no measurement of
 `usher derive` against a populated cache; `GET /home` under any concurrency; more than one household or
 source; and GPU embedding throughput, still unmeasured for the reason M6 declined it.
+
+---
+
+## M8 plan: docs/plans/2026-08-06-m8-curation.md (23 tasks), branch milestone/m8-curation
+
+Twenty build tasks, each spec-reviewed and quality-reviewed, all fixes applied. Task 21 is the live
+verification, Task 22 the documentation pass, Task 23 the gate and the mutation sweep.
+
+Delivered: an OpenAI-compatible `LLMClient` over httpx (litellm declined and priced — ADR-0027);
+`curated_rows` and `llm_calls` (migration `m08a`); `CandidatePoolService`; `CurationService`'s
+assemble → one completion → validate against the pool → `replace_for_user`, with the validator as its
+own module of pure functions; `RowFamily.CURATED` + `LLMRow` + `CuratedProvider` as the **tenth** row
+provider; `JobKind.CURATE` + handler; `POST /admin/rows/regenerate` (202); `usher curate`; the
+MovieLens genome tag vocabulary (`genome_tags`, migration `m08b`, 1,128 rows); and query expansion.
+
+### ✅ M8 Task 21 — live verification against a local vLLM (2026-08-07)
+
+Driven from a throwaway script outside the working tree, against a **local vLLM already running on
+this host** serving `gemma-4-26b-a4b` (`cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit`, `max_model_len`
+16,384) over `http://127.0.0.1:8000/v1` — a service belonging to something else on this machine, the
+same discipline the M6 GPU probe applied. Over a real **1,271,138**-title catalog. **Bounded at 45
+completions and spending 36.** No credential, token, user id or host written anywhere.
+
+⚠️ **One model, one pool, one evening.** Every rate below is scoped to that and none is a property of
+"an LLM". **What transfers is the *ordering* of options and the *shapes* of failures, never the
+percentages.** This caveat travels with every number quoted from this run, anywhere.
+
+**Guess by guess, refutations first:**
+
+| guess | verdict | evidence |
+|---|---|---|
+| query expansion improves retrieval (the PRD's claim since M1) | **REFUTED** | MRR 0.733 → 0.373, recall@10 0.800 → 0.533; label-free control, query-to-query cosine 0.5417 → 0.5975 mean and 0.6328 → 0.7784 max. Landed by `8c3a30a` |
+| a candidate costs ~14.6 prompt tokens | **REFUTED — 20.4** | marginal 20.40 (8→200) and 20.45 (200→600) against the *shipped* prompt; the +40% is the genre list the shipped candidate line renders. Whole prompt at pool 200: 4,304 cold, 4,359 with 3 history lines (+47% on the probe's 2,924) |
+| `USHER_CURATION_POOL_SIZE`'s `le=1000` is a servable bound | **REFUTED** | 1,000 → HTTP 400. 700 → HTTP 400. **600 works** at 12,540 prompt tokens. The constraint is `prompt_tokens + llm_max_output_tokens ≤ max_model_len` and **nothing couples the two settings** |
+| the coercion defends against providers that ignore the schema | **REFUTED — it is the primary path** | `curation._schema` asks for `integer`, `curation_validate` keys on `str(index)`, so with `strict: true` honoured every id is a JSON int and `_handle`'s int branch runs on **100%** of cards. Deleting `str(value).strip()` drops every card of every generation. Stronger claim, same code |
+| integer handles keep every id in the pool | **confirmed, 3.9× the denominator** | 0 out-of-pool over **405 ids, 20 generations, 5 pool shapes** |
+| `strict: true` is a shape guarantee only | **confirmed stronger — it holds numeric bounds too** | 0 integers above a declared `maximum: 5` across 2,048 output tokens under a prompt begging for 1–200 |
+| a pool that cannot answer will invent | **confirmed refuted, across four shapes** | pool 8, pool 5, 200 unknown titles, 200 bare-number titles; 199 ids, 0 out of pool — it **narrows** |
+| the truncation guard is about rows missing off the end | **confirmed stronger** | an unsatisfiable *value* bound made guided decoding loop `1,2,3,4,3,1,2,3,4…` for the full 2,048 tokens; `finish_reason == "length"` fired and the guard caught it. **First live firing.** It is what stops a degenerate loop being read as a valid answer, and it vindicates `_schema`'s omission of `minItems` — with the floor as a `description` hint the starved arms **narrowed** rather than looping |
+| zero rows is recorded as a failure | **confirmed live** | `ok=false` with the reason, tokens and cost in full, `curated_rows` untouched |
+| `cost_usd` is exact | **confirmed to 8 dp** | `0.00000000` local; with prices 3/15 → `0.01658700` = `Decimal((4359×3+234×15)/1e6)`; column `numeric`, `SUM()` agrees |
+| the LLM adapter's failures reach the CLI as a sentence | **REFUTED, then fixed** | `httpx.HTTPError` can never fire behind a port, so `usher curate` against a dead endpoint printed a **stack** having already billed. `OPERATOR_ERRORS` widened to the three transport families; ADR-0026 amended. Landed by `63cd68b` |
+
+### 🔴 The product finding, and it is the milestone's central risk
+
+**52 of 59 headings (88%) are genre labels**, which the prompt explicitly forbids (*"a mood, a period,
+a theme, a filmmaker — rather than by one genre"*). **One heading in 59 named a filmmaker.**
+*"Animated Wonders for All Ages"*, *"Epic Sci-Fi Adventures"* and *"Mind-Bending Sci-Fi & Thrillers"*
+each recur **verbatim across three separate generations**. So on this model the curated shelf is
+substantively what `GenreAffinityProvider` already gives away free, from a `SELECT`, needing no key.
+
+The 88% is one model. **What is a property of the design is that the prompt's grouping instruction is
+not self-enforcing and nothing in this system checks it.** Recorded as a known limit in PRD 06 and
+PRD 09 rather than fixed: curated rows are additive and PRD 08's *"Home composes without them"* is
+what makes a dull row a disappointment rather than a defect.
+
+**Four more limits, filed and recorded rather than fixed:**
+
+- **The pool has no ownership *filter*.** `list_unwatched_candidates` uses ownership as an `ORDER BY`
+  key only — deliberately, so PRD 06's *"spans the whole catalog"* stays true — while the prompt
+  asserts *"one household's **own** library"*. Both defensible, and they disagree. Filed as decision #40.
+- **`_cards` de-duplicates within a row only.** A title on two shelves of one generation is not
+  counted `duplicate`; the prompt's rule 7 is the only defence.
+- **`min_cards = 5` gives a small unwatched pool zero rows, every time, at full price.** Rows carried
+  5–6 cards at pool 200 and **2–3 at pool 5/8**, so every row was `row_too_short`.
+- **4 of 5 `DropReason` members never fired.** Under a provider honouring `strict` three are close to
+  unreachable. Worth knowing before an operator reads a dashboard of permanent zeros — and they are
+  still exported, because a `base_url` change to a schema-ignoring provider makes `unparseable`
+  spiking the only signal anything moved.
+
+**Untested, named rather than implied:** `media_items = 0`, so ownership sorting and the other nine
+providers never ran against real data; `title_embeddings = 0`, so `CandidatePoolService._reranked`'s
+centroid re-rank **never executed**; end-to-end retrieval through `PostgresSearchIndex`;
+`JobKind.CURATE` via `usher work`; `POST /admin/rows/regenerate` (only the CLI path ran); any hosted
+provider.
+
+### ✅ M8 Task 22 — the documentation pass (2026-08-07)
+
+PRD 01/02/04/05/06/07/08/09/10, ADR-0027 and ADR-0028, `CLAUDE.md`, `README.md`, this file, and PRD
+`README.md`'s implementation-plan table — which stopped at M6 and was missing M7's row; **M7 and M8
+both added.**
+
+**The four not-yet-landed items from Task 21 all landed here.** (1) The plan's ground-truth table is
+**annotated, not rewritten**: `prd-maintenance.md` makes plans historical records and the PRD
+authoritative, so the probe measurement stays as the thing the decision rested on and the correction
+sits beside it, with AMENDMENT 16 naming it. ADR-0028 — which is PRD and *is* authoritative — carries
+the correction properly. (2) `composition.py`'s *"~14.6, measured"* → 20.4, with every copy swept:
+`config.py`, PRD 08, `test_services_curation_pool.py` ×2, `test_services_curation.py`. (3) ADR-0028's
+rule 2 and `curation_validate.py`'s docstring now say the coercion is the primary path. (4)
+`config.py`, PRD 08 and ADR-0028 all carry the pool ceiling, and the ceiling is deliberately **not**
+lowered to 600 — 600 is one endpoint's answer.
+
+**M8's eight boundary calls are now in PRD 09 and in `.claude/rules/milestone-boundary-calls.md`**,
+alongside M4's four, M6's nine and M7's nine. **The live-verification evidence is in a new subsystem
+rules file, `.claude/rules/curation-and-llm.md`**, loading on `adapters/llm/**` and
+`services/curation*.py` — the first new subsystem file since M6, and the placement follows the
+existing convention (M3/M4/M5's live runs are in `emby-push-and-ingest.md`, M6's in
+`search-and-embeddings.md`).
+
+**Found stale and not named in the brief:** PRD 01 said nine providers and nine `BaseRow` subclasses
+(ten), had `services/curation*` missing from both the diagram and the repo tree, said *"Two entries …
+do not exist"* when one was built in M8, and did not document the **eighth** import contract at all;
+PRD 07 said *"Nine of ten providers are behind `/home`"* and *"four of the five rows above"* over a
+six-row table; PRD 08 listed three `SecretStr` fields and omitted `llm_api_key`, counted nine
+providers, had no backup entry for M8's three tables — including `llm_calls`, which is **rebuildable
+from nothing** and belonged in the precious column — and had no degradation row for a query-expansion
+failure that PRD 05 cites it for; PRD 10 argued its partial index from a majority the shipped default
+does not produce; `.claude/rules/milestone-boundary-calls.md` pointed at *"the M6 live-verification
+section below"*, which has never existed in that file; and this file's own status table had said
+"IN PROGRESS" for M3 and "not planned" for M4–M7 since M3.

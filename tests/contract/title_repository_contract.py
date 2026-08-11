@@ -31,6 +31,7 @@ concrete subclasses.
 """
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 
 import pytest
@@ -638,3 +639,484 @@ class TitleRepositoryOwnedContract:
         rows = await repo.list_owned_by_tag(genre="Horror")
 
         assert [row.id for row in rows] == [watched.id]
+
+
+#: A limit comfortably above every fixture below, so a case that is not about
+#: the cap is not silently about it either. `limit` has no default on the port
+#: -- deliberately, see `list_unwatched_candidates` -- so every call states its
+#: own bound, and `test_the_limit_keeps_the_best_rather_than_the_first_found`
+#: is the one case that passes something smaller than what it seeded.
+_ROOMY = 50
+
+#: Makes a title playable, the way each arm spells it -- a list entry for the
+#: fake, a real `media_items` row for Postgres.
+Own = Callable[..., Awaitable[None]]
+
+#: Writes one `watch_states` row: `watch(user_id, title_id=..., played=...)`
+#: or `watch(user_id, episode_id=..., played=...)`.
+Watch = Callable[..., Awaitable[None]]
+
+#: Mints one episode of a series, returning its id.
+EpisodeOf = Callable[[uuid.UUID], Awaitable[uuid.UUID]]
+
+
+class TitleRepositoryCandidateContract:
+    """`list_unwatched_candidates`, the read `CandidatePoolService` is built on.
+
+    A separate mixin for `TitleRepositoryOwnedContract`'s reason and one more:
+    this read's answer depends on **three** tables `titles` does not contain --
+    `media_items` for ownership, `watch_states` for the exclusion, and
+    `episodes` for the roll-up that exclusion goes through -- so a subclass
+    supplies `own`, `watch`, `episode_of` and two households.
+
+    **What the wrong implementations look like, because every one of them is
+    populated.** The pool is 200 titles handed to a model that will write a
+    confident sentence about whichever ones it is given, so none of these
+    fails visibly:
+
+    - **The exclusion dropped or inverted.** A shelf of things the household
+      already finished, under a heading implying they are new.
+    - **The exclusion spelled on `watch_states.title_id` alone.** Trap 7: the
+      series a household is halfway through comes back forever on a library
+      that is 89% episodes.
+    - **The exclusion spelled as "has a watch state" rather than `played`.** A
+      sync writes a row per item it observed, so that predicate is the owned
+      library and the pool is then everything the household does *not* own.
+    - **The ordering's ownership key dropped.** A pool of things to seek out
+      and nothing to play tonight, on a household with a library.
+    - **The genre-affinity key dropped, or spelled as a filter.** Dropped, the
+      pool is the catalog's most-voted 200 on every household in the
+      deployment; as a filter, a household whose affinities are empty --
+      which is every household with no watch history -- gets nothing at all.
+    - **The `id` tiebreak dropped.** ADR-0028 addresses candidates by small
+      integer index, so index 7 naming a different film on a re-read is the
+      substrate moving under the prompt.
+
+    Every case therefore asserts on **position** and seeds a distractor a
+    broken implementation ranks first.
+    """
+
+    @pytest.fixture
+    def repo(self) -> TitleRepository:  # pragma: no cover - supplied by subclasses
+        raise NotImplementedError
+
+    @pytest.fixture
+    def own(self) -> Own:  # pragma: no cover - supplied by subclasses
+        raise NotImplementedError
+
+    @pytest.fixture
+    def watch(self) -> Watch:  # pragma: no cover - supplied by subclasses
+        raise NotImplementedError
+
+    @pytest.fixture
+    def episode_of(self) -> EpisodeOf:  # pragma: no cover - supplied by subclasses
+        raise NotImplementedError
+
+    @pytest.fixture
+    def user_id(self) -> uuid.UUID:  # pragma: no cover - supplied by subclasses
+        raise NotImplementedError
+
+    @pytest.fixture
+    def other_user_id(self) -> uuid.UUID:  # pragma: no cover - supplied by subclasses
+        raise NotImplementedError
+
+    @staticmethod
+    def _candidate(
+        name: str,
+        *,
+        genres: tuple[str, ...] = (),
+        vote_count: int | None = None,
+        kind: TitleKind = TitleKind.MOVIE,
+        title_id: uuid.UUID | None = None,
+        enrichment_state: EnrichmentState = EnrichmentState.ENRICHED,
+    ) -> Title:
+        """One catalog row, with an id nameable for the tiebreak case.
+
+        `title_id` is a parameter for `curated_row`'s reason: `new_id()` is
+        monotonic, so a fixture that mints in insertion order makes
+        `ORDER BY id` and "no ordering at all" the same answer, and the
+        tiebreak is then unobservable.
+
+        **`enrichment_state` defaults to `ENRICHED` and exactly one case
+        passes something else, which is what makes the default a statement
+        about the read rather than about the fixture.**
+        `list_unwatched_candidates` has no `enrichment_state` predicate and no
+        `enrichment_state` key: a skeleton is as eligible as an enriched
+        title, deliberately, because the pool spans the whole catalog and the
+        skeleton tier is most of it. That was argued in prose here and seeded
+        by nothing -- and "has any fixture, anywhere, ever set this to the
+        other value?" is the question this milestone has already answered
+        "no" to three times, once per surviving mutant. So
+        `test_a_skeleton_is_as_eligible_a_candidate_as_an_enriched_title`
+        seeds the other value, and a predicate added on this column fails a
+        case instead of passing every one of them.
+
+        Whether a prompt should be handed a candidate with no overview and no
+        genres is a real question and it is the *prompt's*, which is Task 12's
+        -- if the answer ever becomes "no", it lands as a predicate here with
+        its own case, not as a fixture that quietly stopped seeding one tier.
+        """
+        return Title(
+            id=title_id if title_id is not None else new_id(),
+            kind=kind,
+            name=name,
+            sort_name=name.lower(),
+            genres=genres,
+            vote_count=vote_count,
+            enrichment_state=enrichment_state,
+        )
+
+    async def test_a_title_the_household_finished_is_not_a_candidate(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own, watch: Watch
+    ) -> None:
+        """**The distractor is the best row in the catalog**: owned, the most
+        voted title present, and already seen.
+
+        Under a dropped or inverted exclusion it is `[0]` -- the pool's most
+        prominent member is the film the household finished last week, and
+        the model writes a reason for it. Positional, so membership cannot
+        satisfy it.
+        """
+        seen = self._candidate("Already Finished", vote_count=900_000)
+        fresh = self._candidate("Never Opened", vote_count=10)
+        for one in (seen, fresh):
+            await repo.add(one)
+            await own(one.id)
+        await watch(user_id, title_id=seen.id, played=True)
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
+
+        assert [row.id for row in rows] == [fresh.id]
+
+    async def test_a_watched_episode_takes_its_series_out_of_the_pool(
+        self,
+        repo: TitleRepository,
+        user_id: uuid.UUID,
+        own: Own,
+        watch: Watch,
+        episode_of: EpisodeOf,
+    ) -> None:
+        """Trap 7, on the read whose whole job is to subtract.
+
+        A watched *episode*'s `watch_states` row carries `episode_id` and a
+        NULL `title_id`, so an exclusion spelled `ws.title_id = titles.id`
+        never matches one -- and 999,827 of the one measured source's
+        1,126,674 items are episodes. The wrong implementation puts every
+        series the household is midway through into the pool, forever.
+
+        The distractor is a second series with no state at all, so the case
+        cannot pass by an implementation that excluded every series.
+        """
+        midway = self._candidate("A Series In Progress", kind=TitleKind.SERIES, vote_count=900_000)
+        untouched = self._candidate("A Series Never Opened", kind=TitleKind.SERIES, vote_count=10)
+        for one in (midway, untouched):
+            await repo.add(one)
+            await own(one.id)
+        await watch(user_id, episode_id=await episode_of(midway.id), played=True)
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
+
+        assert [row.id for row in rows] == [untouched.id]
+
+    async def test_a_title_started_and_abandoned_is_still_a_candidate(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own, watch: Watch
+    ) -> None:
+        """`played`, never "has a watch state" -- `played_title_ids`' rule,
+        arriving at the read that has to agree with it.
+
+        A sync writes a row per item it observed, so "has a state" is the
+        owned library: under that spelling the pool holds only titles the
+        household does **not** own, which is a plausible-looking pool of
+        things to seek out and nothing to play. The abandoned title is seeded
+        as the *most* voted so it is `[0]` when it is correctly kept and
+        absent when it is not.
+        """
+        abandoned = self._candidate("Twelve Minutes In", vote_count=900_000)
+        untouched = self._candidate("Never Opened", vote_count=10)
+        for one in (abandoned, untouched):
+            await repo.add(one)
+            await own(one.id)
+        await watch(user_id, title_id=abandoned.id, played=False)
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
+
+        assert [row.id for row in rows] == [abandoned.id, untouched.id]
+
+    async def test_another_households_history_does_not_shrink_this_ones_pool(
+        self,
+        repo: TitleRepository,
+        user_id: uuid.UUID,
+        other_user_id: uuid.UUID,
+        own: Own,
+        watch: Watch,
+    ) -> None:
+        """The `user_id` predicate, which on a single-household deployment --
+        i.e. every deployment during development -- is invisible.
+
+        Without it one member's history empties another's pool, and the
+        household with the most watching decides what everyone else is
+        offered. The other household's title is the most voted, so it is
+        `[0]` when the predicate holds and absent when it does not.
+        """
+        theirs = self._candidate("Finished By Somebody Else", vote_count=900_000)
+        mine = self._candidate("Untouched By Anyone", vote_count=10)
+        for one in (theirs, mine):
+            await repo.add(one)
+            await own(one.id)
+        await watch(other_user_id, title_id=theirs.id, played=True)
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
+
+        assert [row.id for row in rows] == [theirs.id, mine.id]
+
+    async def test_an_owned_title_outranks_an_unowned_one_however_voted(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own
+    ) -> None:
+        """Both halves of *"owned or popular"*, in one assertion.
+
+        The unowned title is the most voted in the catalog by five orders of
+        magnitude, so it is `[0]` under an ordering with no ownership key --
+        and it is still *present*, because PRD 06 says the pool spans the
+        whole catalog rather than the library, so suggestions can include
+        things to seek out. An implementation that filtered to owned titles
+        returns one row and fails on the same assertion.
+        """
+        unowned = self._candidate("A Masterpiece Nobody Here Owns", vote_count=900_000)
+        owned = self._candidate("A Quiet Film On The Shelf", vote_count=3)
+        for one in (unowned, owned):
+            await repo.add(one)
+        await own(owned.id)
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
+
+        assert [row.id for row in rows] == [owned.id, unowned.id]
+
+    async def test_a_series_owned_only_through_its_episodes_ranks_as_owned(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own
+    ) -> None:
+        """`list_owned_by_tag`'s divergence from `owned_title_ids`, asserted
+        again here because this read makes its own ownership decision.
+
+        A series' copies are its episode files, so a semi-join carrying
+        `episode_id IS NULL` ranks every series in the library alongside the
+        catalog's strangers. The distractor is the most-voted title in the
+        catalog with no copy at all, so a dropped join fails too.
+        """
+        stranger = self._candidate("An Unowned Stranger", vote_count=900_000)
+        series = self._candidate("An Owned Series", kind=TitleKind.SERIES, vote_count=3)
+        for one in (stranger, series):
+            await repo.add(one)
+        await own(series.id, episode=True)
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
+
+        assert [row.id for row in rows] == [series.id, stranger.id]
+
+    async def test_a_copy_the_source_has_retracted_does_not_rank_as_owned(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own
+    ) -> None:
+        """`media_items.available` is a column the availability sweep *writes*
+        -- `mark_unseen_unavailable` sets it false for an item a walk stopped
+        seeing -- so a row with `available = false` is the ordinary state of a
+        film the household deleted, not an exotic one.
+
+        The wrong implementation ranks it first, because it is still a
+        `media_items` row: the pool then leads with the title the household
+        most recently got rid of, and the model writes a shelf around it.
+        Positional, with a genuinely owned distractor of *lower* vote count so
+        an implementation that dropped the ownership key entirely fails too.
+
+        **The sweep is what said this case was needed**, not a reading of the
+        statement: deleting `available.is_(True)` survived every other case
+        here, because `own` writes `available = true` and nothing else ever
+        wrote the column.
+        """
+        retracted = self._candidate("Deleted From The Server", vote_count=900_000)
+        kept = self._candidate("Still On The Shelf", vote_count=3)
+        for one in (retracted, kept):
+            await repo.add(one)
+        await own(retracted.id, available=False)
+        await own(kept.id)
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
+
+        assert [row.id for row in rows] == [kept.id, retracted.id]
+
+    async def test_a_genre_the_household_watches_outranks_a_more_voted_stranger(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own
+    ) -> None:
+        """The genre-affinity key, which is the only household-shaped signal
+        in the base ordering.
+
+        The distractor is a title of another genre with five orders of
+        magnitude more votes: `[0]` when the key is dropped, and the affinity
+        title is `[0]` when it is honoured. **Both are asserted**, because an
+        implementation that used the genres as a *filter* would answer with
+        one row -- and would then hand an empty pool to every household whose
+        affinities are empty, which is every household with no history.
+        """
+        stranger = self._candidate("A Very Popular Comedy", genres=("Comedy",), vote_count=900_000)
+        affine = self._candidate("A Quiet Western", genres=("Western",), vote_count=3)
+        for one in (stranger, affine):
+            await repo.add(one)
+            await own(one.id)
+
+        rows = await repo.list_unwatched_candidates(user_id, genres=("Western",), limit=_ROOMY)
+
+        assert [row.id for row in rows] == [affine.id, stranger.id]
+
+    async def test_with_no_affinities_the_order_is_the_vote_count(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own
+    ) -> None:
+        """The shipped default's own case: `genres=()` is what a household
+        with no watch history produces, and it must leave a usable order
+        rather than collapsing one.
+
+        Seeded worst-first so `ORDER BY id` and no ordering at all are the
+        reverse of the answer, and the unknown count is seeded *first* so
+        Postgres's `NULLS FIRST` default under `DESC` puts it top and fails.
+
+        **A title voted *zero* times is here because without it the "unknown
+        last" rule is unobservable on the fake arm**, and the sweep is what
+        said so rather than a reading of the code: the natural Python spelling
+        collapses a NULL to `0` via `-(vote_count or 0)`, and with no genuine
+        zero in the fixture that collapse produces the identical list.
+        Deleting the fake's `vote_count is None` key survived the whole suite
+        until this row existed. Seeded second, so the two also disagree on id
+        order.
+        """
+        unknown = self._candidate("Never Rated", vote_count=None)
+        never_voted = self._candidate("Rated By Nobody", vote_count=0)
+        quiet = self._candidate("Barely Voted", vote_count=5)
+        loud = self._candidate("Much Voted", vote_count=500_000)
+        for one in (unknown, never_voted, quiet, loud):
+            await repo.add(one)
+            await own(one.id)
+        assert unknown.id < never_voted.id, (
+            "the fixture must make id order and the unknown/zero split disagree"
+        )
+
+        rows = await repo.list_unwatched_candidates(user_id, genres=(), limit=_ROOMY)
+
+        assert [row.id for row in rows] == [loud.id, quiet.id, never_voted.id, unknown.id]
+
+    async def test_two_titles_alike_in_everything_are_ordered_by_id(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own
+    ) -> None:
+        """**The tiebreak, and it is the whole of ADR-0028's stability.** The
+        prompt addresses candidates by small integer index, so a pool whose
+        ties resolve to "whatever the storage returned" is a pool whose index
+        7 is a different film on a re-read -- and the service's index->UUID
+        map is then a map of nothing.
+
+        Why ties are ordinary rather than exotic here, and why losing the tail
+        changes the pool's *membership* rather than only its order, is argued
+        once on `TitleRepository.list_unwatched_candidates` and deliberately
+        not restated: a count that lives in four places is a count three of
+        them will eventually disagree with, which this milestone has already
+        paid for twice.
+
+        The two are inserted in **descending** id order, so insertion order
+        -- which is heap order on a freshly-seeded table and dict order in
+        the fake -- is the reverse of the answer.
+        """
+        first, second = new_id(), new_id()
+        assert first < second, "the fixture must know its own id order"
+        later = self._candidate("Seeded First", vote_count=7, title_id=second)
+        earlier = self._candidate("Seeded Second", vote_count=7, title_id=first)
+        for one in (later, earlier):
+            await repo.add(one)
+            await own(one.id)
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
+
+        assert [row.id for row in rows] == [first, second]
+
+    async def test_the_limit_keeps_the_best_rather_than_the_first_found(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own
+    ) -> None:
+        """A limit applied before the ordering keeps whichever rows the scan
+        reached first -- and this limit is the pool *size*, which ADR-0028's
+        measurements are scoped to.
+
+        Seeded worst-first, so a limit honoured before the sort answers with
+        the two least-voted titles.
+        """
+        seeded = []
+        for index in range(5):
+            one = self._candidate(f"Candidate {index}", vote_count=index)
+            await repo.add(one)
+            await own(one.id)
+            seeded.append(one)
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=2)
+
+        assert [row.id for row in rows] == [seeded[4].id, seeded[3].id]
+
+    async def test_a_household_that_has_watched_nothing_still_gets_a_pool(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own
+    ) -> None:
+        """A cold start is the *normal* state, not a degraded one -- PRD 06's
+        own words -- and an implementation whose exclusion joined rather than
+        anti-joined answers with nothing at all here.
+
+        Positional rather than `len(rows) > 0`, which is satisfied by
+        returning the whole table in physical order.
+        """
+        quiet = self._candidate("Barely Voted", vote_count=5)
+        loud = self._candidate("Much Voted", vote_count=500_000)
+        for one in (quiet, loud):
+            await repo.add(one)
+            await own(one.id)
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
+
+        assert [row.id for row in rows] == [loud.id, quiet.id]
+
+    async def test_a_skeleton_is_as_eligible_a_candidate_as_an_enriched_title(
+        self, repo: TitleRepository, user_id: uuid.UUID, own: Own
+    ) -> None:
+        """**The tier the pool is mostly made of, seeded for the first time.**
+
+        `list_unwatched_candidates` has no `enrichment_state` predicate on
+        purpose -- the port says the pool *"spans the whole catalog"* and that
+        the skeleton tier is most of it -- and until this case every fixture
+        in both arms wrote `ENRICHED`, so a predicate narrowing the read to
+        the enriched tier would have passed every case in the suite. That is
+        the same shape as `media_items.available`, whose mutation survived
+        everything until a fixture wrote the other value, and as
+        `titles.popularity` before it: **a predicate on a column no fixture
+        ever writes falsely is unobservable.**
+
+        The defect is not hypothetical and it is quiet. M6 measured the
+        enriched tier at single-digit thousands against a 1.27M-title catalog,
+        so a narrowed read still answers with a full-looking, plausible,
+        well-ordered pool -- of the couple of thousand titles TMDb enrichment
+        happened to reach -- and the household's own recently-imported library
+        is absent from it forever, with nothing counting the absence. PRD 08's
+        operator rule is sharper still: a fresh install that has bootstrapped
+        but not yet enriched has *no* enriched titles at all, so the pool is
+        empty and curation never fires.
+
+        The skeleton is the **most-voted** row and is seeded **second**, so it
+        is neither first in id order nor reachable by accident: a read that
+        dropped it answers with one row, and a read that kept it but lost the
+        `vote_count` key answers in the other order.
+        """
+        enriched = self._candidate("Enriched And Quiet", vote_count=5)
+        skeleton = self._candidate(
+            "A Skeleton Everybody Voted For",
+            vote_count=500_000,
+            enrichment_state=EnrichmentState.SKELETON,
+        )
+        for one in (enriched, skeleton):
+            await repo.add(one)
+            await own(one.id)
+        assert enriched.id < skeleton.id, (
+            "the premise: the answer must be the reverse of id order, or "
+            "`ORDER BY id` alone would produce it"
+        )
+
+        rows = await repo.list_unwatched_candidates(user_id, limit=_ROOMY)
+
+        assert [row.id for row in rows] == [skeleton.id, enriched.id]

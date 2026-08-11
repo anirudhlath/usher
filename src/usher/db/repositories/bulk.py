@@ -68,10 +68,12 @@ from typing import Any, cast
 from sqlalchemy import CursorResult, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from usher.db.repositories._errors import refusals_as_conflict
 from usher.db.staging import stage_records
 from usher.domain.ids import new_id
 from usher.ports.bulk import (
     GENOME_TAG_COUNT,
+    GenomeTag,
     GenomeVector,
     IdCrosswalkPair,
     ImdbRating,
@@ -181,6 +183,18 @@ CREATE TEMP TABLE stg_genome (
     imdb_id text, tmdb_id integer, relevance real[]
 ) ON COMMIT DROP
 """
+
+# One bound-parameter `INSERT`, executemany'd over 1,128 records, and neither
+# half of that is incidental. **Bound values, not an interpolated `VALUES`
+# list**, so the only thing SQLSTATE class 22 can be about is a value a caller
+# handed in -- which is the precondition `_errors.is_row_refusal` documents
+# for its own claim. **Not `usher.db.staging`**, because a `COPY` refuses an
+# out-of-range integer as a bare `builtins.OverflowError` with no SQLSTATE at
+# all, and 1,128 rows have nothing to gain from one.
+_INSERT_GENOME_TAG = text(
+    "INSERT INTO genome_tags (tag_id, tag, genome_revision) "
+    "VALUES (:tag_id, :tag, :genome_revision)"
+)
 
 # `enrichment_state <> 'skeleton'` twice, deliberately: `enriched_with_vector`
 # is counted by joining `genome_scores` back to `titles` rather than by
@@ -390,6 +404,62 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         return GenomeWriteResult(
             inserted=int(inserted), updated=int(updated), unmatched=int(unmatched)
         )
+
+    async def replace_genome_tags(self, tags: Sequence[GenomeTag], *, revision: str) -> int:
+        # Before the DELETE and before the SAVEPOINT, `replace_for_user`'s
+        # placement and for its stated reason: on *this* implementation the
+        # ordering is not observable, because the SAVEPOINT rolls the delete
+        # back with the raise, and it is here so a call that cannot mean
+        # anything never reaches Postgres and so the fake -- which has no
+        # transaction and really would empty the vocabulary -- has one rule to
+        # mirror rather than two.
+        #
+        # It is also the *ceiling on `tag_id`*: nothing else bounds the value
+        # this method binds into an `integer` column. See the module docstring
+        # on `db/models/taste.py` for why that bound lives here.
+        _refuse_partial_vocabulary(tags, revision)
+        records = [
+            {"tag_id": tag.tag_id, "tag": tag.tag, "genome_revision": revision} for tag in tags
+        ]
+        # What this table can refuse: the three CHECKs, and `pk_genome_tags` for
+        # a duplicate lane that `_refuse_partial_vocabulary` has already ruled
+        # out.
+        #
+        # `ck_genome_tags_tag_id_in_vocabulary` is the one that matters: it is
+        # what refuses a vocabulary longer than the 1,128 lanes
+        # `genome_scores.relevance` declares, and it does so as an
+        # `IntegrityError` carrying its own name rather than as asyncpg's
+        # unnamed encoder `DataError`, which is why the column is `integer`
+        # rather than `smallint`.
+        #
+        # **`is_row_refusal` is therefore wider than anything reachable here
+        # today, measured rather than assumed**: when this method carried its
+        # own `except`, narrowing it to `IntegrityError` survived all 2,819 unit
+        # and all 57 relevant integration cases, because every refusal this
+        # table can produce behind that precondition *is* a CHECK violation.
+        # The measurement is why the wide predicate needs a defence and not an
+        # argument for narrowing the shared one, which now answers for three
+        # tables: the `curated_rows."position"` and `llm_calls.cost_usd`
+        # findings in `_errors.py` are both a column that refuses a *value*,
+        # and neither is an `IntegrityError`.
+        async with refusals_as_conflict(
+            self._session, "a genome tag vocabulary violates the column's own bounds"
+        ):
+            # DELETE then INSERT, never `ON CONFLICT DO UPDATE`, and this is the
+            # one behaviour separating this method from `upsert_genome_vectors`
+            # above. An upsert over a release with fewer tags leaves the
+            # previous one's tail behind, still carrying the previous revision,
+            # and the result is indistinguishable from a complete vocabulary
+            # that happens to be mixed. A vector table is legitimately
+            # half-migrated; a vocabulary is not.
+            #
+            # **No `stage_records`, deliberately.** 1,128 rows do not need a
+            # `COPY`, and the `COPY` path is where an out-of-range integer
+            # raises a bare `builtins.OverflowError` with no SQLSTATE for
+            # `is_row_refusal` to inspect -- see `db/repositories/_errors.py`.
+            await self._session.execute(text("DELETE FROM genome_tags"))
+            await self._session.execute(_INSERT_GENOME_TAG, records)
+        return len(records)
 
     async def genome_coverage(self) -> GenomeCoverage:
         with self._session.no_autoflush:
@@ -671,3 +741,44 @@ class PostgresBulkCatalogRepository(BulkCatalogRepository):
         return CrosswalkLinkResult(
             linked=linked, unmatched=int(unmatched), conflicted=int(conflicted)
         )
+
+
+def _refuse_partial_vocabulary(tags: Sequence[GenomeTag], revision: str) -> None:
+    """The four ways a caller can hand `replace_genome_tags` something that is
+    not a vocabulary, refused before anything is written.
+
+    `ValueError` rather than `RepositoryConflict`: nothing has been sent to
+    Postgres, and for the first two Postgres would not refuse either --
+    `ck_genome_tags_tag_id_in_vocabulary` cannot see a *gap*, and an empty
+    `tags` is a legal `DELETE` followed by a legal zero-row `INSERT`. Both are
+    a caller assembling a call that cannot mean anything, which is
+    `CuratedRowRepository.replace_for_user`'s case one table over.
+
+    Kept identical to `tests/fakes/bulk_catalog_repository.
+    _refuse_partial_vocabulary`; `BulkCatalogRepositoryContract` is what holds
+    the two together.
+
+    **The contiguity check is a set check plus a sort, never a check that the
+    input arrived sorted.** `MovieLensGenomeDataset._vocabulary` makes the same
+    call for the same reason: the vector is built by index, so within-batch
+    order genuinely does not matter, and demanding it would refuse a
+    well-formed vocabulary for the shape of the list it came in.
+    """
+    if not tags:
+        # An empty table would then mean two things -- never loaded, and
+        # loaded as nothing -- and `GenomeRepository.vocabulary` answers `None`
+        # for the first, which is a legitimate deployment state.
+        raise ValueError("a genome vocabulary of no tags is not a vocabulary")
+    if sorted(tag.tag_id for tag in tags) != list(range(1, len(tags) + 1)):
+        # The failure that matters, and the one no per-row bound can see: a
+        # gap does not lose one name, it moves every later one.
+        raise ValueError(
+            f"a genome vocabulary is tags 1...{len(tags)} and this one is not; "
+            "the vector is built by index and a gap renames every later lane"
+        )
+    if any(not tag.tag for tag in tags):
+        raise ValueError("a genome tag with no name is a lane that reads as labelled")
+    if not revision:
+        # Matches no `genome_scores` row, so the whole vocabulary would be
+        # stored and permanently unreadable.
+        raise ValueError("a genome vocabulary must record the release it came from")

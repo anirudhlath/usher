@@ -1,11 +1,19 @@
 """Application configuration, read from the environment."""
 
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# A local OpenAI-compatible server, because this project's reference
+# deployment is self-hosted. Declared here rather than in
+# `usher.adapters.llm` deliberately: a deployment default is a property of
+# the configuration layer, and `OpenAICompatibleClient` takes `base_url` as a
+# required argument so it holds no opinion about where it is pointed.
+DEFAULT_LLM_BASE_URL = "http://localhost:8000/v1"
 
 # Not a credential -- a placeholder value kept only to detect and reject it.
 # .env.example itself ships USHER_SECRET_KEY= (blank, not this string) so a
@@ -245,6 +253,186 @@ class Settings(BaseSettings):
     # cache, so the variable would be inert there in any case.)
     embedding_offline: bool = True
 
+    # The LLM (PRD 06's curation, PRD 05's query expansion). Read by
+    # `composition.llm_client`, which is the one place all but one of them is
+    # touched -- the exception is the model name, which is also read by
+    # `build_curation_service` and `build_pipeline` so that `llm_calls.model`
+    # records the string the client was built with on the path where no
+    # response came back to read one from.
+    #
+    # **Off by default, and that is the honest default twice over.** It is
+    # the `embedding_enabled` argument -- a deployment with this off is
+    # *narrowed*, since nine of ten row providers need no model at all -- and
+    # it is also the only setting in this file whose "on" state sends the
+    # household's data to a machine the household may not own. A default that
+    # curated out of the box would make that a thing an operator discovers
+    # rather than chooses.
+    #
+    # **Two spenders, and since 2026-08-07 two switches.** Curation buys one
+    # completion per household per generation; query expansion buys one per
+    # semantic or fused search. This field is the *client*: with it false there
+    # is no `LLMClient` anywhere in the process and neither spender exists.
+    # `query_expansion_enabled` below is the second half.
+    #
+    # This block argued until 2026-08-07 that a second setting's only honest
+    # default is "follow the switch above". **That argument is replaced by a
+    # measurement rather than deleted**, because it was sound only while
+    # expansion was believed to help: measured against a local
+    # `gemma-4-26b-a4b`, expansion moved MRR 0.733 -> 0.373 and recall@10
+    # 0.800 -> 0.533 over five mood queries and 150 real overviews. Two
+    # features with opposite expected values cannot share a switch, and
+    # `llm_calls` grouped by `purpose` -- the old argument's answer -- reports
+    # what expansion cost *after* it has been paid.
+    llm_enabled: bool = False
+    # The provider abstraction, and the whole of it (ADR-0027). OpenAI,
+    # OpenRouter, Together, Groq, DeepSeek, Mistral, vLLM, llama.cpp, Ollama
+    # and LM Studio all serve `POST {base_url}/chat/completions`, which is
+    # what makes `litellm` a dependency bought for wire formats reachable
+    # through OpenRouter anyway. **The default is localhost** because this
+    # project's reference deployment is self-hosted; a default naming a hosted
+    # provider would be a default that sends a watch history off the box.
+    llm_base_url: str = Field(default=DEFAULT_LLM_BASE_URL, min_length=1)
+    # `SecretStr`, and `None` is a first-class value: a local vLLM or an
+    # Ollama needs no credential, and sending `Bearer None` is how a client
+    # fails against the deployment this is actually for.
+    llm_api_key: SecretStr | None = None
+    llm_model: str = Field(default="gpt-4o-mini", min_length=1)
+    # The token ceiling on one completion. It is a correctness setting rather
+    # than a cost one: measured, a completion that hits the ceiling under
+    # guided decoding comes back as *valid* JSON with rows missing off the
+    # end, so the adapter refuses `finish_reason == "length"` outright. Five
+    # rows of eight cards with a reason each is ~500 tokens; 2048 is room to
+    # be wrong without paying for a 32k answer nobody reads.
+    #
+    # ✅ **The guard fired live for the first time on 2026-08-07, and its real
+    # justification is stronger than the sentence above.** An unsatisfiable
+    # *value* bound -- `maximum: 5` in the schema against a prompt asking for
+    # numbers 1-200 -- made guided decoding **loop**: `1,2,3,4,3,1,2,3,4...`
+    # for the entire 2,048-token budget, `finish_reason == "length"`, and the
+    # adapter refused it. So the guard is not only about *"rows missing off
+    # the end"*; it is what stops a **degenerate loop being read as a valid
+    # answer**, which is the failure that would otherwise have arrived as a
+    # well-formed row of repeated handles. One model, one evening,
+    # `gemma-4-26b-a4b`.
+    #
+    # 🔶 **This setting and `curation_pool_size` below spend one budget and
+    # nothing couples them.** The endpoint's real constraint is
+    # `prompt_tokens + llm_max_output_tokens <= max_model_len`, so raising
+    # this silently lowers the workable pool -- and the failure is a 400 that
+    # parks the job rather than a warning at startup. Recorded rather than
+    # solved: see `curation_pool_size`'s measured ceiling below.
+    llm_max_output_tokens: int = Field(default=2048, ge=256, le=32_768)
+    # A generation is a background job with a whole backoff schedule behind
+    # it, so a long timeout costs a worker pass rather than a request. 120 s
+    # is roughly 20x the slowest measured completion (6.5 s, for the UUID arm
+    # ADR-0028 rejects).
+    llm_timeout_seconds: float = Field(default=120.0, gt=0)
+    # Cost, in dollars per million tokens, because **no provider reports
+    # cost** -- the live `usage` object carries token counts and nothing else,
+    # which is why PRD 10's "litellm reports per-call cost natively" is
+    # corrected. `Decimal`, never `float`: this number is summed over a month
+    # and 1,200 in at $3/Mtok plus 340 out at $15/Mtok is exactly 0.0087.
+    #
+    # Both default to 0, which is the *honest* value for a local model and the
+    # wrong one for a hosted model an operator forgot to price. That failure
+    # is a cost dashboard reading zero, and the mitigation is that
+    # `llm_calls.tokens_in`/`tokens_out` are recorded exactly, so spend is
+    # recomputable from the ledger afterwards. A bundled price table would be
+    # a third-party dataset in the repository.
+    llm_price_in_per_mtok: Decimal = Field(default=Decimal(0), ge=0)
+    llm_price_out_per_mtok: Decimal = Field(default=Decimal(0), ge=0)
+
+    # How many candidates one generation's prompt carries. Read by
+    # `composition.build_pipeline`, which hands it to `CandidatePoolService`.
+    #
+    # **A setting rather than a constant, and the sibling that settles it is
+    # `llm_max_output_tokens` rather than `taste.py`'s constants.** Those are
+    # not settings because `user_taste` is a *stored* artefact and a knob that
+    # changes what "taste" means leaves every cached centroid computed under
+    # the old meaning with nothing to tell them apart. Nothing here is stored:
+    # a pool is assembled, sent, and discarded, and `curated_rows` is
+    # regenerated nightly by a process no re-run reproduces anyway. What this
+    # number is really about is the *context window of whatever model
+    # `USHER_LLM_BASE_URL` names*, which is a deployment fact and not a
+    # product one -- a 16k local model and a 200k hosted one have genuinely
+    # different right answers, and an operator must be able to say so without
+    # editing code.
+    #
+    # 200 is measured rather than round: ADR-0028's three handle arms all ran
+    # against a 200-film pool, where the index spelling costs **2,924 prompt
+    # tokens** for the probe prompt, and the same pool addressed by UUID is
+    # 9,041 -- most of a 16k budget spent on identifiers.
+    #
+    # ⚠️ **The per-candidate figure that arithmetic gave is wrong for the
+    # shipped prompt, re-measured 2026-08-07.** This comment read *"so a
+    # candidate is ~14.6 tokens"* -- a *total* divided by a count, from a probe
+    # prompt whose candidate line was name and year. Measured against the
+    # prompt that ships, at four pool sizes, the **marginal** cost is
+    # **20.40 tokens/candidate** (8 -> 200) and **20.45** (200 -> 600): +40%,
+    # and the difference is the genre list `curation_prompt._genres` renders.
+    # The whole prompt is 4,304 cold at pool 200 and 4,359 with three history
+    # lines, against the probe's 2,924.
+    #
+    # 🔴 **And `le=1000` is a bound this milestone's own reference endpoint
+    # cannot serve.** Measured 2026-08-07 against the local vLLM
+    # (`gemma-4-26b-a4b`, `max_model_len` 16,384) with the shipped defaults:
+    # **1,000 -> HTTP 400. 700 -> HTTP 400. 600 -> works**, at 12,540 prompt
+    # tokens. The constraint is not the context window alone, it is
+    # `prompt_tokens + llm_max_output_tokens <= max_model_len` -- and
+    # **nothing in this file couples the two**, so raising
+    # `USHER_LLM_MAX_OUTPUT_TOKENS` silently lowers the workable pool.
+    # `le=1000` is kept rather than lowered to 600, because 600 is *this*
+    # endpoint's answer and the whole argument above is that the right number
+    # is a deployment fact -- a 200k-context hosted model has a different one.
+    # What the ceiling is honestly a bound on is arithmetic no configuration
+    # can satisfy anywhere, and the mechanism below is what makes the rest
+    # survivable: a context-length 400 is a permanent failure for that prompt
+    # whose only fix is a smaller pool (trap 13), the adapter translates it to
+    # `PortDataMalformed`, and `JobWorker` parks immediately rather than
+    # spending four more completions on the same wall. Verified live: the
+    # 400 arrived, was translated, and parked. `ge=1`
+    # rather than something friendlier because a pool of one is a legal,
+    # useless configuration and this file does not invent product minima --
+    # what a *row* needs is a card floor, which is the validator's
+    # `DEFAULT_MIN_CARDS` and is deliberately **not** a setting: it crosses the
+    # prompt, the request schema and the validator from one definition, and
+    # `composition.build_curation_service` takes that default rather than
+    # wiring a second value that can disagree with it. (This comment named a
+    # `curation_min_cards` field until 2026-08-07; no such field was ever
+    # shipped, and the sentence read as though one had been.)
+    curation_pool_size: int = Field(default=200, ge=1, le=1000)
+
+    # PRD 05's query expansion: one completion rewriting the query before
+    # `SearchService` embeds it. Read by `composition.build_pipeline`, which
+    # builds the `QueryExpansionService` or does not, and by `cli._search`,
+    # which uses it to decide whether opening an `httpx.AsyncClient` for the
+    # command would buy anything.
+    #
+    # **Named for the feature rather than for the client or for the lane**, the
+    # call `curation_pool_size` already made one block up: `llm_*` is the
+    # endpoint and its credential, `search_*` is the retrieval tuning
+    # `build_pipeline` hands to the two indexes, and this is neither -- it is a
+    # switch on one LLM *feature*, which is what `curation_*` is too.
+    #
+    # **Off by default, and that default is a measurement rather than caution.**
+    # PRD 05 has named query expansion the cheaper, better-evidenced lever for
+    # mood queries since M1, on the literature's authority. Run on 2026-08-07
+    # against a local `gemma-4-26b-a4b` -- five mood queries against the 150
+    # most-voted catalog titles' real overviews, embedded with the shipped
+    # `compose_document` and the shipped `FastEmbedEmbedder`, targets written
+    # down before any cosine was computed -- it made retrieval **worse**: MRR
+    # 0.733 -> 0.373, recall@10 0.800 -> 0.533, with the typed query winning
+    # four of the five queries and tying the fifth. A label-free control says
+    # why: pairwise cosine *between the five queries themselves* rose from
+    # 0.5417 to 0.5975 mean and 0.6328 to 0.7784 max, so five distinct searches
+    # came back more alike than they went in. See
+    # `docs/prd/05-search-and-similarity.md` for the caveats, which are real --
+    # one model, one 150-document corpus, five queries.
+    #
+    # **`true` here with `llm_enabled` false is refused rather than ignored**
+    # -- see `_query_expansion_needs_a_client` below.
+    query_expansion_enabled: bool = False
+
     # The retrieval half. Every one of these is read by
     # `composition.build_pipeline`, which constructs the two indexes and
     # `SearchService`.
@@ -414,12 +602,60 @@ class Settings(BaseSettings):
             )
         return self
 
-    @field_validator("tmdb_api_key", "otlp_endpoint", mode="before")
+    @model_validator(mode="after")
+    def _query_expansion_needs_a_client(self) -> "Settings":
+        """The one combination of the two LLM switches that cannot mean
+        anything, refused at startup rather than left to mean nothing.
+
+        Query expansion is a completion in front of an embed. With
+        `llm_enabled` false there is no `LLMClient` in the process at all --
+        `composition.llm_client` answers `(None, no-op)` and `build_pipeline`
+        has nothing to build a `QueryExpansionService` from -- so
+        `USHER_QUERY_EXPANSION_ENABLED=true` beside it is a knob an operator
+        turned with no effect. That is the failure `extra="forbid"` and
+        `USHER_COMPOSE_` both exist to prevent, arriving as a *state* rather
+        than as a typo, and this project has already paid for it once:
+        `USHER_WORKER_ENABLED` was documented, worked when delivered directly,
+        and was silently ignored where the docs pointed.
+
+        The other three combinations are all reachable and all meaningful, so
+        this refusal is the whole of the coupling between the two fields:
+        off/off is the shipped default, on/off is an LLM deployment that
+        curates and embeds every query as typed, and on/on adds the rewrite.
+
+        **The message names both variables**, which is not cosmetic: an
+        operator who kills spend by setting `USHER_LLM_ENABLED=false` meets
+        this on the next start, and a sentence naming only the field that was
+        set would send them to delete the line they meant to keep rather than
+        to the line that makes it work.
+
+        A cross-field rule for `_suggest_cap_leaves_room_to_choose`'s reason:
+        neither field can express it alone, and a bound that is a real
+        constraint belongs in the type system wherever it fits.
+        """
+        if self.query_expansion_enabled and not self.llm_enabled:
+            raise ValueError(
+                "USHER_QUERY_EXPANSION_ENABLED=true needs USHER_LLM_ENABLED=true "
+                "-- query expansion is one completion in front of the embed, and "
+                "with no LLM there is no completion to put there"
+            )
+        return self
+
+    @field_validator("tmdb_api_key", "otlp_endpoint", "llm_api_key", mode="before")
     @classmethod
     def _blank_to_none(cls, value: object) -> object:
         """An env var that is present but empty (as `.env.example` ships
         `USHER_TMDB_API_KEY=` and `OTEL_EXPORTER_OTLP_ENDPOINT=`) means
-        "not set", not "set to the empty string" — keep `str | None` honest."""
+        "not set", not "set to the empty string" — keep `str | None` honest.
+
+        **`llm_api_key` joined this list because the suite caught it**, and it
+        is the one of the three where the empty string is not merely untidy:
+        a local vLLM or Ollama is configured with no credential at all, so
+        `USHER_LLM_API_KEY=` is the *documented* way to say so — and a
+        `SecretStr("")` is truthy enough to build an `Authorization: Bearer `
+        header, which a permissive server accepts and a strict one rejects
+        with a 401 naming a credential the operator never set.
+        """
         if isinstance(value, str) and value == "":
             return None
         return value

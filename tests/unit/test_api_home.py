@@ -8,29 +8,76 @@ rows in registry order.
 """
 
 import ast
+import dataclasses
 import inspect
 import pathlib
 import uuid
-from collections.abc import AsyncIterator
-from datetime import timedelta
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
+from pydantic import AwareDatetime
 
+from tests.fakes.taste_repository import FakeTasteRepository
+from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.unit.rows import USER, Library, days_ago
 from usher.api.app import create_app
 from usher.api.deps import get_home_service, get_row_cache, get_row_context
 from usher.api.dto.home import RowResponse
 from usher.config import Settings
 from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
+from usher.domain.taste import GenreAffinity
+from usher.ports.embedding import Embedder
+from usher.ports.repository import (
+    TasteRepository,
+    TitleEmbeddingRepository,
+    TitleRepository,
+    WatchStateRepository,
+)
 from usher.ports.rows import RowContext
 from usher.services.home import HomeService
 from usher.services.rows import ROW_PROVIDERS
 from usher.services.rows.cache import RowCache
+from usher.services.taste import TasteService
 
 EXTERNAL_ID = "emby-item-9f31a2"
+
+
+class _CountingTaste(TasteService):
+    """`TasteService` with a tally on the one method this route calls.
+
+    A subclass rather than a stub, so the count is taken over the *real*
+    service reading the real fakes: a stub would answer the "how many times"
+    question and lose the "with what" one, which is the assertion that stops a
+    deferred field being a field wired to nothing.
+    """
+
+    def __init__(
+        self,
+        *,
+        watch_states: WatchStateRepository,
+        embeddings: TitleEmbeddingRepository,
+        titles: TitleRepository,
+        taste: TasteRepository,
+        embedder: Embedder | None,
+        now: Callable[[], AwareDatetime],
+    ) -> None:
+        super().__init__(
+            watch_states=watch_states,
+            embeddings=embeddings,
+            titles=titles,
+            taste=taste,
+            embedder=embedder,
+            now=now,
+        )
+        self.affinity_reads = 0
+
+    async def genre_affinity(self, user_id: uuid.UUID) -> list[GenreAffinity]:
+        self.affinity_reads += 1
+        return await super().genre_affinity(user_id)
 
 
 class _Seeded:
@@ -122,6 +169,174 @@ async def library_only() -> AsyncIterator[httpx.AsyncClient]:
             yield connected
 
 
+async def test_the_route_hands_every_provider_a_context_it_can_actually_read() -> None:
+    """**The one thing every other case in this file overrides away**, and the
+    gap M8 Task 15's mutation sweep found: `_app` replaces `get_row_context`
+    with a `Library`'s, so nothing in the unit suite has ever built the real
+    one -- and `curated=None` in it survived all 2,743 cases while being
+    perfectly type-annotated at the call site.
+
+    `RowContext` is a frozen dataclass with no runtime validation, so a field
+    the route wires to `None` constructs happily and fails as an
+    `AttributeError` inside whichever provider reads it, on the first request,
+    in production. `mypy` catches the spelling in this plant; it does not catch
+    an `Optional` widened by a later change, and a type checker is not the
+    thing this file is for.
+
+    **`mypy` is not the only thing in the gate that catches it, and saying so
+    was wrong** (corrected 2026-08-07).
+    `tests/integration/test_pipeline_spans.py` has driven a real `GET /home`
+    against `create_app()` with no dependency overrides since M7's own
+    `342e476`, and it kills 9 of these 10 plants;
+    `test_pipeline_deps.py::test_the_row_context_carries_the_stored_user_and_
+    not_a_fresh_one` kills `user`. What this case buys is **speed and
+    locality**, not exclusivity: it needs no Docker and it fails naming the
+    context rather than naming a span tree. The one plant nothing anywhere
+    catches is `episodes=None` -- 2,759 unit and 866 integration cases, all
+    green -- because `NextUpProvider` reads it at hydration time and no case
+    composes a real context over a household with an unfinished series.
+
+    **Two assertions, because the behavioural one alone does not generalise.**
+    Measured 2026-08-07, planting `None` into each of `get_row_context`'s ten
+    repository/user arguments in turn and running the whole unit suite against
+    the behavioural assertion by itself: **8 killed, 2 survived** --
+    `titles=None` and `episodes=None` both passed all 2,759 cases. The
+    behavioural half only asks every provider to `propose()` against an
+    **empty** household, and `titles`/`media_items` are read mostly at
+    *hydration* time (`Row.build`), which no empty household reaches. Pairing
+    it with `test_every_row_context_field_is_read_by_at_least_one_provider`
+    does not close that: **that case scans `services/rows/` for the string
+    `ctx.<name>`, which says a reader exists, not that this case reaches it.**
+
+    So the `None` scan below is kept, and it is **not** the "second list" the
+    first draft of this docstring dismissed -- it is derived from
+    `dataclasses.fields(ctx)`, so it grows with the dataclass and there is
+    nothing to keep in step. Nothing on the real context is legitimately
+    `None`: `now` is a callable, and so is `affinities` since the screen-cache
+    finding deferred it -- **which is the shape this scan has to keep working
+    against**, because "a field that is a callable" and "a field wired to
+    nothing" are one keystroke apart and only one of them is legal. A callable
+    is not `None`, so a plant there still dies here; what this scan cannot see
+    is a callable that answers `[]` forever, which is why
+    `test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_it`
+    asserts a *genre* off the real one. It kills all ten, including the two the
+    behavioural half cannot see.
+
+    The behavioural half is kept anyway, and it is the half with the *reason*
+    in it: a scan proves the field is populated, and `propose()` proves it is
+    populated with something a provider can actually call. Between them, the
+    thirteenth field is covered the day it is added.
+    """
+    library = Library()
+    taste = TasteService(
+        watch_states=library.watch_states,
+        embeddings=FakeTitleEmbeddingRepository(),
+        titles=library.titles,
+        taste=FakeTasteRepository(library.watch_states),
+        embedder=None,
+        now=lambda: datetime.now(UTC),
+    )
+
+    ctx = await get_row_context(
+        user=USER,
+        titles=library.titles,
+        media_items=library.media_items,
+        watch_states=library.watch_states,
+        episodes=library.episodes,
+        neighbors=library.neighbors,
+        people=library.people,
+        credits=library.credits,
+        collections=library.collections,
+        curated=library.curated_rows,
+        taste=taste,
+    )
+
+    assert len(dataclasses.fields(ctx)) >= 12, "the context lost fields, so this proves nothing"
+    assert len(ROW_PROVIDERS) == 10, "the registry shrank, so this proves nothing"
+
+    assert [one.name for one in dataclasses.fields(ctx) if getattr(ctx, one.name) is None] == [], (
+        "the route wired a context field to None"
+    )
+
+    for provider in ROW_PROVIDERS:
+        assert await provider.propose(ctx) == [], (
+            f"{type(provider).__name__} could not read the context the route builds"
+        )
+
+
+async def test_the_route_does_not_read_a_households_taste_until_a_row_asks_for_it() -> None:
+    """**The genre-affinity read used to happen before the screen cache could
+    answer**, because `RowContext.affinities` was a value this dependency
+    computed rather than a callable a provider awaits.
+
+    FastAPI resolves the whole dependency graph before the handler runs, and
+    `HomeService.compose_report` only looks in the cache once it has a context
+    -- so every `GET /home`, hit or miss, paid `list_recent(50)` +
+    `list_by_ids(50)` + the library-wide `unnest(genres) GROUP BY` for a value
+    exactly one of the ten providers reads. On the measured 1,271,570-title
+    catalog those are the three most expensive statements a *cached* screen
+    could possibly issue.
+
+    Three assertions, and each rules out a different wrong shape:
+
+    - **nothing is read while the context is assembled** -- the finding;
+    - **the first await returns the real answer** -- which is what stops the
+      repair being the failure `.claude/rules/testing-discipline.md` records
+      for this exact dependency, a field wired to something that reads as
+      populated and delivers nothing (`affinities=lambda: []` would satisfy the
+      count assertion alone, so the *genre* is asserted);
+    - **the second await costs nothing more**, because two providers reading it
+      one day must not be two reads.
+
+    The other half of the finding -- that a screen the cache answers never
+    awaits it at all -- is
+    `test_services_home.py::test_a_screen_the_cache_can_answer_reads_no_taste_
+    at_all`, because it is the composer that decides.
+    """
+    library = Library()
+    # Four owned-and-finished westerns against twenty owned dramas: support
+    # clears `_MIN_SUPPORT` and lift clears `_MIN_LIFT` by a factor of six, so
+    # the affinity this route delivers is a real one rather than `()`.
+    for index in range(4):
+        watched = await library.title(f"Western {index}", genres=("Western",))
+        await library.finished(watched, at=days_ago(index + 1))
+    for index in range(20):
+        await library.title(f"Drama {index}", genres=("Drama",))
+    taste = _CountingTaste(
+        watch_states=library.watch_states,
+        embeddings=FakeTitleEmbeddingRepository(),
+        titles=library.titles,
+        taste=FakeTasteRepository(
+            library.watch_states, titles=library.titles, media_items=library.media_items
+        ),
+        embedder=None,
+        now=lambda: datetime.now(UTC),
+    )
+
+    ctx = await get_row_context(
+        user=USER,
+        titles=library.titles,
+        media_items=library.media_items,
+        watch_states=library.watch_states,
+        episodes=library.episodes,
+        neighbors=library.neighbors,
+        people=library.people,
+        credits=library.credits,
+        collections=library.collections,
+        curated=library.curated_rows,
+        taste=taste,
+    )
+
+    assert taste.affinity_reads == 0, "the route read the household's taste to build a context"
+
+    first = await ctx.affinities()
+    second = await ctx.affinities()
+
+    assert [one.genre for one in first] == ["Western"], "the deferred field delivered nothing"
+    assert list(second) == list(first)
+    assert taste.affinity_reads == 1, "the deferred field was not memoised for the request"
+
+
 async def test_the_screen_is_rows_in_the_order_the_server_composed_them(
     client: httpx.AsyncClient, seeded: _Seeded
 ) -> None:
@@ -161,15 +376,21 @@ def test_a_row_with_nothing_to_explain_carries_a_null_reason_and_not_an_empty_st
     and it cannot be told from a row that had something to say and said
     nothing. Kills `reason: str = ""` on the DTO.
 
-    **Asserted at the DTO rather than through the route, and that is a finding
-    rather than a convenience.** All nine shipped providers return a sentence
-    -- `BuiltRow.reason` is `str | None` and *nothing in `src/` returns
-    `None`* -- so the null arm is a shape the wire promises and no provider
-    currently reaches. Written through the route it would be a case that could
-    only ever assert the positive arm, which is the vacuous-pass failure this
-    milestone is about; written here it holds the DTO to the contract
-    `/openapi.json` publishes. Recorded for M8, whose `CuratedProvider` is the
-    first plausible row with nothing to explain.
+    **Asserted at the DTO rather than through the route, and the reason it was
+    a finding has now expired.** All nine of M7's providers return a sentence,
+    so `BuiltRow.reason`'s null arm was a shape the wire promised and *nothing
+    in `src/` reached* -- written through the route the case could only ever
+    have asserted the positive arm, which is the vacuous-pass failure M7 is
+    named for. It stays at the DTO because that is what holds the contract
+    `/openapi.json` publishes.
+
+    ✅ **M8 supplied the reader M7 recorded this waiting for.** `LLMRow` passes
+    the stored `reason` through, `None` included -- `curation_validate` turns a
+    blank one into `None` rather than `""` for this case's own argument -- and
+    `CuratedProvider` is what puts such a row on a screen.
+    `test_rows_curated.py::test_a_row_the_model_gave_no_reason_for_has_no_
+    subtitle_not_an_empty_one` is the behavioural half, so the wire's null arm
+    now has a producer as well as a promise.
     """
     row = BuiltRow(
         slug="a-row-with-nothing-to-say",
@@ -288,13 +509,22 @@ def test_the_home_service_and_every_provider_hold_no_source_adapter() -> None:
     **string** annotation, which is the one form needing no import at all; and
     an `ast.ImportFrom`-only scan does not see `import usher.ports.source`.
 
-    Scans **every** registered provider, not just the composer: nine providers
-    is nine chances, and a guard scoped to one of them reads as coverage. Same
+    Scans **every** registered provider, not just the composer: ten providers
+    is ten chances, and a guard scoped to one of them reads as coverage. Same
     lesson M6's sweep recorded when a docstring guard scoped to the class missed
     the method.
+
+    **The count moves with the registry and the claim does not**, which is why
+    this update is mechanical where `test_rows_invariants.py`'s is not: it is a
+    guard on the guard ("the sweep lost providers"), and nothing about a tenth
+    provider makes a source adapter more or less reachable. What *is* new about
+    `CuratedProvider` is the port it must not hold, and `usher.ports.source` is
+    not it -- `test_rows_curated.py::test_the_curated_module_holds_no_llm_
+    client_and_cannot_complete_anything` is this case's sibling for the one
+    that matters.
     """
     modules: list[type] = [HomeService, *(type(provider) for provider in ROW_PROVIDERS)]
-    assert len(modules) == 10, "the sweep lost providers, so it proves nothing"
+    assert len(modules) == 11, "the sweep lost providers, so it proves nothing"
 
     for target in modules:
         source = pathlib.Path(inspect.getfile(target)).read_text()

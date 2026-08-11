@@ -73,6 +73,7 @@ from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
 from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher
+from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
 from usher.ports.source import SourceAdapter, SourceEvent
 from usher.services.push import PushOutcome, PushSupervisor
@@ -97,6 +98,7 @@ class LaneSupervisor:
         user_id: Callable[[], Awaitable[uuid.UUID]],
         provider: MetadataProvider | None = None,
         embedder: Embedder | None = None,
+        client: LLMClient | None = None,
         rows: RowCache | None = None,
         idle_seconds: float = IDLE_SLEEP_SECONDS,
     ) -> None:
@@ -110,10 +112,15 @@ class LaneSupervisor:
         self._rows = rows
         self._user_id = user_id
         self._provider = provider
-        # Carried, never built here. Both of these are per-*process*
+        # Carried, never built here. All three of these are per-*process*
         # resources handed in by the composition root that made them, and
         # `_run_worker` below rebuilds everything else once per pass.
         self._embedder = embedder
+        # The completion client, on identical terms. `None` is the shipped
+        # default (`USHER_LLM_ENABLED=false`) and is what makes the worker
+        # lane register no `curate` handler -- so curate work waits for a
+        # process that can run it rather than being claimed and parked.
+        self._client = client
         # Injected only so a test can run several worker passes without
         # spending five seconds each: `usher work`'s equivalent is a module
         # constant for the reason stated above, and nothing in `src/` passes
@@ -390,6 +397,7 @@ class LaneSupervisor:
                         self._settings,
                         provider=self._provider,
                         embedder=self._embedder,
+                        client=self._client,
                         resolve=registry.resolve,
                         user_id=await self._user_id(),
                     )

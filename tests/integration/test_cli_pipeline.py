@@ -31,8 +31,11 @@ the two cases below exercise "nothing to probe" and "no credential to probe
 with", both of which answer from local state.
 """
 
+import re
 import uuid
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from decimal import Decimal
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -41,7 +44,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fakes.embedding import FakeEmbedder
+from tests.fakes.llm_client import FakeLLMClient, usage
 from usher.cli import (
+    _curate,
     _home,
     _open_adapter,
     _push,
@@ -66,12 +71,22 @@ from usher.ports.ingest import MediaItemUpsert
 from usher.ports.jobs import JobRequest
 from usher.ports.repository import ScoredNeighbor, TitleEmbeddingUpsert
 from usher.ports.search import SearchFilters
+from usher.services.curation_validate import (
+    ITEM_IDS_KEY,
+    REASON_KEY,
+    ROWS_KEY,
+    TITLE_KEY,
+    DropReason,
+)
 
 # The blend these arranged rows claim to have been computed under. A literal,
 # never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
 # express "this row came from a different blend", which is the whole state the
 # column exists to describe.
 _FP = "arranged-by-a-test"
+
+# The shape every `(thing, close it)` pair in `usher.composition` returns.
+AsyncCloser = Callable[[], Awaitable[None]]
 
 
 @pytest.fixture
@@ -109,6 +124,10 @@ async def _purge(settings: Settings) -> None:
     async with _session_for(settings) as session:
         for statement in (
             "DELETE FROM jobs",
+            # M8's cost ledger, which cascades from nothing and has no
+            # `user_id` to scope a delete by -- so a committing curate case
+            # has to clear the table.
+            "DELETE FROM llm_calls",
             "DELETE FROM watch_states",
             "DELETE FROM media_items",
             "DELETE FROM users WHERE name = 'default'",
@@ -143,11 +162,14 @@ async def test_unmatched_reports_an_empty_review_queue(
 async def test_work_runs_a_pass_over_an_empty_queue(
     cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`work --once` against an empty database. It builds every service, the
-    handler for all three kinds it can serve, requeues whatever a previous
-    process left `running`, claims nothing, and exits -- and it creates the
-    singleton default user on the way, which nothing before M4 ever did and
-    without which `watch_states.user_id` has no row to point at."""
+    """`work --once` against an empty database. It builds every service and a
+    handler per kind this deployment can serve -- **two** of the six here,
+    since `enrich` and `derive` want a TMDb key, `index` wants the embedding
+    extra and `curate` wants `USHER_LLM_ENABLED`, and this fixture configures
+    none of the three -- requeues whatever a previous process left `running`,
+    claims nothing, and exits. It creates the singleton default user on the
+    way, which nothing before M4 ever did and without which
+    `watch_states.user_id` has no row to point at."""
     await _work(cli_settings, once=True)
     assert "0 jobs" in capsys.readouterr().out
     async with _session_for(cli_settings) as session:
@@ -157,6 +179,107 @@ async def test_work_runs_a_pass_over_an_empty_queue(
             )
         ).scalar_one()
     assert stored is not None
+
+
+async def test_work_parks_a_curate_job_it_cannot_serve_and_buys_nothing(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_slate: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """**`usher work` is the second composition root, and this is the only
+    thing that says it builds an `LLMClient` at all.**
+
+    `tests/integration/test_lanes_in_the_server_process.py` makes the same
+    claim about `create_app`; the two roots are exactly what
+    `usher.composition` exists to keep in step, and "one root gains a
+    collaborator and the other keeps answering as though it had none" is the
+    drift that module's docstring names. Without this case, deleting
+    `_work`'s `llm_client(settings)` leaves the whole suite green and turns
+    `USHER_LLM_ENABLED=true` on a split deployment into a queue that grows
+    forever.
+
+    Parked rather than completed, and against an **empty** database on
+    purpose: `CurationService` refuses an empty candidate pool with
+    `PortDataMalformed` *before* the client is touched, so this exercises the
+    whole claim/handle/classify path at a cost of nothing and opens no socket
+    -- which is the same reason PRD 08's "every command works against an
+    empty database" is the rule this file is built around.
+
+    Its own settings rather than the shared `cli_settings` fixture, because
+    the one thing under test is a setting the shared fixture does not set.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", postgres_url)
+    monkeypatch.setenv("USHER_SECRET_KEY", "0" * 32)
+    monkeypatch.setenv("USHER_LLM_ENABLED", "true")
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.llm_enabled is True, "the premise: the fixture really turned it on"
+    household = new_id()
+    async with _session_for(settings) as session:
+        await build_pipeline(session, settings).queue.enqueue(
+            [JobRequest(kind=JobKind.CURATE, key=str(household), priority=JobPriority.BACKFILL)]
+        )
+        await session.commit()
+
+    await _work(settings, once=True)
+
+    assert "1 jobs" in capsys.readouterr().out
+    async with _session_for(settings) as session:
+        status = (
+            await session.execute(
+                text("SELECT status FROM jobs WHERE kind = 'curate' AND key = :k"),
+                {"k": str(household)},
+            )
+        ).scalar_one()
+        # The whole table: `llm_calls` carries no `user_id` -- `generation_id`
+        # is its only correlation key -- and `_purge` empties it either side.
+        billed = (await session.execute(text("SELECT count(*) FROM llm_calls"))).scalar_one()
+    assert status == "parked", "the curate job was never claimed; this root built no LLM client"
+    assert int(billed) == 0, "an empty catalog was billed for a completion"
+    get_settings.cache_clear()
+
+
+async def test_work_releases_every_process_resource_it_built(
+    cli_settings: Settings, monkeypatch: pytest.MonkeyPatch, clean_slate: None
+) -> None:
+    """The `usher work` half of `create_app`'s
+    `test_the_lifespan_releases_every_process_resource_it_built`, and the two
+    are one claim about two roots -- which is what `usher.composition` exists
+    to keep in step.
+
+    Measured before writing it: deleting any one of `aclose()`,
+    `aclose_model()` or `aclose_client()` from `_work`'s `finally` left
+    `tests/unit` and `tests/integration` fully green. `aclose_client()` is
+    M8's line and the other two are inherited; all three are pinned here
+    rather than only the new one.
+
+    The three factories are substituted for the reason the API case states:
+    on this deployment's settings the real ones all answer
+    `(None, composition.nothing)`, and `nothing` is one shared module-level
+    no-op, so a real run cannot tell "released the thing" from "awaited the
+    no-op". `--once` so the loop exits and the `finally` actually runs.
+    """
+    calls: list[str] = []
+
+    def _factory(name: str) -> Callable[..., Awaitable[tuple[None, AsyncCloser]]]:
+        async def _build(*_: object, **__: object) -> tuple[None, AsyncCloser]:
+            async def _close() -> None:
+                calls.append(name)
+
+            return None, _close
+
+        return _build
+
+    monkeypatch.setattr("usher.cli.metadata_provider", _factory("provider"))
+    monkeypatch.setattr("usher.cli.embedder", _factory("embedder"))
+    monkeypatch.setattr("usher.cli.llm_client", _factory("client"))
+
+    await _work(cli_settings, once=True)
+
+    assert sorted(calls) == ["client", "embedder", "provider"], (
+        "`usher work` built three process-lifetime resources and did not release all three"
+    )
 
 
 async def test_the_default_user_is_created_once_and_is_stable(
@@ -570,7 +693,13 @@ async def test_suggest_finds_a_title_by_a_prefix_of_its_name(
 async def test_every_search_command_prints_and_never_logs(
     cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`cli.py:153-154`'s rule, asserted rather than followed.
+    """`cli._print_home_report`'s rule, asserted rather than followed.
+
+    **Cited by name rather than by line number since 2026-08-07**: the two
+    copies of this citation said `cli.py:153-154`, which had drifted onto an
+    `httpx.AsyncClient` construction inside `_bootstrap` -- a line reference
+    into a 1,500-line module is a citation that goes stale on the next
+    insertion above it.
 
     With `USHER_LOG_JSON=true` -- the default -- a result routed through
     loguru is a JSON envelope wrapped around a table, per line. The wrong
@@ -662,7 +791,7 @@ async def test_home_composes_a_screen_against_an_empty_database(
     await _home(cli_settings, limit=10, repeat=1)
 
     out = capsys.readouterr().out
-    assert "9 providers, 9 proposed nothing" in out
+    assert "10 providers, 10 proposed nothing" in out
     assert "screen: 0 rows, 0 cards" in out
 
 
@@ -675,8 +804,17 @@ async def test_home_prints_a_line_for_a_provider_that_proposed_nothing(
     left out of `ROW_PROVIDERS` survives review.
 
     Kills a report built by iterating the *proposals* rather than the registry.
-    Asserted by name for every one of the nine, because a count is satisfied by
-    a report printing one provider nine times.
+    Asserted by name for every one of the **ten**, because a count is satisfied
+    by a report printing one provider ten times.
+
+    **A superset passes this case and that is why the tenth had to be added
+    deliberately.** M8 registered `CuratedProvider` and every assertion below
+    stayed green -- the report simply grew a line nothing looked at -- which is
+    the same shape as the report dropping a silent provider, arriving from the
+    other direction. The count in
+    `test_home_composes_a_screen_against_an_empty_database` above is what
+    actually failed, so the two cases are load-bearing together and neither is
+    on its own.
     """
     await _home(cli_settings, limit=10, repeat=1)
 
@@ -691,6 +829,7 @@ async def test_home_prints_a_line_for_a_provider_that_proposed_nothing(
         "genre-affinity",
         "seasonal",
         "people",
+        "curated",
     ):
         assert any(line.startswith(slug) and " 0 " in line for line in lines), slug
 
@@ -729,3 +868,287 @@ async def test_home_prints_and_never_logs_its_answer(
     await _home(cli_settings, limit=10, repeat=1)
 
     assert capsys.readouterr().out.strip()
+
+
+# --------------------------------------------------------------- usher curate
+#
+# **Driven against real Postgres for the reason `usher home`'s cases are**: the
+# command coroutine takes a `Settings` and builds its own engine, its own
+# pipeline and its own `CurationService` through `_session_for`, so the three
+# arms below are the only place that wiring is executed at all.
+#
+# The *client* is the one collaborator these substitute, and it is substituted
+# rather than pointed at a dead endpoint for two reasons that point the same
+# way: nothing in this suite may open a socket, and a scripted response is what
+# makes "what did the validator do with a real completion" observable end to
+# end. `tests/unit/test_cli_curate.py` covers the arm with no client at all,
+# which is the one that must answer before a connection is opened.
+
+_CURATE_MARK = "cli-curate"
+
+#: `curation_validate.DEFAULT_MIN_CARDS`, which is what a kept row needs. Not
+#: imported as a bound to compare against -- the fixtures below are *built*
+#: from it, so a change to the floor changes what these cases seed rather than
+#: silently making them assert a row the validator would now discard.
+_CARDS = 5
+
+
+def _curatable(name: str) -> Title:
+    """One candidate. No `media_items` row, deliberately: ownership is a *sort
+    key* in `list_unwatched_candidates` and never a filter, so an unowned
+    title is an eligible candidate and seeding a library would test the
+    ordering instead of the wiring."""
+    return Title(kind=TitleKind.MOVIE, name=name, sort_name=_CURATE_MARK, year=2021)
+
+
+async def _seed_candidates(settings: Settings, count: int) -> list[Title]:
+    titles = [_curatable(f"An Invented Film {index}") for index in range(count)]
+    async with _session_for(settings) as session:
+        pipeline = build_pipeline(session, settings)
+        for title in titles:
+            await pipeline.titles.add(title)
+        await session.commit()
+    return titles
+
+
+def _completion(handles: Sequence[int]) -> dict[str, Any]:
+    """One shelf, addressed by handle. Written through the validator's own four
+    exported key constants rather than by retyping `"rows"`/`"item_ids"`: a
+    fixture saying `ids` and a reader saying `item_ids` is a case that asserts
+    a 100% drop and calls it coverage."""
+    return {
+        ROWS_KEY: [
+            {
+                TITLE_KEY: "Slow-burn sci-fi for a rainy night",
+                REASON_KEY: "Because this household finished three of these.",
+                ITEM_IDS_KEY: list(handles),
+            }
+        ]
+    }
+
+
+@pytest.fixture
+def scripted_llm(monkeypatch: pytest.MonkeyPatch) -> FakeLLMClient:
+    """`composition.llm_client` replaced with one that answers on a script.
+
+    Substituted on `usher.cli` rather than on `usher.composition`, which is
+    where `_curate` looks it up -- and returning the fake's own `aclose` so a
+    case can see whether the command released the process resource it built.
+    """
+    client = FakeLLMClient()
+
+    async def _factory(
+        settings: Settings, *, report: bool = True
+    ) -> tuple[FakeLLMClient, Callable[[], Awaitable[None]]]:
+        return client, client.aclose
+
+    monkeypatch.setattr("usher.cli.llm_client", _factory)
+    return client
+
+
+@pytest_asyncio.fixture
+async def clean_curation(cli_settings: Settings) -> AsyncIterator[None]:
+    await _purge_curation(cli_settings)
+    yield
+    await _purge_curation(cli_settings)
+
+
+async def _purge_curation(settings: Settings) -> None:
+    async with _session_for(settings) as session:
+        for statement in (
+            # The ledger carries no `user_id` -- `generation_id` is its only
+            # correlation key -- so a committing curate case has to clear the
+            # whole table rather than scope a delete by household.
+            "DELETE FROM llm_calls",
+            # `curated_rows` and the stored taste profile both cascade from
+            # `users`, so this one delete reaches everything the run wrote for
+            # the household.
+            "DELETE FROM users WHERE name = 'default'",
+        ):
+            await session.execute(text(statement))
+        await session.execute(
+            text("DELETE FROM titles WHERE sort_name = :mark"), {"mark": _CURATE_MARK}
+        )
+        await session.commit()
+
+
+async def test_curate_against_an_empty_database_says_so_and_buys_nothing(
+    cli_settings: Settings,
+    clean_slate: None,
+    clean_curation: None,
+    scripted_llm: FakeLLMClient,
+) -> None:
+    """**PRD 08's operator rule, on the one command in this project that spends
+    money.**
+
+    An empty catalog produces an empty candidate pool, and
+    `CurationService.generate` refuses it *before the client is touched* --
+    which is the whole of why this case can exist in a suite that opens no
+    socket. Four things are asserted and the last three are the ones with
+    teeth:
+
+    - the operator gets a sentence rather than sixty frames;
+    - **the sentence names nothing an operator cannot look up**, which until
+      2026-08-07 it did -- see the comment on that assertion;
+    - **nothing was attempted**, so `complete_json` was never called. A
+      generation for a household with nothing to recommend is a charge with a
+      guaranteed empty answer;
+    - **nothing was billed.** This is the one path in the milestone that
+      writes no `llm_calls` row at all, and the rule the service implements is
+      `record()` on every path that *attempted* a call -- a row here would be
+      spend an operator has to explain away.
+    """
+    with pytest.raises(SystemExit) as exit_info:
+        await _curate(cli_settings)
+
+    message = str(exit_info.value)
+    assert "the candidate pool is empty" in message, message
+    assert "Traceback" not in message, message
+    # The fact none of the raised messages carries and every operator asks
+    # first, on the run where the screen looks unchanged.
+    assert "previous rows still stand" in message, message
+    # **The sentence's only concrete token was the household's uuid until
+    # 2026-08-07**, carried as the raise's `detail`. `build_parser` refuses a
+    # `--user` flag on the grounds that a household id is "an id an operator has
+    # no way to look up on a deployment that has exactly one", so the command
+    # was printing the one token its own parser argues nobody can read.
+    # `test_the_empty_pool_message_carries_no_household_id` pins the raise; this
+    # asserts the *rendered* sentence, which is the surface that argument is
+    # about -- and it matches a uuid shape rather than this run's id because the
+    # user row is flushed and never committed, so there is no id to read back.
+    assert re.search(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", message) is None, message
+    assert scripted_llm.calls == [], "an empty catalog bought a completion"
+    assert scripted_llm.closed == 1, "the command did not release the client it built"
+    async with _session_for(cli_settings) as session:
+        billed = (await session.execute(text("SELECT count(*) FROM llm_calls"))).scalar_one()
+    assert int(billed) == 0, "an empty catalog was billed for a completion"
+
+
+async def test_curate_writes_a_generation_and_reports_what_it_bought(
+    cli_settings: Settings,
+    clean_slate: None,
+    clean_curation: None,
+    scripted_llm: FakeLLMClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The whole path, end to end and through the real wiring: pool → prompt →
+    one completion → validate → `replace_for_user` → ledger → one commit.
+
+    **The pool size is asserted as a number larger than what was kept**, which
+    is the property `CurationReport` carries it for: a command that summed the
+    rows it was handed would print `5` for a generation chosen from ten
+    candidates, and the ratio is what an operator reads to decide whether the
+    pool is big enough. Asserted as an inequality rather than as `10` because
+    this file commits against a session-scoped container and the catalog is not
+    this case's to own.
+
+    The two rows the run has to leave behind are checked in the database rather
+    than in the output -- a report is what the command *said*, and PRD 10's
+    dashboard 5 is `llm_calls JOIN curated_rows USING (generation_id)`.
+    """
+    await _seed_candidates(cli_settings, 10)
+    scripted_llm.responses.append(_completion(range(1, _CARDS + 1)))
+    scripted_llm.usages.append(
+        usage(
+            model="served/actually-2",
+            tokens_in=4_812,
+            tokens_out=391,
+            cost_usd=Decimal("0.00042100"),
+            latency_ms=2_314,
+        )
+    )
+
+    await _curate(cli_settings)
+
+    out = capsys.readouterr().out
+    pool = int(re.search(r"pool: (\d+) candidates", out).group(1))  # type: ignore[union-attr]
+    assert pool >= 10, out
+    assert pool > _CARDS, "the pool size was the kept-card count, not the pool"
+    assert f"kept: 1 row, {_CARDS} cards" in out, out
+    assert "Slow-burn sci-fi for a rainy night" in out, out
+    for reason in DropReason:
+        assert reason.value in out, f"{reason.value} is missing from the report: {out}"
+    assert "4812 in, 391 out" in out, out
+    assert "$0.00042100" in out, out
+    assert "served/actually-2" in out, out
+    assert len(scripted_llm.calls) == 1, "PRD 06's one completion per household per run"
+
+    async with _session_for(cli_settings) as session:
+        rows = (
+            await session.execute(
+                text("SELECT slug, generation_id FROM curated_rows ORDER BY position")
+            )
+        ).all()
+        ledger = (
+            await session.execute(text("SELECT ok, error, generation_id FROM llm_calls"))
+        ).all()
+    assert [row.slug for row in rows] == ["curated-1"]
+    assert len(ledger) == 1
+    assert ledger[0].ok is True and ledger[0].error is None
+    # One commit covering both writes, so PRD 10's join never sees a screen
+    # with no cost attributed to it.
+    assert ledger[0].generation_id == rows[0].generation_id
+
+
+async def test_curate_says_what_it_dropped_when_nothing_survived(
+    cli_settings: Settings,
+    clean_slate: None,
+    clean_curation: None,
+    scripted_llm: FakeLLMClient,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """**ADR-0028's rule 3 at a terminal: the call worked, the money is spent,
+    and the generation produced nothing.**
+
+    The state that made ADR-0028 necessary is a run whose ledger row reads
+    `ok = true` with real tokens and whose household has no rows -- so what
+    this command has to say is not "it failed" but *what was dropped and for
+    which reason*, which is the only thing distinguishing a validator eating
+    the output from a model with nothing to say. `CurationRejected.error` is
+    numbers and label names only, which is why it is safe to put on a screen.
+
+    Handles past the end of the pool rather than a malformed body: it is the
+    108/108 shape ADR-0028 measured, it leaves the completion perfectly
+    well-formed, and it reaches **two** reasons at once -- five cards
+    `not_in_pool` and then the row itself `row_too_short` -- which is the
+    second-order effect an operator reads first.
+
+    Both database assertions matter and the second is the one a missing commit
+    breaks: last night's screen still stands, *and* the spend is on the record
+    anyway.
+
+    **And the message may not say "nothing was written", which is what it said
+    until 2026-08-07.** The two assertions below are a contradiction unless the
+    sentence is right: this case requires `len(ledger) == 1` -- the call was
+    billed -- so a message telling the operator nothing was written is telling
+    them they were not charged, on the one path in this milestone where the
+    money is gone and the screen is unchanged. That is the exact state
+    ADR-0028's rule 3 exists to make visible, inverted at the terminal. The
+    clause the arm is *for* is the screen one, which is true on all three paths
+    and is asserted above.
+    """
+    await _seed_candidates(cli_settings, 10)
+    invented = range(9001, 9001 + _CARDS)
+    scripted_llm.responses.append(_completion(invented))
+
+    with pytest.raises(SystemExit) as exit_info:
+        await _curate(cli_settings)
+
+    message = str(exit_info.value)
+    assert f"{DropReason.NOT_IN_POOL.value}={_CARDS}" in message, message
+    assert f"{DropReason.ROW_TOO_SHORT.value}=1" in message, message
+    assert "previous rows still stand" in message, message
+    assert "nothing was written" not in message, message
+    assert "Traceback" not in message, message
+    # Nothing the model wrote reaches the screen on this path: the heading was
+    # the model's prose and the tally is numbers and label names.
+    assert "Slow-burn sci-fi" not in message, message
+    assert capsys.readouterr().out == "", "a rejected generation printed a report"
+
+    async with _session_for(cli_settings) as session:
+        kept = (await session.execute(text("SELECT count(*) FROM curated_rows"))).scalar_one()
+        ledger = (await session.execute(text("SELECT ok, error FROM llm_calls"))).all()
+    assert int(kept) == 0, "a generation that validated to nothing replaced the household's rows"
+    assert len(ledger) == 1, "the call was billed and the ledger has to say so"
+    assert ledger[0].ok is False
+    assert f"{DropReason.NOT_IN_POOL.value}={_CARDS}" in ledger[0].error

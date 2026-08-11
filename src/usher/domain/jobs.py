@@ -66,6 +66,76 @@ class JobKind(StrEnum):
     in it, and the only lever would be a `JobPriority` rung that does not
     exist between `BACKFILL` and `NEW`.
 
+    `curate` buys one LLM completion and replaces one household's
+    `curated_rows` (PRD 06). **Its key is a `user_id`**, which is what makes
+    `(kind, key)` do the milestone's central cost work rather than merely
+    tidying the queue. Nothing keyed per *request* -- a `generation_id`, a
+    timestamp -- deduplicates at all, and a key naming no household would put
+    two households on one screen.
+
+    **What the queue actually does with a repeat, measured against real
+    Postgres rather than reasoned from the statement** (2026-08-07, one
+    session, `PostgresJobQueue`). Enqueueing `(curate, A)` writes **1** row;
+    enqueueing it again at the same priority writes **0** and leaves one row;
+    twice inside one batch writes **0** more (`SELECT DISTINCT ON (kind,
+    key)`); at a *higher* priority it writes **1** as a promotion of the same
+    row, not a second one; and `(curate, B)` writes **1**, so two households
+    really are two jobs. Two halves of that are worth knowing before building
+    on it, and the first is a number Task 17 would otherwise read backwards:
+
+    - **A request arriving while the generation is `running` is coalesced
+      into it at the same or a lower priority, promotes it at a higher one,
+      and is discarded either way.** `status = 'running'` appears nowhere in
+      `_ENQUEUE`'s `WHERE`, so what a repeat costs turns entirely on
+      `jobs.priority < excluded.priority` -- which makes this two
+      measurements, not one:
+
+      | running row | repeat asks | rows written | row afterwards |
+      |---|---|---|---|
+      | `BACKFILL` | `BACKFILL` | 0 | `('running', 20)` |
+      | `DEMAND` | `DEMAND` | 0 | `('running', 100)` |
+      | `NEW` | `BACKFILL` | 0 | `('running', 50)` |
+      | `BACKFILL` | `NEW` | **1** | `('running', 50)` |
+      | `BACKFILL` | `DEMAND` | **1** | `('running', 100)` |
+
+      `complete()` then deletes that one row in **every** line of the table,
+      so the requested generation never runs and the queue is empty
+      afterwards. For "one completion per household per day" that is the
+      wanted answer.
+
+      **What it is not is a signal, and `written == 0` is the wrong thing to
+      read as one.** A promoting repeat reports success -- `enqueue` cannot
+      distinguish creating a job from promoting one, both return 1 -- so a
+      caller at `JobPriority.DEMAND` (`POST /admin/rows/regenerate`, and
+      `api/routers/titles.py`'s existing promotion) is told 1 row was written
+      and gets nothing back for it. A caller that wants a *fresh* generation
+      after the one in flight has to arrange that above the queue; there is
+      no return value here that tells it what happened. The one thing that
+      does save the repeat is a *failure*: `_FAIL` returns the promoted row
+      to `pending`, so the retry serves it. Measured 2026-08-07 against
+      `pgvector/pgvector:pg17` through `PostgresJobQueue`, and pinned by the
+      three `test_a_..._repeat_...` cases in
+      `tests/integration/test_job_queue.py`, which are where to change this
+      table rather than here.
+    - **A parked `curate` job is not un-parked or promoted by asking again**,
+      even at `DEMAND`. Measured: 0 rows written and the row still
+      `('parked', 20)`. That is `_ENQUEUE`'s `WHERE jobs.status <> 'parked'`,
+      and it is the right answer -- an empty catalog does not stop being
+      empty because something asked twice -- but it means an operator has to
+      release the row, exactly as for every other kind.
+
+    **It is the first kind whose registration is conditional**, and that is
+    not the stub M4 forbade. `composition.build_worker` registers it only
+    when `composition.llm_client` built one, exactly as it registers `index`
+    only when an embedder exists, and `run_once` claims `list(self._handlers)`
+    -- so a deployment with `USHER_LLM_ENABLED=false` leaves curate work
+    pending for a process that can run it rather than parking work whose only
+    problem is the process it was offered to. The member itself is
+    unconditional because it is domain vocabulary two things outside the
+    worker need: the enqueue site (`POST /admin/rows/regenerate`) and
+    `depth()`, which promises a key per kind so PRD 10's `usher.jobs.queued`
+    never stops reporting a series.
+
     **Adding a member here needs no migration**, verified rather than
     assumed: `db/models/jobs.py` declares `kind` through `enum_column`, whose
     `native_enum=False` compiles to a plain `VARCHAR(32)` and whose
@@ -79,6 +149,7 @@ class JobKind(StrEnum):
     WATCH_HISTORY = "watch_history"
     INDEX = "index"
     DERIVE = "derive"
+    CURATE = "curate"
 
 
 class JobStatus(StrEnum):
@@ -119,11 +190,18 @@ class JobPriority(IntEnum):
 class Job(DomainModel):
     """One outstanding unit of work.
 
-    `key` is the kind's own identifier for the work -- a `Title.id` for
-    `enrich`, and a source's own `external_id` for `match` and
-    `watch_history` -- as a string, so one column serves every kind without
-    a polymorphic payload. `(kind, key)` is unique; enqueueing the same work
-    twice promotes rather than duplicates.
+    `key` is the kind's own identifier for the work, and it is **one column,
+    three kinds of identifier**: a `Title.id` for `enrich`, `index` and
+    `derive`; a source's own `external_id` for `match` and `watch_history`; a
+    `User.id` for `curate`. All three as a string, so one column serves every
+    kind without a polymorphic payload. `(kind, key)` is unique; enqueueing
+    the same work twice promotes rather than duplicates.
+    `usher.services.handlers` is where a key is converted back, and
+    `_uuid_key` takes the expected thing as an argument precisely because
+    three answers to "what is this key" means three different sentences in
+    `jobs.last_error`. **`curate` is the one that names neither a title nor a
+    source item**, which is why `(kind, key)` does this milestone's cost work
+    rather than merely tidying the queue -- see `JobKind.CURATE`.
 
     **The two source-scoped kinds key on the source's id for the item, not
     on `MediaItem.id`, and that is a deliberate trade with a known cost.**

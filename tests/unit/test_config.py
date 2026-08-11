@@ -594,3 +594,68 @@ def test_the_suggest_cap_is_above_the_result_limit(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("USHER_SEARCH_SUGGEST_CANDIDATES", "200")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_the_two_llm_spenders_have_independent_switches_and_both_default_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**Three reachable configurations, and each is a different deployment.**
+
+    `USHER_LLM_ENABLED` used to gate both spenders at once, on the argument
+    that a second switch's only honest default is "follow the first". That
+    argument was sound while query expansion was believed to help. It is not
+    sound now: measured 2026-08-07 against a local `gemma-4-26b-a4b`, expansion
+    moved MRR **0.733 -> 0.373** and recall@10 **0.800 -> 0.533** over five mood
+    queries and 150 real overviews, so the two spenders have opposite expected
+    values and cannot share a switch (`docs/prd/05-search-and-similarity.md`).
+
+    Asserted as a walk through the three states rather than as three
+    independent cases, because the claim is that the second switch **moves
+    independently of the first** -- and a case that only ever reads the pair in
+    one state cannot see a `query_expansion_enabled` wired to return
+    `llm_enabled`.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    off = Settings()
+    assert (off.llm_enabled, off.query_expansion_enabled) == (False, False)
+
+    monkeypatch.setenv("USHER_LLM_ENABLED", "true")
+    curation_only = Settings()
+    assert (curation_only.llm_enabled, curation_only.query_expansion_enabled) == (True, False)
+
+    monkeypatch.setenv("USHER_QUERY_EXPANSION_ENABLED", "true")
+    both = Settings()
+    assert (both.llm_enabled, both.query_expansion_enabled) == (True, True)
+
+
+def test_query_expansion_without_an_llm_is_refused_rather_than_silently_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fourth combination, made unreachable rather than merely documented.
+
+    Expansion is one completion in front of an embed, so with no client there
+    is nothing for it to be: `composition.llm_client` answers `(None, no-op)`,
+    `build_pipeline` is handed nothing to build an expander from, and a
+    `USHER_QUERY_EXPANSION_ENABLED=true` left standing beside it would be a
+    knob an operator turned with no effect -- which is
+    `test_every_setting_is_read_by_something`'s whole subject arriving as a
+    *state* rather than as a missing reader, and the same shape
+    `USHER_WORKER_ENABLED` was silently ignored in for four milestones.
+
+    A cross-field rule, in the shape `_suggest_cap_leaves_room_to_choose`
+    established. **The message has to name both variables**: one naming only
+    the field that was set sends an operator to delete the line they meant,
+    rather than to the line that makes it work.
+    """
+    monkeypatch.setenv("USHER_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("USHER_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("USHER_QUERY_EXPANSION_ENABLED", "true")
+    with pytest.raises(ValidationError) as failure:
+        Settings()
+    message = str(failure.value)
+    assert "USHER_QUERY_EXPANSION_ENABLED" in message, message
+    assert "USHER_LLM_ENABLED" in message, message
+
+    monkeypatch.setenv("USHER_LLM_ENABLED", "true")
+    assert Settings().query_expansion_enabled is True

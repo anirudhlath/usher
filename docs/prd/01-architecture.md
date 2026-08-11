@@ -16,7 +16,8 @@ services for a household-scale deployment.
 │                                                           │
 │  api/         routers · dependencies · DTOs               │
 │  services/    catalog · ingest · match · enrich ·         │
-│               search · rows · watchstate · bootstrap      │
+│               search · rows · curation · watchstate ·     │
+│               bootstrap                                   │
 │  domain/      Pydantic models — the canonical language    │
 │  ports/       SourceAdapter · MetadataProvider ·          │
 │               SearchIndex · Embedder · LLMClient ·        │
@@ -43,8 +44,13 @@ too, despite one implementation each, because neither implementation is
 itself a single external service to name: **`fastembed` runs in-process
 against a local ONNX conversion of a BAAI checkpoint** — a Qdrant library
 serving a third-party conversion of somebody else's weights, which is three
-names and no upstream service at all — and `litellm` is itself a
-multi-provider abstraction, not one upstream. (This example read
+names and no upstream service at all — and the LLM client's upstream is
+whatever `USHER_LLM_BASE_URL` points at, which is a setting rather than a
+name. (That second half read *"`litellm` is itself a multi-provider
+abstraction, not one upstream"* until M8 declined the dependency
+([ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md)); the
+conclusion is unchanged and the reason is now a property of the shipped code
+rather than of a library.) (This example read
 `sentence-transformers` until M6 replaced the runtime; the argument is
 unchanged and the substitution makes it stronger. See
 [ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md).)
@@ -90,7 +96,20 @@ These are the invariants that keep Emby out of everything:
    independently of internal models.
 
 Import discipline is enforced in CI (`import-linter` contracts), because
-layering rules that are only documented become suggestions.
+layering rules that are only documented become suggestions. **Eight contracts
+as of M8, and the eighth is a rule the first seven structurally could not
+reach.** Contracts two and three are sourced at `domain`/`ports`/`services`,
+so the indirect chain that catches a *core* module reaching `usher.composition`
+does not exist for a router — and `usher.api` is itself a composition root, so
+it is allowed to reach `db/` and `adapters/` directly. A router doing
+`from usher.composition import build_curation_service` therefore passed all
+seven, ruff, mypy and both suites; planted and measured. The eighth forbids
+`usher.api.routers` from **naming** `usher.composition`, `usher.services.
+curation` or `usher.ports.llm`, and it needs `allow_indirect_imports = true` to
+say only that: every router imports `usher.api.deps`, which imports the wiring
+on purpose. A router may *reach* the wiring through a dependency and may not
+*name* it — which is what makes [07](07-client-api.md)'s *"the route holds no
+`LLMClient`"* a property of the build rather than of a review.
 
 ## Ports are ABCs, not Protocols
 
@@ -157,10 +176,10 @@ Other ports follow the same pattern:
 | `SearchIndex` | `PostgresSearchIndex` (`MeilisearchIndex` gated) |
 | `SuggestIndex` | `PostgresSuggestIndex` (`MeilisearchSuggestIndex` gated) — **the gate moved to this port**, which is [ADR-0021](decisions/0021-the-suggest-path-is-its-own-port.md) |
 | `Embedder` | `FastEmbedEmbedder` — **optional**, behind an extra and off by default; a deployment without it still has full-text and trigram, the tier serving 1.27M titles ([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)) |
-| `LLMClient` | `LiteLLMClient` |
+| `LLMClient` | `OpenAICompatibleClient` — **one `POST /v1/chat/completions` over the httpx stack already here, and `litellm` is not taken.** Priced rather than assumed: +146 MB and 29 distributions against +0 and 0, and the 29 are a second async HTTP stack plus two tokenizer runtimes. The provider abstraction is `USHER_LLM_BASE_URL` [ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md) |
 | `TitleRepository` | `PostgresTitleRepository` ([ADR-0009](decisions/0009-repositories-are-ports.md)) |
-| `Row` | `BaseRow` in `services/rows/base.py` and its nine concrete rows — **the base class is in `services/` and the ABC is in `ports/`**, because `hydrate()` reads two repositories off the context and a port with a dependency is not a port ([06](06-rows-and-recommendations.md)) |
-| `RowProvider` | `ContinueWatchingProvider`, `NextUpProvider`, `RecentlyAddedProvider`, `RediscoverProvider`, `BecauseYouWatchedProvider`, `FranchiseProvider`, `GenreAffinityProvider`, `SeasonalProvider`, `PeopleProvider` — nine, registered as `services/rows/__init__.py`'s `ROW_PROVIDERS`. ⏳ `CuratedProvider` is the tenth and **M8 owns it whole**, with `curated_rows` and `LLMRow` ([09](09-roadmap.md)'s M7 boundary call 2) |
+| `Row` | `BaseRow` in `services/rows/base.py` and its **ten** concrete rows — **the base class is in `services/` and the ABC is in `ports/`**, because `hydrate()` reads two repositories off the context and a port with a dependency is not a port ([06](06-rows-and-recommendations.md)) |
+| `RowProvider` | `ContinueWatchingProvider`, `NextUpProvider`, `RecentlyAddedProvider`, `RediscoverProvider`, `BecauseYouWatchedProvider`, `FranchiseProvider`, `GenreAffinityProvider`, `SeasonalProvider`, `PeopleProvider`, ✅ `CuratedProvider` — **ten**, registered as `services/rows/__init__.py`'s `ROW_PROVIDERS`. The tenth shipped in M8 with `curated_rows`, `LLMRow` and `RowFamily.CURATED` as one family ([09](09-roadmap.md)'s M7 boundary call 2), and it is the only one that hydrates an artefact a *model* wrote — it reads `curated_rows` through a port on the context and never holds an `LLMClient` |
 
 **`adapters/search/` vs `db/repositories/`.** Both ultimately talk to the
 same PostgreSQL instance, which invites conflating them — they are not the
@@ -186,17 +205,22 @@ usher/
 │   ├── prd/                    ← this
 │   └── specs/                  ← reviewed design specs
 ├── src/usher/
-│   ├── api/         routers/ (health, titles, events, home, sources),
+│   ├── api/         routers/ (health, titles, events, home, rows, sources),
 │   │                deps.py, dto/ (… home.py), lanes.py
-│   ├── domain/      title.py, person.py, source.py, watch.py, rows.py
+│   ├── domain/      title.py, person.py, source.py, watch.py, rows.py,
+│   │                curation.py
 │   ├── ports/       *.py  (ABCs only)
 │   ├── adapters/    emby/, tmdb/, bulk/ (… movielens.py), search/,
-│   │                embedding/, llm/
+│   │                embedding/, llm/ (openai_compatible.py)
 │   ├── services/    rows/ (base.py, cache.py, one module per provider),
 │   │                home.py, taste.py, derive.py, similar.py, search.py,
-│   │                matching.py, ingest.py, enrich.py, push.py, jobs.py
+│   │                matching.py, ingest.py, enrich.py, push.py, jobs.py,
+│   │                curation.py, curation_pool.py, curation_prompt.py,
+│   │                curation_validate.py, query_expansion.py,
+│   │                llm_ledger.py (the one `llm_calls` writer)
 │   ├── jobs/        queue.py, scheduler.py, tasks/
-│   ├── db/          models/ (… people.py, collection.py, taste.py),
+│   ├── db/          models/ (… people.py, collection.py, taste.py,
+│   │                curation.py),
 │   │                repositories/ (implement ports/), migrations/
 │   └── config.py
 ├── tests/           unit/, integration/, fixtures/, fakes/ (port doubles
@@ -208,9 +232,10 @@ usher/
 Files stay small and single-purpose. A growing file is a signal that a concept
 wants extracting, not that it needs sections.
 
-⏳ **Two entries in that tree, and in the diagram at the top of this file, do
+⏳ **One entry in that tree, and in the diagram at the top of this file, does
 not exist as written** — recorded rather than quietly redrawn, because the
-tree is what a new reader navigates by.
+tree is what a new reader navigates by. (It read *"Two entries"* until M8; the
+second was `adapters/llm/`, struck through below because M8 built it.)
 
 - **There is no `jobs/` package.** The priority queue landed as
   `ports/jobs.py` + `db/repositories/jobs.py` (a repository, per
@@ -218,10 +243,14 @@ tree is what a new reader navigates by.
   under `db/`), the worker as `services/jobs.py`, and the "scheduler" as
   `api/lanes.py`'s supervised lanes. Nothing was skipped; the concepts landed
   under the layers that own them.
-- **There is no `adapters/llm/`.** `ports/llm.py` exists and has no
-  implementation until M8 — so `LLMClient → LiteLLMClient` in the table above
-  is a plan, not an inventory. `adapters/search/` and `adapters/embedding/`
-  are real as of M6.
+- ~~**There is no `adapters/llm/`.**~~ **Built in M8**, and the entry it said
+  was "a plan, not an inventory" was also wrong about *what* was planned:
+  `LLMClient → LiteLLMClient` became `OpenAICompatibleClient`
+  ([ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md)). The
+  directory keeps its capability name and the *reason* changes — an
+  OpenAI-compatible client has no single upstream either, because its upstream
+  is whatever `base_url` points at. `adapters/search/` and
+  `adapters/embedding/` are real as of M6.
 
 ## Stack
 
@@ -233,7 +262,7 @@ tree is what a new reader navigates by.
 | ORM | SQLAlchemy 2.0 (async) + Alembic |
 | DB | PostgreSQL 17 + pgvector ≥ 0.8.5 |
 | Jobs | In-process asyncio workers over a Postgres-backed queue |
-| LLM | litellm (provider-agnostic) |
+| LLM | Any OpenAI-compatible endpoint, over httpx — `USHER_LLM_BASE_URL` ([ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md)) |
 | Embeddings | fastembed, local, **optional** (167 MiB, no torch) |
 | Packaging | uv |
 | License | MIT |
@@ -268,21 +297,43 @@ the same `JobWorker` as `match` and `enrich`, so its "1 batch worker" is
 really "whatever the one worker is doing next".
 `USHER_EMBEDDING_BATCH_SIZE` is the embedder's internal batch, not a lane.
 
+✅ **M8 adds a sixth thing to that same one worker and no row to this table,
+which is a decision rather than an omission.** `JobKind.CURATE` is registered
+on the same `JobWorker`, guarded on an `LLMClient` existing exactly as `INDEX`
+is guarded on an embedder — so a deployment with `USHER_LLM_ENABLED=false`
+(the default) never claims one. The operational consequence worth stating is
+that a generation holds the single worker for as long as the completion takes,
+up to `USHER_LLM_TIMEOUT_SECONDS` (120 s), while the other five kinds —
+`match`, `watch_history`, `enrich`, `index` and `derive` — wait behind it.
+`watch_history` is worth naming rather than eliding: with `match` it is one of
+only two kinds *every* deployment registers, so it is the one waiting on the
+deployment that has nothing else configured. That is acceptable at the shape this runs in — PRD 06
+budgets *one* completion per household per day, against a queue whose other
+kinds are minutes of background work — and it is the number to look at first if
+a queue ever appears to stall on a curating deployment. A lane of its own is
+the fix if it stops being acceptable, not a semaphore: the ceiling here is one
+upstream call, not concurrency.
+
 **The row-build row is the one line in this table that is a decision rather
 than a design**, and it is here because a concurrency table that silently omits
 the one loop a reader would expect to find in it is how somebody adds
 `asyncio.gather` in good faith. `HomeService` builds the selected rows in a
 `for`, on the request's own session, and 1 is the *correct* number rather than
 an unraised limit: `AsyncSession` is explicitly not safe for concurrent use, so
-nine coroutines awaiting on one session interleave on one connection — a
+ten coroutines awaiting on one session interleave on one connection — a
 corruption that usually works, failing as an intermittent `InvalidRequestError`
-under load. The two escapes are worse at this scale (a session per row is nine
+under load. The two escapes are worse at this scale (a session per row is ten
 connections for one home screen; a semaphore has no lane to belong to, which is
 this very table's gap). There is **no setting**, because
 [08](08-operations.md) already retracted "concurrency per lane" on the
 principle that a setting cannot be added ahead of the mechanism it would bound,
 and the mechanism here is a `for`. Measured rather than assumed: p50 23.9 ms,
-p95 35.9 ms cold over nine providers on a real 1,271,570-title catalog.
+p95 35.9 ms cold over nine providers on a real 1,271,570-title catalog — ⚠️
+**M7's registry and M7's household, not re-run for the tenth**; M8 added
+`CuratedProvider`, whose propose is one indexed read of `curated_rows` and
+whose build hydrates stored ids, so it is the *cheapest* of the ten and the
+measurement is expected to move by less than its own noise. Expected, not
+measured, and marked so.
 [ADR-0025](decisions/0025-rows-build-sequentially.md).
 
 The row that is worth revisiting rather than merely correcting is the

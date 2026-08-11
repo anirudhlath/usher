@@ -131,6 +131,7 @@ from usher.ports.bulk import (
     BulkBatch,
     BulkCursor,
     BulkDataset,
+    GenomeTag,
     GenomeVector,
 )
 from usher.ports.errors import PortDataMalformed
@@ -232,6 +233,14 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         self._file = CachedDatasetFile(client, base_url + ARCHIVE_NAME, cache_dir)
         self._batch_size = batch_size
         self._expected_tags = expected_tags
+        # `(revision, tags)` -- see `_vocabulary`. **Keyed on the revision
+        # rather than a bare tuple**, because the whole argument for
+        # `tag_vocabulary` taking a `revision` instead of resolving one is that
+        # `genome_tags.genome_revision` and `genome_scores.genome_revision`
+        # must come from a single resolution. A memo that answered across an
+        # upstream re-upload would reintroduce exactly the mislabelling that
+        # column exists to make visible -- silently, and from a cache.
+        self._tags: tuple[str, tuple[GenomeTag, ...]] | None = None
 
     @property
     def name(self) -> str:
@@ -261,47 +270,123 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
     ) -> AsyncIterator[BulkBatch[GenomeVector]]:
         return self._batches(resume_from, revision)
 
-    def _tag_count(self) -> int:
-        """The vocabulary width, read from `genome-tags.csv` before a single
-        score is read -- 1,128 rows and 18,103 bytes, so a changed vocabulary
-        costs one 18 kB read rather than a 521 MB pass.
+    async def tag_vocabulary(self, revision: str) -> tuple[GenomeTag, ...]:
+        """The 1,128 tag names, in ascending `tagId` order, for `revision`.
 
-        `split(",", 1)` splits *once*: a tag name may legitimately contain a
-        comma and only the id is read here, so the `csv` module is not needed
-        and IMDb's separate finding -- that `csv.reader` silently strips a
-        field's outer quotes -- does not arise.
+        **Not on `BulkDataset`.** Three of the four sibling datasets have no
+        vocabulary and no honest answer to give, and this is not a second row
+        stream: it is one 18,103-byte member read whole, ahead of an
+        18,472,128-row one, and it has no cursor because it has nothing to
+        resume. So it is a method on this class, which the CLI -- the
+        composition root that already constructs it concretely -- calls
+        directly.
 
-        Contiguity is checked before width. The vector is built *by index*
-        from `tagId`, so a gap means every position after it is off by one,
-        in every vector, for the whole import -- and the resulting table is
-        indistinguishable from a correct one until somebody compares two
-        releases.
+        **`revision` is required rather than resolved here**, which is
+        `BootstrapService.import_dataset`'s argument one layer up applied to a
+        second artefact. `genome_tags.genome_revision` exists to be compared
+        against `genome_scores.genome_revision`, so the two must come from one
+        resolution: two independent `HEAD`s straddling an upstream re-upload
+        would download and read release B while the vectors beside it were
+        stamped release A, which is exactly the mislabelling the column exists
+        to make visible. Passing it in makes them agree by construction.
+
+        `ensure_local` is called here rather than assumed, so this is safe to
+        call before or after a drain; on the ordinary path the archive is
+        already cached at this revision and the call short-circuits on the
+        stamp with no bytes transferred.
+
+        Raises `PortUnavailable`/`PortRateLimited` if the archive is not local
+        and cannot be fetched, and `PortDataMalformed` for the same two shapes
+        `batches()` refuses -- see `_vocabulary`.
         """
-        ids: list[int] = []
+        await self._file.ensure_local(revision)
+        return self._vocabulary(revision)
+
+    def _vocabulary(self, revision: str) -> tuple[GenomeTag, ...]:
+        """`genome-tags.csv`, parsed and checked, before a single score is
+        read -- 1,128 rows and 18,103 bytes, so a changed vocabulary costs one
+        18 kB read rather than a 521 MB pass.
+
+        **Memoised per instance and per revision**, because a bootstrap reads
+        this member through both of its doors: `tag_vocabulary` wants the
+        names, `_batches` wants nothing but `len()` of them. Unmemoised, that
+        second call re-inflated the same 18,103 bytes and rebuilt and re-sorted
+        the same 1,128 `GenomeTag` objects to produce one integer. Cheap in
+        absolute terms and pointless in any terms; the memo is what makes the
+        comment in `_batches` about a single parse literally true rather than
+        true only of the parser.
+
+        `partition(",")` splits *once*: a tag name may legitimately contain a
+        comma (none of the measured 1,128 does, which is a property of this
+        snapshot rather than a promise), so the `csv` module is not needed and
+        IMDb's separate finding -- that `csv.reader` silently strips a field's
+        outer quotes -- does not arise. It is `partition` rather than
+        `split(",", 1)` because a row carrying no comma at all has to be
+        distinguishable, and `split` hands that back as a one-element list
+        whose `[0]` parses as a perfectly good `tagId`.
+
+        **The empty-name refusal is `not name.strip()`, not `not name`**, and
+        the difference is the only defence there is: `ck_genome_tags_tag_not_
+        empty` is spelled `tag <> ''`, which a name of `"   "` satisfies, so a
+        whitespace-only lane would reach the table and read as labelled. All
+        1,128 measured names are `strip()`-stable, so this is hardening rather
+        than a live bug -- and it is why the CHECK was left as it is rather
+        than re-spelled `btrim(tag) <> ''` in a second migration.
+
+        Contiguity is checked before width, and both are checked before the
+        names are of any use. The vector is built *by index* from `tagId`, so
+        a gap means every position after it is off by one, in every vector,
+        for the whole import -- and the resulting table is indistinguishable
+        from a correct one until somebody compares two releases. A vocabulary
+        read through `tag_vocabulary` carries the identical hazard one layer
+        further on: a gap there names lane 3 with tag 4's word, permanently,
+        on a table whose whole purpose is to say what a lane means.
+
+        Returned sorted by `tag_id` rather than in file order. The measured
+        file is already ascending, so the sort is a no-op against every real
+        release -- which is precisely why it has to be here rather than
+        assumed: the fixture that would notice its absence is one nobody
+        writes, the same shape as the UUIDv7 `ORDER BY` trap.
+        """
+        if self._tags is not None and self._tags[0] == revision:
+            return self._tags[1]
+        tags: list[GenomeTag] = []
         for line in self._file.member_lines(_TAGS_MEMBER, skip=1):
             if not line:
                 continue
-            head = line.split(",", 1)[0]
+            head, separator, name = line.partition(",")
             try:
-                ids.append(int(head))
+                tag_id = int(head)
             except ValueError as exc:
                 raise PortDataMalformed(
                     "MovieLens genome-tags.csv has a non-integer tagId", detail=head
                 ) from exc
-        if ids != list(range(1, len(ids) + 1)):
+            if not separator or not name.strip():
+                raise PortDataMalformed(
+                    "MovieLens genome-tags.csv has a tagId with no tag name; a lane named "
+                    "by nothing but whitespace is a vocabulary that still looks complete",
+                    detail=head,
+                )
+            tags.append(GenomeTag(tag_id=tag_id, tag=name))
+        tags.sort(key=lambda tag: tag.tag_id)
+        if [tag.tag_id for tag in tags] != list(range(1, len(tags) + 1)):
             raise PortDataMalformed(
-                f"MovieLens tagIds are not contiguous 1...{len(ids)}; the genome vector is "
+                f"MovieLens tagIds are not contiguous 1...{len(tags)}; the genome vector is "
                 "built by index and a gap moves every later lane",
                 detail=_TAGS_MEMBER,
             )
-        if len(ids) != self._expected_tags:
+        if len(tags) != self._expected_tags:
             raise PortDataMalformed(
-                f"MovieLens genome vocabulary is {len(ids)} tags, expected "
+                f"MovieLens genome vocabulary is {len(tags)} tags, expected "
                 f"{self._expected_tags} -- the schema declares halfvec"
                 f"({self._expected_tags}), so this release cannot be stored under it",
                 detail=_TAGS_MEMBER,
             )
-        return len(ids)
+        # Stored only after all three refusals, so a malformed release raises
+        # on every call rather than once: a memo written before the checks
+        # would make the second door the forgiving one.
+        self._tags = (revision, tuple(tags))
+        return self._tags[1]
 
     def _links(self) -> dict[int, tuple[str, int | None]]:
         """All 86,537 `links.csv` rows, held in memory.
@@ -349,7 +434,19 @@ class MovieLensGenomeDataset(BulkDataset[GenomeVector]):
         rows_seen = usable.rows_seen if usable else 0
         await self._file.ensure_local(resolved)
 
-        width = self._tag_count()
+        # The names are read and discarded on this path: a vector's assembly
+        # needs the *width* and the contiguity guarantee, and nothing else.
+        # One *parser* rather than two, so a release whose vocabulary is gapped
+        # is refused identically whichever door it is read through --
+        # `tag_vocabulary` is the other, and it keeps the names.
+        #
+        # **And now one parse, which it was not.** This comment claimed a
+        # single parse from the start and it was only ever true within a path:
+        # a bootstrap calls `tag_vocabulary` *and* drains `batches`, so the
+        # 18,103-byte member was inflated twice and 1,128 `GenomeTag` objects
+        # built and sorted a second time to be measured with `len()` and thrown
+        # away. `_vocabulary` memoises per revision; the claim is now literal.
+        width = len(self._vocabulary(resolved))
         links = self._links()
 
         batch: list[GenomeVector] = []

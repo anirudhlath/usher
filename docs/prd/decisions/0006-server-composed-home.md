@@ -54,13 +54,23 @@ constraint. `usher.home.compose.duration` is the standing instrument
 ([10](../10-telemetry-and-dashboards.md)).
 
 **"New row types reach every client with zero client work" is now a checked
-claim.** Nine providers ship, registered as one tuple in
+claim.** Nine providers shipped with M7, registered as one tuple in
 `services/rows/__init__.py`; the composition point is a registration, and
 **five** cross-provider invariants are parametrised over the registry, so a
 tenth provider inherits five cases the day it is written. The half that was
 *not*
 free is `RowContext`: two of the fields [06](../06-rows-and-recommendations.md)
 specified had no reader in any of the nine and were deleted rather than kept.
+
+**The tenth arrived and the prediction held (M8, `CuratedProvider`).** The
+registry is ten, no client changed, and the five parametrised invariants
+covered it on the day it was written — the two that had a *counted* assertion
+(`len(BASE_SCORES) == 10` and the registry roll-call by name) failed until the
+count was updated, which is the mechanism working rather than a cost. What was
+*not* free the second time was every restated count in prose: nine copies of
+"nine providers" across `src/`, `tests/`, this ADR and
+[10](../10-telemetry-and-dashboards.md)'s `provider`-label vocabulary, each
+true when written and none derived from the registry.
 
 **No cursor, and the display hint reached the wire as an enum.**
 `portrait | landscape | wide | square` is this ADR's only concrete vocabulary
@@ -70,9 +80,13 @@ database answers `200 {"rows": []}` rather than a 404, and deliberately without
 a padded generic row, which would look personalised on a household that has
 watched nothing.
 
-**Nine of ten providers**, and the tenth is named rather than missing:
-`CuratedProvider` and `curated_rows` are M8's whole family
-([09](../09-roadmap.md)'s M7 boundary call 2).
+✅ **All ten providers**, since M8 shipped `CuratedProvider` and `curated_rows`
+as one family ([09](../09-roadmap.md)'s M7 boundary call 2). *(This read
+"**Nine of ten providers**, and the tenth is named rather than missing" until
+2026-08-07 — a tenth copy of the count this ADR's own paragraph four above
+counts nine of, left standing inside the file that names the drift. Recorded
+rather than silently corrected, because a document that describes a failure and
+then commits it is the more useful evidence.)*
 
 **Two consequences this ADR did not anticipate, both recorded elsewhere and
 named here so the trail is complete:**

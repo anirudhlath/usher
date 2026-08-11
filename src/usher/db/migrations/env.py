@@ -30,7 +30,17 @@ from usher.db.base import Base
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers` defaults to True, which sets `.disabled` on
+    # every logger absent from alembic.ini's `[loggers]` (root, sqlalchemy,
+    # alembic) -- silencing loggers this file has no business having an
+    # opinion about, permanently, since nothing in `logging` clears the flag
+    # on reconfigure. Harmless for `alembic upgrade head` as a container runs
+    # it (its own process, exiting before the app starts) and not harmless in
+    # any process that migrates in-process: it is how the test suite lost
+    # every `httpx` record after the integration suite ran. See
+    # `usher.telemetry.configure_logging`, which now reclaims the flag too --
+    # this stops the damage, that one repairs it whoever caused it.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

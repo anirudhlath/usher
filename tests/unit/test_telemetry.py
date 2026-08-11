@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 import pytest
@@ -138,6 +139,93 @@ def test_diagnose_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert captured["diagnose"] is False
     assert captured["backtrace"] is False
+
+
+def test_httpxs_per_request_info_line_does_not_reach_the_sink() -> None:
+    """**A command's answer is stdout, and `httpx` was writing to it.**
+
+    `httpx` logs `HTTP Request: <method> <url> "<status>"` at INFO once per
+    request, and `_InterceptHandler` -- correctly -- redirects every stdlib
+    record into loguru, whose sink is `sys.stdout` at INFO on the shipped
+    defaults. Measured 2026-08-07 against a loopback server: one request put a
+    ~900-character JSON envelope on stdout *in front of* the command's own
+    output. `usher search` and `usher curate` both pass `report=False` to
+    their factories to keep exactly that off the answer, and that call could
+    only silence Usher's own line.
+
+    Two arms, and the second is what stops the fix being "log nothing":
+    INFO is dropped, WARNING still arrives. Asserted through a **DEBUG** sink,
+    so the suppression has to be the stdlib logger's own level and not the
+    loguru sink's -- a fix that raised the sink threshold instead would pass
+    an INFO-sink version of this case and still print on a deployment running
+    `USHER_LOG_LEVEL=DEBUG`.
+
+    Nothing observable is lost: `configure_tracing` instruments `httpx`
+    unconditionally, so the same request is already a client span with method,
+    URL and status on it.
+    """
+    httpx_logger = logging.getLogger("httpx")
+    before = httpx_logger.level
+    configure_logging(_settings_with_telemetry_disabled())
+
+    sink: list[str] = []
+    handler = logger.add(sink.append, level="DEBUG")
+    try:
+        httpx_logger.info('HTTP Request: POST http://model/v1/chat/completions "HTTP/1.1 200 OK"')
+        assert sink == [], f"httpx's per-request line reached the sink: {sink}"
+
+        httpx_logger.warning("Connection pool is full, discarding connection")
+        assert len(sink) == 1, "a real httpx problem was silenced along with the noise"
+        assert "Connection pool is full" in sink[0]
+    finally:
+        logger.remove(handler)
+        httpx_logger.setLevel(before)
+
+
+def test_configure_logging_reclaims_a_logger_that_fileconfig_disabled() -> None:
+    """**`configure_logging` cleared handlers and levels and left `.disabled`
+    standing, so one `fileConfig` call muted a logger permanently.**
+
+    Found 2026-08-10 from CI, and the shape of the failure is the finding:
+    `pytest tests/unit` was green, `pytest tests/integration
+    tests/unit/test_telemetry.py` failed the httpx case above on its *second*
+    arm -- the WARNING that must still arrive. `env.py` calls
+    `fileConfig(config.config_file_name)`, whose `disable_existing_loggers`
+    defaults to **True**, which sets `.disabled = True` on every logger absent
+    from alembic.ini's `[loggers] keys = root,sqlalchemy,alembic`. The
+    integration suite migrates in-process, so `httpx` was disabled before the
+    unit suite ran.
+
+    `Logger.disabled` is checked in `Logger.handle`, *below* both the level
+    check and the handler walk, so nothing `configure_logging` did could
+    recover it: the loop cleared every logger's handlers and forced
+    `propagate = True` -- exactly to reclaim logging from a library that had
+    taken it -- and a disabled logger defeats that as completely as a stray
+    handler does, which is why the reclaim now includes it.
+
+    Pinned here rather than by suite order: this case disables the logger
+    itself, so it fails on `pytest tests/unit/test_telemetry.py` alone. The
+    httpx case is where it surfaced only because its second arm is the rare
+    assertion that requires a stdlib record to *arrive*.
+    """
+    httpx_logger = logging.getLogger("httpx")
+    before_level, before_disabled = httpx_logger.level, httpx_logger.disabled
+    httpx_logger.disabled = True
+
+    try:
+        configure_logging(_settings_with_telemetry_disabled())
+        assert httpx_logger.disabled is False, "configure_logging left the logger disabled"
+
+        sink: list[str] = []
+        handler = logger.add(sink.append, level="DEBUG")
+        try:
+            httpx_logger.warning("Connection pool is full, discarding connection")
+            assert len(sink) == 1, "a reclaimed logger still reached no sink"
+        finally:
+            logger.remove(handler)
+    finally:
+        httpx_logger.disabled = before_disabled
+        httpx_logger.setLevel(before_level)
 
 
 def test_no_metric_exporter_constructed_when_telemetry_disabled(

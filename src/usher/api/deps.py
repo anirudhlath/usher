@@ -8,7 +8,7 @@ direct naming of a *concrete* adapter, which is why the factory below is
 """
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, cast
 
@@ -20,6 +20,7 @@ from usher.composition import adapter_factory
 from usher.config import Settings
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
+from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
@@ -35,12 +36,14 @@ from usher.db.repositories.taste import PostgresTasteRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import default_user, ensure_default_user
+from usher.domain.taste import GenreAffinity
 from usher.domain.watch import User
 from usher.ports.events import EventPublisher
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import (
     CollectionRepository,
     CreditRepository,
+    CuratedRowRepository,
     EpisodeRepository,
     MediaItemRepository,
     PersonRepository,
@@ -522,6 +525,22 @@ def get_taste_repository(session: SessionDep) -> TasteRepository:
     return PostgresTasteRepository(session)
 
 
+def get_curated_row_repository(session: SessionDep) -> CuratedRowRepository:
+    """The read half only, and that is what a request is allowed to have.
+
+    `CuratedRowRepository` also carries `replace_for_user`, which is a
+    *generation*: one paid completion, a validator, and a delete-then-insert
+    over a household's whole screen. Nothing on this path may reach it -- the
+    write belongs to `JobKind.CURATE` under `usher work`, and
+    `POST /admin/rows/regenerate` enqueues that rather than doing it. The port
+    is handed over whole because splitting a repository in two to express which
+    half a caller uses is a second port for one table; what keeps the write off
+    this path is that `CuratedProvider` is the only thing here that holds one
+    and it calls `list_for_user`.
+    """
+    return PostgresCuratedRowRepository(session)
+
+
 async def get_default_user(session: SessionDep) -> User:
     """The singleton default user as a **model**, not just an id.
 
@@ -568,6 +587,48 @@ def get_taste_service(
     )
 
 
+class _Affinities:
+    """This household's genre affinities, read on demand and then remembered.
+
+    **The whole point is that `__call__` may never run.** `RowContext`'s field
+    used to be the awaited *value*, which put three statements --
+    `list_recent(50)`, `list_by_ids(50)` and a library-wide `unnest(genres)
+    GROUP BY` over 1.27M titles -- in front of `HomeService.compose_report`'s
+    look in the ~30 s screen cache, on every request including the ones that
+    hit. Deferred, a hit costs nothing and a miss costs exactly what it did.
+
+    **Memoised because the field is a promise about the request, not about the
+    reader.** `GenreAffinityProvider` is the only thing that awaits it today
+    and awaits it once; a second reader tomorrow must not be a second read, and
+    a provider cannot arrange that for itself because a context is frozen
+    precisely so nothing can stash state on it between `propose` and `build`.
+    One request, one answer, at most one read.
+
+    **`_answer is None` is the miss test rather than falsiness**, because `[]`
+    is the *common* real answer -- no genre cleared `_MIN_LIFT` and
+    `_MIN_SUPPORT`, which is what most households produce -- and a memo that
+    read falsiness would re-read on every ask for exactly the households with
+    nothing to find. Same shape as `TasteService._engaged`'s own memo, one
+    layer down, and stated in both places because both are one keystroke from
+    the version that quietly does nothing.
+
+    Not a closure, so the memo has a name a reader can find and the docstring
+    has somewhere to live; `__slots__` because one is built per request.
+    """
+
+    __slots__ = ("_answer", "_taste", "_user_id")
+
+    def __init__(self, taste: TasteService, user_id: uuid.UUID) -> None:
+        self._taste = taste
+        self._user_id = user_id
+        self._answer: Sequence[GenreAffinity] | None = None
+
+    async def __call__(self) -> Sequence[GenreAffinity]:
+        if self._answer is None:
+            self._answer = await self._taste.genre_affinity(self._user_id)
+        return self._answer
+
+
 async def get_row_context(
     user: Annotated[User, Depends(get_default_user)],
     titles: Annotated[TitleRepository, Depends(get_title_repository)],
@@ -578,9 +639,10 @@ async def get_row_context(
     people: Annotated[PersonRepository, Depends(get_person_repository)],
     credits: Annotated[CreditRepository, Depends(get_credit_repository)],
     collections: Annotated[CollectionRepository, Depends(get_collection_repository)],
+    curated: Annotated[CuratedRowRepository, Depends(get_curated_row_repository)],
     taste: Annotated[TasteService, Depends(get_taste_service)],
 ) -> RowContext:
-    """The eleven values a row may reach, for one request, for one user.
+    """The twelve values a row may reach, for one request, for one user.
 
     **`affinities` is a value the composer hands over, not a service a
     provider reaches.** A provider may import only `domain/` and `ports/`, so
@@ -588,11 +650,27 @@ async def get_row_context(
     inside a provider would need a `TasteRepository` field *and* a second copy
     of the lift arithmetic. `ports/rows.py` argues it at length.
 
+    **It is handed over as a callable, and nothing in this function reads the
+    household's taste.** `await taste.genre_affinity(user.id)` was evaluated
+    here, which is *before* `HomeService.compose_report` can look in the screen
+    cache -- FastAPI resolves the dependency graph and only then calls the
+    handler -- so a 30 s cache hit, which is most requests, had already paid
+    the three most expensive statements on the path. `_Affinities` defers them
+    to `GenreAffinityProvider`'s own `await` and memoises the answer for the
+    request.
+
     **`search` and `taste` used to be here and are not.** No provider read
     either, and `taste` cost a `user_taste` read on every request to deliver a
     value that is structurally `None` on this path -- `TasteService.centroid`
     returns `None` without an embedder and this route deliberately holds none.
     `TasteService` is still injected, for `genre_affinity`.
+
+    **`curated` is M8's, and it is a repository on the same terms as the other
+    nine.** `CuratedProvider` hydrates what a background job stored; nothing on
+    this path generates anything, so `GET /home` acquires no `LLMClient`, no
+    API key and no reason to 503 when the endpoint is down. A deployment with
+    `USHER_LLM_ENABLED=false` reads an empty table and gets a home screen with
+    fewer rows -- the same shape as a deployment with no embedder.
 
     **No `AsyncSession` here either**, which is the structural half of trap 4:
     a row holding repositories has no session to share, so there is nothing for
@@ -613,7 +691,8 @@ async def get_row_context(
         people=people,
         credits=credits,
         collections=collections,
-        affinities=await taste.genre_affinity(user.id),
+        affinities=_Affinities(taste, user.id),
+        curated=curated,
     )
 
 

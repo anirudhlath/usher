@@ -50,8 +50,8 @@ either way.
 absent row are different states, and the composer's metrics count them
 separately.
 
-`RowContext` is a frozen dataclass of ports plus an injected clock — **eleven
-fields as shipped in M7**:
+`RowContext` is a frozen dataclass of ports plus an injected clock — eleven
+fields as shipped in M7 and ✅ **twelve as of M8**:
 
 ```python
 user: User                          now: Callable[[], AwareDatetime]
@@ -59,12 +59,13 @@ titles: TitleRepository             media_items: MediaItemRepository
 watch_states: WatchStateRepository  episodes: EpisodeRepository
 neighbors: TitleNeighborRepository  people: PersonRepository
 credits: CreditRepository           collections: CollectionRepository
-affinities: Sequence[GenreAffinity]
+curated: CuratedRowRepository
+affinities: Callable[[], Awaitable[Sequence[GenreAffinity]]]
 ```
 
 - **No `AsyncSession`, and that is checked rather than commented.**
   `AsyncSession` is not safe for concurrent use, so a context carrying one is
-  a context nine providers can `asyncio.gather` over — which *usually works*,
+  a context ten providers can `asyncio.gather` over — which *usually works*,
   and fails as an intermittent error under load. A row holding repositories
   has no session to share.
 - **The clock is injected** because `SeasonalProvider` fires on a calendar
@@ -74,6 +75,14 @@ affinities: Sequence[GenreAffinity]
   context rather than each provider's constructor because providers are
   registered once, and a per-request clock cannot be a singleton's
   constructor argument.
+- **`curated` is the twelfth and it arrived with its reader.** M8's
+  `CuratedProvider` and this field land in one change, which is the discipline
+  the two deleted fields below did not have — the port and the table existed
+  three tasks earlier, which is exactly the pull that put `search` here three
+  groups before anything retrieved. It is the *repository*, not a generation's
+  rows: a provider is constructed once at import, so per-household data cannot
+  ride on its constructor, and pre-reading the rows would make every
+  `GET /home` pay for a shelf the composer may not select.
 - **`search: SearchIndex` and `taste: Centroid | None` were specified here and
   are not shipped.** Nine providers were built and none read either. Every row
   turned out to be a *predicate over a repository* rather than a retrieval, so
@@ -92,6 +101,21 @@ affinities: Sequence[GenreAffinity]
   optional and off by default (ADR-0022). It fires on lift over the owned
   library instead — counts over `titles.genres`, no embedder required. Fewer
   rows, not worse rows.
+- ✅ **`affinities` is awaited rather than held, so a cached screen costs
+  nothing.** It shipped as the sequence, computed while FastAPI resolved the
+  dependency graph — which happens *before* the handler runs, and therefore
+  before `HomeService` can look in the ~30 s screen cache. So every
+  `GET /home`, hit or miss, paid `list_recent(50)` + `list_by_ids(50)` + a
+  library-wide `unnest(genres) GROUP BY` over 1.27M titles to fill the one
+  field of twelve that a single provider reads. Deferring it to
+  `GenreAffinityProvider`'s own `await` makes the hit — which is most requests
+  — free, and leaves the miss costing exactly what it did. The alternative,
+  looking in the cache before assembling the context, was declined: the entry
+  can expire or be invalidated between the lookup and the compose, and the
+  screen composed from the empty affinity that follows would then be cached
+  for another 30 s. It is the only field of the twelve that is a callable
+  besides the clock, and it is the only one whose value is the product of
+  three statements.
 
 So rows are pure functions of context and trivially testable with fakes.
 
@@ -143,18 +167,64 @@ slug-keyed rule would couple the composer to the catalog.
 |---|---|---|---|---|
 | **`SourceRow`** | `SOURCE` | Catalog and watch state in Postgres | Continue Watching, Next Up, Recently Added, genre shelves, collections | ~60 s |
 | **`SimilarityRow`** | `SIMILARITY` | Embedding / genome neighbours of a seed title | "Because you watched *Dune*", "More like this" | hours |
-| **`LLMRow`** | ⏳ **not built in M7 — M8 owns it** | A persisted `curated_rows` record | "Slow-burn sci-fi for a rainy night" | until regenerated |
+| **`LLMRow`** | `CURATED` | A persisted `curated_rows` record | "Slow-burn sci-fi for a rainy night" | 5 min — see below |
 
 `LLMRow.build()` only *hydrates* stored output. Generation happens in a
 background job — never in the request path.
 
-**`RowFamily` has two members in M7 and no `CURATED`.** M8 owns
-`curated_rows`, `LLMRow`, `CuratedProvider` and
-`POST /admin/rows/regenerate` as one family — hydrating a table whose
+✅ **And the shelves of one generation hydrate together.** `CuratedProvider`
+returns up to five rows from a *single* `list_for_user`, so every card id in
+the family is in hand before anything builds; the composer's per-family cap
+then builds four of them, and one catalog read plus one ownership read each
+was **eight statements for the ~22 distinct ids one generation names**. The
+first shelf to build now reads the union for all of them and the rest read from
+it — at build time, not propose time, so a shelf the cap discards still costs
+nothing, and a shelf served from the row cache never reaches the memo at all
+because `HomeService` returns the cached row before calling `build`.
+
+> **Three surfaces reach that job and only one of them reports what it did.**
+> `POST /admin/rows/regenerate` enqueues a `curate` job and answers 202 with
+> the key; `usher work` claims it, but only if this process built an
+> `LLMClient` at all. ✅ **M8** adds `usher curate`, which runs one generation
+> *in the foreground* against a real database and prints what it bought — the
+> pool it chose from, the rows kept, the drops by reason with all five reasons
+> and their zeros, the token counts and the cost. It is the only place an
+> operator sees the answer in the same breath as the request, which is what a
+> command that spends money owes: a 202 says nothing about what a completion
+> returned, and the ledger row it leaves behind is a row somebody has to go
+> and query. It writes through the same `CurationService` as the job, so it is
+> a surface rather than a second implementation.
+
+> **"Until regenerated" was this table's TTL cell and it is corrected here: it
+> is the *artefact's* lifetime, not the cache's, and read as a TTL it inverts.**
+> The stored row really is immutable until a generation replaces it — but
+> `RowCache` holds the whole built row under `(user_id, slug)`, and a generation
+> of the same row count re-uses the same slugs, so a long TTL does not keep a
+> fresh row fresh: it keeps *last night's* row on the screen. Nothing
+> invalidates that entry, because the cache is in-process in the API and the
+> curation job runs under `usher work`; cross-process invalidation is M9's. So
+> the number is a staleness bound, and `POST /admin/rows/regenerate` is what
+> turns it into an operator watching a screen that has not changed. Five
+> minutes, matching `RecentlyAddedProvider`'s for the sibling reason: both rows'
+> content moves on an event the API process never observes.
+
+**`RowFamily` had two members in M7 and its third arrived with its emitter.**
+Boundary call 2 gave `curated_rows`, `LLMRow`, `CuratedProvider` and
+`POST /admin/rows/regenerate` to M8 as one family — hydrating a table whose
 generator does not exist would fix that table's shape before anything had
-tried to fill it. A "cap per family" over a family with no members is a branch
-nothing can reach, so the member arrives in the same diff as the provider that
-emits it.
+tried to fill it — and `CURATED` was deliberately not pre-declared, because a
+"cap per family" over a family with no members is a branch nothing can reach.
+It cost one line in the diff that added `LLMRow` — ✅ **M8**,
+`services/rows/curated.py`, which is the only thing that emits `CURATED`.
+
+**What the third member made reachable, since that was the question the
+deferral was protecting: `_MAX_ROWS`, and not the cap.** The two cases that
+exercise the cap — `tests/unit/test_services_home.py`'s
+`test_no_family_exceeds_its_cap_even_when_it_proposes_the_top_scores` and
+`test_a_proposal_the_cap_declined_is_selected_zero_rather_than_absent` — have
+each proposed **eight `SIMILARITY`** rows since M7, and the cap has never
+cared how many families exist. The screen ceiling had not been reachable at
+all — see the composition section below.
 
 ## Dynamic composition
 
@@ -199,11 +269,11 @@ consecutive similarity rows; cap per family), builds the top N
 > **"Concurrently" was wrong and is corrected here rather than implemented**
 > ([09](09-roadmap.md)'s M7 boundary call 8). `AsyncSession` is explicitly not
 > safe for concurrent use — two coroutines awaiting on one session interleave
-> on one connection — so `asyncio.gather` over nine providers sharing a
+> on one connection — so `asyncio.gather` over ten providers sharing a
 > request's session is a corruption, and one that *usually works*: two short
 > reads frequently complete, and the failure is an intermittent
 > `InvalidRequestError` or a result set attributed to the wrong query, under
-> load. The two escapes are worse at this scale — a session per row is nine
+> load. The two escapes are worse at this scale — a session per row is ten
 > connections for one home screen, and a semaphore has no lane to belong to.
 > Every provider's query is a bounded local read;
 > `usher.home.compose.duration` and the per-provider `usher.row.build.duration`
@@ -259,16 +329,28 @@ consecutive similarity rows; cap per family), builds the top N
 > constructor defaults rather than settings: the mechanism exists, but the
 > reason to move either is an operator looking at a screen, which is M9's admin
 > surface, and `Settings` is `extra="forbid"` so every field there owes a
-> reader *and* a reason. **With two families the longest screen reachable
-> today is nine rows** — one pinned plus four per family — and `_MAX_ROWS`
-> becomes reachable when M8 registers `CuratedProvider` and `RowFamily` grows
-> its third member.
+> reader *and* a reason. **With two families the longest screen the composer
+> could return was nine rows** — one pinned plus four per family — and the
+> *registry* could only reach eight of those, because
+> `BecauseYouWatchedProvider` is the only `SIMILARITY` emitter and its
+> `_MAX_SEEDS` is 3. Both are under `_MAX_ROWS`, which is the point: it
+> truncated nothing at any input, and the only case that reached that slice
+> injected a smaller ceiling. The "one pinned" term is a property of the
+> registry rather than of the composer — `_select` sets every pinned candidate
+> aside *before* the cap, with no bound of its own — and
+> `tests/unit/test_rows_invariants.py::test_continue_watching_is_the_only_provider_that_pins_and_it_pins_one_row`
+> is what holds it. ✅ **M8's `RowFamily.CURATED` is what made it reachable**:
+> thirteen candidates get past the cap and three are dropped. The case pins it
+> on what was **built** rather than on what came back, because `_order` bounds
+> the returned sequence by the same number — so an over-selecting composer
+> returns ten rows having hydrated thirteen, which no length assertion can see.
 >
 > Each provider declares a `slug_prefix` (`continue-watching`,
 > `because-you-watched`), and every row it proposes mints its slug from that
 > constant. It is what `usher.row.build.duration`'s `provider` label and
-> `usher home`'s report both carry: bounded at nine, where a row slug is
-> bounded by the catalog.
+> `usher home`'s report both carry: bounded at ten, where a row slug is
+> bounded by the catalog — `because-you-watched-<seed>` per seed and
+> `curated-01`, `curated-02`, … per shelf per generation.
 
 | Provider | Fires when | Emits |
 |---|---|---|
@@ -280,22 +362,47 @@ consecutive similarity rows; cap per family), builds the top N
 | `GenreAffinityProvider` | ⏳ **The household watches a genre disproportionately to its share of their library** — *not* "taste centroid concentrated in a genre"; see the Taste section | 1–3 rows |
 | `SeasonalProvider` | Calendar window (Halloween, holidays) — **curated by the author, not derived**; see below | 0–1 rows |
 | `PeopleProvider` | Recurring director or actor in history — **3 distinct engaged titles, in a cast or directing credit**; see below | 0–2 rows |
-| `CuratedProvider` | ⏳ **not built in M7 — M8 owns it**, with `curated_rows`/`LLMRow`/`POST /admin/rows/regenerate`; see below | 0–5 rows |
+| `CuratedProvider` | ✅ **M8** — a generation is in `curated_rows`; it hydrates, never generates. `0–5` is enforced *here*, because the validator deliberately caps nothing; see below | 0–5 rows |
 | `RediscoverProvider` | Watched > 2 years ago, **most-rewatched first** — there is no rating column; see below | 0–1 rows |
 
-**Nine of these ten are registered as of M7; `CuratedProvider` is the tenth
-and M8 owns it whole** (boundary call 2, and the table above is annotated
-rather than silently shipped short). The registry is
-`services/rows/__init__.py`'s `ROW_PROVIDERS`, and it is the composition
-point: **a provider that is not registered is dead code, and dead code that
-looks exactly like a provider with nothing to say** — which is the one failure
-a composed home screen cannot show from the outside. It holds nine, asserted by
-name rather than by count, and four cross-provider invariants are parametrised
-over it, so a tenth provider is covered by four cases the day it is written:
-that only Continue Watching reaches the top score, that every provider returns
-nothing against an empty database, that none falls back to popular titles on a
-household that has watched nothing, and that every one composes with no
-embedder.
+✅ **All ten are registered as of M8.** Nine landed in M7 and boundary call 2
+gave `CuratedProvider` — with `curated_rows`, `LLMRow` and
+`POST /admin/rows/regenerate` — to M8 as one family, so this table was
+annotated rather than silently shipped short; M8's task 15 registered the
+tenth. The registry is `services/rows/__init__.py`'s `ROW_PROVIDERS`, and it is
+the composition point: **a provider that is not registered is dead code, and
+dead code that looks exactly like a provider with nothing to say** — which is
+the one failure a composed home screen cannot show from the outside. It holds
+ten, asserted by name rather than by count, and four cross-provider invariants
+are parametrised over it, so the tenth provider was covered by four cases on
+the day it was written: that only Continue Watching reaches the top score, that
+every provider returns nothing against an empty database, that none falls back
+to popular titles on a household that has watched nothing, and that every one
+composes with no embedder.
+
+**`CuratedProvider` is deliberately not on the "may fire on a household that
+has watched nothing" allowlist**, which the other three library-shaped
+providers are on: a curated shelf **is** a claim about the person, so proposing
+one for a household with no generation would be the popular-titles fallback
+arriving through the one door that costs money.
+
+**Its score is `0.85` and it is the first in this project chosen against the
+whole table rather than against one sibling.** Continue Watching (1.0, pinned)
+and Next Up (0.90) are about *intent* — something the household is in the
+middle of, and the next episode of something they are watching — and a shelf a
+model proposed overnight must never outrank either. Everything at 0.80 and
+below is a discovery claim computed from a single signal (one seed's
+neighbours, one library event, one genre's lift, one recurring face, the
+calendar, one collection, one crossing of the two-year line); this one reads
+the household's whole recent history against a 200-title pool and is the only
+row on the screen that cost money, so it sits above all seven. **Being
+outranked here is "not shown" rather than "shown lower"** — the screen is ten
+rows and a rich household proposes more — so a score below 0.80 would be spend
+with no screen to show for it on exactly the households curation is most worth
+buying for. Every shelf in one generation carries the *same* score, because
+`(-score, slug)` already breaks the tie on a positional, zero-padded slug: the
+model's ordering is spelled once, in the slug, and a per-row decrement would be
+a second spelling of it.
 
 **`SeasonalProvider`'s calendar→signal mapping is a taste judgement with no
 data source, and it is the only thing in `services/` of that kind.** Nothing in
@@ -499,11 +606,14 @@ table left open.** M7's `WatchStateRepository.list_in_progress` settles them.
   episodes.
 
 Adding a row type is a subclass and a registration. Nothing else changes — and
-as of M7 that is **a checked claim rather than an aspiration**. The registry
-holds nine providers, asserted by name *and* by count, the composition point is
-one tuple in `services/rows/__init__.py`, and **five cross-provider invariants
-are parametrised over that registry**, so a tenth provider inherits five cases
-on the day it is written: that it returns nothing against an empty database,
+as of M7 that is **a checked claim rather than an aspiration**. ✅ **M8 spent
+it, and the claim held**: registering `CuratedProvider` was a subclass, a
+tuple entry, a `BASE_SCORES` entry and one new `RowContext` field, and the
+registry now holds ten providers, asserted by name *and* by count, the
+composition point is one tuple in `services/rows/__init__.py`, and **five
+cross-provider invariants are parametrised over that registry**, so the tenth
+provider inherited five cases on the day it was written: that it returns
+nothing against an empty database,
 that it does not fall back to popular titles on a household that has watched
 nothing, that it composes with no embedder, that its cases name the wrong
 implementation they rule out, and that it reaches no port the context does not
@@ -619,21 +729,242 @@ plus borrowed aggregate signals (TMDb similar/recommended) where useful.
 
 Generation runs nightly and on demand:
 
-1. **Assemble context** — recent watch history with ratings, plus a candidate
-   pool of ~200 unwatched titles pre-filtered by taste-centroid proximity and
-   popularity. The pool spans the whole catalog, not just the library, so
-   suggestions can include things to seek out.
-2. **One structured call** via litellm →
-   `[{title, reason, item_ids ⊆ pool}]`, 3–5 rows.
+1. **Assemble context** — recent watch history with ⏳ ~~ratings~~
+   **engagement**, plus a candidate pool of ~200 unwatched titles pre-filtered
+   by ⏳ popularity and genre affinity, **re-ranked** by taste-centroid
+   proximity where a centroid exists. The pool spans the whole catalog, not
+   just the library, so suggestions can include things to seek out.
+
+   ⏳ **"with ratings" is the fourth site in this document where a rating this
+   schema does not have was assumed**, after `RowCard`, `RediscoverProvider`
+   and the centroid — and the substitution the Taste section already writes
+   down applies here unchanged: rewatched (`play_count >= 2`) weighs 1.00,
+   merely finished weighs 0.60.
+
+   ✅ **And the centroid cannot be the pre-filter's spine, because on the
+   shipped configuration there is no centroid.** `USHER_EMBEDDING_ENABLED`
+   defaults to `False`, so implementing that clause literally makes curation
+   the feature that never fires on a default deployment — **which is exactly
+   the failure this document already corrected once**, for
+   `GenreAffinityProvider`, and in the same direction: *"it fails in the
+   direction hardest to notice."* The pool is therefore built from signals
+   that need no model, and the centroid **re-orders** it when one is
+   available — which is also what finally gives `TasteService.centroid` a
+   caller in `src/`, a gap M7 shipped and named.
+
+   ✅ **Built in M8 as `CandidatePoolService` over
+   `TitleRepository.list_unwatched_candidates`, and three details of the
+   sentence above are sharper than it is:**
+
+   - **Membership is "unwatched", full stop** — `played`, rolled up through
+     `episodes.title_id` so a watched episode takes its series with it, and
+     expressed *inside* the statement rather than subtracted after a `LIMIT`.
+     Ownership and popularity are **ranking keys**, which is what keeps
+     *"the pool spans the whole catalog"* true. The order is `owned DESC,
+     carries an affinity genre DESC, vote_count DESC NULLS LAST, id` — and
+     the `id` tail decides **membership** rather than only order, because the
+     `LIMIT` falls inside a tie: losing it makes two reads of one unchanged
+     household return different *sets*, so
+     [ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s integer handles
+     stop naming the same films. The measurement behind that — how much of a
+     real catalog carries no `vote_count` at all — is stated once, on
+     `TitleRepository.list_unwatched_candidates`, and deliberately not
+     repeated here.
+   - **`vote_count`, not `popularity`.** `titles.popularity` was measured NULL
+     on all 1,271,138 rows of a bootstrap-only catalog and is
+     `NOT NULL DEFAULT 0` in `tmdb_ids`, so leading with it lets a
+     crosswalk-linked skeleton at `0.0` outrank an unlinked title with half a
+     million votes — bounded where `list_owned_by_tag` uses it (owned titles
+     only) and unbounded over the whole catalog.
+   - **The re-rank permutes the embedded members among the positions they
+     already occupy**, so a candidate the centroid cannot speak about — no
+     vector, a NULL one, or one of another model's width — keeps its exact
+     index. That is stronger than "unembedded candidates are not dropped" and
+     is chosen for the reason M7 quoted the genome's *candidate-pair* rate
+     (1.81%) rather than its coverage: an artefact whose shape depends on how
+     far `usher index --backfill` has drained is one that changes for reasons
+     the household cannot see. The pool is a function of the household, not
+     of the embedder.
+2. **One structured call** to any OpenAI-compatible endpoint →
+   `[{title, reason, item_ids ⊆ pool}]`, 3–5 rows. (This read *"via litellm"*
+   until M8 priced that dependency at +146 MB and 29 distributions against a
+   `POST` —
+   [ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md).) **`item_ids`
+   are indices into the pool, never UUIDs** — measured, a UUID handle costs
+   3.1× the prompt tokens and is the *least* accurate of three spellings, and
+   an index is the only one that is bounds-checked
+   ([ADR-0028](decisions/0028-the-pool-is-the-contract.md)).
 3. **Validate** — IDs not in the pool are dropped; rows below a minimum length
-   are discarded. Hallucinated identifiers never reach a client.
+   are discarded **whole rather than padded**, because a padded row is a
+   fabricated recommendation wearing a model's reason string. Hallucinated
+   identifiers never reach a client.
+
+   ⚠️ **This step is where the milestone's one live defect was found, and the
+   sentence above does not describe it.** The obvious spelling —
+   `id in set_of_pool_ids` — dropped **108 of 108** identifiers against a
+   provider that returned them as JSON *integers* where the schema asked for
+   strings; coerced, the same run dropped **0**. Not one id was invented. What
+   that ships as is a generation that called the model, wrote an `llm_calls`
+   row reading `ok = true` with real tokens and a real cost, and left the
+   household with no curated rows — indistinguishable from a model that had
+   nothing to say, because the degradation table below reads *"previous
+   curated rows persist"*. So: the validator **coerces before it compares**,
+   `usher.curation.dropped` carries a `reason` label distinguishing
+   `not_in_pool` from `unparseable`, and **a generation that validates to zero
+   rows is a failure rather than an empty success**.
+   [ADR-0028](decisions/0028-the-pool-is-the-contract.md).
+
+   ✅ **Built in M8 as `usher.services.curation_validate`, a module of pure
+   functions over a parsed `dict` and the generation's own index → UUID map.**
+   Four things about it are sharper than the paragraph above:
+
+   - **The map is a `Mapping[int, UUID]`, and the validator does no arithmetic
+     on it.** Which handles were sent is a fact the caller owns, so a sparse
+     pool and a 1-based prompt (what ADR-0028 measured) need no special case,
+     and `pool[-1]` — legal Python, and a real film — is unreachable.
+   - **Coercion is `str(value).strip()` for `int` and `str` only.** A `bool` is
+     refused before the `int` branch (`isinstance(True, int)` is `True`); a
+     `float` is refused rather than rounded, because `int(11.5)` is also 11 and
+     a rule that accepts `11.0` must invent an answer for the other. Prose is
+     never coerced at all: a non-string `title` is a dropped row, not `str(11)`
+     on a television.
+   - **The reason label is five, not two** — `duplicate`, `row_unusable` and
+     `row_too_short` join the original pair, each because it names a different
+     *diagnosis*, not because it names a different fix: two of them share a
+     lever with a member of the pair, and the load-bearing half of the
+     widening is that two of the five count **rows** and three count **cards**.
+     ADR-0028 carries the amendment and the argument.
+   - **Zero rows is unrepresentable as a success**, not merely checked for: the
+     return type is a union whose success arm cannot be built with an empty
+     `rows` and whose failure arm has no `rows` attribute at all.
+
+   ⚠️ **The validator does not cap the number of rows**, deliberately: every
+   card in a hundredth row is still a title the household could watch, so a cap
+   is a product bound rather than a safety one and belongs with
+   `CuratedProvider`'s `0–5 rows` budget. What it does own is the *ordering* —
+   `curated_rows.slug` is zero-padded to the width of the generation, because
+   the composer breaks score ties on `slug` and `curated-10` sorts before
+   `curated-2`.
 4. **Persist** as `curated_rows`.
+
+✅ **All four steps are `usher.services.curation.CurationService` in M8, and
+five things about the assembled whole are sharper than the list above.**
+
+- **The prompt is code, and the two numbers in it that have to agree with
+  something else are rendered rather than written.** The pool's length is the
+  bound the validator checks, and `min_cards` is the floor it enforces — a
+  prompt asking for four cards under a validator demanding five drops every row
+  and reports `row_too_short`, a generation that failed because two numbers in
+  two files disagreed. Everything else in the prompt (the text, the 3–5 row
+  budget, the heading width) is a constant for
+  [08](08-operations.md)'s row-weights-are-code reason.
+- **Step 1's other half is a real read.** The prompt carries this household's
+  last 25 finished titles, most recent first, with a rewatch marked — the
+  engagement substitution this section already makes for the rating column the
+  schema does not have. A pool with no history behind it produces shelves about
+  the catalog rather than about the household.
+- **The `json_schema` sent with the request is an optimisation and never the
+  contract.** It states the handle bound a second time, where a provider that
+  honours guided decoding makes an out-of-pool handle harder to emit; the
+  validator checks it whatever the provider did.
+- **Failure is non-fatal to the screen and fatal to the job.** A failed
+  generation never reaches `replace_for_user`, so *"previous curated rows
+  persist"* below is a property of the control flow rather than of a
+  transaction — and the exception propagates, because `JobWorker` learns "park"
+  from `PortDataMalformed` and "back off" from everything else by catching it.
+  A generation that validated to **nothing** raises `PortDataMalformed`: the
+  three things that produce it are permanent properties of that request, so
+  five more completions reach the same answer at five times the price.
+- **`llm_calls` gets a row on every path that *attempted* a completion**,
+  `ok = false` included — a call that never got an answer is still a row, with
+  zeroed tokens and the model this deployment asked for. The one path that
+  writes none is the one that attempted nothing: an empty candidate pool raises
+  before the client is touched, and an empty catalog is an operator's problem
+  rather than an event of the LLM subsystem.
 
 Failure is non-fatal: previous rows stay until successfully replaced. Cost is
 one modest completion per user per day.
 
 The candidate pool being pre-filtered locally is what keeps this affordable —
 the model sees 200 titles it might plausibly recommend, not a catalog.
+
+### 🔴 What the live run found, and the limits it leaves
+
+Measured 2026-08-07 against a local vLLM serving **`gemma-4-26b-a4b`** over a
+real **1,271,138**-title catalog, bounded at 45 completions and spending 36.
+⚠️ **One model, one pool, one evening.** Every rate below is scoped to that and
+none is a property of "an LLM"; what transfers is the *ordering* of options and
+the *shapes* of failures, never the percentages. The machinery is recorded in
+[ADR-0028](decisions/0028-the-pool-is-the-contract.md); what follows is the
+half that is about the **product**, and it is here rather than in a task queue
+because a reader of this section is the person who needs it.
+
+🔴 **The central product risk: on this model the curated shelf is
+substantively what `GenreAffinityProvider` already gives away free.** Over 59
+headings from 20 generations:
+
+- **52 of 59 — 88% — are genre labels**, which the prompt *explicitly forbids*:
+  *"Group by something a person would recognise — a mood, a period, a theme, a
+  filmmaker — rather than by one genre."*
+- **One heading in 59 named a filmmaker**, which is the behaviour the
+  instruction was written to buy.
+- *"Animated Wonders for All Ages"*, *"Epic Sci-Fi Adventures"* and
+  *"Mind-Bending Sci-Fi & Thrillers"* each recur **verbatim across three
+  separate generations**.
+
+`GenreAffinityProvider` produces a genre shelf from a `SELECT`, for nothing, in
+milliseconds, and needs no key. So the question this section cannot currently
+answer is what the completion is *for* — and the honest statement of it is that
+**the prompt's grouping instruction is not self-enforcing and nothing in this
+system checks it.** That is a property of the design; the 88% is a property of
+one model. A frontier model may well obey it, and the way to find out is to
+run this measurement again against one rather than to assume. Not fixed here:
+curated rows are additive, [08](08-operations.md)'s *"Home composes without
+them"* holds, and a duplicated genre shelf is a disappointment rather than a
+defect.
+
+**Four limits the run named, each recorded rather than fixed:**
+
+- ⚠️ **The pool has no ownership *filter*, and the prompt says it does.**
+  `TitleRepository.list_unwatched_candidates` uses ownership as an `ORDER BY`
+  key only — deliberately, so *"the pool spans the whole catalog, not just the
+  library"* above stays true — while `curation_prompt.build_prompt` opens *"one
+  household's **own** film and television library."* On a household whose
+  unwatched-and-owned set is smaller than the pool size, the tail of the pool
+  is titles it does not own, under a sentence asserting it does. The two
+  sentences are each defensible and they disagree; which one gives way is a
+  product decision and is **filed as one**, not settled here.
+- ⚠️ **De-duplication is within a row only.** `curation_validate._cards`
+  collapses a repeat inside one row and counts it `duplicate`; a title
+  appearing on *two* shelves of the same generation is not counted at all. The
+  prompt's *"Do not use the same candidate in more than one row"* is the only
+  defence, and a prompt rule is not a guarantee — the same thing this section
+  says one level up about the grouping instruction.
+- ⚠️ **`min_cards = 5` means a small unwatched pool yields zero rows, every
+  time, at full price.** Rows carried 5–6 cards at pool 200 and **2–3 at pool 5
+  and pool 8**, so every row was discarded as `row_too_short` and the
+  generation was billed and produced nothing. That is
+  [ADR-0014](decisions/0014-absence-is-not-zero.md) working — a padded row
+  would be a fabricated recommendation — and it is also a household that pays a
+  completion a night for a permanently empty shelf, with nothing warning the
+  operator before the money.
+- ⚠️ **Four of the five `DropReason` members never fired in 20 generations**,
+  and under a provider honouring `strict: true` three of them are close to
+  unreachable: `unparseable` and `row_unusable` are shape failures guided
+  decoding prevents, and `not_in_pool` is a range violation it also prevents.
+  Only `row_too_short` fired. Worth knowing **before** an operator reads a
+  dashboard of permanent zeros and concludes the counter is broken — the
+  vocabulary is still right for the reason ADR-0028 gives (a reason absent from
+  a tally is indistinguishable from a reason nobody counts), and its zeros are
+  now expected rather than surprising.
+
+**What the run did not reach, named rather than implied.** `media_items` was 0,
+so ownership sorting and the other nine providers were never exercised against
+real data; `title_embeddings` was 0, so `CandidatePoolService._reranked`'s
+centroid re-rank **never executed**; end-to-end retrieval through
+`PostgresSearchIndex`, `JobKind.CURATE` via `usher work`, and
+`POST /admin/rows/regenerate` were all untested (only the `usher curate` path
+ran); and no hosted provider was touched at all.
 
 ## Caching
 
@@ -642,9 +973,9 @@ the model sees 200 titles it might plausibly recommend, not a catalog.
 | Built rows | ✅ Per-row TTL, in-process — 60 s (Continue Watching, Next Up) to 12 h (Seasonal), each row's own |
 | Composed home screen | ✅ 30 s per user, in-process |
 | **Neighbour tables** | ⚠️ **Not rebuilt on anything.** This row was false in M6 and is false now; what changed is that half of it is finally *observable* — see below |
-| Curated rows | ⏳ **M8**, with `CuratedProvider` and `curated_rows` |
+| Curated rows | ✅ **M8** — 5 min per built row, in-process, on `CuratedProvider`'s rows out of `curated_rows`. Not "until regenerated": the artefact is immutable until a generation replaces it, and this number is how long a household keeps seeing last night's shelf after tonight's replaced it, because the job runs in another process |
 | Taste centroid | ⏳ **Recomputed when the household's `max(watch_states.updated_at)` moves** — a fingerprint, not an event |
-| Genre affinity | ⏳ **Not cached at all** |
+| Genre affinity | ✅ **Nothing stored, and memoised for the life of one request** — no artefact, no fingerprint, no invalidation to get wrong; the memo is on the request-scoped `TasteService` and dies with it |
 
 Rows are recomputed lazily and served stale while refreshing, so the home screen
 never blocks on a slow row.
@@ -728,15 +1059,33 @@ row that no longer exists forever; and a *cleared* history makes the aggregate
 `NULL`, where `stored < NULL` is `NULL` and therefore never true. The merge
 path publishes nothing and does not know `user_taste` exists.
 
-⏳ **Genre affinity is not cached, and sharing the centroid's row would be
+⏳ **Genre affinity is not *stored*, and sharing the centroid's row would be
 wrong rather than merely wasteful.** That row is invalidated on `model_name IS
 DISTINCT FROM`; genre affinity has no model. Sharing it would make an
 embedding-checkpoint swap invalidate a count no model touched, and — the worse
 half — would require a deployment with **no embedder** to write a `model_name`
 for a model it does not have. There is no honest value for that column. A
-*separate* cache would cost more than the answer: the affinity is a count over
-≤ 50 `text[]` values plus one library-wide aggregate, and the validity check
-guarding it would itself be the `max(updated_at)` read.
+*separate* stored cache would cost more than the answer: the affinity is a
+count over ≤ 50 `text[]` values plus one library-wide aggregate, and the
+validity check guarding it would itself be the `max(updated_at)` read.
+
+✅ **What it does have is two memos inside `TasteService`, both dying with the
+service** — one request on the route, one unit of work in the CLI and the
+worker. Neither is an artefact and neither needs a fingerprint, which is the
+whole difference from the paragraph above:
+
+- **the engaged window** (`WatchStateRepository.list_recent(50)`), which both
+  public methods open with, so one `CandidatePoolService.for_user` on a
+  deployment with an embedder read the household's history twice per
+  generation. Keyed by `user_id` — a memo on a per-user read is the one
+  optimisation whose failure mode is a data leak — and re-read whenever a
+  caller presents a `max(watch_states.updated_at)` that disagrees with the one
+  the memo was filled at, which is free because `centroid` reads that
+  watermark anyway;
+- **the library-wide genre counts** (`unnest(genres) GROUP BY` over 1.27M
+  titles), which take no `user_id` at all, are the denominator of every lift,
+  and were paid once per generation *and* once per home-screen build for a
+  number that changes only when the library does.
 
 ## Alfred
 

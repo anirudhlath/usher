@@ -50,6 +50,10 @@ class TestFakeBulkCatalogRepository(BulkCatalogRepositoryContract):
         assert isinstance(repo, FakeBulkCatalogRepository)
         return repo.genome_keys()
 
+    async def genome_tags_of(self, repo: BulkCatalogRepository) -> tuple[tuple[int, str, str], ...]:
+        assert isinstance(repo, FakeBulkCatalogRepository)
+        return repo.genome_tags()
+
     async def enrich(self, repo: BulkCatalogRepository, imdb_id: str) -> None:
         assert isinstance(repo, FakeBulkCatalogRepository)
         repo.mark_enriched(imdb_id)

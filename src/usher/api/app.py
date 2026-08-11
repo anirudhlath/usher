@@ -10,10 +10,11 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from usher.api.errors import validation_error_without_the_request_body
 from usher.api.lanes import LaneSupervisor
-from usher.api.routers import events, health, home, sources, titles
+from usher.api.routers import events, health, home, rows, sources, titles
 from usher.composition import (
     DefaultUserId,
     embedder,
+    llm_client,
     metadata_provider,
     nothing,
     unit_of_work,
@@ -49,6 +50,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         model, close_model = (
             await embedder(settings) if settings.worker_enabled else (None, nothing)
         )
+        # The completion client, on the same terms again: one per process,
+        # built only where a worker will use it. `USHER_LLM_ENABLED=false` is
+        # the shipped default and answers `(None, no-op)`, which is what
+        # leaves `JobKind.CURATE` unregistered -- so a push-only or
+        # LLM-less deployment holds no `httpx.AsyncClient` with no reader.
+        client, close_client = (
+            await llm_client(settings) if settings.worker_enabled else (None, nothing)
+        )
         lanes = LaneSupervisor(
             settings,
             unit_of_work(session_factory, settings, events=bus, provider=provider),
@@ -56,6 +65,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             user_id=DefaultUserId(session_factory),
             provider=provider,
             embedder=model,
+            client=client,
             rows=row_cache,
         )
         app.state.lanes = lanes
@@ -67,6 +77,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Creates tasks and opens no connection -- see `LaneSupervisor.start`.
         # That is what keeps `/health` answering 200 with Postgres down.
         await lanes.start()
+        # **The `try:` opens here rather than at the engine, so a raise from
+        # `metadata_provider`, `embedder`, `llm_client` or `lanes.start()`
+        # leaks whatever was already built.** Three resources now instead of
+        # M5's two, so the window widened by one this milestone. Measured and
+        # left alone rather than overlooked: each of those four raises only
+        # on a misconfiguration this process cannot survive anyway (a bad
+        # DSN, a missing ONNX model, an unusable base URL), the process exits
+        # seconds later, and the operating system reclaims the socket and the
+        # mapping. `contextlib.AsyncExitStack` is the fix if any of the four
+        # ever becomes recoverable -- push each closer as it is built and let
+        # the stack unwind in reverse -- and `usher work`'s `finally`
+        # (`cli._work`) has the same shape and would take the same change.
         try:
             yield
         finally:
@@ -86,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await lanes.stop()
             await close_provider()
             await close_model()
+            await close_client()
             await engine.dispose()
 
     app = FastAPI(
@@ -140,6 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(events.router)
     app.include_router(health.router)
     app.include_router(home.router)
+    app.include_router(rows.router)
     app.include_router(sources.router)
     app.include_router(titles.router)
     return app

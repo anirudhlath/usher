@@ -3,19 +3,14 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal
-from enum import StrEnum
 from typing import Any
 
-
-class LLMPurpose(StrEnum):
-    """`llm_calls.purpose` (PRD 10) — a closed vocabulary so it stays a
-    usable telemetry dimension instead of a cardinality footgun. PRD 10's
-    own text marks this open-ended ("curation | query_expansion | …"): a
-    new call site adds a member here and to PRD 10 in the same change,
-    never a free-form string."""
-
-    CURATION = "curation"
-    QUERY_EXPANSION = "query_expansion"
+# Re-exported rather than declared. `LLMPurpose` moved to `usher.domain` in
+# M8 because `LLMCall` -- a domain model -- has to type its `purpose` column,
+# and `usher.domain` may not import `usher.ports`. Every caller still spells
+# it `from usher.ports.llm import LLMPurpose`, which is where a reader of this
+# port looks for it.
+from usher.domain.curation import LLMPurpose
 
 
 @dataclass(frozen=True)
@@ -46,3 +41,6 @@ class LLMClient(ABC):
     @abstractmethod
     async def aclose(self) -> None:
         """Release the underlying HTTP connection pool."""
+
+
+__all__ = ["LLMClient", "LLMPurpose", "LLMUsage"]
