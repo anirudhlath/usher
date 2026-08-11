@@ -1264,3 +1264,99 @@ Equivalent because the two are disjoint attributes on a freshly constructed
 object, neither right-hand side reads the other, and nothing runs between
 them — the same shape as the `__all__` reorder and the `SET`-list swap above,
 one layer in. Reported rather than treated as a survivor.
+
+**M9 Task D4's sweep: 13 plants over the playback router — 11 targets of which
+10 were killed on the first pass and 1 was a real coverage gap since closed,
+plus 2 equivalent-mutant controls surviving as designed. 1 BAD-ANCHOR
+(re-spelled and killed), 0 BROKEN-MUTATION, 0 DID-NOT-RUN.** Run 2026-08-11 in
+place over `src/usher/api/routers/playback.py`, `src/usher/api/dto/playback.py`,
+`src/usher/api/deps.py` and `src/usher/api/errors.py`, with the plant list and
+its **expected verdict** written down first, `PYTHONDONTWRITEBYTECODE=1` and a
+`__pycache__` sweep under **both** `src/` and `tests/` in force, every plant
+asserted present by an exact anchor count (`count(old) == 1`, so a silent no-op
+edit is BAD-ANCHOR rather than a kill it did not earn), and every restore
+verified by `md5sum` against a pre-plant digest of all four files. The
+three-way split is the one that says something: "12 killed" would hide the gap
+the round was for.
+
+**Selection**, stated because a survivor list is only true of the selection it
+was measured against: `tests/unit/test_api_playback.py`,
+`test_api_problem.py`, `test_api_errors.py`, `test_api_titles.py` and
+`tests/integration/test_playback_route.py` — 65 cases, 6–15 s a run, green on a
+clean tree before and after. Scoped rather than whole-suite for the reason B2's
+entry gives: `tests/integration/test_sse_end_to_end.py` is intermittent on this
+tree and predates M9, and **a sweep scored on "did the run fail" cannot run
+against a suite containing a flaky case** — every plant inherits the flake's
+failure rate as a false kill. That file is not in this selection.
+
+**The one real survivor, and it is the number this task owns.** Widening
+`TICKET_TTL_SECONDS` from 300 to 3000 **survived all 65 cases**, because both
+TTL boundary cases spelled their offsets as `TICKET_TTL_SECONDS ± 1` — a
+premise written against the thing under test, so the mutant moved both sides
+together and `now - (TTL + 1)` is expired at every TTL. It is not an equivalent
+mutant: the whole reduction ADR-0029 buys is over the window a stored, rendered
+or pasted URL stays useful for, and a ten-times-longer window is ten times less
+of it. Closed by
+`test_a_ticket_is_honoured_for_five_minutes_and_no_second_longer`, parametrised
+over **literal** ages (299 → 302, 301 → 404); re-planted, the mutation fails
+**that case's `[301-404]` arm alone**. **The general form: a boundary case
+whose offsets are derived from the constant pins that the constant is in force
+and cannot pin its value — those are two claims and they need two cases.**
+Nearest relative is *"a premise guard written against a literal slice guards
+the literal"* in B1's entry, arriving at a module constant instead of a fixture.
+Both cases are kept and each says in its own docstring what the other cannot
+see.
+
+The ten targets killed on the first pass and what each cost: `503` → `500`
+fails 3; `Cache-Control: no-store` dropped fails 2 (one unit, one integration);
+the redeem route answering `200` with the URL in the body fails 6;
+`instance` hard-coded rather than read from the request path fails **19**,
+including both `/play` routes — which is why both are exercised; the episode
+route resolving `for_title` fails 3; the title existence read deleted fails 1
+(the 404 collapses into the 409, which is exactly the distinction
+`PlaybackService` cannot make); the `NOT_PLAYABLE` arm deleted, so an unplayable
+title renders `200 {"targets": []}`, fails 3; `PlayTargetResponse.of` dropping
+`scheme` fails 1; and the redeem route ignoring `redeem`'s `None` fails 4,
+including the non-ASCII path segment that would otherwise be a 500.
+
+**The BAD-ANCHOR is worth recording rather than quietly re-spelled, because it
+is the anchor rule catching the thing the anchor rule is for.**
+`quote(ticket, safe="=")` appears **twice** in `api/deps.py` — once in the code
+and once in the docstring arguing for it — so the substitution would have
+mutated prose as well as behaviour and any verdict would have been about both.
+Re-spelled as the whole `return str(request.url_for(...))` line it is KILLED,
+by **one** case: `test_the_minted_url_is_the_redeem_routes_own_path`, whose
+`re.fullmatch(r"http://test/stream/[A-Za-z0-9\-_=]+", …)` sees the `=` become
+`%3D`. **The round-trip cases do not see it**, and that is D1's finding
+arriving at the route rather than a hole: `safe=""` re-encodes `=` and
+Starlette decodes it straight back, so redemption still works — what changes is
+the *artifact*, which is the one thing this whole feature is about. A ticket
+URL that is not the ticket is one client-side re-encode away from a 404, and
+only an assertion on the URL's **shape** can tell.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| `_PLAY_FAILURES`' `404` and `409` entries swapped | PASS | PASS | PASS | PASS (9/0) | PASS (65) |
+| one sentence of `redeem_playback_ticket`'s docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (65) |
+
+The first is a fact about the *code* rather than about what the tools look at:
+`_PLAY_FAILURES` is a `dict` literal with two independent integer keys, FastAPI
+merges it into an OpenAPI `responses` object keyed by status, and
+`test_all_three_routes_are_in_the_openapi_document_with_real_shapes` reads it
+as a mapping and asserts a **set** of keys. The docstring reword was checked
+first against the docstring-scan grep this file records — the fourteen files it
+finds scan `ports/`, `services/`, `adapters/search/` and
+`api/routers/rows.py`, and **none of them scans `api/routers/playback.py` or
+`api/dto/playback.py`**; the one scan in `test_api_problem.py` reads
+`inspect.getsource(problem_response)`, a single function in another module.
+
+**And one plan-drift correction.** D4's acceptance names *"`instance`
+hard-coded rather than taken from the request path"* as a sweep target "which
+is why both POST routes are exercised". The router cannot spell that mutation:
+it raises `ProblemException` and never builds a document, so `instance` is
+`api/errors.py`'s `problem_response` alone — already pinned there by A2 with 12
+cases. Planted where it is really spellable it fails **19** cases across four
+files, so it is a sweep target for the *envelope* rather than for this route.
+What it does confirm is the plan's reason for the pairing: three of the
+nineteen are the two POST routes' own cases, and the episode route's
+`instance` is only ever asserted by the episode route's case.

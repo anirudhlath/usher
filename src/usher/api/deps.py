@@ -11,7 +11,9 @@ import uuid
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, cast
+from urllib.parse import quote
 
+from cryptography.fernet import Fernet
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -38,6 +40,7 @@ from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import default_user, ensure_default_user
 from usher.domain.taste import GenreAffinity
 from usher.domain.watch import User
+from usher.ports.credentials import CredentialStore
 from usher.ports.events import EventPublisher
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import (
@@ -63,6 +66,8 @@ from usher.services.events import InMemoryEventBus
 from usher.services.home import HomeService
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
+from usher.services.playback import PlaybackService
+from usher.services.playback_ticket import build_ticket_cipher, mint
 from usher.services.reconcile import ReconcileService
 from usher.services.rows.cache import RowCache
 from usher.services.sources import SourceService
@@ -276,10 +281,27 @@ def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:
     return adapter_factory(settings)
 
 
+def get_credential_store(session: SessionDep, settings: SettingsDep) -> CredentialStore:
+    """The encrypted credential store, on this request's session.
+
+    Its own provider rather than being constructed inside
+    `get_source_service`, for the reason `get_source_adapter_factory`'s
+    docstring already gives about a second caller -- and `get_playback_service`
+    is that second caller. Two sites each building their own would be two
+    chances for one of them to drift onto a different session and quietly
+    leave the request's transaction.
+
+    The return type is the **port**, so a caller written against this
+    annotation cannot reach a method `CredentialStore` does not have -- and
+    `settings.secret_key` is handed over as the `SecretStr` it is, unwrapped
+    only inside `PostgresCredentialStore`'s own key derivation.
+    """
+    return PostgresCredentialStore(session, settings.secret_key)
+
+
 def get_source_service(
-    session: SessionDep,
-    settings: SettingsDep,
     sources: Annotated[SourceRepository, Depends(get_source_repository)],
+    credentials: Annotated[CredentialStore, Depends(get_credential_store)],
     adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
     lanes: LaneSupervisorDep,
 ) -> SourceService:
@@ -292,12 +314,7 @@ def get_source_service(
     answer is the one an operator reads. `None` when no lane is running for
     that source, which is "not probed" rather than "push is broken".
     """
-    return SourceService(
-        sources,
-        PostgresCredentialStore(session, settings.secret_key),
-        adapters,
-        lanes.push_available,
-    )
+    return SourceService(sources, credentials, adapters, lanes.push_available)
 
 
 SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
@@ -362,6 +379,11 @@ def get_job_queue(session: SessionDep, settings: SettingsDep) -> JobQueue:
 MediaItemRepositoryDep = Annotated[MediaItemRepository, Depends(get_media_item_repository)]
 SyncRunRepositoryDep = Annotated[SyncRunRepository, Depends(get_sync_run_repository)]
 JobQueueDep = Annotated[JobQueue, Depends(get_job_queue)]
+# The two `/play` routes resolve existence before resolving playability --
+# `PlaybackService` reads `media_items`, which is silent about the difference
+# between "no such title" and "no copy of it".
+TitleRepositoryDep = Annotated[TitleRepository, Depends(get_title_repository)]
+EpisodeRepositoryDep = Annotated[EpisodeRepository, Depends(get_episode_repository)]
 
 
 def get_match_service(
@@ -733,3 +755,75 @@ def get_home_service(cache: Annotated[RowCache, Depends(get_row_cache)]) -> Home
 
 
 HomeServiceDep = Annotated[HomeService, Depends(get_home_service)]
+
+
+# ---------------------------------------------------------------------------
+# Playback (M9). `POST /titles/{id}/play`, `POST /episodes/{id}/play` and
+# `GET /stream/{ticket}` -- the first routes in this API that hold a
+# `SourceAdapter`, and therefore the first that can answer 503.
+# ---------------------------------------------------------------------------
+
+
+def get_ticket_cipher(settings: SettingsDep) -> Fernet:
+    """This deployment's playback-ticket cipher.
+
+    Its own provider so that the two sides of the ticket -- the mint below and
+    `GET /stream/{ticket}`'s redeem -- derive their key through **one** call,
+    and so that `settings.secret_key` is unwrapped in exactly one place on
+    this path (inside `build_ticket_cipher`, which never binds the plaintext
+    to a name).
+
+    Per request rather than per process, deliberately. `build_ticket_cipher`
+    is one HKDF-SHA256 expansion over a 32-byte input -- a single HMAC -- and
+    caching it on `app.state` would mean an app that keeps minting valid
+    tickets under a key the running `Settings` no longer names.
+    """
+    return build_ticket_cipher(settings.secret_key)
+
+
+TicketCipherDep = Annotated[Fernet, Depends(get_ticket_cipher)]
+
+
+def get_playback_service(
+    request: Request,
+    cipher: TicketCipherDep,
+    media_items: MediaItemRepositoryDep,
+    sources: Annotated[SourceRepository, Depends(get_source_repository)],
+    credentials: Annotated[CredentialStore, Depends(get_credential_store)],
+    adapters: Annotated[SourceAdapterFactory, Depends(get_source_adapter_factory)],
+) -> PlaybackService:
+    """`PlaybackService`, with the mint closure this request's URL implies.
+
+    **The mint returns a whole URL, not a token, and that is the seam
+    `services/playback.py` was shaped for.** Its `mint` is
+    `Callable[[str], str]` whose answer is substituted verbatim -- so a deep
+    link wraps whatever comes back, and the service needs to know nothing
+    about ciphers, TTLs or the redeem route's path.
+
+    **`quote(ticket, safe="=")`, and the `safe` is measured rather than
+    idiomatic.** A Fernet token's alphabet is url-safe base64 *plus* the `=`
+    padding, and `=` is an RFC 3986 sub-delim and hence a legal `pchar`. D1
+    measured that `quote(ticket, safe="")` -- the reflexive spelling -- is a
+    no-op for only 192 of the 599 plaintext lengths 1-599, because it
+    re-encodes `=` to `%3D`; `safe="="` is a no-op at every length tested.
+    Starlette's own `url_path_for` substitutes the value raw, so if this line
+    does not encode, nothing does.
+
+    **`request.url_for`, not a hand-built string**, so the path can only ever
+    be the redeem route's real path. ⚠️ It builds an absolute URL from the
+    request's own `Host`, so **behind a reverse proxy that does not send
+    `X-Forwarded-Proto`/`-Host` the ticket URL names the internal address.**
+    That is an operator setting (`uvicorn --proxy-headers`, or
+    `ProxyHeadersMiddleware`) rather than a code fix here -- naming it because
+    the failure is a client following a URL it cannot reach, which looks like
+    a playback bug.
+    """
+
+    def mint_ticket_url(url: str) -> str:
+        ticket = mint(cipher, url, minted_at=datetime.now(UTC))
+        return str(request.url_for("redeem_playback_ticket", ticket=quote(ticket, safe="=")))
+
+    return PlaybackService(media_items, sources, credentials, adapters, mint_ticket_url)
+
+
+PlaybackServiceDep = Annotated[PlaybackService, Depends(get_playback_service)]

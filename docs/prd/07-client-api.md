@@ -615,27 +615,55 @@ entries per image and keeps Usher's API off a provider's vocabulary.
 
 ## Playback
 
-`POST /titles/{id}/play` returns ranked targets rather than a single URL:
+`POST /titles/{id}/play` and `POST /episodes/{id}/play` return ranked targets
+rather than a single URL, and **every `url` is a ticket** (see the M9 block
+quote below):
 
 ```jsonc
 {
   "targets": [
     {
       "kind": "direct",
-      "url": "https://…/stream.mkv",
+      "url": "https://usher.example/stream/gAAAAABo…",
       "container": "mkv", "video_codec": "hevc", "hdr_format": "HDR10",
       "resolution": "3840x2160", "audio": "truehd_atmos_7_1",
-      "runtime_seconds": 9360, "resume_position_seconds": 1840
+      "runtime_seconds": 9360, "resume_position_seconds": 1840,
+      "source": { "id": "…", "name": "Living Room Emby" }
     },
-    { "kind": "deep_link", "scheme": "infuse", "url": "infuse://x-callback-url/play?…" }
-  ],
-  "source": { "id": "…", "name": "Emby" }
+    {
+      "kind": "deep_link", "scheme": "infuse",
+      "url": "infuse://x-callback-url/play?url=https%3A%2F%2Fusher.example%2Fstream%2FgAAAAABo…",
+      "source": { "id": "…", "name": "Living Room Emby" }
+    }
+  ]
 }
 ```
 
 The client chooses based on what it can play. Usher supplies complete
 information and never proxies bytes — the deep-link construction currently done
 by hand in the Home Assistant card moves here, where it is testable.
+
+`GET /stream/{ticket}` redeems a ticket into a **`302`** whose `Location` is the
+real source URL, with `Cache-Control: no-store`. The client follows it and
+fetches the bytes from the source itself; Usher still never proxies them. An
+expired or forged ticket is a `404` — one answer for both, deliberately.
+
+**`source` is per target, not per response.** A household with two copies of one
+film has two sources and one list of targets ranked across both, so a
+response-level `source` object could only ever be right for a household with
+one. This paragraph corrects the example above, which carried it at the top
+level from M1 until M9 shipped the route.
+
+**Three failures, and each carries a `code` (see [Errors](#errors)).** A `404`
+for an id the catalog does not hold; a `409 not_playable` when every source
+holding a copy answered and none of them offers a way to play it (a series
+folder, a media source with no container); and a `503 source_unavailable` when
+at least one source could not be reached and nothing playable was found on the
+ones that could — retryable, and the first genuine instance of this envelope in
+the project. A source that fails while *another* source answers is not a
+failure at all: the playable targets are returned, which is PRD 08's "a degraded
+subsystem narrows functionality; it never fails a request local state can
+answer".
 
 > **Settled in M3.** The `StreamTarget` port DTO (`usher.ports.source`) now
 > carries both fields shown above: `scheme` (set only for `deep_link`
@@ -674,6 +702,16 @@ by hand in the Home Assistant card moves here, where it is testable.
 > working until Emby prunes the session or an operator revokes it. See
 > [03](03-sources-and-sync.md) for the cache and ADR-0012 for the risks
 > accepted with it.
+>
+> **Superseded in M9 at the API boundary only, and every sentence above is
+> still true of `StreamTarget`.** The port DTO an adapter builds still carries
+> the session token in `url`, because a URL without one is a URL that does not
+> play; what changed is that `POST /play` no longer *returns* that object.
+> `usher.services.playback` substitutes a ticket for every `url` before the
+> response DTO is built, so the token now reaches a client only as the
+> `Location` of a `302` it followed on purpose. Read this quote as a
+> description of the layer below the route, and the M9 quote below as what the
+> route does with it.
 
 > **Settled in M9 — the playback ticket.** ADR-0012's successor is decided and
 > its cipher is built:
@@ -683,8 +721,9 @@ by hand in the Home Assistant card moves here, where it is testable.
 > `info=b"usher.playback-ticket.v1"`, carrying the source URL as its
 > plaintext. `POST /titles/{id}/play` hands the client a ticket instead of the
 > source URL and `GET /stream/{ticket}` redeems one into a `302` — so Usher
-> still never proxies bytes, and the block quote above's JSON example shows the
-> pre-ticket shape until the route lands.
+> still never proxies bytes. **The three routes landed in M9 and the JSON
+> example above is the shipped shape**; it carried the pre-ticket one until they
+> did.
 >
 > **Encrypted rather than merely signed**, because the payload *is* the URL
 > carrying `api_key`: a signed-but-readable token would publish the credential
@@ -702,7 +741,20 @@ by hand in the Home Assistant card moves here, where it is testable.
 > holds the real URL exactly as it does today. There is deliberately no
 > `USHER_PLAYBACK_TICKET_TTL_SECONDS` — the TTL is a named constant at the one
 > place that mints, because nobody has yet measured how long a client sits
-> between receiving a target and following it.
+> between receiving a target and following it. That constant is
+> `usher.api.routers.playback.TICKET_TTL_SECONDS`, **five minutes**, and its
+> value is a bound rather than a measurement: long enough for the slowest
+> legitimate hand-off (an OS prompt, a cold third-party player launch), short
+> enough that the window a stored or pasted URL stays useful for is minutes
+> rather than the hours a source token lives. M9's live run is what turns it
+> into a number.
+>
+> **The ticket URL is built with `request.url_for`, so it inherits the
+> request's own `Host`.** Behind a reverse proxy that does not send
+> `X-Forwarded-Proto`/`X-Forwarded-Host`, the ticket names the internal
+> address and the client follows a URL it cannot reach — which presents as a
+> playback bug. The fix is an operator setting (`uvicorn --proxy-headers`),
+> not a code change; see [08](08-operations.md).
 
 ## Authentication seam
 
