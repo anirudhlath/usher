@@ -474,6 +474,22 @@ def build_pipeline(
         # (`curation_prompt._genres`), which is the whole +40%. One model, one
         # tokenizer, one evening: `gemma-4-26b-a4b`. This is
         # `USHER_CURATION_POOL_SIZE`'s one reader.
+        #
+        # **What a per-candidate ownership marker would add, measured
+        # 2026-08-11 in the same way, because this is the comment that invites
+        # the question.** Same endpoint, same model and therefore the same
+        # tokenizer -- `usage.prompt_tokens` reported by a local vLLM serving
+        # `cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit` (`max_model_len` 16,384), pool
+        # 200, `max_tokens=1`, four completions. Rendering *"owned"* /
+        # *"not owned"* on every candidate line costs **2.900** tokens a
+        # candidate and *"in the library"* / *"not in the library"* costs
+        # **4.900** -- i.e. 14.2% and 24.0% on top of the 20.40 above. Neither
+        # ships: M9 Task G3 declared a 2.0 tokens/candidate bar before
+        # measuring and both missed it, and at pool 600 (this endpoint's
+        # measured ceiling, 12,540 prompt tokens) even the cheap one leaves
+        # 56 tokens under `max_model_len` once `llm_max_output_tokens` is
+        # added. Correcting the *opening sentence* instead costs **+26 tokens,
+        # once**, and that is what shipped. ADR-0028's 2026-08-11 amendment.
         pool=CandidatePoolService(
             titles=titles,
             embeddings=embeddings,

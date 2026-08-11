@@ -123,9 +123,26 @@ def build_prompt(candidates: Sequence[Title], history: Sequence[str], *, min_car
     """
     # Implicit concatenation, so a source line under 100 characters is not
     # also a *rendered* line break in the middle of a sentence.
+    #
+    # **The second half of this line is a correction, not framing.** It read
+    # "one household's *own* film and television library" until 2026-08-11,
+    # which is a claim about the candidate list that
+    # `TitleRepository.list_unwatched_candidates` does not make: ownership is
+    # an `ORDER BY` key there and never a filter, deliberately, so PRD 06's
+    # "the pool spans the whole catalog, not just the library, so suggestions
+    # can include things to seek out" stays true. Measured through the real
+    # Postgres repository over a 1,000-title catalog: a household owning 20
+    # unwatched titles gets a pool of 200 that is 10.0% owned, and one owning
+    # none gets a pool of 200 that is 0% owned. The tail was titles the
+    # household does not have under a sentence asserting it does; the pool was
+    # right and the sentence was wrong. Costs +26 prompt tokens, once, measured
+    # against the endpoint in ADR-0028's 2026-08-11 amendment, which also
+    # records why a *per-candidate* ownership marker is not rendered.
     lines = [
         "You are choosing what to put on the home screen of one household's "
-        "own film and television library.",
+        "film and television library. Some of the candidates below are in that "
+        "library and some are not; a suggestion the household would have to go "
+        "and find is welcome.",
         "",
     ]
     if history:

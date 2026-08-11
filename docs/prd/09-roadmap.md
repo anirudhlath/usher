@@ -810,14 +810,29 @@ suspicion.
   fake, a contract case and a read on every fused search. Mitigated but not
   closed by the new default: it now takes two opt-ins rather than one. **Goes
   with whoever takes the entry above.**
-- **The candidate pool has no ownership *filter*, only an `ORDER BY` key** —
-  while the curation prompt asserts *"one household's **own** library"*.
+- ✅ **The candidate pool has no ownership *filter*, only an `ORDER BY` key** —
+  while the curation prompt asserted *"one household's **own** library"*.
   Reachable on any library with fewer than `USHER_CURATION_POOL_SIZE` unwatched
   owned titles. Interacts with `min_cards = 5`: M8 measured rows carrying 5–6
   cards at pool 200 and 2–3 at pool 5–8, so a household with a small unwatched
   pool gets **zero rows every time, at full price** — and filtering on ownership
   makes small pools more common. A product decision (filter, or correct the
   prompt's claim), not a defect to patch. **M9**, with the other row work.
+  **Paid by M9 Task G3 on 2026-08-11: the prompt was corrected and the pool was
+  not filtered**, on a pool-composition sweep through the real Postgres
+  repository that made *"filtering makes small pools more common"* a number —
+  the owned fraction of a 200-title pool runs 0.0% / 1.5% / 2.5% / 4.0% /
+  10.0% / 100.0% for a household owning 0 / 3 / 5 / 8 / 20 / 200 unwatched
+  titles, a filtered pool at 3 owned titles cannot fill one row, and **the
+  filter could add nothing**, because `owned DESC` is the first sort key so the
+  unfiltered pool already carries every unwatched-owned title there is. A
+  per-candidate ownership marker was priced against the endpoint at 2.9–4.9
+  prompt tokens a candidate, missed a bar of 2.0 declared before the
+  measurement, and is not rendered; the corrected sentence costs +26 tokens
+  once. Evidence and the arm not taken are in
+  [ADR-0028](decisions/0028-the-pool-is-the-contract.md)'s dated amendment.
+  ⚠️ **The second half of this entry — that `min_cards = 5` bills a small pool
+  for nothing — is not settled here** and stays open for the task that owns it.
 - ✅ **`ports/repository.py` was 3,434 lines holding 19 ABCs, and it was the one
   layer that did not mirror `db/repositories/`** — found by M8's review
   2026-08-10, **paid by M9 Task A1 on 2026-08-11**, which is the entry this list
