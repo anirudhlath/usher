@@ -247,6 +247,18 @@ class RunLog:
     verdicts: dict[str, Any] = field(default_factory=dict)
 
 
+def _say(message: str) -> None:
+    """A progress line with a wall clock on it.
+
+    Not decoration: a run of this measured **over half an hour** on the first
+    end-to-end pass and the log was silent for all of it, so there was no way
+    to tell a slow phase from a hung one -- or to size the quiet window the
+    real run needs. Every phase says what it is about to do and how much of
+    it there is.
+    """
+    print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+
 def _quantile(ordered: Sequence[float], q: float) -> float:
     """Nearest-rank quantile.
 
@@ -680,9 +692,11 @@ async def measure_tier1(
     out: dict[str, Any] = {"search_names": names}
 
     probes = [one.probe for one in cases]
+    _say(f"tier1 {label}: W1 cold, {len(probes)} probes")
     out["w1_cold"] = asdict(
         Timing.of(f"W1 cold ({label})", await _time_cold(session, statement, probes, 10))
     )
+    _say(f"tier1 {label}: W1 warm, {len(probes)} probes x<={reps}")
     warm: list[float] = []
     for probe in probes:
         warm.extend(await _time_statement(session, statement, probe, 10, reps))
@@ -690,7 +704,9 @@ async def measure_tier1(
 
     chooser = random.Random(GATE_SEED)  # noqa: S311 - a fixed draw, not a secret
     by_length: dict[int, list[float]] = {length: [] for length in KEYSTROKE_LENGTHS}
-    for length, probe in await keystroke_probes(session, chooser):
+    keystrokes = await keystroke_probes(session, chooser)
+    _say(f"tier1 {label}: W2, {len(keystrokes)} distinct probes over lengths 1-8")
+    for length, probe in keystrokes:
         by_length[length].extend(await _time_statement(session, statement, probe, 10, reps))
     out["w2"] = {
         str(length): asdict(Timing.of(f"W2 len={length} ({label})", samples))
@@ -701,7 +717,9 @@ async def measure_tier1(
     )
 
     worst: dict[str, Any] = {}
-    for probe, title_rows, name_rows in await adversarial_probes(session):
+    adversarial = await adversarial_probes(session)
+    _say(f"tier1 {label}: W3, {len(adversarial)} worst-case probes")
+    for probe, title_rows, name_rows in adversarial:
         samples = await _time_statement(session, statement, probe, 10, reps)
         worst[probe] = {
             "matched_titles": title_rows,
@@ -773,6 +791,7 @@ async def measure_tier2(
     index = PostgresSuggestIndex(
         session, threshold=SHIPPED_THRESHOLD, candidates=SHIPPED_CANDIDATES
     )
+    _say(f"tier2: the shipped path over {len(cases)} cases")
     samples: list[float] = []
     hits = 0
     misses: list[TypoCase] = []
@@ -787,6 +806,7 @@ async def measure_tier2(
         if not marked:
             misses.append(case)
         await session.rollback()
+    _say(f"tier2: tracing {min(len(misses), diagnose)} of {len(misses)} misses to a stage")
     split = await _diagnose_misses(session, misses[:diagnose])
     log.plans["tier2_worst"] = {
         "probe": cases[samples.index(max(samples))].probe,
@@ -931,6 +951,24 @@ def _verdicts(log: RunLog) -> dict[str, Any]:
             "split_verdict": "PASS" if split_shipped else "FAIL",
             "tier2_recall_at_5": tier2["recall_at_5"],
         }
+    ab = log.tier2.get("without_prefix_indexes")
+    if ab:
+        with_indexes = log.tier2["latency"]["p50"]
+        without = ab["latency"]["p50"]
+        # **Within-run, over the identical 2,993 cases, with only the two
+        # indexes differing.** Comparing today's p50 to the gate's 33.6 ms is
+        # a comparison across two days, two runs and two levels of box
+        # contention; this one has a single variable. The GIN/GiST finding is
+        # the reason it exists at all -- an added index took the identical
+        # configuration 33.3 -> 141.5 ms p50 for byte-identical recall, and no
+        # plan-shape test could see it.
+        out["btree_does_not_tax_tier2"] = {
+            "p50_with_prefix_indexes_ms": round(with_indexes, 3),
+            "p50_without_ms": round(without, 3),
+            "ratio": round(with_indexes / without, 3) if without else None,
+            "recall_identical": ab["recall_at_5"] == log.tier2["recall_at_5"],
+            "verdict": "PASS" if without and abs(with_indexes / without - 1.0) <= 0.10 else "FAIL",
+        }
     recall = log.tier1.get("recall", {})
     if recall:
         value = recall["recall_at_5"]
@@ -980,6 +1018,7 @@ async def run(args: argparse.Namespace) -> None:
             log.catalog["driver_floor"] = await driver_floor(session, max(args.reps, 5))
 
             if args.indexes:
+                _say("indexes: dropping and rebuilding both prefix indexes")
                 log.indexes = await measure_indexes(session)
                 print(json.dumps(log.indexes, indent=2), flush=True)
 
@@ -990,6 +1029,7 @@ async def run(args: argparse.Namespace) -> None:
                 log.tier1["union"] = await measure_tier1(
                     session, cases, log, reps=args.reps, with_union=True
                 )
+                _say("tier1: recall@5 over both configurations")
                 log.tier1["recall"] = await measure_tier1_recall(session, cases, with_union=True)
                 log.tier1["recall_titles_only"] = await measure_tier1_recall(
                     session, cases, with_union=False
@@ -999,6 +1039,45 @@ async def run(args: argparse.Namespace) -> None:
             if args.tier2:
                 log.tier2 = await measure_tier2(session, cases, log, diagnose=args.diagnose)
                 print(json.dumps(log.tier2, indent=2, default=str), flush=True)
+
+            if args.tier2_ab:
+                # **The claim being tested is that a btree cannot tax the `%`
+                # path, and "cannot" is a claim about the planner rather than
+                # about this catalog.** Measured within one run over the same
+                # 2,993 cases, one variable: both prefix indexes present, then
+                # both dropped. The indexes are rebuilt afterwards, and the
+                # rebuild is not optional -- leaving the tree's database
+                # without them is how the *next* run measures the wrong thing.
+                _say("tier2 A/B: dropping both prefix indexes and re-running")
+                for name in (
+                    "ix_titles_name_lower_prefix",
+                    "ix_title_search_names_name_lower_prefix",
+                ):
+                    await session.execute(text(f"DROP INDEX IF EXISTS {name}"))
+                await session.commit()
+                try:
+                    log.tier2["without_prefix_indexes"] = await measure_tier2(
+                        session, cases, log, diagnose=0
+                    )
+                finally:
+                    _say("tier2 A/B: rebuilding both prefix indexes")
+                    await session.execute(
+                        text(
+                            "CREATE INDEX ix_titles_name_lower_prefix ON titles "
+                            "USING btree (lower(name) text_pattern_ops)"
+                        )
+                    )
+                    await session.execute(
+                        text(
+                            "CREATE INDEX ix_title_search_names_name_lower_prefix "
+                            "ON title_search_names USING btree (lower(name) text_pattern_ops)"
+                        )
+                    )
+                    await session.commit()
+                print(
+                    json.dumps(log.tier2["without_prefix_indexes"], indent=2, default=str),
+                    flush=True,
+                )
     finally:
         await engine.dispose()
     log.load["after"] = _load_snapshot()
@@ -1024,6 +1103,11 @@ def main() -> None:
     parser.add_argument("--indexes", action="store_true", help="time and size both prefix indexes")
     parser.add_argument("--tier1", action="store_true", help="bars 1, 2 and 4")
     parser.add_argument("--tier2", action="store_true", help="bar 3")
+    parser.add_argument(
+        "--tier2-ab",
+        action="store_true",
+        help="re-run tier 2 with both prefix indexes dropped, then rebuild them",
+    )
     parser.add_argument("--all", action="store_true", help="every phase")
     parser.add_argument("--reps", type=int, default=5, help="timed executions per probe")
     parser.add_argument("--diagnose", type=int, default=250, help="misses traced back to a stage")
@@ -1036,14 +1120,14 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="write the whole run log here as JSON")
     args = parser.parse_args()
     if args.all:
-        args.indexes = args.tier1 = args.tier2 = True
+        args.indexes = args.tier1 = args.tier2 = args.tier2_ab = True
     if args.smoke:
-        args.indexes = args.tier1 = args.tier2 = True
+        args.indexes = args.tier1 = args.tier2 = args.tier2_ab = True
         args.sample = args.sample or 24
         args.reps = min(args.reps, 2)
         args.diagnose = min(args.diagnose, 8)
     if args.check_frame:
-        args.indexes = args.tier1 = args.tier2 = False
+        args.indexes = args.tier1 = args.tier2 = args.tier2_ab = False
     asyncio.run(run(args))
 
 
