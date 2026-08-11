@@ -519,6 +519,14 @@ async def _prefix_histogram(session: AsyncSession, table: str, width: int) -> di
     return {row.opening: row.rows for row in rows}
 
 
+# Memoised for two reasons and only one of them is the four full `GROUP BY`
+# scans over 10.9M rows it saves. The other is comparability: the titles-only
+# and union configurations have to be timed on the *same* worst-case probes,
+# and re-deriving them per configuration is one `ANALYZE` away from silently
+# not being the same list.
+_ADVERSARIAL: list[tuple[str, int, int]] = []
+
+
 async def adversarial_probes(session: AsyncSession, top: int = 5) -> list[tuple[str, int, int]]:
     """W3: the prefixes with the largest match sets, found rather than guessed.
 
@@ -526,6 +534,8 @@ async def adversarial_probes(session: AsyncSession, top: int = 5) -> list[tuple[
     both arms -- the worst case B2 named, chosen by measurement rather than by
     picking `t` and hoping.
     """
+    if _ADVERSARIAL:
+        return _ADVERSARIAL
     alphabet = set("abcdefghijklmnopqrstuvwxyz0123456789 ")
     sized: list[tuple[str, int, int]] = []
     for width in (1, 2):
@@ -537,7 +547,8 @@ async def adversarial_probes(session: AsyncSession, top: int = 5) -> list[tuple[
             sized.append((opening, titles.get(opening, 0), names.get(opening, 0)))
     ones = sorted((one for one in sized if len(one[0]) == 1), key=lambda one: -(one[1] + one[2]))
     twos = sorted((one for one in sized if len(one[0]) == 2), key=lambda one: -(one[1] + one[2]))
-    return ones[:top] + twos[:top]
+    _ADVERSARIAL.extend(ones[:top] + twos[:top])
+    return _ADVERSARIAL
 
 
 # A probe's timed executions are capped by a wall-clock budget as well as by
