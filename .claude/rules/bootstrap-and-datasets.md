@@ -179,21 +179,51 @@ plan: **(A)** people + credits is affordable only if retained credits ≤ 20M
 **(C)** if (A) fails the fallback is the names-only design and *the deliverable
 is the recorded refusal, not a shrunken (A)*.
 
+**Every number below comes out of a named phase of
+`scripts/measure_imdb_people.py`, and the whole chain was re-run end to end
+from the pinned files to make that true.** Row counts and the parser-side
+filters are `--phase counts`; every relation size is `pg_table_size` /
+`pg_total_relation_size` after `VACUUM ANALYZE` from `--phase relations`; the
+`titles` growth is `--phase titles`; the `credit_names` shape is
+`--phase names` + `--phase blast`. Nothing is arithmetic on another figure
+except where the text says so.
+
+*This paragraph exists because the first version of this entry could not have
+been written.* Several figures — the trimmed table's size, the `character` and
+`job` byte sums, the whole `titles` growth block and (B)'s breakdown — were
+real `psql` measurements taken at a prompt outside the script, and a reviewer
+walking the script's phases correctly found no trail for any of them and
+blocked. **Byte-exact precision on an untraceable number, sitting beside
+traceable ones, is indistinguishable from a number somebody computed in their
+head**, and the reader has no way to tell which is which. The fix was not to
+soften the prose: `--phase relations` now builds and sizes the trimmed table
+and weighs the two text columns itself, `--phase titles` is new and does the
+whole copy/`UPDATE`/`VACUUM FULL` sequence, and `--phase counts` counts the
+canonical-restating akas rows as it writes them. Re-running reproduced every
+load-bearing figure exactly; what it moved is recorded where it moved.
+
 **(A) fails. (B) passes.** Two of (A)'s three clauses pass comfortably —
 **12,626,452 retained credits** of a 20M ceiling and **3,211,941 people** of a
 6M one — and the third fails on both readings of its unit: **2,701,697,024 B,
-i.e. 2.702 GB or 2.516 GiB, against a 2.0 GB bar**. It is not a fat column.
-Stripped to the five load-bearing columns `(id, person_id, title_id, kind,
-billing_order)` — no `character`, no `job`, no `department`, no
-`tmdb_credit_id`, no `created_at` — and carrying only its primary key and the
-two foreign-key indexes, the same 12,625,259 rows plus `people` still measure
-**2,395,414,528 B (2.395 GB / 2.231 GiB)**, over the bar by 20%. The whole text
-payload it sheds to get there is 89,306,409 B of `character` and 20,325,470 B
-of `job` — **110 MB against an overrun of 702 MB**, so deleting every string in
-the table still leaves it 592 MB over. The cost is 12.6M tuple headers and
-three uuids apiece, so *there is no version of (A) that fits by trimming*,
-which is exactly why (C) was written first. Nor does the shipped `credits`
-shape even support the load: its only unique key is on `tmdb_credit_id`, which
+i.e. 2.702 GB or 2.516 GiB, against a 2.0 GB bar**. It is not a fat column, and
+that is measured rather than argued: `t3_credits_trimmed` is the same
+12,625,259 rows cut to the five columns a credit cannot do without —
+`(id, person_id, title_id, kind, billing_order)`, so no `character`, no `job`,
+no `department`, no `tmdb_credit_id`, no `created_at` — carrying only its
+primary key and the two foreign-key indexes, and it measures **1,833,467,904 B
+against the full table's 2,139,750,400**. With `people` unchanged that is
+**2,395,414,528 B (2.395 GB / 2.231 GiB), still over the bar by 20%**. The
+whole text payload shed to get there is `sum(octet_length(...))` on the server:
+**89,306,409 B of `character` over 6,316,428 rows and 20,325,470 B of `job`
+over 2,070,320 — 109,631,879 B in all**, against a measured saving of
+306,282,496 B for dropping those two columns plus `department`,
+`tmdb_credit_id` and `created_at`. Read against the bar directly: **the full
+design is 702 MB over it and the smallest thing that is still a
+`people`/`credits` design is 395 MB over it.** What is left at that point is
+12.6M tuple headers and three uuids apiece, so *there is no version of (A) that
+fits by trimming*, which is exactly why (C) was written first. Nor does the shipped
+`credits` shape even support the load: its only unique key is on
+`tmdb_credit_id`, which
 is NULL on every IMDb row, and the obvious idempotency index `(title_id,
 person_id, kind)` **cannot be UNIQUE** — 1,341,798 retained credits collide on
 it — while adding a further **682,950,656 B (651.3 MiB)**.
@@ -220,8 +250,14 @@ against an 8M ceiling — in **307,822,592 B (0.308 GB / 0.287 GiB)** at
 `m09a`'s exact `title_search_names` shape, both indexes included, against a
 1.0 GB ceiling. **Only 399,046 of 1,271,138 titles (31.4%) gain even one
 alias**, so the alias half is a narrow, cheap win rather than a broad one.
-1,653,088 of the survivors carry a `region` and 410,634 a `language`, which is
-what those two columns are for. Zero retained akas rows are empty and **zero
+**1,653,088 of the survivors carry a `region`**, which is what that column is
+for. The matching `language` count is deliberately *not* quoted: the dedupe is
+`DISTINCT ON (title_id, folded) ... ORDER BY title_id, folded, region NULLS
+LAST`, so among rows tying on region the survivor is arbitrary and its
+`language` is whichever row won. Two runs over the identical pinned file gave
+410,634 and 410,596 — a 38-row wobble that is a property of the measurement,
+not of the data. `region` is stable because it is an `ORDER BY` key; a loader
+that needs a stable `language` has to add one. Zero retained akas rows are empty and **zero
 exceed `SEARCH_NAME_MAX_CHARS`** (512), so `m09a`'s btree-bound CHECK rejects
 nothing in this snapshot.
 
@@ -231,17 +267,21 @@ catalog: 12,626,452 of 101,151,422 principals rows retained (12.5%);
 `nconst` referenced, of which 3,211,942 appear in `name.basics` and 3,211,941
 carry a `primaryName` — **one referenced person in the whole file has none**.
 That is also why the 12,626,452 retained principals store only **12,625,259**
-credits: 1,193 of them name one of the 970 `nconst` that resolve to no usable
-person, and a credit whose person cannot be stored is dropped rather than
-orphaned. 7,536,366 of 58,906,368 akas rows retained (12.8%), over **1,270,074
+credits — both measured, and the difference of 1,193 is the credits naming one
+of the 970 `nconst` (969 absent + 1 nameless) that resolve to no usable person,
+because a credit whose person cannot be stored is dropped rather than orphaned. 7,536,366 of 58,906,368 akas rows retained (12.8%), over **1,270,074
 of 1,271,138 titles (99.92%)** before the canonical-name filter.
 
 **The snapshot was pinned and the pin is the finding's date.**
 `title.principals` `"08ce60665889cb40c7371e1eab44a1f2-93"`, `name.basics`
 `"a3b9681921c92e5917182d1ecc05bd2d-37"`, `title.akas`
-`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`; each file's on-disk length equals the
-`Content-Length` its own `HEAD` reported and `gzip -t` validates all three
-whole streams, so nothing here is measured over a truncation.
+`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"` — written by `--phase head` to
+`/tmp/m9-t3/pin.json`, and every later phase passes the pinned value to
+`ensure_local` and aborts if the byte stream upstream served carries a
+different one. Two truncation checks, both run at a shell rather than in the
+script and named here as such: each file's on-disk length equals the
+`Content-Length` its own `HEAD` reported, and `gzip -t` exits clean on all
+three, which validates the trailing CRC32 and ISIZE of the whole stream.
 **IMDb does not regenerate the seven files together**, which the pin made
 visible: five carried `Last-Modified: Tue, 11 Aug 2026 00:47–00:48 GMT` and
 `name.basics`/`title.akas` carried `Mon, 10 Aug 2026 12:53 GMT`. The
@@ -254,21 +294,26 @@ routine and drop the credit, not raise.
 themselves weigh — measured on a real 1,271,138-row copy of `titles` at the
 `m09a` schema, not estimated.** **1,192,217 of 1,271,138 titles (93.8%) gain a
 non-empty `credit_names`**, mean **9.11** names each, 10,862,893 names and
-**158,479,368 B of text**. `titles`' total relation size goes **872,759,296 B →
-1,496,825,856 B after `VACUUM FULL`: +624,066,560 B, +71.5%**, i.e. 3.9 bytes
+**158,479,368 B of text**. `titles`' total relation size goes **873,177,088 B →
+1,496,850,432 B after `VACUUM FULL`: +623,673,344 B, +71.4%**, i.e. 3.9 bytes
 stored for every byte of name. Decomposed, and the third term is a confound
-worth stating rather than hiding: heap + toast **+559,407,104 B (+126.9%)**;
-`ix_titles_search_document` **4.54×, 40,304,640 → 182,951,936 B
-(+142,647,296)**, which is the class-B lexemes; and the remaining nine indexes
+worth stating rather than hiding: heap + toast **+558,948,352 B (+126.7%)**;
+`ix_titles_search_document` **4.54×, 40,304,640 → 183,017,472 B
+(+142,712,832)**, which is the class-B lexemes; and the remaining nine indexes
 **net −77,987,840 B**, because `VACUUM FULL` rebuilds every index by sort while
 the baseline's btrees were built incrementally by `COPY`. So the honest
 statement is that the fill costs ~624 MB *net of* an index-rebuild saving that
 an operator only collects if they actually run the vacuum.
 The *transient* figure is the one an operator's disk sees, and it is more than
-double the settled one: before any vacuum the same table is **2,240,970,752 B,
-+1,368,211,456 B over baseline** (GIN alone at 208,003,072), because a single
+double the settled one: before any vacuum the same table is **2,240,831,488 B,
++1,367,654,400 B over baseline** (GIN alone at 207,970,304), because a single
 `UPDATE` of 1.19M rows leaves a dead tuple for every live one. **That peak, not
 the settled 624 MB, is the number to budget against PRD 08's 8–12 GB.**
+*These are `--phase titles`' numbers from the re-run that gave them a trail.
+The first pass measured the same quantities through a `psql` pipe and differed
+in the third significant figure — 872,759,296 vs 873,177,088 at baseline, a
+0.05% page-level wobble — while `+624 MB`, `×4.54` and every row count below
+are identical to both. Nothing built against the first pass needs revisiting.*
 **And the embedding blast radius of that fill is zero today and ~100% tomorrow,
 which is an ordering constraint rather than a reassurance.**
 `db/repositories/search.py:180` pins the embedded population to
