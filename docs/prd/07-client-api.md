@@ -674,15 +674,24 @@ proxies that mangle upgrades, and it reconnects natively in browsers.
 
 `GET /images/{image_id}?w=` — the caching proxy from [02](02-data-model.md).
 Fetches a provider **rung** on first request, stores the bytes on disk, and
-serves them with a long-lived cache header thereafter. It does not decode and
+serves them with immutable cache headers thereafter. It does not decode and
 does not re-encode: nothing in Usher's runtime can read an image, and nothing
 needs to. See [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md).
 
-⏳ **`Cache-Control: immutable` is conditional and is not yet earned.** It is
-honest only if an image id survives re-derivation, and the `images` table
-shipped in `m09a` with no unique key to make that true — so until the key lands
-(requested as `m09c`, specified in ADR-0032) this route sends a long `max-age`
-**without** `immutable`, which lets a client revalidate.
+✅ **`Cache-Control: immutable` is earned, as of `m09c`.** It is honest only if
+an image id survives re-derivation; `m09a` shipped `images` with no unique key
+to make that true, and `m09c` added
+`uq_images_owner_provider_path` — `UNIQUE NULLS NOT DISTINCT (title_id,
+episode_id, person_id, provider, provider_path)` — so a re-derive upserts and
+returns the id the row was first inserted with. **Between those two revisions
+this route was specified to send a long `max-age` without `immutable`**; that
+interim is over.
+
+**Logos the provider stores as SVG are not served.** The CDN ignores the ladder
+for `image/svg+xml` — every rung returns the `original` bytes — so nothing the
+clamp does can bound one, and the proxy will not store active content under a
+year-long `max-age`. A minority of titles therefore have a logo this route
+returns nothing for; ADR-0032 records the measurement and the degradation.
 
 Clients never see provider image URLs and never need a provider key. `w` is
 clamped **up** to a closed ladder of four widths — `154 342 780 1280`, a code
