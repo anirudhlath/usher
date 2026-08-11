@@ -151,7 +151,7 @@ be added if a client turns out to need flexible field selection.
 | `GET /series/{id}/seasons` · `GET /seasons/{id}/episodes` | Series hierarchy |
 | `GET /episodes/{id}` | Episode detail |
 | `GET /people/{id}` ✅ | Filmography grouped by role |
-| `GET /collections/{id}` | Franchise contents with ownership completeness |
+| `GET /collections/{id}` ✅ | Franchise contents with ownership completeness |
 
 > **Built in M5: `GET /titles/{id}`, narrowed.** ✅ It carries metadata,
 > `enrichment_state`, `enrichment_error`, `availability` and `watch_state` —
@@ -242,6 +242,42 @@ be added if a client turns out to need flexible field selection.
 > unassigned ([09](09-roadmap.md)'s M7 orphan). There is no column for them, so
 > there is nothing to render as null. `sort_name` is absent too: it equals
 > `name` on every row today, and a wire field is a promise.
+
+> **Built in M9: `GET /collections/{id}`.** ✅
+> [06](06-rows-and-recommendations.md)'s franchise signal — *"you own 2 of 4"*
+> — as a resource: `owned_count`, `total_count`, and **every** member in
+> release order with an `owned` flag apiece. A member list narrowed to the
+> owned subset would read "2 of 2", a completeness signal that always reads
+> complete; that is why `OwnedCollection` carries two *lists* rather than two
+> counts, and why the two numbers on the wire are their `len()` over what was
+> actually rendered. A client that counts the cards gets the same answer.
+>
+> **`owned` means an available, title-level media item** — the predicate
+> `/browse` settled, `episode_id IS NULL` **and** `available`, written into
+> both statements rather than implied. Both halves fail in the same direction:
+> a retracted copy on an unmounted drive and an episode-level row each read as
+> owned without them, so the page overstates. A collection holds only movies —
+> `belongs_to_collection` is a field of TMDb's `/movie/{id}` with no `/tv/{id}`
+> counterpart — so a series carrying a collection id is a defect and is not a
+> member here; `titles` carries no CHECK to stop such a row being *stored*, so
+> the read filters for itself rather than trusting the writer.
+>
+> **A franchise the household owns none of is a `200` with `owned_count: 0`**,
+> and only a franchise the catalog does not hold is a `404` (the generic
+> `not_found` of
+> [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)).
+> Collapsing the two would make "you own 0 of 7" unreachable, which is a real
+> answer for a client that followed a link from a film it does own.
+>
+> **This is not the home row's read with a filter.** `list_owned`'s floor of
+> two owned members is a statement about what belongs on a *screen*; a
+> franchise you own one of is a single film with a subtitle. Asking for one by
+> id carries **no floor at all**, because "you own 1 of 4" is the honest answer
+> and it is the one a household that has barely started something most wants.
+>
+> **No cursor, stated as a bound.** TMDb franchises are single-digit to
+> low-double-digit members and the hydration is one statement over all of them;
+> the whole answer is two statements regardless of size.
 
 ### Actions
 

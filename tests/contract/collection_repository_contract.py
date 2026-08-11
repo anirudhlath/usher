@@ -19,6 +19,7 @@ import uuid
 from abc import ABC, abstractmethod
 
 from usher.domain.collection import Collection
+from usher.domain.ids import new_id
 from usher.ports.repository import CollectionRepository
 
 
@@ -54,9 +55,25 @@ class CollectionSeeder(ABC):
     @abstractmethod
     async def collection_of(self, title_id: uuid.UUID) -> uuid.UUID | None:
         """Read `titles.collection_id` back. A test affordance, not a port
-        method: the port has no `get`, because `OwnedCollection` answers
-        `FranchiseProvider` in one statement and a per-collection read would
-        be an N+1 the port *offers*."""
+        method: `OwnedCollection` answers `FranchiseProvider` in one statement,
+        and reading a *link* back is not what `get` does -- `get` answers a
+        whole franchise and its ownership, which is a different question from
+        "which collection is this title in"."""
+
+    @abstractmethod
+    async def force_collection(self, title_id: uuid.UUID, collection_id: uuid.UUID) -> None:
+        """Link a title to a collection **without** going through
+        `attach_titles`.
+
+        Exists for exactly one case, and it is the one that matters: the
+        `kind = 'movie'` filter lives in `attach_titles`, so a case that seeded
+        a series through the port would be asserting that the *writer* refused
+        it and would say nothing about what a *reader* does with a row that got
+        in anyway. `titles` deliberately carries no
+        `CHECK (collection_id IS NULL OR kind = 'movie')` -- see
+        `db/models/collection.py` -- so such a row is storable, and a scoped
+        read that trusted the writer would put a series on a franchise page.
+        """
 
 
 class CollectionRepositoryContract:
@@ -295,6 +312,148 @@ class CollectionRepositoryContract:
         assert len(listed[0].title_ids) == 4
         assert listed[0].owned_title_ids == frozenset(members[:2])
         assert set(listed[0].title_ids) == set(members)
+
+    async def test_a_collection_the_household_owns_one_of_is_still_readable_by_id(
+        self, repository: CollectionRepository, seeder: CollectionSeeder
+    ) -> None:
+        """`list_owned` and `get` answer two different questions, and this is
+        the case that makes them different rather than one being the other with
+        a filter.
+
+        `min_owned` defaults to 2 because a franchise you own one of is not a
+        franchise **row** -- it is a single film with a subtitle, and the home
+        screen is right to leave it out. Asking for that collection *by id* is
+        a legitimate request: the client is on the film's page and followed a
+        link. So the scoped read carries **no `min_owned` at all**, and the
+        mutation this kills is re-applying it -- under which the one franchise a
+        household has barely started 404s, which is the one it most wants to be
+        told it has 1 of 4 of.
+
+        The premise is asserted rather than assumed: `list_owned()` really does
+        exclude this collection, so "the scoped read returned it" is a
+        statement about the difference between the two reads.
+        """
+        await repository.upsert_many([collection(98_000_022, "Barely Started")])
+        collection_id = (await repository.resolve_tmdb_ids([98_000_022]))[98_000_022]
+
+        members = [await seeder.movie() for _ in range(4)]
+        for member in members:
+            await repository.attach_titles([(member, collection_id)])
+        await seeder.own(members[0])
+
+        assert [one.collection_id for one in await repository.list_owned()] == [], (
+            "the premise: at one owned member this franchise is below list_owned's floor"
+        )
+
+        found = await repository.get(collection_id)
+        assert found is not None
+        assert found.collection_id == collection_id
+        assert found.name == "Barely Started"
+        assert found.owned_title_ids == frozenset({members[0]})
+        assert set(found.title_ids) == set(members)
+        assert len(found.title_ids) == 4
+
+    async def test_a_collection_the_household_owns_none_of_is_a_real_answer(
+        self, repository: CollectionRepository, seeder: CollectionSeeder
+    ) -> None:
+        """Zero owned is a fact, not an absence.
+
+        The wrong implementation this kills is an inner join to `media_items`,
+        under which a franchise nobody in the house owns any of is
+        indistinguishable from a franchise that does not exist -- and the route
+        above turns the second into a 404. "You own 0 of 7" is exactly the
+        answer a client following a link from a film it *does* own needs.
+        """
+        await repository.upsert_many([collection(98_000_023, "Owned By Nobody")])
+        collection_id = (await repository.resolve_tmdb_ids([98_000_023]))[98_000_023]
+        members = [await seeder.movie() for _ in range(3)]
+        for member in members:
+            await repository.attach_titles([(member, collection_id)])
+
+        found = await repository.get(collection_id)
+        assert found is not None
+        assert found.owned_title_ids == frozenset()
+        assert len(found.title_ids) == 3
+
+    async def test_a_scoped_read_counts_only_available_title_level_items(
+        self, repository: CollectionRepository, seeder: CollectionSeeder
+    ) -> None:
+        """`owned` means an **available, title-level** media item here too, and
+        the clause is written into this statement rather than inherited from
+        `list_owned`'s.
+
+        Two wrong implementations at once, both of which read as working: a
+        join on `media_items.title_id` alone, and one that ignores `available`.
+        The second overstates -- "you own 3 of 4" for a household that owns one
+        -- which is the direction nobody checks. `media_items` holds 999,827
+        episode rows on the one measured deployment, so the first reads the
+        wrong population entirely; collections hold only movies, so no episode
+        can match today, which is exactly why the clause has to be written down
+        rather than implied.
+
+        Seeded so a wrong answer is *longer* than the right one: one genuinely
+        owned member, one unavailable, one owned only through an episode-level
+        row.
+        """
+        await repository.upsert_many([collection(98_000_024, "Three Kinds Of Owned")])
+        collection_id = (await repository.resolve_tmdb_ids([98_000_024]))[98_000_024]
+
+        genuine = await seeder.movie()
+        unavailable = await seeder.movie()
+        episode_level = await seeder.movie()
+        for member in (genuine, unavailable, episode_level):
+            await repository.attach_titles([(member, collection_id)])
+        await seeder.own(genuine)
+        await seeder.own(unavailable, available=False)
+        await seeder.own(episode_level, as_episode=True)
+
+        found = await repository.get(collection_id)
+        assert found is not None
+        assert found.owned_title_ids == frozenset({genuine})
+        assert len(found.title_ids) == 3
+
+    async def test_a_series_that_got_a_collection_id_anyway_is_not_a_member(
+        self, repository: CollectionRepository, seeder: CollectionSeeder
+    ) -> None:
+        """The front matter's **fourth** wrong implementation, killed at a
+        second call site.
+
+        `attach_titles` filters `kind = 'movie'` and
+        `test_attaching_a_collection_to_a_series_is_refused` proves it -- but
+        that is a claim about the *writer*, and `titles` deliberately carries no
+        `CHECK (collection_id IS NULL OR kind = 'movie')`, so the row is
+        storable by anything else that touches the column. This case writes it
+        through the seeder's `force_collection` precisely to get past the
+        writer, so what is under test is what the **reader** does with it.
+
+        The series is seeded owned, so an unfiltered read reports "you own 2 of
+        2" for a franchise that is one film and a television show.
+        """
+        await repository.upsert_many([collection(98_000_025, "One Film And A Series")])
+        collection_id = (await repository.resolve_tmdb_ids([98_000_025]))[98_000_025]
+        movie_id = await seeder.movie()
+        series_id = await seeder.series()
+        await repository.attach_titles([(movie_id, collection_id)])
+        await seeder.force_collection(series_id, collection_id)
+        assert await seeder.collection_of(series_id) == collection_id, (
+            "the plant did not land: force_collection has to bypass attach_titles' kind filter"
+        )
+        await seeder.own(movie_id)
+        await seeder.own(series_id)
+
+        found = await repository.get(collection_id)
+        assert found is not None
+        assert tuple(found.title_ids) == (movie_id,)
+        assert found.owned_title_ids == frozenset({movie_id})
+
+    async def test_an_unknown_collection_id_is_none(self, repository: CollectionRepository) -> None:
+        """`None` rather than an empty `OwnedCollection`, because the route
+        above turns the two into different status codes: a 404 for a franchise
+        the catalog does not hold, and a 200 with `owned_count: 0` for one it
+        holds and the household owns none of. An implementation answering an
+        empty shell for both collapses them into one 200 about nothing.
+        """
+        assert await repository.get(new_id()) is None
 
     async def test_an_empty_collection_batch_is_a_no_op(
         self, repository: CollectionRepository

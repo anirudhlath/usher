@@ -62,6 +62,13 @@ class FakeCollectionSeeder(CollectionSeeder):
     async def collection_of(self, title_id: uuid.UUID) -> uuid.UUID | None:
         return self._repository.catalog.collection_ids.get(title_id)
 
+    async def force_collection(self, title_id: uuid.UUID, collection_id: uuid.UUID) -> None:
+        """Straight into the affordance, past the `kind = 'movie'` filter
+        `attach_titles` applies -- which is the whole point of the method. In
+        Postgres the same bypass is a raw `UPDATE`; here it is the dict the
+        port's own filter reads."""
+        self._repository.catalog.collection_ids[title_id] = collection_id
+
 
 class TestFakeCollectionRepository(CollectionRepositoryContract):
     @pytest.fixture

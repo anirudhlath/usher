@@ -175,9 +175,15 @@ def test_no_port_is_a_protocol(port: type[ABC]) -> None:
                 "count_titles_with_credits",
             },
         ),
+        # `get` is here as of M9's `GET /collections/{id}`, the second of Task
+        # 6's four absences to close and for the same reason as
+        # `PersonRepository.get`: the route arrived. It is not `list_owned`
+        # with a filter -- it carries **no `min_owned`**, which is the whole
+        # difference between "what belongs on a screen" and "the franchise the
+        # client asked for by id".
         (
             CollectionRepository,
-            {"upsert_many", "resolve_tmdb_ids", "attach_titles", "list_owned", "count"},
+            {"get", "upsert_many", "resolve_tmdb_ids", "attach_titles", "list_owned", "count"},
         ),
         # Not one of Task 6's three, and added here by M7's Task 35 because
         # this is exactly the list that catches what that task did: it grew
@@ -231,9 +237,12 @@ def test_the_new_repository_ports_declare_exactly_these_abstract_methods(
     deliberately-absent ones -- `PersonRepository.get`,
     `CollectionRepository.get`, `list_members`, and any `rebuild` -- cannot
     be added without this list moving and someone reading the reason.
-    **`PersonRepository.get` is now present**, and it arrived with the route
-    Task 6 named as the caller it was waiting for. The other three are still
-    absent and still deliberate.
+    **Two of those four are now present** -- `PersonRepository.get` and
+    `CollectionRepository.get` -- and each arrived with the M9 route Task 6
+    named as the caller it was waiting for. `list_members` and `rebuild` are
+    still absent and still deliberate: `OwnedCollection` carries the member
+    list, so a separate members read would be a second opinion about the same
+    fact.
 
     It moved once, and this is the record of it: M7's `usher derive` report
     added `PersonRepository.count`, `CollectionRepository.count` and

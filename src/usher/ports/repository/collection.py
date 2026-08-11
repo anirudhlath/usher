@@ -55,6 +55,57 @@ class CollectionRepository(ABC):
     """
 
     @abstractmethod
+    async def get(self, collection_id: uuid.UUID) -> OwnedCollection | None:
+        """One franchise and the household's coverage of it, or `None` when
+        the catalog does not hold it.
+
+        **The same shape `list_owned` returns and deliberately not a narrower
+        one.** PRD 06's signal is *"you own 2 of 4"*, which is two numbers and
+        the cards to render; `OwnedCollection` carries the two **lists** so the
+        counts are `len()` and cannot disagree with what they count. A scoped
+        read that answered a bare count would reintroduce exactly the state no
+        consumer could interpret.
+
+        **No `min_owned`, and its absence is the whole difference from
+        `list_owned`.** That method's floor of 2 is a statement about what
+        belongs on a *screen* -- a franchise you own one of is a single film
+        with a subtitle. Asking for a specific collection by id is a different
+        request: the client is on a film's page and followed a link, and the
+        honest answer is "you own 1 of 4". Re-applying the floor here 404s the
+        franchise a household has barely started, which is the one it most
+        wants to be told about.
+
+        `None` rather than a raise, and never an empty `OwnedCollection`: the
+        route above answers 404 for a franchise the catalog does not hold and
+        200 with `owned_count: 0` for one it holds and the household owns none
+        of. An implementation returning an empty shell for both collapses two
+        different facts into one.
+
+        **Movies only, and this statement says so itself rather than trusting
+        `attach_titles`.** That filter is a property of the data source --
+        `belongs_to_collection` has no `/tv/{id}` counterpart -- and `titles`
+        deliberately carries no `CHECK (collection_id IS NULL OR kind =
+        'movie')`, so a series carrying a collection id is storable by anything
+        that writes the column. A reader that trusted the writer would put a
+        television show on a franchise page.
+
+        **Owned means an available, title-level media item**, `episode_id IS
+        NULL` written into the predicate rather than implied, for
+        `list_owned`'s reason restated because it is the same predicate: 999,827
+        of the one measured deployment's 1,126,789 `media_items` rows are
+        episodes, and its absence is otherwise indistinguishable from having
+        forgotten it.
+
+        Members in release order, exactly as `list_owned` returns them, so the
+        two reads of one franchise cannot render it differently.
+
+        **Unbounded, and the bound is stated rather than assumed.** TMDb
+        franchises are single-digit to low-double-digit; there is no cursor,
+        and the day one is needed it is the opaque codec `browse` already uses
+        over the keyset shape `browse` already has.
+        """
+
+    @abstractmethod
     async def upsert_many(self, collections: Sequence[Collection]) -> BulkWriteResult:
         """Insert or update, keyed on `tmdb_id`.
 

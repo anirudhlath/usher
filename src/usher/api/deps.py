@@ -551,6 +551,9 @@ def get_collection_repository(session: SessionDep) -> CollectionRepository:
 # lands on the function that builds it.
 PersonRepositoryDep = Annotated[PersonRepository, Depends(get_person_repository)]
 CreditRepositoryDep = Annotated[CreditRepository, Depends(get_credit_repository)]
+# And `GET /collections/{id}`, on the same terms: one port read plus a
+# `TitleRepository.list_by_ids` hydration, with no service between them.
+CollectionRepositoryDep = Annotated[CollectionRepository, Depends(get_collection_repository)]
 
 
 def get_taste_repository(session: SessionDep) -> TasteRepository:
