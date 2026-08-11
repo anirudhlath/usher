@@ -22,13 +22,17 @@ import dataclasses
 import io
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from loguru import logger
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import SecretStr
 
 from tests.fakes.collection_repository import FakeCollectionRepository
@@ -1010,6 +1014,28 @@ def _overlap(left: tuple[float, float], right: tuple[float, float]) -> float:
     return max(0.0, min(left[1], right[1]) - max(left[0], right[0]))
 
 
+def _without_suspending(coro: Coroutine[object, object, object]) -> object:
+    """Drive `coro` one step and require it to have finished.
+
+    `tests/unit/test_services_home_stale.py`'s helper, copied for the reason
+    the `_Clock` fixtures in this suite are copied. Here it does a second job:
+    the read below happens while the lane is parked inside `build`, so an
+    implementation that made that read a *rebuild* -- `read_screen` popping the
+    entry it just served, say -- would park on the same gate and **hang the
+    whole file** rather than fail it. Driven by hand it fails in microseconds,
+    on its own message.
+    """
+    try:
+        coro.send(None)
+    except StopIteration as finished:
+        return finished.value
+    coro.close()
+    raise AssertionError(
+        "compose suspended: a read that should have been served from the cache "
+        "rebuilt instead, and would have parked on the refresh's own gate"
+    )
+
+
 _HOUSEHOLD = User(id=USER_ID, name="default", is_default=True)
 
 
@@ -1122,7 +1148,7 @@ async def test_a_read_during_an_in_flight_refresh_schedules_nothing_and_they_ove
         await _drain(row.entered.is_set)
 
         started = time.perf_counter()
-        served = await service.compose(_context(_HOUSEHOLD))
+        served = _without_suspending(service.compose(_context(_HOUSEHOLD)))
         read_window = (started, time.perf_counter())
 
         assert queue.depth == 0, "a key already being refreshed must not be queued again"
@@ -1227,3 +1253,73 @@ async def test_no_cache_means_no_refresh_lane(fakes: _Fakes) -> None:
         assert supervisor.rows_refreshing() is False
     finally:
         await supervisor.stop()
+
+
+async def test_the_refresh_is_a_root_span_linked_to_the_request_that_served_stale(
+    fakes: _Fakes,
+) -> None:
+    """PRD 10's `rows.refresh`, and the two invariants that move with it.
+
+    **A root with a `Link`, never a child.** The request that served the stale
+    screen has usually already returned, so a child span of a finished parent
+    misstates causality -- the same reason a worker's `job.*` is a root, and
+    the convention PRD 10 already specifies. Asserted as *parentage*: a refresh
+    that nested still produces valid ids, still exports, and still carries the
+    name the document asks for. The schedule happens inside a span here so
+    there is a context to be wrongly parented to -- without one, "root" is
+    what an implementation with no ambient span produces anyway and the
+    assertion could not fail.
+
+    **And its `row.build` spans have no `home.compose` parent at all.** PRD 10
+    said "the number of `row.build` children of a `home.compose` is the number
+    of misses"; a background refresh builds outside any request, so
+    `HomeService.rebuild` opens none and the sentence is corrected in the same
+    commit. A refresh that minted one would nest perfectly and quietly double
+    the `home.compose` count on every dashboard reading it as "requests that
+    composed".
+
+    Written because a documented span nobody emits is the trace-side
+    permanently-empty panel, indistinguishable from a quiet system.
+    """
+    exporter = InMemorySpanExporter()
+    tracers = TracerProvider()
+    tracers.add_span_processor(SimpleSpanProcessor(exporter))
+    trace.set_tracer_provider(tracers)
+
+    cache = RowCache(clock=lambda: datetime.now(UTC))
+    queue = RefreshQueue()
+    provider, row = _gated_provider()
+    row.gate.set()
+    _stale(cache, ())
+    service = HomeService(providers=[provider], cache=cache, refresh=queue.schedule)
+    supervisor = _supervisor(
+        fakes,
+        rows=cache,
+        refreshes=queue,
+        providers=[provider],
+        push_enabled=False,
+        worker_enabled=False,
+    )
+    await supervisor.start()
+    try:
+        with trace.get_tracer("test").start_as_current_span("GET /home") as request:
+            _without_suspending(service.compose(_context(_HOUSEHOLD)))
+            request_id = request.get_span_context().span_id
+        await _drain(lambda: queue.pending == frozenset())
+    finally:
+        await supervisor.stop()
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    assert "rows.refresh" in spans, sorted(spans)
+    refresh = spans["rows.refresh"]
+    assert refresh.parent is None, "the refresh nested under a request that had already returned"
+    assert [link.context.span_id for link in refresh.links] == [request_id]
+    assert refresh.attributes is not None
+    assert refresh.attributes["usher.home.rows"] == 1
+
+    assert "home.compose" not in spans, (
+        "a refresh minted a home.compose -- PRD 10 counts those as compositions a request paid for"
+    )
+    build = spans["row.build"]
+    assert build.parent is not None
+    assert build.parent.span_id == refresh.context.span_id

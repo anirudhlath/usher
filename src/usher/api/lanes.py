@@ -80,6 +80,7 @@ from collections.abc import Awaitable, Callable
 
 from loguru import logger
 from opentelemetry import trace
+from opentelemetry.context import Context
 from opentelemetry.trace import Link
 
 from usher.composition import (
@@ -479,7 +480,14 @@ class LaneSupervisor:
         parent at all, because `HomeService.rebuild` opens none.
         """
         links = [Link(stale.link)] if stale.link.is_valid else []
-        with _tracer.start_as_current_span("rows.refresh", links=links) as span:
+        # `context=Context()` -- an empty context -- so "root" is structural
+        # rather than a property of where `start()` happened to be called.
+        # A worker's `job.*` relies on there being no ambient span, which is
+        # true today and is not enforced; a lane task inherits the context of
+        # whatever created it (`asyncio.create_task` copies it), so a lifespan
+        # or a test that started the supervisor inside a span would silently
+        # turn every refresh into a child of one request forever.
+        with _tracer.start_as_current_span("rows.refresh", context=Context(), links=links) as span:
             async with self._work() as pipeline:
                 # A session this lane opened, closed when the block ends --
                 # never the request's, which `get_session` committed and closed

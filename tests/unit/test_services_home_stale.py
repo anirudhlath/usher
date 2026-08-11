@@ -260,7 +260,17 @@ async def test_a_composer_with_no_refresher_never_serves_stale(
 async def test_two_reads_over_one_stale_key_schedule_one_refresh(
     ctx: RowContext, clock: _Clock
 ) -> None:
-    """The deduplication, at the queue's own level.
+    """The deduplication, at the queue's own level -- **and the second read is
+    still served the stale screen.**
+
+    That second half is not decoration. `read_screen` returning the stale value
+    *and popping the entry* is a one-line mutation that satisfies every other
+    assertion in this file: the first read is served, the key is queued once,
+    nothing is dropped -- and the next request is **cold**, so the household
+    pays the full compose serve-stale exists to spare it, once per refresh, for
+    as long as the lane is behind. Measured: without the two assertions below
+    that mutation survived this whole file and only surfaced in
+    `tests/unit/test_api_lanes.py`, as a *hang*.
 
     **This is a count, and a count is not a concurrency claim.** What it rules
     out is a queue with no dedup at all; the claim that matters -- that a
@@ -270,13 +280,19 @@ async def test_two_reads_over_one_stale_key_schedule_one_refresh(
     """
     cache = RowCache(clock=clock)
     queue = RefreshQueue()
-    service = HomeService(providers=[_provider()], cache=cache, refresh=queue.schedule)
+    provider = _provider()
+    service = HomeService(providers=[provider], cache=cache, refresh=queue.schedule)
 
-    await service.compose(ctx)
+    warm = await service.compose(ctx)
     clock.advance(_SCREEN_TTL)
     _without_suspending(service.compose(ctx))
-    _without_suspending(service.compose(ctx))
+    second = _without_suspending(service.compose(ctx))
 
+    assert second == warm, "the entry must be left in place for the next reader"
+    assert len(provider.contexts) == 1, (
+        "the second read re-proposed, so the stale entry was consumed rather "
+        "than served -- the next request after a stale serve must not be cold"
+    )
     assert queue.depth == 1
     assert queue.dropped == 0, "the second read was deduplicated, not dropped"
 
