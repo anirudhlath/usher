@@ -233,6 +233,28 @@ class MediaItemRepository(ABC):
         """
 
     @abstractmethod
+    async def list_for_episode(self, episode_id: uuid.UUID) -> list[MediaItem]:
+        """Every copy of one **episode**, across every source.
+        `list_for_title`'s counterpart, for `POST /episodes/{id}/play`.
+
+        `list_for_title` carries `AND episode_id IS NULL` -- load-bearing and
+        measured, 1 row in 0.251 ms against 20,001 rows and 22.901 ms without
+        it, on one 20,000-episode series (`.claude/rules/db-and-sql.md`) --
+        which is exactly what makes it useless here: an episode's row is
+        precisely one of the rows that clause excludes. The alternative,
+        `resolve_external_ids` once per configured source, is N statements
+        and returns an id with none of the availability facts `/play`'s
+        ranking needs.
+
+        Same ordering as `list_for_title`, for the same reason: `available`
+        first, then most recently seen, then `id` as a total-order tiebreak,
+        so a detail screen does not shuffle its badges between refreshes.
+
+        Empty is the ordinary answer for an episode with no copy on any
+        configured source, not a missing row.
+        """
+
+    @abstractmethod
     async def list_unmatched(
         self, source_id: uuid.UUID | None = None, *, limit: int = 100, offset: int = 0
     ) -> list[MediaItem]:

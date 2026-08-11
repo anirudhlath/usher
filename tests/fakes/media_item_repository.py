@@ -255,6 +255,21 @@ class FakeMediaItemRepository(MediaItemRepository):
         )
         return copies
 
+    async def list_for_episode(self, episode_id: uuid.UUID) -> list[MediaItem]:
+        # No `title_id` bound here, deliberately: `episode_id` alone already
+        # names the row, and reading `title_id` too is the wrong
+        # implementation this method's contract case exists to fail --
+        # `list_for_title`'s bound is the opposite one, for the opposite
+        # reason.
+        copies = [entry for entry in self._items.values() if entry.episode_id == episode_id]
+        # Same ordering as `list_for_title`, for the same reason -- see that
+        # method's comment for the divergence this fake's `list.sort`
+        # stability hides from Postgres's `id` tiebreak.
+        copies.sort(
+            key=lambda entry: (not entry.available, -entry.last_seen_at.timestamp(), entry.id)
+        )
+        return copies
+
     async def list_unmatched(
         self, source_id: uuid.UUID | None = None, *, limit: int = 100, offset: int = 0
     ) -> list[MediaItem]:
