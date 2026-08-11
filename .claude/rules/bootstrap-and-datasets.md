@@ -105,6 +105,70 @@ across 101,151,422 + 15,563,615 + 58,906,368 data rows, **zero** lines split to
 the wrong column count, so a wrong count is a real signal in every one of them
 and not noise to be tolerated.
 
+**`title.akas`'s parser-level shape, measured over the whole pinned file
+rather than over the catalog-retained slice of it — 2026-08-11 (M9 T5).** T3's
+figures are all *retained* ones (a `titleId` the catalog holds); these are over
+all **58,906,368 data rows** of `"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`,
+because a parser sees every row and cannot know which titles exist. Header is
+exactly `titleId ordering title region language types attributes
+isOriginalTitle` — 8 columns, and **zero rows split to any other count**.
+
+- **`isOriginalTitle` is 21.6% of the file — 12,703,704 rows — and not one of
+  them carries a `region`** (0 of 12,703,704). `types` reads exactly `original`
+  on all of them, and the two counts are *identical*, so in this snapshot the
+  flag and the type are one signal spelled twice. There is no `\N` and no `\r`
+  in that column: the vocabulary is exactly `0` and `1`.
+- **33 rows exceed `SEARCH_NAME_MAX_CHARS` (512) and the longest title is 831
+  characters.** T3 measured 0 among the retained rows and that still holds
+  (0 of 7,541,357 on a re-run), so all 33 belong to titles outside the catalog
+  — *today*. `SearchNameRepository`'s contract refuses an over-long name for
+  the **whole call**, so the parser drops them rather than letting one row take
+  a ten-thousand-row batch with it.
+- **`title` is never empty and never `\N`** — 0 of 58,906,368. The empty-name
+  drop is unreachable in this snapshot and exists because
+  `ck_title_search_names_name_not_empty` is `name <> ''`.
+- **39,880 titles contain a literal `"` and 6,344 open with one**, so
+  `csv.reader`'s `QUOTE_MINIMAL` would silently rewrite 6,344 alias names.
+  This is the third file the finding has been confirmed on and by far the
+  largest count.
+- **`types` and `attributes` are multi-valued inside one tab-delimited column
+  and the separator is `\x02`** — 429 rows carry a two-valued `types`,
+  commonest `imdbDisplay\x02dvd` (207). A reader assuming a tab there would
+  call those 429 rows nine-column and malformed. 23 distinct `types` values,
+  185 distinct free-text `attributes` values, 251 distinct regions whose seven
+  largest (IN, DE, JP, FR, ES, IT, PT) are 5.4–5.8M rows each.
+- **`ordering` is present and integral on every row**, min 1, max 300.
+- **12,748,984 rows carry no `region` and 19,243,152 no `language`**, and they
+  are not the same rows.
+
+**And the decisive one, which settles whether an `isOriginalTitle` filter
+belongs in the parser: it costs 7 aliases.** Joining the pinned akas file to a
+1,272,367-title catalog built from this host's cached `title.basics`
+(`"128751cb2f3132bd73bdf08c7f4def5d-27"` — **a different upstream snapshot**,
+which is the same not-one-snapshot hazard recorded below and is why the
+numbers differ from T3's by ~0.07%): 7,541,357 akas rows are in the catalog,
+1,272,135 of them are flagged, and **1,272,111 (99.998%) casefold-equal the
+title's own `name` or `original_name`**. Only **24** disagree, and 17 of those
+repeat a name a non-flagged row already carries — so after deduplicating on
+`(title_id, casefold(name))` the alias total goes 1,663,330 → 1,663,323, a
+loss of **7**. The hazard that would have made the filter unsafe is
+empirically zero: **0 of the 1,272,367 catalog titles have no
+`originalTitle`**, so there is no title whose flagged aka is its only carrier.
+**The filter is a cheap prefix of the writer's rule and never a substitute** —
+of the 6,269,222 retained rows that survive it, **4,426,783 (70.6%) still
+casefold-equal the title's own name**, and only a comparison against the
+stored `Title` can see that.
+
+**The plan's "heavily-filtered file yields row-less batches" risk is inverted
+by the measurement.** It was written for three files at once; of the one that
+survives, `title.akas` keeps **78.4%** of its lines, which makes it the
+*least* filtered dataset `_ImdbDataset` has ever streamed — `title.basics`
+keeps 1,271,138 of 12,678,891, i.e. **10.0%**, and has shipped that way since
+M2. So `_ImdbDataset` was not changed to emit cursor-advancing empty batches:
+a trailing run of filtered lines costs a re-read on resume and never a lost
+row, because `position` counts lines consumed and every downstream write is an
+upsert.
+
 **`title.principals` + `name.basics` will not fit a `people`/`credits` design
 for this catalog, and the refusal is a size measurement rather than a row
 count — measured 2026-08-11 (M9 T3).** The bar was written to
