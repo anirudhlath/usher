@@ -945,3 +945,74 @@ entry was written; re-measured here per gate step rather than re-argued.
 Gate green before and after, on the fully restored tree: `ruff check`,
 `ruff format --check`, `mypy` over 471 files, `lint-imports` 9 kept / 0
 broken, and the whole-suite baseline unchanged at **2,995 unit / 4 skipped**.
+
+## M9 Task B1 — `title_search_names`' credited-person half (2026-08-11)
+
+Sixteen plants over `db/repositories/people.py`, `tests/fakes/credit_repository.py`
+and `ports/repository/people.py`, **in place, against the whole suite** minus
+one deselection named below. Twelve behavioural mutations, all KILLED; three
+controls, all SURVIVED; zero BAD-ANCHOR, BROKEN-MUTATION, DID-NOT-RUN or HUNG.
+Each kill was checked against the case it names and nothing else.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| the search-name delete loses its `title_ids` scope | KILLED | 1 — `..._replaces_its_searchable_person_names` |
+| the search-name delete loses its `kind` scope | KILLED | 1 — `..._an_alias_row_..._survives_a_credit_replacement` |
+| the names come from the `credits` sequence, not the mapping | KILLED | 2 |
+| the ordering is dropped (`sorted(set(...))`) | KILLED | 2 |
+| the in-batch duplicate name is stored twice | KILLED | 1 |
+| **the scope keeps a duplicated title id** | **SURVIVED, then closed** | 0, then 1 |
+| the write moves after the `if not records: return 0` | KILLED | 2 |
+| `region`/`language` filled with an enrichment locale | KILLED | 1 |
+| the three `unnest` arrays paired wrongly (ids against names) | KILLED | 8 |
+| the fake stores a duplicated name twice | KILLED | 1 |
+| the fake drops the ordering | KILLED | 2 |
+| the fake leaves an emptied title's names in place | KILLED | 2 |
+
+**The survivor was a reachable defect, not an equivalence, and the caller is
+what settles it.** Iterating `title_ids` rather than `dict.fromkeys(title_ids)`
+passed the whole suite. `DeriveService._resolve` extends its list **once per
+payload** — `resolved.extend((title_id, payload) for payload in payloads)` — so
+a title `raw_payloads` holds two payloads for reaches
+`CreditRepository.replace_for_titles` **twice in one `title_ids`**. Every other
+destination of that call absorbs it and that is why nothing saw it: both
+deletes are `= ANY(...)`, the credits insert dedupes on the natural key, and
+`credit_names` is a mapping whose `UPDATE ... FROM` touches the row once. The
+searchable names are the one write that is per `(title, name)`, so under the
+mutant every credited name is stored once per cached payload and a
+`LIKE 'pre%'` probe answers the same title that many times. Closed with
+`test_a_title_named_twice_in_one_scope_is_written_once` — re-planted, and it
+fails **that case and only that case**. The general shape: *a guard that
+survives on a port taking a `Sequence` is answered by reading the shipped
+caller, not by reasoning about the port* — and here the fake's own `set(title_ids)`
+is what hid it, since only the Postgres arm can tell a per-name write that
+repeats from one that does not.
+
+**The controls, measured against all five gate steps rather than pytest
+alone:**
+
+| control | `pytest` (whole suite) | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` |
+|---|---|---|---|---|---|
+| the two search-name statement constants swapped | PASS | PASS | PASS | PASS | PASS |
+| the two independent list appends swapped (`search_title_ids`/`search_names`) | PASS | PASS | PASS | PASS | PASS |
+| one sentence of the port docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+Each is a fact about the code: two module-level string bindings that reference
+nothing and have no import-time side effect; two appends to two different lists
+from two different names, neither of which can observe the other; and a
+docstring whose *wording* nothing checks —
+`test_ports_repository_package.py::test_every_port_and_abstract_method_in_the_package_carries_a_docstring`
+checks a docstring's **presence**, which was verified by reading it before the
+control was chosen rather than after it survived.
+
+**One deselection, and it is named rather than silent.**
+`test_sse_end_to_end.py::test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands`
+is intermittent and predates M9 — measured **red 5/5 at the base commit
+`4e0935b`** with the identical assertion (`assert '745' is None`), in a
+worktree of its own whose `usher.__file__` was checked to be that worktree's.
+It is the `enrich` lane and no plant here can reach it, so leaving it in would
+have scored eleven verdicts on a coin flip. Its mechanism was settled
+separately by G1.
+
+Gate green before and after on the fully restored tree, with all three touched
+files verified by `md5sum` against their pre-sweep digests.
