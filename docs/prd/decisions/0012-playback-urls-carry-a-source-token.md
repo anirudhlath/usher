@@ -1,11 +1,14 @@
 # ADR-0012 — A playback URL carries a source token, in v1
 
-**Status:** Accepted for v1, with a named successor in M9. Implemented in M3
+**Status:** Accepted for v1, with a named successor in M9 — **now decided:
+[ADR-0029](0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)
+built option 1 below.** Implemented in M3
 ([plan](../../plans/2026-07-30-m3-emby-adapter.md), Task 7). Both of the
 mitigations recorded below as "recommended, not implemented" have since
 shipped — dropping `DeviceId` from a playback URL in M3, and the
 administrator check in M5 — so the accepted risk is now *observable* rather
-than merely documented. It is still accepted.
+than merely documented. **The risk this ADR accepts is still accepted** — see
+"The successor, in M9" below for what ADR-0029 changes and what it does not.
 
 ## Context
 
@@ -255,6 +258,18 @@ Option 1 is preferred: it needs no authentication work and is a pure
 addition to the API surface M9 is building anyway. The obligation is
 recorded in [09](../09-roadmap.md)'s M9 entry as well as here — a successor
 named only inside the document that defers it is not a plan.
+
+**Built, M9 — option 1, exactly as named above, and this paragraph is
+amended rather than rewritten.**
+[ADR-0029](0029-the-playback-ticket-changes-the-artifact-not-the-grant.md)
+records the cipher (Fernet over an HKDF-SHA256 subkey of
+`USHER_SECRET_KEY`), the TTL, and the no-revocation-before-expiry cost this
+option always implied. Its own framing — *"what it changes is the artifact,
+not the grant"* — is the same claim the opening line of this section makes,
+restated once the thing existed to measure: weakest for `deep_link`, and
+accepted rather than solved. **Option 2 remains unbuilt and its blocker is
+unchanged** — no client identity exists until PRD 01's authentication seam
+does, so a per-client scoped token still has nothing to scope to.
 
 ## Recommended, not implemented
 

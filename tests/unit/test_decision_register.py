@@ -50,3 +50,23 @@ def test_the_provider_proposal_adr_is_reachable_from_prd_06() -> None:
     """
     prd = (_DECISIONS.parent / "06-rows-and-recommendations.md").read_text()
     assert "0023-a-provider-proposes-it-does-not-decide.md" in prd
+
+
+def test_the_playback_ticket_adr_is_reachable_from_prd_07_and_from_adr_0012() -> None:
+    """ADR-0029 settles ADR-0012's named M9 successor -- ADR-0012's own
+    "The successor, in M9" section named two options and deferred the
+    choice. A reader who reaches PRD 07's Playback section but not
+    ADR-0012, or ADR-0012 but not ADR-0029, is a reader who re-derives which
+    option was actually built and re-litigates the "removes the credential"
+    mistake ADR-0029 exists to correct.
+
+    Kills writing ADR-0029 and leaving either link unwritten -- PRD 07's
+    Playback section (H's D4) or ADR-0012's own Status line and successor
+    section (this task).
+    """
+    prd = (_DECISIONS.parent / "07-client-api.md").read_text()
+    adr_0012 = (_DECISIONS / "0012-playback-urls-carry-a-source-token.md").read_text()
+
+    target = "0029-the-playback-ticket-changes-the-artifact-not-the-grant.md"
+    assert target in prd, "PRD 07's Playback section does not link ADR-0029"
+    assert target in adr_0012, "ADR-0012 does not point at its own settled successor"
