@@ -18,7 +18,7 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from usher.api.lanes import LaneSupervisor
-from usher.composition import adapter_factory, build_search_service
+from usher.composition import adapter_factory, build_image_proxy_service, build_search_service
 from usher.config import Settings
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
@@ -44,6 +44,7 @@ from usher.domain.taste import GenreAffinity
 from usher.domain.watch import User
 from usher.ports.credentials import CredentialStore
 from usher.ports.events import EventPublisher
+from usher.ports.images import ImageBlobStore, ImageFetcher
 from usher.ports.jobs import JobQueue
 from usher.ports.repository import (
     CollectionRepository,
@@ -68,6 +69,7 @@ from usher.ports.rows import RowContext
 from usher.ports.source import SourceAdapterFactory
 from usher.services.events import InMemoryEventBus
 from usher.services.home import HomeService
+from usher.services.images import ImageProxyService
 from usher.services.ingest import IngestService
 from usher.services.matching import MatchService
 from usher.services.playback import PlaybackService
@@ -504,6 +506,26 @@ def get_credit_repository(session: SessionDep) -> CreditRepository:
     return PostgresCreditRepository(session)
 
 
+# Declared here rather than in the M7 block below, because this is its first
+# user in the request graph -- `Depends(...)` is evaluated when the `def` under
+# it executes, so a provider appended after its consumer is a `NameError` at
+# import of this module. `get_row_context` is its second: C6's shelf artwork
+# and C7's `images` key read the same port, and this is the one provider.
+def get_image_repository(session: SessionDep) -> ImageRepository:
+    """Artwork references for the request that is rendering them.
+
+    The read half only, on `get_curated_row_repository`'s terms and for the
+    same reason: `replace_for_titles` is a *derivation* -- a scoped delete plus
+    an upsert over a title's whole artwork set -- and it belongs to
+    `usher derive` under `JobKind.DERIVE`. The port is handed over whole
+    because splitting a repository in two to express which half a caller uses
+    is a second port for one table; what keeps the write off this path is that
+    the two callers are `BaseRow.hydrate`, which calls `primary_for_titles`,
+    and `TitleReadService.detail`, which calls `list_for_title`.
+    """
+    return PostgresImageRepository(session)
+
+
 def get_title_read_service(
     titles: Annotated[TitleRepository, Depends(get_title_repository)],
     media_items: MediaItemRepositoryDep,
@@ -511,8 +533,9 @@ def get_title_read_service(
     watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
     queue: JobQueueDep,
     credits: Annotated[CreditRepository, Depends(get_credit_repository)],
+    images: Annotated[ImageRepository, Depends(get_image_repository)],
 ) -> TitleReadService:
-    """Five repositories and the queue, and deliberately no adapter factory.
+    """Six repositories and the queue, and deliberately no adapter factory.
 
     The absence is the design (PRD 08: "a degraded subsystem narrows
     functionality; it never fails a request local state can answer"), not an
@@ -522,12 +545,21 @@ def get_title_read_service(
     `tests/unit/test_services_titles.py` asserts it on the service's own
     imports so that adding one here would fail rather than pass review.
 
-    **`CreditRepository` is the fifth and it does not weaken that.** It is a
-    read of a table `usher derive` fills from `raw_payloads` with no second
-    network call, so it adds no way for this route to depend on anything being
-    up. It was four repositories until M9's `credits` key.
+    **`CreditRepository` and `ImageRepository` are the fifth and sixth and
+    neither weakens that.** Both read tables `usher derive` fills from
+    `raw_payloads` with no second network call, so neither adds a way for this
+    route to depend on anything being up. It was four repositories until M9's
+    `credits` key and five until its `images` key.
+
+    ⚠️ **`ImageRepository` in particular is not the image proxy.**
+    `GET /images/{id}` fetches bytes from a CDN and can fail because that CDN
+    is down; this route reads *rows*, which is why an unreachable CDN narrows
+    a client's screen to a missing picture and cannot touch this response's
+    status code. The two are a separate route with a separate failure mode by
+    construction, not by a caught exception -- `usher.ports.images` is not in
+    this function's graph at all.
     """
-    return TitleReadService(titles, media_items, sources, watch_states, queue, credits)
+    return TitleReadService(titles, media_items, sources, watch_states, queue, credits, images)
 
 
 TitleReadServiceDep = Annotated[TitleReadService, Depends(get_title_read_service)]
@@ -608,21 +640,6 @@ def get_row_provider_settings_repository(session: SessionDep) -> RowProviderSett
 RowProviderSettingsRepositoryDep = Annotated[
     RowProviderSettingsRepository, Depends(get_row_provider_settings_repository)
 ]
-
-
-def get_image_repository(session: SessionDep) -> ImageRepository:
-    """Artwork references for the request that is rendering them.
-
-    The read half only, on `get_curated_row_repository`'s terms and for the
-    same reason: `replace_for_titles` is a *derivation* -- a scoped delete plus
-    an upsert over a title's whole artwork set -- and it belongs to
-    `usher derive` under `JobKind.DERIVE`. The port is handed over whole
-    because splitting a repository in two to express which half a caller uses
-    is a second port for one table; what keeps the write off this path is that
-    `BaseRow.hydrate` is the only thing here that holds one and it calls
-    `primary_for_titles`.
-    """
-    return PostgresImageRepository(session)
 
 
 async def get_default_user(session: SessionDep) -> User:
@@ -1026,6 +1043,14 @@ def get_search_service(session: SessionDep, settings: SettingsDep) -> SearchServ
     embed for one to sit in front of. `SearchService` buys a completion only
     inside the `else` of its `embedder is None` branch, so this is not a
     saving that has to be argued -- there is no reachable call site.
+
+    **The household is not wired here, and looking for it here is the mistake
+    this paragraph exists to prevent.** `SearchService.search` takes a
+    `user_id` per call, so the route reads `DefaultUserIdDep` beside this
+    dependency and passes it in; what `build_search_service` wires is the
+    `WatchStateRepository` the term reads *through*. A service built around one
+    household would be a per-request object cached per session, and the two
+    would disagree the first time a request carried an identity.
     """
     return build_search_service(session, settings)
 
@@ -1074,3 +1099,49 @@ def get_watch_write_service(
 
 
 WatchWriteServiceDep = Annotated[WatchWriteService, Depends(get_watch_write_service)]
+
+
+# The image proxy (M9). One dependency function, deliberately: `app.py` and
+# this module are the milestone's worst collision pair, and every other
+# consumer of `images` -- `RowCard.artwork`, `GET /titles/{id}`'s `images` key
+# -- reads the repository rather than this service, so a shared
+# `get_image_repository` would be a second claimant on one line for no caller.
+# ---------------------------------------------------------------------------
+
+
+def get_image_proxy_service(request: Request, session: SessionDep) -> ImageProxyService:
+    """`GET /images/{id}`'s service: this request's repository over the
+    process's fetcher and store.
+
+    **The asymmetry is the design, not an inconsistency.** The repository is
+    session-scoped because a row read belongs to the request's unit of work;
+    the fetcher and the store are process-scoped because the fetcher owns an
+    `httpx.AsyncClient` and a client per request is a connection pool per
+    request. `composition.image_proxy` builds both halves together in
+    `create_app`'s lifespan, so a deployment cannot end up with a cache
+    directory the fetcher's byte ceiling was never told about.
+
+    **The repository, not the `Pipeline`.** `composition.build_image_proxy_
+    service` says why: this route reads one row and needs none of the other
+    twenty-odd fields, and a route handed the whole pipeline could reach the
+    job queue from a request path.
+
+    Same defensive `getattr`/`cast` shape as `get_session_factory`, and for
+    the same reason -- `app.state` is typed `Any`.
+    """
+    fetcher = getattr(request.app.state, "image_fetcher", None)
+    store = getattr(request.app.state, "image_store", None)
+    if fetcher is None or store is None:
+        raise RuntimeError(
+            "app.state.image_fetcher/image_store is not set -- create_app's lifespan "
+            "has not run. If this is a test using a bare ASGI transport, wrap the app "
+            "in asgi_lifespan.LifespanManager first."
+        )
+    return build_image_proxy_service(
+        PostgresImageRepository(session),
+        cast(ImageFetcher, fetcher),
+        cast(ImageBlobStore, store),
+    )
+
+
+ImageProxyServiceDep = Annotated[ImageProxyService, Depends(get_image_proxy_service)]

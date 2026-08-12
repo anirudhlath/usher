@@ -36,12 +36,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from usher.api.app import create_app
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
+from usher.db.repositories.image import PostgresImageRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
-from usher.domain.enums import EnrichmentState, HdrFormat, SourceKind, TitleKind
+from usher.domain.enums import EnrichmentState, HdrFormat, ImageKind, SourceKind, TitleKind
 from usher.domain.ids import new_id
+from usher.domain.image import Image
 from usher.domain.jobs import JobPriority
 from usher.domain.source import Source
 from usher.domain.title import Title
@@ -373,6 +375,96 @@ async def test_an_episodes_watch_state_does_not_leak_onto_its_series(
     assert len(body["availability"]) == 1
 
 
+async def test_the_images_key_renders_real_rows_and_leaks_no_provider_url(
+    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """`images` end to end: rows a real `replace_for_titles` wrote, ordered by
+    a real `ORDER BY`, rendered by the DTO, over a real request.
+
+    Two things only this level can say. The order is the *statement's* --
+    against the fake it is a Python key function, and a deleted `ORDER BY
+    is_primary DESC, id` leaves heap order, which is why the backdrop is
+    written first so its UUIDv7 id is the smaller of the two. And the leak
+    assertion is against the *serialised body*: the CDN base and the
+    provider's own path are what a client would need to go around this API,
+    and PRD 07's "clients never see provider image URLs and never need a
+    provider key" is a claim about these bytes.
+    """
+    title = await _given_title(sessions, "A Film With Artwork", state=EnrichmentState.ENRICHED)
+    backdrop = Image(
+        title_id=title.id,
+        kind=ImageKind.BACKDROP,
+        provider="tmdb",
+        provider_path="/a-backdrop.jpg",
+        is_primary=False,
+    )
+    poster = Image(
+        title_id=title.id,
+        kind=ImageKind.POSTER,
+        provider="tmdb",
+        provider_path="/a-poster.jpg",
+        is_primary=True,
+    )
+    logo = Image(
+        title_id=title.id,
+        kind=ImageKind.LOGO,
+        provider="tmdb",
+        provider_path="/a-logo.svg",
+        is_primary=False,
+    )
+    assert backdrop.id < poster.id, (
+        "the premise: the unflagged image sorts first by id, so is_primary is the "
+        "only thing that can put the poster in front of it"
+    )
+    async with sessions() as session:
+        await PostgresImageRepository(session).replace_for_titles(
+            [title.id], [backdrop, poster, logo]
+        )
+        await session.commit()
+
+    response = await client.get(f"/titles/{title.id}")
+    body = response.json()
+
+    assert body["images"] == [
+        {"id": str(poster.id), "kind": "poster"},
+        {"id": str(backdrop.id), "kind": "backdrop"},
+    ]
+    assert "image.tmdb.org" not in response.text
+    assert "/a-poster.jpg" not in response.text
+
+
+async def test_a_title_whose_only_artwork_is_declined_carries_no_images_key(
+    client: AsyncClient, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """The filter's residual through a real request: the row is in Postgres,
+    the response has no `images` key at all, and the two are only reconcilable
+    through `usher.images.references`. Asserted here as well as in the unit
+    file because `response_model_exclude_unset` is a route-level flag, so the
+    key's absence is a property of the request rather than of the DTO."""
+    title = await _given_title(sessions, "A Film With Only A Logo", state=EnrichmentState.ENRICHED)
+    async with sessions() as session:
+        await PostgresImageRepository(session).replace_for_titles(
+            [title.id],
+            [
+                Image(
+                    title_id=title.id,
+                    kind=ImageKind.LOGO,
+                    provider="tmdb",
+                    provider_path="/only-a-logo.svg",
+                    is_primary=True,
+                )
+            ],
+        )
+        await session.commit()
+
+    body = (await client.get(f"/titles/{title.id}")).json()
+
+    assert "images" not in body
+    async with sessions() as session:
+        stored = await PostgresImageRepository(session).list_for_title(title.id)
+    assert len(stored) == 1, "the premise: the row is stored and the read is what drops it"
+
+
 async def test_a_title_read_costs_the_same_statements_however_many_copies_it_has(
     client: AsyncClient,
     sessions: async_sessionmaker[AsyncSession],
@@ -380,10 +472,10 @@ async def test_a_title_read_costs_the_same_statements_however_many_copies_it_has
 ) -> None:
     """**The shape that would catch a quadratic, on the read path.**
 
-    `TitleReadService.detail` is six reads and a promotion, and none of
-    them may be per copy, per source, per credit or per person: a household's
-    detail screen is the request a client makes most, and a film on three
-    servers must not cost three round trips. One copy on one source against
+    `TitleReadService.detail` is seven reads and a promotion, and none of
+    them may be per copy, per source, per credit, per person or per image: a
+    household's detail screen is the request a client makes most, and a film
+    on three servers must not cost three round trips. One copy on one source against
     five copies on three sources, and the statement counts have to be *equal*
     -- not "small", which a per-copy read of a title with two copies also
     satisfies.
@@ -428,18 +520,19 @@ async def test_a_title_read_costs_the_same_statements_however_many_copies_it_has
         "three -- something on this read costs a statement per copy or per source"
     )
     # **And the absolute level, because flatness alone would not have shown
-    # what this measurement found.** Twelve, not the service's six: one
-    # `ensure_default_user` read, the six reads `detail` documents, and
+    # what this measurement found.** Thirteen, not the service's seven: one
+    # `ensure_default_user` read, the seven reads `detail` documents, and
     # **five for the promotion** -- `SAVEPOINT`, `DROP TABLE IF EXISTS
     # pg_temp.stg_jobs`, `CREATE TEMP TABLE stg_jobs`, the `INSERT ...
     # SELECT`, `RELEASE SAVEPOINT` -- plus a `COPY` on the raw asyncpg
     # connection that this counter cannot see at all.
     #
     # It was ten against four service reads until M9's `credits` key, which
-    # adds one `list_for_title` per `CreditKind`. **Both numbers moved by the
-    # same two and the flatness assertion above is untouched**, which is the
-    # distinction this bound exists to draw: two more statements *per request*
-    # is a cost, and one more *per copy* would be a defect.
+    # adds one `list_for_title` per `CreditKind`, and twelve against six until
+    # its `images` key. **Each time both numbers moved by the same amount and
+    # the flatness assertion above is untouched**, which is the distinction
+    # this bound exists to draw: one more statement *per request* is a cost,
+    # and one more *per copy* would be a defect.
     # `PostgresJobQueue.enqueue` is M4's bulk path, and PRD 03's demand
     # promotion is the first caller that invokes it **once per client
     # request** rather than once per batch of a walk. The count is unchanged
@@ -450,7 +543,7 @@ async def test_a_title_read_costs_the_same_statements_however_many_copies_it_has
     # nothing shared to lock, which is why five statements per request is now
     # a cost rather than a contention point --
     # `tests/integration/test_staging_lock.py` is where that is asserted.
-    assert small <= 12, f"one title read issued {small} statements: {statement_counter}"
+    assert small <= 13, f"one title read issued {small} statements: {statement_counter}"
 
 
 async def test_the_route_answers_with_the_source_down(

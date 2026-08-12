@@ -168,9 +168,13 @@ be added if a client turns out to need flexible field selection.
 > `query`, `requested_mode`, `mode`, `semantic_coverage`, `expanded_query` and
 > `results`; **`expanded_query` is present-and-null** rather than absent, which
 > is deliberately not `GET /titles/{id}`'s absence convention — an absent
-> `images` says *this server has no such capability yet*, a null
-> `expanded_query` says *nothing was substituted on this search*, which is a
-> fact about the request a client acts on every time. **A blank or
+> `images` says *this title has no artwork to offer*, a null
+> `expanded_query` says *nothing was substituted on this search*, and the
+> difference is that the second is a fact about **this request** which a client
+> acts on every time, where the first is a fact about the resource.
+> (That clause read *"this server has no such capability yet"* until M9 filled
+> the key; the distinction it draws is unchanged and its example was one
+> milestone out of date.) **A blank or
 > whitespace-only `q` is `200` with no results and buys no completion** — a
 > search box sends one between keystrokes — and **`?limit=` declares a floor
 > and no ceiling**, because `USHER_SEARCH_RESULT_LIMIT` is the ceiling and
@@ -200,14 +204,30 @@ be added if a client turns out to need flexible field selection.
 | `GET /people/{id}` ✅ | Filmography grouped by role |
 | `GET /collections/{id}` ✅ | Franchise contents with ownership completeness |
 
-> **Built in M5: `GET /titles/{id}`, narrowed.** ✅ It carries metadata,
-> `enrichment_state`, `enrichment_error`, `availability` and `watch_state` —
-> every field backed by a table [M4](09-roadmap.md) fills. `credits`, `images`,
-> `similar` and the season/episode hierarchy are **absent rather than empty**:
-> `Person`/`Credit` land with M7 and `Image` with M9, each re-derived from
-> `raw_payloads` with no second network call ([09](09-roadmap.md)'s M4 boundary
-> call 2), and an empty list would be indistinguishable from a film with no
-> cast.
+> **Built in M5 narrowed, and M9 answered all four narrowings.** ✅ M5 shipped
+> metadata, `enrichment_state`, `enrichment_error`, `availability` and
+> `watch_state` — every field backed by a table [M4](09-roadmap.md) fills — and
+> left `credits`, `images`, `similar` and the season/episode hierarchy **absent
+> rather than empty** ([09](09-roadmap.md)'s M4 boundary call 2). This
+> paragraph named those four in the future tense for four milestones; it is
+> rewritten once, whole, now that all four are answered, because four M9 tasks
+> made it false in four different ways and a paragraph corrected a clause at a
+> time is one whose last clause is always wrong. **Two became keys on this
+> response and two became routes**: `credits` is `cast` and `crew` (below),
+> `images` is a list of ids and kinds (below), `similar` is
+> `GET /titles/{id}/similar`, and the hierarchy is `GET /series/{id}/seasons`
+> plus `GET /seasons/{id}/episodes`. Both tables are re-derived from
+> `raw_payloads` with no second network call ([ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)).
+>
+> ⚠️ **The absence convention survives all four and its meaning has changed.**
+> An empty list would still be indistinguishable from a film with no cast, so a
+> title with no derived credits carries neither `cast` nor `crew` and a title
+> with no artwork carries no `images` — never `[]`, never `null`. What absence
+> said until M9 was *"this server has not built it"*; what it says now is
+> *"this title has nothing here"*. **An earlier draft of the `images` work
+> shipped `"images": []`** on the reasoning that the convention was a statement
+> about unbuilt milestones; it is not, and the correction is the sentence
+> above.
 >
 > **M9 answered the credits shape decision, and the answer is two keys.** ✅
 > M7 landed `Person`, `Credit` and `Collection` as tables and this route
@@ -227,7 +247,6 @@ be added if a client turns out to need flexible field selection.
 > spelling (`billing_order or 0`) puts an unbilled crew member above the lead.
 > `department` is absent for the weaker reason that this shape does not group
 > by it, and adding a field later is additive where removing one is not.
-> `Image` is unchanged and still M9's from both ends.
 >
 > ⚠️ **An underived title and a genuinely uncredited one are indistinguishable
 > on this route, and that is a recorded residual rather than a fix.** Both
@@ -241,6 +260,44 @@ be added if a client turns out to need flexible field selection.
 > nothing. Closing it is a column, a migration and a writer that M9 does not
 > contain; a `credits_derived` flag that nothing sets would be worse than the
 > silence.
+>
+> **`images` is a list of ids and kinds, and that is the whole entry.** ✅
+> `[{"id": "…", "kind": "poster"}, …]`, in the stored `(is_primary DESC, id)`,
+> present only when it has members. **A client composes
+> `GET /images/{id}?w=` from an id**, which is what makes *"clients never see
+> provider image URLs and never need a provider key"* a property of this
+> response body rather than only of the proxy: `provider` and `provider_path`
+> are exactly what a client would need to go around this API, and neither is on
+> the wire. There is no rendered `src` either — a URL built at serialisation
+> time fixes a width, and the width is the client's to choose through the
+> ladder ([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)).
+> `is_primary` is absent for `billing_order`'s reason one key over: it *is* the
+> order, and it is a judgement Usher's derivation makes rather than something
+> the provider publishes, so a client re-sorting on it would be re-deciding on
+> a flag it cannot interpret. `width`/`height`/`language` are absent for the
+> weaker reason — the stored dimensions are the provider's originals rather
+> than the size of the bytes a rung will answer with — and adding them is
+> additive.
+>
+> ⚠️ **Artwork this deployment cannot serve is filtered out of the list rather
+> than annotated in it, and that filter is reported off the wire rather than
+> on it.** The provider publishes some logos as `.svg`; the proxy declines that
+> type because its width ladder cannot bound it (ADR-0032), so a reference to
+> one is a link `GET /images/{id}` can never answer. Rendering it anyway would
+> be this API minting a broken link deliberately, and a `servable: false` field
+> would be a discriminator whose only honest client behaviour is to skip the
+> entry — this filter relocated into every client. The residual is that **a
+> title whose only artwork is declined answers exactly like a title with
+> none** — roughly one title in seventeen has an SVG logo, measured across 51
+> popular and top-rated titles. Unlike the credits residual above this one is
+> *reported*: `usher.images.references` ([10](10-telemetry-and-dashboards.md))
+> counts every read surface's references `served` against `unservable`, because
+> a filter with no counter makes "this catalog has no logos" and "this proxy
+> dropped all of them" the same answer. The row itself is kept in `images`, so
+> an operator debugging a missing logo finds it with one `SELECT`. **The same
+> filter runs on `GET /home`'s cards** ([06](06-rows-and-recommendations.md)),
+> on one definition, because two reads of one table disagreeing about what is
+> servable is the drift that predicate exists to prevent.
 >
 > **`GET /titles/{id}/similar` is M9's, and it now ships.** ✅ This sentence
 > said "M6's" until M6 ran and added no HTTP route at all
@@ -618,6 +675,43 @@ be added if a client turns out to need flexible field selection.
 > it. There is no `user_id` — the toggle is deployment-wide — and nothing
 > schedules a re-enable.
 
+> **Built in M9: `GET /admin/unmatched` · `POST /admin/unmatched/{id}/resolve`.**
+> [02](02-data-model.md)'s *"unmatched items are never dropped"* has had a CLI
+> review queue since M4 (`usher unmatched`) and no wire until now. `GET` answers
+> the `Page` envelope above — items newest-arrival first, undated ones last,
+> `?source_id=` narrowing it and `?limit=` bounded at 200 — and pages by
+> **cursor**, never by offset. That is not a house-style preference: the same
+> read's `OFFSET` is measured at **43.7 ms at offset 0 and 388.9 ms at offset
+> 1,126,574**, and it is the measurement the Pagination section below cites.
+> `usher unmatched --offset` keeps the offset form, because an operator typing a
+> number at a terminal and a client following a token are two access patterns
+> rather than one duplicated.
+>
+> **A queue entry carries the source's own `external_id`, which every *client*
+> response refuses.** An operator resolves an unmatched file by finding it on
+> their own server, and that id is the only handle that gets them there;
+> `usher unmatched` has printed it since M4 for the same reason. This is the one
+> place in the surface where it is the subject rather than a leak.
+>
+> **`POST /admin/unmatched/{id}/resolve` takes `{title_id, episode_id?}`** and
+> answers the resolved row. The `episode_id` is the argument `usher unmatched
+> --resolve` could not offer — an operator has no way to read an `Episode.id`
+> off that listing — and the route **refuses an `episode_id` whose episode
+> belongs to a different title**, because nothing below it would:
+> [02](02-data-model.md) records that `media_items` has no CHECK tying the two
+> columns together and that a mismatched pair is a write real PostgreSQL
+> accepts. A `title_id` or `episode_id` this catalog does not hold, and the
+> mismatched pair, are each a **422 `validation_failed`** — the request parsed
+> and its instruction cannot be carried out, the shape `GET /search` already
+> uses for an unservable `?mode=semantic`. A media item id no row carries is a
+> **404 `not_found`**, generic, because RFC 9457's `instance` already names it.
+> No problem code is minted (ADR-0030 stands at seven).
+>
+> **It enqueues nothing and invalidates nothing**, matching
+> `usher unmatched --resolve` exactly: resolving writes `media_items.title_id`,
+> and no job, neighbour list or cached screen reads that column. Stated so a
+> later reader does not add a re-derive on the assumption it was forgotten.
+
 ### Meta
 
 | Endpoint | Purpose |
@@ -645,10 +739,14 @@ does not carry a `failed` tier.
   "year": 2021,
   "enrichment_state": "stub",     // overview not yet fetched
   "overview": null,
-  // no "images" key, and no "cast" or "crew" -- absent, never null.
-  // The earlier draft of this example carried "images": {"poster": null},
-  // which is the exact shape the paragraph above refuses. "credits" is not
-  // a key at all: M9 answered that shape decision as two separate keys.
+  // no "images", "cast" or "crew" key -- absent, never null and never [].
+  // All three are built; this title simply has nothing for any of them, and
+  // that is the whole of what an absent key means since M9. Two earlier
+  // drafts of this example got it wrong in opposite directions: one carried
+  // "images": {"poster": null}, the shape the paragraph above refuses, and
+  // one carried "images": [] on the reasoning that the convention expired
+  // when the table landed. "credits" is not a key at all -- M9 answered that
+  // shape decision as two separate keys.
   "availability": [ { "source": "Emby", "quality": "2160p HDR10" } ],
   "watch_state": { "position_seconds": 1840, "played": false }
 }
@@ -975,6 +1073,32 @@ for `image/svg+xml` — every rung returns the `original` bytes — so nothing t
 clamp does can bound one, and the proxy will not store active content under a
 year-long `max-age`. A minority of titles therefore have a logo this route
 returns nothing for; ADR-0032 records the measurement and the degradation.
+
+✅ **Built in M9, and the header ships.** `GET /images/{image_id}?w=` answers
+`Cache-Control: public, max-age=31536000, immutable` plus a strong `sha256`
+`ETag` over the exact bytes served, and a conditional request gets a `304`
+carrying both. `public`, unlike every other cached route here: an image takes no
+user, `images` has no user column, and the bytes are identical for every
+household, so a shared proxy caching them is the feature rather than the leak
+`usher.api.caching`'s `private` rule exists to prevent. The mechanics are that
+module's, not a second implementation.
+
+**The response names the rung it served** in `Content-Location`
+(`/images/{id}?w=780`), which is RFC 9110 §8.7's own mechanism for "you asked
+for 400 and this is the representation I selected" — so a client caches under a
+URL it can re-ask for rather than guessing the ladder. It is built from the
+route table and the *clamped* rung, never from the request's own path, so no
+byte a client sent reaches a response header.
+
+**Four failures and each is a problem document.** A missing row is
+`404 not_found`; **artwork this deployment declines to carry — the SVG logos
+above — is the same `404`**, because the provider answered correctly and a
+client owes it the same fallback it renders for a title with no logo. A CDN
+that did not answer is `503 source_unavailable` with `Retry-After`; a CDN that
+answered something else unusable is the same code without it. [08](08-operations.md)'s
+degradation table carries all four with the reason the fourth is not a 502:
+[ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)'s
+closed vocabulary has no member for one, and C5 asked rather than minting.
 
 Clients never see provider image URLs and never need a provider key. `w` is
 clamped **up** to a closed ladder of four widths — `154 342 780 1280`, a code

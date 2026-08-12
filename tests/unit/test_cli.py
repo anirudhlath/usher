@@ -974,6 +974,7 @@ async def test_a_semantic_search_hands_the_completion_client_to_the_pipeline(
     monkeypatch.setattr("usher.cli.embedder", _an_embedder)
     monkeypatch.setattr("usher.cli.llm_client", _client)
     monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.ensure_default_user", _no_household)
     monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
 
     await _search(
@@ -1008,6 +1009,7 @@ async def test_a_search_with_no_embedding_model_opens_no_completion_client(
 
     monkeypatch.setattr("usher.cli.llm_client", _never_a_client)
     monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.ensure_default_user", _no_household)
     monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
 
     settings = _cli_settings(llm_enabled=True, query_expansion_enabled=True)
@@ -1037,6 +1039,7 @@ async def test_a_search_on_a_deployment_that_curates_but_does_not_expand_opens_n
     monkeypatch.setattr("usher.cli.embedder", _an_embedder)
     monkeypatch.setattr("usher.cli.llm_client", _never_a_client)
     monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.ensure_default_user", _no_household)
     monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
 
     await _search(
@@ -1068,6 +1071,7 @@ async def test_a_full_text_search_opens_no_completion_client_at_all(
     monkeypatch.setattr("usher.cli.embedder", _an_embedder)
     monkeypatch.setattr("usher.cli.llm_client", _never_a_client)
     monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.ensure_default_user", _no_household)
     monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
 
     await _search(
@@ -1079,6 +1083,42 @@ async def test_a_full_text_search_opens_no_completion_client_at_all(
     )
 
     assert captured["llm"] is None
+
+
+async def test_a_search_ranks_for_the_default_household(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`usher search` resolves the singleton household and hands it on.
+
+    Fails: a command that never resolves one, which renders identically -- the
+    same rows, the same scores, no error and no line to say the watch-state
+    term was absent. It is the one term whose absence is invisible in the
+    output, so only the argument says whether it ran.
+
+    `ensure_default_user` and not `default_user`, for `usher curate`'s reason:
+    this needs an id and nothing else.
+    """
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("usher.cli.llm_client", _never_a_client)
+    monkeypatch.setattr("usher.cli._session_for", _no_session)
+    monkeypatch.setattr("usher.cli.ensure_default_user", _no_household)
+    monkeypatch.setattr("usher.cli.build_pipeline", _recording_pipeline(captured))
+
+    await _search(
+        _cli_settings(),
+        query="the quiet vacuum",
+        mode="full_text",
+        limit=5,
+        filters=SearchFilters(),
+    )
+
+    assert captured["search_kwargs"] == {
+        "mode": SearchMode.FULL_TEXT,
+        "limit": 5,
+        "filters": SearchFilters(),
+        "user_id": _CLI_HOUSEHOLD,
+    }
 
 
 async def _never_a_client(*_: object, **__: object) -> object:
@@ -1123,12 +1163,30 @@ async def _no_session(_: Settings) -> AsyncIterator[None]:
     yield None
 
 
+#: The household `_no_household` answers with. Fixed rather than minted, so a
+#: case can assert the id that reached the service is the id the command
+#: resolved rather than merely that one did.
+_CLI_HOUSEHOLD = uuid.UUID(int=0xA1)
+
+
+async def _no_household(_: object, **__: object) -> uuid.UUID:
+    """`db.users.ensure_default_user`, without the database it reads.
+
+    `_no_session` yields `None`, so the real one has nothing to run its
+    `SELECT` against. Substituted here rather than given a session because
+    which row the id came from is `tests/integration/test_cli_pipeline.py`'s
+    question; these cases are about what `_search` hands on.
+    """
+    return _CLI_HOUSEHOLD
+
+
 def _recording_pipeline(captured: dict[str, object]) -> Callable[..., object]:
-    """A `build_pipeline` that records its keyword arguments and answers a
-    `SearchAnswer` with nothing in it."""
+    """A `build_pipeline` that records its keyword arguments, and a `search`
+    that records its own, answering a `SearchAnswer` with nothing in it."""
 
     class _Search:
-        async def search(self, query: str, **_: object) -> SearchAnswer:
+        async def search(self, query: str, **kwargs: object) -> SearchAnswer:
+            captured["search_kwargs"] = kwargs
             return SearchAnswer()
 
     class _Pipeline:

@@ -2505,6 +2505,7 @@ Gate green before and after on the fully restored tree: **3,492 unit / 4
 skipped**, **1,063 integration / 22 skipped**, `ruff check`,
 `ruff format --check`, `mypy` over 532 files, `lint-imports` 9 kept / 0 broken,
 PRD link check `OK`.
+
 ## M9 Task E2 — `GET`/`PUT /admin/rows/providers`, and the toggle reaching the screen (2026-08-11)
 
 **14 plants over the four files E2 touches in `src/` — 12 targets all KILLED,
@@ -2957,3 +2958,608 @@ finds scan `ports/embedding.py`, `ports/metadata.py`, `services/`, `api/`,
 and the one that *does* read `usher.ports.repository`
 (`test_ports_repository_package.py`) checks a docstring's **presence** and
 walks the module for `ast.ImportFrom` nodes, neither of which sees prose.
+
+## M9 Task C7 — the `images` key on `GET /titles/{id}` (2026-08-11)
+
+**16 plants over `services/titles.py`, `api/dto/title.py`,
+`db/repositories/image.py` and `tests/fakes/image_repository.py` — 13
+behavioural targets of which 12 were killed on the first pass and **1 was a
+real coverage gap since closed**, plus 3 equivalent-mutant controls surviving
+all five gate steps. 1 BAD-ANCHOR (re-spelled and killed), 0
+BROKEN-MUTATION, 0 DID-NOT-RUN, 0 HUNG.** Harness at `/var/tmp/m9-C7/plants.py`
+— **outside the working tree**, for the reason V1's entry records — with the
+plant list and its **expected verdict** written down first, an exact anchor
+count asserted before every plant, the landing spelled `old not in landed and
+new in landed` (B6's substring-immune form), `compile()` as the dry run,
+`PYTHONDONTWRITEBYTECODE=1` with `__pycache__` swept under **both** `src/` and
+`tests/`, a 900 s per-plant timeout, no second `-q`, and every restore verified
+by `md5sum` **plus** a read-back of the original anchor.
+
+**Selection:** `test_api_titles.py`, `test_services_titles.py`,
+`test_api_dto.py`, `test_api_problem.py`,
+`tests/integration/test_services_titles.py` and
+`tests/integration/test_titles_route.py` — 93 cases, ~11 s a run, green before
+and after. Scoped rather than whole-suite for B2's and D4's reason:
+`tests/integration/test_sse_end_to_end.py` is intermittent on this tree and **a
+sweep scored on "did the run fail" cannot run against a suite holding a flaky
+case**. The last two files of the selection are in it because
+`TitleReadService` and `api/dto/title.py` are reached from outside this task's
+own files there.
+
+**The survivor is a predicate's negative parameters chosen against the wrong
+wrong-implementation, and it is C4's own warning arriving one task later.**
+`is_servable_path` is imported rather than re-spelled, so the plant that
+matters is somebody inlining it — and
+`".svg" not in one.provider_path.lower()` **survived all 93 cases**. The case
+had seeded `/svg-poster.jpg` and `/A-LOGO.SVG`, taken from C4's ledger entry as
+"the two adversarial paths"; but **`/svg-poster.jpg` contains no `.svg` at
+all** — it discriminates a `"svg" in path` spelling, and the `.svg`-substring
+spelling is discriminated by a third parameter, `/.svg.jpg`. C4's parameter
+table carries all three and its ledger entry names two, so a consumer reading
+the entry rather than the table seeds exactly the pair that ratifies the
+mutant. Closed by adding `/.svg.jpg` to both cases; re-planted, it fails **both
+of them** and nothing else.
+
+**The general form, and it is a strengthening of C4's rule rather than a
+restatement:** *"choose a predicate's negatives against the wrong
+implementations"* is only executable if the list of wrong implementations is
+the one being defended against — and a summary of a parameter table is not the
+parameter table. When a case is seeded from another task's prose, plant each
+wrong implementation the prose names and check that a *different* parameter
+dies for each; two mutants dying on one parameter means one of them is
+untested.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the fake's `(is_primary DESC, id)` loses `is_primary` | KILLED | 1 — the named unit ordering case |
+| P2 `_LIST_FOR_TITLE`'s `ORDER BY is_primary DESC, id` → `ORDER BY id` | KILLED | 2 — both integration ordering cases |
+| P3 the absent-key branch replaced by an unconditional set (`"images": []`) | KILLED | 4 |
+| P4 `kind` dropped from `ImageResponse` | KILLED | 4 |
+| P5 the servability filter deleted | KILLED | 4 |
+| P6 the filter inverted | KILLED | 4 |
+| **P7 the predicate inlined as `".svg" in …`** | **SURVIVED, then closed** | 0, then 2 |
+| P8 the predicate inlined without lower-casing | KILLED | 2 |
+| P9 the counter's `served` arm deleted (the drop count loses its denominator) | KILLED | 2 |
+| P10 the counter's `unservable` arm deleted | KILLED | 2 |
+| P11 both arms guarded by `if images:` (zeros suppressed) | KILLED | 1 |
+| P12 the images read never made | KILLED | 4 |
+| P13 `detail`'s docstring left at M9's previous read count | KILLED | 1 |
+
+**Two results worth carrying beyond the survivor.**
+
+- **P13 is a plant against a *sentence*, and it is the mechanism this task was
+  asked for instead of an ordinal.** The acceptance says explicitly that no
+  ordinal may be written into the plan, because which of B9 and C7 merges last
+  is not knowable when either is written — so `detail`'s docstring counts its
+  own reads in words and
+  `test_the_read_count_this_docstring_states_is_the_count_it_makes` parses
+  those words and counts the awaited calls against the fakes. Counted through a
+  **recording proxy** rather than through per-fake counters, because two of the
+  six fakes have no `calls` attribute and adding them would have made the case's
+  subject "which fakes count" rather than "how many reads happen". Same family
+  as T5's `AKAS_NAME_MAX_CHARS` binding assertion: a claim whose whole purpose
+  is that it agrees with something else needs an assertion on the agreement.
+- **P11 is the zeros, and only one case can see it.** Publishing
+  `served`/`unservable` only when a title has artwork passes every case that
+  seeds artwork — which is every images case except one. The counter exists
+  because *"this catalog has no logos"* and *"this proxy dropped all of them"*
+  are the same body, and a series absent from the export until the first drop
+  is the same silence one layer out; `test_a_title_with_no_artwork_publishes_
+  both_series_at_zero` is the whole of the coverage for it.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `TitleReadService.__init__`'s `self._credits` / `self._images` writes swapped | PASS | PASS | PASS | PASS (9/0) | PASS (93) |
+| C2 `_servable`'s two `_image_references.add` calls swapped | PASS | PASS | PASS | PASS (9/0) | PASS (93) |
+| C3 one sentence of `_servable`'s docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (93) |
+
+C1 and C2 are facts about the *code* rather than about what the tools look at:
+two disjoint attribute writes on a freshly constructed object, neither
+right-hand side reading the other and nothing running between them; and two
+`Counter.add` calls whose attribute sets differ, so the SDK aggregates them
+into two independent time series that no ordering can reach — both arguments
+are side-effect-free reads of two locals bound before either call. **C2 is
+deliberately not the positional-argument reorder A5's entry corrects**: swapping
+`add`'s own two arguments is a `TypeError` from `math.isfinite`, i.e. a kill
+mistaken for a survivor, which is the inversion that entry exists to prevent.
+C3 was checked first against `grep -rln "getdoc\|__doc__\|ast.unparse\|
+getsource" tests/` — twenty-two files scan source, and the only one reading
+this module is **this task's own** `test_the_read_count_this_docstring_states_
+is_the_count_it_makes`, which reads `inspect.getdoc(TitleReadService.detail)`;
+the control is therefore planted in `_servable`'s docstring, a different
+method, which nothing scans. Checked rather than assumed, and it is the first
+entry in this file where the scan that constrains the docstring control was
+added by the same commit.
+
+Gate green before and after on the fully restored tree: **3,643 unit / 4
+skipped**, **1,123 integration / 22 skipped**, `ruff check`,
+`ruff format --check`, `mypy` over 555 files, `lint-imports` 9 kept / 0 broken,
+PRD link check `OK`.
+
+### C7 follow-up — the second unfiltered read, after C6 landed (2026-08-11)
+
+**1 plant over `services/rows/base.py::BaseRow._artwork`, KILLED, naming
+exactly the one case written for it.** C6 shipped `RowCard.artwork` through
+`ImageRepository.primary_for_titles` and left it **unfiltered**, on
+`is_servable_path`'s own argument that the measured gap is logo-only and a card
+is never handed a logo. That argument is true and one measurement short: the
+`kind` filter excludes logos, and what excludes a *poster or backdrop published
+as `.svg`* is only the provider's present habit — `images_from_payload` records
+whatever `provider_path` a payload carried, for every kind, and servability is
+otherwise decided at serve time from a fetched `Content-Type`.
+
+So both read surfaces now call one `servable_images` in
+`usher.services.images`, and the plant is the state before that: `_artwork`
+returning `primary_for_titles`' answer whole. Against
+`test_rows_artwork.py`, `test_api_home.py` and `test_rows_curated.py` (60
+cases) it fails **exactly**
+`test_a_poster_the_proxy_cannot_serve_leaves_the_card_with_none`, which is the
+case added with the filter. `cp` backup, `md5sum`-verified restore.
+
+**Two things worth carrying.**
+
+- **"Unreachable by construction" and "unreached by this provider's current
+  habits" read identically in a docstring, and only one of them is a
+  guarantee.** C6's case
+  `test_a_title_whose_only_artwork_is_a_logo_carries_none` pins the half that
+  *is* structural (a card asks for `POSTER` or `BACKDROP`); nothing pinned the
+  half that is empirical, because nothing could — no fixture had ever seeded a
+  `.svg` poster, and the state is invisible until a provider publishes one.
+  **The tell is a claim about what a third party does, stated in the same
+  sentence as a claim about what the code does.**
+- **The shelf's filter degrades and the detail's does not, and that is stated
+  rather than discovered.** `primary_for_titles` has already chosen one image,
+  so filtering afterwards yields `artwork: null` rather than the title's second
+  poster of that kind. Falling through would mean the predicate in SQL — a
+  second spelling of the fact `is_servable_path` owns — which is the trade this
+  filter exists to refuse. The degradation is the same render as "this title
+  has no poster", which is C6's own argument for why a card carries no
+  discriminator, so the two agree.
+
+Gate green after, on the merged tree: **3,690 unit / 4 skipped**, **1,130
+integration / 22 skipped**, `ruff check`, `ruff format --check`, `mypy` over
+557 files, `lint-imports` 9 kept / 0 broken, PRD link check `OK`.
+## M9 Task C5 — `GET /images/{id}`, the caching proxy on the wire (2026-08-11)
+
+**39 plants over `api/routers/images.py`, `api/caching.py`, `services/images.py`,
+`api/app.py`, `api/deps.py` and (through the route) `ports/images.py` — 36
+behavioural targets and 3 equivalent-mutant controls. Three-way split: **33
+KILLED, 3 SURVIVED, 3 controls surviving all five gate steps.** 0 BAD-ANCHOR,
+0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.** Every verdict
+was written down before the run and every one matched. Run in place with
+`PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under **both** `src/` and
+`tests/` before every run, `compile()` rather than `ast.parse` as the dry run,
+every plant asserted present by an exact anchor count (`count(old) == 1`), and
+every restore verified by `md5sum` against a pre-plant digest.
+
+**Selection:** `tests/unit` whole (3,660 cases, ~31 s a run) rather than a
+scoped subset — the run is cheap enough that scoping would have been the only
+source of a false survivor — plus `tests/integration/test_images_route.py` for
+the two plants named below. **Re-run in full after merging
+`milestone/m9-api-surface`**, because that merge brought C1's ADR-0032
+amendment (`immutable` earned) and C4's `MediaTypeNotServable`, and a ledger
+measured against code that is not what shipped is not a ledger. The first
+run's numbers are superseded and its two repaired survivors are kept below,
+because the *repairs* are the finding.
+
+🔴 **The two survivors from the first run, both the identity-element family,
+and one of them is a security property.** Both are killed by the code that
+shipped; they are recorded because the plant is what found them.
+
+- **`Content-Location` built from `request.url.path` instead of from the route
+  table survived all 3,474 unit cases.** The two spellings agree on every
+  request whose path is already the canonical one, which is every request any
+  fixture was making. This box is internet-facing and that spelling echoes a
+  client-supplied byte sequence into a response header. The smallest request
+  that separates them is an **upper-cased UUID** — `uuid.UUID` parses it,
+  FastAPI routes it, and `str(uuid)` is lower-case — and the property it pins
+  is a *canonicalisation* as well as a leak: two clients spelling one id
+  differently must be told the same representation URI or they cache the same
+  bytes twice and never revalidate against each other. Re-planted, it fails
+  `test_the_representation_uri_is_canonical_and_not_the_path_the_client_typed`
+  alone. **The general form: a header derived from a request is untested until
+  a case sends a spelling the server would not have generated** — and for any
+  identifier with a canonical form, the non-canonical spelling is free to
+  construct and is the only fixture that can see the difference.
+- **Swapping the hit and miss counters survived, because the fixture made one
+  cold request and one warm one and both counters therefore read `1`.** A pair
+  of counters over a symmetric fixture is its own inverse, exactly as a
+  transposition is for a permutation and a zero origin is for a subtraction.
+  One cold and **two** warm requests — 1 miss against 2 hits — is the smallest
+  fixture that is not, and re-planted the swap fails that case alone.
+
+**The two plants only the integration file can see, which is a *scope* result
+and not a gap.** `app.state.image_store = None` and `deps.py` handing the
+fetcher in as the store both survive the whole unit suite, for the reason this
+file already records under *"a dependency every test overrides is a dependency
+no test covers"*: every unit case overrides `get_image_proxy_service`, which is
+correct — it is what makes the route testable with no database and no disk.
+Against `tests/integration/test_images_route.py`, which drives the
+un-overridden graph, each fails **6 of 6**. Recorded because the honest
+statement of the residual risk is *"the wiring is covered by one file"*, and a
+sweep scoped to `tests/unit` alone would have reported two live mutants in the
+composition root.
+
+**The three real survivors, each with why it is one:**
+
+| survivor | why |
+|---|---|
+| `merged = {"ETag": …, "Cache-Control": …, **(headers or {})}` — a caller's headers shadowing the validators | Predicted. No caller passes `ETag` or `Cache-Control` and the only caller passing anything is this route, with `Content-Location`. A case would assert a defence against a call nobody makes; the shipped order (caller first, validators last) is the cheap half and is what a reviewer should keep. |
+| `await close_images()` deleted from the lifespan's `finally` | Predicted, and re-confirmed against the integration file. An `httpx.AsyncClient` leaked at shutdown, in a process that is exiting. `app.py`'s own comment makes the same argument about the three resources beside it. Nothing in this repository asserts a closed transport. |
+| a bare `HTTPException(404)` in place of the missing-row `ProblemException` | **Genuinely equivalent, and only at 404.** `_CODE_FOR_STATUS` maps 404, 405 and 422, so `http_error_as_a_problem_document` translates a bare 404 into the identical document — same `code`, same `type`, same media type. ADR-0030 ruling 4 is what makes this true and it is *not* true one status over: both upstream arms are 503s with no entry in that map, and deleting either `ProblemException` there fails its own case at once. So this survivor measures ruling 4 rather than the route. |
+
+**The five plants the plan named as headlines, with what each costs** (whole
+unit suite, no `-x`): the **clamp call** replaced by the raw width fails 3; the
+**`immutable` directive** removed fails 2; the **ETag comparison** loosened to
+"any `If-None-Match` matches" fails 4 — three of them A4's, which is the shared
+implementation earning its keep; the **404/upstream split** inverted fails 1;
+the **`code` string** changed to another member fails 1. Beside them,
+`app.include_router(images.router)` deleted fails **24**.
+
+**The arm ordering C4's subclass bought, pinned two ways.**
+`MediaTypeNotServable` subclasses `PortDataMalformed`, so an `except` arm
+written *after* its parent's is unreachable and the whole distinction vanishes
+with nothing failing. Two plants: the arm deleted, and the arm respelled as a
+second `except PortDataMalformed` (which is what "moved below its parent"
+compiles to). Both are killed — the first by the declined-media-type case, the
+second by the *503* case, which is the pair working as intended: one arm
+proves the 404 is reached, the other proves the 503 still is. A structural case
+(`test_the_declined_media_type_arm_precedes_its_parents`) reads the handler's
+own `except` clauses, for the reason `testing-discipline.md` records about
+`pytest.raises(Child)` — behavioural coverage of a subclass says nothing about
+ancestry, and a third arm added later is exactly when this stops being obvious.
+
+The other twenty-odd, grouped: clamping down instead of up fails 3 and clamping
+to the default only fails 1 (both through the *fetcher's* recorded rung and the
+store's key, so an unclamped width is loud rather than a CDN 400); `max-age`
+zeroed fails 1 and `private` for `public` fails 1; a weak `W/` validator fails
+2 and a tag over the media type rather than the bytes fails 2; a 304 without
+its validators fails 2; the transient `except` arm deleted fails 1 and the
+residual-malformed one fails 1; `Retry-After` added to the malformed arm fails
+1 and removed from the transient arm fails 1; the declined arm's code changed
+fails 1; `Content-Location` carrying the width the client asked for fails 3 and
+dropped entirely fails 3; `Query(gt=0)` unbounded fails 1; the OpenAPI content
+map replaced by `application/json` fails 1; the `cache` label changed to `row`
+fails 1, the miss not recorded fails 1, and a parallel instrument pair declared
+beside A5's fails 1; a missing row falling through to the 200 path fails 1.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| `timedelta(days=365)` → `timedelta(seconds=31_536_000)` | PASS | PASS | PASS | PASS (9/0) | PASS (3,660 / 4 skipped) |
+| `deps.py`'s two `getattr(app.state, …)` reads swapped | PASS | PASS | PASS | PASS (9/0) | PASS (3,660 / 4 skipped) |
+| one sentence of `_representation_of`'s docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (3,660 / 4 skipped) |
+
+The first two are facts about the *code* rather than about what the tools look
+at: one `timedelta` literal with a single reader that immediately calls
+`.total_seconds()`, and two disjoint reads of `app.state` neither of which
+reads the other with nothing between them. The docstring reword was checked
+first against `grep -rn "getdoc\|__doc__\|ast.unparse\|getsource" tests/` — the
+scans it finds read `api/errors.py`, `api/caching.py`'s module docstring,
+`api/dto/playback.py`, `services/rows/`, `api/routers/rows.py` and
+`api/routers/home.py`, and **none reads `api/routers/images.py`**. Note that
+`test_api_problem_vocabulary.py` *does* AST-walk every module under
+`src/usher/api/`, but harvests `ProblemCode.<MEMBER>` attribute accesses and
+string literals passed as `code=`, so a docstring naming a code in prose — and
+this one's failure table names four — is invisible to it by construction.
+
+**The eighth import contract was verified in both directions, in the careful
+spelling.** `from usher.composition import build_image_proxy_service` planted
+in `api/routers/images.py` **in its isort position and with a use** — the
+careless spelling is caught by ruff as `F401`, which is the wrong way round for
+a guard — passes `ruff check`, `ruff format --check`, `mypy` and the whole unit
+suite, and reports **8 kept, 1 broken**, naming
+`usher.api.routers.images -> usher.composition`. Restored, `md5sum`-verified,
+9 kept / 0 broken.
+
+🔴 **One harness note worth carrying, learned the expensive way.** The first
+attempt at this sweep was run under a 10-minute foreground timeout and was
+**killed mid-plant**, leaving `services/images.py` carrying a mutation and the
+run reporting nothing at all. The recovery is what the discipline is for: the
+harness had already `cp`-ed the pristine file, so the restore was a `cp` back
+verified by *reading the import line back* and by `git status` — never
+`git checkout`. **A sweep runs detached with its own timeout, not inside a
+caller's**, because a harness killed between plant and restore is
+indistinguishable from one that never ran, and the tree it leaves behind looks
+exactly like working code.
+## M9 Task D9 — `PortRateLimited.retry_after` reaches `JobQueue.fail` (2026-08-11)
+
+**4 plants over `db/repositories/jobs.py` and `services/jobs.py` — 2 KILLED, 1
+survived contrary to its own prediction (measured and corrected in place), 1
+survived exactly as predicted (an equivalent mutant today); 2 controls, both
+SURVIVED as designed; 0 BROKEN-MUTATION, 0 DID-NOT-RUN, 0 HUNG.** Run in place
+with the plant list and predicted verdicts written to `/var/tmp/m9-D9-plants.md`
+before the first plant, `cp` backups for every file touched, a grep/read-back
+confirming each plant landed, `python3 -c "import ast; ast.parse(...)"` as the
+syntax dry run, and a restore verified by `diff` against the pre-plant backup
+(byte-identical every time) rather than by the suite going green.
+
+**Selection:** `tests/unit/test_services_jobs.py`, `tests/unit/
+test_job_queue_contract.py` (the fake arm), `tests/integration/
+test_job_queue.py` (the Postgres arm) and `tests/integration/
+test_services_jobs.py` — 139 passed / 2 skipped baseline, ~15–25 s a run.
+Scoped rather than whole-suite because the change is four files with a closed
+blast radius (`JobQueue.fail`'s one new keyword-only parameter); P4's survival
+was cross-checked against the full 3,667-case unit suite anyway, since a
+`getattr` widening in `JobWorker._fail` touches every exception path, and it
+still survived whole.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 delete `GREATEST(…, 0)` around `:retry_after_seconds` in `_FAIL` | KILLED | 1 — `test_a_non_positive_hint_never_pulls_the_backoff_earlier_than_now[-999.0]` |
+| P2 drop `+ :backoff_seconds * power(2, attempts) * (0.5 + random() / 2)` | KILLED | 6 — both spread cases (the new one and the pre-existing `test_backoff_is_jittered`, once both were respelled to a magnitude assertion; see below) plus four unrelated backoff cases that assumed a non-zero base term |
+| P3 replace the Python `None → 0.0` normalisation with a raw `None` bind | **SURVIVED, contrary to its own prediction** | 0 |
+| P4 `JobWorker._fail` reads the hint via `getattr(exc, "retry_after", None)` instead of `isinstance(exc, PortRateLimited)` | SURVIVED, as predicted (equivalent today) | 0 |
+
+**P3 is the finding worth carrying past this task, and it was found by running
+the plant rather than by trusting the docstring that predicted it.** The plan
+argued the raw-`None` bind would fail on the Postgres arm with asyncpg's
+"could not determine data type of parameter" — the shape `db-and-sql.md`
+already documents for a truly untyped parameter. Measured on a connection that
+had never executed any other statement (so no prepared-statement cache could
+be priming a type, and `tests/integration/conftest.py`'s `session` fixture
+builds a fresh `engine` per test specifically so nothing carries over): it does
+not fail. `GREATEST(:retry_after_seconds, 0)` gives Postgres a concrete
+sibling literal to resolve the parameter's type against, which a bare
+`:retry_after_seconds` with nothing beside it would not — and `GREATEST(NULL,
+0)` genuinely evaluates to `0`, not to `NULL` propagating through the rest of
+the `make_interval(...)` expression, which the isolated probe confirmed by
+reading back an ordinary, non-`NULL` `run_after`. The normalisation is kept in
+`PostgresJobQueue.fail` anyway — one line, and it stops the floor's
+correctness depending on a literal `0` staying textually adjacent to the
+parameter inside `GREATEST(...)`, which a later refactor (moving the
+parameter, or spelling the literal `0.0`) could silently break — but the
+*reason* recorded in the module's own docstring was wrong, and is now
+corrected there rather than left standing. Same family as `db-and-sql.md`'s "a
+wrong reason in a docstring outlives the decision it justifies" entry, this
+time about a reason for code that still ships, not about a decision that
+changed.
+
+**P2 exposed that the spread assertion it was meant to test had no teeth, in
+both the new case and a pre-existing one it was copied from.** `len(instants) >
+1` over twenty `PostgresJobQueue.fail()` calls is satisfied by real
+`clock_timestamp()` drift between twenty sequential round trips alone —
+measured directly (a throwaway probe, not part of the committed suite): ~8 ms
+of spread with the jitter term deleted outright, against ~410–440 ms across
+four runs with it present. So the *first* draft of
+`test_a_retry_after_hint_still_spreads_across_a_batch` passed against P2
+unmodified, and so does the repository's own pre-existing
+`test_backoff_is_jittered`, written for M4 and carrying the identical
+`len(instants) > 1` shape. Both are respelled to assert on the *range*
+(`max(instants) - min(instants)`) against a threshold sized with a wide margin
+on both sides of the two measured numbers (`>= 1s` at `backoff_seconds=60.0`,
+`>= 100ms` at `backoff_seconds=1.0`), and the docstrings on both cases now
+carry the measurement rather than assert a count that clock drift alone
+satisfies. **The general form, and it is `CLAUDE.md`'s own "a membership
+assertion is not an ordering test, and `len(x) > 0` is not a relevance test"
+one register over: a count of *distinct* values across N real round trips is
+satisfied by real-time drift between them, independent of whatever the code
+under test does — the assertion needs a magnitude, sized against a measured
+floor and a measured ceiling, not a count.** This is not filed as a new
+finding in `testing-discipline.md` because it is the same finding already
+there under a different operation (spread rather than count-of-distinct); it
+is filed here because it is where it was found and because it corrects a case
+this project has been carrying since M4.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `max(retry_after_seconds, 0.0)` → `max(0.0, retry_after_seconds)` in `FakeJobQueue.fail` | PASS | PASS | PASS | — | PASS (139/2) |
+| C2 `retryable` and `retry_after_seconds` reordered in `JobQueue.fail`'s abstract signature | PASS | PASS | PASS | — | PASS (139/2) |
+
+Both are facts about the language rather than about the tools: `max` is
+commutative, and every call site binds both parameters by keyword, so a
+keyword-only parameter's position in the signature is unobservable at every
+call site in `src/` and `tests/`. `lint-imports` was not re-run per control —
+neither touches an import.
+
+Gate green before and after on the fully restored tree (`git status` clean,
+every touched file `diff`-verified byte-identical to its pre-sweep `cp`
+backup): **3,667 unit passed / 4 skipped**, **1,130 integration passed / 22 skipped**,
+`ruff check`, `ruff format --check`, `mypy` over 555 files, `lint-imports` 9
+kept / 0 broken, PRD link check `OK`.
+
+**Two things this task refutes or narrows, named rather than left to be
+re-derived.** `PortRateLimited.retry_after` is now read exactly once in
+`src/`, at `JobWorker._fail` — `grep -rn "\.retry_after" src/` finds that
+reader beside the assignment in `ports/errors.py:50`, closing the debt the
+grep in D9's dispatch stated. And T2's live TMDb run (393 requests, no 429,
+the one 400 carrying no `retry-after` header) means the field this closes has
+never yet been exercised by a real response from the provider this project
+talks to most — stated in `.claude/rules/tmdb-and-enrichment.md` already, and
+restated here because it is the reason `test_a_429_carrying_a_retry_after_
+backs_off_no_sooner_than_the_upstream_asked` is the only place its behaviour
+is pinned at all.
+
+## M9 Task E4 — the review queue's keyset and its resolve route (2026-08-11)
+
+**17 plants over `db/repositories/media_item.py`, `tests/fakes/media_item_
+repository.py`, `api/routers/unmatched.py` and `api/cursor.py` — 15 behavioural
+targets, all KILLED; 1 measured equivalent mutant reported rather than closed;
+2 equivalent-mutant controls surviving all five gate steps. 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.** Harness at
+`/var/tmp/m9-E4/plants.py`, **outside the working tree** for the reason V1's
+entry records, and `/var/tmp` rather than `/tmp` because `/tmp` is tmpfs on this
+host. Plant list and expected verdict written down first, exact anchor count
+asserted before each plant, the landing spelled `old not in landed and new in
+landed`, `compile()` as the dry run, `PYTHONDONTWRITEBYTECODE=1` with
+`__pycache__` swept under **both** `src/` and `tests/` before every run, a 600 s
+per-plant timeout reporting `HUNG` as its own verdict, no second `-q`, and every
+restore `md5sum`-verified against a pre-plant digest. Tree committed first, so
+`git status` is the verification; clean after.
+
+**Selection:** `test_api_unmatched.py`, `test_media_item_repository_contract.py`,
+`test_ports_repository_ingest.py` (unit) and `test_admin_unmatched.py`,
+`test_media_item_repository.py` (integration) — **166 cases**, 12–28 s a run,
+green before and after. Scoped rather than whole-suite because nothing outside
+this task's own files reads `list_unmatched_page` or the new router (grepped,
+not assumed), and because `tests/integration/test_sse_end_to_end.py` is
+intermittent on this tree: **a sweep scored on "did the run fail" cannot run
+against a suite holding a flaky case.**
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 pg: the NULL disjunct dropped from the **dated** arm | KILLED | 2 — the route walk, and `..._resuming_from_a_dated_boundary_still_reaches_the_undated_tail` |
+| **P2 pg: ADR-0034's refuted row comparison, one statement for both boundaries** | KILLED | **2 — the route walk, and `..._a_page_boundary_inside_the_undated_group_does_not_drop_the_rest_of_it`** |
+| P3 fake: the NULL disjunct dropped | KILLED | 2 |
+| P4 fake: the literal row-comparison transcription (`TypeError`) | KILLED | 3 |
+| P5 fake: the **sentinel** transcription | **SURVIVED — equivalent, measured** | 0 |
+| P6 pg: the tiebreak dropped from the dated arm | KILLED | 2 |
+| P7 pg: the tiebreak dropped from the undated arm | KILLED | 2 |
+| P8 pg: `id DESC` dropped from the `ORDER BY` | KILLED | 5 |
+| P9 pg: `>` for `<` on the dated key | KILLED | 2 |
+| P10 pg: both tails relaxed `<` → `<=` | KILLED | 5 |
+| P11 route: the episode-belongs-to-title check deleted | KILLED | 3 |
+| P12 route: `attach_title`'s boolean return ignored | KILLED | 1 |
+| P13 route: the title existence read deleted | KILLED | 3 |
+| P14 route: `over_fetch(limit)` → `limit` alone | KILLED | 6 |
+| **P15: the off-by-one in full** — `over_fetch` dropped **and** `paginate`'s `<= limit` relaxed to `< limit` | KILLED | **2, and they are the same case on both arms** |
+
+**Four results worth carrying.**
+
+- **P1 and P2 are two arms of one predicate and they die on two different
+  cases, which is the whole point of writing both.** The plan's requirement was
+  that the NULL mutation *"must fail the boundary case specifically, not merely
+  some case"*: P2 — the row comparison ADR-0034 was corrected to remove — fails
+  the undated-boundary case and **passes** the dated-boundary one, while P1
+  does the reverse. A single case covering "NULLs are handled" would have been
+  satisfied by either and would have made the pair indistinguishable.
+- **The off-by-one is invisible outside `count % limit == 0`, re-measured
+  here.** P15 is the naive spelling in full and it fails **exactly** the two
+  `test_a_page_that_exactly_exhausts_the_queue_carries_no_next_cursor` cases
+  (one unit, one integration) out of 166 — the seven-item partition walk at
+  `limit=3` in the same file stays green, because `7 % 3 != 0`. **P14 is the
+  half-spelling and is a different, louder defect**: `over_fetch(limit) - 1`
+  makes `len(fetched) <= limit` always true, so *no* cursor is ever minted and
+  six cases fall over. Both are kills; only P15 is the one ADR-0034's evidence
+  section names, and a summary reporting "the off-by-one dies, 6 cases" would
+  have been describing the wrong mutation.
+- **P5 is the interesting survivor and it is an equivalence rather than a
+  gap.** `FakeMediaItemRepository._after` spelled as
+  `(entry.added_at or _UNDATED, entry.id) < (boundary.added_at or _UNDATED,
+  boundary.id)` — which is how that fake's own `list_unmatched` already spells
+  NULLS LAST, so it is the spelling an author would reach for — survives all
+  166. The sentinel map is order-preserving over the whole reachable domain, so
+  the mutant and the original differ on **no state a source can produce**: only
+  on an item genuinely dated `datetime.min`, which is the sentinel's own value.
+  Applying this file's own test (*which collaborator could falsify the promise*)
+  answers "none", so it is reported rather than closed. **The three arms are
+  kept anyway, for a reason that is about the sweep rather than about
+  behaviour: under the sentinel there is no NULL leg to delete, so the fake arm
+  of the contract loses P3 entirely.** A contract fake's job is to carry the
+  *shape* of the predicate it stands in for, and that is worth more than one
+  line of tidiness. Written into `_after`'s own docstring, both spellings
+  named, so the next reader does not "simplify" it back.
+- **P4 confirms `fixtures-and-fakes.md`'s asymmetry in the direction that entry
+  predicts.** The literal row comparison is a `TypeError` in Python and a
+  silent full-looking short page in Postgres — same defect, loud here, quiet
+  there — which is why the headline case for it lives in the integration file
+  and only *echoes* in the contract's unit arm.
+
+**The two controls, measured against every gate step separately** — the check
+V1's entry exists to force, run with the harness outside the tree so the four
+whole-repository steps are not measuring the harness:
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 — `_UNMATCHED_AFTER_DATED` / `_UNMATCHED_AFTER_UNDATED` defined in the other order | PASS | PASS | PASS (559) | PASS (9/0) | PASS (166) |
+| C2 — one sentence of `MediaItemRepository.list_unmatched_page`'s docstring reworded | PASS | PASS | PASS (559) | PASS (9/0) | PASS (166) |
+
+C1 is a fact about the *code* rather than about what the tools look at: both
+are module-level `str` assignments built by one pure function from two
+module-level literals, referencing neither each other nor anything between
+them, in a module with no import-time side effect. It is deliberately **not**
+an `__all__` reorder, which `RUF022` rejects. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`: the twenty-two
+files it finds include `test_ports_repository_package.py`, which **does** read
+this package — but it checks a docstring's **presence**, not its wording, which
+was verified by reading that case before the control was chosen rather than
+after it survived. The one scan this task itself adds
+(`test_the_router_enqueues_nothing_and_invalidates_nothing`) parses
+`api/routers/unmatched.py` with every docstring **stripped**, precisely so a
+module whose prose names `JobQueue` and `RowCache` on purpose can say why it
+holds neither.
+## M9 Task F4 — the watch-state and recency terms, and a `NameError` scored as a twelve-case kill (2026-08-11)
+
+**12 plants over `services/search.py`, `api/routers/search.py` and `cli.py` —
+10 behavioural targets, all KILLED; 2 equivalent-mutant controls, both
+SURVIVED and both passing every gate step separately; 1 BROKEN-MUTATION
+re-spelled and then killed. 0 BAD-ANCHOR, 0 DID-NOT-RUN, 0 HUNG.** Run in
+place from a harness at `/tmp/m9-exec/F4/plants.py`, **outside the tree** for
+V1's reason, with the plant list and its expected verdict written down first,
+`PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under **both** `src/` and
+`tests/` before every run, `compile()` as the dry run, an exact anchor count
+asserted before each plant, the landing spelled `old not in landed and new in
+landed`, and every restore verified by `md5sum` against a pre-plant digest.
+Committed before sweeping, so `git status` is the verification.
+
+**Selection:** `test_services_search.py`, `test_api_search.py`, `test_cli.py`,
+`test_telemetry_search.py` (unit) and `test_services_search.py` (integration) —
+133 cases, 15–19 s a run, green before and after. Scoped rather than
+whole-suite for B2's reason: `tests/integration/test_sse_end_to_end.py` is
+intermittent on this tree and predates M9, and a sweep scored on "did the run
+fail" cannot include a flaky case.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the watch-state term dropped from the blend, the household read intact | KILLED | 3 |
+| P2 the household read issued with a placeholder id when there is none | KILLED | 2 — both read-count cases, one per arm |
+| P3 the recency term deleted | KILLED | 1 |
+| P4 an absent year scored rather than excluded (`year or 1`) | KILLED | 2 |
+| P5 the watch-state term inverted into a demotion | KILLED | 3 |
+| P6 `owned` 0.15 → 0.10, breaking the M6 ratio and no ordering | KILLED | **1 — the numeric case alone** |
+| P7 the household read scoped to `list(_ALL)` | **BROKEN-MUTATION** | (12, on a `NameError`) |
+| P7b the household read scoped to `list(owned)` | KILLED | 5 |
+| P8 the route never resolves a household | KILLED | 1 |
+| P9 `usher search` never resolves one | KILLED | 1 |
+
+**P6 is the round's yield and it is a result about the *numeric* case.**
+Re-balancing `owned` against `relevance` reorders **nothing** — every ordering
+case in the file compares two rows whose owned-ness or popularity differs in
+the same direction under either weight — so all ten ordering cases stay green
+and exactly one assertion fails:
+`test_with_no_household_and_no_year_the_score_is_the_one_m6_computed`, whose
+expectation is two literals rather than a read of `_WEIGHTS`. **A weight table
+is not pinned by any number of ordering cases**; a re-weighting that reordered
+nothing would change every score on the wire and be invisible. Same family as
+D4's `TICKET_TTL_SECONDS` and B9's `CAST_LIMIT` — a constant whose value only a
+literal-valued case can hold — arriving at a *ratio* between two constants
+rather than at one constant's magnitude.
+
+🔴 **P7 is the recorded `NameError` trap, and the first spelling produced a
+plausible twelve-case kill across four files.** *"The household read unbounded
+by the hits"* was first spelled `played_title_ids(user_id, list(_ALL))` — and
+`_ALL` is defined nowhere, so the expression raised inside `_rank`, every
+ranked search in the selection errored, and the log named twelve cases
+including three that have nothing to do with the household. The existing rule
+covers an `except` clause; this is the same defect in an ordinary argument
+position, on the path *every* case reaches rather than only the failing ones,
+which is what makes the false kill so large and so plausible. **The wider form:
+check a plant's new identifiers are bound before believing any verdict, and
+treat a kill whose failing cases are far broader than the plant's subject as a
+tell.**
+
+**And the defect P7 named is only half spellable, which is the design result
+underneath it.** `played_title_ids` takes a `Sequence[uuid.UUID]`; the service
+holds the hydrated ids and nothing else, and the port has no "the household's
+whole history" call at all — so *unbounded* cannot be written here (B6's OFFSET
+finding, arriving at a port argument instead of a cursor). What *is* spellable
+is the read scoped to the **wrong** set the service happens to hold, and P7b —
+`list(owned)`, a plausible copy-paste from the line above — fails 5 cases
+including `test_the_household_read_is_bounded_by_the_hits`, which is the case
+written for it.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `_WEIGHTS`' `played` and `recency` entries in the other order | PASS | PASS | PASS | PASS | PASS (133) |
+| C2 one sentence of `_recency_term`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (133) |
+
+C1 is a fact about the *code* rather than about what the tools look at:
+`_WEIGHTS` is a dict literal with two distinct, independent keys read only by
+`_WEIGHTS[name]` inside `_blend`, and a mapping's insertion order cannot reach
+a weighted sum. It is deliberately **not** an `__all__` reorder, which `RUF022`
+rejects, and it is not spellable as an argument reorder, which is A5's entry's
+reason for checking rather than assuming. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/` — the
+twenty-four files it finds scan `ports/`, `services/curation*`,
+`services/home_sequential.py`, `services/jobs.py`, `adapters/` and several
+`api/` modules, and **none of them reads `services/search.py`**; the one scan
+this task itself adds parses `services/home.py` and `services/rows/*.py`.

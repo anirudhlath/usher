@@ -608,3 +608,35 @@ def configure_telemetry(settings: Settings) -> None:
     configure_logging(settings)
     configure_tracing(settings)
     configure_metrics(settings)
+
+
+# ---------------------------------------------------------------------------
+# The shared cache counters.
+#
+# These live here rather than beside their first caller because **three caches
+# now record through them** -- the row cache and the screen cache in
+# `services/rows/cache.py`, and group C's image proxy in `services/images.py`
+# -- and a fourth would make it four. Two `create_counter` calls under one
+# meter for one instrument name is either a duplicate-instrument warning or a
+# second stream, and either way a dashboard's hit rate silently stops covering
+# a cache; so the pair is declared exactly once and imported.
+#
+# 🔴 They were declared in `services/rows/cache.py` until 2026-08-11 and moved
+# on the merge that put both callers in one tree: `services/images.py` importing
+# the counters while `services/rows/base.py` imported `servable_images` from
+# `services/images.py` is a cycle, and it broke collection of 27 test modules.
+# Neither task could see it alone -- each half is acyclic. `telemetry.py`
+# imports nothing from `usher`, which is what makes it the safe home rather
+# than merely a convenient one.
+#
+# The description names no cache in particular: it said "Row/screen" while the
+# pair had one caller, and that was a lie the moment it had two.
+_cache_meter = metrics.get_meter("usher.cache")
+
+CACHE_HITS = _cache_meter.create_counter(
+    "usher.cache.hits", description="Cache reads that found a live entry"
+)
+CACHE_MISSES = _cache_meter.create_counter(
+    "usher.cache.misses",
+    description="Cache reads that found nothing or an expired entry",
+)

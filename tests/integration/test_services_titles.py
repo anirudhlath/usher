@@ -32,6 +32,14 @@ against the fake, where the tempting `or 0` repair sorts an unbilled credit
 above the lead. What only this arm can see is the statement: the `kind`
 predicate, the `title_id` scope and the join that supplies the name are one
 `SELECT` here and three Python comprehensions there.
+
+**And the images read is the fifth, in the same direction.**
+`FakeImageRepository` sorts with a Python key function, so its ordering case
+passes because the key function *is* the answer; here a deleted `ORDER BY
+is_primary DESC, id` leaves heap order, which a small fixture is frequently
+already in. The servability filter is the other half: it is a *read-side*
+drop, so only an arm that can hold the stored row and the answered row apart
+can say the catalog is still a faithful record of what the provider published.
 """
 
 import uuid
@@ -43,6 +51,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from usher.db.repositories.image import PostgresImageRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
@@ -50,7 +59,8 @@ from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
-from usher.domain.enums import EnrichmentState, HdrFormat, SourceKind, TitleKind
+from usher.domain.enums import EnrichmentState, HdrFormat, ImageKind, SourceKind, TitleKind
+from usher.domain.image import Image
 from usher.domain.jobs import JobKind, JobPriority, JobStatus
 from usher.domain.people import Credit, CreditKind, Person, person_sort_name
 from usher.domain.source import Source
@@ -81,6 +91,7 @@ def service(session: AsyncSession, queue: PostgresJobQueue) -> TitleReadService:
         PostgresWatchStateRepository(session),
         queue,
         PostgresCreditRepository(session),
+        PostgresImageRepository(session),
     )
 
 
@@ -420,3 +431,87 @@ async def test_a_read_of_a_title_with_no_source_row_answers_rather_than_raising(
     assert detail is not None
     assert detail.availability == ()
     assert detail.watch_state is None
+
+
+async def test_the_images_order_comes_from_the_statement_and_not_from_the_heap(
+    service: TitleReadService, session: AsyncSession, user_id: uuid.UUID
+) -> None:
+    """The fifth divergence, and it runs the same way as the credits one: the
+    fake sorts in Python, so its ordering case passes because the key function
+    *is* the answer. Only here can a deleted `ORDER BY` leave heap order --
+    which on a small fixture is frequently already sorted, and which is why
+    the premise below is stated from the ids the fixture minted rather than
+    from the order they were inserted in.
+
+    The backdrop is written first, so its UUIDv7 id is the smaller and
+    `is_primary DESC` is the only thing that can put the poster in front of
+    it. There is no `sort_order` column between the two keys -- ADR-0032's
+    migration request left it out and `m09c` is authorised for the natural key
+    alone -- so `id` is first-sighting order and this is the whole of the
+    read's order.
+    """
+    title = await _seed_title(session, EnrichmentState.ENRICHED)
+    backdrop = Image(
+        title_id=title.id,
+        kind=ImageKind.BACKDROP,
+        provider="tmdb",
+        provider_path="/a-backdrop.jpg",
+        is_primary=False,
+    )
+    poster = Image(
+        title_id=title.id,
+        kind=ImageKind.POSTER,
+        provider="tmdb",
+        provider_path="/a-poster.jpg",
+        is_primary=True,
+    )
+    assert backdrop.id < poster.id, (
+        "the premise: the unflagged image sorts first by id, so a read with no "
+        "is_primary key answers in the wrong order"
+    )
+    await PostgresImageRepository(session).replace_for_titles([title.id], [backdrop, poster])
+
+    detail = await service.detail(title.id, user_id=user_id)
+
+    assert detail is not None
+    assert [one.id for one in detail.images] == [poster.id, backdrop.id]
+
+
+async def test_a_declined_logo_is_filtered_out_of_a_real_read(
+    service: TitleReadService, session: AsyncSession, user_id: uuid.UUID
+) -> None:
+    """The filter over rows Postgres really returned, which is the arm that
+    can see the *row still being there*: `replace_for_titles` stored it,
+    `list_for_title` answers it, and the service drops it -- so an operator
+    debugging a missing logo finds the reference with one `SELECT`, which is
+    the reason C4 rejected refusing at the write instead."""
+    title = await _seed_title(session, EnrichmentState.ENRICHED)
+    images = PostgresImageRepository(session)
+    await images.replace_for_titles(
+        [title.id],
+        [
+            Image(
+                title_id=title.id,
+                kind=ImageKind.LOGO,
+                provider="tmdb",
+                provider_path="/a-logo.svg",
+                is_primary=True,
+            ),
+            Image(
+                title_id=title.id,
+                kind=ImageKind.POSTER,
+                provider="tmdb",
+                provider_path="/a-poster.jpg",
+                is_primary=False,
+            ),
+        ],
+    )
+
+    detail = await service.detail(title.id, user_id=user_id)
+
+    assert detail is not None
+    assert [one.provider_path for one in detail.images] == ["/a-poster.jpg"]
+    assert len(await images.list_for_title(title.id)) == 2, (
+        "the premise: both rows are stored, so this is a read-side filter and the "
+        "catalog stays a faithful record of what the provider published"
+    )

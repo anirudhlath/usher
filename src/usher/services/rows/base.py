@@ -56,6 +56,7 @@ from usher.domain.image import Image
 from usher.domain.rows import BuiltRow, DisplayHint, RowCard
 from usher.domain.title import Title
 from usher.ports.rows import Row, RowContext
+from usher.services.images import servable_images
 
 #: Which kind of artwork a shelf's cards are painted with, keyed on the shelf's
 #: own `display_hint`. **Total over `DisplayHint` rather than over the hints the
@@ -324,10 +325,32 @@ class BaseRow(Row):
         which is what the port promises -- absent means "no artwork", never
         "not asked", and `hydrate` turns it into `artwork=None` rather than
         into a dropped card.
+
+        **And artwork the proxy can never serve is dropped here too, on the
+        same one definition `GET /titles/{id}`'s `images` key uses.** This
+        read was left unfiltered when it landed, on the argument that the
+        measured gap is logo-only and a card is never handed a logo -- true of
+        the provider today and an *empirical property of it* rather than
+        anything in this code, since nothing stops a poster or a backdrop
+        being published as `.svg`. Two reads of one table disagreeing about
+        what is servable is the drift `is_servable_path` exists as one
+        definition to prevent, so `servable_images` is called from both. The
+        degradation here is worth stating rather than discovering:
+        `primary_for_titles` has **already chosen**, so a title whose chosen
+        image is unservable renders the fallback rather than falling through
+        to its second image of that kind. That is the same render "this title
+        has no poster" produces, which is precisely why a card must not carry
+        a discriminator instead -- its only two behaviours are "render
+        artwork" and "render the fallback", and both states want the second.
         """
-        return await ctx.images.primary_for_titles(
+        found = await ctx.images.primary_for_titles(
             list(title_ids), ARTWORK_FOR_HINT[self.display_hint]
         )
+        # Filtered by *identity* rather than rebuilt from `Image.title_id`, so
+        # the mapping keeps the keys the port chose and this hook stays free of
+        # an opinion about which owner column a shelf image hangs off.
+        servable = {one.id for one in servable_images(found.values())}
+        return {title_id: one for title_id, one in found.items() if one.id in servable}
 
     def empty(self) -> BuiltRow:
         """This row with no cards.

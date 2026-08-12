@@ -98,13 +98,19 @@ _meter = metrics.get_meter("usher.cache")
 # `row` and `screen` today, and a new cache appends its value in the commit
 # that ships it** -- stated as a rule rather than a closed list because
 # group C's image proxy is the third and writes its own.
-_cache_hits = _meter.create_counter(
-    "usher.cache.hits", description="Row/screen cache reads that found a live entry"
-)
-_cache_misses = _meter.create_counter(
-    "usher.cache.misses",
-    description="Row/screen cache reads that found nothing or an expired entry",
-)
+#
+# **Public, because the third cache arrived and re-declaring the pair is the
+# one thing it must not do.** `services/images.py` records the image proxy's
+# reads through *these two objects*: two `create_counter` calls under one
+# meter for one instrument name is either a duplicate-instrument warning or a
+# second stream, and either way a dashboard's hit rate silently stops covering
+# a cache. The description therefore names no cache in particular -- it did
+# say "Row/screen" until the proxy landed, which was accurate when this pair
+# had one caller and a lie the moment it had two.
+# Declared in `usher.telemetry` and re-exported here, because
+# `services/images.py` also records through them and importing them from this
+# module made a cycle. See the note beside their definition.
+from usher.telemetry import CACHE_HITS, CACHE_MISSES  # noqa: E402
 
 # One household's row cache is `_MAX_ENTRIES` slugs. Ten providers propose
 # roughly a dozen rows a screen, so this is ~80 screens' worth of distinct
@@ -313,17 +319,17 @@ class RowCache:
         """
         entry = self._screens.get(user_id)
         if entry is None:
-            _cache_misses.add(1, {"cache": "screen"})
+            CACHE_MISSES.add(1, {"cache": "screen"})
             return ScreenRead(freshness=Freshness.ABSENT, screen=None)
         if not self._expired(entry):
-            _cache_hits.add(1, {"cache": "screen", "freshness": "fresh"})
+            CACHE_HITS.add(1, {"cache": "screen", "freshness": "fresh"})
             return ScreenRead(freshness=Freshness.FRESH, screen=entry.value)
         if self._now() < entry.expires_at + grace:
             # A hit, because the request was served without a rebuild -- and
             # labelled, because a stale serve counted as a plain hit hides the
             # one thing this feature trades away. The module docstring argues
             # both halves; PRD 10's table carries the label.
-            _cache_hits.add(1, {"cache": "screen", "freshness": "stale"})
+            CACHE_HITS.add(1, {"cache": "screen", "freshness": "stale"})
             return ScreenRead(freshness=Freshness.STALE, screen=entry.value)
         # Removed on read rather than left: a screen past its grace is a row of
         # dead weight per user, and the `users` table is the only thing
@@ -332,7 +338,7 @@ class RowCache:
         # A rebuild, the same population `usher.row.build.duration` measures.
         # Recorded here rather than on `put_screen`, because the write that
         # repairs a miss is not a second event.
-        _cache_misses.add(1, {"cache": "screen"})
+        CACHE_MISSES.add(1, {"cache": "screen"})
         return ScreenRead(freshness=Freshness.ABSENT, screen=None)
 
     def get_screen(self, user_id: uuid.UUID) -> tuple[BuiltRow, ...] | None:
@@ -358,7 +364,7 @@ class RowCache:
         entry = self._rows.get(key)
         if entry is None or self._expired(entry):
             self._rows.pop(key, None)
-            _cache_misses.add(1, {"cache": "row"})
+            CACHE_MISSES.add(1, {"cache": "row"})
             return None
         # **The row half has no grace window, and that is a scope decision
         # rather than an omission.** The refresh unit is a *screen*: one key,
@@ -369,7 +375,7 @@ class RowCache:
         # history; without one, a stale row served inside a screen is a row
         # nothing ever replaces, which is the failure serve-stale is supposed
         # to be the cure for.
-        _cache_hits.add(1, {"cache": "row", "freshness": "fresh"})
+        CACHE_HITS.add(1, {"cache": "row", "freshness": "fresh"})
         return entry.value
 
     def put_row(self, user_id: uuid.UUID, slug: str, row: BuiltRow, *, ttl: timedelta) -> None:

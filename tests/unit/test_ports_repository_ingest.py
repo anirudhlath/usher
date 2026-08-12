@@ -44,6 +44,15 @@ def test_media_item_repository_surface() -> None:
             # would silently rank against zero targets forever.
             "list_for_episode",
             "list_unmatched",
+            # M9's keyset form of the queue (E4), for `GET /admin/unmatched`.
+            # It sits **beside** the offset one rather than replacing it --
+            # `usher unmatched --offset` is an operator typing a number at a
+            # terminal, a cursor is a client following a token -- and it is
+            # named here for the same reason every read above is: dropped from
+            # the ABC, an implementation could stop providing it, type-check,
+            # and leave the route paging by the `OFFSET` measured at 388.9 ms
+            # at offset 1,126,574.
+            "list_unmatched_page",
             "attach_title",
             # M7's episode-keyed ownership read, and it is named here rather
             # than folded in beside `owned_title_ids` because the two look

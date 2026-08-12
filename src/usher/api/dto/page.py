@@ -14,8 +14,11 @@ question, over a different aggregate, and are group B's.
 **`next_cursor` is `str | None` and is always present**, which is deliberately
 *not* the convention the rest of `api/dto/` keeps. Elsewhere an empty value is
 an absent key -- `ProblemResponse.errors` is dropped when there is nothing to
-say, and `dto/title.py` omits four whole sections rather than sending them
-empty. Here a client takes both arms on every listing it renders, so "the key
+say, and `dto/title.py` omits `cast`, `crew` and `images` rather than sending
+them empty. (That read *"four whole sections"* until 2026-08-11, when the last
+of the four M5 left absent landed: two became keys on that response and two
+became routes of their own, so three is the count and the fourth is not a key
+at all.) Here a client takes both arms on every listing it renders, so "the key
 is missing" and "there is no next page" would be the same bytes on the wire and
 a client would learn the difference by guessing.
 
