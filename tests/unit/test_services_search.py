@@ -57,7 +57,12 @@ from usher.ports.search import (
     SuggestIndex,
 )
 from usher.services.query_expansion import QUERY_KEY, QueryExpansionService
-from usher.services.search import SearchService, SemanticSearchUnavailable, _blend
+from usher.services.search import (
+    SearchService,
+    SemanticSearchUnavailable,
+    SuggestTier,
+    _blend,
+)
 
 # Fixed ids, ordered on purpose. `_UNOWNED < _OWNED` and `_ZERO_POP <
 # _NO_POP` so that a mutation which ties the two rows sorts the *wrong* one
@@ -404,6 +409,11 @@ async def _service(
     played: frozenset[uuid.UUID] = frozenset(),
     played_by: uuid.UUID = _HOUSEHOLD,
     suggestions: SuggestIndex | None = None,
+    # Which tier the scripted suggest index is bound to. The other tier gets an
+    # inert one, so a case parametrised over both asks the identical question
+    # of each and a service that consulted the wrong collaborator answers
+    # nothing.
+    tier: SuggestTier = SuggestTier.FUZZY,
     result_limit: int = 50,
     expander: _Expander | None = None,
     ports: _Ports | None = None,
@@ -464,9 +474,12 @@ async def _service(
                 for title_id, vector in sorted(vectors.items())
             ]
         )
+    scripted: SuggestIndex = _ScriptedSuggest() if suggestions is None else suggestions
+    idle = _ScriptedSuggest()
     return SearchService(
         index,
-        _ScriptedSuggest() if suggestions is None else suggestions,
+        scripted if tier is SuggestTier.PREFIX else idle,
+        scripted if tier is SuggestTier.FUZZY else idle,
         kit.titles,
         kit.media_items,
         kit.watch_states,
@@ -526,14 +539,20 @@ async def test_a_blank_query_never_reaches_the_model() -> None:
     assert index.requests == [], "a blank query reached the index"
 
 
-async def test_a_blank_prefix_never_reaches_the_suggest_index() -> None:
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_a_blank_prefix_never_reaches_the_suggest_index(tier: SuggestTier) -> None:
     """The same refusal on the type-ahead path, which is where a search box
     actually sends whitespace. Fails: a `suggest` that forwards it, which on
     the real backend is a trigram probe with an empty needle against every
-    name in a 1,271,138-row table."""
+    name in a 1,271,138-row table -- or, on tier 1, `LIKE '%'` over the same
+    1,271,138 rows collected, de-duplicated and sorted.
+
+    Parametrised over both tiers because the guard is written once above the
+    tier selection: a spelling that moved it inside one branch would leave the
+    other forwarding whitespace, and one arm cannot see that."""
     suggestions = _ScriptedSuggest((SearchHit(title_id=_QUIET, score=1.0),))
-    service = await _service(_ScriptedIndex(SearchOutcome()), suggestions=suggestions)
-    assert await service.suggest("  ") == ()
+    service = await _service(_ScriptedIndex(SearchOutcome()), suggestions=suggestions, tier=tier)
+    assert await service.suggest("  ", tier=tier) == ()
     assert suggestions.calls == []
 
 
@@ -703,7 +722,8 @@ async def test_a_semantic_search_with_no_embedder_buys_no_completion() -> None:
     assert expander.ledger.calls == []
 
 
-async def test_type_ahead_buys_no_completion() -> None:
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_type_ahead_buys_no_completion(tier: SuggestTier) -> None:
     """**The one that would hurt.** `suggest` is what a client calls per
     keystroke; it has no semantic lane at all, so it has no embed for an
     expansion to sit in front of. Fails: an expansion factored to the top of
@@ -715,10 +735,11 @@ async def test_type_ahead_buys_no_completion() -> None:
         _ScriptedIndex(SearchOutcome()),
         embedder=FakeEmbedder(),
         suggestions=suggestions,
+        tier=tier,
         expander=expander,
     )
 
-    assert await service.suggest("the quie") != ()
+    assert await service.suggest("the quie", tier=tier) != ()
     assert expander.client.calls == []
 
 
@@ -1506,7 +1527,8 @@ async def test_the_filters_reach_the_index_unchanged() -> None:
     assert index.requests[0].filters == filters
 
 
-async def test_suggest_hydrates_and_does_not_re_rank() -> None:
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_suggest_hydrates_and_does_not_re_rank(tier: SuggestTier) -> None:
     """`PostgresSuggestIndex` already ordered by edit distance and then by
     popularity *inside* the capped candidate set. Fails: a service applying
     the search blend here, which is popularity counted twice -- once inside the
@@ -1520,33 +1542,119 @@ async def test_suggest_hydrates_and_does_not_re_rank() -> None:
     suggestions = _ScriptedSuggest(
         (SearchHit(title_id=_ZERO_POP, score=1.0), SearchHit(title_id=_POPULAR, score=1.0))
     )
-    service = await _service(_ScriptedIndex(SearchOutcome()), suggestions=suggestions)
-    results = await service.suggest("vac")
+    service = await _service(_ScriptedIndex(SearchOutcome()), suggestions=suggestions, tier=tier)
+    results = await service.suggest("vac", tier=tier)
     assert [result.title_id for result in results] == [_ZERO_POP, _POPULAR]
     assert [result.name for result in results] == [_CATALOG[_ZERO_POP][0], _CATALOG[_POPULAR][0]]
 
 
-async def test_suggest_marks_an_owned_candidate() -> None:
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_suggest_marks_an_owned_candidate(tier: SuggestTier) -> None:
     """PRD 05 wants unowned results surfaced "clearly marked", and a type-ahead
     row is a result. Fails: a `suggest` that hydrates the title and leaves
     `owned` at its default, so the badge is absent from the one surface a
     client renders most often."""
     suggestions = _ScriptedSuggest((SearchHit(title_id=_OWNED, score=1.0),))
     service = await _service(
-        _ScriptedIndex(SearchOutcome()), suggestions=suggestions, owned=frozenset({_OWNED})
+        _ScriptedIndex(SearchOutcome()),
+        suggestions=suggestions,
+        tier=tier,
+        owned=frozenset({_OWNED}),
     )
-    assert [result.owned for result in await service.suggest("vac")] == [True]
+    assert [result.owned for result in await service.suggest("vac", tier=tier)] == [True]
 
 
-async def test_suggest_clamps_its_limit_too() -> None:
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_suggest_clamps_its_limit_too(tier: SuggestTier) -> None:
     """The same ceiling, on the path a keystroke drives. Fails: an unclamped
     `suggest`, where the cost of a wrong number is paid on every keypress."""
     suggestions = _ScriptedSuggest()
     service = await _service(
-        _ScriptedIndex(SearchOutcome()), suggestions=suggestions, result_limit=20
+        _ScriptedIndex(SearchOutcome()), suggestions=suggestions, tier=tier, result_limit=20
     )
-    await service.suggest("vac", limit=10_000)
+    await service.suggest("vac", limit=10_000, tier=tier)
     assert suggestions.calls == [("vac", 20)]
+
+
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_suggest_hydrates_with_two_reads_whatever_the_tier_and_whatever_the_hit_count(
+    tier: SuggestTier,
+) -> None:
+    """`list_by_ids` then `owned_title_ids`, one each, from either tier.
+
+    **The count is the N+1 assertion** -- a `suggest` that hydrated per hit
+    answers the identical box, and only a count over more hits than reads can
+    tell the two apart. Six hits, two reads, on the path a client drives per
+    keystroke.
+
+    **It is not the "written once" assertion**, which is what
+    `test_the_hydration_is_written_once_rather_than_once_per_tier` is for: a
+    body spelled `if tier is PREFIX: <two reads> else: <two reads>` passes
+    everything here, on both arms.
+
+    The three reads `_rank` makes for a household are absent by construction --
+    `suggest` takes no `user_id`, runs no blend, and therefore reads no watch
+    state, no centroid and no vectors. That absence is asserted rather than
+    described, because it is the reason a keystroke is cheap.
+    """
+    hits = tuple(SearchHit(title_id=title_id, score=1.0) for title_id in sorted(_CATALOG)[:6])
+    assert len(hits) == 6, "the premise: more hits than reads, or a count proves nothing"
+    ports = _Ports()
+    service = await _service(
+        _ScriptedIndex(SearchOutcome()),
+        suggestions=_ScriptedSuggest(hits),
+        tier=tier,
+        ports=ports,
+    )
+
+    results = await service.suggest("vac", limit=10, tier=tier)
+
+    assert len(results) == 6, "the premise: the hydration returned every hit"
+    counts = (
+        ports.titles.reads,
+        ports.media_items.reads,
+        ports.watch_states.reads,
+        ports.taste.reads,
+        ports.embeddings.reads,
+    )
+    assert counts == (1, 1, 0, 0, 0)
+
+
+def test_the_hydration_is_written_once_rather_than_once_per_tier() -> None:
+    """**Structural, because the behavioural count above cannot see this.**
+
+    Two reads per tier is what a shared body produces *and* what a body
+    duplicated inside an `if tier is ...` produces. The two answer identically
+    on the day they are written and drift the first time either tier grows a
+    field -- an `owned` flag added to one arm, a `list_by_ids` narrowed in the
+    other -- and nothing behavioural notices, because each arm is still
+    correct about itself.
+
+    So the claim `SearchService.suggest`'s own docstring makes is asserted the
+    only way it can be: the two hydration reads appear **once each** in that
+    function's body. Same move C4 made for a defect whose only symptom was
+    which thread ran.
+
+    Fails: the per-tier duplication, and also a `suggest` that reached for a
+    third read.
+    """
+    source = (_SERVICES / "search.py").read_text()
+    tree = ast.parse(source)
+    bodies = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "suggest"
+    ]
+    # The premise: a scan that found no function passes exactly like a scan
+    # that found a correct one.
+    assert len(bodies) == 1, f"the scan found {len(bodies)} `suggest` definitions"
+    called = [
+        node.func.attr
+        for node in ast.walk(bodies[0])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    ]
+    assert called.count("list_by_ids") == 1, called
+    assert called.count("owned_title_ids") == 1, called
 
 
 # --- the home screen reaches none of this ----------------------------------

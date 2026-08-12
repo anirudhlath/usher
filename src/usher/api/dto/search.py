@@ -1,4 +1,5 @@
-"""`GET /search` — PRD 05's read path on the wire, and PRD 07's `### Screens`.
+"""`GET /search` and `GET /search/suggest` — PRD 05's read path on the wire,
+and PRD 07's `### Screens`.
 
 **`SearchMode` is the port enum, not a wire twin**, for the reason
 `dto/home.py` reuses the domain `DisplayHint`: this route has a
@@ -25,13 +26,14 @@ every route a client can call.
 """
 
 import uuid
+from collections.abc import Sequence
 
 from pydantic import BaseModel
 
 from usher.domain.enums import TitleKind
 from usher.domain.search import SearchResult
 from usher.ports.search import SearchMode
-from usher.services.search import SearchAnswer
+from usher.services.search import SearchAnswer, SuggestTier
 
 
 class SearchResultResponse(BaseModel):
@@ -140,4 +142,112 @@ class SearchResponse(BaseModel):
         )
 
 
-__all__ = ["SearchResponse", "SearchResultResponse"]
+class SuggestResultResponse(BaseModel):
+    """One type-ahead candidate, hydrated.
+
+    **The same six fields as `SearchResultResponse` and a different `score`,
+    which is why it is a second model rather than a reuse.** That one renders
+    `SearchService._blend`'s weighted mean over six ranking terms; this one
+    renders the index's own rank-shaped value, because `suggest` is
+    deliberately **not re-ranked** — the tier already ordered its own answer
+    and applying the blend on top would count popularity twice.
+
+    ⚠️ **`score` is not comparable across tiers, and this is the trap.** Tier 1
+    answers **1.0 for every row**, honestly: every row is an exact prefix match
+    so the distance tier 2 varies its score with is zero for all of them. Tier
+    2 answers `1 / (1 + edit distance)`. A client that painted tier 1 and then
+    replaced the box with tier 2 sees every score fall, and that is a change of
+    *scale*, not of quality. Render the order, not the number. Within one
+    answer it is a rank; between two answers of different tiers it means
+    nothing at all.
+
+    `owned` rides along for `SearchResultResponse`'s reason: PRD 05 requires
+    unowned results to be surfaced "clearly marked", and a type-ahead box is
+    the surface most likely to skip a second request per row to find out.
+
+    `popularity` is nullable and stays nullable (ADR-0014) — `null` for every
+    title TMDb's daily export has never described, which is **all** of an
+    IMDb-only catalog and is exactly the population whose tier-1 ordering falls
+    through to `vote_count`.
+    """
+
+    title_id: uuid.UUID
+    kind: TitleKind
+    name: str
+    year: int | None
+    popularity: float | None
+    owned: bool
+    score: float
+
+    @classmethod
+    def of(cls, result: SearchResult) -> "SuggestResultResponse":
+        return cls(
+            title_id=result.title_id,
+            kind=result.kind,
+            name=result.name,
+            year=result.year,
+            popularity=result.popularity,
+            owned=result.owned,
+            score=result.score,
+        )
+
+
+class SuggestResponse(BaseModel):
+    """The type-ahead box, plus which tier filled it and what it refuses.
+
+    **`tier` is the echo, and it is `requested_mode`'s argument minus the
+    degradation.** `GET /search` carries two mode fields because a `fused`
+    request can be *served* narrower; a tier request is always served by the
+    tier it named, because both indexes exist on every deployment `m09a`
+    reaches — so there is one field here rather than two, and a second one
+    would be a value that could never differ. The echo is still owed for a
+    different reason: **`?tier=` has a default**, so a client that named no
+    tier is reading an answer from a tier it did not choose, and the two tiers
+    give *different answers to the same `q`* by design. A response that did not
+    say which is uninterpretable beside another one, and ADR-0031 records
+    changing the default as a live possibility.
+
+    **`min_query_length` is what makes an empty box legible**, and it is the
+    only thing that can. Below it this route runs no query at all, so
+    `results: []` would otherwise be indistinguishable from *"no title starts
+    with that"* — a filter with no counter, which is the failure
+    `.claude/rules/ports-and-error-taxonomy.md` records as surviving every
+    test because nothing that is missing raises anything. It is a fact about
+    the tier that answered, present on every response rather than only on the
+    refusing ones, so a client can implement the same rule locally and stop
+    sending the request: on tier 1 that is worth **2,707 ms of database work at
+    one character** (ADR-0031's curve).
+
+    **`query` is echoed as typed** — not stripped, not lower-cased. It is what
+    the `LIKE` pattern was built from, and a client rendering "no matches for
+    …" needs the string the server actually used.
+    """
+
+    query: str
+    tier: SuggestTier
+    min_query_length: int
+    results: tuple[SuggestResultResponse, ...]
+
+    @classmethod
+    def of(
+        cls,
+        query: str,
+        *,
+        tier: SuggestTier,
+        min_query_length: int,
+        results: Sequence[SearchResult] = (),
+    ) -> "SuggestResponse":
+        return cls(
+            query=query,
+            tier=tier,
+            min_query_length=min_query_length,
+            results=tuple(SuggestResultResponse.of(result) for result in results),
+        )
+
+
+__all__ = [
+    "SearchResponse",
+    "SearchResultResponse",
+    "SuggestResponse",
+    "SuggestResultResponse",
+]

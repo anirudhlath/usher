@@ -60,6 +60,7 @@ from usher.api.deps import (
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
 from usher.db.users import DEFAULT_USER_NAME
+from usher.services.search import SearchService, SuggestTier
 
 _PROVIDERS = {
     "titles": get_title_repository,
@@ -343,3 +344,59 @@ async def test_the_reconcile_service_carries_this_deployments_tuning(
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             body = (await client.get("/_probe/tuning")).json()
     assert body == {"batch_size": 7, "max_retract_fraction": 0.5}
+
+
+async def test_the_search_service_the_graph_resolves_holds_both_suggest_tiers(
+    postgres_url: str,
+) -> None:
+    """**A `Depends` graph that resolves is not a graph that wired the right
+    objects, and the two suggest tiers are the case where those come apart.**
+
+    `SearchService` takes two `SuggestIndex` collaborators, adjacent and
+    identically typed. A `build_search_service` that handed
+    `PostgresSuggestIndex` to both slots resolves, constructs, passes mypy,
+    passes every unit case in `tests/unit/test_api_suggest.py` (its fakes are
+    two objects whatever the factory does), and answers a plausible box on
+    both tiers -- while `?tier=prefix`, the default on the keystroke path,
+    quietly costs 33.6 ms p50 instead of the btree probe it was designed to
+    be, and gains a typo tolerance ADR-0031 says it does not have.
+
+    So this asserts the **types**, which is the only thing that separates the
+    two wirings at the point of construction. The behavioural half is
+    `tests/integration/test_search_route.py::
+    test_the_two_tiers_are_two_indexes_in_the_composed_graph`, which proves
+    each one runs its own statement against the real schema; neither subsumes
+    the other -- a swap of the two arguments passes this case and fails that
+    one, and a factory that built the right pair and never handed it over
+    fails this one first.
+
+    Reaching a private attribute is deliberate and is the narrower of the two
+    options: the alternative is a public accessor on `SearchService` that
+    exists only for a test, on a class whose whole design is that nothing
+    above it holds an index.
+    """
+    app = create_app(
+        Settings(
+            database_url=postgres_url,
+            secret_key="0" * 32,
+            push_enabled=False,
+            worker_enabled=False,
+        )
+    )
+    seen: dict[str, str] = {}
+
+    def route(service: Annotated[SearchService, Depends(get_search_service)]) -> dict[str, str]:
+        seen.update({tier.value: type(index).__name__ for tier, index in service._tiers.items()})
+        return seen
+
+    app.get("/_probe/suggest_tiers")(route)
+    async with LifespanManager(app) as manager:
+        transport = ASGITransport(app=manager.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/_probe/suggest_tiers")
+
+    assert response.status_code == 200, response.text
+    assert seen == {
+        SuggestTier.PREFIX.value: "PostgresPrefixSuggestIndex",
+        SuggestTier.FUZZY.value: "PostgresSuggestIndex",
+    }

@@ -1069,8 +1069,30 @@ made here**, because B3 measures and does not tune. Coverage is the other
 lever and the curve is steep: at the 10,000-title enriched tier the same
 one-character probe is **489 ms**, and by four characters **5.5 ms**.
 
-**A minimum prefix length before tier 1 fires is a request-boundary property
-and therefore B5's**, along with the route and ADR-0031, which B5 writes.
+✅ **Tier 2 is on the wire beside it, and the minimum prefix length is
+decided.** `GET /search/suggest?q=&tier=prefix|fuzzy&limit=` is one route with
+two separately-askable tiers, defaulting to `prefix`, echoing the tier that
+answered — and **declining to run tier 1 below a four-character prefix**, where
+the answer is `200` with no results, no query issued, and a
+`min_query_length` on every response so an empty box is legible and a client
+can apply the same rule without sending the request at all.
+
+**Four is derived from the curve above rather than chosen**: it is the shortest
+prefix at which tier 1's p95 is below tier 2's (112 ms against 211 ms; at three
+characters tier 1 is 303 ms and therefore *slower* than the tier it exists to be
+cheaper than). It is deliberately **not** the 10 ms keystroke bar, which is met
+only from seven characters up and which would leave the keystroke tier
+answering nothing for most of a typed word — abandoning the short one-word names
+that made the gate fail. Tier 2 is bounded at one character only, because
+nobody has measured *it* per prefix length and its defence is the client's
+debounce; **the server debounces nothing**. `usher suggest --tier` defaults to
+`fuzzy` and has no minimum at all, because a command is typed once.
+
+The whole argument, the alternatives — two routes with different cache TTLs, an
+ordered inner per-arm cap (now known to be much cheaper than it was priced at,
+and the first thing a follow-up should measure), a minimum of seven — and the
+two bars B3 failed with their attributions are in
+[ADR-0031](decisions/0031-the-two-tier-suggest.md).
 
 **The gate as this section defined it measured the wrong half, and that
 correction stands.** A synthetic dry run over 604 cases first showed it, and

@@ -24,7 +24,7 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.fakes.embedding import planted_pair
-from tests.fakes.search_index import FakeSuggestIndex
+from tests.fakes.search_index import FakePrefixSuggestIndex, FakeSuggestIndex
 from usher.adapters.search.postgres import PostgresSearchIndex, _predicates
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.search import PostgresTitleEmbeddingRepository
@@ -73,6 +73,7 @@ def _service(session: AsyncSession) -> SearchService:
     """
     return SearchService(
         PostgresSearchIndex(session, ef_search=_EF_SEARCH, rrf_k=_RRF_K),
+        FakePrefixSuggestIndex(),
         FakeSuggestIndex(),
         PostgresTitleRepository(session),
         PostgresMediaItemRepository(session),

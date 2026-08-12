@@ -9,6 +9,20 @@ recommendation; implemented in M6. **M6 adds no Meilisearch either way**
 amended, and a scoped follow-up with an owner. See "Evidence — the gate,
 measured".
 
+**✅ That follow-up is discharged, and its outcome is
+[ADR-0031](0031-the-two-tier-suggest.md) — the two-tier suggest.** M9 built
+tier 1 (`PostgresPrefixSuggestIndex`), measured it at catalog scale against a
+bar committed beforehand, and put both tiers on one route as
+`GET /search/suggest?tier=prefix|fuzzy`. **Read ADR-0031 before re-opening
+anything in this document about the type-ahead box**, and read it *particularly*
+before quoting consequence 2's *"the only thing measured that fits inside a
+keystroke"*, which that ADR narrows: the figure is real over whole names and a
+keystroke is not a whole name — at a one-character prefix the same statement is
+291 ms on `titles` alone and 2,707 ms over the union, so tier 1 is a keystroke
+path from **seven characters up** and the route declines to run it below four.
+Meilisearch remains gated exactly as this document scopes it and is still not
+built; nothing here is reversed.
+
 ## Context
 
 The initial design specified PostgreSQL as the canonical store plus Meilisearch

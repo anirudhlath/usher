@@ -64,6 +64,20 @@ MARK = "Search Route Case"
 # deliberately below.
 TERM = "kestrelbound"
 
+# The suggest cases' title, invented for this file. Long enough that a
+# one-character substitution near its end stays well above `pg_trgm`'s 0.3
+# similarity floor -- tier 2 gates on `name % prefix` before it computes an
+# edit distance, so a short typo string is a case about the floor rather than
+# about the tier.
+TYPEABLE = "Thornquill Vane"
+#: A true prefix of it. Seven characters, so the route's four-character
+#: minimum is not what this arm is about.
+TYPED_PREFIX = "thornqu"
+#: The whole name with one substituted character. Tier 1 cannot match it --
+#: `LIKE` is not an edit distance -- and tier 2's `levenshtein_less_equal <= 2`
+#: over the same-length head can.
+TYPED_TYPO = "thornquill vame"
+
 
 @pytest.fixture
 def settings(postgres_url: str) -> Settings:
@@ -111,11 +125,12 @@ async def clean(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[Non
 
 
 class _Catalog:
-    """The two seeded titles, by the role each plays in an assertion."""
+    """The seeded titles, by the role each plays in an assertion."""
 
-    def __init__(self, named: uuid.UUID, described: uuid.UUID) -> None:
+    def __init__(self, named: uuid.UUID, described: uuid.UUID, typeable: uuid.UUID) -> None:
         self.named = named
         self.described = described
+        self.typeable = typeable
 
 
 @pytest_asyncio.fixture
@@ -146,6 +161,17 @@ async def catalog(sessions: async_sessionmaker[AsyncSession], clean: None) -> _C
         sort_name=f"{MARK} hour",
         year=2021,
     )
+    # The suggest cases' own title, and it deliberately carries **neither**
+    # `TERM` nor a leading article: tier 1 is `lower(name) LIKE 'typed%'`, so a
+    # name beginning "The " is unreachable by anything a viewer would type at
+    # it, and a name matching `TERM` would add a third row to every `/search`
+    # assertion above.
+    typeable = Title(
+        kind=TitleKind.MOVIE,
+        name=TYPEABLE,
+        sort_name=f"{MARK} thornquill",
+        year=2020,
+    )
     source = Source(
         kind=SourceKind.EMBY,
         name="Search Route Emby",
@@ -157,6 +183,7 @@ async def catalog(sessions: async_sessionmaker[AsyncSession], clean: None) -> _C
         titles = PostgresTitleRepository(session)
         await titles.add(described)
         await titles.add(named)
+        await titles.add(typeable)
         await PostgresSourceRepository(session).add(source)
         await session.commit()
     async with sessions() as session:
@@ -182,7 +209,7 @@ async def catalog(sessions: async_sessionmaker[AsyncSession], clean: None) -> _C
             ]
         )
         await session.commit()
-    return _Catalog(named=named.id, described=described.id)
+    return _Catalog(named=named.id, described=described.id, typeable=typeable.id)
 
 
 @pytest_asyncio.fixture
@@ -319,3 +346,84 @@ async def test_the_limit_is_clamped_by_the_deployments_own_ceiling(
 
     assert response.status_code == 200, response.text
     assert len(response.json()["results"]) == 1
+
+
+# --- `GET /search/suggest`, the two tiers over the real indexes ------------
+
+
+async def test_the_two_tiers_are_two_indexes_in_the_composed_graph(
+    client: AsyncClient, catalog: _Catalog
+) -> None:
+    """**The one claim only this level can make: `build_search_service` really
+    constructs two different `SuggestIndex` implementations, and each one is
+    reachable by name from the wire.**
+
+    Every unit case in `tests/unit/test_api_suggest.py` is satisfied by a
+    factory that handed one index to both slots and by fakes that are two
+    objects either way -- what distinguishes them is *which statement runs
+    against which index in the real schema*. `PostgresPrefixSuggestIndex`
+    reads `ix_titles_name_lower_prefix`, which exists only because `m09a`
+    shipped it; `PostgresSuggestIndex` reads the GIN trigram index M6 shipped.
+
+    Three arms, and all three are needed. Tier 1 on a true prefix proves the
+    btree path answers at all. Tier 1 on a typo proves it is **not** the
+    trigram index wearing tier 1's name -- the arm that fails if both slots
+    hold `PostgresSuggestIndex`. Tier 2 on the same typo proves the fuzzy slot
+    is not `PostgresPrefixSuggestIndex` -- the arm that fails if both slots
+    hold the btree.
+    """
+    found = await client.get("/search/suggest", params={"q": TYPED_PREFIX, "tier": "prefix"})
+    missed = await client.get("/search/suggest", params={"q": TYPED_TYPO, "tier": "prefix"})
+    forgiven = await client.get("/search/suggest", params={"q": TYPED_TYPO, "tier": "fuzzy"})
+
+    assert found.status_code == 200, found.text
+    assert [row["title_id"] for row in found.json()["results"]] == [str(catalog.typeable)], (
+        found.text
+    )
+    assert found.json()["tier"] == "prefix"
+
+    assert missed.json()["results"] == [], missed.text
+    assert [row["title_id"] for row in forgiven.json()["results"]] == [str(catalog.typeable)], (
+        forgiven.text
+    )
+    assert forgiven.json()["tier"] == "fuzzy"
+
+
+async def test_the_minimum_prefix_length_is_in_force_on_the_shipped_route(
+    client: AsyncClient, catalog: _Catalog
+) -> None:
+    """Three characters of a real prefix of a real seeded title, through the
+    real graph: an empty box and a `min_query_length` that says why.
+
+    The fourth character is what makes this a statement about the bound rather
+    than about the catalog -- the same title, one character further in, comes
+    back. Fails: the bound left in a unit fixture and never wired to the
+    shipped router, which every case in the unit file would still pass.
+    """
+    refused = await client.get("/search/suggest", params={"q": TYPED_PREFIX[:3]})
+    served = await client.get("/search/suggest", params={"q": TYPED_PREFIX[:4]})
+
+    assert refused.status_code == 200, refused.text
+    assert refused.json()["results"] == []
+    assert refused.json()["min_query_length"] == 4
+    assert [row["title_id"] for row in served.json()["results"]] == [str(catalog.typeable)], (
+        served.text
+    )
+
+
+async def test_a_blank_suggest_is_answered_without_touching_either_index(
+    client: AsyncClient,
+) -> None:
+    """200 with no results, which is the request a search box sends on every
+    backspace to zero. On tier 1 the query it replaces is `LIKE '%'` over
+    1,271,138 rows plus a 10.9M-row union, collected, de-duplicated and sorted
+    to answer a question nobody asked."""
+    for tier in ("prefix", "fuzzy"):
+        response = await client.get("/search/suggest", params={"q": "   ", "tier": tier})
+        assert response.status_code == 200, response.text
+        assert response.json() == {
+            "query": "   ",
+            "tier": tier,
+            "min_query_length": 4 if tier == "prefix" else 1,
+            "results": [],
+        }

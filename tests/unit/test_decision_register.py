@@ -70,3 +70,33 @@ def test_the_playback_ticket_adr_is_reachable_from_prd_07_and_from_adr_0012() ->
     target = "0029-the-playback-ticket-changes-the-artifact-not-the-grant.md"
     assert target in prd, "PRD 07's Playback section does not link ADR-0029"
     assert target in adr_0012, "ADR-0012 does not point at its own settled successor"
+
+
+def test_the_two_tier_suggest_adr_is_reachable_from_prd_05_and_from_adr_0002() -> None:
+    """ADR-0031 discharges the follow-up ADR-0002's failed typo-tolerance gate
+    opened, and the two documents disagree with each other unless both links
+    exist.
+
+    ADR-0002's consequence 2 says the btree probe is *"the only thing measured
+    that fits inside a keystroke"*, on a figure taken over whole mutated names.
+    ADR-0031 narrows exactly that sentence: at a one-character prefix the same
+    statement is 291 ms on `titles` alone and 2,707 ms over the union. **A
+    reader who reaches ADR-0002 and not ADR-0031 therefore comes away with a
+    claim this project has measured to be wrong at the short end** — which is
+    worse than an unlinked ADR generally is, and is why the link is asserted
+    rather than left to a register row.
+
+    The same holds one document over: PRD 05's autocomplete section carries the
+    two-tier prescription and the per-length curve, and a minimum prefix length
+    is the request-boundary decision that section explicitly defers to the ADR.
+
+    Kills writing ADR-0031 and leaving either link unwritten. Deliberately not
+    scoped to PRD 07 as well: that document's `GET /search/suggest` row names
+    the route, and the argument lives with the search subsystem.
+    """
+    prd_05 = (_DECISIONS.parent / "05-search-and-similarity.md").read_text()
+    adr_0002 = (_DECISIONS / "0002-postgres-first-search.md").read_text()
+
+    target = "0031-the-two-tier-suggest.md"
+    assert target in prd_05, "PRD 05's autocomplete section does not link ADR-0031"
+    assert target in adr_0002, "ADR-0002 does not point at the follow-up that discharges it"

@@ -78,6 +78,7 @@ from usher.services.curation_validate import (
     TITLE_KEY,
     DropReason,
 )
+from usher.services.search import SuggestTier
 
 # The blend these arranged rows claim to have been computed under. A literal,
 # never `blend_fingerprint()`: a case that inherits today's fingerprint cannot
@@ -682,15 +683,24 @@ async def test_search_says_no_match_rather_than_printing_nothing(
     assert "results=0" in printed
 
 
+@pytest.mark.parametrize("tier", [tier.value for tier in SuggestTier])
 async def test_suggest_finds_a_title_by_a_prefix_of_its_name(
-    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str]
+    cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str], tier: str
 ) -> None:
-    """The type-ahead path end to end through the real trigram index, and
-    with **no model loaded** -- `SuggestIndex` is its own port precisely
-    because this tier serves the whole catalog without one."""
+    """The type-ahead path end to end through the real indexes, and with **no
+    model loaded** -- `SuggestIndex` is its own port precisely because this
+    tier serves the whole catalog without one.
+
+    **Both tiers, because `build_pipeline` now constructs two of them and only
+    a real request can say that both resolved.** A `build_search_service` that
+    handed the trigram index to both slots passes every unit case in the
+    project -- the fakes are two objects either way -- and fails here only if
+    the statement each tier issues is really run against the real schema.
+    `PostgresPrefixSuggestIndex` reads `ix_titles_name_lower_prefix`, which
+    exists only because `m09a` shipped it."""
     title = _searchable("The Quiet Vacuum")
     await _seed_searchable(cli_settings, [title])
-    await _suggest(cli_settings, prefix="The Quiet Vacu", limit=5)
+    await _suggest(cli_settings, prefix="The Quiet Vacu", limit=5, tier=tier)
     printed = capsys.readouterr().out
     assert str(title.id) in printed, printed
 
@@ -727,7 +737,7 @@ async def test_every_search_command_prints_and_never_logs(
     try:
         for mode in ("full_text", "fused"):
             await _search(cli_settings, query="vacuum", mode=mode, limit=5, filters=SearchFilters())
-        await _suggest(cli_settings, prefix="quiet", limit=5)
+        await _suggest(cli_settings, prefix="quiet", limit=5, tier=SuggestTier.FUZZY.value)
         await _similar(cli_settings, title_id=new_id(), limit=5, rebuild=False)
     finally:
         logger.remove(handler)

@@ -38,7 +38,11 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
-from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
+from tests.fakes.search_index import (
+    FakePrefixSuggestIndex,
+    FakeSearchIndex,
+    FakeSuggestIndex,
+)
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
@@ -141,6 +145,7 @@ def _document(title: Title) -> SearchDocument:
 def _service(titles: FakeTitleRepository, index: FakeSearchIndex) -> SearchService:
     return SearchService(
         index,
+        FakePrefixSuggestIndex(),
         FakeSuggestIndex(),
         titles,
         FakeMediaItemRepository(),
@@ -201,6 +206,7 @@ async def test_the_mode_label_is_the_mode_that_ran(meter_reader: InMemoryMetricR
     await index.index_many([_document(title)])
     service = SearchService(
         index,
+        FakePrefixSuggestIndex(),
         FakeSuggestIndex(),
         titles,
         FakeMediaItemRepository(),
