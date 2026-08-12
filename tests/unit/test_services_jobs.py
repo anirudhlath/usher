@@ -13,11 +13,13 @@ the code that depends on it most.
 """
 
 import inspect
+import io
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from loguru import logger
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -162,6 +164,22 @@ class _Fixture:
 @pytest.fixture
 def fixture() -> _Fixture:
     return _Fixture()
+
+
+@pytest.fixture
+def errors() -> Iterator[io.StringIO]:
+    """Loguru at `ERROR` and above, for the cases whose claim is silence.
+
+    `logger.remove()` first, because loguru's default sink is stderr and
+    `logger.exception` writes a traceback there whether or not anything is
+    reading -- the same shape `tests/unit/test_composition.py::warnings` uses
+    one module over.
+    """
+    sink = io.StringIO()
+    logger.remove()
+    logger.add(sink, level="ERROR")
+    yield sink
+    logger.remove()
 
 
 @pytest.fixture
@@ -572,14 +590,23 @@ async def test_a_flush_that_raises_does_not_turn_a_completed_job_into_a_failed_o
     assert await fixture.worker.startup() == 0, "the job was left claimed rather than completed"
 
 
-async def test_a_worker_given_no_publisher_still_runs_a_handler_that_publishes(
-    fixture: _Fixture,
+async def test_a_worker_given_no_publisher_offers_into_a_null_one_and_says_nothing(
+    fixture: _Fixture, errors: io.StringIO
 ) -> None:
     """`usher work` as a separate process publishes to `NullEventPublisher`,
-    and the default here is the same one for the same reason: the six
-    composition sites that build a worker without an SSE bus must not each
-    remember to pass one, and a handler that publishes into `None` is an
-    `AttributeError` inside a job rather than a wiring error at build time.
+    and the default here is the same one for the same reason: a handler that
+    publishes into `None` is a failure inside a job rather than a wiring
+    error at build time.
+
+    **The silence is the assertion, and without it the case has no teeth.**
+    `flush` catches whatever a broken publisher raises, because it runs after
+    a commit it cannot undo -- so `DeferredEventPublisher(None)` completes
+    every job perfectly well and logs an `ERROR` per published event instead.
+    Measured: the default deleted, `run_once() == 1` and `startup() == 0` both
+    still hold, and the only difference is one line per enriched title in the
+    log of a deployment that has no SSE clients to tell. That is this
+    repository's ~17,280-lines-a-day shape arriving through an exception
+    handler, and `assert it did not raise` cannot see it.
     """
     queue = FakeJobQueue()
     worker = JobWorker(queue=queue, commit=fixture._commit)
@@ -592,6 +619,7 @@ async def test_a_worker_given_no_publisher_still_runs_a_handler_that_publishes(
 
     assert await worker.run_once() == 1
     assert await worker.startup() == 0, "the job was left claimed rather than completed"
+    assert errors.getvalue() == "", f"the flush had nothing to publish into: {errors.getvalue()}"
 
 
 # -- startup ----------------------------------------------------------------

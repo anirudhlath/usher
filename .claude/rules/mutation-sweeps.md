@@ -3563,3 +3563,81 @@ twenty-four files it finds scan `ports/`, `services/curation*`,
 `services/home_sequential.py`, `services/jobs.py`, `adapters/` and several
 `api/` modules, and **none of them reads `services/search.py`**; the one scan
 this task itself adds parses `services/home.py` and `services/rows/*.py`.
+
+## M9 G2's ledger — twelve killed, and the survivor that a `# type: ignore` bought
+
+**12 mutations, 12 killed; 2 equivalent-mutant controls surviving every gate
+step.** Run 2026-08-11 in place against a **committed** tree (the A6 rule
+above), each mutation against the selection `tests/unit/test_services_jobs.py
+tests/unit/test_services_events.py tests/unit/test_composition.py
+tests/contract tests/integration/test_sse_end_to_end.py` — 99 cases, baseline
+green before and restored green after, every restore verified by md5 rather
+than by the suite. `PYTHONDONTWRITEBYTECODE=1` throughout (the one-second
+`.pyc` collision), `compile()` rather than `ast.parse` as the dry run, and
+`usher.services.jobs.__file__` asserted to resolve under **this** worktree
+before every run — a worktree-parallel milestone is exactly where a `uv run`
+reaching another checkout produces a complete, plausible, wrong result.
+
+**Two of the fourteen did not kill on the first spelling, and neither was a
+coverage gap.**
+
+🔴 **"Flush per batch instead of per job" spelled as an *added* flush after the
+loop is a no-op, and it read as a survivor.** `_run`'s `finally` discards, so
+the buffer is empty by the time `run_once`'s loop ends and a second flush there
+publishes nothing. The mutation the plan names is the flush **moved** — deleted
+from `_run` along with the `discard`, added after the loop — which is two hunks
+and fails **4** cases. Third instance of the recorded rule *a mutation must be
+the change the plan names, not a change that happens to break the statement*,
+and the first where the wrong spelling was an *addition* rather than a
+replacement: an added call to an idempotent method is the shape most likely to
+score a false survivor, because it is syntactically clean and semantically
+nothing.
+
+🔴 **The real survivor was `DeferredEventPublisher(events)` with the `None`
+default deleted, and it survived because `flush` catches.** The buffer holds
+fine, `flush` reaches `None.publish(...)`, the `except Exception` that exists
+so a broken publisher cannot un-complete a finished job swallows the
+`AttributeError`, and the job completes — `run_once() == 1` and `startup() ==
+0` both hold. The damage is one `ERROR` line per published event, forever, in
+a deployment with no SSE clients: this repository's ~17,280-lines-a-day shape
+arriving *through* an exception handler. **A guard written so a caller cannot
+fail is a guard that hides the caller's own wiring defect, and `assert it did
+not raise` is structurally unable to see it.** Closed by an arm asserting
+loguru at `ERROR` recorded nothing, which kills it naming only that case.
+
+And it is a clean instance of CLAUDE.md's careless/careful rule, measured both
+ways: the **careless** spelling dies on `mypy` (*Argument 1 to
+"DeferredEventPublisher" has incompatible type "EventPublisher | None"*), so
+only the spelling carrying `# type: ignore[arg-type]` reaches the suite at all.
+The gate catches the version nobody would write.
+
+**The twelve, and what each fails.** The four the plan named as headline
+targets are the first four.
+
+| mutation | fails |
+|---|---|
+| flush before `complete()` | 3, across all three levels — the unit interleaving, the composition wiring case, and the SSE case on `jobs_seen` |
+| flush on the `_fail` path | 2 |
+| flush per batch (moved, see above) | 4 |
+| `finally: discard()` deleted | 1 — `test_a_crashing_handlers_event_is_not_offered_on_the_next_jobs_commit` |
+| `build_worker` hands `pipeline.events` to `build_enrich_service` | 2 — the composition case and the SSE case; **no unit case of `JobWorker` can see it**, which is why that composition case exists |
+| `JobWorker.events` returns `self._events._inner` | 8 |
+| `publish` delivers to the inner publisher instead of holding | 12, the largest blast radius |
+| `flush` does not take the list before delivering (never empties) | 2 |
+| `discard` is a no-op | 2 |
+| `flush` delivers `reversed(held)` | 2 |
+| `flush` re-raises after logging | 2 |
+| the `None` default deleted (above) | 1 |
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | selection |
+|---|---|---|---|---|---|
+| C1 `DeferredEventPublisher(events or NullEventPublisher())` | PASS | PASS | PASS | PASS | PASS (99) |
+| C2 `flush`'s tuple swap as two statements | PASS | PASS | PASS | PASS | PASS (99) |
+
+C1 is equivalent **today and for a stated reason rather than by inspection**:
+no `EventPublisher` in `src/` or `tests/` defines `__bool__` or `__len__`, so
+every instance is truthy and `or` and `is None` cannot disagree. It is the
+`isinstance`-not-`getattr` shape D9 recorded, one operator over — the day an
+implementation grows a `__len__`, an empty one silently becomes a
+`NullEventPublisher`. Deliberately not an `__all__` or `__slots__` reorder:
+ruff `RUF022` and `RUF023` reject both, which makes them careless spellings.
