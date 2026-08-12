@@ -14,9 +14,11 @@ deployment with no TMDb key produced a `WARNING` every `IDLE_SLEEP_SECONDS`
 that the information is still surfaced rather than merely quieted.
 """
 
+import ast
 import inspect
 import io
 import os
+import pathlib
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime
@@ -28,6 +30,7 @@ from loguru import logger
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+import usher
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.curated_row_repository import FakeCuratedRowRepository
@@ -61,12 +64,12 @@ from usher.config import Settings
 from usher.domain.curation import LLMPurpose
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
-from usher.domain.jobs import JobKind, JobStatus
+from usher.domain.jobs import JobKind, JobPriority, JobStatus
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.embedding import Embedder
 from usher.ports.errors import PortUnavailable
-from usher.ports.events import NullEventPublisher
+from usher.ports.events import ClientEvent, EventPublisher, NullEventPublisher
 from usher.ports.ingest import MediaItemUpsert, WatchStateWrite
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.repository import (
@@ -104,6 +107,7 @@ def _pipeline_over_fakes(
     watch_states: WatchStateRepository | None = None,
     media_items: MediaItemRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
+    events: EventPublisher | None = None,
 ) -> Pipeline:
     """A `Pipeline` carrying the fields `build_worker`'s factories read.
 
@@ -175,7 +179,7 @@ def _pipeline_over_fakes(
         ),
         row_providers=ROW_PROVIDERS,
         row_provider_settings=FakeRowProviderSettingsRepository(),
-        events=NullEventPublisher(),
+        events=NullEventPublisher() if events is None else events,
         commit=settled,
     )
 
@@ -321,10 +325,105 @@ async def test_the_enrich_service_enqueues_into_the_pipelines_own_queue() -> Non
     queue = FakeJobQueue()
     pipeline = _pipeline_over_fakes(titles=titles, queue=queue)
 
-    service = build_enrich_service(pipeline, _settings(), FakeMetadataProvider())
+    service = build_enrich_service(
+        pipeline, _settings(), FakeMetadataProvider(), events=NullEventPublisher()
+    )
     await service.enrich(title.id)
 
     assert (await queue.depth())[JobKind.INDEX] == 1
+
+
+async def test_the_worker_offers_an_enrichments_frame_after_the_jobs_own_commit() -> None:
+    """[ADR-0033](../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)
+    through the real wiring, which is the half `tests/unit/test_services_jobs.py`
+    cannot make.
+
+    That file pins `JobWorker`'s buffer against a handler written for it;
+    this one asserts the *decision* `build_worker` makes -- that the
+    `EnrichService` it constructs is handed `worker.events` rather than
+    `pipeline.events`. The two are indistinguishable from inside either
+    module: a worker that buffers correctly and a factory that hands the
+    bare bus past it publishes exactly as it does today, and every case in
+    both files stays green.
+
+    Driven through `run_once` rather than by reading a private attribute off
+    the service, for the reason
+    `test_the_enrich_service_enqueues_into_the_pipelines_own_queue` states
+    above it: the claim is about what a running deployment does.
+    """
+    log: list[str] = []
+
+    class _Bus(NullEventPublisher):
+        async def publish(self, event: ClientEvent) -> None:
+            log.append("publish")
+
+    async def _commit() -> None:
+        log.append("commit")
+
+    titles = FakeTitleRepository()
+    title = Title(
+        kind=TitleKind.MOVIE,
+        tmdb_id=90000550,
+        name="The Quiet Vacuum",
+        sort_name="quiet vacuum, the",
+        enrichment_state=EnrichmentState.STUB,
+    )
+    await titles.add(title)
+    queue = FakeJobQueue()
+    await queue.enqueue(
+        [JobRequest(kind=JobKind.ENRICH, key=str(title.id), priority=JobPriority.DEMAND)]
+    )
+    pipeline = _pipeline_over_fakes(titles=titles, queue=queue, commit=_commit, events=_Bus())
+
+    worker = build_worker(
+        pipeline,
+        _settings(),
+        provider=FakeMetadataProvider(),
+        embedder=None,
+        client=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+    assert await worker.run_once() == 1
+
+    assert log.count("publish") == 1, f"the enrichment published {log.count('publish')} frames"
+    assert log[-1] == "publish", f"the frame was offered mid-job: {log}"
+    assert log[-2] == "commit", f"nothing was committed between the handler and the frame: {log}"
+
+
+def test_only_the_worker_defers_and_the_push_and_reconcile_lanes_do_not() -> None:
+    """The push and reconcile lanes publish as they go, and that is a
+    decision rather than an omission.
+
+    Neither is a job: each commits its own subject before it publishes
+    (`push.py:170` and `:275`, `reconcile.py:245`), so both already satisfy
+    ADR-0033's stronger form with no buffer at all -- and a `sync.progress`
+    frame held behind a 1,127-batch walk turns a progress bar into a single
+    jump at the end.
+
+    **Structural, because the defect is an absence and no lane's output can
+    show it.** "Published as it went" and "published at the end" are the same
+    list of frames in the same order; only a second commit boundary
+    distinguishes them, and a lane has none to hang the assertion on. So the
+    claim asserted is the one that can be: a `DeferredEventPublisher` is
+    constructed in exactly one place in `src/`, inside `JobWorker`, and no
+    composition root can acquire one for a lane by wrapping something.
+
+    Carries its own premise, because a scan that resolves nothing passes
+    exactly like a scan that passes.
+    """
+    root = pathlib.Path(usher.__file__).parent
+    sites = sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "DeferredEventPublisher"
+    )
+
+    assert sites, "the scan found no construction at all; it would pass over an empty tree"
+    assert sites == ["services/jobs.py"], f"a second lane wraps its publisher: {sites}"
 
 
 async def test_no_embedder_configured_degrades_rather_than_raising(

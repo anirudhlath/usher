@@ -43,7 +43,9 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 from usher.domain.jobs import Job, JobKind
 from usher.ports.errors import PortDataMalformed, PortRateLimited, UsherPortError
+from usher.ports.events import EventPublisher, NullEventPublisher
 from usher.ports.jobs import JobQueue
+from usher.services.events import DeferredEventPublisher
 
 Handler = Callable[[Job], Awaitable[None]]
 
@@ -61,12 +63,29 @@ class JobWorker:
         queue: JobQueue,
         commit: Callable[[], Awaitable[None]],
         *,
+        events: EventPublisher | None = None,
         batch_size: int = 20,
     ) -> None:
         self._queue = queue
         self._commit = commit
         self._batch_size = batch_size
         self._handlers: dict[JobKind, Handler] = {}
+        self._events = DeferredEventPublisher(NullEventPublisher() if events is None else events)
+
+    @property
+    def events(self) -> EventPublisher:
+        """The publisher every service this worker's handlers reach must hold.
+
+        Not the one this worker was constructed with -- the buffer wrapped
+        around it. A handler holding the bare publisher would offer its
+        frames from inside `_run`, which is
+        [ADR-0033](../../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)'s
+        residual window, and the rule would be back to five hand-written
+        comments. `composition.build_worker` hands *this* to every service it
+        builds, and the wrapping happening here rather than there is what
+        leaves one construction site in `src/` instead of one per lane.
+        """
+        return self._events
 
     def register(self, kind: JobKind, handler: Handler) -> None:
         self._handlers[kind] = handler
@@ -133,18 +152,35 @@ class JobWorker:
             span.set_attribute("usher.job.key", job.key)
             span.set_attribute("usher.job.attempts", job.attempts)
             try:
-                await self._handlers[job.kind](job)
-            except PortDataMalformed as exc:
-                span.set_attribute("usher.job.parked", True)
-                await self._fail(job, exc, retryable=False)
-            except UsherPortError as exc:
-                await self._fail(job, exc, retryable=True)
-            else:
-                await self._queue.complete(job.id)
-                # Per job, not per batch: a crash nineteen jobs into twenty
-                # must not re-run the nineteen. Redelivery is safe by
-                # construction (PRD 08), but doing it for free is not.
-                await self._commit()
+                try:
+                    await self._handlers[job.kind](job)
+                except PortDataMalformed as exc:
+                    span.set_attribute("usher.job.parked", True)
+                    await self._fail(job, exc, retryable=False)
+                except UsherPortError as exc:
+                    await self._fail(job, exc, retryable=True)
+                else:
+                    await self._queue.complete(job.id)
+                    # Per job, not per batch: a crash nineteen jobs into twenty
+                    # must not re-run the nineteen. Redelivery is safe by
+                    # construction (PRD 08), but doing it for free is not.
+                    await self._commit()
+                    # ADR-0033, and it is the last thing that happens: every
+                    # write this unit of work made -- the handler's own, the
+                    # `BACKFILL` requests it staged, and the `DELETE` that
+                    # completed the job -- is committed above, so a client
+                    # told now can refetch anything the frame names. Before
+                    # `complete()` it could not: the two enqueues and the
+                    # completion were still open on this session.
+                    await self._events.flush()
+            finally:
+                # The clear between jobs, and it is here rather than on the
+                # two `except` arms because a bug that is not a
+                # `UsherPortError` propagates past both by design. Without
+                # it a crashed job's frames wait in the buffer until the
+                # *next* successful job flushes them -- on a worker built
+                # once per process and polling for days.
+                self._events.discard()
         _job_duration.record(time.perf_counter() - started, {"kind": job.kind.value})
 
     async def _fail(self, job: Job, exc: UsherPortError, *, retryable: bool) -> None:

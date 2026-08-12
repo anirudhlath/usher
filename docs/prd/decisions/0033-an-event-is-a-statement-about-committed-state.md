@@ -1,6 +1,8 @@
 # ADR-0033 — An event is a statement about committed state
 
-**Status:** Accepted. Measured in M9 (G1); made structural by M9 (G2).
+**Status:** Accepted. Measured in M9 (G1); made structural by M9 (G2), which
+shipped `services/events.DeferredEventPublisher` and moved the flush in
+`JobWorker._run` to after `complete()` and its commit.
 
 ## Context
 
@@ -70,9 +72,20 @@ committed state inside a window where the code has not yet produced it.
    table.** A transactional outbox is the durability answer to a different
    question; a reader who arrives at one from this ADR has re-invented what
    M9 group G explicitly refused.
-3. The rule is made **structural** rather than conventional — G2's subject.
-   It is conventional today: five sites, five hand-written comments arguing
-   for the same ordering, and nothing that fails when a sixth author omits it.
+3. The rule is made **structural** rather than conventional — G2's subject,
+   shipped. It was conventional: five sites, five hand-written comments arguing
+   for the same ordering, and nothing that failed when a sixth author omitted
+   it. It is now a property of `JobWorker`. A worker holds a
+   `DeferredEventPublisher` wrapping whatever publisher it was built with;
+   `composition.build_worker` hands **that** to every service it constructs
+   (`build_enrich_service` takes `events` as a required keyword rather than
+   reading `pipeline.events`, which is why the change is visible in a
+   signature); `_run` flushes it after `complete()` and `_commit()`, and
+   discards it in a `finally`. **A handler that publishes writes no line to
+   get the ordering, and a handler that fails cannot keep it.**
+   The rule stops at the worker: the push and reconcile lanes are not jobs,
+   already satisfy the stronger form, and a `sync.progress` frame held behind
+   a 1,127-batch walk would turn a progress bar into a single jump.
 
 ## Consequences
 
@@ -150,3 +163,21 @@ Measured 2026-08-11 in the M9 `G1` worktree, against a real
   `services/events.py`'s module docstring and
   [ADR-0019](0019-the-client-event-channel-is-a-port.md) both already say — so
   it was one file disagreeing with two.
+
+**G2, 2026-08-11 — the same probe, after the change.** The residual window's
+contents are the evidence in both directions, read on a second connection at
+the instant of the frame by
+`test_sse_end_to_end.py::_CommittedStateProbe`:
+
+| | `jobs` rows visible at the frame |
+|---|---|
+| before | `[('enrich', 'running')]` |
+| after | `[('derive', 'pending'), ('index', 'pending')]` |
+
+The claim is gone because the `DELETE` that completes the job committed, and
+the two `BACKFILL` requests are there because they rode the same transaction.
+`_job_xmin_settles` — the bounded poll G1 introduced *because* this assertion
+raced the completing commit, failing 6 runs in 13 unplanted and 5 of 5 with a
+0.25 s delay planted — is **deleted**, and the case reads `_job_xmin` once.
+That single read is the cheapest available proof the ordering is now
+structural: it is the assertion that could not be made before.

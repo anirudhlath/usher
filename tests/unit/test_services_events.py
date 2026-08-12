@@ -34,8 +34,8 @@ from tests.contract.event_publisher_contract import (
     EventPublisherContract,
     publish_all,
 )
-from usher.ports.events import ClientEvent, ClientEventKind
-from usher.services.events import InMemoryEventBus
+from usher.ports.events import ClientEvent, ClientEventKind, NullEventPublisher
+from usher.services.events import DeferredEventPublisher, InMemoryEventBus
 
 # Enough publishes that the window they occupy is measurable against a
 # monotonic clock rather than being rounded to zero, and enough that a
@@ -318,6 +318,185 @@ async def test_replay_does_not_redeliver_what_the_queue_already_holds() -> None:
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(anext(iterator), timeout=0.05)
     assert [first.event.data["seen"], second.event.data["seen"]] == [1, 2]
+
+
+# -- the deferring publisher (ADR-0033) --------------------------------------
+
+
+async def test_a_deferred_publish_reaches_the_inner_publisher_only_on_the_flush() -> None:
+    """The ordering, at the smallest scale that can state it.
+
+    `tests/unit/test_services_jobs.py` asserts the interleaving against a
+    real `JobWorker`; this asserts the same property of the object, so a
+    worker that stopped calling `flush` and a publisher that delivered
+    eagerly are two failures rather than one.
+    """
+    offered: list[ClientEvent] = []
+
+    class _Counting(NullEventPublisher):
+        async def publish(self, event: ClientEvent) -> None:
+            offered.append(event)
+
+    deferred = DeferredEventPublisher(_Counting())
+
+    await deferred.publish(_event(1))
+
+    assert deferred.held == 1
+    assert offered == [], "the inner publisher was reached before the flush"
+
+    await deferred.flush()
+
+    assert [event.data["seen"] for event in offered] == [1]
+    assert deferred.held == 0, "the flush delivered and did not let go"
+
+
+async def test_a_flush_offers_what_was_held_in_the_order_it_was_raised() -> None:
+    """`title.updated` then `watchstate.updated` is a client patching a card
+    and then its progress; the reverse is a progress bar on a card that has
+    not been rewritten yet. The port promises order *within* one subscriber's
+    stream, and a buffer is a place to lose it."""
+    bus = InMemoryEventBus()
+    deferred = DeferredEventPublisher(bus)
+    async with bus.subscribe() as stream:
+        for index in range(5):
+            await deferred.publish(_event(index))
+        await deferred.flush()
+        iterator = aiter(stream)
+        seen = [
+            (await asyncio.wait_for(anext(iterator), timeout=1.0)).event.data["seen"]
+            for _ in range(5)
+        ]
+    assert seen == [0, 1, 2, 3, 4]
+
+
+async def test_a_discard_offers_nothing_and_a_later_flush_offers_nothing_either() -> None:
+    """Both halves, because a `discard` that only marked the buffer would
+    pass the first and re-deliver a rolled-back job's frames on the next
+    job's commit -- which is the defect, one caller up."""
+    bus = InMemoryEventBus()
+    deferred = DeferredEventPublisher(bus)
+    async with bus.subscribe() as stream:
+        await deferred.publish(_event(1))
+        assert deferred.held == 1, "nothing was held; the discard below drops nothing"
+
+        deferred.discard()
+        await deferred.flush()
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(anext(aiter(stream)), timeout=0.05)
+    assert deferred.held == 0
+
+
+async def test_a_flush_that_meets_a_raising_publisher_still_empties_the_buffer() -> None:
+    """`publish` never raises is the port's contract, so this is a case about
+    an implementation breaking it -- and the caller is `JobWorker`, on a path
+    where the job is already complete and committed and there is nothing left
+    to undo.
+
+    The second frame is what makes it more than "it did not raise": a flush
+    that abandoned the loop on the first failure would hold the rest until
+    the next job's commit, which is the same cross-job delivery `discard`
+    exists to prevent.
+    """
+    offered: list[ClientEvent] = []
+
+    class _Breaking(NullEventPublisher):
+        async def publish(self, event: ClientEvent) -> None:
+            offered.append(event)
+            raise RuntimeError("a subscriber transport blew up")
+
+    deferred = DeferredEventPublisher(_Breaking())
+    await deferred.publish(_event(1))
+    await deferred.publish(_event(2))
+
+    await deferred.flush()
+
+    assert [event.data["seen"] for event in offered] == [1, 2]
+    assert deferred.held == 0
+
+
+async def test_a_deferred_publish_is_not_a_suspension_point_either() -> None:
+    """The whole reason `publish` is an `append`.
+
+    Driven one step by hand rather than timed, for the reason the module
+    docstring gives: the mutation this rules out -- delivering to the inner
+    publisher from `publish` -- would inherit whatever *that* publisher does,
+    and the named second implementation of the port is a `LISTEN/NOTIFY`
+    transport that genuinely awaits a connection. A buffer in front of it
+    that awaited too would put a database round trip inside an enrichment.
+    """
+    deferred = DeferredEventPublisher(_Suspending())
+
+    assert _one_step(deferred.publish(_event(1)))
+
+
+async def test_a_flush_with_nothing_held_offers_nothing() -> None:
+    """`JobWorker` flushes after every completed job and most handlers
+    publish nothing at all -- `match`, `derive`, `index`, `curate` and
+    `watch_writeback` are five of the seven kinds. A flush that offered a
+    sentinel, or re-offered the last job's frames, would wake every
+    subscriber on the box once per claimed job."""
+    offered: list[ClientEvent] = []
+
+    class _Counting(NullEventPublisher):
+        async def publish(self, event: ClientEvent) -> None:
+            offered.append(event)
+
+    deferred = DeferredEventPublisher(_Counting())
+
+    await deferred.flush()
+
+    assert offered == []
+
+
+class _Suspending(NullEventPublisher):
+    """A publisher that parks, standing in for the `LISTEN/NOTIFY` transport
+    `ports/events.py` names as the second implementation."""
+
+    async def publish(self, event: ClientEvent) -> None:
+        await asyncio.sleep(0)
+
+
+class TestDeferredEventPublisher(EventPublisherContract):
+    """The port's own guarantees, run against the buffer.
+
+    `EventBusContract` is deliberately not inherited: a `DeferredEventPublisher`
+    has no subscribers, and a suite it "passed" by having nothing to check
+    would ratify a publisher that never delivered -- which is the same
+    argument `event_publisher_contract.py` makes for `FakeEventPublisher`.
+
+    The inner publisher is a real bus with a subscriber that never reads
+    (below), so the burst case walks the overflow branch on the flush rather
+    than being answered by a buffer that swallowed everything.
+    """
+
+    @pytest.fixture
+    def bus(self) -> InMemoryEventBus:
+        return InMemoryEventBus()
+
+    @pytest.fixture
+    def publisher(self, bus: InMemoryEventBus) -> DeferredEventPublisher:
+        return DeferredEventPublisher(bus)
+
+    @pytest.fixture(autouse=True)
+    async def _one_subscriber_that_never_reads(self, bus: InMemoryEventBus) -> AsyncIterator[None]:
+        async with bus.subscribe():
+            yield
+
+    @pytest.fixture(autouse=True)
+    async def _flush_whatever_the_case_held(
+        self, publisher: DeferredEventPublisher
+    ) -> AsyncIterator[None]:
+        """Every contract case ends with a flush, bounded.
+
+        Without it the shared suite measures the `append` and nothing else --
+        `test_publish_never_raises_for_a_subscriber_that_cannot_keep_up`
+        would be a list of 1,000 items growing, which no implementation can
+        fail. With it the burst reaches a real subscriber's full queue and
+        the case means what it says on the bus.
+        """
+        yield
+        await asyncio.wait_for(publisher.flush(), timeout=_BOUND_SECONDS)
 
 
 class TestInMemoryEventBus(EventPublisherContract, EventBusContract):

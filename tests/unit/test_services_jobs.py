@@ -26,9 +26,61 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from tests.fakes.job_queue import FakeJobQueue
 from usher.domain.jobs import Job, JobKind, JobPriority, JobStatus
 from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable, UsherPortError
+from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.jobs import JobRequest
 from usher.services.jobs import JobWorker, _links_for
 from usher.telemetry import current_traceparent
+
+
+class _RecordingPublisher(EventPublisher):
+    """The bus's stand-in, writing into the same log the commits do.
+
+    One shared list rather than a counter beside a counter, for `_Fixture`'s
+    own reason: ADR-0033 is a rule about *ordering*, and "one publish, one
+    commit" is what both orders produce.
+    """
+
+    def __init__(self, log: list[str]) -> None:
+        self._log = log
+        self.offered: list[ClientEvent] = []
+        self.raises: BaseException | None = None
+
+    async def publish(self, event: ClientEvent) -> None:
+        self._log.append("publish")
+        self.offered.append(event)
+        if self.raises is not None:
+            raise self.raises
+
+
+class _RecordingQueue(FakeJobQueue):
+    """`FakeJobQueue`, plus a note in the shared log at each completion.
+
+    The interleaving is `complete -> commit -> publish`, and the completion
+    is the one of the three the *queue* owns -- so without this the case
+    could only assert that a publish came after some commit, which is also
+    what a flush before `complete()` produces.
+    """
+
+    def __init__(self, log: list[str], *, max_attempts: int, backoff_seconds: float) -> None:
+        super().__init__(max_attempts=max_attempts, backoff_seconds=backoff_seconds)
+        self._log = log
+
+    async def complete(self, job_id: uuid.UUID) -> None:
+        self._log.append("complete")
+        await super().complete(job_id)
+
+    async def fail(
+        self,
+        job_id: uuid.UUID,
+        *,
+        error: str,
+        retryable: bool,
+        retry_after_seconds: float | None = None,
+    ) -> Job | None:
+        self._log.append("fail")
+        return await super().fail(
+            job_id, error=error, retryable=retryable, retry_after_seconds=retry_after_seconds
+        )
 
 
 class _Fixture:
@@ -42,10 +94,17 @@ class _Fixture:
     """
 
     def __init__(self, *, batch_size: int = 20, max_attempts: int = 5) -> None:
-        self.queue = FakeJobQueue(max_attempts=max_attempts, backoff_seconds=1.0)
         self.log: list[str] = []
+        self.queue = _RecordingQueue(self.log, max_attempts=max_attempts, backoff_seconds=1.0)
         self.handled: list[Job] = []
-        self.worker = JobWorker(queue=self.queue, commit=self._commit, batch_size=batch_size)
+        self.bus = _RecordingPublisher(self.log)
+        #: Every event a handler in this fixture handed to `worker.events`.
+        #: The premise for every assertion about what was *not* offered: an
+        #: absence read out of a handler that published nothing is vacuous.
+        self.raised: list[ClientEvent] = []
+        self.worker = JobWorker(
+            queue=self.queue, commit=self._commit, events=self.bus, batch_size=batch_size
+        )
         self.worker.register(JobKind.ENRICH, self._handle)
 
     async def _commit(self) -> None:
@@ -60,6 +119,27 @@ class _Fixture:
             self.log.append(f"handle:{job.key}")
             self.handled.append(job)
             raise exc
+
+        return _handler
+
+    def publishing(
+        self, *, failing: BaseException | None = None
+    ) -> Callable[[Job], Awaitable[None]]:
+        """A handler that raises a client event the way `EnrichService` does.
+
+        Through `worker.events` and never through a publisher of its own,
+        because that is the wiring `composition.build_worker` makes: the
+        publisher a handler's service holds *is* the worker's.
+        """
+
+        async def _handler(job: Job) -> None:
+            self.log.append(f"handle:{job.key}")
+            self.handled.append(job)
+            event = ClientEvent(kind=ClientEventKind.TITLE_UPDATED, data={"job": job.key})
+            await self.worker.events.publish(event)
+            self.raised.append(event)
+            if failing is not None:
+                raise failing
 
         return _handler
 
@@ -149,16 +229,25 @@ async def test_the_claim_is_committed_before_the_work_starts(fixture: _Fixture) 
 async def test_each_job_is_committed_as_it_finishes(fixture: _Fixture) -> None:
     """Per job, not per batch. A crash nineteen jobs into twenty must not
     re-run the nineteen -- redelivery is safe by construction, but paying for
-    it when the alternative is free is not."""
+    it when the alternative is free is not.
+
+    The `complete` entries are the queue's, added when this fixture grew an
+    ordering claim about the *completion* (ADR-0033); they pin the second
+    half of "committed as it finishes", which is that the commit follows the
+    completion rather than merely following the handler.
+    """
     await fixture.given("t1", "t2", "t3")
     await fixture.worker.run_once()
     assert fixture.log == [
         "commit",
         "handle:t1",
+        "complete",
         "commit",
         "handle:t2",
+        "complete",
         "commit",
         "handle:t3",
+        "complete",
         "commit",
     ]
 
@@ -337,6 +426,172 @@ async def test_a_claim_requeued_out_from_under_the_worker_does_not_crash(
     await fixture.given("t1")
     assert await fixture.worker.run_once() == 1
     assert await fixture.queue.parked() == []
+
+
+# -- ADR-0033: an event is offered after the job's own commit ----------------
+
+
+async def test_an_event_a_handler_raised_is_not_offered_until_the_completion_is_committed(
+    fixture: _Fixture,
+) -> None:
+    """[ADR-0033](../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md),
+    made a property of the worker rather than of each handler.
+
+    `EnrichService` commits its own title before it publishes and five
+    hand-written comments across three services argue for the same ordering
+    -- but the transaction still open at the instant of an `enrich` frame is
+    **`JobWorker`'s**, holding the two `BACKFILL` enqueues the handler staged
+    and the `DELETE` that completes the job. Buffering here is the only
+    spelling under which *"the client was told"* implies *"every write this
+    unit of work made landed"*, and it is the spelling nothing can forget:
+    a sixth handler that publishes gets the ordering without writing a line.
+
+    **An interleaving, never a membership check.** `publish in log` and
+    `len(offered) == 1` are both satisfied by the order this case exists to
+    forbid. Before the buffer the same fixture recorded
+    `[..., "handle:t1", "publish", "complete", "commit"]`.
+    """
+    fixture.worker.register(JobKind.ENRICH, fixture.publishing())
+    await fixture.given("t1")
+
+    await fixture.worker.run_once()
+
+    assert fixture.raised, "the handler published nothing; nothing below measures anything"
+    assert fixture.log == ["commit", "handle:t1", "complete", "commit", "publish"]
+    assert fixture.bus.offered == fixture.raised
+
+
+async def test_a_job_that_failed_offers_nothing(fixture: _Fixture) -> None:
+    """The twin, written in the same commit as the case above.
+
+    A buffer that flushed on both paths passes that one and is precisely the
+    bug the buffer exists to prevent: the handler's writes rolled back with
+    the job, so a frame telling a client to refetch names a change that never
+    happened -- and the retry publishes a second one.
+
+    **The premise first.** An assertion that nothing was offered is vacuous
+    against a handler that raised nothing, which is the shape a probe that
+    never ran already took once in this milestone.
+    """
+    fixture.worker.register(
+        JobKind.ENRICH, fixture.publishing(failing=PortUnavailable("upstream is down"))
+    )
+    await fixture.given("t1")
+
+    await fixture.worker.run_once()
+
+    assert fixture.raised, "the handler published nothing; the absence below is vacuous"
+    assert fixture.bus.offered == []
+    assert fixture.log == ["commit", "handle:t1", "fail", "commit"]
+
+
+async def test_a_parked_job_offers_nothing_either(fixture: _Fixture) -> None:
+    """`PortDataMalformed` takes the other `except` arm, and an arm added to
+    one and not the other is exactly the drift `_settle` was collapsed to
+    prevent one service over. Two arms, two cases."""
+    fixture.worker.register(
+        JobKind.ENRICH, fixture.publishing(failing=PortDataMalformed("TMDb returned a list"))
+    )
+    await fixture.given("t1")
+
+    await fixture.worker.run_once()
+
+    assert fixture.raised, "the handler published nothing; the absence below is vacuous"
+    assert fixture.bus.offered == []
+    assert [job.key for job in await fixture.queue.parked()] == ["t1"]
+
+
+async def test_the_buffer_is_per_job_and_not_per_pass(fixture: _Fixture) -> None:
+    """A batch of two, the first succeeding and the second failing, offers
+    exactly the first job's events.
+
+    `_run` sits inside `for job in claimed:` deliberately, and a flush hoisted
+    to the end of `run_once` would publish the failed job's frame alongside
+    the successful one's -- invisible to every case that claims one job.
+    """
+    succeeding = fixture.publishing()
+    failing = fixture.publishing(failing=PortUnavailable("upstream is down"))
+
+    async def _handle(job: Job) -> None:
+        await (failing if job.key == "t2" else succeeding)(job)
+
+    fixture.worker.register(JobKind.ENRICH, _handle)
+    await fixture.given("t1", "t2")
+
+    assert await fixture.worker.run_once() == 2
+
+    assert [event.data["job"] for event in fixture.raised] == ["t1", "t2"]
+    assert [event.data["job"] for event in fixture.bus.offered] == ["t1"]
+
+
+async def test_a_crashing_handlers_event_is_not_offered_on_the_next_jobs_commit(
+    fixture: _Fixture,
+) -> None:
+    """The clear between jobs, which no flush-ordering case can see.
+
+    A bug that is not a `UsherPortError` propagates out of `_run` by design,
+    so neither `except` arm runs -- and a buffer emptied only by those two
+    keeps the crashed job's frame until the *next* successful job flushes it,
+    on a worker that is built once per process (`usher work`) and lives for
+    days. Two passes, because one cannot tell "dropped" from "not yet
+    offered".
+    """
+    fixture.worker.register(JobKind.ENRICH, fixture.publishing(failing=ZeroDivisionError("bug")))
+    await fixture.given("t1")
+    with pytest.raises(ZeroDivisionError):
+        await fixture.worker.run_once()
+    assert fixture.raised, "the crashing handler published nothing; this case measures nothing"
+
+    fixture.worker.register(JobKind.ENRICH, fixture.publishing())
+    await fixture.given("t2")
+    await fixture.worker.run_once()
+
+    assert [event.data["job"] for event in fixture.bus.offered] == ["t2"]
+
+
+async def test_a_flush_that_raises_does_not_turn_a_completed_job_into_a_failed_one(
+    fixture: _Fixture,
+) -> None:
+    """`EventPublisher.publish` never raises -- *contract*, and a contract is
+    what an implementation can break.
+
+    The buffer is a new caller of `publish` on a path where the job is
+    already complete and committed, so a publisher that broke the contract
+    would take a finished job's `run_once` down with it and, on the worker
+    lane, log a pass failure for a pass that succeeded.
+    """
+    fixture.bus.raises = RuntimeError("a subscriber transport blew up")
+    fixture.worker.register(JobKind.ENRICH, fixture.publishing())
+    await fixture.given("t1")
+
+    assert await fixture.worker.run_once() == 1
+
+    assert fixture.bus.offered == fixture.raised, "the flush never reached the publisher"
+    assert (await fixture.queue.depth())[JobKind.ENRICH] == 0
+    assert await fixture.queue.parked() == []
+    assert await fixture.worker.startup() == 0, "the job was left claimed rather than completed"
+
+
+async def test_a_worker_given_no_publisher_still_runs_a_handler_that_publishes(
+    fixture: _Fixture,
+) -> None:
+    """`usher work` as a separate process publishes to `NullEventPublisher`,
+    and the default here is the same one for the same reason: the six
+    composition sites that build a worker without an SSE bus must not each
+    remember to pass one, and a handler that publishes into `None` is an
+    `AttributeError` inside a job rather than a wiring error at build time.
+    """
+    queue = FakeJobQueue()
+    worker = JobWorker(queue=queue, commit=fixture._commit)
+
+    async def _handler(job: Job) -> None:
+        await worker.events.publish(ClientEvent(kind=ClientEventKind.TITLE_UPDATED))
+
+    worker.register(JobKind.ENRICH, _handler)
+    await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+
+    assert await worker.run_once() == 1
+    assert await worker.startup() == 0, "the job was left claimed rather than completed"
 
 
 # -- startup ----------------------------------------------------------------
