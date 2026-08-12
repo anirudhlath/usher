@@ -1029,7 +1029,7 @@ suspicion.
   matter more than the rate. **The failing run had `ruff`, `mypy` and
   `lint-imports` executing concurrently in another shell and the clean re-run
   did not** — which is one more datum consistent with load and is *still* not a
-  mechanism, exactly as the last four attempts to explain a flake in this
+  mechanism, exactly as the two earlier attempts to explain a flake in this
   project by load were not. And **the failing run captured only `tail -2`, so
   which assertion lost was not recorded and is still unknown**; the re-run that
   would have shown it passed. *A flake reproduced without its traceback
@@ -1290,6 +1290,14 @@ suspicion.
   says so in its own docstring. The honest statement is that a generated client
   will annotate these responses with the wrong content type until somebody takes
   it.
+  ✅ **Both sites now say so where the fix would land** — the milestone's final
+  review found the two assertions reading `content["application/json"]` with no
+  comment naming why, so the *cost* of the fix was documented everywhere except
+  at the two places that have to change. Corrected 2026-08-12: each carries the
+  known-wrong marker and points at `tests/unit/test_api_openapi.py`. **A debt
+  recorded only in the roadmap is a debt the person editing the code does not
+  see** — the same shape as the curation role sentence corrected in
+  `testing-discipline.md` this same day, one subsystem over.
 
 ## Post-v1 candidates
 
