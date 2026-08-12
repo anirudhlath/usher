@@ -4509,3 +4509,123 @@ scan source, the only one that reads `usher.cli` strips docstrings through
 `ast.unparse` first, `test_composition.py`'s scan reads
 `JobWorker.registered_kinds`' docstring, and **none of them reads
 `services/bootstrap.py`'s prose.**
+
+## M9 Task H2 — `/openapi.json` as the conformance check, and a fix its own explanation ratified (2026-08-12)
+
+**Two rounds. Round 1: 13 plants — 10 targets killed, **1 target survived and
+was a real gap since closed**, 3 equivalent-mutant controls surviving as
+designed. Round 2, after the repair, 16 plants: 12 behavioural targets all
+KILLED, 1 *weakening* plant SURVIVED as designed (the measurement the repair
+rests on), 3 controls SURVIVED all five gate steps. 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG in either round,
+and every round-2 verdict matched its pre-registered expectation.**
+
+Harness at `/var/tmp/m9-H2/plants.py`, **outside the working tree** for V1's
+reason, under `/var/tmp` rather than `/tmp`, which is tmpfs on this host. Plant
+lists and **expected verdicts** written first —
+`/var/tmp/m9-H2/PLANTS.md` (`sha256 a75782bb95…`) and, for the second round
+with its amendment stated, `/var/tmp/m9-H2/PLANTS-round2.md`
+(`sha256 57d9a6f96e…`). Round 1's verdict log is kept at
+`/var/tmp/m9-H2/round1.log`. Tree committed at `52cece9` before round 1, so
+`git status` is the verification. `PYTHONDONTWRITEBYTECODE=1`, `__pycache__`
+swept under **both** `src/` and `tests/` before every run, `compile()` as the
+dry run for Python hunks, an exact anchor count per hunk, `md5sum`-verified
+restore, a 900 s per-plant timeout reporting `HUNG` as its own verdict, and no
+second `-q`.
+
+**The landing check is byte equality with the intended mutant**
+(`path.read_text() == planted`, plus `planted != source`), which is F3's repair
+adopted rather than re-derived — this round has multi-hunk *and* multi-file
+plants (`T2c` and `T2d` each move two anchors, `T2c` across two files), and
+B6's substring form `old not in landed and new in landed` is wrong for both.
+
+**Selection: the whole `tests/unit`** (3,993 cases, ~43 s a run), not a scoped
+subset. Whole because several plants move a helper every `create_app()` case
+can reach; `tests/integration` is out because `test_sse_end_to_end.py` is
+intermittent on this tree and predates M9, and a sweep scored on "did the run
+fail" cannot include a flaky case.
+
+🔴 **The survivor is a fix ratified by the sentence that explains it, and that
+is a shape this file does not hold.** H2's second direction (*the app's routes
+⊆ every endpoint PRD 07 spells anywhere*) found on its first run that
+`DELETE /admin/sources/{id}` was served and spelled nowhere: PRD 07's Admin
+table compressed three methods onto one path as
+`GET·POST·DELETE /admin/sources`. The fix corrected the cell **and** added a
+blockquote sentence saying why. Re-planting the old cell (`T2b`) then
+**survived both directions**:
+
+- direction 1 compared **paths**, and `/admin/sources` is served by *some*
+  method, so a cell naming a method the app does not serve passed;
+- direction 2 reads the whole document **by design** — three M9 routes are
+  documented only in prose — and the new blockquote spells
+  `DELETE /admin/sources/{id}` in prose, so the path was "spelled".
+
+So the corrected table cell was pinned by nothing except the paragraph
+explaining the correction. **The general form: when a check's own repair ships
+with a prose note in the corpus the check reads, the note can satisfy the check
+on the defect's behalf — ask whether the plant is still red *after* the
+explanation is written, not only before it.** Nearest relative is
+`testing-discipline.md`'s *"prose in a `src/` docstring can satisfy a textual
+scan on behalf of a reader that does not exist"*, arriving at a PRD table
+instead of a settings field, and one step worse: there the prose was incidental,
+here it was written by the same commit as the fix.
+
+**Closed by comparing direction 1 over `(method, path)` pairs**, which is
+strictly stronger and is still not a spelling comparison — parameter names are
+emptied on both sides, which is the distinction the plan draws. Re-planted,
+`T2b` fails **direction 1 alone**. And the repair's own load-bearingness is
+measured rather than argued: `T2c` plants the old cell **and** weakens direction
+1 back to paths, and **survives all 3,993 cases** — so pair granularity is the
+only cover, and direction 2's whole-document scope cannot substitute for it.
+
+**Round 2's thirteen behavioural verdicts, each naming the case written for
+it.** `T2a` (PRD's Actions cell restored to `DELETE …`, the ellipsis a machine
+cannot read) fails direction 1 alone; `T2d` (both prose spellings of
+`GET /stream/{ticket}` deleted) fails **direction 2 alone**, which is the route
+the plan says that direction exists to oblige, so the two directions are
+measured to be independent rather than asserted to be. `T1` (the extraction
+narrowed to the Screens table) fails on the **`>= 29` positive control** rather
+than on a membership claim, which is what a control is for. `T4` (`_normalise`
+stops emptying `{...}`) fails on the normalisation control. `T5` (the
+`/openapi.json` exemption dropped) fails naming `/openapi.json`. `T3`
+(`responses=` deleted from `GET /titles/{title_id}`) fails both the
+completeness case and the shape case. `T6`/`T7`/`T10` each fail the exemption
+case — the exemption tuple claiming `/health/ready` keeps `ProblemResponse`,
+`health.py`'s `503: ReadinessResponse` declaration deleted, and a bodyless
+exemption re-labelled as a handler exemption — which is what makes the
+exemptions assertions rather than a skip list. `T8` (`ProblemResponse.code`
+retyped `str`, so the wire vocabulary leaves the schema) fails the vocabulary
+pin. `T9` (`_raised` stops following an imported `usher.api` function) fails
+the `invalid_cursor` premise **and** the emitter case, which is the measurement
+that the cross-module hop into `api/cursor.py` is load-bearing: without it the
+three cursor routes read as routes that cannot fail.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| C1 the exemption tuple's `/stream/{ticket}` and `/images/{image_id}` entries swapped | PASS | PASS | PASS | PASS | PASS |
+| C2 one sentence of `_raised`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+| C3 `_TITLE_FAILURES`' `404` and `422` entries swapped | PASS | PASS | PASS | PASS | PASS |
+
+C1 is the control the plan names, and its equivalence is a fact about the
+*code*: `_NOT_A_PROBLEM_DOCUMENT` is a tuple of independent 4-tuples read only
+by iteration into a `(path, status)` set and a per-entry assertion, so no
+consumer can observe the order. C3 is the same shape one layer down — a `dict`
+literal with two distinct integer keys that FastAPI merges into an OpenAPI
+`responses` object keyed by status, which every case reads as a mapping. Neither
+is an `__all__` reorder, which `RUF022` rejects, and neither is a reorder of a
+*positional* call, which A5's entry is the reason for checking rather than
+assuming. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`: every scan it
+finds reads a module under `src/`, and **nothing in this repository scans a
+test module's prose** — which is also why C2 is the only one of the three
+planted in `tests/`.
+
+**One measured non-conformance is reported rather than closed, and it is named
+in the test file's own docstring.** A problem document goes out as
+`application/problem+json`; FastAPI renders `responses={404: {"model":
+ProblemResponse}}` under the *route's* response media type, so
+`/openapi.json` describes every one of them at `application/json`. Spelling the
+media type in would fork `test_api_playback.py`'s and `test_api_watch.py`'s
+assertions, which read `content["application/json"]`, and buys a client nothing
+it cannot read off the `type` member. The scan therefore asserts the **shape**
+and not the media type, and says so where a reader will find it.

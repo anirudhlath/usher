@@ -237,16 +237,20 @@ def test_the_codes_the_api_emits_are_exactly_the_codes_the_decision_records() ->
 
     A member the ADR does not name is a code no client was told about; a
     member the ADR names and nothing emits is a contract with no behaviour
-    behind it. The first is checked as an equality against the enum; the
-    second is deliberately checked as a **containment** for the length of
-    this milestone, because ADR-0030 completes the vocabulary before the
-    read-route fan-out lands and a member may therefore sit with no route
-    for a while. `invalid_cursor` is that case today and the only one:
-    `api/cursor.py` emits it and no route calls the codec yet.
+    behind it. Both are equalities now.
 
-    H2 discharges the inversion by upgrading this to `declared == emitted`
-    and deleting any member still without an emitter. That handoff is in
-    ADR-0030's Consequences so it is an obligation rather than a hope.
+    **The second was a containment for the length of the fan-out and H2
+    closed it, without deleting anything.** ADR-0030 completed the vocabulary
+    before the read routes landed, so a member was allowed to sit with no
+    emitter for a while; `invalid_cursor` was named as the case and the only
+    one. B7's `GET /browse`, E4's `GET /admin/unmatched` and B12's
+    `GET /seasons/{id}/episodes` all call `decode_cursor` now, so the member
+    has three emitting routes and the deletion obligation ADR-0030's
+    Consequences hand H2 is discharged by measurement rather than by edit.
+    `tests/unit/test_api_openapi.py::test_every_member_of_the_vocabulary_has_a_route_that_can_emit_it`
+    is the stronger half of the same claim: this case reads the whole of
+    `src/usher/api/`, which cannot tell a code a *route* can reach from one
+    only a helper names, and that one walks each route's own call graph.
     """
     emitted = _emitted_codes()
     assert _ANCHOR in emitted, (
@@ -270,6 +274,11 @@ def test_the_codes_the_api_emits_are_exactly_the_codes_the_decision_records() ->
     )
     assert emitted - members == set(), (
         f"`src/usher/api/` emits codes the vocabulary does not hold: {sorted(emitted - members)}"
+    )
+    assert members - emitted == set(), (
+        f"`ProblemCode` holds members nothing under {_API} emits: "
+        f"{sorted(members - emitted)} -- ADR-0030's Consequences oblige M9 to delete a member "
+        "no route can produce, rather than ship a contract with no behaviour behind it."
     )
 
 

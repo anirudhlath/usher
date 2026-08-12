@@ -31,6 +31,7 @@ exactly the clients that already hold the title and would send
 """
 
 import uuid
+from typing import Any, Final
 
 from fastapi import APIRouter, status
 
@@ -43,15 +44,30 @@ from usher.api.deps import (
     TitleReadServiceDep,
     TitleRepositoryDep,
 )
-from usher.api.dto.problem import ProblemCode
+from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.similar import SimilarResponse
 from usher.api.dto.title import TitleResponse
 from usher.api.errors import ProblemException
 
 router = APIRouter(tags=["titles"])
 
+#: What `/openapi.json` says these routes answer when they fail. The `422` is
+#: declared rather than left to FastAPI, whose automatic one names
+#: `HTTPValidationError` while `api/errors.py` answers an RFC 9457 document
+#: carrying the same error list under `errors`.
+#: `tests/unit/test_api_openapi.py` holds both halves.
+_TITLE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    404: {"model": ProblemResponse, "description": "No such title."},
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+}
 
-@router.get("/titles/{title_id}", response_model=TitleResponse, response_model_exclude_unset=True)
+
+@router.get(
+    "/titles/{title_id}",
+    response_model=TitleResponse,
+    response_model_exclude_unset=True,
+    responses=_TITLE_FAILURES,
+)
 async def get_title(
     title_id: uuid.UUID,
     titles: TitleReadServiceDep,
@@ -106,7 +122,7 @@ async def get_title(
     return TitleResponse.of(detail)
 
 
-@router.get("/titles/{title_id}/similar", response_model=SimilarResponse)
+@router.get("/titles/{title_id}/similar", response_model=SimilarResponse, responses=_TITLE_FAILURES)
 async def get_similar_titles(
     title_id: uuid.UUID, titles: TitleRepositoryDep, similarity: SimilarityServiceDep
 ) -> SimilarResponse:

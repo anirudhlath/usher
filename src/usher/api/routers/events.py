@@ -23,24 +23,36 @@ ordinary document.
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any, Final
 
 from fastapi import APIRouter, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from usher.api.deps import EventBusDep, SettingsDep
 from usher.api.dto.events import encode_sse, parse_titles
-from usher.api.dto.problem import ProblemCode
+from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.errors import ProblemException
 from usher.services.events import SentEvent
 
 router = APIRouter(tags=["events"])
+
+#: This route is on `PROBLEM_EXEMPTIONS` for its **stream** -- once it has
+#: answered `200 text/event-stream` there is no status code left to carry a
+#: document, and its in-stream vocabulary is an SSE event instead. That
+#: exemption does not reach the one ordinary failure it has: a malformed
+#: `?titles=` is refused before the stream starts and is a problem document
+#: like any other, so it is declared like any other.
+#: `tests/unit/test_api_openapi.py` holds it.
+_EVENTS_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    422: {"model": ProblemResponse, "description": "`?titles=` is not a comma-separated id list."},
+}
 
 # A `:` line is a comment an SSE client is required to ignore, so it costs a
 # client nothing and keeps a proxy from closing an idle connection.
 _HEARTBEAT = ": keepalive\n\n"
 
 
-@router.get("/events")
+@router.get("/events", responses=_EVENTS_FAILURES)
 async def events(
     request: Request,
     bus: EventBusDep,

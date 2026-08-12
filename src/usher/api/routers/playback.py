@@ -129,11 +129,17 @@ _TICKET_INVALID_DETAIL: Final = (
 #: Declared so `/openapi.json` describes the failures with the shape they
 #: really have. A route that can fail and documents only its 200 is a client
 #: writing its error handling against the wrong body.
+#:
+#: The `422` is here for the same reason and is FastAPI's rather than this
+#: module's: left automatic it is documented as `HTTPValidationError`, and
+#: `api/errors.py` answers an RFC 9457 document carrying the same error list
+#: under `errors`. `tests/unit/test_api_openapi.py` holds both halves.
 _PLAY_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
     404: {
         "model": ProblemResponse,
         "description": "No such title or episode.",
     },
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
     409: {
         "model": ProblemResponse,
         "description": (
@@ -244,6 +250,7 @@ async def play_episode(
             "model": ProblemResponse,
             "description": ("The ticket is expired or forged -- deliberately one answer for both."),
         },
+        422: {"model": ProblemResponse, "description": "The request was rejected."},
     },
     summary="Redeem a playback ticket into a redirect",
 )

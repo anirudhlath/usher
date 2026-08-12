@@ -27,15 +27,26 @@ behind it.
 """
 
 import uuid
+from typing import Any, Final
 
 from fastapi import APIRouter, status
 
 from usher.api.deps import CreditRepositoryDep, PersonRepositoryDep, TitleRepositoryDep
 from usher.api.dto.people import PersonResponse
-from usher.api.dto.problem import ProblemCode
+from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.errors import ProblemException
 
 router = APIRouter(tags=["people"])
+
+#: What `/openapi.json` says this route answers when it fails. The `422` is
+#: declared rather than left to FastAPI, whose automatic one names
+#: `HTTPValidationError` while `api/errors.py` answers an RFC 9457 document
+#: carrying the same error list under `errors`.
+#: `tests/unit/test_api_openapi.py` holds both halves.
+_PERSON_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    404: {"model": ProblemResponse, "description": "No such person."},
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+}
 
 # **The route's number, not the port's.** `list_for_person`'s own default is
 # 50 as well, so passing this explicitly changes nothing today -- and that is
@@ -56,6 +67,7 @@ FILMOGRAPHY_CREDIT_LIMIT = 50
     # Every other field is passed explicitly on both arms, so nothing else can
     # disappear through it.
     response_model_exclude_unset=True,
+    responses=_PERSON_FAILURES,
 )
 async def get_person(
     person_id: uuid.UUID,

@@ -31,7 +31,7 @@ would be a second spelling of it (ADR-0030).
 """
 
 import uuid
-from typing import Annotated, cast
+from typing import Annotated, Any, Final, cast
 
 from fastapi import APIRouter, Query, status
 
@@ -39,12 +39,30 @@ from usher.api.cursor import CursorSpec, CursorType, decode_cursor, over_fetch, 
 from usher.api.deps import EpisodeRepositoryDep, TitleRepositoryDep
 from usher.api.dto.episode import EpisodeResponse, SeasonResponse, SeasonsResponse
 from usher.api.dto.page import Page
-from usher.api.dto.problem import ProblemCode
+from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.errors import ProblemException
 from usher.domain.episode import Episode
 from usher.ports.repository import EpisodeCursorPosition
 
 router = APIRouter(tags=["series"])
+
+#: What `/openapi.json` says these routes answer when they fail. The `422` is
+#: declared rather than left to FastAPI, whose automatic one names
+#: `HTTPValidationError` while `api/errors.py` answers an RFC 9457 document
+#: carrying the same error list under `errors`.
+#: `tests/unit/test_api_openapi.py` holds both halves.
+_SERIES_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    404: {"model": ProblemResponse, "description": "No such series, season or episode."},
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+}
+
+#: The paged route answers one more: `decode_cursor` refuses a cursor minted
+#: for another season, another sort or another version with `400
+#: invalid_cursor` rather than serving a plausible, wrong page.
+_EPISODE_PAGE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    400: {"model": ProblemResponse, "description": "The cursor is malformed or not this query's."},
+    **_SERIES_FAILURES,
+}
 
 #: A season of the one measured library's largest show is a few dozen
 #: episodes, so the default renders most seasons in one request; the ceiling
@@ -118,6 +136,7 @@ def _not_found(what: str) -> ProblemException:
 @router.get(
     "/series/{title_id}/seasons",
     response_model=SeasonsResponse,
+    responses=_SERIES_FAILURES,
     summary="The seasons of a series",
 )
 async def list_series_seasons(
@@ -149,6 +168,7 @@ async def list_series_seasons(
 @router.get(
     "/seasons/{season_id}/episodes",
     response_model=Page[EpisodeResponse],
+    responses=_EPISODE_PAGE_FAILURES,
     summary="One page of a season's episodes",
 )
 async def list_season_episodes(
@@ -196,6 +216,7 @@ async def list_season_episodes(
 @router.get(
     "/episodes/{episode_id}",
     response_model=EpisodeResponse,
+    responses=_SERIES_FAILURES,
     summary="One episode",
 )
 async def get_episode(episode_id: uuid.UUID, episodes: EpisodeRepositoryDep) -> EpisodeResponse:

@@ -25,12 +25,12 @@ source_adapter` uses one router over.
 """
 
 import uuid
-from typing import Literal
+from typing import Any, Final, Literal
 
 from fastapi import APIRouter, Response, status
 
 from usher.api.deps import JobQueueDep, SourceRepositoryDep, SourceServiceDep
-from usher.api.dto.problem import ProblemCode
+from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.source import (
     SourceCreateRequest,
     SourceResponse,
@@ -45,6 +45,34 @@ from usher.telemetry import current_traceparent
 
 router = APIRouter(prefix="/admin/sources", tags=["admin"])
 
+#: What `/openapi.json` says these routes answer when they fail. The `422` is
+#: declared rather than left to FastAPI, whose automatic one names
+#: `HTTPValidationError` while `api/errors.py` answers an RFC 9457 document
+#: carrying the same error list under `errors` -- and this is the one route in
+#: Usher handed a source credential, so the shape a client generates against
+#: for a rejected registration is the shape whose `input` A2 strips.
+#: `tests/unit/test_api_openapi.py` holds both halves.
+_REJECTED: Final[dict[int | str, dict[str, Any]]] = {
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+}
+
+#: A `404` for a source id no row carries, and nothing else: the status route
+#: answers `200` for every state a *configured* source can be in, including a
+#: rejected credential and an unreachable host, because those are facts about
+#: the source rather than failures of the request.
+_SOURCE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    404: {"model": ProblemResponse, "description": "No such source."},
+    **_REJECTED,
+}
+
+#: The sync trigger adds a `409` for a source an operator has disabled --
+#: `not_playable`, reused rather than minted, because it says the same thing
+#: ADR-0030's amendment records: stop asking until that state changes.
+_SYNC_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    409: {"model": ProblemResponse, "description": "This source is disabled."},
+    **_SOURCE_FAILURES,
+}
+
 _DISABLED_DETAIL = (
     "this source is disabled; enable it before requesting a sync -- "
     "a disabled source is one an operator has parked, and the worker will "
@@ -52,7 +80,12 @@ _DISABLED_DETAIL = (
 )
 
 
-@router.post("", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=SourceResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses=_REJECTED,
+)
 async def create_source(request: SourceCreateRequest, sources: SourceServiceDep) -> SourceResponse:
     source = await sources.register(
         kind=request.kind,
@@ -74,7 +107,7 @@ async def list_sources(sources: SourceServiceDep) -> list[SourceResponse]:
     return [SourceResponse.of(source) for source in await sources.list_sources()]
 
 
-@router.get("/{source_id}/status", response_model=SourceStatusResponse)
+@router.get("/{source_id}/status", response_model=SourceStatusResponse, responses=_SOURCE_FAILURES)
 async def source_status(source_id: uuid.UUID, sources: SourceServiceDep) -> SourceStatusResponse:
     result = await sources.status(source_id)
     if result is None:
@@ -86,7 +119,7 @@ async def source_status(source_id: uuid.UUID, sources: SourceServiceDep) -> Sour
     return SourceStatusResponse.of(result)
 
 
-@router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT, responses=_SOURCE_FAILURES)
 async def delete_source(source_id: uuid.UUID, sources: SourceServiceDep) -> Response:
     if not await sources.remove(source_id):
         raise ProblemException(
@@ -104,6 +137,7 @@ async def delete_source(source_id: uuid.UUID, sources: SourceServiceDep) -> Resp
     "/{source_id}/sync",
     response_model=SyncTriggerResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    responses=_SYNC_FAILURES,
 )
 async def sync_source(
     source_id: uuid.UUID,
