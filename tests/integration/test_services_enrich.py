@@ -75,7 +75,14 @@ class _ReadsOnItsOwnConnection(JobQueue):
     async def complete(self, job_id: uuid.UUID) -> None:
         raise NotImplementedError
 
-    async def fail(self, job_id: uuid.UUID, *, error: str, retryable: bool) -> Job | None:
+    async def fail(
+        self,
+        job_id: uuid.UUID,
+        *,
+        error: str,
+        retryable: bool,
+        retry_after_seconds: float | None = None,
+    ) -> Job | None:
         raise NotImplementedError
 
     async def requeue_running(self, *, older_than_seconds: float = 0.0) -> int:

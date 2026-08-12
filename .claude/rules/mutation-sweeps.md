@@ -3261,3 +3261,110 @@ verified by *reading the import line back* and by `git status` — never
 caller's**, because a harness killed between plant and restore is
 indistinguishable from one that never ran, and the tree it leaves behind looks
 exactly like working code.
+## M9 Task D9 — `PortRateLimited.retry_after` reaches `JobQueue.fail` (2026-08-11)
+
+**4 plants over `db/repositories/jobs.py` and `services/jobs.py` — 2 KILLED, 1
+survived contrary to its own prediction (measured and corrected in place), 1
+survived exactly as predicted (an equivalent mutant today); 2 controls, both
+SURVIVED as designed; 0 BROKEN-MUTATION, 0 DID-NOT-RUN, 0 HUNG.** Run in place
+with the plant list and predicted verdicts written to `/var/tmp/m9-D9-plants.md`
+before the first plant, `cp` backups for every file touched, a grep/read-back
+confirming each plant landed, `python3 -c "import ast; ast.parse(...)"` as the
+syntax dry run, and a restore verified by `diff` against the pre-plant backup
+(byte-identical every time) rather than by the suite going green.
+
+**Selection:** `tests/unit/test_services_jobs.py`, `tests/unit/
+test_job_queue_contract.py` (the fake arm), `tests/integration/
+test_job_queue.py` (the Postgres arm) and `tests/integration/
+test_services_jobs.py` — 139 passed / 2 skipped baseline, ~15–25 s a run.
+Scoped rather than whole-suite because the change is four files with a closed
+blast radius (`JobQueue.fail`'s one new keyword-only parameter); P4's survival
+was cross-checked against the full 3,667-case unit suite anyway, since a
+`getattr` widening in `JobWorker._fail` touches every exception path, and it
+still survived whole.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 delete `GREATEST(…, 0)` around `:retry_after_seconds` in `_FAIL` | KILLED | 1 — `test_a_non_positive_hint_never_pulls_the_backoff_earlier_than_now[-999.0]` |
+| P2 drop `+ :backoff_seconds * power(2, attempts) * (0.5 + random() / 2)` | KILLED | 6 — both spread cases (the new one and the pre-existing `test_backoff_is_jittered`, once both were respelled to a magnitude assertion; see below) plus four unrelated backoff cases that assumed a non-zero base term |
+| P3 replace the Python `None → 0.0` normalisation with a raw `None` bind | **SURVIVED, contrary to its own prediction** | 0 |
+| P4 `JobWorker._fail` reads the hint via `getattr(exc, "retry_after", None)` instead of `isinstance(exc, PortRateLimited)` | SURVIVED, as predicted (equivalent today) | 0 |
+
+**P3 is the finding worth carrying past this task, and it was found by running
+the plant rather than by trusting the docstring that predicted it.** The plan
+argued the raw-`None` bind would fail on the Postgres arm with asyncpg's
+"could not determine data type of parameter" — the shape `db-and-sql.md`
+already documents for a truly untyped parameter. Measured on a connection that
+had never executed any other statement (so no prepared-statement cache could
+be priming a type, and `tests/integration/conftest.py`'s `session` fixture
+builds a fresh `engine` per test specifically so nothing carries over): it does
+not fail. `GREATEST(:retry_after_seconds, 0)` gives Postgres a concrete
+sibling literal to resolve the parameter's type against, which a bare
+`:retry_after_seconds` with nothing beside it would not — and `GREATEST(NULL,
+0)` genuinely evaluates to `0`, not to `NULL` propagating through the rest of
+the `make_interval(...)` expression, which the isolated probe confirmed by
+reading back an ordinary, non-`NULL` `run_after`. The normalisation is kept in
+`PostgresJobQueue.fail` anyway — one line, and it stops the floor's
+correctness depending on a literal `0` staying textually adjacent to the
+parameter inside `GREATEST(...)`, which a later refactor (moving the
+parameter, or spelling the literal `0.0`) could silently break — but the
+*reason* recorded in the module's own docstring was wrong, and is now
+corrected there rather than left standing. Same family as `db-and-sql.md`'s "a
+wrong reason in a docstring outlives the decision it justifies" entry, this
+time about a reason for code that still ships, not about a decision that
+changed.
+
+**P2 exposed that the spread assertion it was meant to test had no teeth, in
+both the new case and a pre-existing one it was copied from.** `len(instants) >
+1` over twenty `PostgresJobQueue.fail()` calls is satisfied by real
+`clock_timestamp()` drift between twenty sequential round trips alone —
+measured directly (a throwaway probe, not part of the committed suite): ~8 ms
+of spread with the jitter term deleted outright, against ~410–440 ms across
+four runs with it present. So the *first* draft of
+`test_a_retry_after_hint_still_spreads_across_a_batch` passed against P2
+unmodified, and so does the repository's own pre-existing
+`test_backoff_is_jittered`, written for M4 and carrying the identical
+`len(instants) > 1` shape. Both are respelled to assert on the *range*
+(`max(instants) - min(instants)`) against a threshold sized with a wide margin
+on both sides of the two measured numbers (`>= 1s` at `backoff_seconds=60.0`,
+`>= 100ms` at `backoff_seconds=1.0`), and the docstrings on both cases now
+carry the measurement rather than assert a count that clock drift alone
+satisfies. **The general form, and it is `CLAUDE.md`'s own "a membership
+assertion is not an ordering test, and `len(x) > 0` is not a relevance test"
+one register over: a count of *distinct* values across N real round trips is
+satisfied by real-time drift between them, independent of whatever the code
+under test does — the assertion needs a magnitude, sized against a measured
+floor and a measured ceiling, not a count.** This is not filed as a new
+finding in `testing-discipline.md` because it is the same finding already
+there under a different operation (spread rather than count-of-distinct); it
+is filed here because it is where it was found and because it corrects a case
+this project has been carrying since M4.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `max(retry_after_seconds, 0.0)` → `max(0.0, retry_after_seconds)` in `FakeJobQueue.fail` | PASS | PASS | PASS | — | PASS (139/2) |
+| C2 `retryable` and `retry_after_seconds` reordered in `JobQueue.fail`'s abstract signature | PASS | PASS | PASS | — | PASS (139/2) |
+
+Both are facts about the language rather than about the tools: `max` is
+commutative, and every call site binds both parameters by keyword, so a
+keyword-only parameter's position in the signature is unobservable at every
+call site in `src/` and `tests/`. `lint-imports` was not re-run per control —
+neither touches an import.
+
+Gate green before and after on the fully restored tree (`git status` clean,
+every touched file `diff`-verified byte-identical to its pre-sweep `cp`
+backup): **3,667 unit passed / 4 skipped**, **1,130 integration passed / 22 skipped**,
+`ruff check`, `ruff format --check`, `mypy` over 555 files, `lint-imports` 9
+kept / 0 broken, PRD link check `OK`.
+
+**Two things this task refutes or narrows, named rather than left to be
+re-derived.** `PortRateLimited.retry_after` is now read exactly once in
+`src/`, at `JobWorker._fail` — `grep -rn "\.retry_after" src/` finds that
+reader beside the assignment in `ports/errors.py:50`, closing the debt the
+grep in D9's dispatch stated. And T2's live TMDb run (393 requests, no 429,
+the one 400 carrying no `retry-after` header) means the field this closes has
+never yet been exercised by a real response from the provider this project
+talks to most — stated in `.claude/rules/tmdb-and-enrichment.md` already, and
+restated here because it is the reason `test_a_429_carrying_a_retry_after_
+backs_off_no_sooner_than_the_upstream_asked` is the only place its behaviour
+is pinned at all.

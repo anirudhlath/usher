@@ -301,6 +301,21 @@ Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
   instantly re-claimable" a property rather than a probability. Implemented in
   `usher.db.repositories.jobs`, one `CASE` inside the failure statement;
   `job_backoff_seconds` is the base.
+- **A server-supplied `Retry-After` is a floor added to that same jittered
+  delay, never a replacement for it.** ✅ M9: `PortRateLimited.retry_after`
+  had been assigned at six sites across four adapters since M4 and read
+  nowhere — a 429 that told this project exactly when to come back was
+  answered with the queue's own jittered guess instead. `JobQueue.fail`
+  now takes `retry_after_seconds`, and `JobWorker._fail` reads it off a
+  caught `PortRateLimited` by `isinstance`, never by `getattr` (a future
+  exception member must not accidentally opt into the behaviour). The hint
+  is clamped at zero before it is added: a `Retry-After` carrying RFC 9110's
+  HTTP-date form can already be in the past, and an unclamped hint would
+  pull a rate-limited job's retry *earlier* than the ordinary schedule — the
+  exact hot loop the backoff exists to prevent. **No ceiling is imposed on
+  the hint itself** — a hostile or buggy upstream can ask for an arbitrarily
+  long wait, bounded only by the attempt ceiling below and visible as
+  `usher.jobs.queued` failing to drain. Recorded, not solved.
 - **Malformed data does not back off at all — it parks on the first attempt.**
   `PortDataMalformed` means the upstream answered and the answer was wrong, so
   five identical retries only delay a human seeing it by the whole backoff

@@ -1,6 +1,6 @@
 """In-memory `JobQueue`.
 
-**Where this is more forgiving than Postgres, on purpose.** Seven places, and
+**Where this is more forgiving than Postgres, on purpose.** Eight places, and
 the first is not a nuance -- it is the whole point of the port:
 
 (**Seven, corrected 2026-08-07.** This header said six from `69e0ae3`, which
@@ -59,6 +59,13 @@ fake's seventh" by name: `src/usher/ports/search.py`,
   whole promotion predicate to stay honest about the parked and
   higher-priority branches too, and a fake that reimplements the statement
   is a second implementation rather than a stand-in.
+- **`fail`'s `retry_after_seconds` floor holds no per-row `random()`.** Both
+  arms add the hint as a floor to the same expression, but this one is
+  Python's `2 ** attempts` with no jitter (the second divergence above), so
+  a batch failed with an identical hint lands on identical instants here --
+  the spread `PostgresJobQueue.fail` produces is real only on the Postgres
+  arm, and is pinned there rather than here for exactly the reason
+  `test_backoff_is_jittered` already is.
 """
 
 import uuid
@@ -141,7 +148,14 @@ class FakeJobQueue(JobQueue):
         if found is not None:
             del self._jobs[found]
 
-    async def fail(self, job_id: uuid.UUID, *, error: str, retryable: bool) -> Job | None:
+    async def fail(
+        self,
+        job_id: uuid.UUID,
+        *,
+        error: str,
+        retryable: bool,
+        retry_after_seconds: float | None = None,
+    ) -> Job | None:
         found = self._find(job_id)
         if found is None:
             return None
@@ -151,6 +165,11 @@ class FakeJobQueue(JobQueue):
         # the upstream answered and the answer was wrong, so five identical
         # retries only delay a human seeing it.
         parked = not retryable or attempts >= self._max_attempts
+        # A floor, never a replacement -- see `PostgresJobQueue`'s `GREATEST`
+        # and the module docstring's eighth divergence. A hint that already
+        # elapsed (negative) must not pull the retry earlier than the
+        # ordinary schedule, so it is clamped at zero, same as the SQL arm.
+        hint = 0.0 if retry_after_seconds is None else max(retry_after_seconds, 0.0)
         updated = stored.evolve(
             attempts=attempts,
             last_error=error,
@@ -161,7 +180,7 @@ class FakeJobQueue(JobQueue):
                 # Deterministic, not jittered -- the divergence this fake's
                 # docstring names. `stored.attempts` (pre-increment) is the
                 # exponent, so the first retry waits one base interval.
-                else _now() + timedelta(seconds=self._backoff_seconds * 2**stored.attempts)
+                else _now() + timedelta(seconds=hint + self._backoff_seconds * 2**stored.attempts)
             ),
             updated_at=_now(),
         )
