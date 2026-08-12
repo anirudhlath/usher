@@ -8,9 +8,18 @@ Subclass and provide a `publisher` fixture:
             return FakeEventPublisher()
 
 The subscriber-facing cases live in `EventBusContract` below, which
-`InMemoryEventBus` runs and `FakeEventPublisher` does not -- a spy has no
-subscribers, and a suite it "passed" by having nothing to check would ratify
-a bus that never delivered.
+`InMemoryEventBus` runs and neither `FakeEventPublisher` nor
+`DeferredEventPublisher` does -- a spy has no subscribers and a buffer has
+none either, and a suite one of them "passed" by having nothing to check
+would ratify a bus that never delivered.
+
+**`DeferredEventPublisher` runs this class and needs one thing arranged for
+it to mean anything**: its `publish` is an `append`, so every case here is
+satisfied trivially unless something drains it. `tests/unit/test_services_events.py`
+gives it an autouse fixture that flushes into a real bus with a subscriber
+that never reads, bounded -- which is what puts the burst case back on the
+overflow branch it was written for. A contract suite run against a component
+that buffers is measuring the buffer until the drain is wired in.
 
 **Neither class asserts that `publish` never *suspends*.** It is async
 because a transport can be, and the named second implementation -- a Postgres

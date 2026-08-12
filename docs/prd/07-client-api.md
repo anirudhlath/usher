@@ -966,6 +966,31 @@ spelling, and no `internal_error` either — nothing emits one.
 > inside a response that has already answered `200 text/event-stream`, where
 > there is no status code left to report it with.
 
+> **Settled in M9 — an event is a statement about committed state.** Every
+> event above is offered only after **every write the unit of work that raised
+> it made** has committed, not merely the write the event is about. So a client
+> that acts on a frame the moment it arrives — which is what the *Client
+> action* column instructs — can read the change and everything that shipped
+> with it. [ADR-0033](decisions/0033-an-event-is-a-statement-about-committed-state.md)
+> has the measurement and the reasoning.
+>
+> **It is an ordering guarantee and not a delivery one, and the distinction is
+> the whole of what is promised.** The bus is in-process and lossy by design:
+> an event is still lost when nobody is subscribed, when a subscriber's buffer
+> overflows, and when the process dies. `resync_required` and `Last-Event-ID`
+> answer every gap, exactly as before. Nothing here is durable, nothing here
+> needs a table, and a reader who arrives at a transactional outbox from this
+> paragraph has answered a different question.
+>
+> **Structural for jobs, and deliberately not for the lanes.** A `title.updated`
+> raised by `EnrichService` runs inside a job, whose transaction closes *above*
+> the service, so `JobWorker` holds the frame and offers it once the job's own
+> completion has committed — no handler decides this and none can forget it.
+> The push lane and a reconcile's `sync.progress` are **not** deferred: neither
+> is a job, each commits its own subject before it publishes, and a progress
+> event held behind a walk of 1,127 batches would arrive as one jump at the
+> end instead of a moving bar.
+
 - Subscriptions are scoped by query (`?titles=id1,id2`) so a detail screen isn't
   woken by unrelated churn.
 - Reconnect sends `Last-Event-ID`; the server replays from a bounded buffer.

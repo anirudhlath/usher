@@ -657,15 +657,28 @@ def build_push_applier(
 
 
 def build_enrich_service(
-    pipeline: Pipeline, settings: Settings, provider: MetadataProvider
+    pipeline: Pipeline, settings: Settings, provider: MetadataProvider, *, events: EventPublisher
 ) -> EnrichService:
+    """Enrichment, with its publisher passed in rather than read off the
+    pipeline.
+
+    `events` is explicit for the reason `build_push_applier`'s is, pointing
+    the other way: the applier's publisher **must** be the live bus, and this
+    one's must **not** be. An enrichment runs inside a job, so its frames are
+    `JobWorker`'s to offer once the job's own transaction has committed
+    ([ADR-0033](../prd/decisions/0033-an-event-is-a-statement-about-committed-state.md)),
+    and `pipeline.events` -- the right answer for every caller outside a job
+    -- would put them back inside the residual window. Required rather than
+    defaulted to `pipeline.events`, because a default is what a sixth caller
+    forgets and `mypy` cannot see.
+    """
     return EnrichService(
         titles=pipeline.titles,
         episodes=pipeline.episodes,
         payloads=pipeline.payloads,
         provider=provider,
         commit=pipeline.commit,
-        events=pipeline.events,
+        events=events,
         # The *same* queue `MatchService` and `IngestService` hold. This is
         # what a composition root is for: `services/` may not import `db/`
         # (ADR-0009), so nothing below here can discover that these are one
@@ -702,7 +715,20 @@ def build_worker(
     `metadata_provider`, which is where the decision is made and which every
     composition root calls exactly once per process.
     """
-    worker = JobWorker(pipeline.queue, pipeline.commit, batch_size=settings.job_batch_size)
+    worker = JobWorker(
+        pipeline.queue,
+        pipeline.commit,
+        # The bus itself, which the worker wraps in its own buffer. Every
+        # service registered below that publishes is handed `worker.events`
+        # -- the buffer -- and never `pipeline.events`, so a frame raised
+        # inside a job is offered after `complete()` and its commit
+        # (ADR-0033). The push and reconcile lanes are deliberately not
+        # wrapped: they are not jobs, they commit their own subject before
+        # they publish, and deferring a `sync.progress` behind a
+        # 1,127-batch walk turns a progress bar into a single jump.
+        events=pipeline.events,
+        batch_size=settings.job_batch_size,
+    )
     worker.register(JobKind.MATCH, match_handler(pipeline.matcher, pipeline.media_items, resolve))
     worker.register(
         JobKind.WATCH_HISTORY, watch_history_handler(pipeline.watch, resolve, user_id=user_id)
@@ -724,7 +750,10 @@ def build_worker(
     )
     if provider is not None:
         worker.register(
-            JobKind.ENRICH, enrich_handler(build_enrich_service(pipeline, settings, provider))
+            JobKind.ENRICH,
+            enrich_handler(
+                build_enrich_service(pipeline, settings, provider, events=worker.events)
+            ),
         )
         # Guarded on the provider rather than on the embedder, and that is the
         # honest dependency rather than the convenient one: `DeriveService`

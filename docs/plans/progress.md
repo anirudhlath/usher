@@ -2530,3 +2530,61 @@ both restored against an `md5sum` — deleting the `credit_names` segment kills
 the **premise** (six SQL segments against the composer's seven), and replacing
 it with `''` kills the **named assertion** while leaving the premise green.
 Ledger and every measurement above in `.claude/rules/search-and-embeddings.md`.
+### ✅ M9 Task G2 — the ordering rule made structural: a job's events are offered after the job's own commit (2026-08-11)
+
+**[ADR-0033](../prd/decisions/0033-an-event-is-a-statement-about-committed-state.md) is now a property
+of `JobWorker` rather than of five hand-written comments.** G1 measured that the roadmap's claim was
+false at all five publish sites and that what survived was one layer up — the transaction open at an
+`enrich` frame is the *worker's*, holding two `BACKFILL` enqueues and the `DELETE` that completes the
+job. This task closed that window. A worker holds a `DeferredEventPublisher` wrapping whatever
+publisher it was built with; `composition.build_worker` hands `worker.events` to every service it
+constructs; `_run` flushes after `complete()` and `_commit()` and discards in a `finally`. **A sixth
+handler that publishes gets the ordering without writing a line, and a handler that fails cannot keep
+it.**
+
+**The evidence on the wire is G1's own probe, flipped.** `_CommittedStateProbe` reads the `jobs` table
+on a second connection at the instant of the frame: `[('enrich','running')]` before, and
+`[('derive','pending'), ('index','pending')]` after — the residual window's entire contents,
+committed. **And G1's bounded `_job_xmin_settles` poll is deleted**, which is the cheapest available
+proof: it existed because `assert await _job_xmin(...) is None` raced the completing commit, and a
+single read is now correct because the frame the case already read arrives strictly after it.
+
+**Measured both ways, with G1's `asyncio.sleep(0.25)` planted between the handler returning and
+`complete(job.id)`, `cp`-backed and restored by md5.** With the change in place: **5 passes of 5**.
+With the wiring reverted (`build_enrich_service` handed `pipeline.events`) and the plant still in
+place: **5 failures of 5**, every one on `jobs_seen`, reporting `[[('enrich','running')]]`. With the
+`jobs_seen` assertion additionally neutralised so the *other* half could report: **3 of 3** on
+`assert '745' is None` — the exact failure G1 documented, and the licence for retiring the poll.
+
+**The failing test first was an interleaving, never a membership check.**
+`["complete", "commit", "publish"]` against the `["publish", "complete", "commit"]` the same fixture
+recorded, failing on index 2. Its twin — a failed job offers nothing, premise-guarded that an event
+*was* raised — landed in the same commit, because a buffer that flushed on both paths passes the
+first and is exactly the bug the buffer exists to prevent.
+
+**The push and reconcile lanes are not wrapped, and that is asserted structurally because it cannot
+be asserted behaviourally.** Neither is a job, each commits its own subject before publishing, and a
+`sync.progress` held behind a 1,127-batch walk is a progress bar that arrives as one jump. But
+*"published as it went"* and *"published at the end"* are the same list of frames in the same order —
+only a second commit boundary distinguishes them, and a lane has none. So the claim asserted is the
+one that can be: `DeferredEventPublisher` is constructed in exactly **one** place in `src/`.
+
+**Sweep: 12 mutations, 12 killed, 2 controls surviving all five gate steps.** Two findings, both in
+`.claude/rules/mutation-sweeps.md`. *"Flush per batch"* spelled as an **added** flush after the loop
+is a no-op — the `finally` already emptied the buffer — and read as a survivor until it was re-spelled
+as the flush **moved**, at which point it fails 4. And deleting the `NullEventPublisher()` default
+survived, because `flush`'s `except Exception` — which exists so a broken publisher cannot un-complete
+a finished job — swallows the `AttributeError` and logs an `ERROR` per event instead. **A guard
+written so a caller cannot fail is a guard that hides the caller's own wiring defect.** Closed by an
+arm asserting loguru at `ERROR` recorded nothing. Its careless spelling dies on `mypy`; only the one
+carrying `# type: ignore[arg-type]` reached the suite.
+
+**What this bought and what it did not.** Ordering, not durability. The bus is in-process and lossy by
+design, `resync_required` still answers every gap, and **no table was added** — ADR-0033's own warning
+that a reader arriving at a transactional outbox has answered a different question. What the deferral
+converts is the enrich path's duplicate: a crash in the residual window now publishes *nothing*,
+`requeue_running` re-runs the job, and the re-run publishes once. Before, the same crash published
+twice.
+
+Gate: ruff clean, `mypy` 564 files, **9 kept / 0 broken**, **3,791 unit / 4 skipped**, **1,170
+integration / 22 skipped**, PRD link check `OK`.
