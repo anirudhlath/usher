@@ -13,11 +13,24 @@ question, over a different aggregate, and are group B's.
 
 **`next_cursor` is `str | None` and is always present**, which is deliberately
 *not* the convention the rest of `api/dto/` keeps. Elsewhere an empty value is
-an absent key (`RowCard` carries no artwork field at all rather than a null
-one, and `ProblemResponse.errors` is dropped when there is nothing to say).
-Here a client takes both arms on every listing it renders, so "the key is
-missing" and "there is no next page" would be the same bytes on the wire and a
-client would learn the difference by guessing.
+an absent key -- `ProblemResponse.errors` is dropped when there is nothing to
+say, and `dto/title.py` omits `cast`, `crew` and `images` rather than sending
+them empty. (That read *"four whole sections"* until 2026-08-11, when the last
+of the four M5 left absent landed: two became keys on that response and two
+became routes of their own, so three is the count and the fourth is not a key
+at all.) Here a client takes both arms on every listing it renders, so "the key
+is missing" and "there is no next page" would be the same bytes on the wire and
+a client would learn the difference by guessing.
+
+**`RowCardResponse.artwork` is the same call as this one and used to be the
+opposite**, which is worth naming here because this paragraph cited it as the
+precedent for absence. M7 shipped no artwork field at all, on the argument that
+an always-null one is a branch that never takes its other arm -- and the day M9
+filled the table the field arrived nullable-and-always-present, because both
+arms are now reachable and most cards on an underived catalog take the null
+one. The rule the two agree on is the rule: **a key is absent when its value
+could never be anything else, and present-and-null when a client has to
+branch.**
 
 **Generic over the item type**, so `/openapi.json` describes `TitleSummary[]`
 rather than `{"type": "object"}` -- the same argument `api/dto/health.py` made

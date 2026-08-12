@@ -651,3 +651,255 @@ set to `30/N` **per process** because the bucket is per client, and
 `JobWorker.startup()`'s default `older_than_seconds = 0.0` requeues
 *everything* running — so restarting one worker mid-run steals the others'
 live claims.
+
+## The priority tier actually enriched, 2026-08-12 (M9 S3) — 130,334 requests, 1.98 h, and the first 5xx this repository has ever seen from TMDb
+
+**The run S2 priced, executed whole.** 22:08:53Z → 00:07:46Z against
+`api.themoviedb.org/3`, driving the shipped `usher work` on the shipped
+`TmdbMetadataProvider`. Bar — nine numbered predictions and what would count
+as failure rather than refutation — written to
+[`/tmp/m9-exec/S3/BAR.md`](/tmp/m9-exec/S3/BAR.md) **before the first
+request**; the enqueue driver (`/tmp/m9-exec/S3/enqueue_by_id.py`) and the
+per-process `httpx.AsyncClient.send` probe
+(`/tmp/m9-exec/S3/sitecustomize.py`) ran outside the working tree reading the
+operator's own `.env`. The probe records **path only, never the query
+string** — a v3 key rides in `api_key=` — and one file per pid, because three
+daemons appending to one file is a torn line waiting to happen. All three
+`.installed` markers asserted before a single number was believed. The key
+was idle from **00:07:46Z**.
+
+**Status distribution over the whole run, which is the evidence for most of
+what follows: 130,141 × 200, 107 × 404, 86 × 502.** No 429, no transport
+error, and **no `Retry-After` on any response** including all 86 of the 502s.
+Two independent instruments agree: the probe counted 130,334 requests and
+`raw_payloads` gained 130,141 rows, and the difference is exactly the
+non-200s.
+
+### The four numbers S3 was authorised against, against what it did
+
+| | S2 predicted | measured | |
+|---|---|---|---|
+| wall clock | 3.50 h at 1 worker, 95% CI [3.41, 3.59] | **1.98 h at 3 → 2 workers** | see the crash below |
+| fetches | 130,806 | **130,334** (130,806 − 537 cached + 65 retries) | ✅ |
+| `raw_payloads` | ~1.0 GiB, mean 6,914 B | **995 MB**, mean **7,001 B** | ✅ within 1.3% |
+| follow-up jobs | 261,612 | **261,294** = 2 × 130,647 successes | ✅ exactly two per success |
+
+**Confirmed, and it is the one that makes the extrapolation defensible: S2's
+0.38% sample priced the median request correctly and the tail not at all.**
+HTTP median **0.0588 s** against S2's 0.0580 s — 1.4% apart over 500 requests
+versus 130,334. But **p95 0.4267 s against S2's 0.1049 s, a 4.1× blowout**,
+and mean 0.0993 s against 0.0637 s. Concurrency does not move the median
+request; it moves the tail, and a sequential sample cannot see that.
+
+**Refuted: "three workers at `30/N` each reach 30 rps".** That was this
+repository's own arithmetic, recorded in PRD 04 and in S2's entry above, and
+it is wrong because it assumes per-worker throughput survives concurrency. It
+does not. Three workers achieved **19.76 rps** — 6.59 rps each against S2's
+**10.38 rps** measured on one worker, a **37% per-worker loss** — and the
+bucket, set to 10 per process, was never the binding constraint on any of
+them. The scaling factor from one worker to three is **1.90×, not 3×**.
+
+### One worker died 78 minutes in, and its claims are still `running`
+
+**`usher work` crashed at 23:26:57Z with an unhandled
+`MissingGreenlet: greenlet_spawn has not been called; can't call await_only()
+here`**, killing one of the three daemons. This is a defect in the shipped
+worker that only a multi-hour run reaches; nothing in `tests/` has ever
+executed this path. Three consequences, all measured:
+
+- **The run finished on two workers.** Phase 1 (3 workers, 78.1 min): 92,550
+  requests, **19.76 rps**. Phase 2 (2 workers, 40.8 min): 37,784 requests,
+  **15.43 rps**. Per-worker throughput actually *rose* when the third died —
+  6.59 → 7.72 rps — which is the contention story from the other side.
+- **Its 20 claimed jobs are orphaned in `status = 'running'` forever.**
+  `JobWorker.startup()` is the only thing that requeues an abandoned claim
+  and it runs once, at process start. So a worker that dies mid-batch takes
+  its batch with it, and the only recovery is a restart — which
+  `older_than_seconds = 0.0` makes steal every *other* worker's live claims.
+  **That is a genuine dead end at N > 1**: with three workers there is no way
+  to recover one's orphans without corrupting the other two. Deliberately not
+  restarted; the 20 are reported as part of the shortfall instead.
+- **The crash's last two log records are both the `ix_titles_imdb_id`
+  conflict path**, 19 ms and 24 ms before death — the only unusual control
+  flow in the run. Correlation stated, causation **not** established: the
+  driver did not set `usher --traceback work`, so no stack was captured. The
+  ~30 earlier conflicts on the same process did not kill it.
+
+### A failure class no taxonomy in this file covers: `ix_titles_imdb_id`
+
+**30 of the 139 parked jobs are not upstream failures at all — they are write
+conflicts on the catalog's own unique index**, and this is the first time any
+run has produced one. `titles.imdb_id` is `CREATE UNIQUE INDEX ... WHERE
+imdb_id IS NOT NULL`; enrichment writes TMDb's `external_ids.imdb_id` over
+the bulk export's, **the two crosswalks disagree, and the id TMDb hands back
+is already held by a different catalog row**. Confirmed rather than inferred,
+by re-fetching five of them through the shipped provider:
+
+| catalog `imdb_id` | TMDb `external_ids.imdb_id` | already owned by |
+|---|---|---|
+| `tt0023002` | `tt9731440` | another movie |
+| `tt0032420` | `tt0035828` | another movie |
+| `tt0023046` | `tt0165558` | another movie |
+| `tt0023322` | `tt0155020` | another movie |
+| `tt0026564` | `tt0026577` | another movie (adjacent `tconst`) |
+
+Rate **30 in 130,806 = 0.023%**. It is *not* `PortDataMalformed`, so it
+retries: **every occurrence burns all five attempts and the full backoff
+schedule** before parking, and the fetch is re-made each time because the
+failing write rolls the `raw_payloads` insert back with it. That is the 65
+retry requests in the arithmetic above. The title is left `skeleton` with
+`enrichment_error` set — `EnrichService._record_failure` logs *"tier stays
+skeleton"*, which is the M4 finding about a failure handler that must not
+reset the tier, working correctly.
+
+### The first 502s, in two exact bursts of 43
+
+**86 × 502, all inside 526 s (23:07:50Z → 23:16:36Z), in two bursts of
+exactly 43.** Before today this repository had observed **zero** 5xx from
+TMDb in 1,644 requests across three runs. None carried `Retry-After`. All 86
+were classified `PortUnavailable` (retryable), backed off and **recovered** —
+not one parked job carries a 502-shaped error, which is the retry taxonomy
+working on a branch that had never fired in production. The two-identical-
+bursts shape suggests one upstream node cycling rather than load shedding,
+and **no 429 appeared at any point**, so this is not the rate limit in
+disguise. Guess 1 — whether a real 429 carries `Retry-After` — is *still*
+unverified, and now so is whether TMDb ever sends `Retry-After` at all: 193
+non-200s across this run carried none.
+
+### The `index` lane does not drain beside the `enrich` lane, and `USHER_EMBEDDING_ENABLED` is not why
+
+**`title_embeddings` sat at 542 through the entire enrich run and then jumped
+to 4,929 within minutes of the enrich queue emptying.** The embedder was on
+the whole time — this was head-of-line blocking, and the mechanism is one
+line of the claim:
+
+```sql
+ORDER BY priority DESC, created_at
+```
+
+Every job in the table is at `JobPriority.BACKFILL` (20), and the enqueue
+wrote all 130,804 `enrich` rows inside a **1.3-second window** at 22:08:54–55.
+An `index` job is only created when its title finishes enriching, so **every
+enrich job sorts ahead of every follow-up job**, and `LIMIT 20` never reaches
+past them. Measured directly: the head of the claim queue returned 20 × 
+`enrich` on every probe during the run, and the five embeddings that *did*
+get written are the moments when fewer than 20 enrich jobs were claimable.
+
+**Three independent checks that the embedder was on**, recorded because the
+alternative reading — `composition.embedder` returning `(None, no-op)` —
+produces an identical-looking backlog and was the live hypothesis for an hour:
+
+1. `/proc/<pid>/environ` on the live claimers: `USHER_EMBEDDING_ENABLED=true`.
+2. `composition.embedder` logs `"no embedding model configured; index jobs
+   will not be claimed"` on the no-op branch. **That line is absent from all
+   three worker logs**, while its structural sibling `"no LLM configured;
+   curate jobs will not be claimed"` is present in all three — an internal
+   control, in the same file, emitted by the same shape of guard.
+3. A pre-run calibration drained 537 `index` jobs to 537 embeddings and 537
+   `derive` jobs in 12.7 s, at **zero** outbound requests.
+
+**So `USHER_EMBEDDING_ENABLED` is necessary and not sufficient**, and the
+ruling that it be on was right for a reason one step removed from the one
+given: it makes the index jobs *claimable*, but a bulk enqueue at a single
+priority defers them wholesale until the bulk lane is empty. The plan's stated
+risk — *"this puts a multi-hour job on the single `JobWorker` lane"* — is
+confirmed, and it applies to the run's **own** follow-ups, not just to
+`match` and `watch_history`.
+
+### The per-pass gauge refresh is O(the enriched tier), and this run grew that 244×
+
+`usher work` calls `SearchGauges.refresh` after **every** `run_once`, i.e.
+every 20 jobs. Its two `count(*)`s run `_COUNT` over `enrichment_state <>
+'skeleton'` with `_FINGERPRINT_SQL`'s `md5()` of seven concatenated columns
+evaluated per row. `PostgresTitleEmbeddingRepository`'s own docstring prices
+this at *"2k-10k rows"* and *"a query that runs a few times a day"*. Measured
+on this run as the tier filled:
+
+| enriched rows | one `count_stale` |
+|---|---|
+| 7,718 | 16.4 ms |
+| 18,267 | 29.4 ms |
+| 88,001 | **327.9 ms** |
+
+At the run's end that is ~0.7 s of gauge per 20-job pass, per worker, against
+~2.8 s of enrich work — and against ~1.4 s of `index`/`derive` work, where it
+is a ~50% tax. The docstring's estimate was off by **13×** in population and
+by four orders of magnitude in frequency. Recorded, not fixed: the fix is a
+throttle or an index and both are decisions this task has no mandate for.
+
+### The pre-state and the post-state, each against the population it was taken over
+
+**Pre-state, read from the database at 22:02Z**, not from a script's stdout.
+`alembic current` reported **m09a**, was upgraded to **m09c (head)** by this
+task at 22:00Z, and the gap mattered only in that C2's `images` natural key
+had to exist before `derive` ran. The plan's premise guard — one row,
+`(skeleton, 1,272,367)`, and `count(raw_payloads) = 0` — **is not the state
+that existed**, because S2 enriched 537 titles against this same scratch
+database first: 1,271,830 `skeleton` + 537 `enriched`, 537 payloads, 537
+pending `index` jobs and 2 parked `enrich`. Recorded as what it was.
+
+**The tier was frozen before the first request** — `s3_tier_snapshot`, 130,806
+ids, created 22:02:21Z:
+
+```sql
+SELECT id FROM titles WHERE kind='movie' AND tmdb_id IS NOT NULL
+  AND (vote_count >= 100 OR enrichment_state <> 'skeleton')
+```
+
+The live predicate alone gave **130,349**; the 457 rows S2's enrichment had
+already pushed below the floor bring it to **130,806**, reconstructing the
+plan's population exactly. Every count below is over those 130,806 frozen ids
+and says so.
+
+| over the frozen tier (n = 130,806) | |
+|---|---|
+| `enriched` | **130,647** (99.88%) |
+| still `skeleton` | **159** = 139 parked + 20 orphaned by the crash |
+| `enrichment_error` non-NULL | 140 |
+| `overview` (weight class C) | 129,926 (99.33%) |
+| `tagline` (weight class C) | 54,567 (41.72%) |
+| `genres` (weight class D) | 130,781 (99.98%) |
+| `keywords` (weight class D) | 82,405 (63.00%) |
+| `field_provenance.vote_count = 'tmdb'` | 130,647 |
+
+**The shortfall is 159 and every one is accounted for**, which is what the
+acceptance asked for: 109 titles TMDb has merged away (404, parked at
+`attempts = 1`, the `PortDataMalformed` path), 30 `imdb_id` conflicts (parked
+at `attempts = 5`), and 20 orphaned by the crash. It is **not** a `tmdb_id`
+coverage finding — the `tmdb_id IS NOT NULL` conjunct had already removed
+those 30,983 before the walk began.
+
+**Confirmed: a re-run inside the freshness window costs nothing, at scale this
+time.** All 537 titles S2 had already enriched were re-enqueued as part of the
+snapshot and **not one was re-fetched** — `raw_payloads.fetched_at` on all 537
+is still S2's 21:4xZ. S2 established this on 20 rows named by id; this is the
+same claim over 537 inside a 130,806-row walk.
+
+**Confirmed, and now over 130,806 rather than 537: the tier evicts itself.**
+Of the frozen tier's 130,647 enriched rows, **21,640 (16.56%)** still carry
+`vote_count >= 100` — against S2's 14.9% from a 537-row sample, so the small
+sample was low by 1.7 points and directionally right. Median TMDb `vote_count`
+**15** against a median frozen IMDb `numVotes` of **576**. The live predicate
+`kind='movie' AND vote_count >= 100` has fallen **161,332 → 52,782**, and with
+`tmdb_id` **130,349 → 21,799**. ⚠️ **Those last two are a different population
+from every tier statistic in this file and in the group S preamble**, all of
+which were taken before enrichment. A number re-derived from the predicate now
+answers about a sixth of what it used to.
+
+### What this run leaves behind, priced
+
+`enrich` is drained. **261,294 follow-up jobs are not**: at the two surviving
+workers' measured 34.2 jobs/s across both kinds, the remaining `index` +
+`derive` backlog is **~1.9 h**. Those jobs are durable and nothing is lost.
+`title_embeddings` was **11,585 and climbing at 17.0/s** when this was
+written, `title_neighbors` 0, `people` 57,703, `credits` 290,760.
+`pg_database_size` 2,746 MB.
+
+**Still unverified after this run, named rather than implied:** a real 429 and
+whether one carries `Retry-After` (130,334 requests, zero 429s, and now 193
+non-200s with no `Retry-After` on any); the season-omission branch (movies
+only, so this adds nothing to the 626-listed-seasons count); whether the
+`MissingGreenlet` crash is caused by the conflict path or merely followed one;
+and what **four or more** concurrent workers achieve, given that three
+returned 1.90× and the marginal worker was measured to *reduce* per-worker
+throughput.

@@ -91,7 +91,9 @@ affinities: Callable[[], Awaitable[Sequence[GenreAffinity]]]
   centroid needs an embedder and the route deliberately holds none, so every
   `GET /home` paid a `user_taste` read for a value that was both unused and
   unusable. A field with no consumer is what this project deletes; the
-  argument is `RowCard`'s absent artwork field, one layer up.
+  argument was `RowCard`'s absent artwork field, one layer up — and M9's
+  `images` is the same argument from the other side, added by the task that
+  first reads it rather than by the task that built the port.
   `test_every_row_context_field_is_read_by_at_least_one_provider` now scans for
   the next one rather than counting.
 - **`affinities` replaced `taste` as the taste signal a row actually reads.**
@@ -122,7 +124,8 @@ So rows are pure functions of context and trivially testable with fakes.
 `BuiltRow` and `RowCard` are Pydantic DTOs (`usher.domain.rows`). `RowCard`
 carries `title_id`, `kind`, `name`, `year`, `enrichment_state`, `owned`, and
 the progress triple `position_seconds` / `runtime_seconds` / `played`, plus ⏳
-`episode_id` / `episode_label` for the two rows that are about a chapter.
+`episode_id` / `episode_label` for the two rows that are about a chapter, plus
+`artwork`.
 
 ⏳ **`title_id` is always the *series*, never the episode**, and the chapter
 rides alongside it. Every other field on the card — `kind`, `name`, `year`,
@@ -135,16 +138,49 @@ composed on the server so the zero-padding is decided once rather than by each
 client — ADR-0006's "the server composes", applied to a string. Both are `None`
 on every card of the other seven rows.
 
-Three fields an earlier draft of this sentence listed are **deliberately
+**`artwork` is one image id, chosen server-side against the row's own
+`display_hint`** — a poster for `portrait`/`square`, a backdrop for
+`landscape`/`wide`. M7 shipped no such field at all, absent rather than null,
+because there was no `Image` entity, no `images` table and no `poster_path` on
+`titles`; M9 built all three (the entity and the natural key, the derivation
+from `raw_payloads`, and `GET /images/{id}`), so the field arrives **populated**
+and the addition is additive to a DTO that never lied about having it.
+
+Three consequences worth stating, because each was a live alternative:
+
+- **An id, never a URL and never a path.** A URL bakes the CDN base and
+  [ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)'s ladder rung
+  into a screen a client caches; a path is provider vocabulary. `GET /images/{id}`
+  is where both are decided, and the id survives a re-derivation because
+  `uq_images_owner_provider_path` is the natural key.
+- **One, not a list.** The poster/backdrop choice is keyed on the row's hint,
+  which lives one level above the card — a client cannot make it, and
+  ADR-0006 would not have it make it.
+- **`null` is a real answer**, and on a catalog that has been synced but never
+  derived it is the answer for every card. It is *not* an
+  [ADR-0014](decisions/0014-absence-is-not-zero.md) site: that rule is about a
+  falsy value being read as a measurement, and a UUID has no zero.
+
+A card also paints a poster or a backdrop and **never a logo**, which is why
+ADR-0032's refusal of `image/svg+xml` needs no discriminator here: *"no logo"*
+and *"a logo we will not serve"* would produce the identical rendering anyway.
+🔴 **That sentence read *"the `kind` filter makes an unservable logo
+unreachable from a card"* until 2026-08-11, and the clause is one measurement
+short.** The `kind` filter excludes *logos*; what excludes a **poster or a
+backdrop published as `.svg`** is only the provider's present habit, which is
+an empirical property of TMDb and not a guarantee this code holds. So the
+shelf read filters on `usher.ports.images.is_servable_path` exactly as
+`GET /titles/{id}`'s `images` key does ([07](07-client-api.md)) — two reads of
+one table disagreeing about what is servable is the drift that one definition
+exists to prevent. The degradation is stated rather than discovered: the shelf
+read has **already chosen one image**, so a title whose chosen poster is
+unservable renders `artwork: null` rather than falling through to its second
+poster — which is the same render the paragraph above is about, and which is
+the whole reason a card carries no discriminator instead.
+
+Two further fields an earlier draft of this sentence listed are **deliberately
 absent**, each for a stated reason:
 
-- **artwork refs** — M9 owns the `Image` entity, the `images` table and
-  `GET /images/{id}`. There is no `poster_path` on `titles` either, so the
-  choice was an always-null field or no field, and
-  [ADR-0006](decisions/0006-server-composed-home.md)'s sibling call on
-  `GET /titles/{id}`'s absent `images` key settles it the same way: *"an empty
-  list would be indistinguishable from a film with no cast."* M9 adds the
-  field additively, to a DTO that never lied about having it.
 - **rating** — `watch_states` has no rating column at all, and neither does
   `SourceWatchState`. A `rating` on a card is a field with no source.
 - **progress**, as a fraction — `runtime_seconds` is nullable, so a fraction

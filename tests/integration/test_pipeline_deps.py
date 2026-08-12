@@ -33,6 +33,7 @@ from usher.api.deps import (
     get_default_user_id,
     get_episode_repository,
     get_home_service,
+    get_image_repository,
     get_ingest_service,
     get_job_queue,
     get_match_service,
@@ -101,6 +102,12 @@ _PROVIDERS = {
     # `taste` service, awaited later by the one provider that reads them). Two
     # counts of two different things, one sentence.
     "curated_rows": get_curated_row_repository,
+    # M9's, and the eleventh `Depends` on `get_row_context` -- `RowCard.artwork`
+    # is read through it by `BaseRow.hydrate` rather than by any one provider.
+    # Here for the same reason `curated_rows` is: a dependency annotated
+    # without `Depends` raises `FastAPIError` at route registration, which no
+    # unit test overriding `get_row_context` can see.
+    "images": get_image_repository,
     "taste_repository": get_taste_repository,
     "default_user": get_default_user,
     "taste_service": get_taste_service,

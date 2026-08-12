@@ -176,7 +176,10 @@ directly on `titles`, and the narrow table duplicates nothing from it: it
 carries **no `primary` rows**, because a canonical name is answered by
 `ix_titles_name_lower_prefix` on `titles` itself, so a `primary` row would be
 exactly the one-row-per-title copy boundary call 3 refused. Its two members
-are `alias` and `person`, each with a named emitter inside M9.
+are `alias` and `person`, and **both emitters are now built** — see the alias
+half below for the measurement that keeps the "duplicating `titles`" argument
+true of the rows actually written, which is that three retained akas rows in
+four restate the title's own name and are dropped.
 
 `(title_id, name, kind, region, language)`. **`region` and `language` are new
 and are not decoration:** IMDb `title.akas` is the alias source, and without
@@ -200,19 +203,34 @@ text_pattern_ops` to **both** `titles` and `title_search_names`: p50 0.6 ms,
 p95 1.0 ms, max 10 ms, 44 MB, building in 0.559 s over 1,271,138 rows, against
 the trigram path's 33.3 ms p50 and 734 ms max.
 
-⏳ **`m09a` builds the shape; the two halves that fill it have separate
-writers, and one of them is now built.** M6 deferred this to *"the day M7 lands
-aliases and people"*. **M7 landed people and not aliases** — a deferral
-silently rolled forward is the exact failure [09](09-roadmap.md) names for the
-tag genome (*"an obligation recorded only where it was postponed is one nobody
-plans"*). Both halves, with an owner:
+✅ **`m09a` builds the shape and both halves that fill it are now written, by
+two separate writers.** M6 deferred this to *"the day M7 lands aliases and
+people"*. **M7 landed people and not aliases** — a deferral silently rolled
+forward is the exact failure [09](09-roadmap.md) names for the tag genome (*"an
+obligation recorded only where it was postponed is one nobody plans"*). Both
+halves, with an owner:
 
-- **Aliases are not merely unbuilt, they are not in the cache.**
-  `alternative_titles` is in neither `append_to_response` list
-  ([03](03-sources-and-sync.md)), so aliases are absent from `raw_payloads`
-  entirely — landing them changes the crawl's *request shape* and re-fetches
-  the whole enriched tier. **Unassigned**, and named in PRD 03 rather than
-  left implied by this deferral.
+- ✅ **Aliases come from IMDb `title.akas`, which needs no API call and does
+  not touch the crawl's request shape.** The blocker this bullet used to carry
+  was real and is about a *different source*: `alternative_titles` is in
+  neither `append_to_response` list ([03](03-sources-and-sync.md)), so aliases
+  are absent from `raw_payloads` entirely and landing them there would
+  re-fetch the whole enriched tier. `BulkCatalogRepository.replace_aliases`
+  writes them from the bulk dump instead — `kind = 'alias'`, `region` and
+  `language` filled, the delete scoped by `imdb_ids` **and** `kind` so the
+  people half survives it.
+
+  **Three akas in four are not aliases at all, and dropping them is what keeps
+  boundary call 3 from being reversed by accident.** Measured over a real
+  1,271,138-title catalog: of 7,536,366 retained akas rows, **5,693,570
+  (75.5%) `lower()`-equal the title's own `name` or `original_name`** and are
+  not stored — such a row carries nothing `ix_titles_name_lower_prefix` on
+  `titles` does not already answer. What survives deduplicates on
+  `(title_id, lower(name))` to **1,663,364 rows in 307,822,592 B** (0.308 GB),
+  against a bar of 8M rows and 1.0 GB written down before the measurement.
+  **Only 399,046 of 1,271,138 titles (31.4%) gain even one alias**, so this is
+  a narrow, cheap win rather than a broad one, and the comparison is `lower()`
+  on both sides because that is the function the tier-1 index is built over.
 - ✅ **The credited-person half is written by
   `CreditRepository.replace_for_titles`** — the call that already writes
   `credits` and `titles.credit_names`, from the same `credit_names` mapping, in

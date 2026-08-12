@@ -12,6 +12,7 @@ from usher.ports.bulk import (
     GenomeTag,
     GenomeVector,
     IdCrosswalkPair,
+    ImdbAka,
     ImdbCreditNames,
     ImdbRating,
     ImdbTitle,
@@ -20,12 +21,57 @@ from usher.ports.bulk import (
 from usher.ports.repository._results import BulkWriteResult
 
 __all__ = [
+    "AliasWriteResult",
     "BulkCatalogRepository",
     "CreditNamesFillResult",
     "CrosswalkLinkResult",
     "GenomeCoverage",
     "GenomeWriteResult",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class AliasWriteResult:
+    """What one scoped alias replacement actually stored, and what it dropped.
+
+    Four fields, because **three of the four rows this write is handed do not
+    become rows** and a filter nobody can count is indistinguishable from an
+    upstream that has nothing to give. Against the measured catalog the whole
+    file reduces 7,536,366 retained akas rows to **1,663,364** stored aliases,
+    and the two filters below are where the other 5.87M go.
+
+    `written` counts rows stored — after the canonical filter and after the
+    dedupe, so it is the number that goes against T3's bar (B) and not the
+    batch's length.
+
+    **`canonical` counts rows dropped for restating the title's own name**,
+    and it is the dominant term: **5,693,570 of 7,536,366 (75.5%)**
+    `lower()`-equal `titles.name` or `titles.original_name`. A row like that
+    carries nothing `ix_titles_name_lower_prefix` does not already answer, so
+    storing it is the one-row-per-title duplication M6's boundary call 3
+    refused this table for. An operator watching this number sit at ~0 is
+    watching the comparison miss, which otherwise looks exactly like a dump
+    full of genuine aliases.
+
+    **`duplicate` counts rows dropped as a repeat of `(title_id,
+    lower(name))`** already kept for that title — 1,842,796 survivors
+    deduplicate to 1,663,364, i.e. **9.7%**. It is not a defensive count: one
+    name is legitimately listed for several regions, and the loser's `region`
+    and `language` are discarded, so the number says how much locale detail
+    this shape costs.
+
+    `unmatched` counts **scoped IMDb ids resolving to no catalog title**,
+    mirroring `CreditNamesFillResult.unmatched` and
+    `CrosswalkLinkResult.unmatched`. It counts the scope rather than the rows,
+    because the scope is what the caller is asserting it has read the upstream
+    for; rows belonging to such an id are neither written nor filtered, they
+    are attributed to the id that was not there.
+    """
+
+    written: int
+    unmatched: int
+    canonical: int
+    duplicate: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +337,83 @@ class BulkCatalogRepository(ABC):
         Postgres reason. Idempotent, and a replay reports `filled = 0`: an
         unchanged row is not rewritten, so the `set_updated_at` trigger, two
         GIN indexes and a stored generated column are not paid for nothing.
+        """
+
+    @abstractmethod
+    async def replace_aliases(
+        self, rows: Sequence[ImdbAka], *, imdb_ids: Sequence[str]
+    ) -> AliasWriteResult:
+        """Replace the `alias` half of `title_search_names` for the titles
+        `imdb_ids` names, from IMDb `title.akas`. Never creates a title, and
+        never touches a row of any other `kind`.
+
+        **This is the alias source M6 refused the table for the lack of.**
+        Boundary call 3 declined `title_search_names` because with no aliases
+        and no people it would hold one row per title duplicating four columns
+        of `titles`; M7 restated that rather than renewing it, landing people
+        and not aliases; and PRD 03 named the blocker outright — TMDb's
+        `alternative_titles` is in neither `append_to_response` list, so
+        aliases are not in `raw_payloads` at all. `title.akas` is an alias
+        source that needs **no API call and no change to the crawl's request
+        shape**.
+
+        **The scope is `imdb_ids` and it is a separate argument, not something
+        derived from `rows`.** A title whose akas IMDb has withdrawn
+        contributes no rows, so a scope taken from the rows cannot name it and
+        its stale aliases stand forever with nothing able to report them.
+        Identical argument, and identical shape, to
+        `CreditRepository.replace_for_titles`' `title_ids`.
+
+        **Every row's `imdb_id` must be in `imdb_ids`, and a row outside it is
+        refused with `ValueError` before anything is written.** Such a row
+        would be inserted and never deletable — the next pass over that title
+        deletes by a scope it is not in — which is the one row shape a
+        re-import cannot repair. `ValueError` rather than `PortDataMalformed`
+        or `RepositoryConflict` for `replace_genome_tags`' reason: it is a
+        caller-assembly mistake, not an upstream payload and not a backing
+        store refusing a row.
+
+        **The scope must hold each title's aliases whole**, exactly as
+        `fill_credit_names`' write is a set rather than a merge. Two calls
+        naming one title each replace the other's rows, so a caller batching a
+        line-oriented dump has to close a title's run before it closes a batch.
+
+        **An alias equal to the title's own `name` or `original_name` is not
+        stored**, compared under `lower()` — the function
+        `ix_titles_name_lower_prefix` is built over, so two names differing
+        only in case are one entry to every reader of this table. Measured over
+        a real 1,271,138-title catalog, **5,693,570 of 7,536,366 retained akas
+        rows (75.5%) are exactly this**, and keeping them would reproduce the
+        duplication boundary call 3 refused rather than reverse it on purpose.
+        The parser's `isOriginalTitle` filter is a cheap prefix of this rule
+        and never a substitute: **70.6% of the rows that survive it still
+        restate the title's own name**, and only a comparison against the
+        stored `Title` can see that.
+
+        **`region` and `language` are written rather than dropped**, which is
+        what `m09a` added those two columns for: without them a French and a
+        Brazilian alias of one film are indistinguishable rows. Nothing is
+        *filtered* on either axis, nor on `types` or `attributes`, and that is
+        a decision rather than an omission — bar (B) passed 4.8x under on rows
+        and 3.2x under on bytes, so a recall-costing filter buys headroom
+        nobody needs. The only axis this write filters on is the one above,
+        which costs no recall at all: a dropped row's name is already reachable
+        through `titles`.
+
+        **Two rows of one title whose names are equal under `lower()` become
+        one row, and the survivor is the lowest `ordering`.** The dump lists
+        one name for several regions routinely — 9.7% of what survives the
+        canonical filter — and the loser's `region` *and* `language` are
+        discarded with it, so the winner has to be deterministic or both
+        columns wobble between two runs over the identical file. `ordering` is
+        the only per-title sequence `title.akas` supplies and is why `ImdbAka`
+        carries it.
+
+        Idempotent, and a replay is **not** invisible: it reports the same
+        `written` again, because the delete-and-insert rewrites the same rows.
+        That is the honest answer for a table with no unique constraint to
+        upsert against — `m09a` ships none deliberately, and what would reverse
+        that is a writer that upserts.
         """
 
     @abstractmethod

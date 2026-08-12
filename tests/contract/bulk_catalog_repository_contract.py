@@ -36,12 +36,14 @@ from usher.ports.bulk import (
     GenomeTag,
     GenomeVector,
     IdCrosswalkPair,
+    ImdbAka,
     ImdbCreditNames,
     ImdbRating,
     ImdbTitle,
     TmdbId,
 )
 from usher.ports.repository import (
+    AliasWriteResult,
     BulkCatalogRepository,
     BulkWriteResult,
     CreditNamesFillResult,
@@ -90,6 +92,22 @@ SLEEPER = ImdbTitle(
 )
 
 
+SHARP_S = ImdbTitle(
+    imdb_id="tt99000160",
+    kind=TitleKind.MOVIE,
+    # `ß`, because it is the one character where `lower()` and `casefold()`
+    # disagree in the direction *both* implementations of this port can see.
+    # See `test_the_fold_is_lower_and_not_casefold` for why that matters and
+    # for the Greek half, which they cannot.
+    name="Eine Synthetische Straße",
+    original_name=None,
+    year=1961,
+    end_year=None,
+    runtime_minutes=94,
+    genres=("Drama",),
+)
+
+
 GENOME_RELEASE_A = "an-invented-etag-a"
 GENOME_RELEASE_B = "an-invented-etag-b"
 
@@ -118,6 +136,23 @@ def _credit_names(imdb_id: str, *names: str) -> ImdbCreditNames:
     writer has no way to *blank* an array another source filled.
     """
     return ImdbCreditNames(imdb_id=imdb_id, names=names)
+
+
+def _aka(
+    imdb_id: str,
+    ordering: int,
+    name: str,
+    *,
+    region: str | None = None,
+    language: str | None = None,
+) -> ImdbAka:
+    """One retained `title.akas` row, as `parse_akas_row` emits it.
+
+    Already past the parser's three filters — the header, `isOriginalTitle`,
+    and a name that cannot be stored — so everything here is a row the writer
+    is genuinely being asked to decide about.
+    """
+    return ImdbAka(imdb_id=imdb_id, ordering=ordering, name=name, region=region, language=language)
 
 
 def _vocabulary(*names: str) -> tuple[GenomeTag, ...]:
@@ -1063,6 +1098,430 @@ class BulkCatalogRepositoryContract:
         await repo.fill_credit_names([ImdbCreditNames(imdb_id=SHAWSHANK.imdb_id, names=ranked)])
 
         assert await self.credit_names_of(repo, SHAWSHANK.imdb_id) == ranked
+
+    # --- title_search_names' alias half, from IMDb title.akas
+
+    async def test_replacing_a_titles_aliases_is_scoped_to_that_title(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """**The scoping bug `CreditRepository.replace_for_titles`' docstring
+        already names as "the one row shape a re-derivation cannot repair".**
+
+        A second title's aliases are seeded first and asserted present, then a
+        replace naming only the first title runs. A delete that forgot its
+        scope leaves the second title with nothing and nothing raised — a
+        `title_search_names` that is silently missing rows reads exactly like a
+        catalog whose titles have no aliases, which is 68.6% of them anyway.
+        """
+        await repo.upsert_titles([SHAWSHANK, THRONES])
+        await repo.replace_aliases(
+            [_aka(THRONES.imdb_id, 1, "Uma Série Sintética", region="BR", language="pt")],
+            imdb_ids=[THRONES.imdb_id],
+        )
+        assert await self.search_names_of(repo, THRONES.imdb_id) == (
+            ("alias", "Uma Série Sintética", "BR", "pt"),
+        ), "the premise: the neighbouring title's alias was really stored first"
+
+        await repo.replace_aliases(
+            [_aka(SHAWSHANK.imdb_id, 2, "Un Long Métrage Synthétique", region="FR", language="fr")],
+            imdb_ids=[SHAWSHANK.imdb_id],
+        )
+
+        assert await self.search_names_of(repo, THRONES.imdb_id) == (
+            ("alias", "Uma Série Sintética", "BR", "pt"),
+        )
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
+            ("alias", "Un Long Métrage Synthétique", "FR", "fr"),
+        )
+
+    async def test_an_alias_equal_to_the_titles_own_name_is_not_stored(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """**75.5% of retained akas rows are this**, measured over 7,536,366
+        rows against a real 1,271,138-title catalog — 5,693,570 of them
+        casefold-equal the title's own `name` or `original_name`.
+
+        Storing them reproduces exactly the one-row-per-title duplication M6's
+        boundary call 3 refused the table for, and it would reverse a boundary
+        call by accident rather than by argument: `lower(name)
+        text_pattern_ops` on `titles` already answers a prefix of the canonical
+        name, so such a row adds a second copy and no reachability.
+
+        The comparison is `lower()` on both sides — the function the tier-1
+        index is built over — so an alias differing from the canonical name
+        only in case is the same string to every reader of this table.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+
+        result = await repo.replace_aliases(
+            [
+                _aka(SHAWSHANK.imdb_id, 1, SHAWSHANK.name, region="US"),
+                _aka(SHAWSHANK.imdb_id, 2, "Un Long Métrage Synthétique", region="FR"),
+            ],
+            imdb_ids=[SHAWSHANK.imdb_id],
+        )
+
+        assert (result.written, result.canonical) == (1, 1)
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
+            ("alias", "Un Long Métrage Synthétique", "FR", None),
+        )
+
+    async def test_an_alias_equal_to_the_titles_original_name_is_not_stored(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """Both names, not just `name`. IMDb's own `originalTitle` is what
+        `titles.original_name` holds, and an aka restating it is the same
+        non-alias as one restating the display name — measured together,
+        because the 75.5% figure is against *either* of the two.
+
+        `SHAWSHANK` is the fixture carrying an `original_name` at all
+        (`THRONES` has none), which is asserted here rather than assumed: a
+        title whose `original_name` is NULL must not have every alias compared
+        against NULL and silently kept or silently dropped.
+        """
+        assert SHAWSHANK.original_name is not None, "the premise: this fixture has an original name"
+        assert SHAWSHANK.original_name != SHAWSHANK.name, "and it differs from the display name"
+        await repo.upsert_titles([SHAWSHANK])
+
+        result = await repo.replace_aliases(
+            [_aka(SHAWSHANK.imdb_id, 1, SHAWSHANK.original_name, region="US")],
+            imdb_ids=[SHAWSHANK.imdb_id],
+        )
+
+        assert (result.written, result.canonical) == (0, 1)
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == ()
+
+    async def test_the_canonical_comparison_is_case_normalised_the_way_the_index_reads_it(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """`ix_titles_name_lower_prefix` is a btree over **`lower(name)`**, so
+        two names differing only in case are one entry to the tier-1 probe.
+        An alias kept because its capitalisation differs is therefore a row
+        that can never be reached by a prefix the canonical name does not
+        already answer — the duplication with an extra step.
+
+        The premise is carried: the alias and the title's own name must differ
+        as strings, or a plain `=` comparison passes this case for the wrong
+        reason.
+        """
+        shouted = SHAWSHANK.name.upper()
+        assert shouted != SHAWSHANK.name, "the premise: the two differ before folding"
+        assert shouted.lower() == SHAWSHANK.name.lower(), "and are the same after it"
+        await repo.upsert_titles([SHAWSHANK])
+
+        result = await repo.replace_aliases(
+            [_aka(SHAWSHANK.imdb_id, 1, shouted, region="GB")], imdb_ids=[SHAWSHANK.imdb_id]
+        )
+
+        assert (result.written, result.canonical) == (0, 1)
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == ()
+
+    async def test_the_fold_is_lower_and_not_casefold(self, repo: BulkCatalogRepository) -> None:
+        """**The measurement this write was taken with is not the rule this
+        write applies, and one character in the dump can tell them apart.**
+        T3 and T5 measured the alias population with Python `str.casefold()`;
+        `replace_aliases` compares under `lower()`, because that is the
+        function `ix_titles_name_lower_prefix` is built over and therefore the
+        only one that answers *"does this alias reach anything `titles` does
+        not"*.
+
+        `casefold()` folds `ß` to `ss` and neither `lower()` does, so
+        `Eine Synthetische STRASSE` restates `Eine Synthetische Straße` under
+        the measured rule and is a genuine, separately-reachable index entry
+        under the shipped one.
+        Measured over the whole pinned `title.akas.tsv.gz`
+        (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`), **32,223 of 46,202,631
+        retained rows (0.070%) fold differently under the two** — this family
+        and Greek final sigma — so the direction is what settles bar (B): the
+        shipped rule stores *more* than the 1,663,364 that was measured.
+
+        This case is in the shared contract because Python's `str.lower()` and
+        Postgres's `lower()` **agree** on `ß`. They disagree on Greek final
+        sigma, which is why that half is integration-only and is enumerated in
+        the fake's divergence list rather than asserted here.
+
+        The premise is carried: the two names must fold together under
+        `casefold()` and apart under `lower()`, or the case is about nothing.
+        """
+        shouted = "Eine Synthetische STRASSE"
+        assert shouted.casefold() == SHARP_S.name.casefold(), "the premise: casefold folds these"
+        assert shouted.lower() != SHARP_S.name.lower(), "and lower does not"
+        await repo.upsert_titles([SHARP_S])
+
+        result = await repo.replace_aliases(
+            [_aka(SHARP_S.imdb_id, 1, shouted, region="DE", language="de")],
+            imdb_ids=[SHARP_S.imdb_id],
+        )
+
+        assert (result.written, result.canonical) == (1, 0)
+        assert await self.search_names_of(repo, SHARP_S.imdb_id) == (
+            ("alias", shouted, "DE", "de"),
+        )
+
+    async def test_region_and_language_are_stored_rather_than_dropped(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """**The two columns `m09a` added for this loader**, and the reason
+        they exist: without them a French and a Brazilian alias of one film are
+        indistinguishable rows.
+
+        Both are independently optional and NULL means "not specific to a
+        region", which is a different fact from any code — measured over the
+        whole pinned `title.akas.tsv.gz`, **12,748,984 rows carry no `region`
+        and 19,243,152 no `language`, and they are not the same rows**. So all
+        four shapes are exercised here rather than only the populated one.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+
+        result = await repo.replace_aliases(
+            [
+                _aka(SHAWSHANK.imdb_id, 1, "Both", region="FR", language="fr"),
+                _aka(SHAWSHANK.imdb_id, 2, "Region Only", region="BR"),
+                _aka(SHAWSHANK.imdb_id, 3, "Language Only", language="ja"),
+                _aka(SHAWSHANK.imdb_id, 4, "Neither"),
+            ],
+            imdb_ids=[SHAWSHANK.imdb_id],
+        )
+
+        assert result.written == 4
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
+            ("alias", "Both", "FR", "fr"),
+            ("alias", "Language Only", None, "ja"),
+            ("alias", "Neither", None, None),
+            ("alias", "Region Only", "BR", None),
+        )
+
+    async def test_a_title_whose_aliases_all_disappeared_upstream_loses_its_stale_rows(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """**The whole reason the scope is a separate argument.** A title whose
+        akas IMDb has withdrawn contributes no rows at all, so a scope derived
+        from `rows` cannot name it and its stale aliases stand forever, with
+        nothing anywhere able to report that they are stale.
+
+        Same argument and same shape as `replace_for_titles`' `title_ids`
+        parameter one port over.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+        await repo.replace_aliases(
+            [_aka(SHAWSHANK.imdb_id, 1, "Withdrawn Upstream", region="FR")],
+            imdb_ids=[SHAWSHANK.imdb_id],
+        )
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
+            ("alias", "Withdrawn Upstream", "FR", None),
+        ), "the premise: the alias was really stored before the pass that removes it"
+
+        result = await repo.replace_aliases([], imdb_ids=[SHAWSHANK.imdb_id])
+
+        assert result.written == 0
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == ()
+
+    async def test_a_replayed_batch_stores_the_same_rows_rather_than_doubling_them(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """`title_search_names` has **no unique constraint** — `m09a` says so
+        in the migration and states the condition that would reverse it (a
+        writer that upserts). So nothing in the database stops a replay
+        doubling every alias; the delete is what makes the write idempotent,
+        and a resume replays a batch by design.
+        """
+        batch = [
+            _aka(SHAWSHANK.imdb_id, 1, "Un Long Métrage Synthétique", region="FR", language="fr")
+        ]
+        await repo.upsert_titles([SHAWSHANK])
+        first = await repo.replace_aliases(batch, imdb_ids=[SHAWSHANK.imdb_id])
+        assert first.written == 1, "the premise: the first pass really wrote"
+
+        again = await repo.replace_aliases(batch, imdb_ids=[SHAWSHANK.imdb_id])
+
+        assert again.written == 1
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
+            ("alias", "Un Long Métrage Synthétique", "FR", "fr"),
+        )
+
+    async def test_two_akas_of_one_name_are_one_row_and_the_lowest_ordering_wins(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """**The dedupe is 9.7% of what survives the canonical filter** —
+        1,842,796 rows down to 1,663,364 on the measured catalog — because one
+        name is legitimately listed for several regions.
+
+        The winner is the lowest `ordering`, which is the only per-title
+        sequence the dump supplies and the reason `ImdbAka` carries it at all.
+        That matters rather than being a formality: the loser's `region` **and**
+        `language` are discarded, so an arbitrary winner makes both columns
+        unstable across two runs over the identical file (measured: a 38-row
+        wobble on `language` alone).
+
+        The premise is that `ordering` order and arrival order disagree — with
+        the low-`ordering` row seeded second, an implementation keeping
+        first-seen, last-seen or the smallest id answers differently from one
+        keeping the lowest `ordering`.
+        """
+        arrived = [
+            _aka(SHAWSHANK.imdb_id, 7, "One Name Many Regions", region="BR", language="pt"),
+            _aka(SHAWSHANK.imdb_id, 2, "one name many regions", region="FR", language="fr"),
+        ]
+        assert [row.ordering for row in arrived] != sorted(row.ordering for row in arrived), (
+            "the premise: arrival order is not ordering order"
+        )
+        await repo.upsert_titles([SHAWSHANK])
+
+        result = await repo.replace_aliases(arrived, imdb_ids=[SHAWSHANK.imdb_id])
+
+        assert (result.written, result.duplicate) == (1, 1)
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
+            ("alias", "one name many regions", "FR", "fr"),
+        )
+
+    async def test_a_scoped_title_the_catalog_does_not_hold_is_counted_not_written(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """`title.akas` covers **1,270,074 of 1,271,138 catalog titles** but
+        the file itself names far more than the catalog retains, so a scoped id
+        matching nothing is routine rather than anomalous. Counted, the way
+        `CreditNamesFillResult.unmatched` and `GenomeWriteResult.unmatched`
+        are: a join that matched almost nothing must not look identical to one
+        that matched everything.
+
+        **`unmatched` counts the scope and not the rows**, which is a real
+        distinction rather than a spelling: the third id here is in scope, has
+        no rows *and* has no title — a title IMDb withdrew every aka for and
+        the catalog never held. Counted from the rows it is invisible, and for
+        every *other* shape a batch can take the two answers are the same
+        number, which is why it is written into this case rather than assumed.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+
+        result = await repo.replace_aliases(
+            [
+                _aka(SHAWSHANK.imdb_id, 1, "Un Long Métrage Synthétique", region="FR"),
+                _aka("tt99000900", 1, "An Alias Of Nothing", region="FR"),
+            ],
+            imdb_ids=[SHAWSHANK.imdb_id, "tt99000900", "tt99000910"],
+        )
+
+        assert (result.written, result.unmatched) == (1, 2)
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
+            ("alias", "Un Long Métrage Synthétique", "FR", None),
+        )
+
+    async def test_a_row_outside_the_scope_is_refused_before_anything_is_written(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """An alias whose title the scope does not name would be **inserted and
+        never deletable** — the next pass over that title deletes by a scope
+        this row is not in, so it survives every re-import and every upstream
+        withdrawal. That is the one row shape a re-derivation cannot repair,
+        so it is a `ValueError` from the caller rather than a row.
+
+        `ValueError` rather than `PortDataMalformed` or `RepositoryConflict`,
+        following `replace_genome_tags` two methods up: this is a
+        caller-assembly mistake, not an upstream payload and not a backing
+        store refusing a row.
+
+        The premise is carried both ways — the in-scope title's earlier alias
+        is asserted present before the refusal and unchanged after it — because
+        "nothing was written" is also what a call that wrote nothing at all
+        produces.
+        """
+        await repo.upsert_titles([SHAWSHANK, THRONES])
+        await repo.replace_aliases(
+            [_aka(SHAWSHANK.imdb_id, 1, "Already Here", region="FR")],
+            imdb_ids=[SHAWSHANK.imdb_id],
+        )
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
+            ("alias", "Already Here", "FR", None),
+        ), "the premise: the in-scope title already had an alias"
+
+        with pytest.raises(ValueError, match=THRONES.imdb_id):
+            await repo.replace_aliases(
+                [
+                    _aka(SHAWSHANK.imdb_id, 2, "A Replacement", region="FR"),
+                    _aka(THRONES.imdb_id, 1, "Out Of Scope", region="BR"),
+                ],
+                imdb_ids=[SHAWSHANK.imdb_id],
+            )
+
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
+            ("alias", "Already Here", "FR", None),
+        )
+        assert await self.search_names_of(repo, THRONES.imdb_id) == ()
+
+    async def test_an_alias_write_leaves_a_credited_persons_rows_alone(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """**The mirror of B1's own case, from the other writer.**
+        `title_search_names` has two writers inside one milestone —
+        `CreditRepository.replace_for_titles` owns `kind = 'person'` and this
+        call owns `kind = 'alias'` — and a delete scoped by `title_id` alone
+        makes them mutually destructive, whichever runs second erasing the
+        other's rows with nothing raised and nothing logged.
+
+        `replace_for_titles` scopes its delete by `title_ids` **and** `kind`
+        and seeds an alias row by hand to prove it. This is the same assertion
+        from this side, and the person row is seeded by hand for the same
+        reason: calling the other port would make this case pass or fail on a
+        second implementation's correctness.
+        """
+        await repo.upsert_titles([SHAWSHANK])
+        await self.seed_person_search_name(repo, SHAWSHANK.imdb_id, "Ada Synthetic")
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
+            ("person", "Ada Synthetic", None, None),
+        ), "the premise: the credited person's row was really there first"
+
+        await repo.replace_aliases(
+            [_aka(SHAWSHANK.imdb_id, 1, "Un Long Métrage Synthétique", region="FR")],
+            imdb_ids=[SHAWSHANK.imdb_id],
+        )
+
+        assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
+            ("alias", "Un Long Métrage Synthétique", "FR", None),
+            ("person", "Ada Synthetic", None, None),
+        )
+
+    async def test_an_empty_alias_batch_with_an_empty_scope_writes_nothing_and_does_not_raise(
+        self, repo: BulkCatalogRepository
+    ) -> None:
+        """`BulkDataset.batches`' contract permits a batch that exists only to
+        advance the cursor, and `_ImdbDataset` yields no batch at all for a
+        trailing run of filtered lines — so the caller reaching this with
+        nothing on either side is routine."""
+        assert await repo.replace_aliases([], imdb_ids=[]) == AliasWriteResult(
+            written=0, unmatched=0, canonical=0, duplicate=0
+        )
+
+    async def seed_person_search_name(
+        self, repo: BulkCatalogRepository, imdb_id: str, name: str
+    ) -> None:
+        """Leave behind exactly what `CreditRepository.replace_for_titles`
+        leaves behind for one credited person: a `title_search_names` row at
+        `kind = 'person'`, with `region` and `language` NULL.
+
+        A hook rather than a call to that port, for `derive_credit_names`'
+        reason one method down: it is a *different port*, and making this
+        case's verdict depend on a second implementation's correctness would
+        test the wrong thing.
+        """
+        raise NotImplementedError
+
+    async def search_names_of(
+        self, repo: BulkCatalogRepository, imdb_id: str
+    ) -> tuple[tuple[str, str, str | None, str | None], ...]:
+        """Every `title_search_names` row for a title, as
+        `(kind, name, region, language)` ascending.
+
+        A test affordance rather than a port method, for `popularity_of`'s
+        reason: nothing in production reads this table through
+        `BulkCatalogRepository` — `PostgresPrefixSuggestIndex` reads it, and it
+        is a different port with no write surface at all.
+
+        `kind` is in the tuple deliberately. This table has **two** writers in
+        one milestone and the one thing an alias write must not do is disturb
+        the other's rows, so a read that could not tell them apart would make
+        the case that pins it unwritable.
+        """
+        raise NotImplementedError
 
     async def credit_names_of(
         self, repo: BulkCatalogRepository, imdb_id: str

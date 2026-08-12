@@ -65,6 +65,7 @@ from usher.ports.repository import (
     CreditRepository,
     CuratedRowRepository,
     EpisodeRepository,
+    ImageRepository,
     MediaItemRepository,
     PersonRepository,
     TitleNeighborRepository,
@@ -105,7 +106,7 @@ class RowContext:
     code (boundary call 9) -- they are constructed once, and a per-request
     clock cannot be a constructor argument of a singleton.
 
-    **Twelve fields, and two were removed rather than counted.** Group B built
+    **Thirteen fields, and two were removed rather than counted.** Group B built
     `PersonRepository`, `CreditRepository` and `CollectionRepository` and did
     not put them here; nothing in tasks 22-25 read them, so the gap was
     invisible until `FranchiseProvider` and `PeopleProvider` needed them. They
@@ -118,7 +119,7 @@ class RowContext:
     The full list:
 
         user, now, titles, media_items, watch_states, episodes, neighbors,
-        people, credits, collections, affinities, curated
+        people, credits, collections, affinities, curated, images
 
     **`search` and `taste` were here and are gone, and that is the other half
     of the same promise.** Group I/J found by grep that no provider read
@@ -222,7 +223,17 @@ class RowContext:
     would be `affinities`' shape spent on data the composer has no reason to
     read and every request would pay for it whether or not the provider fired.
 
-    A thirteenth field arriving without a task is drift, and
+    **`images` is the thirteenth and it arrived with its reader too**, in M9's
+    Task C6, in the same commit as `RowCard.artwork` and `BaseRow._artwork`.
+    It is the first field on this bag whose reader is `BaseRow` rather than a
+    named provider, and that is what makes it a *port*: the image a card shows
+    is chosen against the **row's** `display_hint` (a poster for
+    `portrait`/`square`, a backdrop for `landscape`/`wide`), so the question
+    cannot be answered before the rows that would answer it exist. A
+    `Mapping[uuid.UUID, uuid.UUID]` computed by the composer would be
+    `affinities`' shape spent on a decision the composer cannot make.
+
+    A fourteenth field arriving without a task is drift, and
     `test_every_row_context_field_is_read_by_at_least_one_provider` is what
     now says so -- scanned rather than counted, because the count was correct
     on the day two of the thirteen were decoration.
@@ -257,6 +268,15 @@ class RowContext:
     # have. `list_for_user` answers the newest generation, so the provider
     # never asks which night it is looking at.
     curated: CuratedRowRepository
+    # M9's one, the thirteenth field, and its reader is `BaseRow.hydrate`
+    # rather than any single provider -- which is a first for this bag and is
+    # the reason it is a *port* here rather than a mapping the composer
+    # computes. `affinities` is a value because exactly one provider reads it;
+    # artwork is read by every row that renders a card, once per shelf, keyed
+    # on that shelf's own `display_hint`. A composer-side read would have to
+    # know every proposed row's hint before any of them built, which is the
+    # two-phase coupling `RowContext` being frozen exists to refuse.
+    images: ImageRepository
 
 
 class Row(ABC):
