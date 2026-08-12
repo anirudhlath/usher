@@ -281,9 +281,10 @@ uv sync --extra embedding                    # optional: fastembed, 167 MiB, no 
 The order is measured rather than stylistic — `credit-names`, `aliases` and
 `movielens` all join to `titles` on `imdb_id` so all three follow `imdb`, and
 `credit-names` comes before anything that *enriches* a title because the fill
-re-writes `search_document` and stales the embedding of every title it touches
-(**0 of 1,271,138** on a pure bootstrap, **203,969 of 204,335** ≥100-vote titles
-after a priority-tier crawl). One vocabulary rather than two:
+writes only skeletons, so a title already enriched is deferred to TMDb for good
+(**203,969 of 204,335** ≥100-vote titles gain names in this order and none in
+the other; it stales no embedding in either, the embedded population being the
+exact complement of what it writes). One vocabulary rather than two:
 `POST /admin/bootstrap/{phase}` and `argparse`'s `choices=` are the same enum,
 so a phase cannot exist on one boundary and not the other.
 

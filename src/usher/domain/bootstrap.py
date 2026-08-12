@@ -29,15 +29,20 @@ class BootstrapPhase(StrEnum):
     and `movielens` all join to `titles` on `imdb_id`, so all three follow
     `imdb` and an empty catalog joins to nothing -- each refuses before its
     own download rather than checkpointing a vacuous `COMPLETED`.
-    `credit-names` comes before **everything that enriches a title**: the
-    fill re-writes `search_document` and so stales the embedding of every
-    title it touches, which on a pure bootstrap is **0 of 1,271,138** and
-    after a priority-tier crawl would be **203,969 of the 204,335 titles with
-    >=100 votes (99.82%)**, at a cost of +624 MB settled / +1,368 MB
-    transient and a GIN index 4.54x its previous size. That is an ordering
-    constraint on an *operator*, which is why it is stated in the CLI's own
-    report, in PRD 04 and here rather than enforced -- nothing in this
-    system knows when a crawl is about to start.
+    `credit-names` comes before **everything that enriches a title**, and
+    the reason is precedence rather than staleness. The fill writes only
+    where `enrichment_state = 'skeleton'`, so a title the crawl has reached
+    is deferred to TMDb permanently -- on that run and every later one. Run
+    first and **203,969 of the 204,335 titles with >=100 votes (99.82%)**
+    gain names that a later derivation is free to overwrite; run last and
+    those same titles never gain them at all. The fill **cannot** stale an
+    embedding in either order: the embedded population is
+    `enrichment_state <> 'skeleton'`, the exact complement of what it writes.
+    The cost of the fill itself is +624 MB settled / +1,368 MB transient and
+    a GIN index 4.54x its previous size, and it is paid whenever it runs.
+    That is an ordering constraint on an *operator*, which is why it is
+    stated in the CLI's own report, in PRD 04 and here rather than enforced
+    -- nothing in this system knows when a crawl is about to start.
 
     `ALL` is a member rather than a `None`: it is what an operator types, it
     is a legitimate `Job.key` (a `--phase all` job is one unit of work, the

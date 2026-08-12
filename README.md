@@ -224,12 +224,13 @@ design measured 2.702 GB against a 2.0 GB ceiling and was refused
 
 ⚠️ **Run `credit-names` before the TMDb enrichment crawl, not after.** It
 writes only where `enrichment_state = 'skeleton'`, so TMDb keeps every title
-it has already reached — and because filling the column rewrites
-`search_document`, running it afterwards stales the embeddings of the tier you
-just paid to crawl. Measured: **0 of 1,271,138** embeddings on a fresh
-bootstrap (nothing is embedded before enrichment), against **203,969 of the
-204,335 titles with ≥100 votes (99.82%)** if the same work is done after the
-priority tier lands.
+it has already reached — which means a title you crawl first is one this fill
+declines for good, on that run and on every later one. Measured: **203,969 of
+the 204,335 titles with ≥100 votes (99.82%)** gain a `credit_names` when the
+fill runs first, and none of them when it runs last. It **stales no
+embedding** in either order — only non-skeletons are embedded, and only
+skeletons are filled — so the cost of getting the order wrong is missing
+names, not a re-index.
 
 **After either phase, re-index — and here is the measured number of
 embeddings it invalidates.** `usher index --backfill`, then `usher similar

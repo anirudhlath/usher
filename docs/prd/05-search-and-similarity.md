@@ -108,13 +108,19 @@ against [08](08-operations.md)'s 8–12 GB, not the settled one**: before any
 vacuum the same table is 2,240,970,752 B, because one `UPDATE` over 1.19M rows
 leaves a dead tuple per live one.
 
-**And it is an ordering constraint on the roadmap rather than a free win.**
-The embedded population is `enrichment_state <> 'skeleton'`, so filling B on a
-bootstrap-only catalog invalidates **no** embedding — by construction, since
-that is the exact complement of the predicate the fill writes under. Run it
-*after* a priority tier is enriched and it invalidates nearly all of one:
-**203,969 of the 204,335 titles with ≥100 votes (99.82%)** would gain a
-`credit_names`. Backfill it before the crawl, not after.
+**And it is an ordering constraint on the roadmap rather than a free win —
+though not the one this paragraph claimed until 2026-08-12.** The embedded
+population is `enrichment_state <> 'skeleton'` and the fill writes under
+exactly the complement of that predicate, so filling B invalidates **no**
+embedding, on a bootstrap-only catalog or an enriched one, by construction.
+The constraint is *precedence*: run it after a priority tier is enriched and
+the fill correctly declines every title in that tier, so the **203,969 of the
+204,335 titles with ≥100 votes (99.82%)** that would have gained a
+`credit_names` never do — and no re-run repairs it, because the predicate
+goes on declining them. Backfill it before the crawl, not after. (The
+superseded sentence said the late ordering "invalidates nearly all" of the
+tier; it is refused by the fill's own `AND m.ours`, and it had reached the
+CLI's `--help` and the bootstrap report before an audit caught it.)
 
 **Measured class weights**, pg17.10, one term in three classes scored with
 `ts_rank(…, websearch_to_tsquery('english', …))`: name **0.991** (A),
