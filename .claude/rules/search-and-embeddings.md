@@ -481,3 +481,142 @@ The `usher similar --rebuild` freshness gap itself is stated in `CLAUDE.md`
 (always loaded); the one detail not there: `title_neighbors` carries a
 whole-artefact `computed_at` rather than a per-pair fingerprint, which is
 exactly why no per-row predicate can detect the staleness.
+
+## M9 Task S4 — the embedding path measured against a real 130,647-title tier, and the estimate `usher index` prints is the model's rate rather than the backfill's (2026-08-12)
+
+**The first run of this subsystem over a genuinely enriched tier.** Every
+figure above it was taken on a synthetic corpus or a ~10k population; S3 left
+130,647 enriched titles carrying weight classes C and D, and this is what the
+shipped code did with them. Host as always: Ryzen 7 5800X3D, CPU only,
+`pgvector/pgvector:pg17`.
+
+**The population, and what it is a count of.** `title_embeddings` is
+**130,647 rows, every one carrying a vector, 0 refused** — against S3's frozen
+`s3_tier_snapshot` of **130,806 ids**, of which 130,647 enriched. So the
+embedded population is **100.0% of the enriched population and 99.88% of the
+frozen tier**, and the 159-row gap is not missing embeddings: those titles are
+still `skeleton`, which `_POPULATION` (`t.enrichment_state <> 'skeleton'`)
+excludes, so no `index` job was ever owed for them. **The population predicate
+demonstrated at scale rather than asserted**: 1,141,720 skeletons, every one
+without an embedding row, and `count_stale` **0** — 1.14M rows that would match
+the staleness half and are excluded by the population half.
+
+**Two passes, and the second one's size is the measurement.** `EnrichService`
+enqueues `INDEX` and `DERIVE` together at `BACKFILL` and does not order them,
+so a title whose `INDEX` is claimed first embeds from a document with an empty
+weight-class-B segment and goes stale the moment `DERIVE` writes
+`credit_names`. Pass one drained both kinds. Pass two —
+`usher index --backfill`, sweeping the whole enriched tier in **3.3 s** —
+reported **8,603 stale titles swept, 8,603 index jobs written**: **6.58% of
+130,647**. Not an error, and not a race that mostly loses: `DERIVE` won for
+93.4% of the tier. Confirmed independently on the rows themselves — exactly
+8,603 have `updated_at > created_at`. A third sweep wrote **0**, and
+`usher index` bare reports **stale 0, refused 0**.
+
+**Wall clock.** Pass one's index phase ran 00:07:46Z (the instant the enrich
+queue emptied) → 02:26:19Z: **8,313 s = 2.31 h** for ~130,091 embeddings,
+**15.6 rows/s aggregate** across the two surviving workers, on a host also
+running other agents' test suites. Pass two, index-only and on a quiet box:
+8,603 jobs in **361 s**, **23.8 rows/s aggregate**.
+
+**The invariant holds and the backfill does not run at it — quote it for the
+model, never for the queue.** Real documents, measured with the shipped
+tokenizer over 1,000 sampled embedded titles: mean **125.4 tokens**, median
+118, p95 197, max 323, none over the checkpoint's 512 window. So the enriched
+`name + credits + overview + tagline + genres + keywords` document sits inside
+the **~100–130 tokens** this file already records, and `cli.py`'s 135-token
+estimate is the fair, slightly pessimistic figure it says it is. The *model*
+on those documents, one text per call — the shape `IndexService._embed` uses —
+runs at **9,683 tokens/s**, inside the **8,000–10,700 tokens/s** invariant. The
+*queue* moved 8,603 × 125.4 = 1,078,816 tokens in 361 s: **2,988 tokens/s
+across two workers, ~1,494 each — about 15% of the model's own rate.**
+
+**So `usher index`'s "estimated worker time" is off by a measured factor, and
+its arithmetic is not what is wrong with it.** It printed **109–145 s** for the
+pass that took **361 s** — **2.5–3.3×**. The line computes `stale × 135 /
+10,700` and `/ 8,000`, which prices *the model*; the backfill is the model plus
+a claim, three reads (`titles.get`, `credit_names_for`, `embeddings.get`), a
+staged `COPY` through a `CREATE TEMP TABLE ... ON COMMIT DROP`, and a commit —
+**per title**. `db/repositories/search.py`'s docstring prices that staging path
+"at the 2k-10k rows boundary call 4 embeds"; here it ran 130,647 times.
+
+**A quarter of the drain was the staleness gauge.** `usher work` calls
+`SearchGauges.refresh` after *every* `worker.run_once()` — a pass of at most 20
+jobs — and the refresh is three counts. At this tier `count_stale` is
+**360.9 ms** and `count_refused` **22 ms**. Pass two's 8,603 jobs is ~431
+passes, ~215 per worker, × 0.383 s = **82 s of the 361 s wall clock, 23%**,
+spent counting a backlog nothing reads while a backfill is running. S3 watched
+this grow 16.4 → 29.4 → 327.9 ms as the tier went 7,718 → 18,267 → 88,001; at
+130,647 it is 360.9 ms and has flattened, because the cost is the scan of the
+enriched population and that population has stopped moving. `telemetry.py:546`
+and `composition.py:1317` both still describe this scan's population as "2k-10k
+rows".
+
+**And an idle worker is not idle — the cost is on the database, which is why
+`ps` says otherwise.** Two workers with an empty queue burned **0 seconds of
+process CPU over 60 s** and simultaneously held `usher-m9-pg` at **9–67% CPU**:
+each 5-second poll is another gauge refresh, and the refresh is an O(tier)
+scan. Anyone measuring anything else on the same database must stop the
+workers, not merely observe that they are quiet.
+
+### The pool walk `SimilarityService.rebuild` draws — the first per-seed price in this project's history
+
+Priced by running `rebuild`'s own page shape read-only — `list_embedded` →
+`nearest_for(page_ids, limit=_CANDIDATE_POOL)` — against the real populated
+table, writing nothing.
+
+| what | measurement |
+|---|---|
+| 3 pages × 50 seeds | 1,902 / 1,843 / 1,859 ms → **37.36 ms/seed** |
+| 1 page × 500 seeds (`rebuild`'s default) | 18,250 ms → **36.50 ms/seed** |
+| `list_embedded`, 500 rows, at the 0/25/50/75/95th percentile cursors | 2.2–20.7 ms — flat, keyset confirmed |
+| prefix / suffix / random 50 seeds | 38.75 / 38.58 / 38.04 ms/seed |
+
+**Full walk: 130,647 × 36.5 ms = 4,769 s ≈ 80 minutes.** *Measured*: the
+per-seed cost, over 650 seeds, at the real population, on an idle box.
+*Extrapolated*: that the remaining ~130,000 seeds cost the same as the 650 —
+which is the only step here that is not a measurement, and which the
+prefix/suffix/random row is the check on. Page size is not a lever (the two
+page shapes agree within 2.3%) and the seed-side paging is ~3 s of the 80
+minutes.
+
+**The cost is linear per seed in the population, so the walk is quadratic in
+it.** Five points taken as the population grew under two-worker load: 30,562 →
+13.93; 44,344 → 19.18; 58,111 → 25.50; 71,967 → 29.55; 86,868 → 34.61 ms/seed.
+Fit ≈ `2.7 ms + 0.367 µs × N`, which predicts 50.7 ms/seed at 130,647 against
+the 36.5 measured there on a quiet box — **a loaded host overstates this by
+~39%, so a price taken during a drain is not the price**.
+
+**Bounding the walk by seed count is legitimate; bounding it by a
+`list_embedded` prefix is not.** The price is seed-independent to within 1.9%,
+so a random sample of seeds costs the same per seed and gives an unbiased
+estimate of pool composition. A prefix does not: `list_embedded` orders by
+`title_id`, the ids are UUIDv7 minted during a bulk import that walked IMDb
+`tconst` order, so a prefix is ordered by registration era.
+
+**A figure this project already had, in the place nobody looked.** The M9 plan
+states that "165.7–166.2 ms for 50 seeds and 619.9 ms for 200" appears nowhere
+in this repository. It appears twice — `db/repositories/search.py:263-264` and
+`tests/integration/test_services_similar.py:711-712` — and the plan's real
+point survives intact, because **neither site records the embedded population
+it was taken over**. Both are measuring where the `genome_scores` join belongs
+relative to `_EXACT_SCAN_OFF`, on a "real 15,565-row" genome table; the 50-seed
+baseline is a per-seed cost of ~3.3 ms, which is **11× cheaper than the same
+statement over 130,647 embeddings** for exactly the reason the linear fit
+above gives. A per-seed price without its population is not a price.
+
+### The mutation ledger for `test_a_title_embedded_before_its_credits_landed_is_stale_again`
+
+The shipped `_FINGERPRINT_SQL` already satisfies the new case, so its red was
+demonstrated rather than claimed. Two plants, harness outside the tree at
+`/var/tmp/m9-S4/plants.py`, each asserted present before the run that judged it
+and each restore verified by `md5sum` against `f804193a097e3b9dad7066c5c657a53d`.
+
+| plant | spelling | died on |
+|---|---|---|
+| careless | `usher_array_text(t.credit_names) \|\| CHR(10) \|\|` deleted | the **premise** — `assert True is False`; six SQL segments against the composer's seven, so no uncredited title agrees either |
+| careful | the same line replaced by `'' \|\| CHR(10) \|\|` | the **named assertion** — `assert False is True`; seven segments with a permanently empty third, so the premise passes and the credit write moves nothing |
+
+The careful spelling is the one worth keeping in mind: it preserves everything
+the case checks first and fails only the property the case is named for, which
+is the shape a linter and a careless plant both miss.
