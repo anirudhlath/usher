@@ -389,3 +389,54 @@ forbidden_modules = [
     "usher.adapters.search",
     "usher.adapters.tmdb",
 ]
+
+# **The tenth contract, and the invariant it holds is the only one in this
+# project that no top-level contract can see.** The nine above are stated at
+# `usher.api`, `usher.services`, `usher.ports`, `usher.domain`, `usher.adapters`,
+# `usher.db`, `usher.config` and `usher.cli` -- top-level packages -- so an
+# import between two *submodules* of `usher.ports.repository` is invisible to
+# every one of them. Measured by A1's own sweep: inverting `_results.py` into
+# `bulk.py` and importing it back the other way passes `ruff check`,
+# `ruff format --check`, `mypy` and all nine contracts, and is caught only by
+# `tests/unit/test_ports_repository_package.py::test_no_aggregate_module_imports_
+# another_aggregate_module`, one bespoke AST scan in one file.
+#
+# `testing-discipline.md`'s own rule from M8 Task 17 is what settles it --
+# *prefer a graph property wherever one is expressible* -- and here one is:
+# `independence` forbids an import in **either** direction between any pair of
+# the listed modules, including indirect chains, which a `forbidden` contract
+# cannot express without twenty source/forbidden pairs. The two checks do not
+# subsume each other and both are kept: the AST scan sees a module the list has
+# forgotten, and the contract sees an indirect chain the scan's single-hop
+# `ImportFrom` walk does not.
+#
+# **The list is the contract, exactly as the one above says of its own**, so
+# `test_the_independence_contract_names_every_aggregate_port_module` derives the
+# expected membership from the package and fails if a new port module lands
+# unlisted. `usher.ports.repository._results` is deliberately absent: it is the
+# shared private module every aggregate is allowed to import, and listing it
+# would forbid the thing this design is for.
+[[tool.importlinter.contracts]]
+name = "no aggregate port module imports another"
+type = "independence"
+modules = [
+    "usher.ports.repository.bulk",
+    "usher.ports.repository.collection",
+    "usher.ports.repository.curation",
+    "usher.ports.repository.episode",
+    "usher.ports.repository.genome",
+    "usher.ports.repository.image",
+    "usher.ports.repository.import_run",
+    "usher.ports.repository.llm_call",
+    "usher.ports.repository.matching",
+    "usher.ports.repository.media_item",
+    "usher.ports.repository.people",
+    "usher.ports.repository.row_provider_settings",
+    "usher.ports.repository.search",
+    "usher.ports.repository.search_query",
+    "usher.ports.repository.source",
+    "usher.ports.repository.sync",
+    "usher.ports.repository.taste",
+    "usher.ports.repository.title",
+    "usher.ports.repository.watch_state",
+]

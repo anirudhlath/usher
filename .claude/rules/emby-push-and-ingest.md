@@ -14,6 +14,32 @@ Verified facts, loaded when working in this subsystem. Measured or observed,
 never assumed — each entry carries its date, its sample and what it refuted.
 The always-on conventions live in `CLAUDE.md`; this file is the evidence.
 
+🔴 **M9 put playback and outbound watch state on the wire and did NOT verify
+either against a live server.** Recorded here because this file is where the
+Emby live-run evidence lives, and an absence has to be as findable as a
+measurement. M9's H4 (`POST /titles/{id}/play` → a minted ticket →
+`GET /stream/{ticket}` → `302` → a real `206` from the source) and H5 (the watch
+write-back round trip, read back **from Emby**) were both planned as live runs
+against a real Emby 4.9.5.0 and neither ran: `.env` on the development host
+holds `USHER_SECRET_KEY` and `USHER_TMDB_API_KEY` only, `sources` is empty in
+every catalog on the box, and nothing outside the tree names an Emby host —
+verified, not assumed. There is no fake substitute, because the *reason* those
+runs exist is that every previous one on this list found something the fakes
+agreed with and the server did not, the write-back route below being the
+loudest.
+
+**What that leaves open, specifically.** The `POST /PlayedItems`
+position-clearing divergence recorded further down is carried as a standing 🔴
+risk on M9's write-back handler rather than as an observation — H5 was the run
+that would have settled it. And the redirect chain has never been walked against
+a server that answers ranges: `StreamTarget`'s four leak surfaces are pinned
+(M9's D5, one of them against a real loopback socket, because
+`HTTPXClientInstrumentor` cannot see an `httpx.MockTransport`), and the ticket's
+mint/redeem/expiry is pinned by unit and integration cases — what is unpinned is
+whether the URL those produce is one this Emby will serve. Both tasks are
+dispatchable unchanged the moment an operator supplies a base URL and an API key
+in a secrets file outside the tree.
+
 **Emby push works.** Verified 2026-07-29 against the live server with a normal
 non-admin token: `/embywebsocket` upgrades (101), delivers periodic `Sessions`,
 and pushes `UserDataChanged` within seconds of an out-of-band state change. Two

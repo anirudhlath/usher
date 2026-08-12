@@ -21,7 +21,7 @@ milestone smoke test passes.
 | M6 | Search (FTS, embeddings, RRF) | docs/plans/2026-08-02-m6-search.md | ✅ MERGED to main (b0c04e5), 2,433 passed / 5 skipped. ADR-0002's gate ran and **failed** |
 | M7 | Rows | docs/plans/2026-08-03-m7-rows.md | ✅ MERGED to main (6d9b2a1), 3,217 passed / 5 skipped, 7 import contracts |
 | M8 | Curation (LLM) | docs/plans/2026-08-06-m8-curation.md | ✅ complete on `milestone/m8-curation`, 8 import contracts — see the M8 section at the end of this file |
-| M9 | API surface | — | not planned |
+| M9 | API surface | docs/plans/2026-08-10-m9-api-surface.md | ✅ complete on `milestone/m9-api-surface`, 10 import contracts — **74 tasks planned, and two names travel with the milestone**: T4 was **withdrawn** when its own pre-registered bar failed (2.702 GB against a 2.0 GB ceiling), and **H4/H5 did not run** — no Emby credentials exist on this host, recorded in PRD 09 as a named gap rather than a pass. H7 is the gate and the final whole-suite sweep |
 | M10 | Hardening + dashboards | — | not planned |
 
 **This table was stale from M3 down until 2026-08-07** — it said "IN PROGRESS"
