@@ -136,6 +136,7 @@ def servable_images(images: Iterable[Image]) -> tuple[Image, ...]:
     _image_references.add(len(every) - len(kept), {"outcome": "unservable"})
     return kept
 
+
 #: PRD 10's `cache` label, third value. A module constant rather than a
 #: literal at two call sites, because a hit counted under `image` and a miss
 #: counted under `images` is a hit rate that reads as 100%.
