@@ -3563,3 +3563,67 @@ twenty-four files it finds scan `ports/`, `services/curation*`,
 `services/home_sequential.py`, `services/jobs.py`, `adapters/` and several
 `api/` modules, and **none of them reads `services/search.py`**; the one scan
 this task itself adds parses `services/home.py` and `services/rows/*.py`.
+
+## M9 Task F5 — the taste term, and the weight the headroom appeared to allow
+
+**9 mutations: 8 killed, 0 survivors, 1 control surviving as designed.**
+Selection: `tests/unit/test_services_search.py`,
+`test_services_taste.py`, `test_services_curation_pool.py`,
+`test_fakes_taste_repository.py`, `test_api_search.py`,
+`test_telemetry_search.py`. Harness outside the tree
+(`/var/tmp/f5/sweep.py`), `cp` backups restored and compared byte for byte
+after every plant, and each plant asserted **present** before its verdict was
+read.
+
+| plant | verdict | failing cases |
+|---|---|---|
+| P1 `taste` 0.005 → **0.01**, the headroom the constant's own comment named | KILLED | 2 |
+| P2 `taste` 0.005 → 0.02, matching `played`/`recency` | KILLED | 2 |
+| P3 an absent taste scored `0.0` rather than dropped | KILLED | 2 |
+| P4 the vector read left unscoped by the centroid's model | KILLED | **1 — the case written for it** |
+| P5 the vector read gated on `stored is not None` rather than on the centroid | KILLED | **1** |
+| P6 the negative cosine left unclamped | KILLED | **1** |
+| P7 `latest` inheriting `get`'s staleness predicate | KILLED | **1** |
+| P8 the stored row never read at all (`stored = None`) | KILLED | 6 |
+| C1 one sentence of `_taste_term`'s docstring reworded | SURVIVED | 0 |
+
+**P1 is the round's result and it is a fact about the *bound*, not about the
+suite.** `0.01` is the exact headroom F4 wrote down, it passes ruff, ruff
+format, mypy and every ordering case in the file, and it **inverts the
+displacement bound by one ulp** — `0.35 + 0.15 + 0.15 + 0.02 + 0.02 + 0.01`
+is `0.7000000000000001` against an exact match's `0.7`, so the challenger
+sorts first regardless of id. The only assertions that see it are the two
+numeric ones; the eight ordering cases in the same file are green under
+0.005, 0.01 **and** 0.02. That is F4's *"a weight table is not pinned by any
+number of ordering cases"* reproduced at a second constant, plus the sharper
+half: the case with teeth had to call `_blend` **directly**, because
+"popularity maximally for it" is asymptotic (`p / (p + 10)` never reaches 1.0)
+and no seeded catalog can reach the corner the bound is about. Full numbers in
+`.claude/rules/search-and-embeddings.md`.
+
+**P3's second failing case is the cross-check worth naming.** Scoring the
+absence as `0.0` fails
+`test_a_hit_with_no_vector_is_not_a_cosine_of_zero` *and*
+`test_with_no_household_and_no_year_the_score_is_the_one_m6_computed` — the M6
+byte-for-byte pin — because a taste term present at 0.0 on every row changes
+every score M6 ever computed. The two arms were written for different reasons
+and one plant reaches both, which is what says the M6 claim really is load
+bearing rather than decorative.
+
+🔴 **P7's first spelling died on `ruff format --check`, not on the suite**, and
+was re-run in a formatted spelling before anything was written down. Same
+careless/careful shape `testing-discipline.md` records for the router plant and
+`ports-and-error-taxonomy.md` for the re-parented exception — third instance,
+and the first where the careless spelling is a *line-length* break rather than
+an import position. In the careful spelling it passes ruff, ruff format, mypy
+and fails exactly `test_latest_answers_a_row_that_get_calls_stale`, which is
+the case that exists for it.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `pytest` (selection) |
+|---|---|---|---|---|
+| C1 one docstring sentence of `_taste_term` reworded | PASS | PASS | PASS | PASS |
+
+C1 was checked against `grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`
+before being used, on F4's terms: no scan in the suite reads
+`services/search.py`'s docstrings, and the one this pair of tasks adds parses
+`services/home.py` and `services/rows/*.py`.

@@ -151,6 +151,52 @@ class TasteRepository(ABC):
         """
 
     @abstractmethod
+    async def latest(self, user_id: uuid.UUID) -> StoredTaste | None:
+        """The stored row for this household, **whatever model wrote it** —
+        read-only, and no staleness predicate.
+
+        This is the read that lets a process which cannot *compute* a centroid
+        still *serve* one. `TasteService.centroid` refuses without an embedder
+        and says why: `model_name` is the key the stored row is invalidated on
+        and a deployment with no model has no honest value for it. Every
+        request is such a process — `create_app`'s lifespan builds an embedder
+        only under `worker_enabled` — so a ranking term routed through
+        `centroid()` is structurally inert on the shipped route, which is the
+        `GenreAffinityProvider` failure PRD 06 has already corrected once.
+
+        **No `model_name` argument, for the same sentence's reason.** A caller
+        with no embedder cannot supply one, and requiring it would make this
+        method unreachable from the only place it is for. The stored row
+        carries its own `model_name`, so the filter moves to the *other* side:
+        the caller scopes its vector read by what the centroid was computed
+        under. Comparing a centroid from one checkpoint against vectors stored
+        under another is the ST-vs-fastembed divergence — max pairwise-similarity
+        delta 1.41e-03, **6x the halfvec quantisation error** — arriving as a
+        confident cosine rather than as an error.
+
+        **Deliberately not `get()` with the argument dropped.** `get` evaluates
+        `STALE_TASTE`, whose whole question is *"should I recompute?"*, and a
+        caller that cannot recompute has no use for the answer: applying it
+        here would withhold the term from exactly the households that watch
+        things, because the watch state that moves the watermark is also what
+        produced the centroid worth serving. The row's `computed_at` and
+        `source_watermark` travel with it, so a caller that wants to judge age
+        can. `get()` and `centroid()` are untouched by this method's existence.
+
+        **Read-only, and that is a boundary rather than a naming choice.** It
+        is what stops a request path minting a `user_taste` row under a model
+        it does not have — `centroid()` writes its refusals, and a request
+        writing one would stamp the deployment's *absent* model onto the
+        household's cache.
+
+        **A returned row may carry `centroid=None`.** That is the written
+        refusal `StoredTaste`'s docstring exists to make representable, and it
+        is answered rather than raised: to a ranking caller it means "no term",
+        which is the same answer as no row at all and is deliberately not
+        distinguished here.
+        """
+
+    @abstractmethod
     async def put(self, taste: StoredTaste) -> None:
         """Upsert one user's row, refusals included.
 

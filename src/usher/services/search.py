@@ -57,6 +57,7 @@ not interchangeable without a re-embed.
 """
 
 import hashlib
+import math
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -69,7 +70,13 @@ from pydantic import AwareDatetime
 from usher.domain.search import SearchResult
 from usher.domain.title import Title
 from usher.ports.embedding import Embedder
-from usher.ports.repository import MediaItemRepository, TitleRepository, WatchStateRepository
+from usher.ports.repository import (
+    MediaItemRepository,
+    TasteRepository,
+    TitleEmbeddingRepository,
+    TitleRepository,
+    WatchStateRepository,
+)
 from usher.ports.search import (
     SearchFilters,
     SearchHit,
@@ -259,21 +266,19 @@ _RECENCY_MIDPOINT_YEARS = 25.0
 # decimal place of this divisor cannot reach a result.
 _DAYS_IN_YEAR = 365.25
 
-# PRD 05's ranking terms, five of the six. Taste-centroid proximity is the one
-# still *absent* rather than zeroed -- a term with no data is a weight that
-# reads like a signal -- and it is F5's.
+# PRD 05's six ranking terms, all of them, as of M9.
 #
 # Relevance dominates because a search is a request for a specific thing; the
-# other four are tie-breakers among things that already matched. **The
-# arithmetic bound, stated over all five rather than one at a time:** the
-# rank-0 hit scores `0.70` with every other signal against it, and a rank-1 hit
-# with every other signal maximally for it scores `0.35 + 0.15 + 0.15 + 0.02 +
-# 0.02 = 0.69` -- the denominators are equal because the present-signal set is
-# the same -- so no combination of ownership, popularity, watch state and
-# recency can displace an exact match. That is PRD 05's "boosted but not
-# exclusive" as arithmetic rather than as a promise, and it is the constraint
-# every number here is chosen under: the non-relevance weights must sum below
-# half the relevance weight.
+# other five are tie-breakers among things that already matched. **The
+# arithmetic bound, stated over all six rather than one at a time:** the rank-0
+# hit scores `0.70` with every other signal against it, and a rank-1 hit with
+# every other signal maximally for it scores `0.35 + 0.15 + 0.15 + 0.02 + 0.02
+# + 0.005 = 0.695` -- the denominators are equal because the present-signal set
+# is the same -- so no combination of ownership, popularity, watch state,
+# recency and taste can displace an exact match. That is PRD 05's "boosted but
+# not exclusive" as arithmetic rather than as a promise, and it is the
+# constraint every number here is chosen under: the non-relevance weights must
+# sum **strictly** below half the relevance weight.
 #
 # **The three M6 weights keep their exact values, and that is a requirement
 # rather than inertia.** `_blend` renormalises over the signals that are
@@ -282,26 +287,56 @@ _DAYS_IN_YEAR = 365.25
 # while re-scaling all three together would move none of them. Holding the
 # ratio is what makes "a hit with no popularity, no year and no household
 # scores exactly what M6 scored it" true, which is the one thing a client
-# upgrading across this commit can check.
+# upgrading across this commit can check. **F5 kept it**: the alternatives were
+# to take weight from popularity or owned, or to raise relevance's share, and
+# both end that claim to buy a larger weight for the *weakest-evidenced* term
+# in the table.
 #
-# **Both new weights are 0.02 and they are equal on purpose.** Each rests on an
-# argument rather than on a measurement -- the direction of the watch-state
-# term, the value of the recency midpoint -- so the weight is the bound on how
-# wrong the argument can make a score. At 0.02 the played boost moves a title
-# from about rank 10 to about rank 7 mid-list, which is a nudge; the owned
-# boost at 0.15 moves the same title to about rank 2, which is the difference
-# the two are meant to have.
+# **Both M9 watch/recency weights are 0.02 and they are equal on purpose.**
+# Each rests on an argument rather than on a measurement -- the direction of
+# the watch-state term, the value of the recency midpoint -- so the weight is
+# the bound on how wrong the argument can make a score. At 0.02 the played
+# boost moves a title from about rank 10 to about rank 7 mid-list, which is a
+# nudge; the owned boost at 0.15 moves the same title to about rank 2, which is
+# the difference the two are meant to have.
 #
-# ⚠️ **The budget is spent.** 0.34 against a ceiling of 0.35 leaves 0.01, so
-# F5's taste term cannot be added without either taking weight from popularity
-# and owned -- which ends the byte-for-byte claim above -- or raising
-# relevance's share. That trade is F5's to make and to write down.
+# 🔴 **`taste` is 0.005 and the ceiling is *open*, which is measured rather
+# than argued.** The remaining headroom is 0.35 - 0.34 = 0.01, and this comment
+# said so -- but 0.01 is the bound, not a value available under it. Taken
+# exactly, the challenger's numerator is `0.35 + 0.15 + 0.15 + 0.02 + 0.02 +
+# 0.01`, which in IEEE-754 doubles is **0.7000000000000001** against the exact
+# match's **0.7**: one ulp *above*, so the rank-1 hit with every signal
+# maximally for it sorts **first** and the property this whole paragraph
+# protects fails. Not a tie broken by id -- an inversion, and one that no
+# ordering case away from that exact configuration can see.
+#
+# So the usable interval is the **open** `(0, 0.01)`: 0 excluded because a
+# zero-weighted term is the "weight that reads like a signal" this table
+# refuses, 0.01 excluded by the arithmetic above. Nothing measured
+# distinguishes any point inside it -- `title_embeddings` holds **0 rows** on
+# both surviving catalogs, so the term's real effect size is not merely
+# unmeasured but unmeasurable today -- and 0.005 is the midpoint, which is the
+# only choice in that interval that does not import a preference nobody has.
+# It leaves 0.005 of headroom, so a seventh term is still expressible.
+#
+# **What 0.005 can actually move, stated rather than implied.** With all six
+# present the denominator is 1.045, so the term spans 0.0048 of score. It
+# cannot overturn `owned` (0.15) or `played` (0.02) at any cosine gap, and it
+# overturns one step of relevance only where `1/(1+k) - 1/(2+k)` falls below
+# it: `0.005*dcos > 0.70/((1+k)(2+k))` needs **k >= 11** even at the impossible
+# `dcos = 1.0`, and k >= 25 at a realistic 0.2. Where it decides is where every
+# other term has already tied -- and `_dense_ranks` makes that the ordinary
+# case rather than a corner, because equal index scores share a rank and the
+# relevance term then cancels exactly. It is a tie-break, and the weight says
+# so honestly: the magnitude was chosen by a full table, not by a measurement
+# of what taste proximity is worth.
 _WEIGHTS: dict[str, float] = {
     "relevance": 0.70,
     "popularity": 0.15,
     "owned": 0.15,
     "played": 0.02,
     "recency": 0.02,
+    "taste": 0.005,
 }
 
 
@@ -425,6 +460,8 @@ class SearchService:
         titles: TitleRepository,
         media_items: MediaItemRepository,
         watch_states: WatchStateRepository,
+        taste: TasteRepository,
+        embeddings: TitleEmbeddingRepository,
         *,
         result_limit: int,
         embedder: Embedder | None = None,
@@ -441,6 +478,21 @@ class SearchService:
         # before they search. What is optional is the *argument* to `search`,
         # because a caller may legitimately have no household to speak for.
         self._watch_states = watch_states
+        # **Not an `Embedder` and not a `TasteService`, and both absences are
+        # the point.** The taste term needs a centroid; computing one needs a
+        # model this process does not have and will not be given
+        # (`create_app`'s lifespan builds one only under `worker_enabled`), so
+        # what reaches the blend is a centroid some *other* process wrote --
+        # `TasteRepository.latest`, one indexed single-row probe. Routed
+        # through `TasteService.centroid` instead, the term would be
+        # structurally `None` on every request the shipped default serves: a
+        # weight that reads like a signal and moves nothing, which is the
+        # `GenreAffinityProvider` failure PRD 06 has corrected once already and
+        # the direction hardest to notice.
+        self._taste = taste
+        # Read only when a centroid was found, and scoped by the model that
+        # wrote it. See `_rank`.
+        self._embeddings = embeddings
         self._result_limit = result_limit
         # Injected for the reason every clock in `services/` is: the recency
         # term is a function of the instant it is scored at, and a term read
@@ -642,6 +694,13 @@ class SearchService:
             if user_id is None
             else await self._watch_states.played_title_ids(user_id, list(titles))
         )
+        stored = None if user_id is None else await self._taste.latest(user_id)
+        centroid = None if stored is None else stored.centroid
+        vectors: dict[uuid.UUID, tuple[float, ...]] = (
+            {}
+            if stored is None or centroid is None
+            else await self._embeddings.list_for_titles(list(titles), model_name=stored.model_name)
+        )
         today = self._now().date()
         ranks = _dense_ranks(hits)
         results = [
@@ -670,6 +729,17 @@ class SearchService:
                     # never-watched. ADR-0014, one signal over from popularity.
                     played=None if user_id is None else (1.0 if hit.title_id in played else 0.0),
                     recency=_recency_term(titles[hit.title_id], today=today),
+                    # **`None` rather than 0.0 in both absent cases** --
+                    # ADR-0014, in a sixth place. A zero cosine is a real
+                    # orthogonality claim about two vectors; "this household
+                    # has no stored centroid" and "this hit has no vector
+                    # under the model that centroid names" are not claims
+                    # about the title at all. Scored zero, the whole
+                    # un-embedded catalog would sink beneath whatever the
+                    # backfill reached first -- and `title_embeddings` is
+                    # currently empty on every catalog this project has, so
+                    # that is the *population* rather than a corner.
+                    taste=_taste_term(centroid, vectors.get(hit.title_id)),
                 ),
             )
             for hit, rank in zip(hits, ranks, strict=True)
@@ -759,6 +829,77 @@ def _recency_term(title: Title, *, today: date) -> float | None:
         return None
     age_years = max((today - released).days, 0) / _DAYS_IN_YEAR
     return 1.0 / (1.0 + age_years / _RECENCY_MIDPOINT_YEARS)
+
+
+def _taste_term(
+    centroid: tuple[float, ...] | None, vector: tuple[float, ...] | None
+) -> float | None:
+    """`max(0, cos)` held inside `[0, 1]`, or `None` when there is nothing to
+    compare.
+
+    **`None` is not 0.0** -- ADR-0014, in a sixth place after
+    `_popularity_term`'s fourth and `_recency_term`'s fifth. There are three
+    ways to get it and all three mean the same thing to `_blend`, *drop this
+    signal for this row*:
+
+    - **No stored centroid.** The household has none, or has a written refusal
+      (`StoredTaste.centroid is None`, a household below `TasteService.
+      _MIN_TITLES`). Both are the shipped default -- no worker has run -- and
+      neither is a statement about any title.
+    - **No vector under that centroid's model.** `list_for_titles` is scoped by
+      `StoredTaste.model_name` here, so a row from another checkpoint is absent
+      exactly as a missing row is. That collapse is the port's own and is
+      deliberate: a caller that drops the term either way does not need to know
+      which, and one that branched on it would be reading the backfill's
+      progress out of a data row.
+    - **A vector of another width**, which the model scope makes unreachable
+      in principle and which is guarded anyway, for `CandidatePoolService.
+      _cosine`'s reason one service over: `zip(strict=True)` across two widths
+      raises, and a search request is not the place to discover that something
+      else changed.
+
+    **Clamped to `[0, 1]`, which is `similar.py`'s `_clamped` shape and its
+    argument.** `_blend` is only a weighted *mean* if every term is in `[0, 1]`;
+    a negative cosine outside it would make the taste weight a penalty of
+    unbounded relative size on exactly the rows the term knows least about. A
+    negative cosine is not "unlike your taste" in any sense this project has
+    measured -- the corpus-level statistic that would license reading it that
+    way does not exist -- so 0.0 loses nothing.
+
+    **The lower clamp is load-bearing and the upper one is not, and saying so
+    is the point.** Dividing by the norms makes the value a true cosine, so it
+    cannot exceed 1.0 by more than float error and `min` is guarding rounding
+    rather than data -- unlike `similar.py`'s `_clamped`, whose upper arm
+    defends a `CHECK (score <= 1)` against a port implementation. It stays
+    because `_blend`'s claim to be a weighted *mean* is a claim about the
+    range, and a range assertion with one open end is not one.
+
+    **A second spelling of `CandidatePoolService._cosine` and not a shared
+    helper**, because the two answer different questions: that one returns the
+    raw cosine, where a negative is a meaningful ordering inside a stratum;
+    this one returns a bounded *term*, where a negative is out of range. One
+    function serving both would have to grow a flag deciding which, which is
+    the point at which the sharing costs more than the copy. The norms are
+    recomputed rather than assumed for the reason recorded there: `Embedder`
+    guarantees unit vectors and `TasteService._normalise` makes the centroid
+    one, so both are 1.0 in every shipped configuration -- but a stored
+    vector's norm is a property of whatever wrote it, and this is not the place
+    to find out that something else did.
+    """
+    if centroid is None or vector is None or len(vector) != len(centroid):
+        return None
+    dot = sum(one * other for one, other in zip(centroid, vector, strict=True))
+    norms = math.sqrt(sum(value * value for value in centroid)) * math.sqrt(
+        sum(value * value for value in vector)
+    )
+    if norms == 0.0:
+        # Unreachable through `list_for_titles`, which never hands back a zero
+        # vector, and guarded for `_normalise`'s reason one module over: a
+        # `ZeroDivisionError` in a ranking function is the kind of thing that
+        # becomes reachable the day somebody relaxes a refusal, and it would
+        # arrive as a 500 on a search.
+        return None
+    return min(1.0, max(0.0, dot / norms))
 
 
 def _blend(**signals: float | None) -> float:

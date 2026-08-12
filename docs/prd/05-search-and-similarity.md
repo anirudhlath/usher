@@ -785,11 +785,9 @@ Retrieval is separated from ranking, deliberately:
 Owned titles are boosted but not exclusive: searching should surface things you
 don't have, clearly marked, because that feeds discovery.
 
-**Five of those six terms ship, and the sixth is named rather than implied**
-(`services/search.py`). Relevance, popularity and owned-vs-not shipped in M6;
-**watch state and recency landed in M9**, each with the seam it was waiting on
-now filled. **Taste-centroid proximity is the one still absent**, and absent
-rather than zeroed — a term with no data is a weight that reads like a signal.
+**All six terms ship as of M9** (`services/search.py`). Relevance, popularity
+and owned-vs-not shipped in M6; **watch state, recency and taste-centroid
+proximity landed in M9**, each with the seam it was waiting on now filled.
 
 **`SearchService.search` takes a household** (`user_id`), which is the seam
 watch state was blocked on for three milestones. It is a keyword on the method
@@ -826,23 +824,65 @@ ships. The term ships anyway rather than leaving "three ranking terms" at two,
 and it is bounded so a wrong constant moves a score by at most its weight.
 
 **The weights are constrained rather than chosen freely, and the constraint is
-stateable.** The non-relevance weights sum below half the relevance weight, so
-no combination of ownership, popularity, watch state and recency can displace
-an exact match — 0.70 against 0.35 + 0.15 + 0.15 + 0.02 + 0.02. The three M6
-weights keep their exact ratio, so a hit with no popularity, no year and no
-household scores what M6 scored it; the blend renormalises over present
-signals, so adding a term moves only the rows that term is present on.
+stateable.** The non-relevance weights sum **strictly** below half the
+relevance weight, so no combination of ownership, popularity, watch state,
+recency and taste can displace an exact match — 0.70 against 0.35 + 0.15 +
+0.15 + 0.02 + 0.02 + 0.005. The three M6 weights keep their exact ratio, so a
+hit with no popularity, no year and no household scores what M6 scored it; the
+blend renormalises over present signals, so adding a term moves only the rows
+that term is present on.
 
-⏳ **The taste centroid is still not a ranking term.** `TasteService` and
-`user_taste` exist ([06](06-rows-and-recommendations.md)), and the household
-seam that blocked watch state is now filled for it too — what remains is that
-on the request path the centroid is structurally `None`, because it needs an
-embedder and the route deliberately holds none
-([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)).
-A naive wiring would ship a term that is inert on the default deployment — the
-failure [06](06-rows-and-recommendations.md) already corrected once, for
-`GenreAffinityProvider`. **Owner: M9**, and it needs a read that lets a request
-serve a centroid it cannot compute.
+🔴 **"Strictly" is a measurement, not a stylistic tightening.** The headroom
+left after the five M9 weights is 0.35 − 0.34 = 0.01, and **0.01 itself is not
+available**: taken exactly, the challenger's numerator `0.35 + 0.15 + 0.15 +
+0.02 + 0.02 + 0.01` is **0.7000000000000001** in IEEE-754 doubles — one ulp
+*above* 0.70 — so the rank-1 hit with every signal maximally for it sorts
+first and the property above fails. Not a tie broken by id: an inversion, and
+one only a case built at that exact corner can see. The usable interval is the
+open `(0, 0.01)`; the taste weight is its midpoint. Pinned by
+`test_no_combination_of_the_other_five_can_displace_an_exact_match`, which
+asserts the arithmetic rather than an ordering — a re-weighting that reorders
+nothing changes every score on the wire and is invisible to any number of
+ordering cases (M9 F4 measured this: `owned` 0.15 → 0.10 left all ten green).
+
+**Taste-centroid proximity is a term, and it is *read* rather than computed.**
+`TasteService.centroid` needs an embedder and a request holds none
+([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)),
+so routing the term through it would have shipped a weight that is inert on
+the shipped default — the failure [06](06-rows-and-recommendations.md) already
+corrected once, for `GenreAffinityProvider`. `TasteRepository.latest(user_id)`
+answers the household's stored `user_taste` row **whatever model wrote it**,
+read-only and with no staleness predicate: the predicate answers *"should I
+recompute?"*, which a process with no model cannot act on, and inheriting it
+would withhold the term from exactly the households that watch things.
+`centroid()` is untouched — it still refuses without an embedder and still
+writes its refusals — and read-only is what stops a request minting a
+`user_taste` row under a model it does not have.
+
+**The stored row's `model_name` is the filter on the other side.**
+`TitleEmbeddingRepository.list_for_titles` gained a keyword-only, optional
+`model_name`; the ranking path passes the centroid's, and `TasteService.
+centroid` and `CandidatePoolService` keep the unscoped call they argue for.
+Comparing a centroid computed under one checkpoint against vectors stored
+under another is the ST-vs-fastembed divergence — max pairwise-similarity delta
+1.41e-03, 6x the halfvec quantisation error — arriving as a confident cosine.
+
+🔶 **The term is `max(0, cos)` clamped into [0, 1], and `None` — never 0.0 —
+when there is no centroid or no vector under that model**
+([ADR-0014](decisions/0014-absence-is-not-zero.md), in a sixth place). A zero
+cosine is a real orthogonality claim about two vectors; "no worker has run" and
+"the backfill has not reached this title" are not claims about a title at all,
+and `title_embeddings` is currently empty on every catalog this project holds,
+so the absent case is the population rather than a corner. **What 0.005 can
+move is small and is stated rather than implied**: it cannot overturn `owned`
+or `played` at any cosine gap, and it overturns one step of relevance only from
+about rank 11 downward even at an impossible cosine gap of 1.0. Where it
+decides is where the other five have already tied, which equal index scores
+(one dense rank) make ordinary. **The magnitude was set by a full weight table,
+not by a measurement of what taste proximity is worth** — the alternatives were
+to take weight from popularity or owned, or to raise relevance's share, and
+both end the M6 byte-for-byte claim above to buy a larger weight for the
+weakest-evidenced term in the set.
 
 **Relevance enters the blend as a rank, never as a raw score.** A `ts_rank` is
 around 0.06, an RRF score around 0.016–0.033 and a cosine is in [-1, 1];

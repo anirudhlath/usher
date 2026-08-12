@@ -259,11 +259,18 @@ def _pipeline(
     # slot here would fail at construction instead of at the lane behaviour
     # each of these cases is about.
     people = FakePersonRepository()
+    # One instance, three consumers, because that is what the composition root
+    # produces: `build_pipeline` and `build_search_service` each construct a
+    # `PostgresTasteRepository` over the **same session**, so they read one
+    # table. Two independent fakes here would let a case store a centroid
+    # through one and search through the other, which is a state no deployment
+    # has.
+    taste_rows = FakeTasteRepository(watch_states)
     taste = TasteService(
         watch_states=watch_states,
         embeddings=embeddings,
         titles=titles,
-        taste=FakeTasteRepository(watch_states),
+        taste=taste_rows,
         embedder=None,
         now=lambda: datetime.now(UTC),
     )
@@ -280,7 +287,7 @@ def _pipeline(
         queue=queue,
         embeddings=embeddings,
         neighbors=neighbors,
-        taste_rows=FakeTasteRepository(watch_states),
+        taste_rows=taste_rows,
         people=people,
         credits=FakeCreditRepository(people, titles),
         collections=FakeCollectionRepository(),
@@ -313,6 +320,8 @@ def _pipeline(
             titles,
             fakes.media_items,
             watch_states,
+            taste_rows,
+            embeddings,
             result_limit=settings.search_result_limit,
         ),
         similar=SimilarityService(embeddings, neighbors, titles, commit),
