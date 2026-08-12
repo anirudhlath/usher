@@ -979,3 +979,44 @@ plus two-sided ±0.10 idle-sampled CPU drift. Bars run: drift **−0.0147**,
 foreign 0. Diagnostic run: **−0.0019**, foreign 0. The one-minute load average
 went **1.30 → 3.71** across the bar run and decides nothing — that is the run's
 own work, and a load-average gate would have condemned it.
+
+## The claim's lease is two statements and one column, and a change to either alone breaks it silently (2026-08-12, M9 W1)
+
+`PostgresJobQueue` gains `_TOUCH`:
+
+```sql
+UPDATE jobs SET updated_at = clock_timestamp()
+WHERE id = ANY(:ids) AND status = 'running'
+```
+
+**`updated_at` is the column `_REQUEUE` measures the age on**, so the two
+statements are one mechanism: a heartbeat that moved any other column, or a
+requeue that compared against any other, would leave a lease that reads exactly
+like a working one and recovers live claims. Both statements now say so in
+their own comments.
+
+`status = 'running'` is doing the same work in `_TOUCH` as it does in
+`_REQUEUE`, one step later in the lifecycle: a beat is sent for everything a
+worker holds in flight, and by the time it lands a peer may already have
+recovered the claim (the row is `pending`) or the job may have been parked.
+Moving `updated_at` on a **parked** row is a lie in the column an operator
+sorts the review queue by — `_PARKED` is `ORDER BY updated_at DESC, id DESC`.
+
+`clock_timestamp()` rather than `now()` for this module's standing reason, and
+it is sharper here than anywhere else in the file: a beat sent twenty minutes
+into a long transaction has to stamp *now*, or the lease it exists to renew is
+renewed to an instant already past.
+
+**The pool is settings-driven from this milestone** — `build_engine` takes
+`pool_size` and `max_overflow`, defaulting to 20 and 10, and its own comment
+had predicted the task: *"Revisit if/when a milestone adds a second
+long-running process (e.g. a worker pool) sharing this pool."* It is not a
+second process; it is `USHER_JOB_CONCURRENCY` jobs in one, each holding a
+session because `AsyncSession` is not concurrency-safe, plus the claim, plus
+the heartbeat, plus the API's own requests when `usher serve` runs the lane.
+The old `pool_size=10, max_overflow=5` could not hold the worker alone.
+**Over capacity `QueuePool` does not fail fast** — it waits `pool_timeout`
+(30 s, unchanged) per checkout and then raises — so the symptom is a lane
+getting slower until it starts parking jobs, which is a configuration mistake
+wearing an upstream's clothes. `Settings` refuses that arithmetic at startup
+instead.

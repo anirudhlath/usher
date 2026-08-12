@@ -645,11 +645,18 @@ the rebuild reads stored vectors — so both start in about a tenth of a second.
 
 **The server process already runs a worker lane**, and a push lane per
 enabled source, so a normal deployment needs neither command. They are for
-splitting the lanes across containers, and there is one rule: **do not run
-`usher work` against a server that also has `USHER_WORKER_ENABLED=true`.**
-A worker requeues everything left `running` at startup — correct at exactly
-one worker, and at two it steals the other's live claims. Set
-`USHER_WORKER_ENABLED=false` on the server first.
+splitting the lanes across containers.
+
+Running `usher work` beside a server with `USHER_WORKER_ENABLED=true` used to
+be a **correctness** rule — a worker requeued everything left `running` at
+startup, so at two workers each stole the other's live claims. It is not any
+more: recovery takes back only claims nobody has heartbeated for
+`USHER_JOB_LEASE_SECONDS`, so two workers coexist safely. What two workers
+still do is spend the same upstream budget twice: `USHER_JOB_CONCURRENCY` and
+`USHER_TMDB_REQUESTS_PER_SECOND` are both **per process**, so N processes are N
+times the configured limit against a rate limit that is per client. Set
+`USHER_WORKER_ENABLED=false` on the server, or divide the two settings by the
+number of processes.
 
 ```bash
 uv run usher push --probe                    # open each source's channel, report what arrived

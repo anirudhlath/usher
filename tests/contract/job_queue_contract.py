@@ -39,6 +39,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobPriority, JobStatus
 from usher.ports.jobs import JobQueue, JobRequest
 
@@ -622,6 +623,64 @@ class JobQueueContract:
         recovered = await queue.claim([JobKind.ENRICH])
         assert [job.attempts for job in recovered] == [1]
         assert recovered[0].last_error == "upstream said no"
+
+    async def test_touch_moves_a_running_claim_out_of_a_lease(self, queue: JobQueue) -> None:
+        """The heartbeat half of the lease, and the property that makes a
+        *short* lease safe for a long job.
+
+        `requeue_running(older_than_seconds=...)` is what recovers an abandoned
+        claim without stealing a live one; without a beat, the threshold has to
+        exceed the longest job a deployment can run -- a `bootstrap` phase is
+        measured in hours -- and the orphan window becomes hours with it. So the
+        assertion is a *pair*: at a threshold of zero the claim is recoverable,
+        and after a beat, at a threshold that spans the whole test, it is not.
+
+        Neither half alone says anything. "It came back" is what a threshold of
+        zero does to everything; "it did not come back" is what an empty queue
+        does.
+        """
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        claimed = await queue.claim([JobKind.ENRICH])
+        assert len(claimed) == 1, "the premise: there is a claim to keep alive"
+
+        assert await queue.touch([claimed[0].id]) == 1
+        assert await queue.requeue_running(older_than_seconds=3600.0) == 0, (
+            "a claim heartbeated a moment ago was recovered anyway"
+        )
+        assert await queue.requeue_running(older_than_seconds=0.0) == 1, (
+            "the control: with no lease at all the same claim does come back"
+        )
+
+    async def test_touch_leaves_a_job_no_worker_is_holding(self, queue: JobQueue) -> None:
+        """`status = 'running'` in the statement, which is the half easy to
+        omit.
+
+        A beat is sent for everything a worker holds, and by the time it lands a
+        peer may already have recovered the claim or the job may have been
+        parked. Moving `updated_at` on a *parked* row is a lie in the column an
+        operator sorts the review queue by; on a pending one it is a claim about
+        work nobody is doing.
+        """
+        await queue.enqueue(
+            [
+                JobRequest(kind=JobKind.ENRICH, key="pending", priority=JobPriority.NEW),
+                JobRequest(kind=JobKind.ENRICH, key="parked", priority=JobPriority.NEW),
+            ]
+        )
+        claimed = await queue.claim([JobKind.ENRICH], limit=2)
+        assert len(claimed) == 2, "the premise: both were claimable"
+        parked = next(job for job in claimed if job.key == "parked")
+        assert await queue.fail(parked.id, error="the answer was wrong", retryable=False)
+        assert await queue.requeue_running() == 1, "the premise: the other went back to pending"
+
+        assert await queue.touch([job.id for job in claimed]) == 0
+
+    async def test_touch_tolerates_an_id_that_is_not_there(self, queue: JobQueue) -> None:
+        """A worker whose claim was recovered out from under it has nothing
+        useful to do with the news, and a job must not fail over its own
+        telemetry -- the same argument `complete`'s idempotence rests on."""
+        assert await queue.touch([new_id()]) == 0
+        assert await queue.touch([]) == 0
 
     async def test_requeue_running_leaves_pending_work_alone(self, queue: JobQueue) -> None:
         """It returns "how many", and a count inflated by every pending job

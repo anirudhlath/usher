@@ -903,3 +903,210 @@ only, so this adds nothing to the 626-listed-seasons count); whether the
 and what **four or more** concurrent workers achieve, given that three
 returned 1.90× and the marginal worker was measured to *reduce* per-worker
 throughput.
+
+## M9 Task W1 — the lane was the ceiling, not the policy: 1 → 12 in flight, and the limiter now binds at three settings (2026-08-12)
+
+**Bar written, hashed and committed before the first line of source changed** —
+[`/var/tmp/w1/BAR.md`](/var/tmp/w1/BAR.md),
+`sha256 4178b99eca239f970f2da9ef2ee5c1323c578297928216cd450fa6e7a5aad4f1`,
+2026-08-12T15:27:48-05:00, against a clean tree at `3625b94`.
+`scripts/measure_worker_lane.py` re-hashes it at run time and prints the digest
+in its own log, so an edit made after a number was seen shows up.
+
+**Measured against a local stub, never against TMDb.** ADR-0005 chose ~25 rps
+as courtesy against a stated ~40 and S3 already drew 86 × 502 from that server
+in two bursts of 43, so probing the real ceiling is not something this bar
+permits — and the stub is the *accurate* instrument as well as the courteous
+one, because it isolates the lane from upstream variance. Both arms ran back to
+back against **one** throwaway `pgvector/pgvector:pg17`, the baseline from a
+`git archive 3625b94` tree with its own venv, so the only variable is the lane.
+
+### The success criterion was not a throughput number, and this is why
+
+S3 measured **19.76 rps on three workers against a bucket configured at 10 rps
+per process that was never binding on any of them**. A faster number would not
+have distinguished "the lane got better" from "the box got faster". The bar is
+that throughput **tracks the configured limit from a single process**, scored
+at three settings, all at or under ADR-0005's ~25:
+
+| configured | baseline `3625b94` | ratio | after `m9/w1` | ratio |
+|---|---|---|---|---|
+| 5 rps | 4.991 | 0.998 ✅ | 5.003 | **1.001 ✅** |
+| 12 rps | 9.641 | 0.803 ❌ | 11.943 | **0.995 ✅** |
+| 24 rps | 10.075 | **0.420 ❌** | 24.187 | **1.008 ✅** |
+
+Band `[0.85, 1.05]`, declared in the bar. Denominator for every rate: requests
+counted **at the stub**, over the window from the first request past a 2 s
+warm-up to the last, 1,500 enrich jobs seeded per arm, 45 s per setting.
+`retried = 0` and `enriched = done` in all six runs — the premise guard that
+separates a rate from a measurement of the backoff schedule.
+
+**The baseline's ceiling is ~10 rps whatever it is asked for**, which is S2's
+own one-worker figure (10.38 rps) reproduced against a stub. The 5 rps row is
+the control that makes the other two mean something: the instrument *can* see a
+bucket bind, and on the sequential lane it binds only where the bucket is the
+smaller of the two ceilings.
+
+**Observed overlap, not a count** (CLAUDE.md's fourth rule). Peak concurrent
+in-flight requests at the stub: **1, 1, 1** on the baseline against **5, 12,
+12** after; intersection-over-union of the request windows **0.0000** against
+0.108 / 0.423 / 1.227. At 5 rps the pool self-throttles to 5 because the bucket,
+not the pool, is holding the jobs — which is the bar restated as a shape.
+
+🔴 **Prediction B1 was wrong in the flattering direction and the harness said
+so.** The bar predicted a sequential ceiling of 6–9 rps from S3's mean HTTP plus
+S2's per-job bookkeeping; measured 9.64–10.08. The cause is the stub, not the
+lane: **no two-parameter lognormal reproduces all three of S3's statistics**,
+and the fit shipped in the first run matched the median and the *mean* while
+under-reproducing the p95 by 39%. The comment beside it claimed the p95 fit
+"lands the mean within a percent", from an arithmetic slip —
+`(ln(0.4267) + 2.834) / 1.645` is **1.205**, not the 0.9007 written next to it.
+
+| `sigma` | median | mean | p95 |
+|---|---|---|---|
+| S3, live, n = 130,334 | 0.0588 | 0.0993 | 0.4267 |
+| 0.9 (shipped default) | 0.0587 | 0.0882 (-11%) | 0.2585 (**-39%**) |
+| 1.205 | 0.0588 | 0.1214 (+22%) | 0.4267 |
+
+**The real distribution is more skewed than a lognormal**, which is S3's own
+*"concurrency does not move the median request; it moves the tail"* arriving as
+a fitting problem. Caught only because the harness prints its drawn median,
+mean and p95 **beside the live ones** — a harness that printed the median alone
+would have agreed to four decimal places and said nothing. Both fits are run
+and both are reported; the default is left at 0.9 because that is what the
+first run was taken with, and moving an instrument after seeing a number is how
+a bar stops being one.
+
+### Both arms again at the p95-matched tail, which is the sterner test
+
+Same box, same throwaway Postgres, `--sigma 1.205` (median 0.0587, mean 0.1213,
+p95 0.4270 over 20,000 draws):
+
+| configured | baseline `3625b94` | ratio | after `m9/w1` | ratio |
+|---|---|---|---|---|
+| 5 rps | 4.473 | 0.895 ✅ | 5.004 | **1.001 ✅** |
+| 12 rps | 7.415 | 0.618 ❌ | 11.833 | **0.986 ✅** |
+| 24 rps | 6.744 | **0.281 ❌** | 21.626 | **0.901 ✅** |
+
+Peak in-flight **1, 1, 1** against **5, 12, 12**; IoU **0.0000** against
+0.259 / 0.796 / 1.702. Quiet: drift **-0.0166** and **+0.0056**, foreign 0.
+
+**Prediction B1 is vindicated at the fit it was derived from**: the bar
+predicted a sequential ceiling of 6–9 rps from S3's *tail*, and the p95-matched
+run measures **6.7–7.4**. The 9.6–10.1 of the first run was the stub's missing
+tail, not the lane — which is the same sentence S3 wrote about its own 0.38%
+sample, arriving one layer down.
+
+⚠️ **And the sterner run prices `job_concurrency = 12` honestly: it holds
+~21.6 rps, not 25.** The ratio at 24 rps is 0.901 — inside the declared band
+and the lowest number in the table — so twelve in flight sits *at* ADR-0005's
+policy limit rather than comfortably inside it, which is exactly where Little's
+law over the p95 put it and is not a coincidence. An operator who wants a firm
+25 rps against a real TMDb tail should raise `USHER_JOB_CONCURRENCY` (and the
+pool with it, which `Settings` will insist on). Recorded rather than changed:
+the default was derived before the measurement and moving it to fit the
+measurement is how a derivation becomes a curve fit.
+
+### What the change was, and the four things that were not the `gather`
+
+`JobWorker` now takes a **scope factory** and opens one scope per claim and one
+per job — session, commit, handlers and event buffer each. The `gather` is the
+easy tenth of it; the rest is why a `gather` alone would have been *worse than
+doing nothing*:
+
+- **the session**, which `AsyncSession` makes non-negotiable (ADR-0025's rule,
+  satisfied by giving each unit its own rather than by refusing concurrency);
+- **the event buffer**, because `discard()` on a failing job empties a
+  *concurrent* job's held frames — an enriched title no client is told about;
+- **the resolver**, because `SourceRegistry.resolve` issues two reads of its
+  own, so a registry holding one pipeline was a second door onto one session;
+- **the pool**, because `db/base.py`'s hardcoded `pool_size=10, max_overflow=5`
+  could not hold 12 jobs plus a claim plus a heartbeat, and over capacity
+  `QueuePool` waits `pool_timeout` per checkout rather than failing fast.
+
+Full argument in
+[ADR-0036](../../docs/prd/decisions/0036-the-worker-is-a-bounded-pool-of-scopes.md).
+
+### 🔴 Refuted: the shared-session explanation for S3's `MissingGreenlet`
+
+The task was dispatched with the hypothesis that the crash was *"the canonical
+symptom of an `AsyncSession` touched from the wrong context"* and that the
+per-job scope would remove its cause. **The deployment shape refutes that
+outright, and no measurement was needed to see it.** The process that died was
+`usher work`, which held **one** session for the life of the command and ran
+**one** job at a time: `asyncio.run(_work(...))` creates no tasks, and every
+call in the loop is awaited in sequence. There was no second coroutine to touch
+that session, so a shared-session race cannot be what killed it.
+
+What the per-job scope does remove is a real hazard, demonstrated rather than
+asserted:
+`tests/integration/test_services_jobs.py::test_two_concurrent_jobs_on_one_shared_session_really_do_break`
+drives two concurrent jobs through **one** session against real Postgres and
+records what SQLAlchemy raises. That is the state W1 would have created had it
+stopped at the `gather`, and it is the case the design exists to make
+unreachable — it is **not** evidence about the crash.
+
+**So `MissingGreenlet` is not claimed fixed, and "did not reproduce" is not
+"fixed": it took ~78 min and ~92,000 jobs to appear once.** What is still
+unexplained: what a single-session, single-job-at-a-time worker was doing that
+needed IO outside a greenlet context, 78 minutes and ~30 `ix_titles_imdb_id`
+conflicts in. The two candidates this run did not distinguish are a session
+poisoned by a caught `IntegrityError` whose next statement raised, and a lazy
+load reached from a `finally`. Neither was captured, because the driver did not
+set `usher --traceback work`. **The next multi-hour run must.**
+
+### Orphan recovery, which was the actual dead end
+
+S3: *"with three workers there is no way to recover one's orphans without
+corrupting the other two"* — `JobWorker.startup()` called `requeue_running()`
+with the port's `older_than_seconds=0.0` default, once, at process start. That
+is now unsafe **inside one process** as well, since one worker holds up to
+`job_concurrency` claims. Replaced by a lease plus a heartbeat:
+`recover()` always passes `USHER_JOB_LEASE_SECONDS` (300) and is called on a
+timer rather than once, and `JobQueue.touch()` moves `updated_at` for
+everything in flight every third of a lease. **The heartbeat is what lets the
+lease be minutes**: without it the threshold has to exceed the longest job a
+deployment can run — a `bootstrap` phase, hours — and the orphan window becomes
+hours with it. S3's twenty orphans would now come back after five minutes with
+nothing else disturbed.
+
+Both arms are asserted, and the second is the one with teeth: *"an abandoned
+claim comes back"* is satisfied by requeueing everything, which is exactly what
+this replaced.
+
+### Per-kind concurrency, and the one number that is not measured
+
+`usher.services.jobs.KIND_CONCURRENCY`, total over `JobKind`:
+
+| kind | in flight | from |
+|---|---|---|
+| `enrich` | the global, 12 | Little's law over S3: p95 0.4267 s HTTP + ~0.033 s bookkeeping ≈ 0.46 s a job, so ~11.5 to hold ADR-0005's ~25 rps |
+| `match`, `watch_history`, `watch_writeback` | 4 | ⚠️ **not measured** — a household server, never run under concurrency by this project; a deliberately conservative cap |
+| `derive` | 4 | ⚠️ **not measured** — the connection-pool budget, not a throughput |
+| `index` | 1 | `fastembed` holds 8,000–10,700 tokens/s **flat across the size range**; a CPU ceiling is not raised by asking from more coroutines |
+| `curate` | 1 | pool 600 renders ~12,540 prompt tokens, **56 tokens** under `max_model_len` — no room for a second generation's KV cache |
+| `sync`, `bootstrap` | 1 | a walk of 1,126,674 items; ADR-0015's retraction ceiling is per run; `bulk_load_window` commits the caller's session |
+
+**Two of the eight are bounds rather than measurements and say so in the
+source.** The measurement that would move `derive` is derive jobs/s against 1,
+2, 4 and 8 in flight on one pool; nothing here has run it.
+
+### Head-of-line blocking is narrowed and not removed
+
+A pool does not fix an *ordering*. The claim is still `priority DESC,
+created_at`, so the finding above this one — `title_embeddings` frozen at 542
+through a whole 130,806-title crawl with the embedder on, then jumping to 4,929
+within minutes of the enrich queue emptying — is unchanged by W1. What *is*
+changed is that a `sync` or a `bootstrap` no longer stops the other kinds dead
+for its duration: they run beside it, up to `job_concurrency`.
+
+### Quiet, and one run discarded for not being
+
+Two-sided idle-sampled CPU drift and the argv-token foreign-process census
+imported from `scripts/measure_suggest_tiers.py` rather than re-derived.
+Reported runs: drift **+0.0169** and **-0.0003**, foreign 0. **The first
+baseline attempt was discarded**, and the gate is why: it reported two foreign
+`pytest` processes, which were a *different worktree* running the integration
+suite on this shared box. The load average at the time was 7.04 against 2.04 on
+the run that was kept. That is the census earning its keep on the failure mode
+it was built for.

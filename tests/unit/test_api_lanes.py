@@ -94,6 +94,7 @@ from usher.ports.source import (
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.home import SCREEN_STALE_GRACE, HomeService
 from usher.services.ingest import IngestService
+from usher.services.jobs import DEFAULT_LEASE_SECONDS
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
 from usher.services.rows import ROW_PROVIDERS
@@ -195,6 +196,7 @@ class _CountingQueue(FakeJobQueue):
         super().__init__()
         self.claims = 0
         self.requeues = 0
+        self.requeue_ages: list[float] = []
         # What each pass *asked for*, which is the observable half of
         # `run_once` claiming `list(self._handlers)`: a lane with no model
         # must not ask for `index` work at all.
@@ -207,6 +209,10 @@ class _CountingQueue(FakeJobQueue):
 
     async def requeue_running(self, *, older_than_seconds: float = 0.0) -> int:
         self.requeues += 1
+        # Recorded, not just counted: the *age* is the whole difference between
+        # recovery and theft, and a lane that called this bare would answer
+        # "1 requeue" exactly as a correct one does.
+        self.requeue_ages.append(older_than_seconds)
         return await super().requeue_running(older_than_seconds=older_than_seconds)
 
 
@@ -733,22 +739,30 @@ async def test_the_worker_lane_runs_when_enabled(fakes: _Fakes) -> None:
     assert supervisor.worker_running() is False
 
 
-async def test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass(
+async def test_the_worker_lane_recovers_on_a_lease_and_not_on_every_pass(
     fakes: _Fakes,
 ) -> None:
-    """PRD 08's "startup requeues anything left `in_progress`", and it is a
-    *startup* call rather than a per-pass one.
+    """PRD 08's recovery, and **both** halves of what M9's W1 changed about it.
 
-    `JobQueue.requeue_running`'s default `older_than_seconds=0.0` requeues
-    **everything** currently running, which is correct at exactly one worker
-    -- so a lane that called it every poll would steal a second worker's
-    live claims every five seconds. `usher work` calls it once before its
-    loop for the same reason; this is the property that keeps the two
-    composition roots honest with each other.
+    `JobQueue.requeue_running`'s `older_than_seconds=0.0` default requeues
+    everything currently running. That was the only lever this project had, and
+    M9's S3 measured the dead end it leads to: one of three workers died holding
+    twenty claims, and pulling that lever would have taken the other two
+    workers' **live** claims with it. It is now unsafe inside one process too,
+    because one worker holds several claims at a time.
 
-    `idle_seconds` is dialled down so several passes fit in milliseconds:
-    at the shipped five seconds this case would take fifteen, and a case
-    that asserted after one pass could not tell "once" from "per pass".
+    So two assertions, and the second is the one with teeth:
+
+    - **not per pass**, because recovery is an `UPDATE` scanning
+      `status = 'running'` and there is nothing to find between leases; and
+    - **never at age zero**, which is the difference between recovery and
+      theft. A lane calling `requeue_running()` bare answers "1 requeue" over
+      three passes exactly as a correct one does, so counting alone ratifies
+      it.
+
+    `idle_seconds` is dialled down so several passes fit in milliseconds: at
+    the shipped five seconds this case would take fifteen, and a case that
+    asserted after one pass could not tell "once" from "per pass".
     """
     supervisor = _supervisor(fakes, worker_idle_seconds=0.001)
     await supervisor.start()
@@ -756,6 +770,10 @@ async def test_the_worker_lane_requeues_abandoned_claims_once_not_every_pass(
     await supervisor.stop()
     assert fakes.queue.requeues == 1, (
         f"the worker lane requeued {fakes.queue.requeues} times over {fakes.queue.claims} passes"
+    )
+    assert fakes.queue.requeue_ages == [pytest.approx(DEFAULT_LEASE_SECONDS)], (
+        "the lane recovered at an age that would take a live worker's claims: "
+        f"{fakes.queue.requeue_ages}"
     )
 
 

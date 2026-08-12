@@ -190,3 +190,33 @@ expressible here and is the first ownership bound this fake can tell apart:
 an episode one. `media_items.available` is still not modelled, so the retracted
 distractor stays load-bearing only in the integration run — the same asymmetry
 `list_unwatched_candidates` already records.
+
+**A lease is only observable against a clock, and the fake's affordance is to
+move the *row* rather than the clock (2026-08-12, M9 W1).** `FakeJobQueue`
+gains `touch()` — the port's heartbeat, `updated_at` forward for `running` rows
+only, which is the same column and the same filter the SQL arm uses, so the
+pair really is one mechanism on both arms. It also gains a **test-only**
+`backdate(seconds=…)`, deliberately absent from the port, for `clear_backoff`'s
+reason: the alternative is a case that sleeps for the length of a lease, and a
+suite that waits five minutes to watch a threshold fire is a suite nobody runs.
+
+Backdating the stored row rather than injecting a clock is what keeps the two
+arms comparable: `PostgresJobQueue` reads `clock_timestamp()`, which is not
+injectable, so a fake with a fake clock would be testing a mechanism the
+Postgres arm does not have. The contract cases for `touch` therefore use
+`older_than_seconds` as the variable on **both** arms and never a clock at all
+— `requeue_running(older_than_seconds=3600.0)` must find nothing after a beat,
+and `older_than_seconds=0.0` must find the same claim, which is the control
+that stops the first half passing against a queue that recovers nothing.
+
+`tests/fakes/job_scope.py` joins the fakes for the same reason the others
+exist. `JobWorker` takes a scope *factory* since W1, so a case about a span or
+a metric would otherwise carry six lines of context-manager boilerplate; the
+helper builds one. **What it cannot say is stated in its own module
+docstring**: every scope it opens shares one `FakeJobQueue`, because the fake
+*is* the store — one dict behind one event loop, with no second session to
+model — so "each job got its own session" is not expressible against it at all.
+That property is asserted in `tests/integration/test_services_jobs.py`, where
+two concurrent jobs read `pg_backend_pid()` through their own scope's session
+and the two values have to differ. Ninth divergence, and the first one that is
+about a *fake's shape* rather than about a behaviour it gets wrong.

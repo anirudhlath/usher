@@ -278,25 +278,49 @@ own semaphore, so a slow upstream can't starve the API:
 |---|---|---|
 | API request handling | uvicorn default | — |
 | Source event stream | 1 per source | push connection |
-| Enrichment workers | 8 | TMDb rate limit (~40 rps ceiling) |
-| Source sync workers | 4 | Emby is slow (~1–5 s/request observed) |
-| Embedding | 1 batch worker | CPU/GPU |
+| **Job worker, globally** (M9 W1) | **`USHER_JOB_CONCURRENCY`, default 12** | the connection pool; `Settings` refuses a value it cannot serve |
+| — `enrich` | the global (12) | TMDb, at `USHER_TMDB_REQUESTS_PER_SECOND` |
+| — `match`, `watch_history`, `watch_writeback` | 4 | a household media server, **unmeasured under concurrency** |
+| — `derive` | 4 | the pool's share, not a measured throughput |
+| — `index` | 1 | `fastembed` is CPU-bound at a flat tokens/s ceiling |
+| — `curate` | 1 | the reference endpoint has 56 tokens of context spare |
+| — `sync`, `bootstrap` | 1 | a walk of the whole library; a session `bulk_load_window` commits |
+| Embedding | the `index` row above; `USHER_EMBEDDING_BATCH_SIZE` is its batch | CPU/GPU |
 | **Row build** (M7) | **1, sequential — and not a setting** | `AsyncSession` |
 | **Screen refresh** (M9) | **1 lane, 1 refresh in flight, ≤ 32 keys queued** | `REFRESH_QUEUE_SIZE`; full means dropped |
 
-⏳ **This table is the design, and three of its rows are not what shipped** —
-enrichment workers, source sync workers and embedding. (The row-build row below
-them is the exception and is described rather than corrected; see the paragraph
-after this one.) There is **no semaphore anywhere in `src/`** and none of those
-three numbers exists as a limit. What actually bounds the work: one `JobWorker` claiming a
-batch and running it **sequentially**, so enrichment concurrency is 1, not 8;
-TMDb is bounded by a **token bucket** at `USHER_TMDB_REQUESTS_PER_SECOND`
-rather than by a worker count, which is the more direct control over the thing
-the row names; source sync is one sequential walk per push lane; and
-**embedding has no lane of its own at all** — `JobKind.INDEX` is registered on
-the same `JobWorker` as `match` and `enrich`, so its "1 batch worker" is
-really "whatever the one worker is doing next".
-`USHER_EMBEDDING_BATCH_SIZE` is the embedder's internal batch, not a lane.
+✅ **The three rows this table carried as "design, not shipped" are shipped in
+M9's W1, and the numbers are different from the ones it guessed.** It used to
+read *"there is no semaphore anywhere in `src/`"*, and that was the whole
+finding: `JobWorker` claimed a batch of twenty and awaited them **one at a
+time**, so enrichment concurrency was 1 rather than 8. M9's S3 measured what
+that cost against the live TMDb API — **19.76 rps on three worker processes,
+against a token bucket configured at 10 rps per process that was never the
+binding constraint on any of them**, with per-worker throughput *rising* from
+6.59 to 7.72 rps when one of the three died. The architecture was the ceiling,
+not the policy.
+
+What replaced it is a **bounded pool per kind on one worker**, not a lane per
+kind: `usher.services.jobs.KIND_CONCURRENCY` is a table over every `JobKind`,
+resolved against the global at build time, and **each entry names the
+measurement it came from in its own source** — with one exception, `derive`,
+which is derived from the connection-pool budget rather than from any measured
+throughput and says so. The global default of 12 is Little's law over S3's
+measured tail (p95 HTTP 0.4267 s plus ~0.033 s of per-job bookkeeping, so
+~11.5 in flight to hold ADR-0005's ~25 rps), not a round number.
+
+⚠️ **The `match`/`watch_history`/`watch_writeback` row is the one number here
+that is a *bound* rather than a measurement.** The old table guessed 4 for
+"source sync workers" against *"Emby is slow (~1–5 s/request observed)"*; this
+repository still has no measurement of a household media server under
+concurrent load, so 4 survives as a deliberately conservative cap on an
+unmeasured upstream. It is written down as unmeasured rather than dressed up.
+
+**Every job in flight holds an `AsyncSession`**, which is why
+`USHER_DB_POOL_SIZE` exists and why `Settings` refuses a `job_concurrency` the
+pool cannot serve: over capacity SQLAlchemy's `QueuePool` does not fail fast,
+it waits `pool_timeout` per checkout and then raises, so the symptom is a lane
+getting slower until it starts parking jobs.
 
 ✅ **M8 adds a sixth thing to that same one worker and no row to this table,
 which is a decision rather than an omission.** `JobKind.CURATE` is registered

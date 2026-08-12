@@ -26,18 +26,22 @@ reports nothing.
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from tests.contract.job_queue_contract import ClaimWindow, overlapping
 from usher.db.base import build_engine, build_session_factory
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.domain.jobs import Job, JobKind, JobPriority
 from usher.ports.errors import PortDataMalformed, PortUnavailable
+from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
-from usher.services.jobs import JobWorker
+from usher.services.events import DeferredEventPublisher
+from usher.services.jobs import DEFAULT_LEASE_SECONDS, JobScope, JobWorker
 
 # Generous next to a local claim (single-digit milliseconds), short next to a
 # test run. Anything that reaches it is blocked on a lock, not slow.
@@ -78,6 +82,44 @@ def _queue(session: AsyncSession) -> PostgresJobQueue:
     return PostgresJobQueue(session, max_attempts=3, backoff_seconds=30.0)
 
 
+def _worker(
+    sessions: async_sessionmaker[AsyncSession],
+    handlers: Mapping[JobKind, Callable[[Job], Awaitable[None]]],
+    *,
+    concurrency: int = 1,
+    batch_size: int = 20,
+    lease_seconds: float = DEFAULT_LEASE_SECONDS,
+) -> JobWorker:
+    """A worker in the shape a composition root builds: **a session per scope.**
+
+    This is the production wiring rather than a convenience. `AsyncSession` is
+    not concurrency-safe, so `JobWorker` opens one scope for the claim and one
+    per job, and `composition.build_worker`'s factory opens a session inside
+    each. The unit file's equivalent hands back one pipeline over fakes every
+    time and says so; here the sessions really are different, which is the only
+    place that difference can be *observed* -- see
+    `test_two_jobs_in_flight_at_once_hold_different_connections` below.
+    """
+
+    @asynccontextmanager
+    async def _scope() -> AsyncIterator[JobScope]:
+        async with sessions() as session:
+            yield JobScope(
+                queue=_queue(session),
+                commit=session.commit,
+                handlers=handlers,
+                events=DeferredEventPublisher(NullEventPublisher()),
+            )
+
+    return JobWorker(
+        _scope,
+        dict.fromkeys(handlers, concurrency),
+        max_in_flight=concurrency,
+        batch_size=batch_size,
+        lease_seconds=lease_seconds,
+    )
+
+
 async def _enqueue(factory: async_sessionmaker[AsyncSession], *keys: str) -> None:
     async with factory() as writer:
         await _queue(writer).enqueue(
@@ -114,14 +156,11 @@ async def test_the_claim_is_durable_while_the_handler_runs(
     await _enqueue(factory, "t1")
     seen: list[str | None] = []
 
-    async with factory() as worker_session:
-        worker = JobWorker(queue=_queue(worker_session), commit=worker_session.commit)
+    async def _handle(job: Job) -> None:
+        seen.append(await _status_of(factory, job.key))
 
-        async def _handle(job: Job) -> None:
-            seen.append(await _status_of(factory, job.key))
-
-        worker.register(JobKind.ENRICH, _handle)
-        assert await asyncio.wait_for(worker.run_once(), CLAIM_TIMEOUT) == 1
+    worker = _worker(factory, {JobKind.ENRICH: _handle})
+    assert await asyncio.wait_for(worker.run_once(), CLAIM_TIMEOUT) == 1
 
     assert seen == ["running"], "another backend could not see the claim while it ran"
     assert await _status_of(factory, "t1") is None, "the completed job was not deleted"
@@ -145,16 +184,15 @@ async def test_two_workers_split_one_batch_and_never_run_a_job_twice(
     handled: dict[int, list[str]] = {0: [], 1: []}
 
     async def _run(index: int) -> None:
+        worker = _worker(factory, {JobKind.ENRICH: _recorder(handled[index])}, batch_size=2)
         async with factory() as session:
-            worker = JobWorker(queue=_queue(session), commit=session.commit, batch_size=2)
-            worker.register(JobKind.ENRICH, _recorder(handled[index]))
             # Opens the transaction and takes a snapshot before the barrier,
             # so the only thing overlapping is the claim itself.
             await session.execute(text("SELECT 1"))
-            await barrier.wait()
-            started = time.monotonic()
-            await asyncio.wait_for(worker.run_once(), CLAIM_TIMEOUT)
-            windows.append((started, time.monotonic()))
+        await barrier.wait()
+        started = time.monotonic()
+        await asyncio.wait_for(worker.run_once(), CLAIM_TIMEOUT)
+        windows.append((started, time.monotonic()))
 
     await asyncio.gather(_run(0), _run(1))
 
@@ -178,7 +216,7 @@ def _recorder(into: list[str]) -> Callable[[Job], Awaitable[None]]:
 async def test_a_parked_job_stays_parked_across_a_restart(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """`startup()` requeues `running` and must not touch `parked`.
+    """`recover()` requeues `running` and must not touch `parked`.
 
     A requeue keyed on anything looser un-parks poison on every restart,
     which is the failure parking exists to end arriving through the recovery
@@ -186,21 +224,17 @@ async def test_a_parked_job_stays_parked_across_a_restart(
     retried again.
     """
     await _enqueue(factory, "t1")
-    async with factory() as session:
-        worker = JobWorker(queue=_queue(session), commit=session.commit)
-        worker.register(JobKind.ENRICH, _raising(PortDataMalformed("the answer was wrong")))
-        await worker.run_once()
+    poison = {JobKind.ENRICH: _raising(PortDataMalformed("the answer was wrong"))}
+    await _worker(factory, poison).run_once()
     assert await _status_of(factory, "t1") == "parked"
 
-    async with factory() as restarted:
-        worker = JobWorker(queue=_queue(restarted), commit=restarted.commit)
-        worker.register(JobKind.ENRICH, _raising(PortDataMalformed("the answer was wrong")))
-        assert await worker.startup() == 0
-        assert await worker.run_once() == 0
+    restarted = _worker(factory, poison, lease_seconds=0.0)
+    assert await restarted.recover() == 0
+    assert await restarted.run_once() == 0
     assert await _status_of(factory, "t1") == "parked"
 
 
-async def test_startup_recovers_a_claim_a_killed_worker_committed(
+async def test_recover_takes_back_a_claim_a_killed_worker_committed(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The other half of "the claim is durable": the recovery that durability
@@ -215,11 +249,16 @@ async def test_startup_recovers_a_claim_a_killed_worker_committed(
     assert await _status_of(factory, "t1") == "running"
 
     handled: list[str] = []
-    async with factory() as restarted:
-        worker = JobWorker(queue=_queue(restarted), commit=restarted.commit)
-        worker.register(JobKind.ENRICH, _recorder(handled))
-        assert await worker.startup() == 1
-        assert await worker.run_once() == 1
+    # `lease_seconds=0.0` because the claim above was made milliseconds ago and
+    # the shipped 300 s lease is what stops a worker recovering work somebody
+    # is still doing. The *other* arm -- that a claim inside its lease is left
+    # alone -- is
+    # `test_a_live_workers_claim_survives_another_workers_recovery` below, and
+    # it is the one with teeth: "an abandoned claim comes back" is satisfied by
+    # requeueing everything, which is exactly what this replaced.
+    restarted = _worker(factory, {JobKind.ENRICH: _recorder(handled)}, lease_seconds=0.0)
+    assert await restarted.recover() == 1
+    assert await restarted.run_once() == 1
     assert handled == ["t1"]
 
 
@@ -235,16 +274,12 @@ async def test_a_transient_failure_is_not_re_claimable_by_a_second_worker_either
     hammering a broken upstream would actually take.
     """
     await _enqueue(factory, "t1")
-    async with factory() as first:
-        worker = JobWorker(queue=_queue(first), commit=first.commit)
-        worker.register(JobKind.ENRICH, _raising(PortUnavailable("upstream is down")))
-        assert await worker.run_once() == 1
+    down = _worker(factory, {JobKind.ENRICH: _raising(PortUnavailable("upstream is down"))})
+    assert await down.run_once() == 1
     assert await _status_of(factory, "t1") == "pending"
 
-    async with factory() as second:
-        other = JobWorker(queue=_queue(second), commit=second.commit)
-        other.register(JobKind.ENRICH, _recorder([]))
-        assert await asyncio.wait_for(other.run_once(), CLAIM_TIMEOUT) == 0
+    other = _worker(factory, {JobKind.ENRICH: _recorder([])})
+    assert await asyncio.wait_for(other.run_once(), CLAIM_TIMEOUT) == 0
 
     async with factory() as reader:
         run_after = (
@@ -289,10 +324,8 @@ async def test_the_newest_kind_stores_claims_and_completes_with_no_migration_beh
     assert stored == JobKind.WATCH_WRITEBACK.value == "watch_writeback"
 
     handled: list[str] = []
-    async with factory() as session:
-        worker = JobWorker(queue=_queue(session), commit=session.commit)
-        worker.register(JobKind.WATCH_WRITEBACK, _recorder(handled))
-        assert await asyncio.wait_for(worker.run_once(), CLAIM_TIMEOUT) == 1
+    worker = _worker(factory, {JobKind.WATCH_WRITEBACK: _recorder(handled)})
+    assert await asyncio.wait_for(worker.run_once(), CLAIM_TIMEOUT) == 1
 
     assert handled == ["emby-1"]
     async with factory() as after:
@@ -307,3 +340,190 @@ def _raising(exc: BaseException) -> Callable[[Job], Awaitable[None]]:
         raise exc
 
     return _handle
+
+
+# -- the per-job scope, and what only a real engine can say about it ---------
+
+
+async def test_two_jobs_in_flight_at_once_hold_different_connections(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """**The claim W1 rests on, measured rather than argued.**
+
+    `AsyncSession` is not concurrency-safe and every repository a handler holds
+    is bound to one, so "the worker runs jobs concurrently" is only safe if each
+    job got a session of its own. Nothing in the unit suite can see that: its
+    scope factory hands back one pipeline over fakes every time, deliberately,
+    because a dict has no connection to be different.
+
+    Here each job reads Postgres's own `pg_backend_pid()` **through the queue's
+    session**, so the value is a property of the object the handler's
+    repositories would use, not of anything the case constructed. Two distinct
+    pids is what a per-job scope produces; one is what a shared session
+    produces, and one is also what a *serialised* worker produces -- which is
+    why the overlap is asserted beside it rather than instead of it.
+    """
+    await _enqueue(factory, "a", "b")
+    rendezvous = asyncio.Barrier(2)
+    pids: dict[str, int] = {}
+    windows: list[ClaimWindow] = []
+    seen: dict[str, AsyncSession] = {}
+
+    async def _handle(job: Job) -> None:
+        started = time.monotonic()
+        session = seen[job.key]
+        pids[job.key] = int((await session.execute(text("SELECT pg_backend_pid()"))).scalar_one())
+        await asyncio.wait_for(rendezvous.wait(), CLAIM_TIMEOUT)
+        windows.append(
+            ClaimWindow(keys=(job.key,), started_at=started, finished_at=time.monotonic())
+        )
+
+    @asynccontextmanager
+    async def _scope() -> AsyncIterator[JobScope]:
+        async with factory() as session:
+
+            async def _bind(job: Job) -> None:
+                seen[job.key] = session
+                await _handle(job)
+
+            yield JobScope(
+                queue=_queue(session),
+                commit=session.commit,
+                handlers={JobKind.ENRICH: _bind},
+                events=DeferredEventPublisher(NullEventPublisher()),
+            )
+
+    worker = JobWorker(_scope, {JobKind.ENRICH: 2}, max_in_flight=2)
+    assert await asyncio.wait_for(worker.run_once(), CLAIM_TIMEOUT) == 2
+
+    assert set(pids) == {"a", "b"}, f"the premise: both handlers ran -- {pids}"
+    assert overlapping(windows), f"the two jobs did not overlap: {windows}"
+    assert pids["a"] != pids["b"], (
+        "two concurrently-running jobs shared one Postgres backend, so they shared "
+        f"one AsyncSession: {pids}"
+    )
+
+
+async def test_two_concurrent_jobs_on_one_shared_session_really_do_break(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The positive control for the case above, and the honest limit of what
+    this task can claim about `MissingGreenlet`.
+
+    M9's S3 lost a worker to an unhandled
+    `MissingGreenlet: greenlet_spawn has not been called`, and the hypothesis
+    W1 was dispatched with is that it was an `AsyncSession` touched from the
+    wrong context. **This case does not reproduce that crash and is not
+    evidence that it is fixed** -- see the write-up in
+    `.claude/rules/tmdb-and-enrichment.md`, which records why the shape of that
+    run refutes the shared-session explanation outright. What it does establish
+    is that the hazard the per-job scope removes is real and not theoretical:
+    with one session behind two concurrent jobs, SQLAlchemy raises rather than
+    silently interleaving, and it raises from the same family.
+
+    The failure is recorded rather than asserted by name, because which member
+    of the family arrives depends on which of the two coroutines gets there
+    first, and a case pinned to one spelling would be flaky by construction.
+    """
+    await _enqueue(factory, "a", "b")
+    rendezvous = asyncio.Barrier(2)
+    failures: list[str] = []
+
+    async with factory() as shared:
+
+        async def _handle(job: Job) -> None:
+            # Both jobs park here, then both drive the *same* session at once.
+            await asyncio.wait_for(rendezvous.wait(), CLAIM_TIMEOUT)
+            await shared.execute(text("SELECT pg_sleep(0.05)"))
+
+        @asynccontextmanager
+        async def _scope() -> AsyncIterator[JobScope]:
+            yield JobScope(
+                queue=_queue(shared),
+                commit=shared.commit,
+                handlers={JobKind.ENRICH: _handle},
+                events=DeferredEventPublisher(NullEventPublisher()),
+            )
+
+        worker = JobWorker(_scope, {JobKind.ENRICH: 2}, max_in_flight=2)
+        try:
+            await asyncio.wait_for(worker.run_once(), CLAIM_TIMEOUT)
+        except BaseException as exc:
+            failures.append(f"{type(exc).__module__}.{type(exc).__name__}: {exc}")
+
+    assert failures, (
+        "two concurrent jobs drove one AsyncSession and nothing complained -- "
+        "either the worker serialised them (so the premise is gone) or SQLAlchemy "
+        "silently interleaved two statements on one connection"
+    )
+    print(f"one shared session under two concurrent jobs raises: {failures[0]}")
+
+
+async def test_a_live_workers_claim_survives_another_workers_recovery(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """**The arm that makes recovery a lease rather than a theft**, against
+    two real backends.
+
+    M9's S3: one of three workers died holding twenty claims, and the only
+    recovery lever was `requeue_running(older_than_seconds=0.0)` -- which would
+    have taken the other two workers' live claims with it. *"A genuine dead end
+    at N > 1"*, and the twenty were written off.
+
+    So the property is the negative one: a second worker recovering orphans
+    must leave a claim somebody is still working on exactly where it is. The
+    premise is asserted first -- a `running` row has to exist for the recovery
+    to have had the chance to steal it.
+    """
+    await _enqueue(factory, "held")
+    async with factory() as live:
+        claimed = await asyncio.wait_for(_queue(live).claim([JobKind.ENRICH]), CLAIM_TIMEOUT)
+        assert [job.key for job in claimed] == ["held"], "the premise: a live claim exists"
+        await live.commit()
+        assert await _status_of(factory, "held") == "running"
+
+        peer = _worker(factory, {JobKind.ENRICH: _recorder([])})
+        assert await peer.recover() == 0
+        assert await _status_of(factory, "held") == "running", (
+            "a second worker's recovery stole a claim its holder was still working on"
+        )
+
+        # And the heartbeat keeps it there: the beat is what lets the lease be
+        # minutes rather than longer than the longest job.
+        assert await _queue(live).touch([claimed[0].id]) == 1
+        await live.commit()
+        assert await _status_of(factory, "held") == "running"
+
+    # The control that makes the two assertions above mean something: past the
+    # lease, the same call does take it.
+    aged = _worker(factory, {JobKind.ENRICH: _recorder([])}, lease_seconds=0.0)
+    assert await aged.recover() == 1
+    assert await _status_of(factory, "held") == "pending"
+
+
+async def test_a_touch_does_not_resurrect_a_job_another_worker_recovered(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`_TOUCH`'s `status = 'running'` predicate, which is the half that is
+    easy to leave out.
+
+    A beat is sent for everything a worker holds in flight, and by the time it
+    lands a peer may already have recovered the claim (the row is `pending`
+    again) or the job may have been parked. Without the predicate the beat
+    moves `updated_at` on those rows too -- which for a `pending` row is
+    harmless noise and for a `parked` one is a lie in the column an operator
+    sorts the review queue by.
+    """
+    await _enqueue(factory, "recovered", "poisoned")
+    async with factory() as session:
+        queue = _queue(session)
+        claimed = await asyncio.wait_for(queue.claim([JobKind.ENRICH], limit=2), CLAIM_TIMEOUT)
+        assert len(claimed) == 2, "the premise: two live claims"
+        assert await queue.requeue_running() == 2
+        parked = await queue.fail(claimed[0].id, error="the answer was wrong", retryable=False)
+        assert parked is not None and parked.status.value == "parked", "the premise: one parked"
+        await session.commit()
+
+        assert await queue.touch([job.id for job in claimed]) == 0, (
+            "the heartbeat moved rows no worker is holding"
+        )

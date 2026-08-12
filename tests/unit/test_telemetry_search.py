@@ -37,6 +37,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.job_queue import FakeJobQueue
+from tests.fakes.job_scope import worker_over
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.search_index import (
     FakePrefixSuggestIndex,
@@ -57,7 +58,6 @@ from usher.ports.repository import ScoredNeighbor, SearchQueryRecord
 from usher.ports.search import SearchDocument, SearchMode, SearchOutcome, SearchRequest
 from usher.services.handlers import index_handler
 from usher.services.index import IndexService
-from usher.services.jobs import JobWorker
 from usher.services.search import SearchAnalytics, SearchService
 from usher.services.similar import blend_fingerprint
 from usher.telemetry import (
@@ -671,8 +671,9 @@ async def test_an_index_job_nests_its_embed_span_under_index_title(
         embedder=FakeEmbedder(),
         commit=_commit,
     )
-    worker = JobWorker(queue, _commit, batch_size=1)
-    worker.register(JobKind.INDEX, index_handler(service))
+    worker = worker_over(
+        queue, {JobKind.INDEX: index_handler(service)}, commit=_commit, batch_size=1
+    )
     await queue.enqueue(
         [JobRequest(kind=JobKind.INDEX, key=str(title.id), priority=JobPriority.BACKFILL)]
     )
@@ -695,7 +696,7 @@ async def test_a_skipped_index_job_emits_no_embed_span(
 
     The wrong implementation opens the span around the whole method and
     reports a 0.2 ms `index.embed` for every redelivered job --
-    `JobWorker.startup()` requeues everything left `running`, so redelivery is
+    `JobWorker.recover()` requeues an abandoned claim, so redelivery is
     ordinary, and a p50 computed over those is a p50 of doing nothing.
     """
     titles = FakeTitleRepository()

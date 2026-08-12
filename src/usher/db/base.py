@@ -50,12 +50,36 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
-def build_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
-    # pool_size/max_overflow are hardcoded, not read from usher.config.Settings
-    # -- deferred, not designed away. Nothing in M1 has a reason to run more
-    # than one process against the same database, so there is no real
-    # deployment yet to tune these for. Revisit if/when a milestone adds a
-    # second long-running process (e.g. a worker pool) sharing this pool.
+def build_engine(
+    database_url: str, *, echo: bool = False, pool_size: int = 20, max_overflow: int = 10
+) -> AsyncEngine:
+    # **pool_size/max_overflow are arguments now, and the comment they replace
+    # named this task.** It read: *"hardcoded, not read from
+    # usher.config.Settings -- deferred, not designed away. Nothing in M1 has a
+    # reason to run more than one process against the same database ... Revisit
+    # if/when a milestone adds a second long-running process (e.g. a worker
+    # pool) sharing this pool."* M9's W1 is that milestone, and the thing
+    # sharing the pool is not a second process: it is `job_concurrency` jobs in
+    # one, each holding its own session because `AsyncSession` is not
+    # concurrency-safe, **plus the API's own requests**, because `usher serve`
+    # runs the worker lane inside the same process against this same engine.
+    #
+    # The budget at the shipped defaults (`job_concurrency = 12`, this
+    # `pool_size = 20` + `max_overflow = 10`): 12 jobs + 1 claim + 1 heartbeat
+    # leaves 6 pooled and 10 overflow connections for everything else. The old
+    # 10 + 5 could not hold the worker on its own, and over capacity
+    # `QueuePool` does not fail fast -- it waits `pool_timeout` (30 s) per
+    # checkout and then raises, so the symptom is a lane getting slower until
+    # it starts parking jobs. `Settings` refuses the arithmetic that cannot
+    # work at all (`_the_pool_can_hold_the_worker`); the defaults here are what
+    # a caller that has no `Settings` gets, and the two composition roots pass
+    # theirs.
+    #
+    # The defaults are stated *twice*, here and on `Settings`, and that is
+    # deliberate rather than a copy: `build_engine` has callers with no
+    # settings object (the integration suite's own fixtures, `alembic`'s
+    # `env.py`) and a required argument would make every one of them invent a
+    # number. `tests/unit/test_config.py` pins the two together.
     #
     # connect_args={"timeout": 5} bounds asyncpg's own connection-establishment
     # attempt, not query execution. Without it, a connection attempt against
@@ -87,8 +111,8 @@ def build_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
         database_url,
         echo=echo,
         pool_pre_ping=True,
-        pool_size=10,
-        max_overflow=5,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
         connect_args={"timeout": 5},
     )
 

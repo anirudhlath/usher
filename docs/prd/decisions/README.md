@@ -43,6 +43,7 @@ otherwise be lost and re-litigated in six months.
 | [0033](0033-an-event-is-a-statement-about-committed-state.md) | An event is a statement about committed state — an ordering rule, not a durability one | Accepted — corrects PRD 09's carried-debt entry |
 | [0034](0034-the-cursor-carries-a-position.md) | The cursor carries a sort position and nothing else, and no port takes one | Accepted — settles PRD 07's `### Pagination` |
 | [0035](0035-the-tags-similarity-term.md) | The MovieLens user-tag term is not built — 6.08% against a 10% floor, and set Jaccard's zero is not evidence over an open vocabulary | Accepted — a recorded refusal with a scoped follow-up; gate run 2026-08-12 |
+| [0036](0036-the-worker-is-a-bounded-pool-of-scopes.md) | The job worker is a bounded pool, and a job's scope is a session | Accepted — corrects PRD 01's concurrency table and PRD 08's recovery rule |
 
 Format: context → decision → consequences → evidence. Short is fine.
 
