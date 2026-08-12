@@ -709,6 +709,30 @@ async def test_every_row_written_under_the_four_signal_blend_reads_as_stale() ->
     assert await service.stale_neighbors() == report.rows
 
 
+def test_the_surviving_weights_are_m7s_and_not_a_revert_to_m6s() -> None:
+    """The second half of S7's decision, and nothing else in this file can see
+    it -- every number here is a **literal**.
+
+    Removing the genome licenses nothing about keywords against genres, so
+    `cosine`/`keywords`/`genres` stay at M7's 0.45 / 0.20 / 0.10 rather than
+    returning to M6's 0.60 / 0.25 / 0.15. `_blend` renormalises, so keeping M7's
+    means a pair that carried no genome is scored under **exactly** the
+    denominator it already was and its stored score does not move -- confining
+    the change to the 2.4746% of pairs the measurement is about. M6's numbers
+    would move every row for a reason nothing measured.
+
+    **`test_every_pair_is_scored_within_m6s_reweighting_bound` cannot pin
+    this.** Its assertions are derived from `_WEIGHTS` -- `abs(new - old) <=
+    0.0167` is 0.0 under M6's own weights and
+    `_WEIGHTS["cosine"] / sum(_WEIGHTS.values())` is 0.600 under both tables --
+    so it pins that the weights are *in force* and not what they *are*. Those
+    are two claims and they need two cases, which is D4's `TICKET_TTL_SECONDS`
+    finding and B9's `CAST_LIMIT` arriving at a third constant. The tell, as in
+    both of those, is the constant appearing on both sides of the assertion.
+    """
+    assert _WEIGHTS == {"cosine": 0.45, "keywords": 0.20, "genres": 0.10}
+
+
 @pytest.mark.parametrize(
     "signals",
     [
