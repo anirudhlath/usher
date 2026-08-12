@@ -39,6 +39,7 @@ from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
+from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_neighbor_repository import FakeTitleNeighborRepository
 from tests.fakes.title_repository import FakeTitleRepository
@@ -144,6 +145,8 @@ def _service(titles: FakeTitleRepository, index: FakeSearchIndex) -> SearchServi
         titles,
         FakeMediaItemRepository(),
         FakeWatchStateRepository(),
+        FakeTasteRepository(),
+        FakeTitleEmbeddingRepository(),
         result_limit=50,
         embedder=FakeEmbedder(),
     )
@@ -202,6 +205,8 @@ async def test_the_mode_label_is_the_mode_that_ran(meter_reader: InMemoryMetricR
         titles,
         FakeMediaItemRepository(),
         FakeWatchStateRepository(),
+        FakeTasteRepository(),
+        FakeTitleEmbeddingRepository(),
         result_limit=50,
         embedder=None,
     )

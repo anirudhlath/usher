@@ -590,6 +590,15 @@ def build_search_service(
         # `api/deps.py`** -- this function is the one assembly, so a caller
         # that reaches it gets the watch-state term or nobody does.
         PostgresWatchStateRepository(session),
+        # Six and seven, on the same terms, and they are what makes the taste
+        # term reachable from a request. Neither needs an embedder: the
+        # centroid is *read* from `user_taste` (whatever process computed it)
+        # and the vectors are read scoped to the model that row names. A route
+        # assembling these itself would be a second wiring, which is the drift
+        # this function exists to prevent -- silent, because both spellings
+        # return a working `SearchService`.
+        PostgresTasteRepository(session),
+        PostgresTitleEmbeddingRepository(session),
         result_limit=settings.search_result_limit,
         embedder=embedder,
         expander=expander,

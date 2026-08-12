@@ -378,6 +378,87 @@ async def test_a_vector_survives_the_halfvec_round_trip(session: AsyncSession) -
     assert float(reversed_distance.scalar_one()) > 1e-2
 
 
+async def test_a_vector_read_scoped_to_a_model_leaves_the_other_checkpoints_rows_behind(
+    session: AsyncSession,
+) -> None:
+    """`list_for_titles`' keyword-only `model_name`, against the table that
+    can actually hold two checkpoints at once.
+
+    A cosine across two checkpoints is the ST-vs-fastembed divergence — max
+    pairwise-similarity delta **1.41e-03, 6x the halfvec quantisation error** —
+    arriving as a confident number rather than as an error, so a caller that
+    holds a model name (a stored `user_taste` row carries one) must be able to
+    ask for only that model's rows.
+
+    **Both arms, because either alone is satisfied by the wrong thing.** A
+    scoped read must drop the other checkpoint's row *and keep its own*, so
+    "the predicate is `model_name <> :model_name`" and "the predicate matches
+    nothing" both fail; and the default must still answer both, so a scope that
+    leaked into the unscoped call — the widening's own failure mode, and the
+    one that would silently narrow `TasteService.centroid` — fails too.
+    """
+    repository = PostgresTitleEmbeddingRepository(session)
+    ours = await _enriched(session, "The Current Checkpoint")
+    theirs = await _enriched(session, "A Checkpoint Ago")
+    other_model = _MODEL + "-superseded"
+    assert other_model != _MODEL, "the premise: two names, not one"
+    await repository.upsert_many(
+        [
+            TitleEmbeddingUpsert(
+                title_id=ours,
+                embedding=_VECTOR,
+                model_name=_MODEL,
+                source_fingerprint="0" * 32,
+            ),
+            TitleEmbeddingUpsert(
+                title_id=theirs,
+                embedding=_VECTOR,
+                model_name=other_model,
+                source_fingerprint="1" * 32,
+            ),
+        ]
+    )
+
+    scoped = await repository.list_for_titles([ours, theirs], model_name=_MODEL)
+    unscoped = await repository.list_for_titles([ours, theirs])
+
+    assert set(scoped) == {ours}
+    assert set(unscoped) == {ours, theirs}
+
+
+async def test_a_scoped_vector_read_still_excludes_a_written_refusal(
+    session: AsyncSession,
+) -> None:
+    """The model scope is an **additional** predicate, never a replacement for
+    the NULL-vector one.
+
+    A refused title is written with the current `model_name` and a NULL
+    embedding precisely so it stops matching the stale predicate — so it is the
+    one row that satisfies a `model_name` filter and must still be absent.
+    Spelled as `WHERE model_name = :m` alone, this read hands the caller a
+    `None` where its type says `tuple[float, ...]`, which is a `TypeError`
+    inside a ranking function rather than a wrong order.
+    """
+    repository = PostgresTitleEmbeddingRepository(session)
+    refused = await _enriched(session, "A Title With No Words")
+    await repository.upsert_many(
+        [
+            TitleEmbeddingUpsert(
+                title_id=refused,
+                embedding=None,
+                model_name=_MODEL,
+                source_fingerprint="2" * 32,
+            )
+        ]
+    )
+    stored = await repository.get(refused)
+    assert stored is not None and stored.embedding is None, (
+        "the premise: the row exists, under this model, carrying no vector"
+    )
+
+    assert await repository.list_for_titles([refused], model_name=_MODEL) == {}
+
+
 async def test_upserting_the_same_title_twice_is_one_row(session: AsyncSession) -> None:
     """PRD 08's redelivery rule, and the job queue *will* redeliver. The
     second write must also report itself as an update rather than an insert

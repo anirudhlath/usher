@@ -131,17 +131,25 @@ class FakeTitleEmbeddingRepository(TitleEmbeddingRepository):
         return self.rows.get(title_id)
 
     async def list_for_titles(
-        self, title_ids: Sequence[uuid.UUID]
+        self, title_ids: Sequence[uuid.UUID], *, model_name: str | None = None
     ) -> dict[uuid.UUID, tuple[float, ...]]:
         # A title with no row and a title whose row carries a NULL vector are
         # both simply absent -- never a key mapped to `None` and never one
         # mapped to a zero vector. ADR-0014, and the caller drops the title
         # from its mean rather than averaging in an origin.
+        #
+        # A row under another `model_name` joins them when the caller scoped
+        # the read, and is a *third* way to be absent that the caller likewise
+        # does not need to tell apart: it has no vector this centroid can be
+        # compared against, which is the same answer.
         found: dict[uuid.UUID, tuple[float, ...]] = {}
         for title_id in title_ids:
             row = self.rows.get(title_id)
-            if row is not None and row.embedding is not None:
-                found[title_id] = row.embedding
+            if row is None or row.embedding is None:
+                continue
+            if model_name is not None and row.model_name != model_name:
+                continue
+            found[title_id] = row.embedding
         return found
 
     def _population(self) -> list[Title]:

@@ -309,7 +309,7 @@ class TitleEmbeddingRepository(ABC):
 
     @abstractmethod
     async def list_for_titles(
-        self, title_ids: Sequence[uuid.UUID]
+        self, title_ids: Sequence[uuid.UUID], *, model_name: str | None = None
     ) -> dict[uuid.UUID, tuple[float, ...]]:
         """The stored vectors for a named set of titles, in one round trip.
 
@@ -327,6 +327,24 @@ class TitleEmbeddingRepository(ABC):
         that drops the term either way does not need to know which, and one
         that branches on it is reading the backfill's progress out of a data
         row.
+
+        **`model_name` is keyword-only and *optional*, and the default is this
+        method's original unscoped behaviour.** A row written under another
+        checkpoint is a vector from another space: the measured ST-vs-fastembed
+        difference is a max pairwise-similarity delta of 1.41e-03, **6x the
+        halfvec quantisation error**, so the two are not interchangeable
+        without a re-embed and a cosine across them is a confident wrong
+        number rather than a slightly worse one. A caller that *holds* a model
+        name — one comparing against a stored centroid, which carries the name
+        it was computed under — passes it and gets only rows written under it.
+
+        A *required* argument would force a name onto the two callers that
+        argue in their own docstrings for not having one:
+        `TasteService.centroid` averages whatever is stored for the window it
+        read, and `CandidatePoolService._cosine` documents the unscoped read as
+        the reason it answers "no opinion" on a width mismatch rather than
+        raising inside a nightly job. Both keep the call they have, and that
+        no-opinion path is pinned by a case rather than silently narrowed.
         """
 
     @abstractmethod

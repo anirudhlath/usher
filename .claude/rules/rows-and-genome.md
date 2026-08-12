@@ -238,3 +238,43 @@ on a home screen, the first time a provider uses one. Measured by planting
 `SQUARE -> BACKDROP` alone: it fails **exactly one case in 3,497**, the one
 parametrised over the enum. Parametrise over the vocabulary, not over the
 implementations that happen to use it.
+
+**`user_taste` now has two readers with deliberately different predicates, and
+conflating them re-breaks the term that needed the second one.** Added
+2026-08-11 (M9 F5). `TasteRepository.get(user_id, *, model_name)` evaluates
+`STALE_TASTE` and answers *"should I recompute?"*; `TasteRepository.latest(
+user_id)` is one primary-key probe with **no predicate and no model argument**
+and answers *"what is the best statement about this household anyone has
+stored?"*. Both are needed and neither is the other spelled shorter:
+
+- **A request has no embedder**, so it cannot supply `get`'s `model_name` —
+  `create_app`'s lifespan builds a model only under `worker_enabled`, and
+  `centroid()` checks the embedder first precisely because a process with no
+  model has no honest value for that key. Routed through `centroid()`, PRD 05's
+  taste ranking term is structurally `None` on the shipped default: a weight
+  that reads like a signal, which is the `GenreAffinityProvider` failure PRD 06
+  corrected once already.
+- **`latest` must not inherit the staleness predicate**, and the reason is not
+  performance. The watch state that moves the watermark is the same watch state
+  the centroid was computed *from*, so a predicated `latest` would withhold the
+  term from exactly the households that watch things — i.e. all of them — while
+  looking correct on a fixture that never adds a second watch state. Pinned by
+  `test_latest_answers_a_row_that_get_calls_stale`, which asserts `get` answers
+  `None` on the same fixture so that `return await self.get(...)` cannot pass.
+- **`latest` is read-only, and that is a boundary rather than a naming
+  choice.** `centroid()` *writes* its refusals (a household below `_MIN_TITLES`
+  gets a stored NULL-centroid row, which is what stops it being recomputed on
+  every read forever), so a request path allowed to write here would stamp the
+  deployment's absent model onto the household's cache and then invalidate it
+  on every subsequent read.
+
+Related, same task: **`TitleEmbeddingRepository.list_for_titles` gained a
+keyword-only *optional* `model_name`, and `centroid()` deliberately does not
+pass one.** Scoping the window's vector read to the current checkpoint looks
+like an improvement and changes what a centroid *is*: mid-swap the mean would
+be taken over whichever subset the backfill had re-embedded, and `title_count`
+would report that as a fact about the household. `CandidatePoolService` keeps
+the unscoped call for its own documented reason (the width mismatch is why
+`_cosine` answers "no opinion" rather than raising inside a nightly job). Both
+are pinned by cases asserting the recorded argument is `None`, because on a
+single-model fixture the two spellings answer identically.

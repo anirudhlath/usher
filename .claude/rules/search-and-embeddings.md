@@ -620,3 +620,50 @@ and each restore verified by `md5sum` against `f804193a097e3b9dad7066c5c657a53d`
 The careful spelling is the one worth keeping in mind: it preserves everything
 the case checks first and fails only the property the case is named for, which
 is the shape a linter and a careless plant both miss.
+## The blend's weight ceiling is open, and the boundary value inverts by one ulp (2026-08-11, M9 F5)
+
+**Measured while adding PRD 05's sixth ranking term, against the bound M6 and
+M9 F4 had both stated as an inequality with a slack of 0.01.**
+
+`_blend` renormalises over present signals, so the displacement bound compares
+*numerators*: a rank-0 hit with every other signal against it scores `0.70`,
+and a rank-1 hit with every other signal maximally for it scores
+`0.35 + 0.15 + 0.15 + 0.02 + 0.02 + w`. F4's constant comment read *"0.34
+against a ceiling of 0.35 leaves 0.01"*, which invites taking 0.01.
+
+| taste weight `w` | challenger numerator | exact match at 0.7 | verdict |
+|---|---|---|---|
+| 0.01 | **0.7000000000000001** | 0.7 | **exact match DISPLACED** |
+| 0.009 | 0.6999000000000001 | 0.7 | holds, margin 1.0e-04 |
+| 0.005 | 0.6950000000000001 | 0.7 | holds, margin 5.0e-03 |
+
+At `w = 0.01` the challenger is **one ulp above** — `0.7` is
+`0.69999999999999995559…` and the left-to-right sum overshoots it — so the
+sort key `(-score, title_id)` puts the challenger **first regardless of id**.
+It is an inversion, not a tie, and `_blend`'s summation order is the call
+site's kwargs order, so it is not even stable against reordering the argument
+list. **A bound stated as "sums below half" has to be read as strict, and the
+boundary value has to be evaluated in floating point rather than on paper** —
+same family as `mutation-sweeps.md`'s *"before pinning an exact number computed
+through floating point, check the arithmetic in the interpreter"*, arriving at
+a design constant rather than at a fixture.
+
+Two consequences carried in code. The shipped weight is **0.005**, the midpoint
+of the open interval `(0, 0.01)` — 0 excluded because a zero-weighted term is a
+weight that reads like a signal, 0.01 excluded by the table above, and nothing
+measured distinguishes any point between (`title_embeddings` holds **0 rows**
+on both surviving catalogs, so the term's effect size is unmeasurable today,
+not merely unmeasured). And the bound is now pinned by a case that calls
+`_blend` **directly** rather than through a fixture: *"popularity maximally for
+it"* is asymptotic — `p / (p + 10)` never reaches 1.0 — so no seeded catalog
+can reach the corner the bound is about, and an ordering case at any reachable
+configuration is green under every `w` in the table.
+
+**What a 0.005 term can move, so the weight is not mistaken for a measurement
+of the signal.** With all six present the denominator is 1.045, so the term
+spans 0.0048 of score. It cannot overturn `owned` (0.15) or `played` (0.02) at
+any cosine gap. It overturns one relevance step only where
+`0.005·Δcos > 0.70/((1+k)(2+k))`, i.e. **k ≥ 11** at an impossible `Δcos = 1.0`
+and k ≥ 25 at a realistic 0.2. Where it decides is where the other five have
+tied — which `_dense_ranks` makes ordinary rather than rare, because equal
+index scores share a rank and the relevance term then cancels exactly.

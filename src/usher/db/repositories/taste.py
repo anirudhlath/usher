@@ -18,10 +18,11 @@ Same session ownership as every other repository: flushes, never commits.
 """
 
 import uuid
+from typing import Any
 
 from pgvector.sqlalchemy import HALFVEC
 from pydantic import AwareDatetime
-from sqlalchemy import DateTime, Integer, Text, text
+from sqlalchemy import DateTime, Integer, Row, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -147,11 +148,49 @@ UNION ALL
 SELECT NULL, (SELECT count(*)::int FROM owned)
 """
 
+# The same six columns as `_GET`, with **neither the staleness predicate nor a
+# `model_name` bind** -- one primary-key probe on `user_taste`, whose whole
+# content is `pk_user_taste`. It is the read a process holding no embedder
+# makes: it cannot supply a `model_name` and it could not act on "recompute"
+# if it were told to, so `STALE_TASTE` has nothing to offer it. See
+# `TasteRepository.latest`.
+#
+# `.columns()` is mandatory here for `_GET`'s reason and not by symmetry:
+# asyncpg has no codec for a pgvector type, so without it the extension's TEXT
+# output form comes back as a `str` and `tuple(row.centroid)` yields 384
+# one-character strings, raising nothing.
+_LATEST = """
+SELECT ut.user_id, ut.centroid, ut.model_name, ut.source_watermark,
+       ut.title_count, ut.computed_at
+FROM user_taste AS ut
+WHERE ut.user_id = CAST(:user_id AS uuid)
+"""
+
 _WATERMARK = """
 SELECT max(updated_at) AS watermark
 FROM watch_states
 WHERE user_id = CAST(:user_id AS uuid)
 """
+
+
+def _to_stored(row: Row[Any]) -> StoredTaste:
+    """One `user_taste` row as the port's DTO.
+
+    Shared by `get` and `latest` rather than written twice: the two statements
+    differ only in their `WHERE`, and two copies of this mapping is two chances
+    for one of them to lose the `tuple(...)` below.
+    """
+    return StoredTaste(
+        user_id=row.user_id,
+        # pgvector 0.8.6's `HALFVEC.result_processor` hands back a plain
+        # `list[float]`, never a `HalfVector` -- code written for
+        # `.to_list()` is an `AttributeError` at the first read.
+        centroid=None if row.centroid is None else tuple(row.centroid),
+        model_name=row.model_name,
+        source_watermark=row.source_watermark,
+        title_count=row.title_count,
+        computed_at=row.computed_at,
+    )
 
 
 class PostgresTasteRepository(TasteRepository):
@@ -175,17 +214,25 @@ class PostgresTasteRepository(TasteRepository):
             ).one_or_none()
         if row is None:
             return None
-        return StoredTaste(
-            user_id=row.user_id,
-            # pgvector 0.8.6's `HALFVEC.result_processor` hands back a plain
-            # `list[float]`, never a `HalfVector` -- code written for
-            # `.to_list()` is an `AttributeError` at the first read.
-            centroid=None if row.centroid is None else tuple(row.centroid),
-            model_name=row.model_name,
-            source_watermark=row.source_watermark,
-            title_count=row.title_count,
-            computed_at=row.computed_at,
+        return _to_stored(row)
+
+    async def latest(self, user_id: uuid.UUID) -> StoredTaste | None:
+        statement = text(_LATEST).columns(
+            user_id=PGUUID(as_uuid=True),
+            centroid=HALFVEC(EMBEDDING_DIMENSIONS),
+            model_name=Text(),
+            source_watermark=DateTime(timezone=True),
+            title_count=Integer(),
+            computed_at=DateTime(timezone=True),
         )
+        with self._session.no_autoflush:
+            row = (await self._session.execute(statement, {"user_id": user_id})).one_or_none()
+        if row is None:
+            return None
+        # A row carrying `centroid = NULL` is handed back as one, never
+        # collapsed into `None`: that is the written refusal, and the port
+        # says a caller reads it as "no term" rather than as "no row".
+        return _to_stored(row)
 
     async def put(self, taste: StoredTaste) -> None:
         await self._session.execute(

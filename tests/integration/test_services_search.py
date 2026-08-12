@@ -12,8 +12,9 @@ Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
 scans this file.
 """
 
+import math
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
@@ -22,10 +23,13 @@ import pytest_asyncio
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tests.fakes.embedding import planted_pair
 from tests.fakes.search_index import FakeSuggestIndex
 from usher.adapters.search.postgres import PostgresSearchIndex, _predicates
 from usher.db.repositories.media_item import PostgresMediaItemRepository
+from usher.db.repositories.search import PostgresTitleEmbeddingRepository
 from usher.db.repositories.source import PostgresSourceRepository
+from usher.db.repositories.taste import PostgresTasteRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
@@ -33,6 +37,7 @@ from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
+from usher.ports.repository import StoredTaste, TitleEmbeddingUpsert
 from usher.ports.search import SearchFilters, SearchMode
 from usher.services.search import SearchService
 
@@ -72,8 +77,23 @@ def _service(session: AsyncSession) -> SearchService:
         PostgresTitleRepository(session),
         PostgresMediaItemRepository(session),
         PostgresWatchStateRepository(session),
+        PostgresTasteRepository(session),
+        PostgresTitleEmbeddingRepository(session),
         result_limit=100,
     )
+
+
+_TASTE_MODEL = "fake:test-384"
+
+
+def _dot(left: Sequence[float], right: Sequence[float]) -> float:
+    """Cosine over two unit vectors, for a case's own premise.
+
+    A bare dot is a cosine only because both sides are unit before the cast and
+    drift by at most 1.21e-04 after it; every case using this asserts a gap two
+    orders of magnitude wider than that.
+    """
+    return sum(one * other for one, other in zip(left, right, strict=True))
 
 
 async def _seed_title(
@@ -355,23 +375,30 @@ async def test_a_hydrated_result_carries_the_row_and_not_just_an_id(
 
 
 @pytest.mark.integration
-async def test_a_household_costs_exactly_one_more_statement_and_it_is_the_watch_read(
+async def test_a_household_costs_exactly_two_more_statements_and_it_names_them(
     session: AsyncSession,
 ) -> None:
     """The read count, against real SQL rather than against a counter.
 
-    Three statements with a household -- the retrieval, `list_by_ids`,
-    `owned_title_ids` -- plus **one** for `played_title_ids`, whatever the hit
-    count. Fails: a per-hit household read, which is the N+1 the batch port
-    exists to delete and which answers identically; and fails a household read
-    issued when there is no household, which costs a statement per search on
-    every caller that has none.
+    Three statements without a household -- the retrieval, `list_by_ids`,
+    `owned_title_ids`. **Five** with one: those three plus
+    `played_title_ids` and `TasteRepository.latest`, one each, whatever the hit
+    count -- and **no vector read at all**, because this household has no
+    stored centroid, which is the shipped state of every deployment whose
+    worker has never run.
+
+    Fails: a per-hit household read, which is the N+1 the batch port exists to
+    delete and which answers identically; a household read issued when there is
+    no household, which costs two statements per search on every caller that
+    has none; and a `list_for_titles` gated on the *row* rather than on the
+    *centroid*, which puts a `title_id IN (...)` over the whole candidate set
+    on every search of every un-indexed deployment and answers `{}`.
 
     `_record_statements` captures off `before_cursor_execute` and nothing is
-    transcribed, so the count is the count Postgres saw. The `watch_states`
-    assertion is what says the *extra* statement is the one this task added
-    rather than a second hydration read that happens to make the arithmetic
-    work.
+    transcribed, so the count is the count Postgres saw. The three per-table
+    assertions are what say the extra statements are the ones this pair of
+    tasks added rather than a second hydration read that happens to make the
+    arithmetic work.
     """
     for index in range(8):
         await _seed_title(session, f"Vacuum Study {index:02d}")
@@ -389,9 +416,98 @@ async def test_a_household_costs_exactly_one_more_statement_and_it_is_the_watch_
     assert len(anonymous.results) == 8, "the premise: there are more hits than statements"
     assert len(theirs.results) == 8
     assert len(without) == 3, f"three statements without a household: {without}"
-    assert len(with_one) == 4, f"four statements with one: {with_one}"
+    assert len(with_one) == 5, f"five statements with one: {with_one}"
     assert [one for one in without if "watch_states" in one] == []
+    assert [one for one in without if "user_taste" in one] == []
     assert len([one for one in with_one if "watch_states" in one]) == 1
+    assert len([one for one in with_one if "user_taste" in one]) == 1
+    assert [one for one in with_one if "title_embeddings" in one] == []
+
+
+@pytest.mark.integration
+async def test_a_stored_centroid_ranks_a_search_on_a_process_that_holds_no_model(
+    session: AsyncSession,
+) -> None:
+    """PRD 05's sixth term end to end, over the two `halfvec` round trips no
+    fake can express — the centroid's and the candidates'.
+
+    Nothing here holds an `Embedder`. `_service` builds none, and neither does
+    `api/deps.get_search_service`; the centroid is written the way a worker
+    writes one and *read* through `TasteRepository.latest`, which is the whole
+    of what this task closed. Fails: a term routed through
+    `TasteService.centroid`, which answers `None` with no embedder and would
+    leave the two rows tied.
+
+    The angle is planted rather than hoped for, and the premise is read back
+    **through the repository** — after the `halfvec` cast, whose measured max
+    round-trip cosine error is 1.21e-04, three orders of magnitude below the
+    0.5 gap seeded here.
+
+    The vector read is asserted to be **scoped and issued once**: this is the
+    six-statement arm of the count case above — the retrieval plus the service's
+    five port reads, where a household with no stored centroid pays five — and
+    the model name on the wire is what stops a mid-swap deployment blending two
+    spaces.
+    """
+    near = await _seed_title(session, "Vacuum Study Alpha")
+    far = await _seed_title(session, "Vacuum Study Beta")
+    household = await ensure_default_user(session)
+    axis, near_vector = planted_pair(math.pi / 3)
+    _, far_vector = planted_pair(math.pi / 2)
+    embeddings = PostgresTitleEmbeddingRepository(session)
+    await embeddings.upsert_many(
+        [
+            TitleEmbeddingUpsert(
+                title_id=near.id,
+                embedding=tuple(near_vector),
+                model_name=_TASTE_MODEL,
+                source_fingerprint="0" * 32,
+            ),
+            TitleEmbeddingUpsert(
+                title_id=far.id,
+                embedding=tuple(far_vector),
+                model_name=_TASTE_MODEL,
+                source_fingerprint="1" * 32,
+            ),
+        ]
+    )
+    taste = PostgresTasteRepository(session)
+    await taste.put(
+        StoredTaste(
+            user_id=household,
+            centroid=tuple(axis),
+            model_name=_TASTE_MODEL,
+            source_watermark=None,
+            title_count=12,
+            computed_at=SEEN_AT,
+        )
+    )
+    await session.flush()
+
+    stored = await taste.latest(household)
+    assert stored is not None and stored.centroid is not None, (
+        "the premise: the row is readable without a model name"
+    )
+    seen = await embeddings.list_for_titles([near.id, far.id], model_name=stored.model_name)
+    assert _dot(stored.centroid, seen[near.id]) > _dot(stored.centroid, seen[far.id]) + 1e-2, (
+        "the premise: the gap survives the halfvec cast by three orders of "
+        "magnitude more than its 1.21e-04 round-trip error"
+    )
+
+    service = _service(session)
+    statements: list[str] = []
+    with _record_statements(session, statements):
+        answer = await service.search("vacuum study", limit=10, user_id=household)
+
+    scores = {one.title_id: one.score for one in answer.results}
+    assert set(scores) == {near.id, far.id}
+    assert scores[near.id] > scores[far.id]
+    assert len(statements) == 6, f"six statements when a centroid exists: {statements}"
+    vector_reads = [one for one in statements if "title_embeddings" in one]
+    assert len(vector_reads) == 1
+    assert "model_name" in vector_reads[0], (
+        "the vector read must be scoped by the model the stored centroid names"
+    )
 
 
 @pytest.mark.integration

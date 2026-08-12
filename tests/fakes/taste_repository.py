@@ -87,6 +87,14 @@ class FakeTasteRepository(TasteRepository):
         # is the recompute-forever bug the column exists to prevent.
         return stored
 
+    async def latest(self, user_id: uuid.UUID) -> StoredTaste | None:
+        # A plain lookup, and here the fake and the real thing agree exactly:
+        # `_LATEST` is one primary-key probe with no predicate, so there is
+        # nothing for this arm to model more loosely. Notably it does **not**
+        # re-evaluate `STALE_TASTE` -- a caller with no embedder cannot act on
+        # "recompute", and a stale-but-stored centroid is the thing it came for.
+        return self.rows.get(user_id)
+
     async def put(self, taste: StoredTaste) -> None:
         self.writes += 1
         self.rows[taste.user_id] = taste

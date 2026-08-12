@@ -30,6 +30,8 @@ from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.taste_repository import FakeTasteRepository
+from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.app import create_app
@@ -163,6 +165,12 @@ async def _service(
     titles = FakeTitleRepository()
     media_items = FakeMediaItemRepository()
     households = _RecordingWatchStates() if watch_states is None else watch_states
+    # No stored centroid and no vectors: the shipped state of a deployment
+    # whose worker has never run, which is what every case in this file is
+    # about. The taste term is therefore absent from every score below, and
+    # `tests/unit/test_services_search.py` owns the arm where it is present.
+    taste = FakeTasteRepository()
+    embeddings = FakeTitleEmbeddingRepository()
     for title_id, name in _CATALOG.items():
         await titles.add(
             Title(
@@ -179,6 +187,8 @@ async def _service(
         titles,
         media_items,
         households,
+        taste,
+        embeddings,
         result_limit=result_limit,
         embedder=embedder,
         expander=None if expander is None else expander.service,

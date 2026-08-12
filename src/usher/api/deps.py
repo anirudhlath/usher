@@ -679,11 +679,23 @@ def get_taste_service(
     What that costs, stated rather than hidden: `TasteService.centroid` returns
     `None` when there is no embedder, so `RowContext.taste` is `None` on every
     request. **No provider registered in M7 reads that field**, so nothing on
-    the screen changes -- but a deployment whose worker *did* compute a centroid
-    cannot serve it from here, and closing that is a change to `centroid`'s own
-    contract rather than to this wiring. `genre_affinity` is unaffected: it is
-    counts over `titles.genres` and needs no model at all, which is the whole
-    reason M7 declined PRD 06's "taste centroid concentrated in a genre".
+    the screen changes. `genre_affinity` is unaffected: it is counts over
+    `titles.genres` and needs no model at all, which is the whole reason M7
+    declined PRD 06's "taste centroid concentrated in a genre".
+
+    ⚠️ **This docstring used to end "a deployment whose worker *did* compute a
+    centroid cannot serve it from here". That is closed, and not here.**
+    `centroid`'s contract is unchanged -- it still checks the embedder first,
+    still refuses without one, and still writes its refusals -- because the
+    thing a request needs is not a *computation* under a model it does not
+    have. It is a **read**: `TasteRepository.latest(user_id)` answers the
+    stored row whatever model wrote it, and `SearchService` uses it for PRD
+    05's taste-centroid ranking term (`composition.build_search_service` wires
+    it). So the gap is closed by a second port method rather than by giving
+    this dependency an embedder, and `RowContext.taste` staying `None` is now a
+    statement about the *row providers*, which read no centroid, rather than
+    about what a request can reach. A provider that wanted one would take
+    `latest` too.
     """
     return TasteService(
         watch_states=watch_states,
@@ -1058,6 +1070,16 @@ def get_search_service(session: SessionDep, settings: SettingsDep) -> SearchServ
     `WatchStateRepository` the term reads *through*. A service built around one
     household would be a per-request object cached per session, and the two
     would disagree the first time a request carried an identity.
+
+    **The taste term is served here despite the missing model, and that is a
+    read rather than an exception to the paragraph above.** PRD 05's sixth
+    ranking term needs a *centroid*, not an *embedder*:
+    `build_search_service` wires a `TasteRepository` and a
+    `TitleEmbeddingRepository`, and `SearchService` reads the household's
+    stored row through `latest` and scopes its vector read by the model that
+    row names. So a deployment whose worker computed a centroid serves it from
+    this route with no model in this process -- which is the gap
+    `get_taste_service` above spent a milestone describing.
     """
     return build_search_service(session, settings)
 

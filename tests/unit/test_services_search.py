@@ -22,25 +22,29 @@ scans this file.
 
 import ast
 import dataclasses
+import math
 import pathlib
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from tests.fakes.embedding import FakeEmbedder
+from tests.fakes.embedding import FakeEmbedder, planted_pair
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.taste_repository import FakeTasteRepository, stored_taste
+from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import TitleKind
 from usher.domain.title import Title
 from usher.ports.errors import PortUnavailable
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
+from usher.ports.repository import StoredTaste, TitleEmbeddingUpsert
 from usher.ports.rows import RowContext
 from usher.ports.search import (
     SearchDocument,
@@ -53,7 +57,7 @@ from usher.ports.search import (
     SuggestIndex,
 )
 from usher.services.query_expansion import QUERY_KEY, QueryExpansionService
-from usher.services.search import SearchService, SemanticSearchUnavailable
+from usher.services.search import SearchService, SemanticSearchUnavailable, _blend
 
 # Fixed ids, ordered on purpose. `_UNOWNED < _OWNED` and `_ZERO_POP <
 # _NO_POP` so that a mutation which ties the two rows sorts the *wrong* one
@@ -76,6 +80,11 @@ _UNPLAYED = uuid.UUID(int=0x0A)
 _PLAYED = uuid.UUID(int=0x0B)
 _OLD = uuid.UUID(int=0x0C)
 _UNDATED = uuid.UUID(int=0x0D)
+# `_FAR < _NEAR` on the same rule again: the taste term is the smallest weight
+# in the table, so an implementation that drops it ties the two rows exactly
+# and the tiebreak then puts the *far* one first.
+_FAR = uuid.UUID(int=0x0E)
+_NEAR = uuid.UUID(int=0x0F)
 _SOURCE = uuid.UUID(int=0xFF)
 _HOUSEHOLD = uuid.UUID(int=0xA1)
 _OTHER_HOUSEHOLD = uuid.UUID(int=0xA2)
@@ -113,7 +122,18 @@ _CATALOG: dict[uuid.UUID, tuple[str, float | None]] = {
     _PLAYED: ("Vacuum, Finished", None),
     _OLD: ("Vacuum Antique", None),
     _UNDATED: ("Vacuum, Undated", None),
+    _FAR: ("Vacuum, Unlike Yours", None),
+    _NEAR: ("Vacuum, Like Yours", None),
 }
+
+# The model the household's stored centroid and the stored vectors were both
+# written under. A *second* name is what the cross-model case varies, because
+# comparing a centroid computed under one checkpoint against vectors stored
+# under another is the ST<->fastembed divergence -- max pairwise-similarity
+# delta 1.41e-03, 6x the halfvec quantisation error -- arriving as a confident
+# cosine rather than as an error.
+_TASTE_MODEL = "fake:test-384"
+_OTHER_MODEL = "fake:other-checkpoint-384"
 
 # Release years, defaulting to the 2019 every case above was written against.
 # Only the recency cases vary it, and `_UNDATED` is the one with **no** year:
@@ -296,22 +316,84 @@ class _CountingWatchStates(FakeWatchStateRepository):
         return await super().played_title_ids(user_id, title_ids)
 
 
+class _CountingTaste(FakeTasteRepository):
+    """The stored-centroid probe, counted.
+
+    **One indexed single-row read per ranked search with a household, and none
+    at all without one** -- which is the whole cost of the taste term on a
+    household that has no stored centroid, and is a number no assertion about
+    the returned order can carry.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+        self.asked: list[uuid.UUID] = []
+
+    async def latest(self, user_id: uuid.UUID) -> StoredTaste | None:
+        self.reads += 1
+        self.asked.append(user_id)
+        return await super().latest(user_id)
+
+
+class _CountingEmbeddings(FakeTitleEmbeddingRepository):
+    """The vector read, counted -- and the `model_name` it was scoped by
+    recorded beside it.
+
+    The scope is the half a count cannot see: an unscoped read answers with a
+    vector from *some* checkpoint and the blend then reports a confident cosine
+    between two spaces, which is a plausible number and not an error.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+        self.asked: list[tuple[tuple[uuid.UUID, ...], str | None]] = []
+
+    async def list_for_titles(
+        self, title_ids: Sequence[uuid.UUID], *, model_name: str | None = None
+    ) -> dict[uuid.UUID, tuple[float, ...]]:
+        self.reads += 1
+        self.asked.append((tuple(title_ids), model_name))
+        return await super().list_for_titles(title_ids, model_name=model_name)
+
+
 @dataclass(slots=True)
 class _Ports:
-    """The three repositories `_rank` reads, so a case can count them.
+    """The five repositories `_rank` reads, so a case can count them.
 
     Held together rather than passed one at a time because the acceptance is
     about the *set* of reads one search makes, and a case that could only see
-    one of the three would report two reads as three or three as two.
+    one of the five would report four reads as five or five as four.
     """
 
     titles: _CountingTitles = field(default_factory=_CountingTitles)
     media_items: _CountingMediaItems = field(default_factory=_CountingMediaItems)
     watch_states: _CountingWatchStates = field(default_factory=_CountingWatchStates)
+    taste: _CountingTaste = field(default_factory=_CountingTaste)
+    embeddings: _CountingEmbeddings = field(default_factory=_CountingEmbeddings)
 
     @property
     def reads(self) -> int:
-        return self.titles.reads + self.media_items.reads + self.watch_states.reads
+        return (
+            self.titles.reads
+            + self.media_items.reads
+            + self.watch_states.reads
+            + self.taste.reads
+            + self.embeddings.reads
+        )
+
+
+def _cos(left: Sequence[float], right: Sequence[float]) -> float:
+    """Cosine over two planted unit vectors, for a case's own premise.
+
+    Reads the vectors a case seeded **back through the ports** rather than
+    recomputing from the module-level literals it passed in: a premise computed
+    from a literal is a premise no fixture change can falsify, which
+    `.claude/rules/testing-discipline.md` records four instances of one file
+    over.
+    """
+    return sum(one * other for one, other in zip(left, right, strict=True))
 
 
 async def _service(
@@ -326,6 +408,11 @@ async def _service(
     expander: _Expander | None = None,
     ports: _Ports | None = None,
     now: datetime | None = None,
+    centroid: Sequence[float] | None = None,
+    centroid_for: uuid.UUID = _HOUSEHOLD,
+    centroid_model: str = _TASTE_MODEL,
+    vectors: Mapping[uuid.UUID, Sequence[float]] | None = None,
+    vector_model: str = _TASTE_MODEL,
 ) -> SearchService:
     """The service over fakes, with the whole invented catalog already stored.
 
@@ -337,6 +424,12 @@ async def _service(
     recency term is a function of it: a case pinning an age against
     `datetime.now(UTC)` would say something slightly different every day it
     ran, and something quite different in five years.
+
+    **`centroid` is *stored*, never computed.** There is no embedder on this
+    path and there is none on the shipped route either, so a fixture that
+    computed one would be arranging a state no request can reach.
+    `centroid=None` -- the default, and every case above this task -- is the
+    household with nothing stored, which is also the shipped default.
     """
     kit = _Ports() if ports is None else ports
     for title_id in _CATALOG:
@@ -347,12 +440,38 @@ async def _service(
         await kit.watch_states.merge_from_source(
             [_finished(title_id, user_id=played_by) for title_id in sorted(played)]
         )
+    if centroid is not None:
+        await kit.taste.put(
+            stored_taste(
+                centroid_for,
+                centroid=tuple(centroid),
+                model_name=centroid_model,
+                title_count=12,
+            )
+        )
+    if vectors:
+        # Through `upsert_many` rather than the fake's `given` seeder: `given`
+        # also mints a `Title` of its own, and every title in this file already
+        # exists with the name, year and popularity its case depends on.
+        await kit.embeddings.upsert_many(
+            [
+                TitleEmbeddingUpsert(
+                    title_id=title_id,
+                    embedding=tuple(vector),
+                    model_name=vector_model,
+                    source_fingerprint="0" * 32,
+                )
+                for title_id, vector in sorted(vectors.items())
+            ]
+        )
     return SearchService(
         index,
         _ScriptedSuggest() if suggestions is None else suggestions,
         kit.titles,
         kit.media_items,
         kit.watch_states,
+        kit.taste,
+        kit.embeddings,
         result_limit=result_limit,
         embedder=embedder,
         expander=None if expander is None else expander.service,
@@ -838,13 +957,18 @@ async def test_two_households_that_disagree_about_one_title_get_different_orders
     assert [result.title_id for result in yours.results] == [_UNPLAYED, _PLAYED]
 
 
-async def test_a_ranked_search_with_a_household_makes_exactly_three_reads() -> None:
-    """`list_by_ids`, `owned_title_ids`, `played_title_ids` -- one each, whatever
-    the hit count.
+async def test_a_ranked_search_for_a_household_with_no_centroid_makes_exactly_four_reads() -> None:
+    """`list_by_ids`, `owned_title_ids`, `played_title_ids`, `latest` -- one
+    each, whatever the hit count, and **`list_for_titles` not at all**.
 
-    Fails: a per-hit `played_title_ids`, which is the N+1 the batch read exists
-    to delete and which no assertion about the answer can see. Counted against
-    fakes because a count is the only thing a fake can carry honestly here.
+    This is the shipped default and therefore the number that matters: no
+    worker has run, `user_taste` is empty, and the taste term costs exactly one
+    indexed single-row probe. Fails: a per-hit `played_title_ids`, which is the
+    N+1 the batch read exists to delete; and a vector read issued before the
+    centroid is known to exist, which is a `WHERE title_id IN (...)` over the
+    whole candidate set on every search of every deployment that has never
+    indexed anything -- answering `{}`, so no assertion about the order can see
+    it.
     """
     hits = tuple(SearchHit(title_id=title_id, score=_STRONG) for title_id in sorted(_CATALOG)[:6])
     assert len(hits) == 6, "the premise: more hits than reads, or a count proves nothing"
@@ -853,16 +977,88 @@ async def test_a_ranked_search_with_a_household_makes_exactly_three_reads() -> N
 
     await service.search("vacuum", user_id=_HOUSEHOLD)
 
-    assert (ports.titles.reads, ports.media_items.reads, ports.watch_states.reads) == (1, 1, 1)
-    assert ports.reads == 3
+    # Captured before the premise is checked, because checking it is itself a
+    # `latest` and would otherwise be counted as one of the search's own.
+    counts = (
+        ports.titles.reads,
+        ports.media_items.reads,
+        ports.watch_states.reads,
+        ports.taste.reads,
+        ports.embeddings.reads,
+    )
+    assert await ports.taste.latest(_HOUSEHOLD) is None, (
+        "the premise: this household has nothing stored, so the vector read is "
+        "the one that must not happen"
+    )
+    assert counts == (1, 1, 1, 1, 0)
+    assert sum(counts) == 4
+
+
+async def test_a_ranked_search_for_a_household_with_a_centroid_makes_exactly_five() -> None:
+    """The other arm, and the fifth read is the vector one.
+
+    Fails: a `list_for_titles` issued per hit rather than per search -- which
+    answers identically and costs a statement a hit -- and a `latest` re-read
+    once per candidate, which is the same defect on the cheaper port.
+    """
+    axis, near_vector = planted_pair(math.pi / 3)
+    hits = tuple(SearchHit(title_id=title_id, score=_STRONG) for title_id in sorted(_CATALOG)[:6])
+    assert len(hits) == 6, "the premise: more hits than reads, or a count proves nothing"
+    ports = _Ports()
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(hits=hits)),
+        centroid=axis,
+        vectors={_NEAR: near_vector},
+        ports=ports,
+    )
+
+    await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    assert (
+        ports.titles.reads,
+        ports.media_items.reads,
+        ports.watch_states.reads,
+        ports.taste.reads,
+        ports.embeddings.reads,
+    ) == (1, 1, 1, 1, 1)
+    assert ports.reads == 5
+
+
+async def test_a_stored_refusal_costs_the_probe_and_not_the_vector_read() -> None:
+    """A household below `TasteService._MIN_TITLES` has a **written refusal** —
+    a `user_taste` row whose `centroid` is NULL — and that is a readable row
+    rather than an absence.
+
+    Fails: `if stored is not None` as the gate on the vector read, which is the
+    obvious spelling and which pays a `WHERE title_id IN (...)` over every
+    candidate for a household there is provably nothing to compare against; and
+    an implementation that raised on the refusal, which is a 500 on a search
+    for the emptiest household in the deployment.
+    """
+    hits = tuple(SearchHit(title_id=title_id, score=_STRONG) for title_id in sorted(_CATALOG)[:6])
+    ports = _Ports()
+    service = await _service(_ScriptedIndex(SearchOutcome(hits=hits)), ports=ports)
+    await ports.taste.put(
+        stored_taste(_HOUSEHOLD, centroid=None, model_name=_TASTE_MODEL, title_count=3)
+    )
+
+    answer = await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    stored = await ports.taste.latest(_HOUSEHOLD)
+    assert stored is not None and stored.centroid is None, (
+        "the premise: the row is present and its centroid is the written refusal"
+    )
+    assert len(answer.results) == 6
+    assert ports.embeddings.reads == 0
 
 
 async def test_a_ranked_search_with_no_household_makes_exactly_two() -> None:
-    """The other side, and it is not tidiness: `played_title_ids` needs a
-    `user_id`, so a service that asked anyway would have to invent one.
+    """The other side, and it is not tidiness: `played_title_ids` and `latest`
+    both need a `user_id`, so a service that asked anyway would have to invent
+    one.
 
-    Fails: a household read issued with a placeholder id, which costs a
-    statement per search on every caller that has no household and answers
+    Fails: a household read issued with a placeholder id, which costs two
+    statements per search on every caller that has no household and answers
     about a user nobody is.
     """
     hits = tuple(SearchHit(title_id=title_id, score=_STRONG) for title_id in sorted(_CATALOG)[:6])
@@ -871,7 +1067,13 @@ async def test_a_ranked_search_with_no_household_makes_exactly_two() -> None:
 
     await service.search("vacuum")
 
-    assert (ports.titles.reads, ports.media_items.reads, ports.watch_states.reads) == (1, 1, 0)
+    assert (
+        ports.titles.reads,
+        ports.media_items.reads,
+        ports.watch_states.reads,
+        ports.taste.reads,
+        ports.embeddings.reads,
+    ) == (1, 1, 0, 0, 0)
     assert ports.reads == 2
 
 
@@ -955,6 +1157,266 @@ async def test_a_newer_title_outranks_an_older_one_at_equal_relevance() -> None:
     answer = await service.search("vacuum")
 
     assert [result.title_id for result in answer.results] == [_LOW_ID, _OLD]
+
+
+async def test_a_title_near_the_household_centroid_outranks_a_far_one_at_equal_relevance() -> None:
+    """PRD 05's sixth ranking term, and **the angle is planted rather than
+    hoped for out of the hashing fake**.
+
+    `FakeEmbedder` is `blake2b -> Box-Muller -> L2-normalise`, whose measured
+    off-diagonal cosine is mean -0.00001 / sd 0.05102 with **zero pairs above
+    0.5** -- so "these two titles are similar" is not a thing a hash can be
+    asked for, and a case built on one asserts nothing about the term.
+    `planted_pair` gives `dot(a, cos(t)*a + sin(t)*b) == cos(t)` exactly, to
+    2.22e-16.
+
+    Fails: no taste term at all (the two rows tie exactly and the tiebreak puts
+    `_FAR` first, because `_FAR < _NEAR`), a term whose weight is zero, a term
+    read off `TasteService.centroid` (which is structurally `None` on any
+    process holding no embedder, so it would tie too), and a term with the sign
+    the other way round.
+
+    **Its premise is asserted first and read back through the ports**, not
+    recomputed from the literals the fixture was handed: equal index scores, so
+    `_dense_ranks` gives the two hits one rank and the relevance term cancels
+    exactly; and the stored centroid really is nearer the one row than the
+    other.
+    """
+    axis, near_vector = planted_pair(math.pi / 3)
+    _, far_vector = planted_pair(math.pi / 2)
+    hits = (
+        SearchHit(title_id=_FAR, score=_STRONG),
+        SearchHit(title_id=_NEAR, score=_STRONG),
+    )
+    assert {hit.score for hit in hits} == {_STRONG}, (
+        "the premise: equal index scores, so the relevance term cancels and the "
+        "taste term is the only thing left that can separate the two"
+    )
+    ports = _Ports()
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(hits=hits)),
+        centroid=axis,
+        vectors={_NEAR: near_vector, _FAR: far_vector},
+        ports=ports,
+    )
+
+    answer = await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    stored = await ports.taste.latest(_HOUSEHOLD)
+    assert stored is not None and stored.centroid is not None
+    seeded = await ports.embeddings.list_for_titles([_NEAR, _FAR], model_name=stored.model_name)
+    assert _cos(stored.centroid, seeded[_NEAR]) > _cos(stored.centroid, seeded[_FAR]), (
+        "the premise: the stored centroid really is nearer one of the two -- "
+        f"near {_cos(stored.centroid, seeded[_NEAR])}, far "
+        f"{_cos(stored.centroid, seeded[_FAR])}"
+    )
+    assert [result.title_id for result in answer.results] == [_NEAR, _FAR]
+
+
+async def test_a_centroid_from_one_model_never_ranks_a_vector_stored_under_another() -> None:
+    """The failure that produces a **plausible number** rather than an error.
+
+    `title_embeddings` is not scoped to a checkpoint — a deployment mid-swap
+    holds two — and the measured ST-vs-fastembed difference is a max pairwise
+    similarity delta of 1.41e-03, **6x the halfvec quantisation error**. So a
+    cosine taken across the two is not slightly worse; it is a confident
+    statement about two different spaces, and it raises nothing.
+
+    Both stored vectors here are under the *other* model, so the correct answer
+    is that neither has a term: the two rows tie and the tiebreak orders them.
+    An unscoped read would find both, and the two vectors are deliberately at
+    **different** angles from the centroid, so it would order them the other
+    way round. The `model_name` that crossed the port is asserted as well,
+    because the outcome alone is also what "no taste term at all" produces.
+    """
+    axis, near_vector = planted_pair(math.pi / 3)
+    _, far_vector = planted_pair(math.pi / 2)
+    hits = (
+        SearchHit(title_id=_FAR, score=_STRONG),
+        SearchHit(title_id=_NEAR, score=_STRONG),
+    )
+    ports = _Ports()
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(hits=hits)),
+        centroid=axis,
+        centroid_model=_TASTE_MODEL,
+        vectors={_NEAR: near_vector, _FAR: far_vector},
+        vector_model=_OTHER_MODEL,
+        ports=ports,
+    )
+    assert _cos(axis, near_vector) > _cos(axis, far_vector), (
+        "the premise: an unscoped read really would order these two, so the "
+        "tie below is the scope doing something rather than the fixture being flat"
+    )
+    assert _TASTE_MODEL != _OTHER_MODEL, "the premise: two checkpoints, not one"
+
+    answer = await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    assert ports.embeddings.asked == [((_FAR, _NEAR), _TASTE_MODEL)]
+    assert await ports.embeddings.list_for_titles([_NEAR, _FAR]) != {}, (
+        "the premise: the vectors really are stored — an empty table would make "
+        "the scope unobservable"
+    )
+    assert [result.title_id for result in answer.results] == [_FAR, _NEAR]
+
+
+async def test_a_hit_with_no_vector_is_not_a_cosine_of_zero() -> None:
+    """ADR-0014 in a sixth place, and here the collapse is uniquely tempting
+    because `0.0` is a *reachable* cosine rather than an impossible one.
+
+    A measured zero says "these two are orthogonal", which is a claim about two
+    vectors; "the backfill has not reached this title" is a claim about a job
+    queue. `_blend` drops an absent signal from numerator **and** denominator,
+    so the un-embedded row is scored on what is known about it — and
+    `title_embeddings` is empty on every catalog this project currently has, so
+    the un-embedded row is the population.
+
+    `_FAR` carries the measured zero and `_NEAR` carries no vector at all, so a
+    `taste or 0.0` spelling ties the two and the tiebreak puts `_FAR` first.
+    """
+    axis, orthogonal = planted_pair(math.pi / 2)
+    hits = (
+        SearchHit(title_id=_FAR, score=_STRONG),
+        SearchHit(title_id=_NEAR, score=_STRONG),
+    )
+    ports = _Ports()
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(hits=hits)),
+        centroid=axis,
+        vectors={_FAR: orthogonal},
+        ports=ports,
+    )
+
+    answer = await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    seeded = await ports.embeddings.list_for_titles([_NEAR, _FAR], model_name=_TASTE_MODEL)
+    assert _NEAR not in seeded and _FAR in seeded, (
+        "the premise: one row has a vector and the other has none"
+    )
+    assert _cos(axis, seeded[_FAR]) == pytest.approx(0.0, abs=1e-15), (
+        "the premise: the one that does have a vector measures orthogonal, "
+        "which is the value the absent one must not be scored as"
+    )
+    assert [result.title_id for result in answer.results] == [_NEAR, _FAR]
+
+
+async def test_a_negative_cosine_is_no_affinity_and_not_a_penalty() -> None:
+    """The lower clamp, which is the arm that touches real data.
+
+    `_blend` is only a weighted *mean* if every term is in `[0, 1]`; an
+    unclamped negative cosine makes the taste weight a **penalty** of unbounded
+    relative size on exactly the rows the term knows least about. And "pointing
+    away from the centroid" is not a measured statement about dislike — the
+    corpus-level distribution that would license reading it that way does not
+    exist in this project — so the two rows below are equally *un*-endorsed and
+    the term must say nothing about which is worse.
+
+    `_FAR` is at 2π/3 (cosine -0.5) and `_NEAR` at π/2 (cosine 0.0): clamped,
+    both terms are 0.0 and the tiebreak orders them; unclamped, `_FAR` is
+    pushed below `_NEAR` and the answer inverts.
+    """
+    axis, orthogonal = planted_pair(math.pi / 2)
+    _, opposed = planted_pair(2 * math.pi / 3)
+    hits = (
+        SearchHit(title_id=_FAR, score=_STRONG),
+        SearchHit(title_id=_NEAR, score=_STRONG),
+    )
+    ports = _Ports()
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(hits=hits)),
+        centroid=axis,
+        vectors={_FAR: opposed, _NEAR: orthogonal},
+        ports=ports,
+    )
+
+    answer = await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    seeded = await ports.embeddings.list_for_titles([_NEAR, _FAR], model_name=_TASTE_MODEL)
+    assert _cos(axis, seeded[_FAR]) < 0.0 < _cos(axis, seeded[_NEAR]) + 1e-15, (
+        "the premise: one cosine really is negative and the other is not, so an "
+        f"unclamped term would separate them -- far {_cos(axis, seeded[_FAR])}, "
+        f"near {_cos(axis, seeded[_NEAR])}"
+    )
+    scores = {result.title_id: result.score for result in answer.results}
+    assert scores[_FAR] == scores[_NEAR]
+    assert [result.title_id for result in answer.results] == [_FAR, _NEAR]
+
+
+async def test_the_taste_weight_is_pinned_by_arithmetic_rather_than_by_an_ordering() -> None:
+    """F4's finding, applied to the weight F4 left room for: **a weight table
+    is not pinned by any number of ordering cases.** Re-balancing `owned` from
+    0.15 to 0.10 left all ten of this file's ordering cases green and failed
+    exactly one assertion, the numeric one.
+
+    `_UNDATED` has no popularity and no year, so with a household exactly four
+    signals are present — relevance, owned, played and taste — and `_blend`
+    renormalises over those four. The vector is planted at **θ = 0**, which is
+    exact in binary at every step (`cos(0.0)` is 1.0 and `sin(0.0)` is 0.0), so
+    the taste term is 1.0 to the bit and the expected score is a closed form.
+
+    **Every literal is written out rather than read from `_WEIGHTS`**, for the
+    reason the M6 pin below gives: a case whose expectation is derived from the
+    constant under test pins that the constant is in force and cannot pin its
+    value.
+    """
+    axis, identical = planted_pair(0.0)
+    hits = (SearchHit(title_id=_UNDATED, score=_STRONG),)
+    ports = _Ports()
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(hits=hits)),
+        centroid=axis,
+        vectors={_UNDATED: identical},
+        ports=ports,
+    )
+    assert _YEARS[_UNDATED] is None and _CATALOG[_UNDATED][1] is None, (
+        "the premise: no year and no popularity, so those two signals are absent "
+        "and the denominator is the four below"
+    )
+
+    answer = await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    assert _cos(axis, identical) == 1.0, "the premise: the angle is exact, not approximate"
+    assert answer.results[0].score == (
+        (0.70 * 1.0 + 0.15 * 0.0 + 0.02 * 0.0 + 0.005 * 1.0) / (0.70 + 0.15 + 0.02 + 0.005)
+    )
+
+
+def test_no_combination_of_the_other_five_can_displace_an_exact_match() -> None:
+    """PRD 05's *"boosted but not exclusive"* as arithmetic, restated over six
+    signals — and **the reason `taste` is 0.005 rather than the 0.01 of
+    headroom the table appeared to leave.**
+
+    A rank-0 hit with every other signal against it against a rank-1 hit with
+    every other signal maximally for it. The two present-signal sets are equal,
+    so the denominators are equal and the comparison is between numerators:
+    `0.70` against `0.35 + 0.15 + 0.15 + 0.02 + 0.02 + w`.
+
+    🔴 At `w = 0.01` that sum is **0.7000000000000001** in IEEE-754 doubles —
+    one ulp *above* 0.70 — so the challenger wins and the property fails. Not a
+    tie broken by id: an inversion, and one that only a case built at this
+    exact configuration can see. That is why the interval is open and why the
+    weight is its midpoint.
+
+    Driven through `_blend` directly rather than through a fixture, because
+    "popularity maximally for it" is asymptotic (`p / (p + 10)` never reaches
+    1.0) and no seeded catalog can reach the corner the bound is about.
+    """
+    exact = _blend(relevance=1.0, popularity=0.0, owned=0.0, played=0.0, recency=0.0, taste=0.0)
+    challenger = _blend(
+        relevance=0.5, popularity=1.0, owned=1.0, played=1.0, recency=1.0, taste=1.0
+    )
+
+    assert exact > challenger, (
+        f"an exact match at {exact} was displaced by a rank-1 hit at {challenger}"
+    )
+    # The literals, so the bound is pinned to these six numbers and not merely
+    # to whatever `_WEIGHTS` currently holds.
+    denominator = 0.70 + 0.15 + 0.15 + 0.02 + 0.02 + 0.005
+    assert exact == 0.70 / denominator
+    assert challenger == (0.35 + 0.15 + 0.15 + 0.02 + 0.02 + 0.005) / denominator
+    # And the measurement that closed the interval, asserted rather than
+    # described: the value this table's headroom appeared to permit inverts it.
+    assert 0.35 + 0.15 + 0.15 + 0.02 + 0.02 + 0.01 > 0.70
 
 
 async def test_with_no_household_and_no_year_the_score_is_the_one_m6_computed() -> None:
@@ -1104,6 +1566,7 @@ _RANKING_NAMES = frozenset(
         "_dense_ranks",
         "_popularity_term",
         "_recency_term",
+        "_taste_term",
     }
 )
 
@@ -1111,7 +1574,7 @@ _RANKING_NAMES = frozenset(
 def test_the_home_screen_and_its_providers_reach_no_ranking_term() -> None:
     """The claim that makes `GET /home`'s measured budget cheap to hold.
 
-    Five ranking terms now, three repository reads with a household, and a
+    Six ranking terms now, five repository reads with a household, and a
     clock -- none of which the home screen pays for, because no row provider
     and no composer can reach any of it. Asserted structurally rather than by
     re-measuring the 5,200-copy household's figures: a timing run proves the

@@ -48,7 +48,7 @@ import uuid
 from collections.abc import Sequence
 
 from pydantic import AwareDatetime
-from sqlalchemy import select, text
+from sqlalchemy import ColumnElement, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, defer
@@ -442,7 +442,7 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
         )
 
     async def list_for_titles(
-        self, title_ids: Sequence[uuid.UUID]
+        self, title_ids: Sequence[uuid.UUID], *, model_name: str | None = None
     ) -> dict[uuid.UUID, tuple[float, ...]]:
         # One statement for a named set, because `TasteService` averages ~50
         # titles and `get()` in a loop is 50 round trips to build one
@@ -452,18 +452,26 @@ class PostgresTitleEmbeddingRepository(TitleEmbeddingRepository):
             # An empty `IN ()` is a syntax error rather than an empty answer,
             # so the guard is required and is not an optimisation.
             return {}
+        conditions: list[ColumnElement[bool]] = [
+            TitleEmbeddingRow.title_id.in_(list(title_ids)),
+            # NULL vectors excluded here rather than by the caller, the
+            # same call `list_embedded` makes: a *refused* title is
+            # written with a NULL embedding precisely so it stops
+            # matching the stale predicate, and it has no vector to
+            # contribute to any mean. Excluding it in the caller means
+            # every future caller has to remember.
+            TitleEmbeddingRow.embedding.is_not(None),
+        ]
+        if model_name is not None:
+            # **A predicate rather than a filter in Python**, because the
+            # useless rows should not cross the wire: a mid-swap table holds
+            # both checkpoints and the caller wants one of them. Absent, this
+            # read is exactly what it has always been -- `None` is not "the
+            # NULL model name", it is "do not scope".
+            conditions.append(TitleEmbeddingRow.model_name == model_name)
         with self._session.no_autoflush:
             result = await self._session.execute(
-                select(TitleEmbeddingRow.title_id, TitleEmbeddingRow.embedding).where(
-                    TitleEmbeddingRow.title_id.in_(list(title_ids)),
-                    # NULL vectors excluded here rather than by the caller, the
-                    # same call `list_embedded` makes: a *refused* title is
-                    # written with a NULL embedding precisely so it stops
-                    # matching the stale predicate, and it has no vector to
-                    # contribute to any mean. Excluding it in the caller means
-                    # every future caller has to remember.
-                    TitleEmbeddingRow.embedding.is_not(None),
-                )
+                select(TitleEmbeddingRow.title_id, TitleEmbeddingRow.embedding).where(*conditions)
             )
         # `float(value)` for `get()`'s reason: pgvector hands `halfvec` back as
         # float16, and a caller comparing that against a freshly embedded
