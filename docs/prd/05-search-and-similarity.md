@@ -696,6 +696,32 @@ thing would be worse than an honest gap. Nothing in M6 re-runs the rebuild —
 "TTL: hours" is a statement about how long a consumer may cache what it read,
 not a promise about this table's age.
 
+**There is no fifth term over MovieLens *user tags*, and that is a measured
+refusal rather than an omission —
+[ADR-0035](decisions/0035-the-tags-similarity-term.md).** `ml-latest/tags.csv`
+(21,274,899 rows / 85 MB) reaches **49,055** titles in this catalog against the
+genome's 15,565, which is the reason a term over it looked worth building. M9
+ran the question as a gate with one pre-registered threshold and walked the real
+candidate pool once — **130,647 seeds, 13,064,700 candidate pairs, 2026-08-12** —
+measuring the rate that decides a weight, the fraction of pairs carrying the
+signal on **both** sides: **6.0821%** (794,606 pairs) at `>= 5` tags, **3.0999%**
+at `>= 10`, against the **10%** floor a 0.25 weight assumes. Two things follow
+and the second is the one that would otherwise be re-litigated. `>= 10` is
+*lower* than `>= 5` **by construction** — those pairs are a strict subset over
+an identical denominator — so a stricter threshold can never buy the rate. And
+the rate is not the binding reason: on the marginal population the **median pool
+pair shares no tag at all and 62.3% share none**, so a `_jaccard` that answers
+`None` only for an *empty* set would hand `_blend` a hard `0.0` — a confident
+negative — for most of the pairs the term fired on. **Presence with no overlap
+is evidence over a closed ~19-value genre vocabulary and is the default over an
+open user-tag one**, which is the same vocabulary-size argument this section
+already makes for keeping genres and keywords apart, landing the other way. The
+follow-up ADR-0035 names is a measurement (the rate at `>= 1` tag, the empty-
+overlap share, and whether a different instrument over the same rows puts the
+median firing pair above zero), not a build — and it explicitly is **not** "wait
+for more enrichment": the archive is frozen at 2023-07-20 and movies-only, so
+every further enrichment pass grows the denominator and moves coverage down.
+
 ### Mood queries
 
 "Movies about isolation in space" is handled by embedding the query and

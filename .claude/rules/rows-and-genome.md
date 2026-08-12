@@ -409,3 +409,32 @@ four points high, and high **by construction**, because the stored rows are the
 pool already sorted by a blend that weights the very signal being counted at
 0.25. The first draft of `scripts/measure_pair_rates.py` was written with that
 spelling on purpose and the case was red against it before it was fixed.
+
+**The verdict those measurements bought, so the numbers above are not read as
+an open question — [ADR-0035](../../docs/prd/decisions/0035-the-tags-similarity-term.md),
+2026-08-12 (M9 S6).** 6.0821% is the `< 10%` arm of the pre-registered bar, so
+**no user-tag term is built in M9 and no line of `src/` moved on this arm** —
+`services/similar.py` and `tests/unit/test_services_similar.py` are absent from
+that diff, which is what the bar required. **The rate is the weaker of the two
+reasons and should not be the first thing a later reader re-checks.** The
+binding reason is the Jaccard distribution one table up: `_jaccard` answers
+`None` only for an *empty* set, so the 62.3% of marginal pool pairs sharing no
+tag would feed `_blend` a hard `0.0` and the term would **demote most of the
+pairs it fired on**. ADR-0014's rule covers *absence*; what this measured is
+**presence with no overlap**, which is evidence over a closed ~19-value genre
+vocabulary and the default over an open user-tag one.
+
+**And the rate is buyable, which is why it cannot be the criterion.** Single-side
+coverage at `>= 1 tag` is **34.47%** on this population, projecting **11.9%**
+(independent draws) to **16.3%** (× the measured 1.37 factor) — over the floor on
+both arithmetics. So a later reader who lowers the threshold will clear the bar
+and make the zero worse. **Raising coverage at `>= 5` is the direction that is
+closed**: clearing 10% there needs **27.0%** against 21.094%, i.e. ~7,700 more
+`>= 5`-tagged titles inside the same 130,647-title population, while the archive
+is frozen at 2023-07-20 and **19,222** of this catalog's tagged titles carry one
+to four tags and no genome. Enrichment reaches titles MovieLens never tagged, so
+every further pass moves coverage **down**. The scoped follow-up ADR-0035 names
+is three read-only measurements — the `>= 1` rate over *distinct* tags, the
+empty-overlap share at whatever threshold clears, and whether TF-IDF over the
+tag strings or an embedding of the joined tag text puts the median firing pair
+above zero — and no build.

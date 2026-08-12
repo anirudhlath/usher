@@ -2686,6 +2686,99 @@ integration / 22 skipped**, PRD link check `OK`. `test_no_third_party_data.py`'s
 repo-wide row scan passes and **no dataset row is committed** — the walk's
 output, the Jaccard probe and the IMDb drift check all live outside the tree
 under `/var/tmp/m9-S5/`.
+
+## ✅ M9 Task S6 — ADR-0035: the refusal written down, and the zero is the reason rather than the rate (2026-08-12)
+
+**The gate answered and this is the deliverable it was built to be able to
+produce.** S5's 6.0821% is the `< 10%` arm of
+[`/tmp/m9-gate/BAR.md`](/tmp/m9-gate/BAR.md)'s single threshold, upper band, so
+[ADR-0035](../prd/decisions/0035-the-tags-similarity-term.md) records the number
+and names a **scoped follow-up with the number attached** rather than a bare
+refusal. **Documentation-only, as the plan's own risk paragraph predicted** —
+`git diff --stat` touches nothing under `src/`, and `services/similar.py` and
+`tests/unit/test_services_similar.py` do not appear, which is what BAR.md
+required in as many words.
+
+**Failing test first, and it is the one the task names.** `0035-*.md` landed
+without its register row and
+`tests/unit/test_decision_register.py::test_every_adr_file_is_listed_in_the_decisions_register`
+went red naming it exactly — `ADRs missing from the register:
+['0035-the-tags-similarity-term.md']` — then green on the appended row. That
+case scans in both directions and its floor is `len(files) >= 23` against 35
+ADRs, so **it needed no edit**.
+
+🔴 **The ADR is written around the distribution and not around the rate, and
+that is the one editorial call in it.** The rate misses the floor by 39%, which
+is a real reason and the weaker one. The binding reason is that
+**`_jaccard` answers `None` only for an *empty* set**: on the marginal
+population the **median pool pair shares no tag at all and 62.3% share none**,
+so each of those yields a hard `0.0` that `_blend` renormalises as a confident
+negative. **The term would demote most of the pairs it fired on.** Stated as
+ADR-0014 arriving from the other side — that rule covers *absence*, and this is
+**presence with no overlap**, which is evidence over a closed ~19-value genre
+vocabulary and the default over an open user-tag one. PRD 05 already argues
+from vocabulary size for keeping genres and keywords apart; the same argument
+applied to user tags lands on refusing the term.
+
+**And the reason that ordering is load-bearing rather than stylistic: the rate
+is buyable and the distribution is not.** Single-side coverage at `>= 1 tag` is
+**34.47%** on this population, which projects to **11.9%** on independent draws
+and **16.3%** at the measured 1.37× correlation factor — over the floor on both
+arithmetics. A later reader who lowers the threshold clears the bar *and makes
+the zero worse*, because at one to four tags a disjoint pair is overwhelming.
+So the ADR says in its Decision section that the rate is explicitly not the
+thing to re-check first.
+
+**The follow-up, and the direction it rules out with a number.** Three
+read-only measurements, no table, no importer, no migration: the `>= 1` pair
+rate counted over **distinct** tags, the empty-overlap share at whatever
+threshold clears, and whether TF-IDF over the tag strings or an embedding of the
+joined tag text puts the median firing pair above zero — the three instruments
+the task's own brief names, kept apart because they have three different failure
+modes over unnormalised free text. **"Wait for more enrichment" is explicitly
+not the follow-up**: clearing 10% at `>= 5` needs **27.0%** single-side coverage
+against 21.094%, about **7,700 more `>= 5`-tagged titles inside the same
+130,647-title population**, while the archive is frozen at 2023-07-20 and
+movies-only and **19,222** of this catalog's tagged titles carry one to four
+tags and no genome. Enrichment reaches titles MovieLens never tagged, so every
+further pass grows the denominator and moves coverage **down**. The ceiling is a
+property of the dataset.
+
+**The build's real size is priced in the ADR before the answer is chosen rather
+than after** — an importer for a member never read (21,274,899 rows / 85 MB), a
+`title_tags` table, **a migration id that does not exist** (`m09a` is M1's,
+`m09b` group T's, `m09c` spare and requestable but **not minted here**), a
+`NeighborCandidate` field, two widened statements in
+`db/repositories/search.py`, both fakes, the contract suite, and a full
+`usher similar --rebuild`.
+
+**Four things the ADR carries because they are what make it evidence rather
+than a verdict**, each with its refutation: guess 3 refuted **backwards** and
+decomposed exactly (`6.0821% × 0.449 × 1.135 = 3.099%`, monotone by
+construction because `pairs≥10 ⊂ pairs≥5` over one denominator); guess 1
+refuted **upward**, its 0.238 single-side-to-pair ratio measured **non-constant
+inside one walk** at 0.208 for the genome against 0.288 for tags; guess 4
+refuted on its mechanism at **7.7× chance** and confirmed on its conclusion for
+the sharper reason above; and the genome's **2.4746%** recorded as a **second
+measurement, never a delta** against M7's 1.81% over **5,020** name-selected
+seeds — still four times below the floor, with the *weight* question left where
+it belongs, in ADR-0024 and S7's hands. The two smaller carries are in the ADR's Uncertainty section:
+`ml_tags_tmp.n_tags` counts tag **applications** (61.7% of the `>= 5` population
+disagree with a case-folded distinct count; 485, or 1.8%, hold fewer than five),
+and **BAR.md's tag table no longer reproduces exactly** — one title, mechanism
+demonstrated, `imdb_id` being in `EnrichService._ENRICHABLE` and 28 enriched
+titles now carrying an `imdb_id` IMDb does not hold.
+
+**What this task deliberately did not touch**, so S7 can run concurrently: no
+`src/`, no ADR-0024 amendment, no PRD 09, no blend. The plan's `S7 ← S6` edge
+holds only on the `>= 10%` arm.
+
+Files: `docs/prd/decisions/0035-the-tags-similarity-term.md` (new),
+`docs/prd/decisions/README.md` (one appended row),
+`docs/prd/05-search-and-similarity.md` (`### Similarity` only, appended at its
+end so S7's edits to the genome paragraphs rebase cleanly),
+`.claude/rules/rows-and-genome.md`, `docs/plans/progress.md`.
+
 ### ✅ M9 Task G2 — the ordering rule made structural: a job's events are offered after the job's own commit (2026-08-11)
 
 **[ADR-0033](../prd/decisions/0033-an-event-is-a-statement-about-committed-state.md) is now a property
