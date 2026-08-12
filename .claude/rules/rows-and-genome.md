@@ -4,7 +4,20 @@ paths:
   - "src/usher/services/home.py"
   - "src/usher/services/taste.py"
   - "src/usher/services/derive.py"
+  - "src/usher/services/similar.py"
 ---
+
+<!-- `similar.py` was added to the triggers on 2026-08-12 (M9 S7). Half this
+file is about the tag genome, the genome's only consumer was
+`SimilarityService`'s blend, and the trigger list did not name that module —
+so the two sessions most likely to undo the S7 decision (anyone editing the
+blend, and anyone re-adding a signal) were the two this file never loaded for.
+Checked rather than assumed: `grep -rln genome src/usher/services/` finds
+`home.py`, `taste.py`, `curation_pool.py`, `bootstrap.py` and `similar.py` —
+the first two were already triggers, the last was the one that *blends* it and
+was not. `curation_pool.py` and `bootstrap.py` are left off deliberately: they
+read the vocabulary and import the file, and neither can reach a weight. -->
+
 
 # The home screen, row providers and the tag genome
 
@@ -300,6 +313,88 @@ genome rate is now known over a population whose documents carry real
 `overview`/`tagline`/`genres`/`keywords`, which is the thing S3's enrichment
 existed to produce, and it is **still four times below the 10% floor the 0.25
 weight assumes**.
+
+## The genome term was removed on that number, and the read was kept (2026-08-12, M9 S7)
+
+**`SimilarityService._WEIGHTS` loses `"tags"` and `_neighbors_for` stops passing
+`tags=` to `_blend`. Nothing else moves.** `genome_scores`, `genome_tags`,
+`GenomeRepository`, the pairwise statement, `NeighborCandidate.tags`,
+`NeighborSeed.has_genome` and `NeighborRebuild`'s three coverage counters all
+stay. [ADR-0024](../../docs/prd/decisions/0024-the-genome-is-one-dense-vector-per-title.md)
+carries the amendment; this is what a session working in this subsystem needs.
+
+**The removal changes no score on ~97.5% of pairs, and the arithmetic is
+exact.** `_blend` renormalises over present signals, so with `W` the weights of
+the non-genome signals present:
+
+    score_with_genome = (W · score_without_genome + 0.25 · g) / (W + 0.25)
+
+With all three others present `W = 0.75` and that is exactly
+`0.75 · score_without + 0.25 · g`. Two things follow and both are worth
+carrying:
+
+- **The three surviving weights are left at M7's 0.45 / 0.20 / 0.10 rather than
+  reverted to M6's 0.60 / 0.25 / 0.15**, so a genome-less pair is scored under
+  precisely the denominator it already was and its score is byte-identical. The
+  two spellings differ only on keywords-against-genres (0.600/0.267/0.133
+  against 0.600/0.250/0.150), which the pair rate says nothing about — an
+  unevidenced second decision riding on an evidenced first, and one that would
+  move every row rather than the 2.4746%.
+- **The term was a promotion exactly when `g > score_without`**, and the genome
+  cosine's measured distribution is min 0.2556 / p1 0.4075 / p50 0.6095 / mean
+  0.6101 over 268,157,000 pairs — so a genome-bearing candidate scoring below
+  0.4075 on everything else was promoted with 99% probability, and genome
+  coverage concentrates in popular, older, heavily-embedded films (the 1.75×
+  correlation above). ⚠️ **The distribution of the three-signal score over a
+  real pool is NOT measured** — `title_neighbors` holds 0 rows on every catalog
+  on this host — so how often that actually reordered a list is unknown and is
+  not claimed. The identity is exact; the frequency is not.
+
+**Removed, not zeroed, and this is the half a reviewer should check first.**
+`_blend` adds `_WEIGHTS[name] * value` to the numerator **and** `_WEIGHTS[name]`
+to the denominator, so `_WEIGHTS["tags"] = 0.0` is *arithmetically the same
+program* as the signal being absent, to full precision, at every value — and it
+still enters `blend_fingerprint()`, declares every stored row stale and buys an
+85-minute rebuild for a table whose every score is unchanged. **No behavioural
+assertion anywhere can tell the two apart**, which is why the guard is
+structural: `test_every_signal_the_blend_is_handed_has_a_weight_and_no_weight_
+is_zero` asserts `{keywords of the _blend call} == set(_WEIGHTS)` over an AST
+scan and `0.0 not in _WEIGHTS.values()`. The key and the argument also *have*
+to move together — `_blend` looks up `_WEIGHTS[name]` for every signal it is
+handed, so removing the key alone is a `KeyError` on the first pair of the
+first page of a rebuild.
+
+**ADR-0014's `None`-not-0.0 rule on this field survived the removal and changed
+consumer.** Nothing blends the value, so its only reader is
+`pairs_with_tags`, which counts `tags is not None`. A port answering `0.0` for a
+half-covered pair would report a barely-covered catalog as fully covered —
+**making a dead signal look live**, in the one number a later milestone would
+re-open this decision on. That is the argument for keeping the read at all, and
+it is why the removal saves the blend arithmetic and **not** the `<=>` or the
+TOAST fetch per candidate pair. PRD 05's cost sentence is corrected rather than
+quoted as a saving.
+
+**The obligation, and it is not discharged by this change.**
+`blend_fingerprint()` moves `78900b2bd89a649774d7fd3efe082621` (M7/M8's four
+signals) → `78f3ecd20e654c0f6aa4bdf646ec099b`, so every stored row is stale
+until `usher similar --rebuild` runs. At 130,647 embedded titles that is a full
+quadratic walk, priced by S4 at ~80 minutes and measured by S5 at **85.4** —
+a scheduled operation, not the tail of a task, and **S7 did not run one**.
+⚠️ **Whatever closes it must record `title_neighbors`' row count beside the
+verdict**: "`blend_fingerprint` reports no stale rows" is satisfied by an empty
+table, and an empty table is what every catalog on this host holds. The
+four-signal digest is pinned as a literal in
+`tests/unit/test_services_similar.py` (licensed by a case that recomputes it
+from M7's weights, so it cannot drift into a number nothing stamped) precisely
+because the superseded weights are the thing that left `src/`.
+
+⚠️ **The freed name `tags` is a trap and it is resolved in ADR-0024 rather than
+in a commit message.** `_WEIGHTS`, `NeighborCandidate.tags` and
+`pairs_with_tags` all spell the *tag genome* as `tags`, and S6 evaluated
+MovieLens **user tags** under the same word (refused at 6.0821%). A stored
+score records only a fingerprint, so a later reader finding `tags` back in
+`_WEIGHTS` could not tell which signal a row contains. **The genome, if it
+returns, is `genome`; a user-tag term is `user_tags`.**
 
 **`coverage²` is wrong in a measurable direction, and the size of the error is
 the finding.** All three signals beat their independent-draw prediction —

@@ -2837,3 +2837,179 @@ twice.
 
 Gate: ruff clean, `mypy` 564 files, **9 kept / 0 broken**, **3,791 unit / 4 skipped**, **1,170
 integration / 22 skipped**, PRD link check `OK`.
+
+## ✅ M9 Task S7 — the genome term is removed on its own re-measurement; the read, the counter and the rebuild obligation stay (2026-08-12)
+
+**The blend changed.** `SimilarityService._WEIGHTS` loses `"tags"` and
+`_neighbors_for` stops passing `tags=` to `_blend`. That is the whole of the
+behaviour change and it closes the obligation PRD 09 handed M9 by name: the
+tag-genome weight left at 0.25 on coverage that does not support it.
+
+**The number it was decided on, and it is a second measurement.** S5's one
+read-only pool walk over the whole embedded population — **130,647 seeds, 262
+pages, 13,064,700 candidate pairs, 5,125 s** — puts the genome's candidate-pair
+rate at **2.4746%** (323,297 pairs) over **15,525** seeds carrying a vector,
+**11.883%** single-side. S1 had already settled that M7's **1.81%** came from
+**5,020 owned, name-selected, pre-TMDb seeds** in a database that no longer
+exists — the promotion was a tier-label `UPDATE` that moved no document, so
+`search_document`'s weight classes C and D were empty and `nearest_for` drew
+the pool **by name**. Both numbers stay in the record with their populations
+attached; neither is a delta on the other. What 2.4746% newly says is what the
+genome does over documents that finally carry `overview`/`tagline`/`genres`/
+`keywords`, which is what S3's 130,647-title enrichment existed to produce —
+and it is **still four times below the 10% floor the 0.25 weight assumes**.
+S5's coverage reconciliation is exact: 15,565 genome rows = 15,525 embedded +
+7 still `skeleton` + 33 outside the frozen tier.
+
+### What was NOT done, stated first because it is the risk
+
+**No `usher similar --rebuild` was run, and the task does not claim the
+obligation is discharged.** `blend_fingerprint()` moves
+`78900b2bd89a649774d7fd3efe082621` → `78f3ecd20e654c0f6aa4bdf646ec099b`, so
+every stored `title_neighbors` row is stale by construction. At 130,647
+embedded titles the rebuild is a full quadratic walk — S4 priced the equivalent
+at ~80 minutes, S5's actual was **85.4** — so it is a scheduled operation
+needing a cleared box, not the last five minutes of a task.
+
+**What H7 must run, and what it must record.** The plan's D5 is right that
+nothing live-verifies `/similar` (H4 and H5 cover playback and watch
+write-back), so this discharges through H7's acceptance and needs the thing the
+spec forgot:
+
+```
+uv run usher similar --rebuild        # ~85 min at 130,647 embedded titles
+uv run usher similar <any title id>   # reports the blend it was computed under
+SELECT count(*) FROM title_neighbors; # the count that must be recorded
+```
+
+- `stale_neighbors()` **0**, and
+- **`title_neighbors`' row count recorded beside the verdict.** Without it the
+  criterion is satisfied by an **empty table**, which is exactly what every
+  catalog on this host holds today (`usher-m9-pg` and `usher-postgres-1` both
+  measured 0 rows). The expected count is `seeds × 25` less any seed with fewer
+  than 25 candidates, i.e. ~3.27M at this population.
+- And the rebuild's own `pairs_with_tags / candidate_pairs` must **agree with
+  2.4746%**. The pool is invariant to a weight change by construction
+  (`_CANDIDATE_POOL` and `_NEIGHBORS_PER_TITLE` untouched), which is what makes
+  it a valid control; a disagreement means S5's walk and the rebuild drew
+  different pools and is the first thing to report.
+
+### The failing tests came first, and two of them were red
+
+| case | before | failure message |
+|---|---|---|
+| `test_the_tag_genome_cosine_no_longer_reorders_a_pool` | **RED** | `[UUID(…1b), UUID(…1c)] != [UUID(…1c), UUID(…1b)]` — the genome-bearing candidate at the *lower* cosine still won |
+| `test_every_row_written_under_the_four_signal_blend_reads_as_stale` | **RED**, on its premise | `assert '78900b2bd89a649774d7fd3efe082621' != '78900b2bd89a649774d7fd3efe082621'` — the running blend *was* the four-signal one |
+
+The other three are guards rather than red-first cases and the report says so:
+`test_a_zero_weight_signal_is_arithmetically_identical_to_an_absent_one` (green
+on arrival, by arithmetic — it is red against the *assumption* an implementer
+arrives with, as the plan says),
+`test_every_signal_the_blend_is_handed_has_a_weight_and_no_weight_is_zero`, and
+`test_a_half_covered_pair_is_not_counted_as_a_genome_pair`.
+
+### The revert's real shape, and why the careless one is invisible
+
+`_WEIGHTS["tags"] = 0.0` is **arithmetically the same program** as the signal
+being absent — `_blend` adds `_WEIGHTS[name] * value` to `total` and
+`_WEIGHTS[name]` to `applied`, so a zero moves neither — while still entering
+`blend_fingerprint()`, declaring every row stale and buying an 85-minute
+rebuild for a table whose every score is unchanged. **No behavioural assertion
+can tell the two apart**, so the guard is structural: an AST scan asserting
+`{keywords handed to _blend} == set(_WEIGHTS)` (which refuses *both* halves of
+the split — key without argument is a dead weight, argument without key is a
+`KeyError` on the first pair) plus `0.0 not in _WEIGHTS.values()`.
+
+### Three findings this task owns
+
+- **The removal changes no score at all on ~97.5% of pairs, and the arithmetic
+  is exact.** `score_with = (W · score_without + 0.25 · g) / (W + 0.25)`, so
+  with all three other signals present it is `0.75 · score_without + 0.25 · g`.
+  The three surviving weights are left at M7's 0.45 / 0.20 / 0.10, so
+  genome-less pairs are scored under precisely the denominator they already
+  were. **Reverting them to M6's 0.60 / 0.25 / 0.15 was declined**: the two
+  differ only on keywords-against-genres after renormalisation
+  (0.600/0.267/0.133 against 0.600/0.250/0.150), which a pair rate says nothing
+  about — an unevidenced second decision that would move every row instead of
+  the 2.4746%.
+- **The term was a promotion exactly when `g > score_without`**, and the genome
+  cosine's measured floor is 0.2556 with p1 0.4075 and mean 0.6101 over
+  268,157,000 pairs. ⚠️ **The three-signal score's own distribution over a real
+  pool is NOT measured** — `title_neighbors` is empty everywhere on this box —
+  so how often that reordered a list is unknown and is not claimed. The
+  identity is exact; the frequency is not.
+- **The read is kept and the cost claim is corrected rather than repeated.**
+  PRD 05 said the term cost "a `<=>` and a TOAST fetch on every candidate pair
+  of every rebuild"; that describes the *read*, and the read stays, so removing
+  the weight saves the arithmetic and none of the I/O. What it buys is that the
+  number a later milestone would re-open this on keeps being printed by
+  `usher similar --rebuild` rather than by a query somebody has to think to run
+  — and it leaves ADR-0014's `None`-not-0.0 rule with exactly one live
+  consumer, `pairs_with_tags`, where a `0.0` would report a barely-covered
+  catalog as fully covered. **A dead signal looking live** is the wrong
+  direction for that number.
+
+### Documents moved in the same commit
+
+ADR-0024 (status line + a dated amendment section, never a silent
+contradiction), ADR-0014 (its fourth site moved from the blend to the counter,
+and `_clamped`'s two arguments preserved in prose now that the function is
+gone), PRD 04 (the ⏳ "still not measured against an enriched tier" marker
+discharged), PRD 05's `### Similarity` (the bullet, the weights table, the
+reweighting bound), PRD 09 (the M9 row and the deferred-choice bullet),
+`.claude/rules/rows-and-genome.md`, and `usher similar --rebuild`'s own report
+line, which said pairs *"scored a genome cosine"* and now says they *carried a
+genome vector on both sides — measured, not blended*.
+
+⚠️ **`rows-and-genome.md` gained `src/usher/services/similar.py` as a trigger
+path** (and CLAUDE.md's index row with it). Half that file is about the genome,
+the genome's only consumer was the similarity blend, and the trigger list did
+not name that module — so the sessions most likely to undo this decision were
+the ones the file never loaded for.
+
+**The freed name `tags` is a trap and it is resolved in ADR-0024**: the genome,
+if it returns, is `genome`; a user-tag term is `user_tags`. S6 evaluated
+MovieLens *user* tags under the same word (refused at 6.0821%), a stored score
+records only a fingerprint, and a later reader finding `tags` back in
+`_WEIGHTS` could not tell which signal a row contains.
+
+**S6 and S7 were run concurrently and the plan's `S7 ← S6` edge does not
+apply.** That edge holds only on the ≥10% arm where both would edit
+`services/similar.py`; the gate returned 6.0821%, so S6 touches no code. S7
+owns ADR-0024's amendment and the blend; S6 owns ADR-0035 and the refusal.
+
+### The sweep: 7 plants, 5 targets all killed, 2 controls surviving all five gate steps
+
+Full ledger in `.claude/rules/mutation-sweeps.md`; two results belong here.
+
+🔴 **The plant list found a gap before any plant ran, and it is the third
+constant this milestone has needed a literal-valued case for.** Nothing could
+see a revert of `cosine`/`keywords`/`genres` to M6's 0.60/0.25/0.15:
+`test_every_pair_is_scored_within_m6s_reweighting_bound` derives both of its
+assertions from `_WEIGHTS`, and a **renormalising** blend is invariant to any
+positive rescaling of its weight table — so no assertion computed from
+`_WEIGHTS` can distinguish two tables that are multiples of each other. It pins
+that the weights are *in force* and not what they *are*. Closed by a
+literals-only case; re-planted, the revert fails **that case alone** out of 55.
+After D4's `TICKET_TTL_SECONDS` and B9's `CAST_LIMIT`, with the same tell: the
+constant on both sides of the assertion.
+
+🔴 **The careless revert is killed by two cases and neither is behavioural**,
+which is the measurement behind this task's central claim.
+`_WEIGHTS["tags"] = 0.0` with the argument restored passes **every** ordering,
+score and staleness case in the file, and dies only on the AST scan and the
+literal-valued case. The damage it would ship is not a wrong score — it is a
+`blend_fingerprint()` that moves, declaring a 3.27M-row table stale and buying
+an 85-minute rebuild for a table whose every score is unchanged.
+
+**And a case that had been a change-detector since M7**, found by reading three
+verdicts that made no sense: `test_reordering_the_weights_without_changing_one_
+leaves_the_fingerprint` monkeypatched a hand-**transcribed** copy of `_WEIGHTS`,
+so it failed on any change to a value or to the key set and reported a kill for
+three plants that had nothing to do with insertion order. Respelled as
+`dict(reversed(list(_WEIGHTS.items())))` with both premises asserted.
+
+Gate: ruff clean, `ruff format --check` 587 files, `mypy` over 572 files,
+`lint-imports` **9 kept / 0 broken**, **3,946 unit / 4 skipped**, **1,207
+integration / 22 skipped**, PRD link check `OK`. Tree `md5`-verified clean after
+the sweep.

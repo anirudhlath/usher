@@ -551,31 +551,57 @@ first in-process consumer.
 
 - embedding cosine over overview text,
 - Jaccard over genres, keywords, cast, and crew,
-- MovieLens tag-genome cosine where available, weighted in only when present.
-  **The importer shipped in M7** (`usher bootstrap --phase movielens`,
+- ~~MovieLens tag-genome cosine where available, weighted in only when
+  present.~~ 🔴 **Built in M7 at weight 0.25 and REMOVED from the blend on
+  2026-08-12 by M9's S7, on a measurement.** The vectors are still imported,
+  still stored and still read per pair; they are no longer a term.
+  [ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md)
+  carries the full amendment and this is the short form.
+
+  The importer shipped in M7 (`usher bootstrap --phase movielens`,
   `genome_scores`), and Task 36 measured every denominator (2026-08-05, a
   `--phase all` catalog of 1,271,570 titles): 15,565 genome vectors are
   **1.22%** of all titles and **1.73%** of the 899,991 movies; **7.61%** of
   [04](04-catalog-bootstrap.md)'s "≥100 IMDb votes" priority tier (measured at
   204,494 titles) — the denominator that makes the "~7%" this line used to
-  carry roughly right; and **10.68%** of a real household's 5,020 owned titles
-  (10.72% of its owned movies). **The number that actually decides the term's
-  weight is the candidate-pair rate** — of the 100 candidates each seed's pool
-  holds, how many carry a `tags` value — measured (never squared: `coverage²`
-  would say 1.14%) at **1.81%** (9,069 of 502,000 pairs). **That is far below
-  the 10% floor the weight assumes**, so at 0.25 the genome reorders about one
-  neighbour list in fifty-five while costing a `<=>` and a TOAST fetch on every
-  candidate pair of every rebuild. **The term is kept for now, with two
-  caveats and a deferral**: the 1.81% is a *conservative* floor (no TMDb key
-  ran, so documents are name-shaped and the pool is name-selected, which
-  weakens exactly the correlation being measured); the genome is
-  **movies-only** and **frozen at 2023-07-20**, so its coverage of anything
-  newer is structurally zero and decays; and the choice between a genome-aware
-  candidate pool and reverting `_WEIGHTS` to M6's three signals is an **M9
-  decision** to make once a genuinely enriched tier can be measured — cheap and
-  detectable either way, because `title_neighbors.blend_fingerprint` records
-  which blend produced each row. **M7 blends it in at weight 0.25** — see the
-  four-way blend below. Two
+  carry roughly right; and **10.68%** of a real household's 5,020 owned titles.
+  **The number that decides the term's weight is the candidate-pair rate** — of
+  the 100 candidates each seed's pool holds, how many carry a `tags` value —
+  measured, never squared. M7 put it at **1.81%** (9,069 of 502,000 pairs), and
+  M9's S1 then established that those 502,000 pairs are exactly 5,020 owned,
+  **name-selected, pre-TMDb** seeds in a scratch database that no longer
+  exists: the tier promotion moved a label, not a document, so
+  `search_document`'s weight classes C and D were empty and the pool was drawn
+  by name.
+
+  **M9's S5 re-measured it over a genuinely enriched population and it is a
+  second measurement, never a delta: 2.4746% — 323,297 of 13,064,700 candidate
+  pairs, over 130,647 seeds, 15,525 of them carrying a vector (11.883%
+  single-side).** What is new is that the genome rate is now known over
+  documents that finally carry `overview`, `tagline`, `genres` and `keywords`,
+  which is what M9's enrichment existed to produce — and it is **still four
+  times below the 10% floor the 0.25 weight assumes**. Both figures stay in the
+  record with their populations attached. `coverage²` would have predicted
+  1.412%, so the measurement is **1.75×** the independent-draw prediction: pool
+  membership and genome membership are positively correlated, which is the
+  first time this project has had the correction factor rather than the
+  warning.
+
+  So the term comes out — the `_WEIGHTS` key and the `tags=` argument together,
+  never a 0.0 weight, which is arithmetically identical to absence while still
+  moving `blend_fingerprint`. **The `<=>` and the TOAST fetch per candidate
+  pair are NOT saved and that is deliberate**: the cost sentence this bullet
+  used to carry ("costing a `<=>` and a TOAST fetch on every candidate pair of
+  every rebuild") described the *read*, and the read stays so the rate remains
+  reported by `usher similar --rebuild` on every rebuild rather than by a query
+  somebody has to think to run. It is also the only remaining consumer of
+  ADR-0014's `None`-not-0.0 rule on this field.
+
+  **The ceiling is what makes this unlikely to reverse on more enrichment.**
+  `ml-latest` is **movies-only** and **frozen at 2023-07-20**, and scores
+  **16,376** movies — 18.9% of its own 86,537-movie list — so coverage of
+  anything newer is structurally zero and decays. M9's enrichment moved the
+  document and therefore the pool; it could not move the numerator. Two
   vectors are comparable only when they came from the same release, which is
   what `genome_scores.genome_revision` records and what
   `GenomeRepository.get_pair` refuses to blend across,
@@ -597,54 +623,92 @@ is a bare nullable UUID with no table that nothing in `src/` writes. So M6 shipp
 **embedding cosine (0.60) plus keyword Jaccard (0.25) and genre Jaccard
 (0.15)**, written as a sum of weighted terms over an explicit signal list.
 
-**M7 lands the third signal, and the blend is now four terms:**
+**M7 landed the third signal; M9's S7 removed it. The shipped blend is three
+terms, and the surviving weights are M7's rather than M6's:**
 
-| Term | M6 | M7 | Renormalised when `tags` is absent |
-|---|---|---|---|
-| `cosine` | 0.60 | 0.45 | 0.45 / 0.75 = **0.600** |
-| `tags` | — | **0.25** | absent |
-| `keywords` | 0.25 | 0.20 | 0.20 / 0.75 = **0.267** |
-| `genres` | 0.15 | 0.10 | 0.10 / 0.75 = **0.133** |
+| Term | M6 | M7 | **M9 (shipped)** | Renormalised share |
+|---|---|---|---|---|
+| `cosine` | 0.60 | 0.45 | **0.45** | 0.45 / 0.75 = **0.600** |
+| `tags` | — | 0.25 | **removed** | — |
+| `keywords` | 0.25 | 0.20 | **0.20** | 0.20 / 0.75 = **0.267** |
+| `genres` | 0.15 | 0.10 | **0.10** | 0.10 / 0.75 = **0.133** |
+
+**The three surviving weights are deliberately not "reverted to M6's".** The
+measurement licenses removing a term whose coverage cannot support its weight;
+it licenses nothing about keywords against genres, which is the only thing
+0.45/0.20/0.10 and M6's 0.60/0.25/0.15 differ on once `_blend` renormalises
+(0.600/0.267/0.133 against 0.600/0.250/0.150). Leaving them where M7 put them
+means the removal changes **no score at all** on the ~97.5% of pairs that
+carried no genome — those pairs were already scored under this exact
+denominator — so the change is confined to the 2.4746% the evidence is about.
+Restoring M6's numbers would be an unevidenced second decision moving every
+score in the table.
+
+**The removal costs a full rebuild and nothing else.** `blend_fingerprint()`
+moves from `78900b2bd89a649774d7fd3efe082621` to
+`78f3ecd20e654c0f6aa4bdf646ec099b`, so every stored `title_neighbors` row reads
+as stale until `usher similar --rebuild` runs — a **query**, answered by
+`SimilarityService.stale_neighbors()`, not an inference
+([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)). At
+130,647 embedded titles that rebuild is a full quadratic walk measured at
+**85.4 minutes**, so it is a scheduled operation. **It has not been run**: the
+table holds 0 rows on every catalog on this host, which is why the acceptance
+that discharges this obligation has to record `title_neighbors`' row count
+beside the verdict — "no stale rows" is satisfied by an empty table.
 
 ⏳ **Cast/crew Jaccard and collection membership are still not terms, and M7 is
 the milestone where the distinction between "the data landed" and "the term
 landed" has to be said out loud.** `people`, `credits` and `collections` are
 real tables as of M7 ([02](02-data-model.md)), so the *data* both signals need
-now exists — and `SimilarityService._WEIGHTS` has four keys, not six.
+now exists — and `SimilarityService._WEIGHTS` has **three** keys, not six.
 `NeighborSeed`/`NeighborCandidate` carry no cast, crew or collection field, so
 adding either is the same port-plus-two-fakes-plus-a-surface-pin change the tag
 genome turned out to be, **plus** a full `usher similar --rebuild` because
-adding a term re-weights the other four and moves every stored score. It is
+adding a term re-weights the others and moves every stored score. It is
 therefore a change with a fingerprint bump attached rather than a small one,
 and it is **unassigned** — recorded here at the moment its blocker was removed,
-so nobody later reads the four-signal blend as the four signals this section
-specifies.
+so nobody later reads the shipped blend as the four signals this section
+specifies. ⚠️ **And whichever signal arrives next, it must not be called
+`tags`.** That key is free as of S7 and it named the *tag genome*; M9's S6
+evaluated MovieLens **user tags** under the same word and refused it at 6.0821%
+(ADR-0035, which S6 owns). A stored score records only a `blend_fingerprint`,
+so a later reader finding
+`tags` back in `_WEIGHTS` could not tell which of the two signals a row
+contains. The genome, if it returns, is `genome`; a user-tag term is
+`user_tags`.
 
-**The three carried-over weights sum to 0.75, and that is the whole argument
-for these numbers rather than round ones.** `_blend` renormalises over the
-signals that are *present*, so on a pair with no genome — the overwhelming
-majority of them — the cosine share is **exactly 0.600, unchanged to three
-decimal places**, while keywords and genres move by +0.0167 and −0.0167. Such
-a pair's score therefore moves by `0.0167 × (keywords − genres)`, **bounded by
-±0.0167**, and two of them can only swap if they were already within 0.033 of
-each other. That is an arithmetic bound with a real residual, not a claim that
-the existing ordering is preserved.
+**The three surviving weights sum to 0.75, and that is the whole argument for
+these numbers rather than round ones.** `_blend` renormalises over the signals
+that are *present*, so the cosine share is **exactly 0.600, unchanged to three
+decimal places** against M6, while keywords and genres sit +0.0167 and −0.0167
+off it. A pair's score therefore differs from M6's by
+`0.0167 × (keywords − genres)`, **bounded by ±0.0167**, and two of them can
+only swap if they were already within 0.033 of each other. That is an
+arithmetic bound with a real residual, not a claim that the existing ordering
+is preserved. **It covered "the pairs with no genome" from M7 until S7 and now
+covers all of them**, which is exactly the shape of the removal.
 
-**A pair where only one side has a genome vector scores `None`, never 0.0**
+**A pair where only one side has a genome vector carries `None`, never 0.0**
 ([ADR-0014](decisions/0014-absence-is-not-zero.md)). This is the first site
 where `0.0` is not merely uninformative but *unreachable by real data*: every
 genome component is positive, so the true cosine of any real pair is well above
 zero — measured floor **0.2556** over all 268,157,000 ordered off-diagonal
-pairs, mean 0.6101, sd 0.0913.
+pairs, mean 0.6101, sd 0.0913. **Since S7 the rule defends the measurement
+rather than the blend**: nothing scores this value, and its only consumer is
+`NeighborRebuild.pairs_with_tags`, where a `0.0` would report a barely-covered
+catalog as fully covered — making a dead signal look live, which is the wrong
+direction for the number a later milestone would re-open the decision on.
 
-**The genome term's spread was measured before its weight was chosen, and its
-relevance was not.** The saturation bar was written down first — saturated if
-mean ≥ 0.70, or p1 ≥ 0.50, or sd < 0.05, or the top-10 neighbour gap < 0.15 —
-and no clause fired, so the vectors ship raw rather than mean-centred. That
-says the term is not inert. It says nothing about whether 0.25 beats 0.20: the
-weights remain **chosen with an argument, not measured**, because nothing in
-this project measures similarity relevance and M7 does not change that. The two
-claims are kept apart deliberately.
+**The genome term's spread was measured before its weight was chosen, its
+coverage was measured twice, and its relevance was never measured at all.** The
+saturation bar was written down first — saturated if mean ≥ 0.70, or p1 ≥ 0.50,
+or sd < 0.05, or the top-10 neighbour gap < 0.15 — and no clause fired, so the
+vectors ship raw rather than mean-centred. That says the term is **not inert**,
+and it stays true after the removal: what a pair rate settles is how *often*
+the term fires, not how good it is when it does. Nothing here says 0.20 beats
+0.25 — the surviving weights remain **chosen with an argument, not measured**,
+because nothing in this project measures similarity relevance. The three claims
+are kept apart deliberately.
 
 They stay constants rather than settings, because changing one changes what
 "similar" means and every stored row was written under the old meaning — which
