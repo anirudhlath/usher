@@ -2885,6 +2885,38 @@ apply.** That edge holds only on the ≥10% arm where both would edit
 `services/similar.py`; the gate returned 6.0821%, so S6 touches no code. S7
 owns ADR-0024's amendment and the blend; S6 owns ADR-0035 and the refusal.
 
-Gate: ruff clean, `mypy` over 571 files, `lint-imports` **9 kept / 0 broken**,
-**3,945 unit / 4 skipped**, **1,207 integration / 22 skipped**, PRD link check
-`OK`.
+### The sweep: 7 plants, 5 targets all killed, 2 controls surviving all five gate steps
+
+Full ledger in `.claude/rules/mutation-sweeps.md`; two results belong here.
+
+🔴 **The plant list found a gap before any plant ran, and it is the third
+constant this milestone has needed a literal-valued case for.** Nothing could
+see a revert of `cosine`/`keywords`/`genres` to M6's 0.60/0.25/0.15:
+`test_every_pair_is_scored_within_m6s_reweighting_bound` derives both of its
+assertions from `_WEIGHTS`, and a **renormalising** blend is invariant to any
+positive rescaling of its weight table — so no assertion computed from
+`_WEIGHTS` can distinguish two tables that are multiples of each other. It pins
+that the weights are *in force* and not what they *are*. Closed by a
+literals-only case; re-planted, the revert fails **that case alone** out of 55.
+After D4's `TICKET_TTL_SECONDS` and B9's `CAST_LIMIT`, with the same tell: the
+constant on both sides of the assertion.
+
+🔴 **The careless revert is killed by two cases and neither is behavioural**,
+which is the measurement behind this task's central claim.
+`_WEIGHTS["tags"] = 0.0` with the argument restored passes **every** ordering,
+score and staleness case in the file, and dies only on the AST scan and the
+literal-valued case. The damage it would ship is not a wrong score — it is a
+`blend_fingerprint()` that moves, declaring a 3.27M-row table stale and buying
+an 85-minute rebuild for a table whose every score is unchanged.
+
+**And a case that had been a change-detector since M7**, found by reading three
+verdicts that made no sense: `test_reordering_the_weights_without_changing_one_
+leaves_the_fingerprint` monkeypatched a hand-**transcribed** copy of `_WEIGHTS`,
+so it failed on any change to a value or to the key set and reported a kill for
+three plants that had nothing to do with insertion order. Respelled as
+`dict(reversed(list(_WEIGHTS.items())))` with both premises asserted.
+
+Gate: ruff clean, `ruff format --check` 587 files, `mypy` over 572 files,
+`lint-imports` **9 kept / 0 broken**, **3,946 unit / 4 skipped**, **1,207
+integration / 22 skipped**, PRD link check `OK`. Tree `md5`-verified clean after
+the sweep.

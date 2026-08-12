@@ -4204,3 +4204,122 @@ Gate green before and after on the fully restored tree (`git status` clean):
 `ruff check`, `ruff format --check` (585 files), `mypy` over 571 files,
 `lint-imports` 9 kept / 0 broken, **3,934 unit / 4 skipped** and **1,207
 integration / 22 skipped**, PRD link check `OK`.
+
+## M9 Task S7 — the genome term's removal, and an ordering case that was a change-detector (2026-08-12)
+
+**7 plants over `src/usher/services/similar.py` — 5 behavioural targets, all
+KILLED; 2 equivalent-mutant controls, both SURVIVED and both passing every gate
+step separately. 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN, 0 HUNG.** Run
+in place from a harness at `/var/tmp/m9-S7/plants.py`, **outside the working
+tree** for V1's reason and under `/var/tmp` rather than `/tmp`, which is tmpfs
+on this host. Plant list and **expected verdicts** written to
+`/var/tmp/m9-S7/PLANTS.md` (`sha256 7289946585f4…`) before the first run. Tree
+committed at `47b1b03` first, so `git status` is the verification — clean
+afterwards, with `similar.py` `md5`-verified byte-identical
+(`9738e14ef6a2d5ded838df089a9aff92`). `PYTHONDONTWRITEBYTECODE=1`,
+`__pycache__` swept under **both** `src/` and `tests/` before every run,
+`compile()` as the dry run, an exact anchor count asserted before each plant, a
+900 s per-plant timeout reporting `HUNG` as its own verdict, and no second `-q`.
+
+**The landing check is spelled as byte equality with the intended mutant** —
+`TARGET.read_text() == planted` — which is F3's repair adopted on its first
+opportunity rather than re-derived. This round has an **additive** plant (T4
+inserts a `tags=` argument) and a **two-hunk** plant (T1 moves both the weight
+and the argument), and B6's substring form `old not in landed and new in
+landed` is wrong for both.
+
+**Selection:** `tests/unit/test_services_similar.py` (39 cases, 0.2 s a run),
+widened to `tests/integration/test_services_similar.py` for the two plants whose
+damage reaches the real statements (55 cases, ~7.6 s). Scoped rather than
+whole-suite: `grep -rln "services.similar" tests/` finds eight files and every
+plant here moves `_WEIGHTS` or the `_blend` call, which only these two can
+observe — and `tests/integration/test_sse_end_to_end.py` is intermittent on this
+tree and predates M9, so a sweep scored on "did the run fail" cannot include it.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 the full revert — `"tags": 0.25` **and** `tags=candidate.tags` | KILLED | 6 |
+| T2 the **careless** revert — `"tags": 0.0` **and** `tags=candidate.tags` | KILLED | **2, neither of them behavioural** |
+| T3 a dead weight — `"tags": 0.0` in `_WEIGHTS` only | KILLED | **2, the same two** |
+| T4 a signal with no weight — `tags=candidate.tags` at the call only | KILLED | 6, on `KeyError` |
+| T5 the weights reverted to M6's 0.60/0.25/0.15 | KILLED | **1 — the case written for it** |
+| C1 *control* — `_WEIGHTS`' `keywords`/`genres` entries in the other written order | SURVIVED | all five gate steps |
+| C2 *control* — one sentence of `_blend`'s docstring reworded | SURVIVED | all five gate steps |
+
+**Three results worth carrying.**
+
+🔴 **T5 is the yield and the plant list found it, not the run.** Writing down
+*"which case kills a revert to M6's weights?"* found that **none did**.
+`test_every_pair_is_scored_within_m6s_reweighting_bound` derives both of its
+assertions from `_WEIGHTS` — `abs(new - old) <= 0.0167` is exactly **0.0** when
+the running table *is* M6's, and `_WEIGHTS["cosine"] / sum(_WEIGHTS.values())`
+is **0.600** under 0.45/0.20/0.10 *and* under 0.60/0.25/0.15, because `_blend`
+renormalises and the two tables agree on the cosine share by construction. So
+it pins that the weights are **in force** and cannot pin **what they are**, and
+S7's second decision — keep M7's three weights rather than revert to M6's — had
+nothing behind it. Closed by
+`test_the_surviving_weights_are_m7s_and_not_a_revert_to_m6s`, whose every number
+is a literal; re-planted, T5 fails **that case alone** out of 55. **This is the
+third constant in one milestone to need a literal-valued case beside a derived
+one** — after D4's `TICKET_TTL_SECONDS` and B9's `CAST_LIMIT` — and the tell is
+the same every time: *the constant appears on both sides of the assertion*.
+Here it is sharper than in either predecessor, because the derived assertion is
+not merely insensitive to the value, it is **provably** insensitive: a
+renormalising blend is invariant to any positive rescaling of its weight table,
+so no assertion computed from `_WEIGHTS` can ever distinguish two tables that
+are multiples of each other.
+
+🔴 **T2 and T3 are killed by two cases and *neither is behavioural*, which is
+the measurement behind this task's central claim.** The careless revert
+(`_WEIGHTS["tags"] = 0.0` with the argument restored) passes **every** ordering,
+score and staleness case in the file — because `_blend` adds
+`_WEIGHTS[name] * value` to `total` **and** `_WEIGHTS[name]` to `applied`, so a
+zero moves neither and the mutant is arithmetically the same program as the
+shipped code. It dies only on
+`test_every_signal_the_blend_is_handed_has_a_weight_and_no_weight_is_zero` (an
+AST scan requiring `{keywords handed to _blend} == set(_WEIGHTS)` plus
+`0.0 not in _WEIGHTS.values()`) and on the literal-valued case above. **The
+damage the structural guard prevents is not a wrong score — it is a
+`blend_fingerprint()` that moves, declaring every row of a 3.27M-row table
+stale and buying an 85-minute rebuild for a table whose every score is
+unchanged.** Same family as C4's `asyncio.to_thread` scan, where the only
+symptom was *which thread ran*; here the only symptom is *what the fingerprint
+says*, and a behavioural suite has no expressible case for either.
+
+**And a case that had been a change-detector since M7, found by reading three
+verdicts that made no sense.** `test_reordering_the_weights_without_changing_
+one_leaves_the_fingerprint` monkeypatched a **hand-transcribed copy** of
+`_WEIGHTS` in a different order — so it failed on any change to a *value* or to
+the *key set*, not only on a reordering, and the first run of this sweep had it
+reporting a kill for T2, T3 **and** T5, three plants with nothing to do with
+insertion order. A verdict naming it says nothing. Respelled as
+`dict(reversed(list(_WEIGHTS.items())))` with both premises asserted (the order
+really moved; only the order moved) it can fail on the property it is named for
+and on nothing else, and the three verdicts above are the post-repair ones.
+**The general form: a case that monkeypatches a transcribed copy of the constant
+it is about is a change-detector on that constant, and it is invisible until
+something changes the constant for an unrelated reason.** Nearest relative is
+`testing-discipline.md`'s *"a premise guard computed from a literal is a guard
+no fixture change can falsify"*, arriving at the *patched value* instead of at
+the premise — and the direction is inverted: that one cannot fail, this one
+cannot stop failing.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| C1 `_WEIGHTS`' `keywords`/`genres` entries in the other written order | PASS | PASS | PASS | PASS | PASS |
+| C2 one sentence of `_blend`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+C1's equivalence is a fact about the *code* rather than about what the tools
+look at: `_WEIGHTS` is a dict literal with two distinct, independent float keys,
+read only by `_WEIGHTS[name]` inside `_blend` and by
+`dict(sorted(_WEIGHTS.items()))` inside `blend_fingerprint()` — which sorts — so
+neither a score nor a digest can observe insertion order, and the repaired
+ordering case above is the assertion that says so from the other side. It is
+deliberately **not** an `__all__` reorder, which `RUF022` rejects, and not a
+reorder of a positional call, which A5's entry is the reason for checking rather
+than assuming. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`: **28** files scan
+source, and the only two that read `services/similar.py` are this task's own
+scan — which walks `ast.Call` nodes, and a docstring is not a Call — and
+`tests/unit/test_api_similar.py`, whose `ast.unparse` scan is over
+`api/routers/titles.py` and strips docstrings before reading it.
