@@ -90,6 +90,7 @@ from usher.db.repositories.search import (
     PostgresTitleEmbeddingRepository,
     PostgresTitleNeighborRepository,
 )
+from usher.db.repositories.search_query import PostgresSearchQueryRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.sync import PostgresRawPayloadStore, PostgresSyncRunRepository
 from usher.db.repositories.taste import PostgresTasteRepository
@@ -161,7 +162,7 @@ from usher.services.query_expansion import QueryExpansionService
 from usher.services.reconcile import ReconcileService
 from usher.services.rows import row_providers
 from usher.services.rows.cache import RowCache
-from usher.services.search import SearchService
+from usher.services.search import SearchAnalytics, SearchService
 from usher.services.similar import SimilarityService, blend_fingerprint
 from usher.services.taste import TasteService
 from usher.services.watch_sync import WatchStateSyncService
@@ -619,6 +620,17 @@ def build_search_service(
     which is also the shipped default twice over (`USHER_LLM_ENABLED` is
     `false`, and `USHER_QUERY_EXPANSION_ENABLED` is `false` even when it is
     not, because expansion measured *worse*: MRR 0.733 -> 0.373, PRD 05).
+
+    **The analytics pair is built here and not passed, unlike the expander**,
+    because both halves are functions of this session alone -- which is the
+    same test the two suggest indexes and the watch-state repository already
+    pass. That is what makes `search_queries` written on all three roots
+    without any of them saying so: `api/deps.get_search_service` and
+    `usher search` reach this function, and `build_pipeline` delegates to it
+    rather than assembling its own. **`session.commit` rather than the
+    caller's commit boundary** -- `api/deps.get_session` has one and
+    `cli._session_for` does not, so a row left for the caller to commit is a
+    row `usher search` silently loses (F2).
     """
     return SearchService(
         PostgresSearchIndex(
@@ -656,6 +668,15 @@ def build_search_service(
         result_limit=settings.search_result_limit,
         embedder=embedder,
         expander=expander,
+        # Eight and nine: PRD 10's `search_queries`, and the commit that makes
+        # a row written inside a request survive it. Both are functions of the
+        # session, so this is the one assembly of them -- a second caller
+        # wiring its own would be a second chance for one to arrive without the
+        # other, which is precisely the state `SearchAnalytics` exists to make
+        # unconstructible.
+        analytics=SearchAnalytics(
+            queries=PostgresSearchQueryRepository(session), commit=session.commit
+        ),
     )
 
 

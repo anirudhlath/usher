@@ -363,6 +363,19 @@ async def suggest(
     has none — no model, no lane to narrow, no capability an operator may not
     have installed. Both tiers are btree/GIN reads over tables `m09a` creates
     unconditionally.
+
+    🔴 **And no `search_queries` row, on either tier or either arm** — argued
+    rather than deferred (F2). `search_queries.mode` is a `SearchMode`, three
+    reachable values; a tier is a disjoint vocabulary, so storing both under
+    one column is two vocabularies under one name. And this route is driven
+    per keystroke at tier 1's p50 of 0.6 ms against full text's 33.3 ms, so its
+    rows would out-number *and* out-weight the searches by an order of
+    magnitude each in every mode-split panel PRD 10 builds. What it costs is
+    that the question PRD 10 most wants that table for — whether real users
+    type two- to four-character queries at all — is a question about *this* box, and
+    cannot be answered in M9. The two amendments that would answer it are
+    named in PRD 10; neither is a decision this route may take on its own,
+    exactly as with the problem code above.
     """
     minimum = _MIN_CHARS_FOR_TIER[tier]
     if len(q.strip()) < minimum:

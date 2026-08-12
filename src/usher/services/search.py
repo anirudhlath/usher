@@ -60,19 +60,24 @@ import hashlib
 import math
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
 
+from loguru import logger
 from opentelemetry import metrics
 from pydantic import AwareDatetime
 
+from usher.domain.ids import new_id
 from usher.domain.search import SearchResult
 from usher.domain.title import Title
 from usher.ports.embedding import Embedder
+from usher.ports.errors import UsherPortError
 from usher.ports.repository import (
     MediaItemRepository,
+    SearchQueryRecord,
+    SearchQueryRepository,
     TasteRepository,
     TitleEmbeddingRepository,
     TitleRepository,
@@ -234,6 +239,34 @@ class SuggestTier(StrEnum):
 
     PREFIX = "prefix"
     FUZZY = "fuzzy"
+
+
+@dataclass(frozen=True, slots=True)
+class SearchAnalytics:
+    """`search_queries`' retrieval half: the repository, and the commit that
+    makes what it wrote durable.
+
+    **One collaborator rather than two parameters, and the pairing is the
+    point.** A `SearchQueryRepository` on its own is a write nobody sees --
+    every repository in this project flushes and never commits, and a search
+    writes nothing else, so an uncommitted row is rolled back when the read's
+    session closes and the search is recorded nowhere.
+    `api/deps.py:get_session` happens to commit when a handler returns, but
+    `cli._session_for` yields a session and disposes the engine **without ever
+    committing**, so on the CLI path the row would be lost and nothing would
+    say so. Spelled as two optional parameters, "repository without commit" is
+    a state a caller can construct and a guard has to have two arms; spelled as
+    one frozen pair it is unreachable.
+
+    **`commit` is a callable and not a session** because `services/` may depend
+    only on `domain/` and `ports/` (ADR-0009) — verbatim the reason
+    `QueryExpansionService` already has one, and the sweep that makes it worth
+    a case rather than a convention is recorded there: **a deleted `commit()`
+    survived 42 cases.**
+    """
+
+    queries: SearchQueryRepository
+    commit: Callable[[], Awaitable[None]]
 
 
 class SemanticSearchUnavailable(Exception):
@@ -494,7 +527,9 @@ class SearchService:
         result_limit: int,
         embedder: Embedder | None = None,
         expander: QueryExpansionService | None = None,
+        analytics: SearchAnalytics | None = None,
         now: Callable[[], AwareDatetime] = lambda: datetime.now(UTC),
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._index = index
         # **Two `SuggestIndex` implementations, both required, and neither
@@ -544,6 +579,16 @@ class SearchService:
         # term is a function of the instant it is scored at, and a term read
         # off the wall clock is one no case can pin an age against.
         self._now = now
+        # **The interval clock, and it is a second callable rather than a
+        # second reading of `now`.** `_now` is a wall clock and answers an
+        # `AwareDatetime` because `search_queries.at` is a timestamp somebody
+        # will join against; this one is a monotone counter whose epoch is
+        # unspecified, and it exists because `latency_ms` and
+        # `usher.search.duration` are a *duration*. Injected rather than called
+        # directly so a case can move it -- the clamp below defends a promise
+        # `time.perf_counter` never breaks, and an injected clock is the only
+        # thing that can break it.
+        self._clock = clock
         # Optional, and a deployment without it still has search: full-text and
         # trigram are PRD 05's catalog-lookup tier and serve all 1,271,138
         # titles with no model at all.
@@ -555,6 +600,18 @@ class SearchService:
         # expansion's effect on retrieval the wrong way round. With this absent
         # every line below is M6's.
         self._expander = expander
+        # **Optional, and the reason is a *caller* state rather than a
+        # deployment state -- which is the difference from the two suggest
+        # indexes above.** Those are required because `m09a` creates their
+        # tables unconditionally, so "built or not built" had no state left to
+        # express. `search_queries` is created just as unconditionally, and
+        # every one of the three shipped roots supplies this. What is genuinely
+        # variable is the *commit*: this collaborator ends the caller's
+        # transaction, and a caller that is inside a larger unit of work it does
+        # not own has no honest way to write the row. Absent, every line below
+        # is exactly what it was before F2 and the search is unrecorded rather
+        # than wrong.
+        self._analytics = analytics
 
     async def search(
         self,
@@ -591,7 +648,28 @@ class SearchService:
         M6's -- which is the state the numeric case pins, and the reason the
         parameter is optional rather than required: `SearchService` is
         constructed on every deployment there is and a caller with no household
-        to speak for must still be able to search.
+        to speak for must still be able to search. **It is also the second
+        thing that decides whether a `search_queries` row is written**, because
+        `search_queries.user_id` is `NOT NULL` behind a real foreign key: a
+        search nobody is speaking for has no row to write rather than a row
+        with a hole in it, which is the same refusal PRD 10 spends a paragraph
+        making about `clicked_title_id`.
+
+        **`search_queries` gets exactly one row per *answered* search, and it
+        is written after the answer is composed and after the measurement.**
+        A write inside the measured window inflates the number it is recording,
+        and `latency_ms` is that same window read once, so the table and
+        `usher.search.duration` agree by construction rather than by two
+        readings that drift. Failing to write it never fails a search -- see
+        `_record_search`.
+
+        **A row is a search, not a page.** Nothing here takes a cursor, an
+        offset or an `after`, so a second page of one search cannot exist to be
+        counted twice and the zero-result rate PRD 10 exists to compute is not
+        diluted by scrolling. That is a property of this signature rather than
+        a guard, and it is asserted structurally in
+        `tests/unit/test_services_search.py` so the day `GET /search` grows
+        pagination the decision has to be made again rather than defaulted.
         """
         requested = mode
         # Refused before the model, not after. Every whitespace-only input
@@ -608,7 +686,7 @@ class SearchService:
         if not query.strip():
             return SearchAnswer(requested_mode=requested, mode=requested)
 
-        started = time.perf_counter()
+        started = self._clock()
         vector: tuple[float, ...] | None = None
         expanded: str | None = None
         if mode is not SearchMode.FULL_TEXT:
@@ -678,10 +756,98 @@ class SearchService:
         # After the rank, not around the retrieval alone: PRD 05 splits the two
         # stages and an operator asking "why is search slow" is asking about
         # the answer, not about half of it.
+        #
+        # **One clock read, two consumers.** The histogram and
+        # `search_queries.latency_ms` are the same interval by construction
+        # rather than by two readings taken a few statements apart -- a second
+        # read here would make the table and the panel disagree by whatever the
+        # analytics write cost, which is exactly the quantity a reader would be
+        # using the panel to look for.
+        elapsed = self._clock() - started
         labels = {"mode": mode.value}
-        _search_duration.record(time.perf_counter() - started, labels)
+        _search_duration.record(elapsed, labels)
         _search_results.record(len(answer.results), labels)
+        # **Outside the window, deliberately.** An INSERT inside it would be
+        # counted as search latency by both the histogram and the row itself.
+        await self._record_search(
+            query, mode=mode, user_id=user_id, results=len(answer.results), elapsed=elapsed
+        )
         return answer
+
+    async def _record_search(
+        self,
+        query: str,
+        *,
+        mode: SearchMode,
+        user_id: uuid.UUID | None,
+        results: int,
+        elapsed: float,
+    ) -> None:
+        """One `search_queries` row for one answered search, and the commit
+        that makes it durable.
+
+        **`mode` is the mode that ran**, the same value the histogram label
+        carries, for the same reason: a degraded FUSED search stored as `fused`
+        attributes full-text latency and a full-text result count to a lane
+        that did not run, in the very panels PRD 10 builds this table for. The
+        degradation is not stored at all -- it is on the wire as
+        `SearchAnswer.requested_mode` and in the two histograms' `mode` label,
+        and a tenth column for it is a PRD 10 amendment rather than a
+        convenience (group F's third ruling).
+
+        **`clicked_title_id` and `played` are not written here and are not
+        omissions.** Neither is knowable at the instant a search answers;
+        `SearchQueryRepository.record` writes `NULL` and `false` literally, and
+        `record_outcome` fills them later (F3).
+
+        **A failing analytics write must never fail a search, and the
+        narrowness of the catch is the decision.** `except UsherPortError` and
+        deliberately not `except Exception`: a `RepositoryConflict` means the
+        row was refused -- a `latency_ms` past the `integer` column, a
+        `user_id` naming no household -- and the household still gets the
+        results it asked for, while a `TypeError` or a `ValidationError` out of
+        this module is a bug in Usher, and a bug absorbed into a log line is
+        billed as an outage. `QueryExpansionService.expand` pins the identical
+        distinction in two cases of its own.
+
+        **The commit is here rather than left to the caller**, and the reason
+        is `cli._session_for`: it yields a session and disposes the engine
+        **without ever committing**, so on the CLI path the row would be rolled
+        back and the search would be recorded nowhere with nothing to say so.
+        `api/deps.get_session` commits again when the handler returns and that
+        second commit is a no-op over an already-committed transaction; what it
+        costs on the route is that any read *after* this point begins a new
+        transaction, which is why this is the last thing `search` does.
+
+        **The query text reaches no log line.** PRD 08's rule is written about
+        credentials (`docs/prd/08-operations.md:165`) and this extends it by
+        analogy rather than by citation: what somebody typed into a search box
+        is household state, `search_queries.query` is where it is meant to live
+        -- durable, household-scoped and deletable with the household -- and a
+        Loki record is none of the three. The failure is legible without it:
+        the exception says what the store refused, and the row that was lost is
+        one row.
+        """
+        if self._analytics is None or user_id is None:
+            return
+        try:
+            await self._analytics.queries.record(
+                SearchQueryRecord(
+                    id=new_id(),
+                    at=self._now(),
+                    user_id=user_id,
+                    query=query,
+                    mode=mode,
+                    result_count=results,
+                    latency_ms=_ms(elapsed),
+                )
+            )
+            await self._analytics.commit()
+        except UsherPortError as exc:
+            logger.error(
+                "the search analytics row was refused; this search is unrecorded: {error}",
+                error=str(exc) or type(exc).__name__,
+            )
 
     async def suggest(
         self, prefix: str, limit: int = 10, *, tier: SuggestTier
@@ -713,6 +879,31 @@ class SearchService:
         `test_the_hydration_is_written_once_rather_than_once_per_tier` asserts
         it structurally as well as by count -- a duplicated body passes any
         count assertion.
+
+        🔴 **This path writes no `search_queries` row, on either tier, and
+        that is a decision with an argument rather than a measurement
+        deferred.** `search_queries.mode` is a `SearchMode`, which is *"three
+        reachable values"* by its own docstring, and a tier is a disjoint
+        vocabulary (`prefix` | `fuzzy`): storing both under one column is the
+        two-vocabularies-under-one-name hazard PRD 10 already names for
+        `provider`. It would also make every mode-split panel in dashboards 1
+        and 4 a measure of the type-ahead box rather than of search -- tier 1
+        is p50 **0.6 ms** against full text's p50 **33.3 ms** over the same
+        2,993 cases (`.claude/rules/search-and-embeddings.md`), so a client
+        driving this per keystroke would out-number and out-weight the searches
+        by an order of magnitude each.
+
+        **What that costs is stated rather than hidden**: the question PRD 10
+        most wants this table for -- *whether real users type 2-4-character
+        queries at all* -- is a question about this box, and the table cannot
+        answer it in M9. Recording it needs a fourth `SearchMode` member or a
+        tenth column; both are PRD 10 amendments and both are named there so
+        M10 plans it rather than rediscovering it.
+
+        The absence is asserted structurally as well as behaviourally, for the
+        reason the hydration count is: a `suggest` that wrote one row per
+        *refused* prefix and none per answered one would pass a case that only
+        counts rows on the answering path.
         """
         if not prefix.strip():
             return ()
@@ -1000,6 +1191,21 @@ def _blend(**signals: float | None) -> float:
     return total / applied if applied else 0.0
 
 
+def _ms(seconds: float) -> int:
+    """`search_queries.latency_ms`, which is `>= 0` in the column
+    (`ck_search_queries_latency_ms_non_negative`).
+
+    **The clamp is `adapters/llm/openai_compatible.py:181`'s shape and it
+    defends a promise the shipped clock never breaks.** `time.perf_counter` is
+    non-decreasing by contract, so a negative delta is unreachable with it --
+    the injected clock is the only thing that can produce one, which is exactly
+    what makes a guard against a promise nobody breaks testable at all. Without
+    it a backwards clock is a `RepositoryConflict` on the path that has just
+    answered a search correctly.
+    """
+    return max(0, int(seconds * 1000))
+
+
 def _result(title: Title, *, owned: bool, score: float) -> SearchResult:
     return SearchResult(
         title_id=title.id,
@@ -1014,6 +1220,7 @@ def _result(title: Title, *, owned: bool, score: float) -> SearchResult:
 
 __all__ = [
     "EmbeddingDocument",
+    "SearchAnalytics",
     "SearchAnswer",
     "SearchService",
     "SemanticSearchUnavailable",

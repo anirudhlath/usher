@@ -22,29 +22,33 @@ scans this file.
 
 import ast
 import dataclasses
+import inspect
 import math
 import pathlib
+import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from loguru import logger
 
 from tests.fakes.embedding import FakeEmbedder, planted_pair
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
+from tests.fakes.search_query_repository import FakeSearchQueryRepository
 from tests.fakes.taste_repository import FakeTasteRepository, stored_taste
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import TitleKind
 from usher.domain.title import Title
-from usher.ports.errors import PortUnavailable
+from usher.ports.errors import PortUnavailable, RepositoryConflict
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
-from usher.ports.repository import StoredTaste, TitleEmbeddingUpsert
+from usher.ports.repository import SearchQueryRecord, StoredTaste, TitleEmbeddingUpsert
 from usher.ports.rows import RowContext
 from usher.ports.search import (
     SearchDocument,
@@ -58,6 +62,8 @@ from usher.ports.search import (
 )
 from usher.services.query_expansion import QUERY_KEY, QueryExpansionService
 from usher.services.search import (
+    SearchAnalytics,
+    SearchAnswer,
     SearchService,
     SemanticSearchUnavailable,
     SuggestTier,
@@ -113,6 +119,11 @@ _SEEN_AT = datetime(2026, 8, 2, tzinfo=UTC)
 # title against a dated old one) would go on passing while the arithmetic
 # under it drifted.
 _NOW = datetime(2026, 8, 11, tzinfo=UTC)
+
+#: The origin of every injected `clock` below, and it is deliberately not zero
+#: -- see `_Clock`. `time.perf_counter`'s own epoch is unspecified, so a
+#: non-zero origin is also the honest shape of the thing being stood in for.
+_T0 = 1_000.0
 
 _CATALOG: dict[uuid.UUID, tuple[str, float | None]] = {
     _QUIET: ("The Quiet Vacuum", 0.5),
@@ -389,6 +400,75 @@ class _Ports:
         )
 
 
+class _Clock:
+    """A monotone clock a case moves by hand.
+
+    **The origin is 1,000.0 and not 0.0**, for the reason
+    `.claude/rules/testing-discipline.md` records twice: a fixture whose origin
+    is the identity element of the operation under test cannot distinguish the
+    operation from its absence, so at zero an absolute reading
+    (`int(clock() * 1000)`) and a delta (`int((clock() - started) * 1000)`) are
+    the same number and `latency_ms` is pinned by nothing.
+    """
+
+    def __init__(self, *, now: float = _T0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _RefusingQueries(FakeSearchQueryRepository):
+    """A `search_queries` writer that raises whatever it was given, and counts
+    the attempts.
+
+    The count is what makes *"the search still answered"* a statement about the
+    `except` arm rather than about a collaborator that was never reached: a
+    service that stopped writing entirely answers the same search just as
+    happily.
+    """
+
+    def __init__(self, failure: BaseException) -> None:
+        super().__init__()
+        self.failure = failure
+        self.attempts = 0
+
+    async def record(self, record: SearchQueryRecord) -> None:
+        self.attempts += 1
+        raise self.failure
+
+
+class _Recorder:
+    """`search_queries`' retrieval half over the fake, with the commits counted
+    beside it.
+
+    **The count is half the subject.** A row written into a session nobody
+    commits is rolled back when the read's session closes -- `cli._session_for`
+    yields a session and disposes the engine without ever committing -- so
+    "one row" and "one commit" are two claims and a case asserting only the
+    first passes against a service that records nothing durable. The sweep that
+    made this worth counting rather than assuming is the one recorded on
+    `QueryExpansionService`: **a deleted `commit()` survived 42 cases.**
+    """
+
+    def __init__(self, queries: FakeSearchQueryRepository | None = None) -> None:
+        self.queries = FakeSearchQueryRepository() if queries is None else queries
+        self.commits = 0
+
+    def bind(self) -> SearchAnalytics:
+        return SearchAnalytics(queries=self.queries, commit=self._commit)
+
+    async def _commit(self) -> None:
+        self.commits += 1
+
+    @property
+    def rows(self) -> list[SearchQueryRecord]:
+        return list(self.queries.rows.values())
+
+
 def _cos(left: Sequence[float], right: Sequence[float]) -> float:
     """Cosine over two planted unit vectors, for a case's own premise.
 
@@ -417,6 +497,8 @@ async def _service(
     result_limit: int = 50,
     expander: _Expander | None = None,
     ports: _Ports | None = None,
+    analytics: SearchAnalytics | None = None,
+    clock: Callable[[], float] = time.perf_counter,
     now: datetime | None = None,
     centroid: Sequence[float] | None = None,
     centroid_for: uuid.UUID = _HOUSEHOLD,
@@ -488,7 +570,9 @@ async def _service(
         result_limit=result_limit,
         embedder=embedder,
         expander=None if expander is None else expander.service,
+        analytics=analytics,
         now=(lambda: _NOW) if now is None else (lambda: now),
+        clock=clock,
     )
 
 
@@ -1525,6 +1609,357 @@ async def test_the_filters_reach_the_index_unchanged() -> None:
     service = await _service(index)
     await service.search("vacuum", filters=filters)
     assert index.requests[0].filters == filters
+
+
+# --- `search_queries`' retrieval half (F2) ---------------------------------
+#
+# One row per *answered* search, none per keystroke, and the commit that makes
+# it durable. PRD 10's `## Analytics tables`; the write is `record()` and the
+# outcome half (`clicked_title_id`, `played`) is F3's `record_outcome`.
+
+
+async def test_a_search_records_one_row_carrying_the_mode_that_ran() -> None:
+    """The write, and the seven columns F2 owns.
+
+    Fails against a service that writes nothing, which is every version of
+    this file before F2 -- and the failure is silent in production rather than
+    loud: a search answers correctly, the two histograms record, and PRD 10's
+    zero-result rate is computed over an empty table forever.
+
+    **One row, counted rather than looked for.** `assert recorder.rows` is
+    satisfied by a service that writes one row per *hit*, which is the shape
+    an implementation that moved the write inside the ranking loop produces --
+    and which renders identically.
+    """
+    recorder = _Recorder()
+    index = _ScriptedIndex(
+        SearchOutcome(
+            hits=(
+                SearchHit(title_id=_QUIET, score=_STRONG),
+                SearchHit(title_id=_POPULAR, score=_WEAK),
+            )
+        )
+    )
+    service = await _service(index, analytics=recorder.bind())
+
+    answer = await service.search("the quiet vacuum", user_id=_HOUSEHOLD)
+
+    assert len(answer.results) == 2, "the premise: more results than rows, or a count says nothing"
+    (row,) = recorder.rows
+    assert (row.user_id, row.query, row.mode, row.result_count) == (
+        _HOUSEHOLD,
+        "the quiet vacuum",
+        SearchMode.FULL_TEXT,
+        2,
+    )
+    assert row.at == _NOW
+    assert recorder.commits == 1
+
+
+async def test_a_fused_request_served_as_full_text_records_full_text() -> None:
+    """`mode` is the mode that **ran**, byte for byte the rule already applied
+    to `usher.search.duration`'s label.
+
+    Fails against the naive first draft, which records `requested` and passes
+    the case above on its first try: every panel splitting by mode would then
+    attribute full-text latency and full-text result counts to a lane that did
+    not run. The degradation is carried by `SearchAnswer.requested_mode` on the
+    wire and deliberately has no column (group F's third ruling), so the row is
+    the *only* thing this table says about which lane answered.
+    """
+    recorder = _Recorder()
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),))),
+        embedder=None,
+        analytics=recorder.bind(),
+    )
+
+    answer = await service.search("vacuum", mode=SearchMode.FUSED, user_id=_HOUSEHOLD)
+
+    assert (answer.requested_mode, answer.mode) == (SearchMode.FUSED, SearchMode.FULL_TEXT), (
+        "the premise: the request degraded, or the two spellings agree"
+    )
+    (row,) = recorder.rows
+    assert row.mode is SearchMode.FULL_TEXT
+
+
+async def test_a_blank_query_records_nothing() -> None:
+    """A search box sends one between every character, and a keystroke is not
+    a data point.
+
+    The argument transfers unchanged from the guard it sits behind: counted,
+    blank queries would dominate the table exactly as they would dominate the
+    two histograms, and PRD 10's zero-result rate would become a measure of
+    how fast somebody types. `ck_search_queries_query_not_empty` refuses the
+    row anyway, so a writer above the guard is also a `RepositoryConflict` per
+    keystroke.
+
+    Fails against a writer placed above the blank guard rather than below it,
+    with the positive control beside it -- the same service answering a real
+    query -- because "no rows" is also what a service that stopped writing
+    entirely produces.
+    """
+    recorder = _Recorder()
+    index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),)))
+    service = await _service(index, analytics=recorder.bind())
+
+    assert await service.search("   ", user_id=_HOUSEHOLD) == SearchAnswer()
+    assert recorder.rows == []
+    assert recorder.commits == 0
+
+    await service.search("vacuum", user_id=_HOUSEHOLD)
+    assert len(recorder.rows) == 1, "the control: this fixture can write a row at all"
+
+
+async def test_a_search_nobody_is_speaking_for_records_nothing() -> None:
+    """`search_queries.user_id` is `NOT NULL` behind a real foreign key, so a
+    search with no household has no row to write.
+
+    Both shipped callers resolve one (`GET /search` through `DefaultUserIdDep`,
+    `usher search` through `ensure_default_user`), so this is unreachable on
+    the surfaces that exist -- and the alternative spellings are worse than an
+    absent row in the two ways this project already refuses: a placeholder id
+    is a statement about a household nobody is, and a nullable column would put
+    back exactly the "not implemented or genuinely nothing" ambiguity PRD 10
+    spends a paragraph refusing about `clicked_title_id`.
+
+    The control is the same service asked the same question with a household,
+    because "no rows" is also what a service that writes nothing at all
+    produces.
+    """
+    recorder = _Recorder()
+    index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),)))
+    service = await _service(index, analytics=recorder.bind())
+
+    answer = await service.search("vacuum", user_id=None)
+
+    assert len(answer.results) == 1, "the premise: the search answered"
+    assert (recorder.rows, recorder.commits) == ([], 0)
+
+    await service.search("vacuum", user_id=_HOUSEHOLD)
+    assert len(recorder.rows) == 1, "the control: this fixture can write a row at all"
+
+
+async def test_the_latency_is_the_measured_interval_and_not_an_absolute_reading() -> None:
+    """`latency_ms` is `clock() - started`, taken from one read.
+
+    Fails against `int(clock() * 1000)` -- an absolute reading of a clock whose
+    epoch is unspecified -- which is why `_Clock`'s origin is 1,000.0 and not
+    zero. At zero the two spellings are the same number, which is the
+    identity-element trap `.claude/rules/testing-discipline.md` records for a
+    fixture clock and which this file would otherwise reproduce.
+    """
+    clock = _Clock()
+    recorder = _Recorder()
+
+    async def _advance(request: SearchRequest) -> SearchOutcome:
+        clock.advance(0.25)
+        return SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),))
+
+    index = _ScriptedIndex(SearchOutcome())
+    index.search = _advance  # type: ignore[method-assign]
+    service = await _service(index, analytics=recorder.bind(), clock=clock)
+
+    await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    (row,) = recorder.rows
+    assert row.latency_ms == 250
+
+
+async def test_a_clock_that_runs_backwards_is_clamped_rather_than_refused() -> None:
+    """`max(0, ...)`, the shape `adapters/llm/openai_compatible.py` already
+    ships.
+
+    `time.perf_counter` is non-decreasing by contract, so the guard is
+    unreachable with the shipped clock and the injected one is the only thing
+    that can falsify the promise it defends -- which is precisely what makes it
+    testable. Without the clamp a negative delta is a `latency_ms` the column
+    refuses (`ck_search_queries_latency_ms_non_negative`), i.e. a
+    `RepositoryConflict` on a search that answered perfectly.
+    """
+    clock = _Clock()
+    recorder = _Recorder()
+
+    async def _rewind(request: SearchRequest) -> SearchOutcome:
+        clock.advance(-5.0)
+        return SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),))
+
+    index = _ScriptedIndex(SearchOutcome())
+    index.search = _rewind  # type: ignore[method-assign]
+    service = await _service(index, analytics=recorder.bind(), clock=clock)
+
+    answer = await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    assert len(answer.results) == 1, "the premise: the search still answered"
+    (row,) = recorder.rows
+    assert row.latency_ms == 0
+
+
+async def test_a_refused_row_still_answers_the_whole_search_and_never_logs_the_query() -> None:
+    """PRD 08's degradation rule, in the one place a bookkeeping failure could
+    cost a household its results.
+
+    **"It did not raise" is also what a service that stopped writing entirely
+    produces**, so the positive control is in this case rather than in a
+    neighbouring one: the same fixture with a working repository writes exactly
+    one row and commits once.
+
+    **And the query text reaches no log line.** PRD 08's rule is about
+    credentials and this extends it by analogy: what somebody typed is
+    household state, `search_queries.query` is where it is meant to live, and
+    a Loki record is neither household-scoped nor deletable with the household.
+    The sink is asserted non-empty first -- a "the query is absent" assertion
+    over an empty sink passes against a service that logged nothing at all, and
+    would go on passing if the `except` arm were deleted.
+    """
+    query = "kestrelbound and the seventeen vacuums"
+    refusing = _RefusingQueries(RepositoryConflict("latency_ms out of range"))
+    recorder = _Recorder(refusing)
+    index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),)))
+    service = await _service(index, analytics=recorder.bind())
+
+    lines: list[str] = []
+    sink = logger.add(lines.append, level="TRACE", serialize=True)
+    try:
+        answer = await service.search(query, user_id=_HOUSEHOLD)
+    finally:
+        logger.remove(sink)
+
+    assert len(answer.results) == 1
+    assert answer.mode is SearchMode.FULL_TEXT
+    assert refusing.attempts == 1, "the premise: the write was attempted"
+    assert recorder.commits == 0, "a refused row is not a commit"
+    assert lines, "the write failed silently -- nothing said so"
+    assert "latency_ms out of range" in lines[0]
+    assert query not in lines[0], lines[0]
+    assert "kestrelbound" not in lines[0], lines[0]
+
+    working = _Recorder()
+    control = await _service(index, analytics=working.bind())
+    await control.search(query, user_id=_HOUSEHOLD)
+    assert (len(working.rows), working.commits) == (1, 1), "the control: this fixture can write"
+
+
+async def test_a_bug_in_the_repository_is_not_absorbed_as_an_upstream_failure() -> None:
+    """`except UsherPortError`, deliberately not `except Exception`.
+
+    `QueryExpansionService` pins the identical distinction in two cases of its
+    own, for the reason recorded there: a `TypeError` swallowed into a log line
+    is billed as an upstream outage, and the two have opposite fixes. A refused
+    row is a fact about the store; a `TypeError` here is a fact about Usher.
+    """
+    recorder = _Recorder(_RefusingQueries(TypeError("record() got an unexpected keyword")))
+    index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),)))
+    service = await _service(index, analytics=recorder.bind())
+
+    with pytest.raises(TypeError):
+        await service.search("vacuum", user_id=_HOUSEHOLD)
+
+
+def test_the_interval_clock_is_monotone_and_the_wall_clock_is_not_the_same_callable() -> None:
+    """Two clocks, and the defaults say which is which.
+
+    `time.time` would compute the same delta on almost every search and a
+    *negative* one across an NTP step or a DST-shaped adjustment -- which the
+    clamp then renders as `latency_ms = 0`, a plausible number in a panel
+    rather than an error anywhere. Nothing behavioural can tell the two apart
+    (both are callables answering floats a fixture replaces), so the signature
+    is where it is pinned, on the shape
+    `.claude/rules/testing-discipline.md` records for `OpenAICompatibleClient`.
+    """
+    parameters = inspect.signature(SearchService.__init__).parameters
+    assert parameters["clock"].default is time.perf_counter
+    assert parameters["now"].default is not parameters["clock"].default
+
+
+@pytest.mark.parametrize("tier", list(SuggestTier))
+async def test_type_ahead_records_no_row_on_either_tier(tier: SuggestTier) -> None:
+    """A keystroke is not a search, and both tiers agree.
+
+    Storing a tier under `search_queries.mode` -- a `SearchMode`, three
+    reachable values -- would be two vocabularies under one name, and tier 1's
+    p50 of 0.6 ms against full text's 33.3 ms means the suggest rows would
+    out-number and out-weight the searches by an order of magnitude each in
+    every mode-split panel PRD 10 builds.
+
+    **Both an answered prefix and a refused one**, because a writer placed
+    above `suggest`'s blank guard and a writer placed below it are two
+    different defects and a case exercising one arm cannot see the other. The
+    control is the same recorder writing on the search path, so "no rows" is
+    not merely what an unwired fixture produces.
+    """
+    hits = (SearchHit(title_id=_QUIET, score=1.0),)
+    recorder = _Recorder()
+    index = _ScriptedIndex(SearchOutcome(hits=(SearchHit(title_id=_QUIET, score=_STRONG),)))
+    service = await _service(
+        index, suggestions=_ScriptedSuggest(hits), tier=tier, analytics=recorder.bind()
+    )
+
+    assert len(await service.suggest("vac", tier=tier)) == 1, "the premise: the box answered"
+    assert await service.suggest("  ", tier=tier) == ()
+    assert (recorder.rows, recorder.commits) == ([], 0)
+
+    await service.search("vacuum", user_id=_HOUSEHOLD)
+    assert len(recorder.rows) == 1, "the control: this recorder does write on the search path"
+
+
+def test_the_suggest_path_cannot_reach_the_analytics_writer_at_all() -> None:
+    """**Structural, because the behavioural pair above cannot see a third
+    arm.**
+
+    A `suggest` that recorded on some *other* condition -- a hit count, a tier,
+    a prefix length the cases above do not seed -- passes both arms of the
+    parametrised case and writes a row on the request a client makes most.
+    Nothing in the acceptance can be satisfied by "it did not happen in these
+    two fixtures", so the claim is made about the body: `suggest` names neither
+    the collaborator nor the write.
+
+    Fails: any `self._analytics` reference inside `suggest`, and any `record`
+    call there.
+    """
+    tree = ast.parse((_SERVICES / "search.py").read_text())
+    bodies = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "suggest"
+    ]
+    # The premise: a scan that found no function passes exactly like a scan
+    # that found a correct one.
+    assert len(bodies) == 1, f"the scan found {len(bodies)} `suggest` definitions"
+    named = {node.attr for node in ast.walk(bodies[0]) if isinstance(node, ast.Attribute)} | {
+        node.id for node in ast.walk(bodies[0]) if isinstance(node, ast.Name)
+    }
+    assert not named & {"_analytics", "record", "SearchQueryRecord", "commit"}, sorted(named)
+    # And the control, so the scan is known to be reading a real body rather
+    # than an empty one: the two hydration reads it *does* make are there.
+    assert {"list_by_ids", "owned_title_ids"} <= named
+
+
+def test_a_row_is_a_search_and_never_a_page() -> None:
+    """The rule group A's cursor pagination makes necessary, held by a
+    signature rather than by a guard.
+
+    A request carrying a cursor must write nothing, or the zero-result rate
+    PRD 10 exists to compute is diluted by every scroll. `GET /search` and
+    `SearchService.search` carry no cursor at all today, so the rule is
+    satisfied by construction -- and *that* is the thing worth asserting,
+    because the day somebody adds pagination here the decision has to be made
+    again rather than defaulted. Same shape as B6's finding that a port taking
+    a typed position cannot express an `OFFSET` defect: an unreachable defect
+    is a design result, and a design result needs a case or it silently stops
+    being one.
+
+    The premise is that this vocabulary is real in this codebase rather than
+    invented for the assertion: `GET /admin/unmatched` does take a `cursor`.
+    """
+    parameters = set(inspect.signature(SearchService.search).parameters)
+    assert parameters, "the premise: the signature was read at all"
+    assert not parameters & {"cursor", "after", "offset", "page", "position"}, sorted(parameters)
+
+    routers = pathlib.Path(__file__).parents[2] / "src" / "usher" / "api" / "routers"
+    assert "cursor: Annotated" in (routers / "unmatched.py").read_text(), (
+        "the premise: `cursor` is a request parameter this API really has"
+    )
 
 
 @pytest.mark.parametrize("tier", list(SuggestTier))

@@ -111,6 +111,15 @@ async def _wipe(sessions: async_sessionmaker[AsyncSession]) -> None:
         # `TRUNCATE sources CASCADE` takes `media_items` with it, which is what
         # leaves this file's titles with no referents.
         await session.execute(text("TRUNCATE sources CASCADE"))
+        # PRD 10's analytics rows, since M9's F2: every `GET /search` through
+        # this file writes one and commits it. **They have to go before any
+        # other file deletes the default user** -- `search_queries.user_id` is
+        # `ON DELETE RESTRICT` on purpose (a household's search history is user
+        # state), so a row left behind here turns a neighbouring file's
+        # `DELETE FROM users WHERE name = 'default'` into a foreign-key
+        # violation rather than into a slow test. Unscoped rather than marked,
+        # because this table has no column this file could mark.
+        await session.execute(text("DELETE FROM search_queries"))
         await session.execute(
             text("DELETE FROM titles WHERE sort_name LIKE :pattern"), {"pattern": f"{MARK} %"}
         )
@@ -427,3 +436,94 @@ async def test_a_blank_suggest_is_answered_without_touching_either_index(
             "min_query_length": 4 if tier == "prefix" else 1,
             "results": [],
         }
+
+
+async def test_one_answered_request_writes_exactly_one_search_queries_row(
+    client: AsyncClient, sessions: async_sessionmaker[AsyncSession], catalog: _Catalog
+) -> None:
+    """PRD 10's analytics row, through the shipped request and read back from a
+    session the request never touched.
+
+    **`get_session` commits when the handler returns, so this reads a committed
+    row either way** -- which is exactly why the durability claim is made one
+    layer down, in
+    `tests/integration/test_services_search.py::
+    test_the_analytics_row_is_committed_and_a_second_session_can_read_it`, on
+    the root that has no such commit. What this file adds is the three facts
+    only a request has: that the wiring is reached at all, that the household
+    is `DefaultUserIdDep`'s and not an invented one, and that **one request is
+    one row**.
+
+    Two requests rather than one, because a single request cannot tell "one row
+    per request" from "one row, ever" -- and the second asks for a mode that
+    degrades, so the `mode` column is asserted against a request whose
+    `requested_mode` differs from it.
+    """
+    first = await client.get("/search", params={"q": TERM})
+    second = await client.get("/search", params={"q": TERM, "mode": "fused"})
+    assert (first.status_code, second.status_code) == (200, 200), second.text
+    assert second.json()["requested_mode"] == "fused", "the premise: the second request degraded"
+    assert len(first.json()["results"]) == 2, "the premise: the search answered"
+
+    async with sessions() as reader:
+        rows = (
+            await reader.execute(
+                text(
+                    "SELECT q.query, q.mode, q.result_count, q.latency_ms, "
+                    "q.clicked_title_id, q.played, u.is_default "
+                    "FROM search_queries q JOIN users u ON u.id = q.user_id ORDER BY q.id"
+                )
+            )
+        ).all()
+
+    assert [(one.query, one.mode, one.result_count) for one in rows] == [
+        (TERM, "full_text", 2),
+        (TERM, "full_text", 2),
+    ]
+    # The outcome half is F3's, and it is written as literals rather than left
+    # to a column default -- so a dashboard reads a real `false` rather than a
+    # column nobody filled.
+    assert [(one.clicked_title_id, one.played) for one in rows] == [(None, False), (None, False)]
+    # Not an invented id: `DefaultUserIdDep` resolves PRD 01's singleton, which
+    # is the only household this deployment has.
+    assert [one.is_default for one in rows] == [True, True]
+    assert all(one.latency_ms >= 0 for one in rows), rows
+
+
+async def test_a_keystroke_writes_no_row_on_either_tier(
+    client: AsyncClient, sessions: async_sessionmaker[AsyncSession], catalog: _Catalog
+) -> None:
+    """`GET /search/suggest` records nothing -- answered, refused, or blank --
+    and the control is a `/search` request through the same client.
+
+    Storing a `SuggestTier` under `search_queries.mode`, a `SearchMode`, would
+    be two vocabularies under one name; and tier 1 at p50 0.6 ms against full
+    text's 33.3 ms means a keystroke-driven client would out-number the
+    searches by an order of magnitude in every mode-split panel. The argument
+    is in `SearchService.suggest`'s docstring and in PRD 10, and this is what
+    says the shipped route agrees with it.
+
+    Four requests, because the route has three arms -- answered, below
+    `min_query_length`, and blank -- and a writer placed on any one of them is
+    a different defect.
+    """
+    for params in (
+        {"q": TYPED_PREFIX},
+        {"q": TYPED_PREFIX[:3]},
+        {"q": "   "},
+        {"q": TYPED_TYPO, "tier": "fuzzy"},
+    ):
+        assert (await client.get("/search/suggest", params=params)).status_code == 200, params
+
+    async with sessions() as reader:
+        assert await _analytics_rows(reader) == 0
+
+    assert (await client.get("/search", params={"q": TERM})).status_code == 200
+    async with sessions() as reader:
+        assert await _analytics_rows(reader) == 1, (
+            "the control: this deployment does write a row on the search path"
+        )
+
+
+async def _analytics_rows(session: AsyncSession) -> int:
+    return int((await session.execute(text("SELECT count(*) FROM search_queries"))).scalar_one())

@@ -1081,6 +1081,30 @@ def get_search_service(session: SessionDep, settings: SettingsDep) -> SearchServ
     household would be a per-request object cached per session, and the two
     would disagree the first time a request carried an identity.
 
+    **`search_queries` is written from here too, and the commit inside the
+    service is not a duplicate of `get_session`'s.** `build_search_service`
+    hands `SearchService` a `SearchAnalytics` over this session and this
+    session's `commit`, so `GET /search` writes PRD 10's analytics row and
+    makes it durable before the handler returns (F2). The reason the service
+    commits rather than leaning on `get_session` is the *other* root:
+    `cli._session_for` yields a session and disposes its engine without ever
+    committing, so a row left for the caller would be lost on `usher search`
+    and nothing would say so.
+
+    **What it costs on this root is one property, stated rather than
+    discovered**: the commit ends the request's transaction, so any read after
+    the search begins a new one. `GET /search` has none -- the write is the
+    last thing `SearchService.search` does and the route returns the DTO -- and
+    a route that grew a second read after it would be reading in a second
+    transaction. `get_reconcile_service` and `get_similarity_service` already
+    take the same `session.commit` for the same reason.
+
+    **`GET /search/suggest` writes nothing, on either tier**, and it shares
+    this dependency: the absence is a property of `SearchService.suggest`
+    rather than of the wiring, argued in that method's docstring and in PRD 10.
+    A keystroke path that wrote a row would out-number the searches by an order
+    of magnitude, and a `SuggestTier` is not a `SearchMode`.
+
     **The taste term is served here despite the missing model, and that is a
     read rather than an exception to the paragraph above.** PRD 05's sixth
     ranking term needs a *centroid*, not an *embedder*:

@@ -131,6 +131,14 @@ async def _purge(settings: Settings) -> None:
             "DELETE FROM llm_calls",
             "DELETE FROM watch_states",
             "DELETE FROM media_items",
+            # M9's analytics table, and it has to precede the users delete
+            # below: `search_queries.user_id` is `ON DELETE RESTRICT` on
+            # purpose, so a row `usher search` committed turns that statement
+            # into a foreign-key violation. Like `llm_calls` two lines up it
+            # cascades from nothing; unlike it, it *does* have a `user_id` --
+            # which is exactly what makes the ordering load-bearing rather than
+            # the scoping.
+            "DELETE FROM search_queries",
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM sources WHERE name LIKE 'cli-%'",
             "DELETE FROM titles WHERE sort_name = 'cli-orphan'",
@@ -683,6 +691,48 @@ async def test_search_says_no_match_rather_than_printing_nothing(
     assert "results=0" in printed
 
 
+async def test_a_cli_search_leaves_a_search_queries_row_behind_the_process(
+    cli_settings: Settings, clean_slate: None, clean_search: None
+) -> None:
+    """**The root that would lose the row, and the only one where "durable"
+    means anything a session cannot fake.**
+
+    `cli._session_for` yields a session and disposes the engine **without ever
+    committing**, so a `search_queries` row left for the caller is rolled back
+    on the way out and `usher search` records nothing, silently. What makes
+    that invisible in every other file is that `api/deps.get_session` *does*
+    commit -- so a service leaning on its caller looks correct on the route and
+    is wrong here.
+
+    Read back through a session opened **after** `_search` returned and its
+    engine was disposed, which is as close to "survives the process" as a test
+    in this process gets: nothing of the writer's is still open.
+
+    The household is the same singleton `usher search` resolved, and the row's
+    presence proves the household row committed too -- `ensure_default_user`
+    only flushes, and `search_queries.user_id` is a real foreign key, so a
+    commit carrying the row without its household would have been refused
+    rather than silently partial.
+    """
+    await _seed_searchable(cli_settings, [_searchable("The Quiet Vacuum")])
+
+    await _search(cli_settings, query="vacuum", mode="full_text", limit=5, filters=SearchFilters())
+
+    async with _session_for(cli_settings) as reader:
+        rows = (
+            await reader.execute(
+                text(
+                    "SELECT q.query, q.mode, q.result_count, q.played, q.clicked_title_id, "
+                    "u.name FROM search_queries q JOIN users u ON u.id = q.user_id"
+                )
+            )
+        ).all()
+
+    assert [(one.query, one.mode, one.result_count) for one in rows] == [("vacuum", "full_text", 1)]
+    assert [(one.played, one.clicked_title_id) for one in rows] == [(False, None)]
+    assert [one.name for one in rows] == ["default"]
+
+
 @pytest.mark.parametrize("tier", [tier.value for tier in SuggestTier])
 async def test_suggest_finds_a_title_by_a_prefix_of_its_name(
     cli_settings: Settings, clean_search: None, capsys: pytest.CaptureFixture[str], tier: str
@@ -1023,6 +1073,10 @@ async def _purge_curation(settings: Settings) -> None:
             # correlation key -- so a committing curate case has to clear the
             # whole table rather than scope a delete by household.
             "DELETE FROM llm_calls",
+            # `search_queries` does **not** cascade from `users` -- it is the
+            # one `ON DELETE RESTRICT` reference to that table -- so it goes
+            # first or the delete below fails on a foreign key.
+            "DELETE FROM search_queries",
             # `curated_rows` and the stored taste profile both cascade from
             # `users`, so this one delete reaches everything the run wrote for
             # the household.

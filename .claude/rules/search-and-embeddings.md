@@ -848,3 +848,44 @@ the shape. **No statement changed** — no floor, no cap, no index, no `UNION`.
   curve over a `title_search_names` that carries T7's **alias** rows as well as
   the 10.9M person rows it was taken over — the shipped table is larger than
   the measured one, so the curve is optimistic in the direction that matters.
+
+## What one `search_queries` row costs, and the plan's own estimate of it was an order of magnitude out (2026-08-12, M9 F2)
+
+**Measured once, on a throwaway `pgvector/pgvector:pg17` container of this
+driver's own** — never `usher-m9-pg` or `usher-b3-pg`, which other agents hold
+— with the real migration chain (`alembic upgrade head`, `m09c`) and a warm
+connection, 2,000 iterations each. Driver outside the working tree at
+`/var/tmp/m9-F2/`.
+
+| | p50 | p95 | p99 | max |
+|---|---|---|---|---|
+| `record()` **+** `commit()` — what F2 adds per answered search | **3.957 ms** | 4.738 ms | 7.117 ms | 10.194 ms |
+| `record()` alone (SAVEPOINT + INSERT, no commit) | **0.909 ms** | 1.078 ms | — | 2.537 ms |
+| `commit()` alone | **2.965 ms** | 3.520 ms | — | 11.004 ms |
+| floor: `SELECT 1` + `commit()` on the same connection | 0.549 ms | 0.658 ms | — | — |
+
+**F2's acceptance said the write sits "on a path whose p50 is two orders of
+magnitude larger" and that is wrong by a factor of ten.** Against this file's
+recorded full-text figures — p50 **33.3 ms**, p95 **208.8 ms** over 2,993 cases
+at 1,271,138 titles — the write is **11.9% of a p50 search** and 2.3% of a p95
+one: **one** order of magnitude, not two, and at the median it is an eighth of
+the search rather than a hundredth. The conclusion the estimate was supporting
+survives (no bar is minted, and none is needed), but a reader pricing a future
+change off *"two orders of magnitude"* would be out by 10×.
+
+**Three quarters of it is the commit, not the INSERT**, and that is the part
+worth carrying: `search_queries` has no index beyond its primary key, so the
+INSERT itself is 0.9 ms and the rest is one WAL flush. Two consequences.
+`usher search` had no commit at all before F2, so it pays the whole 4 ms. On
+`GET /search` the request *did* already commit through `api/deps.get_session`
+— but on a read-only transaction that commit flushes nothing, so the marginal
+cost on the route is the same ~3.4 ms above the floor rather than the INSERT
+alone. And anything that later records a *keystroke* multiplies this by the
+suggest path's rate, which is the volume half of PRD 10's argument for why
+`GET /search/suggest` writes no row.
+
+Caveats, stated because they bound the number rather than decorate it: a fresh
+container with `fsync=on` and an empty table, on an otherwise-idle host, with
+one connection and one prepared statement — so this is the steady-state cost of
+a warm path and not a first-call or a contended one, and the INSERT figure is a
+property of a table with no secondary index that a later index would move.
