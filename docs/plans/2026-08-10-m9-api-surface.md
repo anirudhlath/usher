@@ -8977,8 +8977,9 @@ property ADR-0020 exists for.
 
 Measured on the merge of both tracks, `milestone/m9-api-surface` at `45da24a`.
 **Of this plan's 74 tasks, 70 are merged; T4 is withdrawn** with the IMDb
-entity design that failed its own size bar; **H4 and H5 did not run**; and this
-is H7. Counted from the merge commits rather than recalled: 66 carry a
+entity design that failed its own size bar; **H4 and H5 did not run at the
+gate — they ran two days later, on 2026-08-12, and both passed** (the section
+after this one); and this is H7. Counted from the merge commits rather than recalled: 66 carry a
 `merge(m9): X` subject naming themselves, and the other four are **M1**
 (`1bd94c2`) and **A1** (`4e0935b`), which predate that convention and are both
 ancestors of `HEAD`; **B11**, which shares `merge(m9): B10 and B11` because
@@ -8990,15 +8991,26 @@ owns is green, the whole-suite mutation sweep found no unintended survivor, and
 the one operational obligation the milestone left open — the neighbour rebuild
 S7's blend change invalidated — has been discharged against the real catalog
 and is recorded below with the row count beside it. **And the live Emby
-verification did not run.** H4 (`/play` → ticket → `302` → a real 206) and H5
-(the watch write-back read back *from Emby*) are the two tasks whose entire
-product is live evidence, there are no Emby credentials on this host, and a run
-that did not run is not a pass. M9 ships saying so, in PRD 09, in
-`CLAUDE.md`'s milestone table, in `.claude/rules/milestone-boundary-calls.md`
-and here. Verified rather than relayed at the gate: `.env` holds
-`USHER_SECRET_KEY` and `USHER_TMDB_API_KEY` and nothing else, and `sources` is
-**0 rows in all three catalogs on this box**, so no Emby server was ever
-configured for either task to drive.
+verification did not run *at this gate*.** H4 (`/play` → ticket → `302` → a real
+206) and H5 (the watch write-back read back *from Emby*) are the two tasks whose
+entire product is live evidence, and M9 shipped saying they had not run, in PRD
+09, in `CLAUDE.md`'s milestone table, in
+`.claude/rules/milestone-boundary-calls.md` and here.
+
+🔴 **The reason given here was wrong, and correcting it is the most valuable
+thing the follow-up run returned.** This gate said *"verified rather than
+relayed: `.env` holds `USHER_SECRET_KEY` and `USHER_TMDB_API_KEY` and nothing
+else, and `sources` is 0 rows in all three catalogs on this box, so no Emby
+server was ever configured for either task to drive."* Both halves of that are
+true and neither supports the conclusion: **the operator's Emby base URL, access
+token, user id and device id were in a Home Assistant secrets file one directory
+outside the repository the whole time** — which is exactly where `CLAUDE.md`'s
+live-verification rule says such a run reads them from, and an empty `sources`
+table is a consequence of never having configured one rather than evidence that
+one cannot be. **A negative established by checking the one place the answer was
+expected is not a negative.** H4 and H5 ran on 2026-08-12 against a real Emby
+4.9.5.0 and **both passed**; the section immediately below is that run, and the
+eight sites that carried the wrong claim are corrected in the same commit.
 
 ### The gate
 
@@ -9106,3 +9118,152 @@ which nine ledger entries in this milestone deselect as intermittent, **passed
 5 of 5 whole-`tests/integration` runs and appears in none of the fifteen
 whole-suite sweep runs' failure lists.** G1's bounded poll closed it. A
 deselection inherited from a ledger is a deselection nobody measured.
+
+---
+
+## The live Emby verification — H4 and H5, run 2026-08-12, two days after the gate
+
+Both halves passed. **The refutation is not in the guess list — it is the
+milestone's own premise for not running them**, and it is stated first because
+it is worth more than either result.
+
+### What this run refutes
+
+🔴 **"No Emby credentials exist on this host" was false, and the way it was
+established is the finding.** M9 wrote that sentence into eight places across
+seven files, each time with a phrase like *"verified rather than assumed"*
+attached. What was verified was `~/code/usher/.env`, plus `sources` being empty
+in all three catalogs on the box. Both facts are true; neither supports the
+conclusion. The operator's Emby base URL, access token, user id and device id
+sit in `~/homeassistant/config/secrets.yaml` — one directory outside the
+repository, and precisely the *"operator's own secrets file"* that `CLAUDE.md`'s
+live-verification rule directs such a run to read. An empty `sources` table is a
+consequence of nobody having configured a source, not evidence that nobody
+could. **A negative established by checking the one place the answer was
+expected is not a negative**, and this one cost the milestone the two tasks
+whose entire product is live evidence.
+
+🔴 **H6's reconciliation counted five sites; there are eight, across seven
+files.** The three it missed are `README.md`, `docs/prd/README.md` and
+`docs/plans/progress.md` — and PRD 09 carries the claim **twice**, once in the
+M9 table row and once in the boundary-calls section. `test_docs_currency.py`
+holds the two *status tables* in step with the plan files; nothing holds a
+*claim* in step with itself, which is how one sentence came to be maintained by
+hand in seven places.
+
+🔴 **H5's own stated risk did not materialise, and the honest reading is "not
+observed", not "cannot happen".** The task spec warns that *"Emby's own indexing
+is asynchronous; a read-back immediately after a 204 may lag"* and asks for
+bounded polling with the observed latency recorded rather than a magic sleep.
+Measured across three writes: the change was visible on the **first** read every
+time, **0.141 s / 0.142 s / 0.143 s** after the worker subprocess returned. Zero
+polls were consumed. The bounded poll stays, because one household on one
+evening cannot establish the absence of a lag — but nothing in this run had to
+wait for one.
+
+🔴 **The dispatch's `PortRateLimited.retry_after` premise was stale.** It said
+the field is *"constructed at six sites and read nowhere outside its own
+`__init__`"*. At the milestone head it is constructed at six `raise`/`return`
+sites and **read once**, at `services/jobs.py:200` in `JobWorker._fail` — which
+is D9's whole product, landed inside this milestone. The premise was measured
+before D9 and carried forward.
+
+### The bar and the guesses, written before the run
+
+Written to `/var/tmp/h45/BAR.md` before a single request was issued —
+`/var/tmp` rather than `/tmp`, which is tmpfs on this host, so a pre-registered
+bar whose whole value is that it provably predates the numbers does not live in
+RAM. `sha256 e298f159909de916989e4c403221ee78e1fb48dbacca8e510318e2e602b3a087`.
+
+**Every one of the eighteen guesses held.** That is the least interesting
+possible result and it is stated plainly rather than dressed up: this run
+confirmed a design that four earlier live runs had already measured the risky
+parts of, and its value is in the two sentences above and in the four new
+observations below — not in the guess table.
+
+| # | guess | verdict |
+|---|---|---|
+| G1 | two targets, `direct` then `deep_link`, for a single-`MediaSource` movie | HELD |
+| G2 | the absence control fires — the token **is** in the `302`'s `Location` | HELD |
+| G3 | the play body carries no `api_key`, no token, no source host | HELD |
+| G4 | `302` + `Cache-Control: no-store`, `Location` byte-for-byte what `build_stream_targets` builds | HELD |
+| G5 | the redirect target answers **206** with real bytes to a `Range` request | HELD — `Content-Range: bytes 0-65535/729664590`, `video/x-matroska`, 65,536 bytes, first four the Matroska magic |
+| G6 | the double percent-encoding candidate does **not** fire | HELD — the `url=` decoded **once** is exactly the direct ticket URL, and following it answers the same `302` |
+| G7 | the ticket survives the path round trip | HELD — 292 chars, url-safe base64 plus `=`, no `%` |
+| G8 | expiry is not lowerable (a constant, not a setting), so hold a ticket past 300 s | HELD — `302` at 127 s, `404 ticket_invalid` at 312 s |
+| G9 | ADR-0029's deep-link behaviour, observed rather than asserted | HELD |
+| G10 | an all-zero candidate turns up within a few single-item confirmations | HELD — the first one |
+| G11 | the observe-the-change check is **red** before the write | HELD — it answered `False` |
+| G12 | 613 s → 6,130,000,000 ticks, no rounding | HELD |
+| G13 | `PlayCount: 1` idempotently, `Played: true`, a real `LastPlayedDate`, position cleared | HELD |
+| G14 | the unplayed path goes through `UserData`, not `DELETE /PlayedItems`, naming `Played` regardless | HELD |
+| G15 | `DELETE /PlayedItems` restores byte-for-byte | HELD — the diff is `{}` |
+| G16 | `retry_after` → `run_after` **not provoked** | HELD — no `429` in 23 requests, `run_after` `NULL`, no job ever attempted twice |
+| G17 | Usher's own state agrees, as the weaker observation | HELD |
+| G18 | one `usher work --once` per press is enough | HELD — each pass claimed exactly `1 jobs` |
+
+### The request budget, stated and held
+
+**23 requests to the operator's server, and no walk of any kind.** Three
+reachability probes (`/System/Info/Public`, `/System/Info` with the token, and
+`/System/Info` without it as the 401 control), one filtered listing
+(`IncludeItemTypes=Movie&Filters=IsUnplayed&Limit=25`), one single-item
+confirmation, one `get_item` for the bounded ingest, two for H4 (the play
+resolution's `stream_targets` read and the `Range` fetch), fourteen for H5's
+writes, read-backs, idempotency press and restore, and one **after** the scratch
+database and the app were torn down, confirming the operator's account is still
+the object that was recorded before anything was written. Eleven requests to
+Usher on 127.0.0.1:8401. The item was chosen by **filtered request**; the ingest's bound
+is in the **iterator** — `list_items` replaced by a closed one-element list
+feeding the shipped `get_item` → `to_source_item` → `IngestService` path —
+never in `max_pages`, which is the walk's dead-man's switch and would have
+recorded `FAILED`.
+
+### Four observations this run added
+
+- **`MediaSourceId` on this build is `mediasource_<item id>`**, a namespace of
+  its own rather than the item id. `build_stream_targets` spells it
+  `media_source.get("Id") or external_id`; the `or` arm is not what runs here,
+  and a URL built from the item id alone would be a different URL.
+- **A second `POST /PlayedItems` is a complete no-op, not merely a
+  non-increment.** M3 recorded `PlayCount` advancing to 1 idempotently; this run
+  adds that the **whole** `UserData` object is byte-identical afterwards —
+  `LastPlayedDate` is not re-stamped. A retried write-back cannot move a
+  household's play history forward in time.
+- **Usher's `last_played_at` after a local `/played` press is Usher's own write
+  instant, not the one Emby stamped** (`…:40.845654Z` locally against Emby's
+  `…:40.0000000Z`). Nothing reconciles the two until a `watch_history` backfill
+  reads the item back. Recorded, not fixed.
+- 🔴 **Starting the shipped app against a real source is itself an unbounded
+  walk.** `LaneSupervisor` starts a push lane per enabled source and its
+  reconnect gap-closer calls `reconcile(source, SyncRunKind.DELTA, adapter)` —
+  against a 1.1M-item household that is exactly the walk this milestone's rules
+  forbid, issued by `uvicorn` with default settings and no command of its own.
+  This run set `USHER_PUSH_ENABLED=false` and `USHER_WORKER_ENABLED=false`. Any
+  future live HTTP run must, or budget for a delta walk it did not ask for.
+
+### How it was driven
+
+From throwaway scripts in `/var/tmp/h45/`, **outside the working tree**, reading
+the operator's secrets file directly so no credential reaches an argument, an
+environment variable or a shell history. Host, token, user id and every item id
+are redacted from every printed line by one function whose **own control** is
+run first — a redactor that redacts nothing produces output that looks exactly
+like output with no secret in it, so each of the four literals is asserted both
+absent from the scrubbed string and to have changed it.
+
+A scratch `pgvector/pgvector:pg17` of this run's own on port 55437, never
+`usher-postgres-1`, migrated to `m09c`. The operator's secrets file holds an
+access token and a user id rather than a password, so
+`EmbySession._authenticate_locked` was swapped for one that installs the known
+token — the same move M3, M4 and M5 made. **The swap lives in a
+`sitecustomize.py` on `PYTHONPATH` rather than in an in-process monkeypatch**,
+because H5's worker pass has to be a real `usher work --once` **subprocess** and
+a patched parent process cannot reach it; it writes a marker file the caller
+asserts on, because a plant that did not land looks exactly like a check that
+passed.
+
+The commit was grepped for the host, the token, the user id, the device id and
+the item id before it landed, and **the grep's own positive control was run
+against the secrets file itself** — outside the tree — so a grep that matches
+nothing is distinguishable from a grep that does not work.

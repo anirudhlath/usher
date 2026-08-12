@@ -9,9 +9,12 @@ PostgreSQL.
 
 **Status: M9 complete on `milestone/m9-api-surface`.** Nine milestones are built
 and verified, several of them against live third-party services rather than only
-against fakes — and **M9 is the first whose live-verification column carries a
-gap rather than a server**, which is the row to read before trusting the
-playback and write-back paths end to end:
+against fakes. **M9 shipped with a gap in that column and the gap is now
+closed**: its H4/H5 live Emby run happened on 2026-08-12, after the milestone
+gate, because the milestone had concluded no credentials existed here by
+checking one `.env` and stopping. **A negative established by looking in the one
+place the answer was expected is not a negative** — the row below is the one to
+read before trusting the playback and write-back paths end to end:
 
 | | delivers | live-verified against |
 |---|---|---|
@@ -23,7 +26,7 @@ playback and write-back paths end to end:
 | **M6** | `search_document` + GIN, trigram type-ahead, embeddings, `title_neighbors`, RRF fusion, the search CLI | a real 1,271,138-title catalog |
 | **M7** | the composed home screen — nine row providers, `HomeService`, `TasteService`, `DeriveService`, the tag genome, `GET /home` | a real 1,271,570-title catalog |
 | **M8** | LLM curation end to end — `OpenAICompatibleClient` (litellm declined), `curated_rows` + `llm_calls`, the candidate pool, `CurationService` and its validator, `CuratedProvider` as the tenth provider, `JobKind.CURATE`, `POST /admin/rows/regenerate`, `usher curate`, the genome tag vocabulary, query expansion | a local vLLM serving `gemma-4-26b-a4b` over a real 1,271,138-title catalog |
-| **M9** | the whole HTTP surface — PRD 07's Screens, Resources, Actions, Admin and Meta tables behind one RFC 9457 envelope over a closed seven-member `code` vocabulary; keyset cursors; search, the two-tier suggest, browse, similarity, the series hierarchy; the image proxy (`images` + `GET /images/{id}`) and artwork on `RowCard`; `POST /titles|episodes/{id}/play` with the playback ticket and outbound watch write-back; the admin completion (sync, unmatched, bootstrap status + trigger, row-provider toggles, `bootstrap.progress`); `search_queries` whole; `GET /meta/attribution`. **Track 2:** `append_to_response=season/N`, the IMDb akas and credit-names bulk expansion, the priority-tier TMDb crawl | the **live TMDb v3 API** (S3: 130,334 requests over 1.98 h, 130,647 titles enriched; T2/T3 against the real IMDb dumps) — 🔴 **and no Emby server. M9's H4/H5 did not run: there are no Emby credentials on this host, so `/play` → ticket → `302` → a real 206, and the watch write-back read back *from Emby*, are unverified live.** Recorded as a named gap in [PRD 09](docs/prd/09-roadmap.md), never as a pass |
+| **M9** | the whole HTTP surface — PRD 07's Screens, Resources, Actions, Admin and Meta tables behind one RFC 9457 envelope over a closed seven-member `code` vocabulary; keyset cursors; search, the two-tier suggest, browse, similarity, the series hierarchy; the image proxy (`images` + `GET /images/{id}`) and artwork on `RowCard`; `POST /titles|episodes/{id}/play` with the playback ticket and outbound watch write-back; the admin completion (sync, unmatched, bootstrap status + trigger, row-provider toggles, `bootstrap.progress`); `search_queries` whole; `GET /meta/attribution`. **Track 2:** `append_to_response=season/N`, the IMDb akas and credit-names bulk expansion, the priority-tier TMDb crawl | the **live TMDb v3 API** (S3: 130,334 requests over 1.98 h, 130,647 titles enriched; T2/T3 against the real IMDb dumps) **and a real Emby 4.9.5.0** — H4/H5 ran 2026-08-12 in 23 bounded requests with no walk: `/play` → ticket → `302` → a real **206** with `video/x-matroska` bytes, the play body leaking nothing with its positive control fired first, and the watch write-back read back *from Emby* and restored **byte-for-byte**. ⚠️ They ran **after** the milestone closed, because M9 recorded "no Emby credentials on this host" having checked `~/code/usher/.env` and nowhere else |
 
 Task breakdowns are in `docs/plans/`, one file per milestone.
 [PRD 09](docs/prd/09-roadmap.md) is what's next. **Do not invent commands for
