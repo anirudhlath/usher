@@ -44,7 +44,7 @@ from usher.domain.enums import EnrichmentState, HdrFormat, ImageKind, SourceKind
 from usher.domain.ids import new_id
 from usher.domain.image import Image
 from usher.domain.jobs import JobKind
-from usher.domain.people import Credit, CreditKind, Person, person_sort_name
+from usher.domain.people import Credit, CreditKind, CreditSource, Person, person_sort_name
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.errors import RepositoryConflict
@@ -470,6 +470,7 @@ async def test_a_titles_cast_is_top_billed_first_and_crew_is_a_separate_key(
                 person_id=bit_player.id,
                 title_id=seeded.title_id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 character="Waiter",
                 billing_order=9,
             ),
@@ -477,6 +478,7 @@ async def test_a_titles_cast_is_top_billed_first_and_crew_is_a_separate_key(
                 person_id=lead.id,
                 title_id=seeded.title_id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 character="Ada Vane",
                 billing_order=0,
             ),
@@ -484,6 +486,7 @@ async def test_a_titles_cast_is_top_billed_first_and_crew_is_a_separate_key(
                 person_id=director.id,
                 title_id=seeded.title_id,
                 kind=CreditKind.CREW,
+                source=CreditSource.TMDB,
                 job="Director",
                 department="Directing",
             ),
@@ -537,6 +540,7 @@ async def test_a_title_with_only_crew_carries_crew_and_not_an_empty_cast(
                 person_id=director.id,
                 title_id=seeded.title_id,
                 kind=CreditKind.CREW,
+                source=CreditSource.TMDB,
                 job="Director",
             )
         ],
@@ -745,6 +749,7 @@ async def test_a_credit_carries_the_role_and_no_provider_identifier(
                 person_id=lead.id,
                 title_id=seeded.title_id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 character="Ada Vane",
                 billing_order=0,
             ),
@@ -752,6 +757,7 @@ async def test_a_credit_carries_the_role_and_no_provider_identifier(
                 person_id=director.id,
                 title_id=seeded.title_id,
                 kind=CreditKind.CREW,
+                source=CreditSource.TMDB,
                 job="Director",
                 department="Directing",
                 tmdb_credit_id="52fe4250c3a36847f8014a11",
@@ -817,6 +823,7 @@ async def test_the_response_carries_every_field_of_its_own_model(
                 person_id=lead.id,
                 title_id=seeded.title_id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 character="Ada Vane",
                 billing_order=0,
             ),
@@ -824,6 +831,7 @@ async def test_the_response_carries_every_field_of_its_own_model(
                 person_id=lead.id,
                 title_id=seeded.title_id,
                 kind=CreditKind.CREW,
+                source=CreditSource.TMDB,
                 job="Producer",
             ),
         ],

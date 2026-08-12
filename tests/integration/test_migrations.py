@@ -519,7 +519,7 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # what makes it fail the moment `-1` starts landing there. Group F
         # re-pointed it for `ffa`, `af64ba2` for `ffb`, M7 Task 36 for `ffc`,
         # M8 Task 8 for `m08a`, M8 Task 19 for `m08b`, M9 Task M1 for `m09a`,
-        # M9 Task C2 for `m09c`. It is cheaper than a step count, which keeps
+        # M9 Task C2 for `m09c`, T4R for `m09d`. It is cheaper than a step count, which keeps
         # passing for the wrong reason instead of failing for the right one.
         #
         # **The direction of the assertion does not decide this.** `m09c`
@@ -542,16 +542,63 @@ async def test_a_full_down_and_up_cycle_restores_every_index(postgres_url: str) 
         # schema is built by one `upgrade head` and never goes down, and the
         # whole-chain `base` round trip below drops every table anyway.
         stepped_back = await _index_set(url)
-        assert "uq_images_owner_provider_path" not in stepped_back
+        # `m09d`'s artefacts, re-pointed here the moment it became head. It is
+        # a *creating* head, so the direction is `not in` -- you do not choose
+        # that, `m09d.downgrade()` does. Three artefact kinds, one assertion
+        # each, because none is observable through another's reader: two
+        # indexes (`_index_set`), two columns (`_column_set`) and a CHECK
+        # (`_constraint_set`).
+        assert "ix_credits_source_natural_key" not in stepped_back
+        assert "ix_people_imdb_id" not in stepped_back
+        assert "source" not in await _column_set(url, "credits")
+        people_columns = await _column_set(url, "people")
+        assert "imdb_id" not in people_columns
+        # The pre-existing column, asserted present in the same breath: a
+        # `downgrade()` that dropped `tmdb_id` instead would satisfy the line
+        # above and leave `people` unable to identify anybody. Same shape as
+        # the `remote_url` pairing this block used to carry for `m09c`.
+        assert "tmdb_id" in people_columns
+        assert "ck_people_imdb_id_not_empty" not in await _constraint_set(url, "people")
+
+        # **A second named stop, at `m09a`, and it exists because `m09c`'s
+        # artefacts are not observable at the deep one.** `m09c` alters
+        # `images`, and `images` is created by `m09a` -- so at
+        # `fe1d40c8b7a3` the table is gone and `_column_set(url, "images")` is
+        # the empty set, which makes a column assertion there vacuous in one
+        # direction and false in the other. That was measured rather than
+        # reasoned: moving these four assertions straight into the block below
+        # failed on `assert 'remote_url' in set()`.
+        #
+        # So a displaced assertion moves to **the shallowest revision at which
+        # its artefact still exists**, not automatically to the deep stop. The
+        # general form for the next head that alters an existing table rather
+        # than creating one: `-1` proves your own `downgrade()`, and the
+        # previous head's proof needs a stop above whatever created the thing
+        # it altered.
+        #
+        # `m09a` is a revision id and not a step count, for the reason the
+        # deep stop gives: every migration added later shifts what `-2` means.
+        await asyncio.to_thread(functools.partial(run_alembic, url, "m09a", direction="down"))
+        at_m09a = await _index_set(url)
+        # `m09c`'s four, displaced from the `-1` half the moment `m09d` became
+        # head -- and displaced *because they had teeth*:
+        # `uq_images_owner_provider_path` failed loudly on the first run with
+        # `m09d` present, which is the eighth landing in a row to do so. Three
+        # artefact kinds, and both directions on the rename for the reason the
+        # `-1` block used to give: a `downgrade()` that dropped the column
+        # rather than renaming it back satisfies the absence and leaves
+        # `images` a column short.
+        assert "uq_images_owner_provider_path" not in at_m09a
         images_columns = await _column_set(url, "images")
         assert "provider_path" not in images_columns
-        # Both directions, because a `downgrade()` that dropped the column
-        # rather than renaming it back would satisfy the line above and leave
-        # `images` a column short.
         assert "remote_url" in images_columns
         images_constraints = await _constraint_set(url, "images")
         assert "ck_images_provider_path_not_empty" not in images_constraints
         assert "ck_images_remote_url_not_empty" in images_constraints
+        # The premise for all six: `images` still exists here. An empty column
+        # set satisfies every absence above, so without this the block would
+        # pass at any depth below `m09a` while asserting nothing.
+        assert images_columns, "the premise: `images` still exists at `m09a`"
 
         # Then down to the revision *below* `ff`, which is where M7 group E's
         # two index changes become observable -- `ffa` sits between head and

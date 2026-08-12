@@ -48,7 +48,7 @@ from usher.domain.collection import Collection
 from usher.domain.enums import ImageKind, TitleKind
 from usher.domain.episode import Episode, Season
 from usher.domain.image import Image
-from usher.domain.people import Credit, CreditKind, Person, person_sort_name
+from usher.domain.people import Credit, CreditKind, CreditSource, Person, person_sort_name
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, UsherPortError
 from usher.ports.ingest import ProviderRef
@@ -325,6 +325,7 @@ class FakeMetadataProvider(MetadataProvider):
                         person_id=people[tmdb_id].id,
                         title_id=title_id,
                         kind=kind,
+                        source=CreditSource.TMDB,
                         tmdb_credit_id=entry.get("credit_id"),
                         character=entry.get("character"),
                         job=forced_job or entry.get("job"),

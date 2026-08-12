@@ -37,7 +37,7 @@ from usher.api.deps import (
 from usher.api.routers.people import FILMOGRAPHY_CREDIT_LIMIT
 from usher.config import Settings
 from usher.domain.enums import EnrichmentState, TitleKind
-from usher.domain.people import Credit, CreditKind, Person
+from usher.domain.people import Credit, CreditKind, CreditSource, Person
 from usher.domain.title import Title
 
 
@@ -158,11 +158,18 @@ async def test_a_filmography_is_grouped_into_cast_and_one_group_per_crew_job(
     await _seed_credits(
         credits,
         [
-            Credit(person_id=person.id, title_id=acted.id, kind=CreditKind.CAST, character="Them"),
+            Credit(
+                person_id=person.id,
+                title_id=acted.id,
+                kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
+                character="Them",
+            ),
             Credit(
                 person_id=person.id,
                 title_id=directed.id,
                 kind=CreditKind.CREW,
+                source=CreditSource.TMDB,
                 job="Director",
                 department="Directing",
             ),
@@ -193,7 +200,15 @@ async def test_a_film_card_carries_what_a_filmography_renders(
     person = await _seed_person(people)
     film = await _seed_title(titles, name="A Film They Acted In", year=1998)
     await _seed_credits(
-        credits, [Credit(person_id=person.id, title_id=film.id, kind=CreditKind.CAST)]
+        credits,
+        [
+            Credit(
+                person_id=person.id,
+                title_id=film.id,
+                kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
+            )
+        ],
     )
 
     groups = (await client.get(f"/people/{person.id}")).json()["groups"]
@@ -230,11 +245,18 @@ async def test_a_person_credited_twice_on_one_title_is_in_both_groups_once_each(
     await _seed_credits(
         credits,
         [
-            Credit(person_id=person.id, title_id=film.id, kind=CreditKind.CAST, character="A Twin"),
             Credit(
                 person_id=person.id,
                 title_id=film.id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
+                character="A Twin",
+            ),
+            Credit(
+                person_id=person.id,
+                title_id=film.id,
+                kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 character="The Other Twin",
                 tmdb_credit_id="an-invented-credit-1",
             ),
@@ -242,6 +264,7 @@ async def test_a_person_credited_twice_on_one_title_is_in_both_groups_once_each(
                 person_id=person.id,
                 title_id=film.id,
                 kind=CreditKind.CREW,
+                source=CreditSource.TMDB,
                 job="Director",
                 tmdb_credit_id="an-invented-credit-2",
             ),
@@ -249,6 +272,7 @@ async def test_a_person_credited_twice_on_one_title_is_in_both_groups_once_each(
                 person_id=person.id,
                 title_id=film.id,
                 kind=CreditKind.CREW,
+                source=CreditSource.TMDB,
                 job="Writer",
                 tmdb_credit_id="an-invented-credit-3",
             ),
@@ -296,6 +320,7 @@ async def test_titles_in_a_group_are_newest_first_with_unknown_years_last(
                 person_id=person.id,
                 title_id=title_id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 tmdb_credit_id=f"an-invented-credit-{index}",
             )
             for index, title_id in enumerate((oldest.id, newest.id, undated.id))
@@ -327,6 +352,7 @@ async def test_two_titles_of_one_year_are_broken_by_id(
                 person_id=person.id,
                 title_id=title_id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 tmdb_credit_id=f"an-invented-credit-{index}",
             )
             # Seeded in the reverse of the answer, so credit order cannot
@@ -365,6 +391,7 @@ async def test_the_groups_are_ordered_deterministically_with_cast_first(
                 person_id=person.id,
                 title_id=film.id,
                 kind=CreditKind.CREW,
+                source=CreditSource.TMDB,
                 job=job,
                 tmdb_credit_id=f"an-invented-credit-{index}",
                 billing_order=index,
@@ -376,6 +403,7 @@ async def test_the_groups_are_ordered_deterministically_with_cast_first(
                 person_id=person.id,
                 title_id=film.id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 tmdb_credit_id="an-invented-credit-cast",
                 billing_order=9,
             )
@@ -405,7 +433,15 @@ async def test_a_crew_credit_with_no_job_lands_in_its_own_group(
     film = await _seed_title(titles)
     await _seed_credits(
         credits,
-        [Credit(person_id=person.id, title_id=film.id, kind=CreditKind.CREW, job=None)],
+        [
+            Credit(
+                person_id=person.id,
+                title_id=film.id,
+                kind=CreditKind.CREW,
+                source=CreditSource.TMDB,
+                job=None,
+            )
+        ],
     )
 
     body = (await client.get(f"/people/{person.id}")).json()
@@ -438,6 +474,7 @@ async def test_a_credit_naming_a_title_the_catalog_no_longer_holds_is_dropped(
                 person_id=person.id,
                 title_id=title_id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 tmdb_credit_id=f"an-invented-credit-{index}",
             )
             for index, title_id in enumerate((kept.id, gone.id))
@@ -530,6 +567,7 @@ async def test_the_page_size_is_the_routes_own_and_is_passed_explicitly(
                 person_id=person.id,
                 title_id=film.id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 tmdb_credit_id=f"an-invented-credit-{index}",
                 billing_order=index,
             )

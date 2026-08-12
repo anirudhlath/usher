@@ -110,6 +110,15 @@ hashable.
 `field_provenance` exists so a second metadata provider can be added later
 without ambiguity about which source won a given field.
 
+⚠️ **It is a `titles` column and it arbitrates nothing else.** Neither `people`
+nor `credits` has one, and the mechanism that decides provenance for those two
+is different in kind: `credits.source` plus `CREDIT_SOURCE_PRECEDENCE`, which
+arbitrates **per title, wholesale**, never per field. See the `### Person /
+Credit` section below and
+[ADR-0036](decisions/0036-the-imdb-tmdb-provenance-rule.md). Reaching for
+`field_provenance` to settle a credit's origin is the wrong tool by one table
+and by one granularity.
+
 🔶 **Deferred to M9** *(and M9 reached it, measured it, and still did not add
 it — see the paragraph after this one)***:** a GIN index on `genres` for faceted
 `/browse` ([07](07-client-api.md)) facet counts at catalog scale. Measured at
@@ -202,7 +211,8 @@ than a string match.
 ```python
 class Person(BaseModel):
     id: UUID
-    tmdb_id: int | None
+    tmdb_id: int | None                  # TMDb's person id
+    imdb_id: str | None                  # IMDb's `nconst` — both nullable, see below
     name: str; sort_name: str            # sort_name NOT NULL, name verbatim
     known_for_department: str | None
     created_at: datetime; updated_at: datetime
@@ -212,10 +222,11 @@ class Credit(BaseModel):
     person_id: UUID
     title_id: UUID                       # required — no episode_id, see below
     kind: CreditKind                     # cast | crew
+    source: CreditSource                 # tmdb | imdb — required, never defaulted
     tmdb_credit_id: str | None           # TMDb's 24-char credit ObjectId
     character: str | None                # cast
     job: str | None; department: str | None   # crew
-    billing_order: int | None
+    billing_order: int | None            # the provider's own ordering
     created_at: datetime
 ```
 
@@ -242,6 +253,48 @@ is `CHECK (>= 0)` and nullable, because a crew credit has no billing.
 `collections`. A credit row is derived from a cached payload and replaced
 wholesale when that payload is re-derived; there is no update path for a
 trigger to fire on.
+
+✅ **`credits.source` and `people.imdb_id` landed in `m09d`, and they are what
+arbitrates two bulk sources over one entity** —
+[ADR-0036](decisions/0036-the-imdb-tmdb-provenance-rule.md).
+
+`replace_for_titles` is a title-scoped delete-then-insert, so without `source`
+the moment IMDb writes credits for a title the next TMDb derivation of that
+title deletes them. The scope is now `(title_id, source)` and the two sets
+coexist. **Arbitration is per title, wholesale, never per field:**
+`CREDIT_SOURCE_PRECEDENCE` puts TMDb above IMDb, so TMDb wins every title it
+covers and IMDb fills every title it does not.
+
+**`source` is required and never defaulted**, in the model and in the schema.
+A nullable `source` makes "unknown provenance" representable, which is the
+state the column exists to abolish, and a default is the same state wearing a
+valid value.
+
+**The IMDb dedup key is `(title_id, source, billing_order)`**, unique, `NULLS
+NOT DISTINCT`, partial on `source <> 'tmdb'` — because
+`ix_credits_tmdb_credit_id` is partial over `tmdb_credit_id IS NOT NULL`, i.e.
+over none of an IMDb load. Measured over the 12,638,471 principals rows a real
+1,272,367-title catalog retains, `(title_id, ordering)` is unique while
+`(title_id, person_id, kind)` collides on 1,343,558 rows.
+
+**A human working under both sources is two `Person` rows**, one with
+`tmdb_id` and one with `imdb_id`. That is a stated consequence rather than a
+defect, and it reaches the surface: `GET /people/{id}` renders a `Person`,
+`PersonRepository.list_recurring_for_user` feeds a row provider, and
+`PersonRepository.count()` — which `usher derive` prints — counts two rows per
+human. **Both id columns are nullable and each is partially unique**, so a row
+carrying both is a legal state today that no writer produces; merging the two
+sources later is a backfill rather than a migration. There is deliberately no
+`people.source` enum, because an enum would have to be dropped to merge a
+person and two nullable ids do not.
+
+⚠️ **Merging people on `nconst` is expensive, not impossible, and the
+distinction matters** — an earlier revision of PRD 03 recorded it as *"cannot
+be merged across the two sources on an id at all"*, which is a qualifier
+dropped one hop up from the correct statement, *"not without a second request
+each"*. `GET /person/{id}/external_ids` answers exactly that. ADR-0036 prices
+it at 887,161 requests, ~9.9 h at Usher's self-imposed ~25 rps, and says why
+the default is not to.
 
 ✅ **Four of these fields reach the wire, and M9 is where that was decided.**
 `GET /titles/{id}` renders `person_id`, the person's `name`, `character` and
