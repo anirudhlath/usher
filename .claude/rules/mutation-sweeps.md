@@ -4700,3 +4700,184 @@ statement form produced the edge — while the AST scan walks `ast.ImportFrom`
 only, so an `ast.Import` node is outside it by construction. **Keep both**: the
 scan sees a module the contract's list has forgotten, and the contract sees a
 statement form and an indirect chain the scan does not.
+
+## M9 Task H7 — the milestone's final whole-suite sweep (2026-08-12)
+
+**21 plants over the merged milestone at `45da24a` — 14 behavioural targets,
+all KILLED; 3 *weakening* plants and 3 equivalent-mutant controls surviving as
+designed; 0 unintended survivors; and 1 plant whose expected verdict was
+written down as `?`, which is the round's yield. 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.** Every other
+verdict matched its pre-registered expectation.
+
+Harness at `/var/tmp/m9-H7/plants.py`, **outside the working tree** for V1's
+reason and under `/var/tmp` rather than `/tmp`, which is tmpfs on this host.
+Plant list with its expected verdicts at `/var/tmp/m9-H7/plantlist.py`
+(`sha256 496112392f29…`, harness `sha256 d4a7a62055cf…`), written before the
+first run; verdict log at `/var/tmp/m9-H7/sweep.jsonl`. Defences: an exact
+anchor count per hunk, the landing check spelled as **byte equality with the
+intended mutant** (F3's repair — this round has two-hunk plants, an additive
+plant and a deletion, and B6's substring form is wrong for all three),
+`compile()` as the dry run for every `.py` hunk, `PYTHONDONTWRITEBYTECODE=1`
+with `__pycache__` swept under **both** `src/` and `tests/` before every run,
+`cp` backups with an `md5sum`-verified restore **and** `git status --porcelain`
+asserted empty after every plant, a 1,800 s timeout reporting `HUNG` as its own
+verdict, a signal handler, no second `-q`, and `usher.__file__` asserted to
+resolve under this worktree before the first run.
+
+**Proven in both directions before anything was scored**, which is this task's
+own failing-test-first: `P00` — the 422 `input` strip deleted, M3's security
+pin — **KILLED 12 cases**; `C1` **SURVIVED all five gate steps**. A harness
+that cannot produce both outcomes has measured nothing.
+
+**Selection: the whole suite in one invocation** — `tests/unit
+tests/integration`, **5,221 collected, ~150 s a run**, green before and after.
+Wider than a per-task selection on purpose: that is what a final sweep is for,
+and the counting says so — **exactly one of the fourteen targets (T7) is killed
+only by `tests/integration`, and three more (T3a 7/7, T8 4/3, P00 11/1) are
+killed on both sides**, so a unit-only sweep would have reported one live
+mutant and four narrower blast radii. Six plants are scored over a single file
+or a single node id instead, and the table says which.
+
+🔴 **One deselection, and it is *not* the case every earlier entry in this file
+deselects.** `tests/integration/test_sse_end_to_end.py::test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands`
+passed **5 of 5** whole-`tests/integration` runs here and appears in **none**
+of the fifteen whole-suite sweep runs' failure lists — G1's bounded
+`_job_xmin_settles` poll closed it, and the standing advice to deselect it is
+now stale. What is intermittent on this tree is
+`tests/integration/test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_own`:
+**1 failure in 5 whole-suite runs, 0 in 5 runs on its own.** It is deselected
+by node id for the sweep, for the reason B2's entry gives — a sweep scored on
+"did the run fail" cannot run against a suite holding a flaky case — and it is
+reported to the milestone rather than swept under it. **A deselection inherited
+from a ledger is a deselection nobody measured**: this round would have
+deselected the wrong case and kept the flaky one.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P00 the 422 `input` strip deleted (the known-fatal proof) | KILLED | 12 |
+| T1-careful `redeem` loses its TTL: `cipher.decrypt(token)` | KILLED | 7 |
+| T1-careless the same, spelled `ttl=None` | KILLED | **22** |
+| T2 the ticket's HKDF `info` collapsed onto the credential store's | KILLED | 5 |
+| T5-transparent `encode_cursor` returns the JSON, not base64url | KILLED | 31 |
+| T5-digest the cursor's query digest never checked | KILLED | 8 |
+| T6 `retry_after` never reaches `JobQueue.fail` | KILLED | **1** |
+| T7 tier-1 suggest's prefix predicate replaced by tier-2's trigram, both arms | KILLED | 6 (all integration) |
+| T8 `enabled_row_providers` drops its `enabled` filter | KILLED | 7 |
+| T3a the play serializer produces no targets at all | KILLED | 14 |
+| T3b the same, with the leak pin's stated positive control removed | **KILLED — expected `?`** | 2 (that file alone) |
+| T3c the positive control removed, nothing else | SURVIVED as designed | — |
+| T9a `/meta/attribution` serves a string no adapter constant backs | KILLED | 3 |
+| T9b the same, with H1's scan narrowed to one direction | SURVIVED as designed | that case alone |
+| T9c the same defect, scored over that case alone | KILLED | 1 |
+| T10a PRD 07's Admin cell compressed back onto one path | KILLED | 1 |
+| T10b the same, with H2's direction 1 narrowed back to paths | SURVIVED as designed | that case alone |
+| T10c the same defect, scored over that case alone | KILLED | 1 |
+
+**Five results worth carrying, and the first is the one written down as `?`.**
+
+🔴 **A positive control can be load-bearing for the *message* and not for the
+verdict, and that distinction is invisible until you delete it.** The plan
+names *"the `StreamTarget` leak pins' positive controls removed — absence is
+also what a serializer never called produces"* as a headline target, and the
+honest expectation was unknown, so it was written down as `?`. Measured: with
+`PlayResponse.of` returning no targets and the stated control
+(`assert urls, "the premise: the serializer produced targets"`) deleted,
+`test_the_success_body_never_carries_the_source_url_the_ticket_replaced` **still
+fails** — two lines later, on `redeemed = await client.get(urls[0])`, with
+`IndexError: list index out of range`. So the leak pin is not vacuous, and what
+saves it is an *incidental* index into an empty list rather than anything the
+case says. The two failures read very differently:
+
+```
+with the control:     E  AssertionError: the premise: the serializer produced targets
+                      E  assert []
+without the control:  E  IndexError: list index out of range
+```
+
+The assertion between them — `assert all(url.startswith("http://test/stream/")
+for url in urls)` — is **vacuously true over `[]`**, which is the shape this
+file already records one layer up. **The general form: when a premise guard is
+removed and the case still fails, ask *on what* — a guard whose removal
+downgrades a named premise failure into an `IndexError` is still doing work,
+because the next person to see that traceback reads it as a broken test rather
+than as a route that served nothing.** Reported rather than closed: the shipped
+case is correct, and the finding is about what its control buys.
+
+**The careless spelling of the TTL defect kills three times as loudly as the
+careful one and is the opposite defect.** `Fernet.decrypt_at_time` raises
+`ValueError` when `ttl is None`, and `redeem` catches `ValueError` beside
+`InvalidToken` on purpose — so `ttl=None` is not "a ticket that never expires",
+it is **a ticket path that refuses everything**, and it fails 22 cases
+including every happy-path redemption. The careful spelling — `cipher.decrypt(token)`,
+which is what an author reaching past `decrypt_at_time` writes — is the real
+defect and fails 7, all of them expiry cases. **A summary reading "the TTL
+mutation dies, 22 cases" would be describing the wrong program.** One caveat on
+the careful spelling, and it is a property of the linter rather than of the
+suite: it has to delete `current_time = _epoch_seconds(now)` as well, or ruff
+answers `F841`, and that line is also the naive-datetime guard — so
+`test_a_naive_datetime_is_refused_rather_than_read_as_local_time[redeem]` is in
+its blast radius as collateral.
+
+**The plan's "cursor's opaque encoding replaced by an offset" is not
+spellable, and that is a design result rather than a gap** — B6's finding
+arriving at the wire format. `encode_cursor` takes the typed keyset values
+`paginate` read off the last row and `decode_cursor` answers the typed values a
+repository takes as `after`; **no argument in either signature carries a count
+of rows already served**, so there is no offset for a mutant to substitute. The
+two spellable weakenings of the same property were planted instead: the
+encoding made transparent (31 cases — the loudest plant in the round, because
+every paging walk in the suite breaks) and the query digest never checked (8
+cases, and it is the quiet one — a cursor minted under `sort=year` replayed
+against `sort=name` decodes cleanly into a plausible, wrong page, which is
+exactly what `api/cursor.py`'s own docstring says the digest is for).
+
+**Both of the milestone's two-direction scans were measured as pairs, and in
+both the second direction is the only cover.** H1's attribution scan: a fifth
+served string no adapter constant backs fails 3 cases whole-suite, and over its
+own case alone it dies on `served == set(scanned)`; narrow that to
+`set(scanned) <= served` and the same defect **passes**. H2's conformance scan:
+PRD 07's Admin cell compressed back onto one path fails **exactly one case** in
+5,221, and narrowing direction 1 from `(method, path)` pairs back to paths lets
+it through — which re-measures H2's own finding at the merge rather than
+inheriting it. **A weakening plant is only evidence in a pair**: on its own it
+survives by construction and says nothing, and the paired defect is what turns
+"this direction exists" into "this direction is the only thing holding it".
+
+**T6 is the narrowest kill in the round and that is the result, not a
+disappointment.** Ignoring `PortRateLimited.retry_after` at `JobWorker._fail`
+fails **one case out of 5,221** — `test_a_429_carrying_a_retry_after_backs_off_
+no_sooner_than_the_upstream_asked`, the case D9 wrote for it, and D9's own entry
+records that the field has never yet been exercised by a real response from the
+provider this project talks to most. One case is the whole cover for the one
+periodic thing M9 added, which is worth knowing before anyone "simplifies" it.
+
+**The three controls, each measured against every gate step separately**,
+because "the gate holds it" and "the suite holds it" are different claims:
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (whole suite) |
+|---|---|---|---|---|---|
+| C1 `api/cursor.py`'s `_VERSION_KEY` and `_DIGEST_KEY` defined in the other order | PASS | PASS | PASS | PASS (10/0) | PASS (5,220) |
+| C2 the 422 handler's `code=`/`detail=` keyword arguments in the other written order | PASS | PASS | PASS | PASS (10/0) | PASS (5,220) |
+| C3 one sentence of `encode_cursor`'s docstring reworded | PASS | PASS | PASS | PASS (10/0) | PASS (5,220) |
+
+C1 and C2 are facts about the *code* rather than about what the tools look at:
+two module-level `Final` string constants that reference neither each other nor
+anything between them, in a module with no import-time side effect, read only
+as dict keys by name on both sides of the encode/decode pair; and keyword
+arguments bound by name over two side-effect-free reads (an enum member and a
+module constant), which is `_ledger_row`'s precedent. Neither is an `__all__`
+reorder, which `RUF022` rejects, and neither is a reorder of a *positional*
+call, which A5's entry is the reason for checking rather than assuming. C3 was
+checked first against `grep -rln "getdoc\|__doc__\|ast.unparse\|getsource"
+tests/`: **30** files scan source, and the only one that so much as imports
+`usher.api.cursor` (`test_api_unmatched.py`) scans `api/routers/unmatched.py`
+over a **docstring-stripped** `ast.unparse`, so this module's prose is read by
+nothing.
+
+Gate green before and after on the fully restored tree, with `git status`
+asserted clean after every one of the 21 plants and every restore
+`md5sum`-verified against its pre-plant digest: `ruff check`, `ruff format --check`
+(594 files), `mypy` over **578** files, `lint-imports` **10 kept / 0 broken**,
+**3,997 unit / 4 skipped** and **1,224 integration / 22 skipped**, PRD link
+check `OK`.

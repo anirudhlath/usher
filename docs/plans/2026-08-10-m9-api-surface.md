@@ -8958,3 +8958,139 @@ property ADR-0020 exists for.
   name `tags` is a trap: a later reader cannot tell which signal a stored score
   contains. Whichever way it is resolved, resolve it in the ADR rather than in a
   commit message.
+
+---
+
+## The final gate — how M9 actually closed (2026-08-12, task H7)
+
+Measured on the merge of both tracks, `milestone/m9-api-surface` at `45da24a`.
+**Of this plan's 74 tasks, 70 are merged; T4 is withdrawn** with the IMDb
+entity design that failed its own size bar; **H4 and H5 did not run**; and this
+is H7. Counted from the merge commits rather than recalled: 66 carry a
+`merge(m9): X` subject naming themselves, and the other four are **M1**
+(`1bd94c2`) and **A1** (`4e0935b`), which predate that convention and are both
+ancestors of `HEAD`; **B11**, which shares `merge(m9): B10 and B11` because
+both touch `app.py` and two agents would have manufactured a conflict; and
+**E7** (`1fb5a46`), which came in under `merge(m9): E6`.
+
+**The verdict, and it has two halves.** Every automated check this project
+owns is green, the whole-suite mutation sweep found no unintended survivor, and
+the one operational obligation the milestone left open — the neighbour rebuild
+S7's blend change invalidated — has been discharged against the real catalog
+and is recorded below with the row count beside it. **And the live Emby
+verification did not run.** H4 (`/play` → ticket → `302` → a real 206) and H5
+(the watch write-back read back *from Emby*) are the two tasks whose entire
+product is live evidence, there are no Emby credentials on this host, and a run
+that did not run is not a pass. M9 ships saying so, in PRD 09, in
+`CLAUDE.md`'s milestone table, in `.claude/rules/milestone-boundary-calls.md`
+and here. Verified rather than relayed at the gate: `.env` holds
+`USHER_SECRET_KEY` and `USHER_TMDB_API_KEY` and nothing else, and `sources` is
+**0 rows in all three catalogs on this box**, so no Emby server was ever
+configured for either task to drive.
+
+### The gate
+
+| step | result |
+|---|---|
+| `uv run ruff check .` | All checks passed |
+| `uv run ruff format --check .` | 594 files already formatted |
+| `uv run mypy src tests` | no issues, **578 source files** |
+| `uv run lint-imports` | **10 kept, 0 broken** |
+| `uv run pytest tests/unit` | **3,997 passed, 4 skipped** (44 s) |
+| `uv run pytest tests/integration` | **1,224 passed, 22 skipped** (101 s) |
+| PRD link check (`prd-maintenance.md`) | `OK` |
+| `alembic heads` | `m09c`, one head |
+| `git log -1 --pretty='%(trailers)'` | prints nothing |
+
+**`lint-imports` is 10, not the 9 this plan says in eight places, and every one
+of those is now stale.** H6 added the `independence` contract over the 19
+aggregate port modules, closing the gap A1's review found: the *"no aggregate
+module imports another"* invariant had exactly one bespoke AST test and no
+contract, and A1 measured that the inversion passes ruff, format, mypy and all
+nine of the contracts that then existed. Both spellings now report BROKEN — the
+careless one on mypy as well, the careful one on the contract alone.
+
+Baseline for the milestone was **2,969 unit / 4 skipped**; M9 added **1,028
+unit cases and 1,224 integration cases** are green beside them.
+
+### The neighbour rebuild — S7's obligation, discharged
+
+S7 removed the tag-genome term after the gate measured **2.4746%** of candidate
+pairs carrying a genome vector on both sides against a 10% floor, which moved
+`blend_fingerprint()` from `78900b2b…` to `78f3ecd2…` and made every stored
+neighbour row stale by definition. Nothing live-verifies `/similar` (defect
+D5), so this is discharged by running the shipped command and reading the
+database back.
+
+`uv run usher similar --rebuild` against the real catalog on `usher-m9-pg`
+(1,272,367 titles, 130,647 embedded), **10:09:00 → 11:37:18, 88.3 minutes,
+exit 0**. Four numbers, and the third is the one without which the criterion is
+satisfiable by a table nobody built:
+
+| | |
+|---|---|
+| the command ran | 2026-08-12, whole population, `rebuilt 130647 seeds, wrote 3266175 neighbour rows` |
+| `stale_neighbors()` | **0** |
+| `SELECT count(*) FROM title_neighbors` | **3,266,175** — 130,647 seeds × 25 stored neighbours, **all 3,266,175 stamped `78f3ecd20e654c0f6aa4bdf646ec099b`**, one fingerprint in the table |
+| the control: the rebuild's own pool against S5's walk | `323,297 / 13,064,700 = 2.4746%` against S5's `323,297 / 13,064,700` — **the same integers, not merely the same percentage** |
+
+**The control is what makes the first three mean anything.** The pool is
+invariant to a weight change by construction (`_CANDIDATE_POOL` and
+`_NEIGHBORS_PER_TITLE` untouched), so a disagreement here would have said the
+walk and the rebuild drew different pools and **voided S5's tags figure** — the
+number the whole S-chain turns on. They agree exactly, and `seeds_with_genome`
+agrees too (15,525 both times). S5's 2.4746% stands, and so does the removal it
+justified. The table was **0 rows before this run**, which is precisely why the
+count is printed beside the verdict: `stale_neighbors()` answers 0 for an empty
+table, and the spec recorded the criterion as met while `title_neighbors` was
+empty on every catalog on this box.
+
+Read back through the shipped code path — `SimilarityService.stale_neighbors()`
+and `computed_at()` — from a throwaway script outside the working tree, which
+wrote nothing.
+
+### The whole-suite mutation sweep
+
+**21 plants, in place, over the merged tree; the selection is the whole suite
+in one invocation (5,221 cases, ~150 s a run).** Three-way split: **14
+behavioural targets, all killed; 3 weakening plants and 3 equivalent-mutant
+controls surviving as designed; 0 unintended survivors** — plus one plant whose
+expected verdict was written down as `?` before the run, which is the round's
+yield. Zero BAD-ANCHOR, BROKEN-MUTATION, PLANT-DID-NOT-LAND, DID-NOT-RUN or
+HUNG. The harness was proven in both directions first: the 422 `input` strip
+deleted kills 12 cases, and the first control survives all five gate steps.
+
+Full ledger, with every kill checked against the case written for it, the
+controls table per gate step, and the four findings, is in
+`.claude/rules/mutation-sweeps.md`. The three worth naming here:
+
+- **The plan's *"cursor's opaque encoding replaced by an offset"* is not
+  spellable** — `encode_cursor` takes typed keyset values and `decode_cursor`
+  answers them; no argument in either signature carries a count of rows already
+  served. B6's finding at the wire format: a defect the type signature makes
+  unreachable is a design result, not a coverage gap. The two spellable
+  weakenings were planted instead (31 cases and 8).
+- **The careless spelling of the TTL defect is the *opposite* defect and kills
+  three times as loudly.** `ttl=None` makes `decrypt_at_time` raise
+  `ValueError`, which `redeem` catches on purpose, so every ticket 404s — 22
+  cases. The defect that ships is `cipher.decrypt(token)`, and it fails 7, all
+  expiry cases.
+- **Both two-direction scans (H1's attribution, H2's conformance) were measured
+  as pairs, and in both the second direction is the only cover.** Narrow either
+  one and its own defect walks straight through.
+
+### One thing this gate found that the milestone did not know
+
+`tests/integration/test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_own`
+is **intermittent under whole-suite load**: 1 failure in 5 whole-`tests/integration`
+runs, **0 in 5 runs on its own**. It is deselected by node id for the sweep
+alone and is **in** every gate number above. It is A6's serve-stale feature
+measured at the HTTP boundary, and its three claims are ordering claims about
+two sessions, so a loaded box is exactly where it is fragile — carried debt,
+recorded rather than deselected in CI.
+
+Its counterpart is retired: `test_sse_end_to_end.py::test_opening_a_stub_promotes_it_and_the_client_is_told_when_it_lands`,
+which nine ledger entries in this milestone deselect as intermittent, **passed
+5 of 5 whole-`tests/integration` runs and appears in none of the fifteen
+whole-suite sweep runs' failure lists.** G1's bounded poll closed it. A
+deselection inherited from a ledger is a deselection nobody measured.

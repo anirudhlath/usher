@@ -346,9 +346,13 @@ carrying:
   0.4075 on everything else was promoted with 99% probability, and genome
   coverage concentrates in popular, older, heavily-embedded films (the 1.75×
   correlation above). ⚠️ **The distribution of the three-signal score over a
-  real pool is NOT measured** — `title_neighbors` holds 0 rows on every catalog
-  on this host — so how often that actually reordered a list is unknown and is
-  not claimed. The identity is exact; the frequency is not.
+  real pool is NOT measured** — that sentence said *"`title_neighbors` holds 0
+  rows on every catalog on this host"* until H7's rebuild wrote **3,266,175**
+  of them on 2026-08-12, and the table still cannot answer it: those rows were
+  scored **without** the genome term, so they are the distribution of
+  `score_without` and not of the four-signal score the promotion was relative
+  to. How often the term actually reordered a list remains unknown and is not
+  claimed. The identity is exact; the frequency is not.
 
 **Removed, not zeroed, and this is the half a reviewer should check first.**
 `_blend` adds `_WEIGHTS[name] * value` to the numerator **and** `_WEIGHTS[name]`
@@ -382,7 +386,23 @@ quadratic walk, priced by S4 at ~80 minutes and measured by S5 at **85.4** —
 a scheduled operation, not the tail of a task, and **S7 did not run one**.
 ⚠️ **Whatever closes it must record `title_neighbors`' row count beside the
 verdict**: "`blend_fingerprint` reports no stale rows" is satisfied by an empty
-table, and an empty table is what every catalog on this host holds. The
+table, and an empty table is what every catalog on this host holds.
+
+✅ **Discharged 2026-08-12 by H7, and the numbers belong here because this is
+where the obligation is written down.** `uv run usher similar --rebuild`
+against `usher-m9-pg`, 10:09:00 → 11:37:18 — **88.3 minutes**, 3.4% over S5's
+85.4 and taken while a whole-suite mutation sweep held the same box, so it is
+not a clean baseline and is not offered as one. `stale_neighbors()` **0**;
+**3,266,175 rows**, 130,647 distinct seeds × 25, **one** `blend_fingerprint`
+value in the table. The control S7 specified holds exactly: the rebuild's own
+`pairs_with_tags / candidate_pairs` is **323,297 / 13,064,700 = 2.4746%**, the
+same two integers S5's read-only walk reported, and `seeds_with_genome` agrees
+too at **15,525** — so the pool really was invariant to the weight change and
+S5's tags figure is not void. Had those disagreed, the walk and the rebuild
+would have drawn different pools and the number this whole decision rests on
+would have had to be withdrawn first.
+
+The
 four-signal digest is pinned as a literal in
 `tests/unit/test_services_similar.py` (licensed by a case that recomputes it
 from M7's weights, so it cannot drift into a number nothing stamped) precisely
