@@ -779,3 +779,31 @@ writer in another process — the `bootstrap` job runs on the worker lane. The
 consequence to carry: **this shape is an admin page's and nothing else's.** A
 client route assembling `BootstrapReport` would be paying a full-catalog scan
 per request.
+
+## A `--phase imdb` run raises 61 `bootstrap.progress` frames (2026-08-12, M9 E7)
+
+Derived arithmetic over measured counts, **not** an observed frame total, and
+labelled as such because the number it is compared against is measured.
+`_ImdbDataset` yields a batch every `bulk_batch_size` **retained** rows
+(`batch.append(parsed)` then `len(batch) >= self._batch_size`), and E7
+publishes one frame per committed batch, so at the shipped default of 50,000:
+
+| dataset | retained rows | frames |
+|---|---|---|
+| `imdb.title.basics` | 1,271,138 | 26 |
+| `imdb.title.ratings` | 1,700,615 | 35 |
+| **`--phase imdb`** | | **61** |
+
+Against `sync.progress`' **measured** 1,127 for one nightly walk of the one
+library this project has measured (`services/reconcile.py:255`), so this is the
+lower-rate of the two producers by an order of magnitude and the SSE bus's
+queue bound is not in play. The retained counts are M2's own end-to-end run,
+recorded further up this file.
+
+**The number that matters is not the total, it is that it is >1 per run.** It
+is what makes deferring these frames behind `DeferredEventPublisher` a
+0%-to-100% jump rather than a rounding error, which is why
+`composition.build_worker` hands the `bootstrap` registration `pipeline.events`
+where every other registration gets `worker.events`. A `--phase all` run adds
+`credit-names`, `aliases`, both TMDb id exports, the crosswalk and MovieLens on
+top.

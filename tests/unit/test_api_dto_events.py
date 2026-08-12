@@ -79,6 +79,7 @@ def test_the_wire_vocabulary_is_its_own_enum() -> None:
         "watchstate.updated",
         "row.invalidated",
         "sync.progress",
+        "bootstrap.progress",
         "resync_required",
     }
 
@@ -158,3 +159,43 @@ def test_a_row_invalidation_carries_no_title_id() -> None:
     )
 
     assert "title_id" not in json.loads(frame.split("\n")[2].removeprefix("data: "))
+
+
+def test_a_bootstrap_progress_frame_carries_its_cursor_and_no_title_id() -> None:
+    """PRD 07's payload column for this row is corrected in M9's E7 from
+    *"Phase, percent"* to what a `BulkCursor` can honestly supply, and this is
+    that correction on the wire.
+
+    **No `title_id` on the data line and none in the filter**, which is what
+    makes *"Admin UI only"* a property: the frame reaches unfiltered
+    subscribers and no others, exactly as `row.invalidated` does and for the
+    inverse reason -- a bulk import touches most of the catalog, so a title id
+    here would wake every detail screen in the household once per batch.
+
+    Kills a frame published with an empty `data`, which is a well-shaped SSE
+    event that tells a progress bar nothing.
+    """
+    frame = encode_sse(
+        _sent(
+            ClientEvent(
+                kind=ClientEventKind.BOOTSTRAP_PROGRESS,
+                data={
+                    "dataset": "imdb.title.basics",
+                    "phase": "imdb",
+                    "rows_seen": 100000,
+                    "rows_written": 100000,
+                    "position": 1043771,
+                },
+            )
+        )
+    )
+
+    lines = frame.split("\n")
+    assert lines[1] == "event: bootstrap.progress"
+    payload = json.loads(lines[2].removeprefix("data: "))
+    assert payload["dataset"] == "imdb.title.basics"
+    assert payload["phase"] == "imdb"
+    assert payload["rows_seen"] == 100000
+    assert payload["position"] == 1043771
+    assert "title_id" not in payload
+    assert "percent" not in payload

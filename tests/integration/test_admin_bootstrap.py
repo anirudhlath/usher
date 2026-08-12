@@ -41,6 +41,7 @@ from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.domain.jobs import JobPriority
 from usher.ports.bulk import GENOME_TAG_COUNT, BulkBatch, BulkCursor, BulkDataset, ImdbTitle
+from usher.ports.events import NullEventPublisher
 from usher.services.bootstrap import BootstrapService, VocabularyState, VocabularyVerdict
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures" / "bulk"
@@ -107,6 +108,7 @@ async def test_a_bootstrap_phase_runs_end_to_end_through_the_shared_dispatch(
         _offline_settings(cache, bulk_batch_size=2),
         BootstrapPhase.IMDB,
         report=printed.append,
+        events=NullEventPublisher(),
     )
 
     assert await catalog.count_titles() == 5
@@ -149,7 +151,13 @@ async def test_a_killed_bootstrap_leaves_a_resumable_checkpoint_rather_than_noth
         async with factory() as worker_session:
             catalog = PostgresBulkCatalogRepository(worker_session)
             runs = PostgresImportRunRepository(worker_session)
-            service = BootstrapService(runs, catalog, worker_session.commit)
+            service = BootstrapService(
+                runs,
+                catalog,
+                worker_session.commit,
+                events=NullEventPublisher(),
+                phase=BootstrapPhase.ALL,
+            )
             batches = 0
 
             async def write_twice_then_die(rows: Sequence[ImdbTitle]) -> int:
@@ -300,6 +308,8 @@ async def test_a_second_bootstrap_leaves_the_owning_processs_checkpoint_untouche
                 _AlwaysFreshStart(loser_session),
                 PostgresBulkCatalogRepository(loser_session),
                 loser_session.commit,
+                events=NullEventPublisher(),
+                phase=BootstrapPhase.ALL,
             )
             result = await loser.import_dataset(_ContendedDataset(), _refuses)
 

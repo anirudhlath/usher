@@ -19,11 +19,11 @@ a browser tab.
 
 **A port with one implementation, deliberately** -- the shape
 [ADR-0001](../../../docs/prd/decisions/0001-abc-over-protocol.md) warns
-about spending effort on. What buys it back is that three services publish
-(`EnrichService`, `PushApplyService` and `ReconcileService`) and all three
-may depend only on `domain/` and `ports/`
+about spending effort on. What buys it back is that four services publish
+(`EnrichService`, `PushApplyService`, `ReconcileService` and, since M9's E7,
+`BootstrapService`) and all four may depend only on `domain/` and `ports/`
 ([ADR-0009](../../../docs/prd/decisions/0009-repositories-are-ports.md)), so
-without a port the bus would be a bare callable injected into three
+without a port the bus would be a bare callable injected into four
 signatures with no shared contract.
 
 *This list read `EnrichService`, `WatchStateSyncService` and the push lane
@@ -57,17 +57,29 @@ from typing import Any
 class ClientEventKind(StrEnum):
     """PRD 07's SSE table, restricted to what this process emits.
 
-    `bootstrap.progress` is absent because bootstrap runs in the CLI process
-    while the bus is in-process, so there is no channel from one to the other.
-    PRD 10's argument for keeping its metric catalogue honest applies harder
-    here: an empty dashboard panel is a puzzle, and an SSE event type nothing
-    emits is a client handler that waits forever.
+    The standing rule, which binds both ways: PRD 10's argument for keeping
+    its metric catalogue honest applies harder here, because an empty
+    dashboard panel is a puzzle while an SSE event type nothing emits is a
+    client handler that waits forever -- and a *publisher* with no member is
+    a `KeyError` inside a response that has already answered 200. So a member
+    lands in the same commit as its publisher, never before it.
 
     **`row.invalidated` landed with M7**, which is the milestone that composes
-    a row -- and it landed in the same commit as its publisher, for the reason
-    above pointed the other way. This docstring used to say it was absent
-    "because nothing composes a row until M7"; that sentence is replaced rather
-    than left to read falsely.
+    a row. This docstring used to say it was absent "because nothing composes
+    a row until M7"; that sentence was replaced rather than left to read
+    falsely.
+
+    **`bootstrap.progress` landed with M9's E7, and its absence sentence gets
+    the same treatment.** It read *"absent because bootstrap runs in the CLI
+    process while the bus is in-process, so there is no channel from one to
+    the other"* -- true until E5, which put `JobKind.BOOTSTRAP` on the queue.
+    A bootstrap started through `POST /admin/bootstrap/{phase}` runs on the
+    worker lane, which in the shipped default is the API process holding this
+    bus, so the channel now exists. What has *not* changed is the
+    split-deployment answer: with `usher work` in its own container the frames
+    reach a `NullEventPublisher` and no client is told, exactly as
+    `title.updated` has degraded since M5, and that is the reason the
+    `LISTEN/NOTIFY` implementation named above still has no owner.
     """
 
     TITLE_UPDATED = "title.updated"
@@ -83,6 +95,22 @@ class ClientEventKind(StrEnum):
     # "every subscriber" nor "the right ones".
     ROW_INVALIDATED = "row.invalidated"
     SYNC_PROGRESS = "sync.progress"
+    # Scoped to **no title**, the same call `sync.progress` makes, and it is
+    # what makes PRD 07's "Admin UI only" true rather than advisory: a
+    # `?titles=` subscriber never sees one. A bulk import touches most of the
+    # catalog, so a frame carrying a title id would wake every detail screen
+    # in the household, per batch, for the length of a 1.27M-row load.
+    #
+    # **No `percent`, and PRD 07's payload column is corrected rather than
+    # satisfied.** Nothing on `BulkCursor` can supply a denominator: it
+    # carries `revision`, `position` and `rows_seen`, and `position` is
+    # documented as "a dataset-defined integer offset whose only contract is
+    # that resuming from it never misses a record" -- a byte offset for IMDb,
+    # a page number for the Wikidata crosswalk, whose SPARQL result set has
+    # no total at all. Widening `BulkCursor`/`BulkBatch` with a total is a
+    # port change across all four M2 datasets that one of them could not
+    # satisfy anyway.
+    BOOTSTRAP_PROGRESS = "bootstrap.progress"
     # Not a domain event: the channel telling a client its own stream has a
     # hole in it. PRD 07: "On buffer overflow the server emits
     # `resync_required` rather than silently skipping events -- a client

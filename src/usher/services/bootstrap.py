@@ -19,9 +19,10 @@ from enum import StrEnum
 from loguru import logger
 from opentelemetry import metrics, trace
 
-from usher.domain.bootstrap import ImportRun, ImportRunStatus
+from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.ports.bulk import BulkCursor, BulkDataset
 from usher.ports.errors import PortDataMalformed, RepositoryConflict, UsherPortError
+from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher
 from usher.ports.repository import (
     BulkCatalogRepository,
     GenomeCoverage,
@@ -197,6 +198,25 @@ class BootstrapService:
     may depend only on `domain/` and `ports/` (PRD 01, layering rule 2), and a
     session is neither. The caller -- `usher.cli`, the composition root --
     supplies a zero-argument coroutine that commits its own unit of work.
+
+    `events` and `phase` are **keyword-only and never defaulted**, on
+    `ReconcileService`'s stated grounds (`services/reconcile.py:121`): a
+    shared `NullEventPublisher()` in a signature is a mutable-looking default
+    that is stateless only by accident, and every other collaborator here is
+    required. The two composition roots supply one where they mean it --
+    `composition.build_worker` the process bus, `cli._bootstrap` a real
+    `NullEventPublisher` for a process that has no SSE client on the other
+    side of a publish.
+
+    **`phase` is the `BootstrapPhase` this run was asked for, not the dataset
+    currently streaming**, and the frame carries both. `dataset` is the
+    fine-grained identifier and moves through seven values on a `--phase all`
+    run; `phase` is what an operator typed, what
+    `POST /admin/bootstrap/{phase}` answered with, and what `Job.key` holds --
+    so it is the field a client uses to tell *its* request's frames from
+    somebody else's. The alternative was threading the phase through every
+    `import_dataset` call in `composition`, which is the same fact spelled
+    once per dataset.
     """
 
     def __init__(
@@ -204,10 +224,15 @@ class BootstrapService:
         runs: ImportRunRepository,
         catalog: BulkCatalogRepository,
         commit: Callable[[], Awaitable[None]],
+        *,
+        events: EventPublisher,
+        phase: BootstrapPhase,
     ) -> None:
         self._runs = runs
         self._catalog = catalog
         self._commit = commit
+        self._events = events
+        self._phase = phase
 
     async def import_dataset[RowT](
         self,
@@ -432,9 +457,52 @@ class BootstrapService:
                 # batches' contract) -- skipping the commit there would make
                 # a resume replay the filtered-out run on every restart.
                 await self._commit()
+                # **After that commit, never before it.** ADR-0033: an event
+                # is a statement about committed state, and this frame's
+                # subject is the batch the line above just made durable --
+                # `rows_seen`, `rows_written` and `position` are all read off
+                # the `ImportRun` that is now in `import_runs`. A client
+                # acting on the frame reads exactly that or newer. The
+                # ordering is asserted rather than assumed: a fake records
+                # how many commits had happened when each frame arrived.
+                await self._publish_progress(run)
             _rows_counter.add(written, {"dataset": dataset.name})
             _batch_duration.record(time.perf_counter() - batch_started, {"dataset": dataset.name})
         return await self._finish(run)
+
+    async def _publish_progress(self, run: ImportRun) -> None:
+        """One `bootstrap.progress` per committed batch, scoped to no title.
+
+        **Per batch rather than per run**, because an admin UI's progress bar
+        is the whole point of the event and one at the end is a bar that jumps
+        from 0% to 100% -- the failure `ReconcileService._publish_progress`
+        already names for `sync.progress`, and the reason the `bootstrap`
+        job's registration hands this service the process bus rather than
+        `JobWorker`'s deferred buffer (`composition.build_worker` carries that
+        argument in full).
+
+        **Scoped to no title**, which is what makes PRD 07's *"Admin UI only"*
+        true rather than advisory: a `?titles=` subscriber never sees one, and
+        a bulk import touching most of the catalog would otherwise wake every
+        detail screen in the household once per batch.
+
+        **No `percent`**, and the payload is what a cursor can honestly
+        supply: `ClientEventKind.BOOTSTRAP_PROGRESS` carries the argument, and
+        PRD 07's payload column is corrected rather than satisfied by a
+        fraction invented from a byte offset.
+        """
+        await self._events.publish(
+            ClientEvent(
+                kind=ClientEventKind.BOOTSTRAP_PROGRESS,
+                data={
+                    "dataset": run.dataset,
+                    "phase": self._phase.value,
+                    "rows_seen": run.rows_seen,
+                    "rows_written": run.rows_written,
+                    "position": run.position,
+                },
+            )
+        )
 
     async def _finish(self, run: ImportRun) -> ImportRun:
         now = datetime.now(UTC)

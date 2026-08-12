@@ -49,6 +49,19 @@ window** — so a rollback there costs two enqueues and one duplicate
 `title.updated` on the `requeue_running` re-run, not a lie to a client. **The
 property G2 buys is ordering, not durability, and it needs no outbox table.**
 
+*Five as of 2026-08-11. **M9's E7 added a sixth**,
+`BootstrapService._publish_progress`, which satisfies the same rule at the same
+reading — it publishes immediately after the per-batch `self._commit()`, and
+`JobWorker` commits a `bootstrap` job's claim before the handler runs, so no
+transaction of the worker's spans the work either. It is deliberately **not**
+wrapped in `DeferredEventPublisher`: deferring one frame per committed batch
+behind a 26-batch `--phase imdb` load is the 0%-to-100% jump the frame exists to
+prevent, there is no residual window left for the buffer to close, and
+`discard()` on a failed job would drop frames naming batches that really did
+commit. ADR-0033 carries the amendment; `composition.build_worker` carries the
+argument at the registration site, pinned from both sides because swapping the
+two publishers there is invisible to every unit case of `JobWorker`.*
+
 **`xmin` is not evidence of an uncommitted read, and a whole milestone's worth
 of agents read it as one.** `test_sse_end_to_end.py`'s
 `assert await _job_xmin(...) is None` failing as `assert '745' is None` was

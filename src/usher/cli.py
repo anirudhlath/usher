@@ -196,6 +196,13 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
     phase that raises must still give its connection pool back -- and the
     client's own `finally` is one layer down, in `run_bootstrap`, where the
     client is built.
+
+    **`NullEventPublisher()` is a real deployment, not a test double.** M5's
+    bus is in-process, so a `bootstrap.progress` frame raised in *this*
+    process has no SSE client on the other side of it -- the same answer
+    `usher work` has given for `title.updated` since M5, and the same
+    degradation PRD 07 and PRD 08 record for a split deployment. A client
+    that wants these frames watches the server that ran the phase.
     """
     engine = build_engine(settings.database_url.get_secret_value())
     factory = build_session_factory(engine)
@@ -208,6 +215,7 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
                 settings,
                 phase,
                 report=print,
+                events=NullEventPublisher(),
             )
     finally:
         await engine.dispose()

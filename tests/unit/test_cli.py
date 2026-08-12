@@ -58,6 +58,7 @@ from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.search import SearchResult
 from usher.ports.bulk import GENOME_TAG_COUNT, ImdbTitle
+from usher.ports.events import NullEventPublisher
 from usher.ports.repository import GenomeCoverage
 from usher.ports.search import SearchFilters, SearchMode
 from usher.services.bootstrap import (
@@ -497,7 +498,9 @@ async def test_the_genome_phase_refuses_an_empty_catalog_before_downloading(
 
     catalog = FakeBulkCatalogRepository()
     runs = FakeImportRunRepository()
-    service = BootstrapService(runs, catalog, _no_commit)
+    service = BootstrapService(
+        runs, catalog, _no_commit, events=NullEventPublisher(), phase=BootstrapPhase.ALL
+    )
     settings = Settings(
         database_url="postgresql+asyncpg://u:p@localhost/db",
         secret_key="0" * 32,
@@ -602,7 +605,13 @@ async def test_the_genome_phase_stores_the_tag_vocabulary_beside_the_vectors(
     cache = _genome_archive(tmp_path)
     catalog = FakeBulkCatalogRepository()
     await catalog.upsert_titles([_SEEDED_TITLE])
-    service = BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
+    service = BootstrapService(
+        FakeImportRunRepository(),
+        catalog,
+        _no_commit,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
         await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
@@ -652,7 +661,13 @@ async def test_the_vocabulary_is_stamped_with_the_token_the_vectors_were_stamped
 
     catalog = FakeBulkCatalogRepository()
     await catalog.upsert_titles([_SEEDED_TITLE])
-    service = BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
+    service = BootstrapService(
+        FakeImportRunRepository(),
+        catalog,
+        _no_commit,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
@@ -702,7 +717,9 @@ async def test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_voca
     catalog = FakeBulkCatalogRepository()
     await catalog.upsert_titles([_SEEDED_TITLE])
     runs = FakeImportRunRepository()
-    service = BootstrapService(runs, catalog, _no_commit)
+    service = BootstrapService(
+        runs, catalog, _no_commit, events=NullEventPublisher(), phase=BootstrapPhase.ALL
+    )
     settings = _genome_settings(cache)
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
@@ -744,7 +761,9 @@ async def test_an_import_that_failed_writes_no_vocabulary(
     catalog = FakeBulkCatalogRepository()
     await catalog.upsert_titles([_SEEDED_TITLE])
     runs = FakeImportRunRepository()
-    service = BootstrapService(runs, catalog, _no_commit)
+    service = BootstrapService(
+        runs, catalog, _no_commit, events=NullEventPublisher(), phase=BootstrapPhase.ALL
+    )
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
         await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
@@ -1427,7 +1446,13 @@ def _expansion_settings(cache: Path, *, batch_size: int = 50_000) -> Settings:
 async def _seeded_catalog() -> tuple[FakeBulkCatalogRepository, BootstrapService]:
     catalog = FakeBulkCatalogRepository()
     await catalog.upsert_titles(list(_EXPANSION_TITLES))
-    return catalog, BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
+    return catalog, BootstrapService(
+        FakeImportRunRepository(),
+        catalog,
+        _no_commit,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
 
 
 def test_the_imdb_expansion_phases_follow_imdb_and_credit_names_comes_first() -> None:
@@ -1592,7 +1617,9 @@ async def test_the_credit_names_phase_refuses_an_empty_catalog_before_downloadin
 
     catalog = FakeBulkCatalogRepository()
     runs = FakeImportRunRepository()
-    service = BootstrapService(runs, catalog, _no_commit)
+    service = BootstrapService(
+        runs, catalog, _no_commit, events=NullEventPublisher(), phase=BootstrapPhase.ALL
+    )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
         await _credit_names(_expansion_settings(tmp_path), client, catalog, service, print)
@@ -1616,7 +1643,9 @@ async def test_the_alias_phase_refuses_an_empty_catalog_before_downloading(
 
     catalog = FakeBulkCatalogRepository()
     runs = FakeImportRunRepository()
-    service = BootstrapService(runs, catalog, _no_commit)
+    service = BootstrapService(
+        runs, catalog, _no_commit, events=NullEventPublisher(), phase=BootstrapPhase.ALL
+    )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
         await _aliases(_expansion_settings(tmp_path), client, catalog, service, print)
@@ -1653,7 +1682,13 @@ async def test_the_credit_names_report_carries_a_denominator_and_the_crawl_order
     catalog = FakeBulkCatalogRepository()
     await catalog.upsert_titles([_EXPANSION_TITLES[1], _EXPANSION_TITLES[2]])
     catalog.mark_enriched("tt99000030")
-    service = BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
+    service = BootstrapService(
+        FakeImportRunRepository(),
+        catalog,
+        _no_commit,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
 
     async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
         await _credit_names(_expansion_settings(cache), client, catalog, service, print)

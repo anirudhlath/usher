@@ -4412,3 +4412,100 @@ getsource" tests/`: the scans it finds cover `ports/`, `services/curation*`,
 modules, and **none reads `services/bootstrap.py`** — the one scan this task
 itself adds parses `usher.cli` for the name `BootstrapService` over a
 docstring-stripped tree, which a docstring in another module is not.
+
+## M9 Task E7 — `bootstrap.progress`, and a publisher choice no unit case can see (2026-08-12)
+
+**10 plants over `services/bootstrap.py`, `api/dto/events.py` and
+`composition.py` — 7 behavioural targets, all KILLED on the first pass; 3
+equivalent-mutant controls, all SURVIVED and all passing every gate step
+separately. 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0
+DID-NOT-RUN, 0 HUNG.** Every expected verdict was written down first and every
+one matched.
+
+Harness at `/var/tmp/m9-E7/plants.py`, **outside the working tree** for V1's
+reason and under `/var/tmp` rather than `/tmp`, which is tmpfs here. Plant list
+and expected verdicts at `/var/tmp/m9-E7/PLANTS.md`
+(`sha256 12d88b20607b…`) before the first run. Tree committed at `b8ca413`
+first, so `git status` is the verification — clean after the round, every file
+`md5sum`-verified against its pre-plant digest. `PYTHONDONTWRITEBYTECODE=1`,
+`__pycache__` swept under **both** `src/` and `tests/` before every run,
+`compile()` as the dry run, exact anchor counts per hunk, no second `-q`.
+
+**The landing check is byte equality with the intended mutant** —
+`path.read_text() == planted` — which is F3's repair adopted on its second
+opportunity rather than re-derived, and this round needed it: two of the seven
+targets are **moves** (T1 swaps two adjacent statements, T3 relocates a call
+from `_drain`'s loop into `_finish`), and B6's substring form `old not in
+landed and new in landed` is wrong for both.
+
+**Selection:** `test_services_bootstrap.py`, `test_ports_events.py`,
+`test_api_dto_events.py`, `test_composition.py`, `test_cli.py` (unit) plus
+`test_sse_end_to_end.py::test_a_bootstrap_batch_reaches_an_unfiltered_subscriber_and_never_a_filtered_one`
+**by node id** — 153 cases, ~8.5 s a run. The node id rather than the file is
+B2's rule applied where the case under test lives *inside* the flaky file: that
+module also holds `test_opening_a_stub_promotes_it…`, which is intermittent on
+this tree and predates M9, and a sweep scored on "did the run fail" cannot
+include a flaky case. Selecting by node id keeps the end-to-end arm and leaves
+the flake out.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 the publish moved above its own commit | KILLED | **1 — the commit-count arm alone** |
+| T2 the frame carries `title_id=run.id` | KILLED | 2 — one per surface |
+| T3 the per-batch publish moved into `_finish` (one per run) | KILLED | 3 |
+| T4 the `_WIRE` entry deleted | KILLED | 4 |
+| T5 the registration handed `worker.events` | KILLED | **1 — the composition case alone** |
+| T6 the frame's `phase` rendered as `run.dataset` | KILLED | 2 |
+| T7 the wire name spelled `bootstrap_progress` | KILLED | 4 |
+
+**T1 and T5 each fail exactly one case, and those two numbers are the round's
+whole content.**
+
+- **T1** is ADR-0033 at this producer, and the only thing that can see it is
+  the commit count recorded *at publish time*. Moving the publish above
+  `self._commit()` leaves the same two frames, in the same order, carrying the
+  same payload — every other assertion in the file is satisfied. `ProgressSpy`
+  records `(event, commits_so_far)` and the arm reads `[1, 2]` against the
+  mutant's `[0, 1]`. Same argument `test_sse_end_to_end.py`'s
+  `_CommittedStateProbe` makes with a second database connection, one layer
+  down where there is no database.
+- **T5** confirms G2's measurement rather than assuming it. Handing the
+  registration `worker.events` instead of `pipeline.events` fails **only**
+  `test_the_bootstrap_handler_publishes_to_the_bus_and_not_to_the_workers_buffer`
+  out of 153 — the job still completes, the frames still arrive, the payloads
+  are identical, and only *when* they arrive differs. That is the blind spot
+  G2 named, arriving with the polarity inverted: here the buffer is the defect,
+  because a bootstrap raises one frame per committed batch (61 for `--phase
+  imdb` at the shipped 50,000 batch size) and deferring them delivers the whole
+  progress bar as a single jump after the run has finished. **A composition
+  root's choice of collaborator is invisible to every unit case of the class it
+  is configuring, in both directions.**
+
+**T3's blast radius is worth reading rather than counting.** Moving the publish
+to per-run kills the batch-count case, the SSE ordering arm — and
+`test_a_failed_phase_publishes_nothing_it_did_not_commit`, because `_finish` is
+never reached on a failed run, so the mutant reports *nothing at all* for a
+phase that committed two batches. That third case exists for the `discard()`
+half of the argument against the deferred buffer and it turns out to hold the
+per-run mutation too.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 the payload's `rows_seen`/`rows_written` keys written in the other order | PASS | PASS | PASS | PASS | PASS (153) |
+| C2 one sentence of `_publish_progress`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (153) |
+| C3 `BootstrapService.__init__`'s `self._events`/`self._phase` writes swapped | PASS | PASS | PASS | PASS | PASS (153) |
+
+C1 and C3 are facts about the *code* rather than about what the tools look at:
+`ClientEvent.data` is a `Mapping` built from a dict literal with two distinct
+keys, read only by key and compared as a dict by every case and by
+`json.dumps` on the wire, so insertion order cannot reach an assertion — and it
+is deliberately **not** an `__all__` reorder, which `RUF022` rejects, nor a
+reorder of a positional call, which A5's entry is the reason for checking
+rather than assuming; and `_events`/`_phase` are two disjoint attribute writes
+on a freshly constructed object from two parameters, neither able to observe
+the other. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`: **thirty** files
+scan source, the only one that reads `usher.cli` strips docstrings through
+`ast.unparse` first, `test_composition.py`'s scan reads
+`JobWorker.registered_kinds`' docstring, and **none of them reads
+`services/bootstrap.py`'s prose.**

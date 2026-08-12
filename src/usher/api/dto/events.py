@@ -41,6 +41,7 @@ class SseEventKind(StrEnum):
     WATCHSTATE_UPDATED = "watchstate.updated"
     ROW_INVALIDATED = "row.invalidated"
     SYNC_PROGRESS = "sync.progress"
+    BOOTSTRAP_PROGRESS = "bootstrap.progress"
     RESYNC_REQUIRED = "resync_required"
 
 
@@ -63,6 +64,7 @@ _WIRE: dict[ClientEventKind, SseEventKind] = {
     ClientEventKind.WATCHSTATE_UPDATED: SseEventKind.WATCHSTATE_UPDATED,
     ClientEventKind.ROW_INVALIDATED: SseEventKind.ROW_INVALIDATED,
     ClientEventKind.SYNC_PROGRESS: SseEventKind.SYNC_PROGRESS,
+    ClientEventKind.BOOTSTRAP_PROGRESS: SseEventKind.BOOTSTRAP_PROGRESS,
     ClientEventKind.RESYNC_REQUIRED: SseEventKind.RESYNC_REQUIRED,
 }
 

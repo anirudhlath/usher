@@ -128,6 +128,43 @@ start. Pre-existing, affects every kind, found while measuring for this ADR,
 and it belongs with whoever owns `requeue_running`'s cadence rather than with
 an ordering rule.
 
+## Amendment (2026-08-12, M9 E7) — a sixth site, and one that must not be deferred
+
+`BootstrapService._publish_progress` is the sixth `events.publish` site, so
+the "exactly five" above is a measurement dated at G1 rather than a claim about
+the tree today. **The rule holds at the new site by the same reading as the
+other five**: the frame is offered immediately after `self._commit()`, which is
+the commit that makes the batch it describes durable — its `rows_seen`,
+`rows_written` and `position` are read off the `ImportRun` that statement just
+persisted, and `JobWorker` commits a `bootstrap` job's claim *before* the
+handler runs, so no transaction of the worker's spans the work either.
+
+**What is new is that this site is deliberately *not* wrapped in
+`DeferredEventPublisher`**, and `composition.build_worker` hands it
+`pipeline.events` where every other registration gets `worker.events`. Three
+reasons, any one sufficient:
+
+1. **Deferring it would produce the failure the frame exists to prevent.** The
+   buffer flushes after `complete()`, so a whole run's progress would arrive as
+   one burst after the run finished — a progress bar that jumps from 0% to
+   100%, which is the same argument this file's own text makes for leaving the
+   push and reconcile lanes unwrapped.
+2. **There is nothing left for it to close.** The residual window this ADR
+   names is `JobWorker`'s staged enqueues plus the `DELETE` that completes the
+   job; a bootstrap handler stages nothing and commits per batch, so the
+   stronger form is already satisfied at the publish site.
+3. **`discard()` would lie by omission.** A failed bootstrap keeps every batch
+   it committed — that is what makes it resumable — so throwing away the frames
+   naming those batches would report *less* than actually landed.
+
+The buffer's own docstring sizes it for *"a handful of events at most"*; a
+`--phase imdb` run raises 61 frames and a `--phase all` more, which is the
+second reason the choice is structural rather than stylistic. Pinned from both
+sides by `tests/unit/test_composition.py::test_the_bootstrap_handler_publishes_
+to_the_bus_and_not_to_the_workers_buffer`, because G2 measured that swapping
+those two objects at a registration site is invisible to every unit case of
+`JobWorker`.
+
 ## Evidence
 
 Measured 2026-08-11 in the M9 `G1` worktree, against a real

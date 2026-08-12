@@ -33,8 +33,9 @@ from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from usher.db.base import build_engine, build_session_factory
 from usher.db.models.bootstrap import ImportRunRow
 from usher.db.repositories.import_run import PostgresImportRunRepository
-from usher.domain.bootstrap import ImportRun, ImportRunStatus
+from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset
+from usher.ports.events import NullEventPublisher
 from usher.services.bootstrap import BootstrapService
 
 _DATASET = "concurrency.probe"
@@ -137,7 +138,11 @@ async def test_a_conflicting_start_leaves_the_winners_run_untouched(postgres_url
             # one event loop can't reproduce on their own).
             loser_catalog = FakeBulkCatalogRepository()
             loser_service = BootstrapService(
-                _AlwaysFreshStart(loser_session), loser_catalog, loser_session.commit
+                _AlwaysFreshStart(loser_session),
+                loser_catalog,
+                loser_session.commit,
+                events=NullEventPublisher(),
+                phase=BootstrapPhase.ALL,
             )
             result = await loser_service.import_dataset(_NeverDrained(), _write)
 
