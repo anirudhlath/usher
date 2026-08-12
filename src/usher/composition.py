@@ -803,14 +803,24 @@ def build_worker(
     worker = JobWorker(
         pipeline.queue,
         pipeline.commit,
-        # The bus itself, which the worker wraps in its own buffer. Every
-        # service registered below that publishes is handed `worker.events`
-        # -- the buffer -- and never `pipeline.events`, so a frame raised
-        # inside a job is offered after `complete()` and its commit
-        # (ADR-0033). The push and reconcile lanes are deliberately not
-        # wrapped: they are not jobs, they commit their own subject before
-        # they publish, and deferring a `sync.progress` behind a
-        # 1,127-batch walk turns a progress bar into a single jump.
+        # The bus itself, which the worker wraps in its own buffer. A service
+        # registered below whose frames belong to the *job's* unit of work is
+        # handed `worker.events` -- the buffer -- so a frame raised inside a
+        # job is offered after `complete()` and its commit (ADR-0033).
+        #
+        # **That is the default and not a law, and there are three exceptions
+        # with one reason between them.** The push and reconcile lanes are not
+        # wrapped because they are not jobs; the `bootstrap` registration is
+        # not wrapped although it *is* one, and its own comment below carries
+        # the argument. All three commit their own subject before they publish
+        # and all three publish per batch, so deferring them buys nothing and
+        # costs the whole point of the frame: a `sync.progress` held behind a
+        # 1,127-batch walk, or a `bootstrap.progress` behind a 26-batch load,
+        # is a progress bar delivered as a single jump after the work it was
+        # describing finished. *(This comment read "every service registered
+        # below that publishes is handed `worker.events` ... and never
+        # `pipeline.events`" until M9's E7, which added the counter-example
+        # rather than the exception the sentence already had.)*
         events=pipeline.events,
         batch_size=settings.job_batch_size,
     )
@@ -846,6 +856,23 @@ def build_worker(
     # the same sentences to a terminal; a worker inside the server process
     # renders them to the log, which is the only difference between the two
     # roots and the reason `run_bootstrap` takes a sink at all.
+    #
+    # ⚠️ **`pipeline.events` and deliberately NOT `worker.events`, which is
+    # the opposite of every registration below and the same call the push and
+    # reconcile lanes already make.** `DeferredEventPublisher` holds a job's
+    # frames until `complete()` and its commit, and its own docstring sizes
+    # the buffer for "a handful of events at most" -- a bootstrap raises one
+    # per committed batch, **26 for `--phase imdb`'s title pass alone** at the
+    # shipped 50,000 batch size, so deferring them delivers the whole progress
+    # bar as a single jump after the run it was describing has already
+    # finished. Two further reasons, either sufficient: those batches are
+    # *individually* committed by this handler (no transaction spans the work
+    # -- `JobWorker` commits the claim before the handler runs), so ADR-0033's
+    # ordering rule is already satisfied at the publish site and the buffer
+    # buys nothing; and `discard()` on a failing job would throw away frames
+    # naming rows that really did land. `test_composition.py` pins the choice
+    # from both sides, because no unit case of `JobWorker` can see which
+    # publisher a handler was handed.
     worker.register(
         JobKind.BOOTSTRAP,
         bootstrap_handler(
@@ -856,6 +883,7 @@ def build_worker(
                 settings,
                 phase,
                 report=_log_bootstrap_line,
+                events=pipeline.events,
             )
         ),
     )
@@ -1561,6 +1589,7 @@ async def run_bootstrap(
     phase: BootstrapPhase,
     *,
     report: BootstrapReporter,
+    events: EventPublisher,
 ) -> None:
     """PRD 04's phased import, run once, for whichever phases `phase` names.
 
@@ -1612,9 +1641,19 @@ async def run_bootstrap(
     `import_runs` -- not the queue -- the durable record of a bootstrap. A
     `bootstrap` job therefore *completes* even when its phase failed, exactly
     as a `sync` job does when `ReconcileService` records a `FAILED` `SyncRun`.
+
+    **`events` is required and is where the `bootstrap.progress` frames go.**
+    `usher bootstrap` passes a real `NullEventPublisher` -- a separate process
+    with no SSE client on the other side of a publish, the same answer
+    `usher work` already gives for `title.updated` -- and `build_worker`
+    passes the **process bus**, deliberately not `JobWorker`'s deferred
+    buffer. That polarity is the opposite of `enrich`'s and the reason is in
+    `build_worker`'s own comment: this producer commits its own subject per
+    batch, and deferring a per-batch frame behind a multi-thousand-batch load
+    turns a progress bar into a single jump at the end.
     """
     client = bulk_client(settings)
-    service = BootstrapService(runs, catalog, commit)
+    service = BootstrapService(runs, catalog, commit, events=events, phase=phase)
     try:
         if phase in (BootstrapPhase.IMDB, BootstrapPhase.ALL):
             # The window wraps both IMDb passes, not each separately: the

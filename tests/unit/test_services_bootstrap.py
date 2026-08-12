@@ -6,10 +6,11 @@ import pytest
 
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.import_run_repository import FakeImportRunRepository
-from usher.domain.bootstrap import ImportRun, ImportRunStatus
+from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, ImdbTitle
 from usher.ports.errors import PortRateLimited, PortUnavailable, RepositoryConflict
+from usher.ports.events import ClientEvent, ClientEventKind, EventPublisher, NullEventPublisher
 from usher.services.bootstrap import BootstrapService
 
 
@@ -112,10 +113,44 @@ def runs() -> FakeImportRunRepository:
     return FakeImportRunRepository()
 
 
+class ProgressSpy(EventPublisher):
+    """Every frame, with **how many commits had happened when it arrived**.
+
+    That second number is the whole of the ordering assertion, and no other
+    shape has it: "the frame was published" and "the frame was published after
+    the batch it describes was committed" are satisfied by the same list of
+    events, and only the commit count taken *at publish time* tells them
+    apart. Same argument `tests/integration/test_sse_end_to_end.py`'s
+    `_CommittedStateProbe` makes with a second database connection, one layer
+    down where there is no database.
+    """
+
+    def __init__(self, commits: CommitSpy) -> None:
+        self._commits = commits
+        self.frames: list[tuple[ClientEvent, int]] = []
+
+    async def publish(self, event: ClientEvent) -> None:
+        self.frames.append((event, self._commits.count))
+
+
 def _service(
-    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository, commit: CommitSpy
+    runs: FakeImportRunRepository,
+    catalog: FakeBulkCatalogRepository,
+    commit: CommitSpy,
+    *,
+    events: EventPublisher | None = None,
+    phase: BootstrapPhase = BootstrapPhase.IMDB,
 ) -> BootstrapService:
-    return BootstrapService(runs, catalog, commit)
+    """A default publisher **here and never in `src/`.**
+
+    `BootstrapService` refuses one, on `ReconcileService`'s grounds: a shared
+    `NullEventPublisher()` in a production signature is stateless only by
+    accident. A test helper is the place where that cost is not worth paying
+    per case, and the cases that are *about* the frames pass their own spy.
+    """
+    return BootstrapService(
+        runs, catalog, commit, events=events or NullEventPublisher(), phase=phase
+    )
 
 
 async def _write(catalog: FakeBulkCatalogRepository, rows: Sequence[ImdbTitle]) -> int:
@@ -388,3 +423,116 @@ async def test_link_crosswalk_commits(
     commit = CommitSpy()
     await _service(runs, catalog, commit).link_crosswalk()
     assert commit.count == 1
+
+
+async def test_one_progress_frame_lands_per_batch_and_never_before_its_own_commit(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """ADR-0033 at this producer: a frame is a statement about committed
+    state, so each one is offered *after* the commit that made its batch
+    durable.
+
+    **The commit count at publish time is the assertion.** Two batches commit
+    once each and `_finish` commits a third time, so a correct run records
+    frames at counts 1 and 2 -- a publish moved above `self._commit()` records
+    0 and 1, which is the same two events in the same order and the reason a
+    list of frames alone cannot see it.
+
+    **Two batches rather than one, and no third frame.** One frame per *run*
+    is the progress bar that jumps from 0% to 100%, which
+    `ReconcileService._publish_progress` already names for `sync.progress`;
+    with a single batch it is indistinguishable from one per batch.
+    """
+    commit = CommitSpy()
+    spy = ProgressSpy(commit)
+    dataset = ScriptedDataset([[_title(1), _title(2)], [_title(3)]])
+
+    await _service(runs, catalog, commit, events=spy).import_dataset(
+        dataset, lambda rows: _write(catalog, rows)
+    )
+
+    assert commit.count == 3, "the premise: two batch commits and the completing one"
+    assert [seen for _, seen in spy.frames] == [1, 2], (
+        "a frame was offered before the commit that made its batch durable"
+    )
+
+
+async def test_a_progress_frame_is_scoped_to_no_title_so_a_detail_screen_never_sees_one(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """PRD 07's "Admin UI only", as a property rather than as advice.
+
+    `?titles=` filters on `ClientEvent.title_id`, so a frame carrying one
+    would reach exactly the detail screens subscribed to whichever title
+    happened to be attached -- and a bulk import touches most of the catalog,
+    once per batch. `sync.progress` makes the same call for the same reason.
+    Both ids, because an episode-scoped frame would be as wrong as a
+    title-scoped one and only `episode_id` would say so.
+    """
+    commit = CommitSpy()
+    spy = ProgressSpy(commit)
+
+    await _service(runs, catalog, commit, events=spy).import_dataset(
+        ScriptedDataset([[_title(1)]]), lambda rows: _write(catalog, rows)
+    )
+
+    assert spy.frames, "no frame was published, so nothing below measures anything"
+    assert [(event.title_id, event.episode_id) for event, _ in spy.frames] == [(None, None)]
+
+
+async def test_a_progress_frame_carries_the_cursor_the_batch_committed(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """The payload PRD 07's column is corrected to, read off the `ImportRun`
+    the commit above it persisted.
+
+    **No `percent`, and it is not an omission.** Nothing on `BulkCursor` can
+    supply a denominator -- `position` is a dataset-defined offset whose only
+    contract is that resuming from it never misses a record, and the Wikidata
+    crosswalk pages a SPARQL result set with no total at all.
+
+    `phase` is the `BootstrapPhase` the run was asked for and `dataset` is
+    what is streaming now; the two differ on every `--phase all` run, which is
+    what a single case seeded with `phase=IMDB` and the `scripted` dataset can
+    show and a case where they agreed could not.
+    """
+    commit = CommitSpy()
+    spy = ProgressSpy(commit)
+
+    await _service(runs, catalog, commit, events=spy, phase=BootstrapPhase.ALL).import_dataset(
+        ScriptedDataset([[_title(1), _title(2)]]), lambda rows: _write(catalog, rows)
+    )
+
+    assert [event.kind for event, _ in spy.frames] == [ClientEventKind.BOOTSTRAP_PROGRESS]
+    assert dict(spy.frames[0][0].data) == {
+        "dataset": "scripted",
+        "phase": "all",
+        "rows_seen": 2,
+        "rows_written": 2,
+        "position": 1,
+    }
+
+
+async def test_a_failed_phase_publishes_nothing_it_did_not_commit(
+    runs: FakeImportRunRepository, catalog: FakeBulkCatalogRepository
+) -> None:
+    """A run that dies mid-stream keeps the frames for the batches that
+    really landed and raises none for the one that did not.
+
+    That is the *reason* the `bootstrap` registration hands this service the
+    process bus rather than `JobWorker`'s deferred buffer: the buffer's
+    `discard()` would throw all of these away on a failed job, and the rows
+    they name are committed and still in the catalog. Kills a publish moved
+    into `_finish`, which would report nothing at all for the failing run.
+    """
+    commit = CommitSpy()
+    spy = ProgressSpy(commit)
+    dataset = ScriptedDataset([[_title(1)], [_title(2)], [_title(3)]], fail_after=2)
+
+    run = await _service(runs, catalog, commit, events=spy).import_dataset(
+        dataset, lambda rows: _write(catalog, rows)
+    )
+
+    assert run.status is ImportRunStatus.FAILED, "the premise: this run did not complete"
+    assert len(spy.frames) == 2, "one frame per committed batch, and the third never committed"
+    assert [event.data["rows_seen"] for event, _ in spy.frames] == [1, 2]

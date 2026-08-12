@@ -248,12 +248,22 @@ class DeferredEventPublisher(EventPublisher):
     [ADR-0033](../../../docs/prd/decisions/0033-an-event-is-a-statement-about-committed-state.md):
     **an event is a statement about committed state, and that is a rule about
     ordering.** Every publisher in `src/` commits the event's own *subject*
-    before it publishes -- measured at all five sites -- and the enrich path
-    still satisfies only the weaker form, because its unit of work is
-    `JobWorker`'s and closes above it. Wrapping the publisher a worker's
+    before it publishes -- measured at all five sites G1 found -- and the
+    enrich path still satisfies only the weaker form, because its unit of work
+    is `JobWorker`'s and closes above it. Wrapping the publisher a worker's
     handlers are given is what makes the stronger form structural: whoever
     decides *when* to flush is the code that owns the transaction, and no
     handler has to remember anything.
+
+    ⚠️ **Not every handler wants that, and `bootstrap` is the one that does
+    not.** E7 added a sixth publish site whose unit of work is its *own* --
+    `BootstrapService` commits per batch and stages nothing for `JobWorker` to
+    close -- so `composition.build_worker` hands that registration the process
+    bus rather than this buffer. Wrapping it would hold a whole run's progress
+    until the run finished, and `discard()` would throw away frames naming
+    batches that really committed. ADR-0033 carries the amendment; the point
+    for a reader here is that this class is the default for a job's frames and
+    not a law about them.
 
     Three properties, none of them accidental:
 

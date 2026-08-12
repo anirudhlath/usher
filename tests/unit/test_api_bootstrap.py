@@ -17,8 +17,10 @@ case rather than in two.
 """
 
 import ast
+import dataclasses
 import inspect
 import pathlib
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -27,11 +29,14 @@ from fastapi import FastAPI
 
 from tests.fakes.job_queue import FakeJobQueue
 from usher.api.app import create_app
-from usher.api.deps import get_job_queue
+from usher.api.deps import get_bootstrap_report, get_job_queue
+from usher.api.dto.bootstrap import BootstrapStatusResponse, VocabularyResponse
 from usher.api.routers import bootstrap as bootstrap_router
 from usher.config import Settings
-from usher.domain.bootstrap import BootstrapPhase
+from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.domain.jobs import JobKind, JobPriority
+from usher.ports.repository import GenomeCoverage
+from usher.services.bootstrap import BootstrapReport, VocabularyState, VocabularyVerdict
 
 
 @pytest.fixture
@@ -161,3 +166,158 @@ def test_the_bootstrap_router_holds_no_dataset_and_can_download_nothing() -> Non
     assert named, "the import scan found nothing, so it proves nothing"
     forbidden = ("usher.adapters.bulk", "usher.services.bootstrap", "usher.composition", "httpx")
     assert [name for name in named if name.startswith(forbidden)] == []
+
+
+# --- `GET /admin/bootstrap/status` -------------------------------------------
+
+
+@pytest.fixture
+def report() -> BootstrapReport:
+    """A catalog mid-bootstrap: one dataset done, one failed with a message an
+    operator has to be able to read, a genome with a vocabulary that names it.
+
+    Deliberately not the empty report -- the empty case is
+    `tests/integration/test_admin_bootstrap.py`'s first case, driven against a
+    real database because "the four reads survive a database no import has
+    touched" is a claim about the reads and not about the serialisation.
+    """
+    return BootstrapReport(
+        runs=(
+            ImportRun(
+                dataset="imdb.title.basics",
+                revision="an-invented-etag",
+                status=ImportRunStatus.COMPLETED,
+                position=12678891,
+                rows_seen=1271138,
+                rows_written=1271138,
+                finished_at=datetime(2026, 8, 12, 9, 30, tzinfo=UTC),
+            ),
+            ImportRun(
+                dataset="wikidata.crosswalk",
+                revision="an-invented-etag",
+                status=ImportRunStatus.FAILED,
+                error="the endpoint refused the connection",
+                position=30,
+                rows_seen=386364,
+                rows_written=385805,
+            ),
+        ),
+        titles=1271138,
+        genome=GenomeCoverage(
+            with_vector=16376,
+            titles=1271138,
+            movies=899828,
+            enriched=204335,
+            enriched_with_vector=15022,
+            revisions=(("an-invented-genome-etag", 16376),),
+        ),
+        vocabulary=VocabularyVerdict(state=VocabularyState.NAMED, tags=1128),
+    )
+
+
+@pytest.fixture
+def status_client(app: FastAPI, report: BootstrapReport):  # type: ignore[no-untyped-def]
+    app.dependency_overrides[get_bootstrap_report] = lambda: report
+    return app
+
+
+async def test_the_status_route_serialises_the_report_and_invents_nothing(
+    status_client: FastAPI, report: BootstrapReport
+) -> None:
+    """Every field of the report reaches the body, and the body holds nothing
+    the report does not.
+
+    The equality is against a whole literal document rather than against a
+    handful of keys, because the failure this route can actually have is a
+    *silent* one: a field dropped in `.of()` renders as a smaller object that
+    every per-key assertion still passes. `error` is the stored string
+    unchanged, and `finished_at` is `null` on the run that has not finished --
+    absent-versus-null is the distinction an admin screen draws a spinner
+    from.
+    """
+    async with LifespanManager(status_client):
+        transport = httpx.ASGITransport(app=status_client)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            response = await http.get("/admin/bootstrap/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["titles"] == 1271138
+    assert body["vocabulary"] == {"state": "named", "tags": 1128, "detail": None}
+    assert body["genome"] == {
+        "with_vector": 16376,
+        "titles": 1271138,
+        "movies": 899828,
+        "enriched": 204335,
+        "enriched_with_vector": 15022,
+        "revisions": [{"revision": "an-invented-genome-etag", "vectors": 16376}],
+    }
+    assert [one["dataset"] for one in body["runs"]] == [
+        "imdb.title.basics",
+        "wikidata.crosswalk",
+    ]
+    failed = body["runs"][1]
+    assert failed["status"] == "failed"
+    assert failed["error"] == "the endpoint refused the connection"
+    assert failed["finished_at"] is None
+    assert body["runs"][0]["error"] is None
+
+
+def test_every_field_of_the_report_is_a_field_of_the_response(report: BootstrapReport) -> None:
+    """The projection is total, derived from the dataclass rather than from a
+    list somebody keeps in step.
+
+    A field added to `BootstrapReport` and forgotten in
+    `BootstrapStatusResponse.of` is a fact an operator screen silently stops
+    showing -- and the case above cannot see it, because a document missing a
+    key it never asserted is a document that passes. Same shape as
+    `test_the_response_carries_every_field_of_its_own_model` one route over,
+    pointed at the *source* of the projection instead of at its target.
+    """
+    projected = set(BootstrapStatusResponse.model_fields)
+    carried = {field.name for field in dataclasses.fields(report)}
+
+    assert carried, "the dataclass scan found nothing, so it proves nothing"
+    assert carried <= projected, sorted(carried - projected)
+
+
+@pytest.mark.parametrize("state", list(VocabularyState))
+def test_every_vocabulary_state_survives_the_wire_as_its_own_member(
+    state: VocabularyState,
+) -> None:
+    """The verdict crosses as a member, not as the CLI's sentence.
+
+    Parametrised over the enum so a sixth state is a case without anybody
+    remembering, and asserted through `model_dump(mode="json")` rather than
+    through the model's own attribute -- a `StrEnum` field compares equal to
+    its own value in Python whatever pydantic does with it on the way out, so
+    reading the attribute back is an assertion that cannot fail.
+    """
+    rendered = VocabularyResponse.of(VocabularyVerdict(state=state, tags=3, detail="a diagnosis"))
+
+    assert rendered.model_dump(mode="json") == {
+        "state": state.value,
+        "tags": 3,
+        "detail": "a diagnosis",
+    }
+
+
+def test_the_status_route_is_in_the_openapi_document_with_a_real_shape(app: FastAPI) -> None:
+    """M9's own acceptance: `/openapi.json` describes the report rather than
+    `{"type": "object"}`, which is half the reason the report is a value
+    object at all.
+
+    The premise guard is not decoration -- a schema lookup that resolved
+    nothing would leave every assertion below iterating an empty dict and
+    passing.
+    """
+    document = app.openapi()
+    operation = document["paths"]["/admin/bootstrap/status"]["get"]
+    ref = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+    schema = document["components"]["schemas"][ref.rsplit("/", 1)[-1]]
+
+    assert schema.get("properties"), "the schema resolved no properties and proves nothing"
+    assert set(schema["properties"]) == {"titles", "runs", "genome", "vocabulary"}
+    assert schema["properties"]["titles"]["type"] == "integer"
+    vocabulary = document["components"]["schemas"]["VocabularyState"]
+    assert set(vocabulary["enum"]) == {one.value for one in VocabularyState}

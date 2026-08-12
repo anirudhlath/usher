@@ -783,6 +783,41 @@ be added if a client turns out to need flexible field selection.
 > route rather than from a command. **Unauthenticated, like every route in this
 > table.**
 >
+> **Built in M9's E6: `GET /admin/bootstrap/status`.** ✅ The reading half, and
+> it is the *same report* `usher bootstrap-status` has printed since M2 —
+> `services.bootstrap.BootstrapReport`, assembled once from four reads, printed
+> by the CLI and serialised here. A route that re-derived it would be a second
+> answer to *"what does 'not loaded' mean?"*, and the branch the two would
+> disagree on is the one nobody ever looks at.
+>
+> **It answers 200 for every state a database can be in** — no import ever run,
+> a `FAILED` run with its `error` string, a genome vocabulary loaded from
+> another release. Each is a fact about the thing being described rather than a
+> failure of the request, which is the rule `GET /admin/sources/{id}/status`
+> already sets. `error` reaches the body as the stored string, written by
+> `BootstrapService` as `str(exc)`: PRD 08's credentials-never-logged rule is
+> enforced where the string is *made*, not by a redaction at the wire, which
+> would be a second and weaker copy of it in the layer least able to know what
+> a credential looks like.
+>
+> **The genome vocabulary's verdict crosses as a member, not as a sentence.**
+> `VocabularyState` is one of `no_vectors`, `mixed_releases`, `not_loaded`,
+> `mismatched`, `named`; the English stays in the CLI. A client that had to
+> regex prose to tell *"never loaded"* from *"loaded from the wrong release"* —
+> two different operator actions — is a client this route has failed. There is
+> no percentage anywhere in the document, for `GenomeCoverage`'s own reason:
+> the counts carry their denominators and a caller picks its own.
+>
+> ⚠️ **Two aggregate reads per request, priced and stated rather than cached.**
+> Measured 2026-08-12 against a real 1,272,367-title catalog with a
+> 15,565-vector genome: `count_titles()` **80.6 ms**, `genome_coverage()`
+> **248.6 ms** plus **2.0 ms** for the revisions read — roughly a third of a
+> second, growing with the catalog rather than with the screen. That is an
+> admin page somebody opens on purpose. **No other route may copy this shape**,
+> and there is deliberately no cache: it would be an unmeasured mechanism on
+> the one page an operator opens precisely because they distrust what they last
+> saw.
+>
 > **Built in M9: `GET`/`PUT /admin/rows/providers`** — the control
 > [08](08-operations.md)'s Database layer has promised since M6 and the
 > discharge of [09](09-roadmap.md)'s M7 boundary call 9, which refused the
@@ -1080,7 +1115,55 @@ spelling, and no `internal_error` either — nothing emits one.
 | `watchstate.updated` | Title/episode id, position, played | Update progress | ✅ M5 |
 | `row.invalidated` | Row slug | Refetch that row | ✅ M7 |
 | `sync.progress` | Source, counts, phase | Admin UI only | ✅ M5 |
-| `bootstrap.progress` | Phase, percent | Admin UI only | — |
+| `bootstrap.progress` | Phase, dataset, rows seen, rows written, cursor position | Admin UI only | ✅ M9 |
+
+> **Built in M9's E7, and this row's payload column is *changed* rather than
+> implemented — so the change is argued here rather than applied silently.**
+> It read **"Phase, percent"** for eight milestones. There is no percent to be
+> had: `BulkCursor` carries `revision`, `position` and `rows_seen`, and
+> `position` is documented as *"a dataset-defined integer offset whose only
+> contract is that resuming from it never misses a record"* — a byte offset
+> for the IMDb dumps, a page number for the Wikidata crosswalk, whose SPARQL
+> result set has no total at all. A denominator would mean widening
+> `BulkCursor`/`BulkBatch` across all four M2 datasets, which one of them
+> could not satisfy anyway, so the payload states what the importer knows and
+> a client that wants a bar divides by whatever it knows about the dump.
+>
+> **The member had no producer until E5 put bootstrap on the queue**, and
+> `ports/events.py` said so in as many words: *"bootstrap runs in the CLI
+> process while the bus is in-process, so there is no channel from one to the
+> other."* A phase started through `POST /admin/bootstrap/{phase}` runs on the
+> worker lane, which in the shipped default is the API process holding the
+> bus. The member and its publisher land in one commit, both ways round: an
+> event type nothing emits is a client handler that waits forever, and a
+> publisher with no wire name is a `KeyError` inside a response that has
+> already answered `200 text/event-stream`.
+>
+> **One frame per committed batch, never one per run**, and never before that
+> batch's own commit ([ADR-0033](decisions/0033-an-event-is-a-statement-about-committed-state.md)).
+> One at the end is a progress bar that jumps from 0% to 100%, which is the
+> same call `sync.progress` makes. The rate is the smaller of the two: a
+> `--phase imdb` run raises **61** frames at the shipped 50,000-row batch size
+> — 26 for the 1,271,138 retained `title.basics` rows and 35 for the 1,700,615
+> `title.ratings` rows, arithmetic over measured counts rather than an
+> observed total — against `sync.progress`' **measured** 1,127 for one nightly
+> walk of the one library this project has measured.
+>
+> **Scoped to no title, which is what makes "Admin UI only" a property.** A
+> `?titles=` subscriber never sees one. A bulk import touches most of the
+> catalog, so a title id here would wake every detail screen in the household
+> once per batch — the same conclusion `row.invalidated` reaches from the
+> opposite direction.
+>
+> ⚠️ **In a split deployment no client is told, and the checkmark above does
+> not mean "works everywhere".** With `usher work` in its own container the
+> frames reach a `NullEventPublisher`, because M5's bus is in-process and the
+> `LISTEN/NOTIFY` implementation `ports/events.py` names still has no owner.
+> That is the identical, already-documented degradation `title.updated` has
+> had since M5 ([08](08-operations.md)), and it costs nothing durable:
+> `import_runs` is the record of a bootstrap and `GET /admin/bootstrap/status`
+> reads it, so a client that missed every frame can still see exactly where
+> the run got to.
 
 > **Settled in M7.** Published by the **push lane only**, at the same point it
 > publishes `watchstate.updated`, because a push event *is* a change — one

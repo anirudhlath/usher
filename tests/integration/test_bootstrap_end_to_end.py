@@ -22,7 +22,7 @@ from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.genome import PostgresGenomeRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
-from usher.domain.bootstrap import ImportRunStatus
+from usher.domain.bootstrap import BootstrapPhase, ImportRunStatus
 from usher.domain.enums import TitleKind
 from usher.ports.bulk import (
     GENOME_TAG_COUNT,
@@ -34,6 +34,7 @@ from usher.ports.bulk import (
     TmdbId,
 )
 from usher.ports.errors import PortDataMalformed, RepositoryConflict
+from usher.ports.events import NullEventPublisher
 from usher.services.bootstrap import BootstrapService
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures" / "bulk"
@@ -70,7 +71,13 @@ async def test_phases_zero_to_two_produce_a_linked_skeleton_catalog(
     session: AsyncSession, cache: Path
 ) -> None:
     catalog = PostgresBulkCatalogRepository(session)
-    service = BootstrapService(PostgresImportRunRepository(session), catalog, session.flush)
+    service = BootstrapService(
+        PostgresImportRunRepository(session),
+        catalog,
+        session.flush,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
 
     async with httpx.AsyncClient(transport=_local(cache)) as client, catalog.bulk_load_window():
         titles_run = await service.import_dataset(
@@ -145,7 +152,13 @@ async def test_the_catalog_is_queryable_between_batches(session: AsyncSession, c
         commits += 1
         await session.flush()
 
-    service = BootstrapService(PostgresImportRunRepository(session), catalog, counting_flush)
+    service = BootstrapService(
+        PostgresImportRunRepository(session),
+        catalog,
+        counting_flush,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
     seen: list[int] = []
 
     async def write_and_peek(rows: Sequence[ImdbTitle]) -> int:
@@ -170,7 +183,9 @@ async def test_a_restart_resumes_from_the_stored_checkpoint(
     cursor the first one committed."""
     catalog = PostgresBulkCatalogRepository(session)
     runs = PostgresImportRunRepository(session)
-    service = BootstrapService(runs, catalog, session.flush)
+    service = BootstrapService(
+        runs, catalog, session.flush, events=NullEventPublisher(), phase=BootstrapPhase.ALL
+    )
 
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         first = IMDbTitleDataset(client, cache, batch_size=2)
@@ -255,7 +270,13 @@ async def test_a_titles_aliases_survive_a_batch_boundary_against_real_postgres(
     for source, name in (("title.akas.slice.tsv", "title.akas.tsv.gz"),):
         (cache / name).write_bytes(gzip.compress((_FIXTURES / source).read_bytes()))
     catalog = PostgresBulkCatalogRepository(session)
-    service = BootstrapService(PostgresImportRunRepository(session), catalog, session.flush)
+    service = BootstrapService(
+        PostgresImportRunRepository(session),
+        catalog,
+        session.flush,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
 
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         await service.import_dataset(
@@ -341,7 +362,13 @@ def _genome_cache(cache: Path) -> Path:
 
 async def _seed_catalog(session: AsyncSession, cache: Path) -> PostgresBulkCatalogRepository:
     catalog = PostgresBulkCatalogRepository(session)
-    service = BootstrapService(PostgresImportRunRepository(session), catalog, session.flush)
+    service = BootstrapService(
+        PostgresImportRunRepository(session),
+        catalog,
+        session.flush,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         await service.import_dataset(
             IMDbTitleDataset(client, cache, batch_size=10), _write_titles(catalog)
@@ -376,7 +403,13 @@ async def test_the_genome_phase_joins_on_imdb_id_and_checkpoints_by_movie_run(
     completed runs, one of which joins to nothing.
     """
     catalog = await _seed_catalog(session, _genome_cache(cache))
-    service = BootstrapService(PostgresImportRunRepository(session), catalog, session.flush)
+    service = BootstrapService(
+        PostgresImportRunRepository(session),
+        catalog,
+        session.flush,
+        events=NullEventPublisher(),
+        phase=BootstrapPhase.ALL,
+    )
 
     async with httpx.AsyncClient(transport=_local(cache)) as client:
         dataset = MovieLensGenomeDataset(client, cache, batch_size=10)

@@ -20,11 +20,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from usher.api.lanes import LaneSupervisor
 from usher.composition import adapter_factory, build_image_proxy_service, build_search_service
 from usher.config import Settings
+from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.episode import PostgresEpisodeRepository
+from usher.db.repositories.genome import PostgresGenomeRepository
 from usher.db.repositories.image import PostgresImageRepository
+from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
@@ -69,6 +72,7 @@ from usher.ports.repository import (
 )
 from usher.ports.rows import RowContext
 from usher.ports.source import SourceAdapterFactory
+from usher.services.bootstrap import BootstrapReport, bootstrap_report
 from usher.services.events import InMemoryEventBus
 from usher.services.home import HomeService
 from usher.services.images import ImageProxyService
@@ -395,9 +399,34 @@ def get_job_queue(session: SessionDep, settings: SettingsDep) -> JobQueue:
     )
 
 
+async def get_bootstrap_report(session: SessionDep) -> BootstrapReport:
+    """The report `usher bootstrap-status` prints, for the route to serialise.
+
+    Assembled here rather than in the router for a structural reason rather
+    than a stylistic one: `tests/unit/test_api_bootstrap.py` asserts that
+    `api/routers/bootstrap.py` names no `usher.services.bootstrap` and no
+    `usher.composition`, because the module holding a *trigger* for a
+    multi-minute download must not be able to spell one. Building the value
+    here and handing it over as `BootstrapReportDep` leaves the router with a
+    dependency alias and a DTO, and leaves this module — the API's composition
+    root, which already reaches `usher.db` on purpose — holding the three
+    repositories.
+
+    ⚠️ Two aggregate reads, ~0.33 s on a real 1.27M-title catalog;
+    `BootstrapReport`'s docstring carries the measurement and the reason there
+    is no cache. An admin screen, never a client path.
+    """
+    return await bootstrap_report(
+        PostgresImportRunRepository(session),
+        PostgresBulkCatalogRepository(session),
+        PostgresGenomeRepository(session),
+    )
+
+
 MediaItemRepositoryDep = Annotated[MediaItemRepository, Depends(get_media_item_repository)]
 SyncRunRepositoryDep = Annotated[SyncRunRepository, Depends(get_sync_run_repository)]
 JobQueueDep = Annotated[JobQueue, Depends(get_job_queue)]
+BootstrapReportDep = Annotated[BootstrapReport, Depends(get_bootstrap_report)]
 # The two `/play` routes resolve existence before resolving playability --
 # `PlaybackService` reads `media_items`, which is silent about the difference
 # between "no such title" and "no copy of it".

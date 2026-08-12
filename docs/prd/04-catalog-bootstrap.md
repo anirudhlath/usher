@@ -584,6 +584,20 @@ before a TMDb crawl, not after**, because the fill re-writes
 `search_document` and would stale 203,969 of the 204,335 ≥100-vote titles'
 embeddings if run the other way round.
 
+**And a phase's progress can be read over HTTP since M9's E6.**
+`GET /admin/bootstrap/status` ([07](07-client-api.md)) answers every
+`import_runs` checkpoint with its cursor and counters, the catalog's title
+count, the genome coverage above and whether the stored tag vocabulary can
+name the lanes of the stored vectors. It is the *same* report
+`usher bootstrap-status` prints — one `BootstrapReport`, one decision, two
+renderings — so a `FAILED` phase reads identically at a terminal and on an
+admin screen. **200 for every state**, including "no import has ever run": a
+diagnostic that refused to answer before the thing it diagnoses had run would
+be useless on exactly the deployment that needs it. ⚠️ The two aggregates it
+reads cost roughly **a third of a second on a 1.27M-title catalog**
+(`count_titles()` 80.6 ms, `genome_coverage()` 250.6 ms, measured
+2026-08-12), which is priced for an operator's page and for nothing else.
+
 ## Licensing — ship importers, never data
 
 Usher's MIT license is unaffected by any of these sources, because Usher never

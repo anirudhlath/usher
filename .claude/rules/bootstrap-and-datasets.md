@@ -749,3 +749,61 @@ holds at all on a live catalog
 (`tests/integration/test_admin_bootstrap.py::test_the_load_window_declines_on_a_
 live_catalog_and_keeps_both_indexes`), which is the half that stops an
 unauthenticated route taking browse ordering away from every reader.
+
+## `bootstrap-status`' two aggregates cost a third of a second at catalog scale (2026-08-12, M9 E6)
+
+**Measured, not estimated**, because `GET /admin/bootstrap/status` makes the
+same four reads on every request and the alternative to stating the number was
+a cache nobody had measured either. Against a real **1,272,367-title** catalog
+with a **15,565-vector** genome and a 1,128-row vocabulary (`usher-m9-pg`, the
+T8 catalog), through `psql \timing`, median of five, on a **busy** box — a
+dozen containers and sibling suites had it — so every figure is an upper bound:
+
+| read | median | range |
+|---|---|---|
+| `count_titles()` — `SELECT count(*) FROM titles` | **80.6 ms** | 79.9–95.3 |
+| `genome_coverage()` — the five-way aggregate | **248.6 ms** | 242.0–260.4 |
+| `genome_coverage()` — `genome_revision GROUP BY` | **2.0 ms** | 2.0–2.5 |
+
+`list_runs()` is six rows and is not worth a figure. So one report is **~331
+ms**, and the shape of the cost is the part that matters: **three of
+`_GENOME_COVERAGE`'s five terms are themselves full scans of `titles`**
+(`count(*)`, `kind = 'movie'`, `enrichment_state <> 'skeleton'`), so the report
+scales with the catalog rather than with what is on the screen and re-reading
+`titles` four times per request is where the quarter-second goes.
+
+**No cache was added and the number is stated instead.** A cache here would be
+an unmeasured mechanism on the one page an operator opens precisely because
+they do not trust what they last saw, and it would have to be invalidated by a
+writer in another process — the `bootstrap` job runs on the worker lane. The
+consequence to carry: **this shape is an admin page's and nothing else's.** A
+client route assembling `BootstrapReport` would be paying a full-catalog scan
+per request.
+
+## A `--phase imdb` run raises 61 `bootstrap.progress` frames (2026-08-12, M9 E7)
+
+Derived arithmetic over measured counts, **not** an observed frame total, and
+labelled as such because the number it is compared against is measured.
+`_ImdbDataset` yields a batch every `bulk_batch_size` **retained** rows
+(`batch.append(parsed)` then `len(batch) >= self._batch_size`), and E7
+publishes one frame per committed batch, so at the shipped default of 50,000:
+
+| dataset | retained rows | frames |
+|---|---|---|
+| `imdb.title.basics` | 1,271,138 | 26 |
+| `imdb.title.ratings` | 1,700,615 | 35 |
+| **`--phase imdb`** | | **61** |
+
+Against `sync.progress`' **measured** 1,127 for one nightly walk of the one
+library this project has measured (`services/reconcile.py:255`), so this is the
+lower-rate of the two producers by an order of magnitude and the SSE bus's
+queue bound is not in play. The retained counts are M2's own end-to-end run,
+recorded further up this file.
+
+**The number that matters is not the total, it is that it is >1 per run.** It
+is what makes deferring these frames behind `DeferredEventPublisher` a
+0%-to-100% jump rather than a rounding error, which is why
+`composition.build_worker` hands the `bootstrap` registration `pipeline.events`
+where every other registration gets `worker.events`. A `--phase all` run adds
+`credit-names`, `aliases`, both TMDb id exports, the crosswalk and MovieLens on
+top.

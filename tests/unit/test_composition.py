@@ -1438,7 +1438,13 @@ async def _journal_of_a_full_bootstrap(
         # each of them refuses an empty catalog with a sentence rather than
         # touching a dataset.
         await run_bootstrap(
-            catalog, runs, _nothing, settings, BootstrapPhase.ALL, report=journal.append
+            catalog,
+            runs,
+            _nothing,
+            settings,
+            BootstrapPhase.ALL,
+            report=journal.append,
+            events=NullEventPublisher(),
         )
         return journal
 
@@ -1589,6 +1595,7 @@ async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
         settings,
         BootstrapPhase.ALL,
         report=lambda _: None,
+        events=NullEventPublisher(),
     )
     assert len(built) == 1
     assert built[0].is_closed
@@ -1605,6 +1612,7 @@ async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
             settings,
             BootstrapPhase.IMDB,
             report=lambda _: None,
+            events=NullEventPublisher(),
         )
     assert len(built) == 2
     assert built[1].is_closed
@@ -1659,3 +1667,74 @@ async def test_the_worker_reports_a_phase_to_the_log_and_never_to_stdout(
 
     assert capsys.readouterr().out == ""
     assert any("titles is empty" in line for line in sink)
+
+
+async def test_the_bootstrap_handler_publishes_to_the_bus_and_not_to_the_workers_buffer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The one registration in `build_worker` that is handed `pipeline.events`
+    rather than `worker.events`, pinned from **both** sides.
+
+    G2 measured that swapping those two objects at a registration site is
+    invisible to every unit case of `JobWorker` -- the handler runs, the job
+    completes, the frames arrive, and only *when* they arrive differs. That
+    blind spot is why the enrich registration has a composition-level case,
+    and it is exactly as wide here with the polarity inverted: this producer
+    must **not** be deferred.
+
+    `DeferredEventPublisher`'s own docstring sizes its buffer for *"a handful
+    of events at most"*, and a bootstrap raises one per committed batch -- 26
+    for `--phase imdb`'s title pass alone at the shipped 50,000 batch size. So
+    a deferred bootstrap delivers its whole progress bar as a single jump
+    after the run it was describing has finished, which is the `0% to 100%`
+    failure `ReconcileService._publish_progress` already names, and
+    `discard()` on a failing job would throw away frames naming batches that
+    really did commit.
+
+    Both assertions are needed and neither implies the other: `is` the bus
+    says the right object was passed, and `is not worker.events` is what fails
+    if a later reader "fixes" this registration to match the four below it.
+    """
+    monkeypatch.setattr(usher.composition, "bulk_client", _offline_client)
+    seen: list[EventPublisher] = []
+
+    async def record(*args: object, **kwargs: object) -> None:
+        publisher = kwargs["events"]
+        assert isinstance(publisher, EventPublisher)
+        seen.append(publisher)
+
+    monkeypatch.setattr(usher.composition, "run_bootstrap", record)
+    queue = FakeJobQueue()
+    pipeline = _pipeline_over_fakes(titles=FakeTitleRepository(), queue=queue, events=_Recorder())
+    worker = build_worker(
+        pipeline,
+        _settings(bulk_data_dir=tmp_path),
+        provider=None,
+        embedder=None,
+        client=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+    await queue.enqueue(
+        [
+            JobRequest(
+                kind=JobKind.BOOTSTRAP, key=BootstrapPhase.IMDB.value, priority=JobPriority.DEMAND
+            )
+        ]
+    )
+
+    assert await worker.run_once() == 1, "the premise: the worker claimed the bootstrap job"
+    assert len(seen) == 1, "the handler did not reach run_bootstrap exactly once"
+    assert seen[0] is pipeline.events, "the handler was not handed the process bus"
+    assert seen[0] is not worker.events, (
+        "the bootstrap frames were handed JobWorker's deferred buffer, which holds them "
+        "until the whole phase completes -- a progress bar that jumps from 0% to 100%"
+    )
+
+
+class _Recorder(NullEventPublisher):
+    """Distinguishable from every other publisher by identity, which is all
+    the case above needs -- `NullEventPublisher()` instances compare equal to
+    nothing but themselves, and an assertion spelled against the *class* would
+    pass against `worker.events`' inner publisher as readily as against the
+    bus itself."""

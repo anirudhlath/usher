@@ -284,6 +284,7 @@ local state can answer.**
 | LLM call fails during a **search** (query expansion) | ✅ M8: the search runs on the query the user typed and `expanded_query` is absent. **The attempt is still billed** — one `llm_calls` row per attempted call — so the warning arrives after the money. Off by default ([05](05-search-and-similarity.md)), which is why this is a narrower row than the one above. |
 | Embedder unavailable | Semantic search falls back to full-text, flagged in the response. |
 | Meilisearch down (if enabled) | Fall back to the Postgres index. It is never the only index. |
+| Worker in its own process (`USHER_WORKER_ENABLED=false` on the server, `usher work` beside it) | ✅ M9: every SSE frame a *job* raises reaches a `NullEventPublisher` and no client is told — `title.updated` since M5, and `bootstrap.progress` since M9's E7 put `JobKind.BOOTSTRAP` on the queue. The bus is in-process and the `LISTEN/NOTIFY` implementation `ports/events.py` names has no owner. **Nothing durable is lost**: the catalog, `import_runs` and `sync_runs` are written by the worker either way, so `GET /admin/bootstrap/status` and `GET /admin/sources/{id}/status` report the same thing in both topologies and a client that heard nothing can still see where a run got to. The cost is latency to a *screen*, not correctness. |
 | Postgres down | Total outage. The one hard dependency, deliberately. |
 
 ## Job reliability
