@@ -38,6 +38,7 @@ from tests.fakes.llm_client import FakeLLMClient, usage
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
+from tests.fakes.row_provider_settings_repository import FakeRowProviderSettingsRepository
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
@@ -162,6 +163,7 @@ def _pipeline_over_fakes(
             titles=titles, embeddings=embeddings, taste=taste, size=POOL_SIZE
         ),
         row_providers=ROW_PROVIDERS,
+        row_provider_settings=FakeRowProviderSettingsRepository(),
         events=NullEventPublisher(),
         commit=settled,
     )

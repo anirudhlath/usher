@@ -23,11 +23,17 @@ import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 
+from tests.fakes.row_provider_settings_repository import FakeRowProviderSettingsRepository
 from tests.fakes.streaming_asgi_transport import StreamingASGITransport
 from tests.unit.rows import Library, days_ago
 from usher.api import caching
 from usher.api.app import create_app
-from usher.api.deps import get_refresh_queue, get_row_cache, get_row_context
+from usher.api.deps import (
+    get_refresh_queue,
+    get_row_cache,
+    get_row_context,
+    get_row_provider_settings_repository,
+)
 from usher.api.dto.home import HomeResponse
 from usher.config import Settings
 from usher.ports.rows import RowContext
@@ -76,6 +82,13 @@ def _app(
         )
     )
     built.dependency_overrides[get_row_context] = lambda: context
+    # M9 E2: `get_home_service` reads `row_provider_settings` to filter the
+    # registry, so without this every case here reaches the dead port above.
+    # An empty overrides table is the shipped state, i.e. every provider
+    # composes -- which is what these cases were written against.
+    built.dependency_overrides[get_row_provider_settings_repository] = (
+        FakeRowProviderSettingsRepository
+    )
     if cache is not None:
         built.dependency_overrides[get_row_cache] = lambda: cache
     if refreshes is not None:

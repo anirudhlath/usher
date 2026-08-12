@@ -222,6 +222,7 @@ be added if a client turns out to need flexible field selection.
 | `POST /admin/sources/{id}/sync` | Trigger reconcile |
 | `GET /admin/unmatched` · `POST /admin/unmatched/{id}/resolve` | Review queue |
 | `POST /admin/rows/regenerate` | Enqueue LLM curation for this household — 202, never a synchronous generate |
+| `GET /admin/rows/providers` · `PUT /admin/rows/providers/{slug}` | Switch a row provider on or off — the registry left-joined onto `row_provider_settings`, so there is an entry per registered provider and absence means enabled |
 | `GET /admin/bootstrap/status` · `POST /admin/bootstrap/{phase}` | Dataset import |
 
 > **Settled in M3.** `SourceAdapter.verify()` returns a `SourceStatus`
@@ -243,9 +244,11 @@ be added if a client turns out to need flexible field selection.
 > [03](03-sources-and-sync.md)'s "configure a normal user" is guidance an
 > operator can only follow if they can see which they did.
 >
-> **Built in M3: four of the six rows above** — four of *five* when this was
-> written, and the sixth is `POST /admin/rows/regenerate`, added to the table
-> by M8 and built by it (below). `GET`/`POST`/`DELETE
+> **Built in M3: four of the seven rows above** — four of *five* when this was
+> written, four of six once M8 added `POST /admin/rows/regenerate` (below), and
+> four of seven since M9 added the row-provider pair (below that). The count is
+> corrected in place each time rather than dropped, because it is the sentence
+> that says *which* of these were M3's. `GET`/`POST`/`DELETE
 > /admin/sources` and `GET /admin/sources/{id}/status` are live
 > (`usher.api.routers.sources`). `POST /admin/sources/{id}/sync` is not —
 > **and the reason recorded here was wrong by M4 and is corrected**: it said
@@ -335,6 +338,46 @@ be added if a client turns out to need flexible field selection.
 > a route adds: that the enqueued key round-trips through a worker in another
 > process, and that a `PortUnavailable` from the queue really does become an
 > ordinary 500 rather than being caught somewhere on the way.
+
+> **Built in M9: `GET`/`PUT /admin/rows/providers`** — the control
+> [08](08-operations.md)'s Database layer has promised since M6 and the
+> discharge of [09](09-roadmap.md)'s M7 boundary call 9, which refused the
+> table until a route could write it.
+>
+> **The list is the registry, not the table.** `GET` answers one entry per
+> registered provider — ten today, derived from `services/rows/__init__.py`'s
+> `ROW_PROVIDERS` — each `{"slug": …, "enabled": …}`, where `slug` is
+> `RowProvider.slug_prefix`, the identifier `usher home`'s report and
+> [10](10-telemetry-and-dashboards.md)'s `provider` label already carry.
+> `row_provider_settings` holds **overrides only**: it ships empty, is never
+> seeded, and **absence means enabled**, so a virgin database answers ten
+> entries all reading `true` — which is what *"providers are enabled by
+> registration in code"* has always meant, now visible and now changeable.
+> Setting a provider back to `true` writes a row rather than deleting one; a
+> recorded action is not absence.
+>
+> **`PUT /admin/rows/providers/{slug}` takes `{"enabled": bool}`** and answers
+> the updated entry. A slug the registry does not hold is a **404 in the
+> envelope** carrying the generic `not_found` (the `instance` member names the
+> provider), and it **writes no row** — an override for a provider nothing
+> registers is dead configuration that reads exactly like working
+> configuration.
+>
+> **What makes it a control rather than a column: the shelf disappears.** A
+> disabled provider is filtered out of the registry in both composition roots —
+> `GET /home` and `usher home` — and out of the background screen refresh, so a
+> toggle survives the ~30 s screen cache instead of coming back on a timer. The
+> route clears `RowCache` **wholesale** on a successful toggle: a provider
+> toggle is deployment-wide and the per-user/per-slug invalidation cannot
+> express it. ⚠️ **A second replica keeps serving its own screen for up to the
+> 30 s TTL** — the cross-process gap [06](06-rows-and-recommendations.md)
+> already records, restated here rather than widened.
+>
+> **An operator may disable everything and get an empty screen**, and no
+> minimum-enabled floor is invented: a zero-row `GET /home` is already reachable
+> for a cold household, and a floor would be a policy with no evidence behind
+> it. There is no `user_id` — the toggle is deployment-wide — and nothing
+> schedules a re-enable.
 
 ### Meta
 

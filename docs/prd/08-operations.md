@@ -8,7 +8,7 @@ Three layers, split by what changes and when:
 |---|---|---|
 | **Environment** | `DATABASE_URL`, port, log level, embedding model, `USHER_SECRET_KEY`, TMDb key, ✅ the LLM endpoint, model and key (M8) | Deploy time |
 | **Config file** (TOML) | Rate limits, TTLs, enrichment tier. 🔴 **Not the image cache ladder** — it said so until 2026-08-11 and the ladder is a code constant ([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)): mechanism before setting, and a knob nothing reads is dead config wearing a control's name | Restart |
-| **Database** | Sources, users, ⏳ row provider enable/disable (**M9** — see below) | Runtime, via admin API |
+| **Database** | Sources, users, ✅ row provider enable/disable (**M9** — see below) | Runtime, via admin API |
 
 Sources live in the database because they are added through the admin API. A
 deployment that needs a compose edit and a restart to connect a media server is
@@ -96,11 +96,12 @@ failure as a table listing a control nothing implements.
   the top-N cap reshape the result, so an operator turning the dial would
   watch a screen change for reasons the dial does not explain.
 
-⏳ **"Row provider enable/disable" is annotated rather than struck, because
-unlike the two above it is a control that should exist — it just cannot yet.**
+✅ **"Row provider enable/disable" was annotated rather than struck, because
+unlike the two above it is a control that should exist — and in M9 it does.**
 The bottom row claims it is available *"runtime, via admin API"*, and the admin
-API is M9's; M6 added no route and M7 added exactly one, `GET /home`. So the
-mechanism is missing on the same principle the concurrency bullet states:
+API was M9's; M6 added no route and M7 added exactly one, `GET /home`. Until
+then the mechanism was missing on the same principle the concurrency bullet
+states:
 
 > A `row_providers` table with ten rows all reading `enabled = true` is
 > indistinguishable from no table, right up until an operator finds it and
@@ -109,6 +110,17 @@ mechanism is missing on the same principle the concurrency bullet states:
 > composition point, nine entries in M7 and **ten since M8 registered
 > `CuratedProvider`** — and the runtime control lands with the admin API that can
 > write it. **M9**, and [09](09-roadmap.md)'s M7 boundary call 9.
+
+**M9 discharged it, and the refusal's own condition is what the discharge had
+to satisfy.** `row_provider_settings(slug_prefix PK, enabled, updated_at)`
+(migration `m09a`) is written by `PUT /admin/rows/providers/{slug}` and read by
+every composer ([07](07-client-api.md),
+[06](06-rows-and-recommendations.md)) — so toggling it does something, which is
+the sentence above turned into a requirement. The half of the refusal that
+survives is that the table is created **empty and is never seeded**: absence
+means enabled, exactly as *"enabled by registration in code"* already meant, so
+there is no state where the table exists and says nothing, and no migration
+carrying a second copy of the registry.
 
 This is the same argument [10](10-telemetry-and-dashboards.md) makes about
 `search_queries`: a table whose writer does not exist gets its shape fixed

@@ -505,6 +505,17 @@ carries a measurement they do not.
    which that port already declares *"declared rather than derived"* and
    *"bounded at ten"*.
 
+   ✅ **Discharged.** The table landed with `m09a`, the writer
+   (`RowProviderSettingsRepository`) with M9's E1, and the routes that give
+   toggling it a meaning — `GET`/`PUT /admin/rows/providers`
+   ([07](07-client-api.md)) — with E2, in the same commit as the read that
+   makes the refusal's own condition false: a disabled provider is filtered out
+   of `GET /home`, of `usher home` and of the background screen refresh, so an
+   operator who finds this table and toggles it watches a shelf disappear. The
+   filter is *filtering*, not *enumeration* — no composition root names a
+   provider — so this item's other half, *"a list a composition root assembles
+   by hand is a list the tenth provider is forgotten from"*, is not reopened.
+
 **M7 is complete, and it is the first milestone whose *subject document* was
 written entirely before any of it existed.** [06](06-rows-and-recommendations.md)
 carried no `⏳` and no `🔶` anywhere: every statement in it read as shipped, and

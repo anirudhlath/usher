@@ -133,6 +133,11 @@ async def _purge(settings: Settings) -> None:
             "DELETE FROM users WHERE name = 'default'",
             "DELETE FROM sources WHERE name LIKE 'cli-%'",
             "DELETE FROM titles WHERE sort_name = 'cli-orphan'",
+            # M9's overrides table. It ships **empty** and is never seeded, so
+            # `DELETE FROM` restores the shipped state exactly -- and it is what
+            # makes `usher home`'s provider count a fact rather than a hope
+            # about whether an earlier case in this file disabled something.
+            "DELETE FROM row_provider_settings",
         ):
             await session.execute(text(statement))
         await session.commit()
@@ -793,6 +798,10 @@ async def test_home_composes_a_screen_against_an_empty_database(
     out = capsys.readouterr().out
     assert "10 providers, 10 proposed nothing" in out
     assert "screen: 0 rows, 0 cards" in out
+    # The other direction of M9 E2's line, and the control for the case below:
+    # on a virgin `row_provider_settings` every provider composes, so "none" is
+    # what an operator reads when the empty screen is *not* a toggle's doing.
+    assert "disabled by an operator: none (0 of 10 registered" in out
 
 
 async def test_home_prints_a_line_for_a_provider_that_proposed_nothing(
@@ -857,6 +866,50 @@ async def test_home_prints_a_cold_and_a_warm_composition(
     # at all, and the table above it is empty -- a measurement that silently
     # became a benchmark of a dict.
     assert "seasonal" in out, "the last run was a cache hit, so --repeat measured the cache"
+
+
+async def test_home_omits_a_disabled_provider_and_names_the_ones_switched_off(
+    cli_settings: Settings, clean_slate: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """**A setting honoured by one composition root and not the other is two
+    different products** (M9 E2).
+
+    `GET /home` filters `ROW_PROVIDERS` against `row_provider_settings` in
+    `api/deps.py`; this command builds its own `HomeService` from
+    `pipeline.row_providers` and would have gone on composing the provider an
+    operator switched off through the admin route -- which is the surface an
+    operator reaches for *when a shelf is missing*, so it is the worst one to
+    be wrong.
+
+    **The row is written through the repository rather than through the route**,
+    deliberately: the claim is that this command reads the *table*, so a fixture
+    that went through `PUT /admin/rows/providers/{slug}` would leave the
+    question of whether the two share a process open. Nothing here has an HTTP
+    server at all.
+
+    Three assertions and the third is the one the acceptance criterion is
+    about. A disabled provider has **no line in the table** -- it never
+    proposed, so `ComposeReport` has no entry for it -- which is
+    indistinguishable from a provider that was deleted from the registry. The
+    printed line is what stops an operator being told to read the database.
+    `recently-added` is the control: the report still has nine lines, so "the
+    line is gone" is a statement about one provider rather than about a report
+    that stopped printing.
+    """
+    async with _session_for(cli_settings) as session:
+        await build_pipeline(session, settings=cli_settings).row_provider_settings.set_enabled(
+            "seasonal", enabled=False
+        )
+        await session.commit()
+
+    await _home(cli_settings, limit=10, repeat=1)
+
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert not any(line.startswith("seasonal") for line in lines), out
+    assert any(line.startswith("recently-added") for line in lines), out
+    assert "9 providers, 9 proposed nothing" in out
+    assert "disabled by an operator: seasonal (1 of 10 registered" in out
 
 
 async def test_home_prints_and_never_logs_its_answer(

@@ -21,17 +21,24 @@ from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 from pydantic import AwareDatetime
 
+from tests.fakes.row_provider_settings_repository import FakeRowProviderSettingsRepository
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
-from tests.unit.rows import USER, Library, days_ago
+from tests.unit.rows import NOW, USER, Library, days_ago
 from usher.api.app import create_app
-from usher.api.deps import get_home_service, get_row_cache, get_row_context
+from usher.api.deps import (
+    get_home_service,
+    get_row_cache,
+    get_row_context,
+    get_row_provider_settings_repository,
+)
 from usher.api.dto.home import RowResponse
 from usher.config import Settings
 from usher.domain.rows import BuiltRow, DisplayHint, RowFamily
 from usher.domain.taste import GenreAffinity
 from usher.ports.embedding import Embedder
 from usher.ports.repository import (
+    RowProviderSettingsRepository,
     TasteRepository,
     TitleEmbeddingRepository,
     TitleRepository,
@@ -116,7 +123,31 @@ async def _household() -> _Seeded:
     return seeded
 
 
-def _app(context: RowContext, *, cache: RowCache | None = None) -> FastAPI:
+def _app(
+    context: RowContext,
+    *,
+    cache: RowCache | None = None,
+    provider_settings: RowProviderSettingsRepository | None = None,
+) -> FastAPI:
+    """The real app, over this file's fakes.
+
+    **The dead port is a tripwire and it fired once, deliberately** (M9 E2,
+    2026-08-11). `GET /home` grew a second request-scoped read --
+    `get_home_service` now filters `ROW_PROVIDERS` against
+    `row_provider_settings`, because a provider an operator switched off must
+    not compose -- and every case in this file went red on
+    `ConnectionRefusedError`, which is exactly what this comment promised would
+    happen and the reason the port is `1`. The read is intentional, so the
+    repository is faked here alongside the context rather than the tripwire
+    being softened: an empty overrides table is the shipped state, so the
+    default below leaves every case in this file meaning what it meant.
+
+    Two reads, not one, is a cost stated in `api/deps.py::get_home_service`:
+    unlike `RowContext.affinities` -- deferred precisely because a 30 s screen
+    hit was paying a library-wide genre aggregate over 1.27M titles -- this one
+    is a sequential scan of a table the registry bounds at ten rows and which
+    is usually empty.
+    """
     built = create_app(
         Settings(
             # A deliberately dead port: nothing on this path may connect, and
@@ -129,6 +160,8 @@ def _app(context: RowContext, *, cache: RowCache | None = None) -> FastAPI:
         )
     )
     built.dependency_overrides[get_row_context] = lambda: context
+    stored = provider_settings or FakeRowProviderSettingsRepository()
+    built.dependency_overrides[get_row_provider_settings_repository] = lambda: stored
     if cache is not None:
         built.dependency_overrides[get_row_cache] = lambda: cache
     return built
@@ -625,7 +658,7 @@ async def test_a_second_request_inside_the_window_is_served_from_the_apps_own_ca
     assert first == second
 
 
-def test_the_route_resolves_the_cache_the_app_actually_built() -> None:
+async def test_the_route_resolves_the_cache_the_app_actually_built() -> None:
     """`get_row_cache` off `app.state`, not a fresh one per request -- a
     request-scoped cache caches nothing, exactly as a request-scoped bus fans
     out to nobody. Asserted through the real `create_app` because the override
@@ -640,4 +673,40 @@ def test_the_route_resolves_the_cache_the_app_actually_built() -> None:
 
     assert isinstance(app.state.row_cache, RowCache)
     assert isinstance(app.state.row_refreshes, RefreshQueue)
-    assert get_home_service(app.state.row_cache, app.state.row_refreshes) is not None
+    assert (
+        await get_home_service(
+            app.state.row_cache, app.state.row_refreshes, FakeRowProviderSettingsRepository()
+        )
+        is not None
+    )
+
+
+async def test_the_composition_root_composes_the_registry_minus_what_is_disabled() -> None:
+    """M9 E2's wiring, at the root rather than through a request.
+
+    **The premise is the first assertion**: with an empty overrides table --
+    the shipped state -- the composer holds the whole registry, so the second
+    assertion is about the toggle and not about a root that always builds a
+    short list. Compared by `slug_prefix` because `row_providers()` mints fresh
+    instances, so identity would be a test of the constructor.
+
+    `_providers` reaches into `HomeService`'s private tuple deliberately: the
+    thing under test is what the root *handed* the composer, and every public
+    surface (`compose`, `compose_report`) needs a context and ten repositories
+    to answer the same question.
+    """
+    cache, refreshes = RowCache(clock=lambda: NOW), RefreshQueue()
+    stored = FakeRowProviderSettingsRepository()
+
+    whole = await get_home_service(cache, refreshes, stored)
+    await stored.set_enabled("seasonal", enabled=False)
+    filtered = await get_home_service(cache, refreshes, stored)
+
+    assert _provider_slugs(whole) == [one.slug_prefix for one in ROW_PROVIDERS]
+    assert _provider_slugs(filtered) == [
+        one.slug_prefix for one in ROW_PROVIDERS if one.slug_prefix != "seasonal"
+    ]
+
+
+def _provider_slugs(service: HomeService) -> list[str]:
+    return [one.slug_prefix for one in service._providers]

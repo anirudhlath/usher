@@ -2062,3 +2062,83 @@ ProviderCdnImageFetcher` planted in `adapters/http.py` **in its isort
 position** (so the careful spelling of the defect is what was measured, not the
 careless one `ruff check` catches as `F401`) reports **8 kept, 1 broken**,
 naming the new module; restored, 9 kept, 0 broken, `md5sum`-verified.
+
+## M9 Task E2 — `GET`/`PUT /admin/rows/providers`, and the toggle reaching the screen (2026-08-11)
+
+**14 plants over the four files E2 touches in `src/` — 12 targets all KILLED,
+2 equivalent-mutant controls surviving all five gate steps, 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 1 DID-NOT-LAND corrected and re-run.** Run in place with the
+plant list and its **expected verdict** written down first
+(`/var/tmp/e2-sweep/plan.md`, `/var/tmp` because `/tmp` is tmpfs on this host),
+`PYTHONDONTWRITEBYTECODE=1` with a `__pycache__` sweep under `src/` **and**
+`tests/` before every run, `compile()` as the dry run, the landing check
+spelled `old not in landed and new in landed`, and every restore verified by
+`md5sum` against a pre-plant digest.
+
+**Selection**, scoped rather than whole-suite: `test_services_home.py`,
+`test_api_rows.py`, `test_api_home.py`, `test_api_lanes.py`,
+`test_api_caching.py` (unit, ~4 s), `test_rows_route.py` (integration, ~9 s),
+and `test_cli_pipeline.py -k home` (integration, ~8 s). The last is what covers
+`usher home`; the first five are what cover both composition roots and the
+refresh lane.
+
+| # | mutation | verdict | the case that names it |
+|---|---|---|---|
+| T1 | `overrides.get(slug, True)` → `False` — **the defect E1's reviewer named for the first caller** | KILLED | `test_a_provider_no_one_has_ever_touched_renders_as_enabled` (+5 more) |
+| T2 | `enabled_row_providers`' `if one.enabled` → `if not one.enabled` | KILLED | `test_a_stored_false_removes_exactly_that_provider_and_leaves_the_other_nine` |
+| T3 | the join reads `ROW_PROVIDERS` instead of the registry it was handed | KILLED | `test_the_join_is_applied_to_whatever_registry_it_is_handed` |
+| T4 | `get_home_service`'s filter deleted (unfiltered `HomeService`) | KILLED | `test_the_composition_root_composes_the_registry_minus_what_is_disabled` |
+| T5 | `RowCache.clear()` deleted from the toggle | KILLED | `test_a_successful_toggle_clears_every_households_cached_screen` |
+| T6 | the 404 arm deleted → a silent upsert for an unregistered slug | KILLED | `test_a_slug_the_registry_does_not_hold_is_refused_and_writes_no_row` |
+| T7 | `set_enabled(slug, enabled=not update.enabled)` — the sense inverted at the write | KILLED | `test_disabling_a_provider_answers_the_entry_and_the_next_read_agrees` |
+| T8 | `cache.clear()` hoisted **above** the registry check, so a 404 empties the cache | KILLED | `test_a_refused_toggle_leaves_the_cached_screens_alone` |
+| T9 | the `rows.refresh` lane composes the unfiltered `pipeline.row_providers` | KILLED | `test_a_refresh_composes_the_registry_minus_what_an_operator_disabled` |
+| T10 | `usher home` composes the unfiltered `pipeline.row_providers` | KILLED | `test_home_omits_a_disabled_provider_and_names_the_ones_switched_off` |
+| T11 | the CLI's disabled list inverted (`if one.enabled`) | KILLED | the same case, plus the empty-database control |
+| T12 | `GET /admin/rows/providers` renders the **table** rather than the registry | KILLED | `test_every_registered_provider_is_listed_and_a_virgin_table_disables_none` |
+| C1 | `cache.clear()` moved *above* `set_enabled` on the success path | SURVIVED | — |
+| C2 | `', '.join(d) if d else 'none'` → `', '.join(d) or 'none'` | SURVIVED | — |
+
+**Both controls measured per gate step rather than against `pytest` alone**,
+which is the form this file records as the only honest one — the careless
+spelling of a defect dies on `ruff check` and the careful one passes all five:
+
+| control | ruff check | ruff format --check | mypy (529) | lint-imports | pytest (full) |
+|---|---|---|---|---|---|
+| C1 | PASS | PASS | PASS | PASS (9/0) | PASS |
+| C2 | PASS | PASS | PASS | PASS (9/0) | PASS |
+
+C1 is equivalent because `set_enabled` **flushes and does not commit** and both
+statements sit inside one request with no `await` on anything a second request
+could reach between them, so no observer exists that could see the two orders
+differ. C2 is `str.join` over an empty sequence being `""`, which is falsy.
+
+**The DID-NOT-LAND is the finding, and it is the landing check earning its
+spelling.** T8's first draft was `old = "    if slug not in {…}:"` and
+`new = "    cache.clear()\n" + old` — i.e. the anchor is a **prefix of its own
+replacement** — so `old not in landed` is false *after a mutation that landed
+perfectly*, and the harness refused it rather than scoring it. Spelled instead
+as a swap over the whole guard-plus-write block (the trailing `cache.clear()`
+moves from the end to the front, so `old` genuinely leaves the file), it lands
+and dies on one case. **A `DID-NOT-LAND` on an additive mutation is usually the
+plant's shape, not the code's** — and the alternative, weakening the check to
+`new in landed` alone, is exactly the "a plant that did not land looks like a
+check that passed" failure this file exists over.
+
+**One target is worth reading as a coverage statement rather than as a kill.**
+T1 — the wrong absence default — fails **six** cases across two files, and five
+of them are in `test_services_home.py` where the join lives. That is by
+construction: the default is spelled in exactly one place because
+`test_the_overrides_mapping_is_never_bound_outside_the_join_that_defaults_it`
+AST-scans `src/usher/` and requires every `overrides()` call to be handed
+straight into `row_provider_settings(...)` as an argument, never bound to a
+name. So the mutation has one site to be planted at, and a second caller
+inventing its own `.get(slug, False)` is a red *before* it can be a defect.
+That case carries a premise guard (`sum(fetched.values()) >= 3`) for the reason
+every scan in this repository does — it found `{}` and reported it while the
+route did not exist yet, which is the shape a passing scan over nothing has.
+
+Gate green on the fully restored tree, `md5sum`-verified per file: `ruff check`,
+`ruff format --check` (556 files), `mypy` over 529 files, `lint-imports`
+**9 kept / 0 broken**, **3,466 unit / 4 skipped** and **1,062 integration /
+22 skipped**.

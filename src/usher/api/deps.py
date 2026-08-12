@@ -28,6 +28,7 @@ from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.people import PostgresCreditRepository, PostgresPersonRepository
+from usher.db.repositories.row_provider_settings import PostgresRowProviderSettingsRepository
 from usher.db.repositories.search import (
     PostgresTitleEmbeddingRepository,
     PostgresTitleNeighborRepository,
@@ -51,6 +52,7 @@ from usher.ports.repository import (
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
+    RowProviderSettingsRepository,
     SourceRepository,
     SyncRunRepository,
     TasteRepository,
@@ -69,6 +71,7 @@ from usher.services.matching import MatchService
 from usher.services.playback import PlaybackService
 from usher.services.playback_ticket import build_ticket_cipher, mint
 from usher.services.reconcile import ReconcileService
+from usher.services.rows import enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RefreshQueue, RowCache
 from usher.services.sources import SourceService
 from usher.services.taste import TasteService
@@ -563,6 +566,22 @@ def get_curated_row_repository(session: SessionDep) -> CuratedRowRepository:
     return PostgresCuratedRowRepository(session)
 
 
+def get_row_provider_settings_repository(session: SessionDep) -> RowProviderSettingsRepository:
+    """The overrides table `GET`/`PUT /admin/rows/providers` renders and writes,
+    and that `get_home_service` below filters the registry against.
+
+    Request-scoped like every other repository here, and **not** cached on
+    `app.state`: the whole point of the toggle is that the next request sees
+    the stored value, and a process-lifetime read would make it a restart.
+    """
+    return PostgresRowProviderSettingsRepository(session)
+
+
+RowProviderSettingsRepositoryDep = Annotated[
+    RowProviderSettingsRepository, Depends(get_row_provider_settings_repository)
+]
+
+
 async def get_default_user(session: SessionDep) -> User:
     """The singleton default user as a **model**, not just an id.
 
@@ -758,16 +777,37 @@ def get_refresh_queue(request: Request) -> RefreshQueue:
     return queue
 
 
-def get_home_service(
-    cache: Annotated[RowCache, Depends(get_row_cache)],
-    refreshes: Annotated[RefreshQueue, Depends(get_refresh_queue)],
-) -> HomeService:
-    """The composer, over the registry `services/rows/__init__.py` owns.
+RowCacheDep = Annotated[RowCache, Depends(get_row_cache)]
 
-    The provider list is **not** assembled here: a list a composition root
-    builds by hand is a list the tenth provider is forgotten from, which is dead
-    code that looks exactly like a provider with nothing to say (boundary call
-    9). `HomeService`'s own default is `ROW_PROVIDERS`.
+
+async def get_home_service(
+    cache: RowCacheDep,
+    refreshes: Annotated[RefreshQueue, Depends(get_refresh_queue)],
+    provider_settings: RowProviderSettingsRepositoryDep,
+) -> HomeService:
+    """The composer, over the registry `services/rows/__init__.py` owns, minus
+    what an operator has switched off.
+
+    **The provider list is still not *assembled* here, and the distinction is
+    the one M9's E2 must not blur.** Boundary call 9's argument -- *"a list a
+    composition root builds by hand is a list the tenth provider is forgotten
+    from"* -- is against **enumeration**, and this root names no provider: it
+    hands `enabled_row_providers` the whole registry and removes the ones a
+    stored row disables. An eleventh provider composes here with no edit,
+    which is the property that argument protects.
+
+    **The read is unconditional and precedes the screen-cache check, which is
+    a cost stated rather than discovered.** `get_home_service` is a FastAPI
+    dependency, so it resolves before the handler runs -- the same shape
+    `RowContext.affinities` was made lazy to escape (`.claude/rules/
+    rows-and-genome.md`: a 30 s cache hit was paying `list_recent(50)` plus a
+    library-wide genre aggregate over 1.27M titles). It is left eager here
+    because the two are not comparable: this is one `SELECT slug_prefix,
+    enabled FROM row_provider_settings` over a table the registry bounds at
+    **ten rows**, usually zero. Deferring it would mean a `HomeService` that
+    took its providers as a callable -- a lazy field on the composer, for a
+    read a sequential scan of ten rows answers -- and the cache hit it would
+    save is a hit the toggle has already invalidated.
 
     **And no embedder**, on the terms `get_taste_service` states: every
     similarity input this route reads is a precomputed artefact.
@@ -780,7 +820,11 @@ def get_home_service(
     traceback can print -- and it is *synchronous*, which is the whole of "the
     screen never waits on it": there is nothing here for a handler to await.
     """
-    return HomeService(cache=cache, refresh=refreshes.schedule)
+    return HomeService(
+        enabled_row_providers(row_provider_settings(await provider_settings.overrides())),
+        cache=cache,
+        refresh=refreshes.schedule,
+    )
 
 
 HomeServiceDep = Annotated[HomeService, Depends(get_home_service)]

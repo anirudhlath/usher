@@ -49,6 +49,7 @@ from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.row_provider import FakeRow, FakeRowProvider
+from tests.fakes.row_provider_settings_repository import FakeRowProviderSettingsRepository
 from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
@@ -73,7 +74,7 @@ from usher.ports.credentials import SourceCredentials
 from usher.ports.embedding import Embedder
 from usher.ports.jobs import JobRequest
 from usher.ports.llm import LLMClient
-from usher.ports.repository import MediaItemRepository
+from usher.ports.repository import MediaItemRepository, RowProviderSettingsRepository
 from usher.ports.rows import RowContext, RowProvider, ScoredRow
 from usher.ports.source import (
     SourceAdapter,
@@ -227,7 +228,10 @@ class _Fakes:
 
 
 def _pipeline(
-    fakes: _Fakes, settings: Settings, providers: Sequence[RowProvider] = ROW_PROVIDERS
+    fakes: _Fakes,
+    settings: Settings,
+    providers: Sequence[RowProvider] = ROW_PROVIDERS,
+    provider_settings: RowProviderSettingsRepository | None = None,
 ) -> Pipeline:
     titles = FakeTitleRepository()
     matching = FakeTitleMatchRepository(titles)
@@ -312,6 +316,11 @@ def _pipeline(
         # provider they can gate and count -- running ten real providers
         # against these fakes would make the case about the providers.
         row_providers=tuple(providers),
+        # M9's overrides table. Absent, the fake answers `{}` -- which is the
+        # shipped state of the real table and therefore "every provider
+        # composes", so every case written before the toggle existed keeps
+        # meaning what it meant.
+        row_provider_settings=provider_settings or FakeRowProviderSettingsRepository(),
         # Over the port double rather than `cast(Any, None)`, and no longer
         # only on the terms `search` above states: the worker lane *writes*
         # this one whenever it holds an `LLMClient`, because
@@ -348,6 +357,7 @@ def _supervisor(
     rows: RowCache | None = None,
     refreshes: RefreshQueue | None = None,
     providers: Sequence[RowProvider] = ROW_PROVIDERS,
+    provider_settings: RowProviderSettingsRepository | None = None,
     **overrides: object,
 ) -> LaneSupervisor:
     settings = Settings(
@@ -363,7 +373,7 @@ def _supervisor(
         # exercising something rather than being decorative.
         await asyncio.sleep(0)
         fakes.units_of_work.append(time.perf_counter())
-        yield _pipeline(fakes, settings, providers)
+        yield _pipeline(fakes, settings, providers, provider_settings)
 
     return LaneSupervisor(
         settings,
@@ -1102,6 +1112,60 @@ async def test_a_stale_key_is_refreshed_on_the_lanes_own_unit_of_work(
     assert read.freshness is Freshness.FRESH
     assert read.screen is not None
     assert [one.slug for one in read.screen] == ["recently-added"]
+
+
+async def test_a_refresh_composes_the_registry_minus_what_an_operator_disabled(
+    fakes: _Fakes,
+) -> None:
+    """**The hole a route-only toggle leaves, and it is the one that reopens
+    itself** (M9 E2).
+
+    `PUT /admin/rows/providers/{slug}` clears `RowCache`, so the next request
+    composes without the disabled provider and caches that. Thirty seconds
+    later the screen is stale, a read serves it and schedules a refresh -- and a
+    lane composing the unfiltered `pipeline.row_providers` writes the disabled
+    shelf straight back into the same cache. The route looks like it worked and
+    the shelf returns, on a timer, which is exactly the *"an operator finds it
+    and expects toggling it to do something"* failure M7's boundary call 9
+    refused the table over.
+
+    **Two providers, because one cannot distinguish a filter from a lane that
+    composed nothing.** `recently-added` has to be on the refreshed screen, or
+    "the disabled slug is absent" is satisfied by a lane that failed, by a
+    queue nothing drained, and by a cache entry nobody replaced. The single
+    equality below carries both halves; the fixture registering two is what
+    makes it able to.
+    """
+    cache = RowCache(clock=lambda: datetime.now(UTC))
+    queue = RefreshQueue()
+    stored = FakeRowProviderSettingsRepository()
+    await stored.set_enabled("seasonal", enabled=False)
+    off, off_row = _gated_provider(slug="seasonal")
+    kept, kept_row = _gated_provider(slug="recently-added")
+    off_row.gate.set()
+    kept_row.gate.set()
+    _stale(cache, ())
+    supervisor = _supervisor(
+        fakes,
+        rows=cache,
+        refreshes=queue,
+        providers=[off, kept],
+        provider_settings=stored,
+        push_enabled=False,
+        worker_enabled=False,
+    )
+    await supervisor.start()
+    try:
+        queue.schedule(_HOUSEHOLD)
+        await _drain(lambda: queue.pending == frozenset())
+    finally:
+        await supervisor.stop()
+
+    read = cache.read_screen(_HOUSEHOLD.id)
+    assert read.screen is not None
+    assert [one.slug for one in read.screen] == ["recently-added"], (
+        "the refresh re-composed a provider a stored row disables"
+    )
 
 
 async def test_a_read_during_an_in_flight_refresh_schedules_nothing_and_they_overlap(
