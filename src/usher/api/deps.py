@@ -608,6 +608,8 @@ def get_row_provider_settings_repository(session: SessionDep) -> RowProviderSett
 RowProviderSettingsRepositoryDep = Annotated[
     RowProviderSettingsRepository, Depends(get_row_provider_settings_repository)
 ]
+
+
 def get_image_repository(session: SessionDep) -> ImageRepository:
     """Artwork references for the request that is rendering them.
 

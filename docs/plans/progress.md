@@ -2452,3 +2452,81 @@ own docstring prices that query at "2k-10k rows" and "a few times a day".
 
 Full evidence, both post-states, and the five confirmed crosswalk conflicts in
 `.claude/rules/tmdb-and-enrichment.md`.
+
+## M9 Task S4 — the tier embedded, both passes, and the pool walk priced at ~80 minutes (2026-08-12)
+
+**The deliverable, with its denominator.** `title_embeddings` holds **130,647
+rows, every one carrying a vector, 0 refused** — **100.0% of S3's enriched
+population and 99.88% of its frozen `s3_tier_snapshot` of 130,806 ids**. The
+159-row gap (109 TMDb 404s, 30 `imdb_id` write conflicts, 20 orphaned by the
+crashed worker) is not missing embeddings: those rows are still `skeleton`, and
+`db/repositories/search.py:180`'s `_POPULATION` excludes skeletons, so no
+`index` job was ever owed for them. **The premise guard, both halves.** Before:
+S3's pre-run state at 22:02:21Z recorded `title_embeddings` **0** and
+`title_neighbors` 0. The second half is demonstrated at the end rather than
+asserted — 1,141,720 skeletons, every one without an embedding row, and
+`count_stale` **0**. After: stale 0, refused 0, and a third
+`usher index --backfill` writes 0.
+
+**The two-pass number, which is the measurement and not an error: 8,603.**
+`EnrichService` enqueues `INDEX` and `DERIVE` together at `BACKFILL` unordered,
+so a title indexed before its `DERIVE` embeds from a document with an empty
+weight class B and goes stale the instant `credit_names` lands. Pass two swept
+the whole tier in 3.3 s and wrote **8,603 index jobs — 6.58% of 130,647**;
+`DERIVE` won the race for the other 93.4%. Confirmed on the rows: exactly 8,603
+carry `updated_at > created_at`. Pass one's index phase took **2.31 h**
+(00:07:46Z → 02:26:19Z, 15.6 rows/s aggregate, contended host); pass two took
+**361 s** (23.8 rows/s, index-only, quiet host).
+
+**The headline refutation is about a number the shipped CLI prints.**
+`usher index` estimated **109–145 s** for the pass that took **361 s** —
+**2.5–3.3× out** — and its arithmetic is fine. It computes `stale × 135 tokens
+/ 8,000–10,700 tokens per second`, which prices *the model*; the backfill is
+the model plus a claim, three reads and a staged `COPY` through a temp table
+and a commit, **per title**. Measured separately on the same host and the same
+documents: the model at one text per call runs at **9,683 tokens/s, inside the
+invariant**, while the queue delivered **2,988 tokens/s across two workers —
+15% of it**. The document itself is exactly what the invariant assumed: mean
+**125.4 tokens** over 1,000 sampled titles, inside the recorded ~100–130.
+
+**A quarter of the drain was a gauge.** `usher work` refreshes `SearchGauges`
+after every pass of ≤20 jobs, and at this tier `count_stale` is **360.9 ms**.
+Pass two spent **82 s of its 361 s — 23%** — counting a backlog nothing reads
+during a backfill. S3 handed this over at 327.9 ms and 88,001 titles; it has
+flattened, because the cost is the scan of the enriched population. Two source
+sites still describe that scan's population as "2k-10k rows"
+(`telemetry.py:546`, `composition.py:1317`). **And an idle worker is not
+idle**: two workers with an empty queue burned 0 s of process CPU over 60 s
+while holding `usher-m9-pg` at 9–67%, because every 5-second poll is another
+O(tier) scan. They were stopped rather than left.
+
+**The pool walk S5 depends on is ~80 minutes.** Priced read-only through
+`rebuild`'s own page shape against the real table: **36.50 ms/seed** at a
+500-seed page (`rebuild`'s default) and 37.36 at 50-seed pages, agreeing within
+2.3%. **130,647 × 36.5 ms = 4,769 s ≈ 80 min.** The per-seed cost is measured
+at the real population over 650 seeds; the full walk is that number multiplied
+out, which is the one extrapolation and is labelled as one. The price is
+linear per seed in the population — five points from 30,562 to 86,868 fit
+`2.7 ms + 0.367 µs × N` — so the walk is **quadratic**, and a loaded host
+overstates it by ~39% (the fit predicts 50.7 ms/seed where a quiet box measures
+36.5). Bounding by seed count is legitimate and bounding by a `list_embedded`
+prefix is not: the price is seed-independent to within 1.9% (prefix 38.75,
+suffix 38.58, random 38.04), while a prefix is ordered by registration era
+because the ids are UUIDv7 minted in IMDb `tconst` order.
+
+**And the figure the plan said this repository does not contain, it contains
+twice.** "165.7–166.2 ms for 50 seeds" is at `db/repositories/search.py:263`
+and `tests/integration/test_services_similar.py:711`. The plan's conclusion
+stands anyway, for a better reason than the one it gave: **neither site records
+the population it was measured over**, both are measuring where the
+`genome_scores` join belongs, and that per-seed ~3.3 ms is 11× cheaper than the
+same statement over 130,647 embeddings.
+
+**The new case's red was demonstrated, not claimed.**
+`test_a_title_embedded_before_its_credits_landed_is_stale_again` is the mirror
+of M7's closure case: index an *un*credited title, then write `credit_names`,
+and it must match the stale predicate again. Two plants in `_FINGERPRINT_SQL`,
+both restored against an `md5sum` — deleting the `credit_names` segment kills
+the **premise** (six SQL segments against the composer's seven), and replacing
+it with `''` kills the **named assertion** while leaving the premise green.
+Ledger and every measurement above in `.claude/rules/search-and-embeddings.md`.

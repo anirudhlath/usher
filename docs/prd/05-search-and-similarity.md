@@ -76,7 +76,10 @@ a bigger one than the sentence implies.** Filling B cost three things:
   positional, so an uncredited title gains a seventh *empty* segment and its
   fingerprint moves too: there is no subset of the catalog that keeps its old
   one. That is ADR-0020's scheme working, and it is 25 s to 2 min at the
-  measured throughput.
+  measured throughput — *for a 2k–10k household library*. Over the 130,647-row
+  priority tier M9 enriched the same re-embed measured **2.31 hours**; the
+  sizing paragraph below carries the arithmetic and why the invariant is not
+  what predicts it.
 
 `SearchDocument.credits` was carried through M6 as an always-empty parameter
 so that M7 filled a caller rather than rewriting the type, and it is filled
@@ -404,10 +407,41 @@ on a Ryzen 7 5800X3D, CPU): throughput is linear in **tokens**, not texts, and
 holds at **~8,000–10,700 tokens/s** across the whole range — 412.7 texts/s at
 19 tokens, 83.5 at 100, 18.7 at 516. A realistic `name + overview + genres +
 keywords` document is **~100–130 tokens**. So the enriched tier is **~25
-seconds to 2 minutes**; all 1,271,138 titles would be **4–6 hours**, which is
-the number the population choice avoids paying. Best CPU batch size is 16, flat
-to 64, worse at 128. GPU throughput is deliberately unmeasured — the probe
-found 210 MiB free of 24,564 and declined to disturb a running service.
+seconds to 2 minutes** at 2k–10k titles; all 1,271,138 titles would be **4–6
+hours**, which is the number the population choice avoids paying. Best CPU
+batch size is 16, flat to 64, worse at 128. GPU throughput is deliberately
+unmeasured — the probe found 210 MiB free of 24,564 and declined to disturb a
+running service.
+
+✅ **The invariant survived its first real tier and the sizing derived from it
+did not — measured 2026-08-12 over 130,647 enriched titles.** M9 enriched a
+priority tier rather than a household library, so the same code ran at 13–65×
+the population above. Three things came back. The **document** is exactly what
+was assumed: mean **125.4 tokens** over 1,000 sampled titles (median 118, p95
+197, max 323, none over the 512 window), inside the ~100–130 band. The
+**model** is exactly what was measured: **9,683 tokens/s** on real documents at
+one text per call, inside 8,000–10,700. But the **backfill** runs at
+**2,988 tokens/s across two workers — about 15% of the model's rate** — because
+an `index` job is the model *plus* a claim, three reads, a staged `COPY`
+through a temp table and a commit, per title, and because `usher work`
+re-counts the whole staleness predicate after every pass of ≤20 jobs (360.9 ms
+at this tier, **23% of one measured drain's wall clock**). **So a tokens/s
+figure sizes the model and never the queue**, and `usher index`'s printed
+estimate — which divides by the invariant — came back **2.5–3.3× optimistic**
+against a measured pass (109–145 s predicted, 361 s actual). Two source sites
+still describe the staleness scan's population as "2k-10k rows"
+(`telemetry.py:546`, `composition.py:1317`).
+
+✅ **And the candidate-pool walk behind `usher similar --rebuild` has a price
+for the first time: ~80 minutes over 130,647 embeddings** (2026-08-12). The
+exact brute-force scan is **36.5 ms per seed** at `rebuild`'s own 500-seed page
+and 37.4 at 50-seed pages, so `130,647 × 36.5 ms = 4,769 s`. Per-seed cost is
+**linear in the embedded population**, which makes the walk quadratic in it;
+seed-side paging is ~3 s of the total and page size is not a lever. The price
+is seed-independent to within 1.9%, so bounding the walk by *seed count* is
+sound while bounding it by a `list_embedded` prefix is not — those ids are
+UUIDv7 minted in IMDb `tconst` order, so a prefix is ordered by registration
+era. Full evidence in `.claude/rules/search-and-embeddings.md`.
 
 **Freshness is a predicate, never an inference.** `title_embeddings` records
 `model_name` (the runtime *and* the checkpoint, e.g.
