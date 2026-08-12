@@ -125,12 +125,20 @@ Every configuration measured, same 2,993 cases:
   relevance+owned renormalised. `SimilarityService` never reads popularity.
 - **The candidate cap is not the binding constraint and the `levenshtein`
   re-rank never drops the true title.** Tracing 250 misses per configuration
-  back to the stage that lost them: at the shipped configuration **63.6% fell
+  back to the stage that lost them: at `GIN % @0.3 cap 200` **63.6% fell
   below the `%` floor, 36.4% were out-ranked, 0.0% were truncated by the cap,
   0.0% were dropped by the re-rank** — and the re-rank figure is 0.0% in
   *every* configuration measured. M6's design story put the cap at the
   centre; on real data it is inert until the floor is dropped, at which point
   it becomes a new defect (24.8% at 0.1) rather than the cure.
+  **"At the shipped configuration" was the wrong label on those two numbers
+  and is corrected here — 63.6/36.4 is the row *without* the vote tiebreak,
+  and the tiebreak shipped in the same run.** The configuration that ships is
+  `GIN % @0.3 cap 200 + vote tiebreak`, whose split is **82.8 / 0.0 / 0.0 /
+  17.2**, one table row below. M9's B3 was sent to reproduce "the shipped
+  split" and found the plan quoting this row's shares beside the other row's
+  p50 — a pairing no single run of `_SUGGEST` can satisfy. The two zeros are
+  the half that carries the claim and they are identical in both rows.
 - **Lowering the trigram floor does not convert misses into hits — it
   converts threshold-excluded misses into out-ranked ones.** 63.6%/36.4% at
   0.3 becomes 4.0%/71.2% at 0.1, recall goes 78.3% → 77.6%, and latency goes
@@ -182,6 +190,136 @@ that needs KNN must *replace* the GIN index.
 suggest: btree prefix on every keystroke, the trigram path debounced behind
 it. Owned by M9 in PRD 09, because a debounce and a tier split are properties
 of a request boundary and M6 adds no route.
+
+**Tier 1 measured at catalog scale on 2026-08-12 (M9's B3), against a bar
+committed before the run, and the headline is that it passes the bar it was
+given and fails the job it exists for.** Same host, same 1,271,138-title
+`--phase imdb` catalog as the 2026-08-03 gate — `popularity` NULL on 100% of
+rows, `vote_count` on 538,937, all three numbers re-verified — plus a
+`title_search_names` **person** arm of **10,896,525 rows over 1,191,768
+titles**. The `alias` arm is **empty**; T7 owes it, so this is a union over one
+of two arms and every number below says so. Box measured quiet by the harness
+itself (zero foreign `pytest`, idle-sampled CPU drift **+0.0025**).
+
+*Regeneration is verified rather than claimed*: the procedure reproduces the
+gate's frame to the row — **81,054** shared lower-cased names, pools **432 /
+2,532 / 7,178 / 20,520 / 17,887**, and exactly **2,993** cases. What is *not*
+claimed is that the 750 sampled names are the same 750; the gate recorded its
+procedure and its pool sizes but not its draw order.
+
+| | bar | measured | |
+|---|---|---|---|
+| (1) tier-1 p95, `titles` only | ≤ 10 ms | **0.947 ms** | **PASS** |
+| (2) tier-1 p95, union at 10.9M rows | ≤ 10 ms | **1.465 ms** | **PASS** |
+| (3) tier-2 p50 | 33.6 ms ±10% | **39.59 ms** | **FAIL** |
+| (4) tier-1 recall@5 | 1.9% (1.6–2.2) | **2.67%** | **FAIL** |
+
+Bars (1) and (2) are scored on the 2,993 typo strings, which is the only
+workload comparable to the gate's `0.6 / 1.0 / 10 ms` btree row — and it
+reproduces it almost exactly: **p50 0.664, p95 0.947**, against a driver floor
+(`SELECT 1` through the same path) of **p50 0.425**. So over a third of tier 1's
+latency is the round trip, not the index.
+
+**The union does not cost tier 1 its budget, and B2's arm stays.** 1.465 ms
+against 10 ms at whole-catalog credited coverage. The plan's pre-recorded
+failure consequence — narrow tier 1 to `titles` and reach
+`title_search_names` from tier 2 alone — **does not fire**, and it was not
+allowed to fire on a different workload than the one the bar named.
+
+**What fails is the keystroke, and it fails on both arms.** p95 by prefix
+length, at `--reps 5`, titles-only against the union:
+
+| prefix length | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| `titles` only | **291 ms** | 51 ms | 15 ms | 5 ms | 19 ms | 14 ms | 2.0 ms | 2.3 ms |
+| union, 10.9M | **2,707 ms** | 809 ms | 303 ms | 112 ms | 100 ms | 86 ms | 2.3 ms | 2.6 ms |
+
+Tier 1 is a keystroke path from **seven characters up** and nowhere below it.
+The union is 9× worse at one character and the two converge at seven. Worst
+single probe measured: **`'m'` at 2,744 ms**, 78,203 `titles` rows and
+1,069,834 `title_search_names` rows.
+
+- **REFUTED — the sort is not the cost, and B2's residual-exposure argument
+  names the wrong mechanism.** B2 declined an inner per-arm cap partly because
+  *"an ordered one costs the same sort, so it buys nothing"*. In the plan for
+  the worst probe the sort is a **top-N heapsort in 26 kB** costing
+  microseconds. The cost is the `UNION`'s de-duplication — a `HashAggregate`
+  at **17 batches spilling 47 MB to disk per worker** — plus a
+  `title_search_names` bitmap heap scan that **goes lossy** (47,951 exact /
+  66,156 lossy heap blocks, **5,664,971 rows removed by filter** to keep
+  1,069,834), plus a hash join back to `titles` at 16 batches. The index probes
+  themselves are 6 ms and 40 ms. **An ordered inner cap would therefore be far
+  cheaper than B2 priced it**, because it would cap the HashAggregate's input
+  rather than paying a sort that is already free — but that is a design change
+  and this task does not tune, so it is handed on rather than made.
+- **CONFIRMED — the join back to `titles` costs more than the second arm's
+  index probe**, at every size measured.
+- **Parallelism is not the lever, and at the worst case it does nothing.**
+  Every W3 probe was also timed under `SET LOCAL
+  max_parallel_workers_per_gather = 0`, verified to have landed (`Gather`
+  present in the parallel plan, absent in the serial one). For the four largest
+  probes serial/parallel is **0.997–1.029** — two extra workers buy nothing,
+  because the work is disk-spill and heap-recheck rather than CPU. For
+  mid-sized probes it is **1.94–2.11**. So the concurrency worry is real in the
+  middle of the range and *absent* at the tail: the 2,744 ms is not a figure
+  that degrades further when the box is busy.
+- **Coverage is the lever, and the curve is steep.** At the enriched-tier size
+  the plan actually contemplates — 10,000 covered titles, 89,808 rows — the
+  union's one-character p95 is **489 ms** against 2,707 ms at 10.9M, and by
+  four characters it is **5.5 ms**, indistinguishable from titles-only. The
+  titles-only column is identical across both runs (291.23 against 290.24 ms at
+  length one), which is the control that says the only variable was table size.
+- **The union costs tier-1 recall, slightly.** 2.34% union against 2.67%
+  titles-only, entirely in the two short bands (2–4: 1.85% against 2.87%);
+  8 characters and up are identical. Person-name rows crowd the true title out
+  of a five-row box.
+- **Bar (4) fails and the index is not why.** 2.67% against a 1.6–2.2% window.
+  Tier 1 finds a typo'd name essentially only when the edit lands on the last
+  character and leaves a true prefix, so recall is a function of the sampled
+  names' lengths — and the draw order the gate never recorded is the one input
+  known to differ. 23 cases out of 2,993 separate the two figures.
+- **Bar (3) fails and `m09a` is not why — measured, not argued.** 39.59 ms
+  against a 30.24–36.96 ms window. The within-run A/B settles the attribution:
+  the identical 2,993 cases with both prefix indexes present and then both
+  dropped give **39.593 ms against 39.571 ms, a ratio of 1.001, with
+  byte-identical recall**. So the GIN/GiST lesson — that an added index can
+  silently tax the shipped path — **does not reproduce for a btree**, which is
+  the thing that needed proving rather than asserting. The 6 ms against
+  2026-08-03 is run-to-run, not `m09a`.
+- **Tier 2's miss split moved and the half that carries the claim did not.**
+  90.8% below the `%` floor / **0.0% truncated by the cap** / **0.0% dropped by
+  the re-rank** / 9.2% out-ranked, against the shipped row's 82.8 / 0.0 / 0.0 /
+  17.2. The two zeros hold **exactly**, so the cap and the re-rank are still
+  inert; the floor/out-ranked balance shifted 8 points on a different draw of
+  750 names. Tier-2 recall@5 **81.49%** against the recorded 82.5%, with the
+  band curve reproducing (2–4: 32.9%, 5–7: 77.0%, 8–11: 97.3%, 12–19: 99.7%,
+  20+: 100%).
+- **Index build and size.** `ix_titles_name_lower_prefix` **0.666 s / 44.2 MB**
+  over 1,271,138 rows, against the gate's 0.559 s / 44 MB — size reproduces
+  exactly, build time is run-to-run. `ix_title_search_names_name_lower_prefix`
+  **4.527 s / 155.4 MB** over 10,896,525 rows, which has no prior number
+  because the table did not exist when the gate ran.
+
+**Two things about measurement harnesses this run paid for, which are not about
+search.** A quiet-check that compares the one-minute load average before and
+after **condemns every clean run**, because a forty-minute run of continuous
+querying raises its own average — this one went 1.34 → 2.82 on a box that was
+provably idle throughout. And a foreign-process census that matches the whole
+command line counts *the shell that mentions the word*: `pgrep -f pytest`
+reported four processes on a box the coordinator had just measured clear, and
+all four were idle `sleep 5` waiters watching for pytest. Both were caught
+before they discarded a good run, both by predicting the failure rather than
+meeting it. Match argv **tokens**, exclude shells, and sample CPU **drift**
+between two moments when the harness itself is idle.
+
+**And a guard is vacuous below the scale that triggers the thing it guards.**
+The check that `SET LOCAL max_parallel_workers_per_gather = 0` actually removed
+the `Gather` cannot fire on a 4,000-row toy catalog, because the planner never
+chooses a Gather there — so a harness validated only on a fixture can carry
+silently inert checks into a real run. Proven on the real statement instead: **1
+Gather node without the knob, 0 with it.** Same family as this file's own
+finding that every typo case in `SuggestIndexContract` is green at a trigram
+floor no deployment uses.
 **Not settled by this run, named rather than implied:** real *typed* queries
 as opposed to synthetically mutated ones (that is `search_queries`, M9's);
 multi-typo queries (`_MAX_DISTANCE = 2` puts them out of reach by

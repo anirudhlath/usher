@@ -202,9 +202,12 @@ is neither.** That index is `(lower(name), year)` with the *default* opclass,
 which under this database's collation cannot answer `LIKE 'pre%'` at all —
 measured on `pgvector/pgvector:pg17`, the plan is a `Seq Scan` even with
 `enable_seqscan = off`. So `m09a` adds a btree on `lower(name)
-text_pattern_ops` to **both** `titles` and `title_search_names`: p50 0.6 ms,
-p95 1.0 ms, max 10 ms, 44 MB, building in 0.559 s over 1,271,138 rows, against
-the trigram path's 33.3 ms p50 and 734 ms max.
+text_pattern_ops` to **both** `titles` and `title_search_names`. The `titles`
+one: p50 0.6 ms, p95 1.0 ms, max 10 ms, 44 MB, building in 0.559 s over
+1,271,138 rows, against the trigram path's 33.3 ms p50 and 734 ms max —
+re-measured by B3 on 2026-08-12 at **0.666 s / 44.2 MB**, the size to the
+tenth. **The `title_search_names` one is a different size of object and was
+never covered by those figures**: **4.527 s / 155.4 MB** over 10,896,525 rows.
 
 ✅ **`m09a` builds the shape and both halves that fill it are now written, by
 two separate writers.** M6 deferred this to *"the day M7 lands aliases and
@@ -1035,14 +1038,39 @@ arrives behind it. It reads the two `text_pattern_ops` indexes `m09a` ships and
 **writes nothing**, so ADR-0021's dual-write cost is still unpaid by a second
 implementation of that port.
 
-🔶 **What is measured about it here is a probe, not the shipped statement.**
-The 0.6 ms figure above is a prefix probe over 1,271,138 names; the union, the
-de-duplication and the sort above the `LIMIT` are not in it, and Postgres has
-no `LIMIT` pushdown through a sort — so a one-character keystroke over a large
-catalog is the open question. **M9's B3 measures the shipped statement at
-catalog scale against a bar written before the run, and is the task authorised
-to narrow the union on the strength of it.** The route that serves both tiers,
-and the ADR recording the split, are B5's.
+✅ **The shipped statement is now measured, and the union stays.** B3 ran it on
+2026-08-12 against the gate's own 1,271,138-title catalog with a
+`title_search_names` **person** arm of 10,896,525 rows over 1,191,768 titles
+(the `alias` arm is still empty — T7's), on a box verified quiet, against a bar
+committed before the run. Over the gate's 2,993 typo strings — the only
+workload comparable to the 0.6 ms figure above — the union answers at **p95
+1.465 ms** against a 10 ms bar, and `titles` alone at **0.947 ms**, reproducing
+the probe figure almost exactly. So the union does **not** cost tier 1 its
+budget, and the narrowing B3 was authorised to make is **not** made.
+
+🔶 **Tier 1 is a keystroke path from seven characters up and nowhere below
+it**, and that is the finding B5 has to design around rather than inherit.
+p95 by prefix length, union against `titles` alone:
+
+| prefix length | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| `titles` only | **291 ms** | 51 ms | 15 ms | 5 ms | 19 ms | 14 ms | 2.0 ms | 2.3 ms |
+| union | **2,707 ms** | 809 ms | 303 ms | 112 ms | 100 ms | 86 ms | 2.3 ms | 2.6 ms |
+
+Both arms miss a 10 ms keystroke budget below seven characters, so **narrowing
+the union would not have bought a keystroke path** — it would have moved a
+291 ms first keystroke to where a 2,707 ms one had been. **The mechanism is not
+the sort**, which is a top-N heapsort in 26 kB: it is the `UNION`'s
+de-duplication spilling 47 MB to disk and a bitmap heap scan going lossy
+(5,664,971 rows rechecked to keep 1,069,834). An *ordered* inner per-arm cap is
+therefore much cheaper than it was priced at, because it would bound the
+de-duplication's input rather than pay a sort that is already free — **not
+made here**, because B3 measures and does not tune. Coverage is the other
+lever and the curve is steep: at the 10,000-title enriched tier the same
+one-character probe is **489 ms**, and by four characters **5.5 ms**.
+
+**A minimum prefix length before tier 1 fires is a request-boundary property
+and therefore B5's**, along with the route and ADR-0031, which B5 writes.
 
 **The gate as this section defined it measured the wrong half, and that
 correction stands.** A synthetic dry run over 604 cases first showed it, and
