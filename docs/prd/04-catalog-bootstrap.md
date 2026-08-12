@@ -79,6 +79,19 @@ for the full catalog would be ~120 GB, so Usher references and lazily caches
 
 Each phase is independently runnable, resumable, and checkpointed.
 
+**The order below is the order `usher bootstrap --phase all` runs, and three
+of its edges are constraints rather than presentation.** Phase 0 first,
+because every later phase joins to `titles` on `imdb_id` and an empty catalog
+joins to nothing. **Phase 0b before Phase 3**, because filling
+`titles.credit_names` rewrites `search_document` and therefore stales the
+embedding of every title it touches — 0 of 1,271,138 on a fresh bootstrap, and
+**203,969 of the 204,335 titles with ≥100 votes (99.82%)** if the same work is
+done after the crawl. And Phase 4's genome last, for Phase 0's reason.
+
+`--phase` names them `imdb`, `credit-names`, `aliases`, `tmdb-ids`,
+`crosswalk`, `movielens` and `all`; the tuple in `usher.cli.PHASES` is in
+execution order and carries the same three reasons.
+
 ### Phase 0 — IMDb skeleton (~30 min)
 
 Stream-parse the TSVs into Postgres via `COPY`. Yields ~1.13M `skeleton`
@@ -109,12 +122,14 @@ Pruning that keeps this sane: retain `movie`, `tvMovie`, `tvSeries`, and
 > `BulkCatalogRepository.replace_aliases` the write. It stores an expected
 > **1,663,364 deduplicated aliases over 399,046 of 1,271,138 titles (31.4%)**,
 > because three retained akas rows in four restate the title's own name and
-> are dropped. Nothing in `usher.cli` constructs that dataset yet, so no
-> bootstrap phase reads the file and no operator pays its **486.5 MiB** today;
-> the phase is a separate change, and it owes one thing the parser and the
-> writer cannot supply between them — **a title's aliases have to reach the
-> writer in one call**, which `_ImdbDataset`'s row-count batching does not
-> guarantee (`IMDbCreditNamesDataset` shows the shape).
+> are dropped. **Both are wired as of M9's T8** — `--phase aliases` and
+> `--phase credit-names`, described under Phase 0b below — so an operator
+> running `--phase all` now does pay the **486.5 MiB**. The one thing that
+> paragraph said the phase owed has been paid: **a title's aliases reach the
+> writer in one call**, because `IMDbAkaDataset.group_of` closes a title's run
+> before it closes a batch. At the shipped batch size the row-count spelling
+> would have split a title at **all 924** of a full import's batch
+> boundaries and silently deleted **3,867** rows it had already written.
 >
 > **The other half hardened rather than lifted.** `title.principals` and
 > `name.basics` are now refused on a *measurement* rather than on a missing
@@ -152,6 +167,66 @@ applies to an empty catalog), and it also produces a ~24% smaller, less
 fragmented pair of indexes than building them incrementally across 1.27M
 individual upserts. The seam is `BulkCatalogRepository.bulk_load_window`, so
 reversing this is a one-line change to `_SUSPENDABLE_INDEXES`.
+
+### Phase 0b — the IMDb expansion: credit names and aliases
+
+Two more IMDb files each become a phase of its own —
+`usher bootstrap --phase credit-names` and `--phase aliases` — and **neither
+makes an API call**. They are what gives a `skeleton` title a cast to be found
+by and an alias to be found under, on a catalog the TMDb crawl will never
+reach the far tail of.
+
+| phase | reads | writes | expected result on a 1,271,138-title catalog |
+|---|---|---|---|
+| `credit-names` | `name.basics` (293.7 MiB) × `title.principals` (742.3 MiB) | `titles.credit_names` | **1,192,217 titles (93.8%)** gain a mean of **9.11** names |
+| `aliases` | `title.akas` (486.5 MiB) | `title_search_names` where `kind = 'alias'` | **1,663,364** aliases over **399,046 titles (31.4%)** |
+
+**Both refuse an empty catalog with the phase to run first**, before
+downloading anything, exactly as the genome phase does: both are joins on
+`imdb_id`, and against an empty `titles` each would read its whole file, write
+nothing, checkpoint `COMPLETED`, and make every later `--phase all` a no-op.
+
+**Three properties are worth stating because they are not obvious from the
+table.**
+
+**No `people` or `credits` row is written.** The `people` + `credits` entity
+design was measured against this catalog at **2.702 GB against a 2.0 GB
+ceiling** and refused, so `credit-names` resolves the
+`title.principals` × `name.basics` join in the importer against a 345 MiB
+in-memory index and stores the *names* — `titles.credit_names` is a `text[]`
+that already existed, and weight class B of `search_document` already indexes
+it. The consequence for a resume is that the index is rebuilt from the whole
+of `name.basics` on **every** run, resumed or not: a fixed **19.5 s** before
+the first batch.
+
+**TMDb wins every title it has reached.** `fill_credit_names` writes only
+where `enrichment_state = 'skeleton'`; a title the crawl has enriched is
+counted as `deferred` and left alone, because `CreditRepository.
+replace_for_titles` owns that column for those titles. So this phase's yield
+*shrinks* as enrichment grows, which is the second half of the ordering
+constraint above.
+
+**An alias equal to the title's own name is not stored.** Three retained akas
+rows in four (**5,693,570 of 7,536,366, 75.5%**) restate `titles.name` or
+`titles.original_name` under `lower()` and are dropped — a name
+`ix_titles_name_lower_prefix` already answers is not an alias. The phase's own
+report prints that count beside the stored one, because a report showing only
+a quarter of the file arriving would otherwise read as a broken import.
+
+**What this costs to download.** The `## Sources` note above measures Phases
+0–2 at ~250 MiB; those are the phases as they stood before this one existed.
+Phase 0b adds **1.49 GiB**, so a full `--phase all` now transfers roughly
+**1.74 GiB** before the TMDb crawl and the genome archive. Nothing is
+downloaded that an operator did not ask for: each phase is separately
+runnable, and `--phase imdb` alone still costs the ~223 MiB it always did.
+
+**After it, re-index.** Filling `credit_names` changes `search_document`, so
+the titles it touched need `usher index --backfill` and then `usher similar
+--rebuild` — the freshness gap `README.md` already documents, arriving at a
+much larger population. On a fresh bootstrap the count of newly-stale
+embeddings is **zero**, because nothing is embedded until a title leaves the
+`skeleton` tier; that is a fact about ordering, not a reason to skip the
+re-index on a catalog that has been enriched.
 
 ### Phase 1 — TMDb ID universe (< 1 min)
 

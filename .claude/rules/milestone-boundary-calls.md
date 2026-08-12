@@ -11,6 +11,67 @@ later reader would otherwise re-litigate — each was stated with its reason in
 that milestone's plan and in [PRD 09](../../docs/prd/09-roadmap.md), and is
 repeated here because the plans are long and this is the part that gets lost.
 
+## M9 Track 2 — the IMDb bulk expansion, and the bar that failed
+
+**The headline call is a measured refusal and it is the one a later reader
+will otherwise re-open: (A) failed on 2.702 GB against a 2.0 GB ceiling, so
+there is no `people`/`credits` bulk load and no `m09b`.** The bar was written
+to `/tmp/m9-t3/BAR.md` **before the first byte was downloaded** and had three
+clauses; two passed comfortably (12,626,452 retained credits against a 20M
+ceiling, 3,211,941 people against 6M) and the third failed on both readings of
+its unit — **2,701,697,024 B, i.e. 2.702 GB or 2.516 GiB**. Stripped to the
+five columns a credit cannot do without, with `people` unchanged, it is still
+**2.395 GB, 20% over**. So *there is no version of (A) that fits by trimming*,
+which is exactly why the fallback was written first.
+
+**What shipped is the names-only design, and it is not a shrunken (A).**
+`titles.credit_names` — a `text[]` M7 already added, which weight class B of
+`search_document` already indexes — is filled directly from
+`title.principals` × `name.basics`, with the join resolved **in the importer**
+against a 345 MiB in-memory index because there is no `people` table for its
+right-hand side to live in. **No person row and no credit row is written from
+IMDb at all**, so the two bulk sources never own one entity and the provenance
+rule that design needed does not exist. `title.akas` lands in `m09a`'s
+`title_search_names`. Neither phase mints a table: **`alembic heads` stays at
+exactly one (`m09c`)**, the `m09b` grant is withdrawn, and T4 (the provenance
+rule) and T6-as-a-credits-writer are withdrawn with it.
+
+**Five smaller calls, each stated with its reason.**
+
+1. **The IMDb people files are read and four of their six columns are
+   dropped.** `birthYear`, `deathYear`, `primaryProfession` and
+   `knownForTitles` have nowhere to land once (A) fails, and filling
+   `Person`'s four `/person/{id}` fields from them is impossible anyway: a
+   TMDb credit entry carries no `nconst`, so the only merge key the two
+   sources share for a person is a name, which by ADR-0003 is not identity.
+2. **`fill_credit_names` writes only where `enrichment_state = 'skeleton'`,
+   so TMDb wins every title it has reached.** That is a precedence rule, not
+   an optimisation: `CreditRepository.replace_for_titles` owns the column for
+   enriched titles, and a `credit_names = '{}'` guard would overwrite TMDb's
+   own answer for a title it derived no cast for. It is also what makes the
+   fill unable to stale an embedding **by construction** rather than by
+   measurement, since the embedded population is exactly the complement.
+3. **The backfill belongs before the TMDb crawl and the ordering is
+   measured.** Filling the column costs **+624 MB settled, +1,368 MB
+   transient, GIN ×4.54**, and **203,969 of 204,335 ≥100-vote titles would
+   gain a `credit_names`** — so run after a priority-tier crawl it invalidates
+   ~100% of that tier's embeddings, and run before it invalidates **0 of
+   1,271,138**. Stated in the CLI's own report and in PRD 04, not only here.
+4. **`replace_aliases` is scoped by `imdb_ids` *and* `kind = 'alias'`**, so
+   B1's `person` rows survive an alias re-import; and the caller's scope is
+   necessarily the batch's own titles, which means a title whose akas IMDb has
+   **withdrawn entirely** keeps its stale aliases — a streaming importer has
+   no other scope available, and the alternative is one call naming 1.27M
+   titles.
+5. **No parser-side guard refuses an ungrouped dump.** A title's rows must be
+   contiguous for the batching to be sound, and that is measured (zero
+   lexicographic descents in `title.akas`' `titleId` over 58,906,368 rows and
+   in `title.principals`' `tconst` over 101,151,422). A one-variable guard on
+   the sort order was declined because it checks a strictly *stronger*
+   property than the writer needs — this repository's own committed akas
+   fixture is contiguous and unsorted, so the guard would refuse a file that
+   is fine.
+
 **M8's eight deliberate boundary calls**, each stated with its reason in the
 M8 plan's Scope section and in PRD 09: **`LiteLLMClient` is NOT built** — the
 client is one `POST /v1/chat/completions` over the httpx stack already here,

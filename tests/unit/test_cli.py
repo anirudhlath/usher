@@ -9,8 +9,11 @@ import argparse
 import asyncio
 import contextlib
 import dataclasses
+import gzip
+import re
 import uuid
 import zipfile
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
@@ -21,13 +24,17 @@ from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.genome_repository import FakeGenomeRepository
 from tests.fakes.import_run_repository import FakeImportRunRepository
 from tests.fakes.llm_client import FakeLLMClient
+from usher.adapters.bulk.imdb import parse_akas_row
 from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.cli import (
     PHASES,
     SYNC_KINDS,
+    _aliases,
     _as_uuid,
+    _credit_names,
     _filters_from,
     _movielens,
+    _percent,
     _print_search_answer,
     _report_coverage,
     _run_lanes,
@@ -402,8 +409,16 @@ def test_movielens_is_the_last_phase_before_all_and_the_order_is_execution_order
     tidy-up that alphabetises `PHASES`, which would put `crosswalk` and
     `movielens` before `imdb` and produce a phase that downloads 335 MiB,
     writes zero rows, and reports success.
+
+    Two edges rather than the whole tuple, because M9 added two phases between
+    `imdb` and `tmdb-ids` and pinning the literal in two places is how one of
+    them comes to be updated and the other merely made green.
+    `test_the_imdb_expansion_phases_follow_imdb_and_credit_names_comes_first`
+    is where the full tuple is asserted, with the measurement behind each new
+    edge.
     """
-    assert PHASES == ("imdb", "tmdb-ids", "crosswalk", "movielens", "all")
+    assert PHASES[-2:] == ("movielens", "all")
+    assert PHASES.index("imdb") < PHASES.index("movielens")
 
 
 async def test_the_genome_phase_refuses_an_empty_catalog_before_downloading(
@@ -1124,3 +1139,403 @@ def _recording_pipeline(captured: dict[str, object]) -> Callable[..., object]:
         return _Pipeline()
 
     return _build
+
+
+# --- the IMDb expansion phases ----------------------------------------
+#
+# `credit-names` and `aliases` are the two phases M9 adds, and both are joins
+# against a catalog the `imdb` phase has to have built first. The fixtures are
+# the committed synthetic slices the adapters' own tests read; the transports
+# below serve them out of a scratch cache directory, so no case here opens a
+# socket and no third-party row is committed.
+
+_BULK_FIXTURES = Path(__file__).parent.parent / "fixtures" / "bulk"
+
+_EXPANSION_TITLES = (
+    ImdbTitle(
+        imdb_id="tt99000010",
+        kind=TitleKind.MOVIE,
+        name='"A Quoted Synthetic Title"',
+        original_name='"A Quoted Synthetic Title"',
+        year=1962,
+        end_year=None,
+        runtime_minutes=111,
+        genres=("Crime", "Drama"),
+    ),
+    ImdbTitle(
+        imdb_id="tt99000020",
+        kind=TitleKind.MOVIE,
+        name="A Synthetic Feature",
+        original_name="A Synthetic Feature",
+        year=1988,
+        end_year=None,
+        runtime_minutes=123,
+        genres=("Drama",),
+    ),
+    ImdbTitle(
+        imdb_id="tt99000030",
+        kind=TitleKind.SERIES,
+        name="A Synthetic Series",
+        original_name="A Synthetic Series",
+        year=2004,
+        end_year=2009,
+        runtime_minutes=44,
+        genres=("Drama",),
+    ),
+)
+
+
+def _stage_slices(tmp_path: Path, *pairs: tuple[str, str]) -> Path:
+    cache = tmp_path / "bulk"
+    cache.mkdir(parents=True, exist_ok=True)
+    for source, name in pairs:
+        (cache / name).write_bytes(gzip.compress((_BULK_FIXTURES / source).read_bytes()))
+    return cache
+
+
+def _recording_local(cache: Path, asked: list[str]) -> httpx.MockTransport:
+    """`_local_archive`, plus the order the files were asked for.
+
+    The order is the assertion in `test_the_credit_names_phase_reads_name_
+    basics_before_title_principals`, and recording it here rather than
+    counting calls is the difference between "both files were read" -- which
+    the wrong order also satisfies -- and "this one was read first".
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = str(request.url).rsplit("/", 1)[-1]
+        asked.append(name)
+        (cache / f"{name}.revision").write_text('"fixture"')
+        return httpx.Response(
+            200, content=(cache / name).read_bytes(), headers={"etag": '"fixture"'}
+        )
+
+    return httpx.MockTransport(handler)
+
+
+def _expansion_settings(cache: Path, *, batch_size: int = 50_000) -> Settings:
+    return Settings(
+        database_url="postgresql+asyncpg://u:p@localhost/db",
+        secret_key="0" * 32,
+        bulk_data_dir=cache,
+        bulk_batch_size=batch_size,
+    )
+
+
+async def _seeded_catalog() -> tuple[FakeBulkCatalogRepository, BootstrapService]:
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles(list(_EXPANSION_TITLES))
+    return catalog, BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
+
+
+def test_the_imdb_expansion_phases_follow_imdb_and_credit_names_comes_first() -> None:
+    """Two edges, both measured, in a tuple `--phase all` executes in order.
+
+    **`credit-names` and `aliases` after `imdb`**: both join to `titles` on
+    `imdb_id`, so against an empty catalog they match nothing -- the same
+    argument `movielens` already makes, arriving at a 1.57 GiB download rather
+    than a 335 MiB one.
+
+    **`credit-names` before everything that enriches a title.**
+    `fill_credit_names` writes only where `enrichment_state = 'skeleton'` and
+    the fill rewrites `search_document`, so it stales the embedding of every
+    title it touches: **0 of 1,271,138** on a pure bootstrap, against
+    **203,969 of the 204,335 titles with >=100 votes (99.82%)** if it is run
+    after a priority-tier crawl. Ordering is the whole mitigation and there is
+    no other one.
+
+    Kills a tidy-up that alphabetises `PHASES` -- which would put `aliases`
+    and `credit-names` before `imdb` and produce two phases that download
+    1.57 GiB, write nothing and report success.
+    """
+    assert PHASES == (
+        "imdb",
+        "credit-names",
+        "aliases",
+        "tmdb-ids",
+        "crosswalk",
+        "movielens",
+        "all",
+    )
+    assert PHASES.index("imdb") < PHASES.index("credit-names") < PHASES.index("aliases")
+
+
+async def test_the_credit_names_phase_reads_name_basics_before_title_principals(
+    tmp_path: Path,
+) -> None:
+    """A credit names a person, so the `nconst -> primaryName` index has to
+    exist before a principal is resolved against it.
+
+    **The order is asserted as a sequence, not as two memberships**: "both
+    files were read" is satisfied by the wrong order, which would resolve
+    every principal against an empty index and yield no record at all -- a
+    phase that completes, checkpoints, and blanks nothing while filling
+    nothing.
+
+    **This is the plan's `test_bootstrap_phase_people_runs_name_basics_before_
+    title_principals` under a name that describes what shipped.** There is no
+    `people` phase: T3 measured the `people` + `credits` design at 2.702 GB
+    against a 2.0 GB ceiling and refused it, so the two files are one dataset
+    resolving the join in the adapter, and the ordering they need is inside
+    that dataset rather than between two phases.
+    """
+    cache = _stage_slices(
+        tmp_path,
+        ("name.basics.slice.tsv", "name.basics.tsv.gz"),
+        ("title.principals.slice.tsv", "title.principals.tsv.gz"),
+    )
+    catalog, service = await _seeded_catalog()
+    asked: list[str] = []
+
+    async with httpx.AsyncClient(transport=_recording_local(cache, asked)) as client:
+        await _credit_names(_expansion_settings(cache), client, catalog, service)
+
+    assert asked, "the premise: the phase reached the transport at all"
+    assert asked.index("name.basics.tsv.gz") < asked.index("title.principals.tsv.gz")
+    assert catalog.credit_names("tt99000020") == (
+        "Ada Synthetic",
+        '"Bo Synthetic"',
+        "Cyd Synthetic",
+    )
+
+
+async def test_the_alias_phase_stores_every_alias_even_when_a_title_straddles_a_batch(
+    tmp_path: Path,
+) -> None:
+    """The phase is the writer's only caller, so this is where the loss the
+    port cannot detect actually shows up.
+
+    `replace_aliases` deletes by scope before it inserts. With a title's rows
+    split across two batches, the second call's scope names that title again
+    and its delete takes the rows the first call wrote -- and **nothing
+    raises**, because the port's `ValueError` guard is about a row *outside*
+    the scope and both halves are inside their own. `batch_size=1` against a
+    slice whose every title has two aliases is the shape that does it: before
+    `IMDbAkaDataset.group_of`, this stored one alias per title instead of two.
+
+    **The premise is read off the fixture, not off the result.** Spelled as
+    *"some title in `stored` has more than one alias"* it is a claim about the
+    outcome, so the defect falsifies the guard instead of the assertion and
+    the case reports a fixture problem it does not have -- measured, by
+    planting `group_of -> None` and watching it fail on `assert 1 > 1`. Read
+    off `parse_akas_row` over the committed slice it is a fact about the file,
+    which only an edit to the file can change.
+    """
+    per_title = Counter(
+        row.imdb_id
+        for row in map(
+            parse_akas_row,
+            (_BULK_FIXTURES / "title.akas.slice.tsv").read_text(encoding="utf-8").splitlines(),
+        )
+        if row is not None
+    )
+    assert max(per_title.values()) > 1, "the premise: the slice holds a title with two aliases"
+
+    cache = _stage_slices(tmp_path, ("title.akas.slice.tsv", "title.akas.tsv.gz"))
+    catalog, service = await _seeded_catalog()
+
+    async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
+        await _aliases(_expansion_settings(cache, batch_size=1), client, catalog, service)
+
+    stored = {
+        imdb_id: tuple(name for _, name, _, _ in catalog.search_names(imdb_id))
+        for imdb_id in ("tt99000010", "tt99000020", "tt99000030")
+    }
+    assert stored == {
+        "tt99000010": ("A Synthetic Festival Title", "A Synthetic Working Title"),
+        "tt99000020": ('"A Quoted Synthetic Alias"', "Un Long Métrage Synthétique"),
+        "tt99000030": ("Uma Série Sintética", "Une Série Synthétique"),
+    }
+
+
+async def test_the_alias_phase_writes_region_and_language_and_leaves_person_rows_alone(
+    tmp_path: Path,
+) -> None:
+    """Two properties the phase's own wiring is responsible for.
+
+    `region` and `language` reach the table -- `m09a` added those two columns
+    for this dump and without them a French and a Brazilian alias of one film
+    are indistinguishable rows. And B1's `person` rows survive: the scope is
+    `kind = 'alias'` as well as `imdb_ids`, so a credited person's searchable
+    name is not collateral of an alias re-import.
+    """
+    cache = _stage_slices(tmp_path, ("title.akas.slice.tsv", "title.akas.tsv.gz"))
+    catalog, service = await _seeded_catalog()
+    catalog.seed_person_search_name("tt99000020", "Ada Synthetic")
+
+    async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
+        await _aliases(_expansion_settings(cache), client, catalog, service)
+
+    assert catalog.search_names("tt99000020") == (
+        ("alias", '"A Quoted Synthetic Alias"', "GB", None),
+        ("alias", "Un Long Métrage Synthétique", "FR", "fr"),
+        ("person", "Ada Synthetic", None, None),
+    )
+
+
+async def test_the_credit_names_phase_refuses_an_empty_catalog_before_downloading(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`_movielens`' refusal, against a 1.09 GB pair of files instead of a
+    335 MiB archive, and with the same three properties: no request of any
+    kind, no `ImportRun`, and a message naming the phase to run first.
+
+    The outcome it prevents is the same one and is worse here for the size:
+    every row would match nothing, the run would checkpoint `COMPLETED`, and
+    every later `--phase all` would find that checkpoint and do nothing.
+    """
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"the credit-names phase reached the network: {request.url}")
+
+    catalog = FakeBulkCatalogRepository()
+    runs = FakeImportRunRepository()
+    service = BootstrapService(runs, catalog, _no_commit)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+        await _credit_names(_expansion_settings(tmp_path), client, catalog, service)
+
+    assert await runs.list_runs() == []
+    printed = capsys.readouterr().out
+    assert "titles is empty" in printed
+    assert "--phase imdb" in printed
+
+
+async def test_the_alias_phase_refuses_an_empty_catalog_before_downloading(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same refusal, against 486 MiB. Separate from the credit-names case
+    rather than parametrised over both, because the two messages name
+    different files and a parametrised case asserting only the shared half is
+    how one of them would come to name the wrong one."""
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"the aliases phase reached the network: {request.url}")
+
+    catalog = FakeBulkCatalogRepository()
+    runs = FakeImportRunRepository()
+    service = BootstrapService(runs, catalog, _no_commit)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+        await _aliases(_expansion_settings(tmp_path), client, catalog, service)
+
+    assert await runs.list_runs() == []
+    printed = capsys.readouterr().out
+    assert "title.akas" in printed
+    assert "--phase imdb" in printed
+
+
+async def test_the_credit_names_report_carries_a_denominator_and_the_crawl_ordering(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A count with the population it is a count *of*, and the one sentence
+    an operator has to read before scheduling this phase.
+
+    The ordering line is here rather than only in a PRD because getting it
+    wrong is not recoverable by re-running anything: run after a priority-tier
+    crawl, the fill stales 99.82% of that tier's embeddings and the repair is
+    a re-index of the whole tier.
+    """
+    cache = _stage_slices(
+        tmp_path,
+        ("name.basics.slice.tsv", "name.basics.tsv.gz"),
+        ("title.principals.slice.tsv", "title.principals.tsv.gz"),
+    )
+    # Two of the slice's three titles, so all three counters carry a number
+    # rather than a zero: `tt99000020` is filled, `tt99000030` is enriched and
+    # so belongs to TMDb, and `tt99000040`'s record never arrives at all --
+    # its only principal names a person `name.basics` does not hold. The
+    # catalog is missing nothing the dump credits, so `unmatched` is 0 here
+    # and the case says so rather than asserting a number the fixture cannot
+    # produce.
+    catalog = FakeBulkCatalogRepository()
+    await catalog.upsert_titles([_EXPANSION_TITLES[1], _EXPANSION_TITLES[2]])
+    catalog.mark_enriched("tt99000030")
+    service = BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
+
+    async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
+        await _credit_names(_expansion_settings(cache), client, catalog, service)
+
+    printed = capsys.readouterr().out
+    assert "credit_names: 1 titles filled this run" in printed
+    assert "of 2 titles in the catalog" in printed
+    assert "0 credited titles this catalog does not hold" in printed
+    assert "1 deferred to TMDb" in printed
+    assert catalog.credit_names("tt99000030") == ()
+    assert "BEFORE the TMDb crawl" in printed
+    assert "usher index --backfill" in printed
+
+
+async def test_the_alias_report_says_where_the_rows_that_are_not_aliases_went(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`written` alone reads as a broken import: three retained akas rows in
+    four restate the title's own name (5,693,570 of 7,536,366, 75.5%), so a
+    report printing only what was stored would show a quarter of the file
+    arriving and say nothing about the rest.
+
+    The fixture is built to exercise the counter rather than to be
+    representative -- one row per title restating the title's own name, which
+    the parser cannot drop because only a comparison against the stored
+    `Title` can see it.
+    """
+    cache = tmp_path / "bulk"
+    cache.mkdir(parents=True)
+    body = (
+        "titleId\tordering\ttitle\tregion\tlanguage\ttypes\tattributes\tisOriginalTitle\n"
+        "tt99000020\t1\tA Synthetic Feature\tUS\ten\timdbDisplay\t\\N\t0\n"
+        "tt99000020\t2\tUn Long Métrage Synthétique\tFR\tfr\timdbDisplay\t\\N\t0\n"
+        "tt99000020\t3\tUN LONG MÉTRAGE SYNTHÉTIQUE\tCA\tfr\timdbDisplay\t\\N\t0\n"
+        "tt99000099\t1\tA Title No Catalog Holds\tUS\ten\timdbDisplay\t\\N\t0\n"
+    ).encode()
+    (cache / "title.akas.tsv.gz").write_bytes(gzip.compress(body))
+    catalog, service = await _seeded_catalog()
+
+    async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
+        await _aliases(_expansion_settings(cache), client, catalog, service)
+
+    printed = capsys.readouterr().out
+    assert "aliases: 1 stored this run of 4 rows read" in printed
+    assert "1 restate the title's own name" in printed
+    assert "1 repeat one already kept" in printed
+    assert "1 scoped ids matched no title" in printed
+    assert "25.00% of the rows read" in printed
+    assert "the catalog holds 3 titles" in printed
+
+
+def test_a_zero_denominator_is_a_sentence_naming_what_it_counted() -> None:
+    """`_percent` now serves two populations, and its zero branch prints the
+    noun. *"n/a (0 titles)"* under a line about rows read is a wrong sentence
+    rather than a missing one -- and a `0/0` percentage is what PRD 08's
+    "every command works against an empty database" rule is about."""
+    assert _percent(0, 0) == "n/a (0 titles)"
+    assert _percent(0, 0, noun="rows") == "n/a (0 rows)"
+    assert _percent(1, 4, noun="rows") == "25.00%"
+
+
+def test_every_subcommands_help_renders() -> None:
+    """`--help` is the one code path in the parser that interpolates, and
+    nothing else in this suite runs it.
+
+    argparse formats each `help=` string against its own parameter dict, so a
+    literal `%` raises `TypeError: %o format: an integer is required, not
+    dict` from `usher bootstrap --help` and from nowhere else. Found by
+    running it: `ruff`, `ruff format --check`, `mypy` and all 67 cases in this
+    file passed against a `--phase` help string containing a bare `~100%`,
+    because every one of them builds the parser and none of them renders it.
+
+    Over every subcommand rather than over `bootstrap` alone -- the defect is
+    a property of writing a help string, not of this command -- and the list
+    is read off the parser's own rendered choices rather than typed out, so a
+    subcommand added later is covered without anyone remembering to add it.
+    """
+    parser = build_parser()
+    rendered = parser.format_help()
+    choices = re.search(r"\{([a-z0-9,-]+)\}", rendered)
+    assert choices, "the premise: the top-level help lists its subcommands"
+    commands = choices.group(1).split(",")
+    assert len(commands) > 10, f"the premise: every subcommand is reached, got {commands}"
+    for name in commands:
+        with pytest.raises(SystemExit) as exit_info:
+            parser.parse_args([name, "--help"])
+        assert exit_info.value.code == 0, name

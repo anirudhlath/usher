@@ -157,16 +157,51 @@ reported by name without its value, because a setting may be a credential.
 **Populate the catalog** — pulls IMDb's `title.basics`/`title.ratings` dumps,
 TMDb's *public daily id export* files (no API key needed for these) and
 Wikidata's SPARQL endpoint. About three minutes and 1.27M titles on a
-reasonable machine. Resumable: kill it and re-run, and it continues from its
-checkpoint. See
+reasonable machine for those three; the two IMDb expansion phases below read
+another 1.49 GiB and take rather longer. Resumable: kill any phase and re-run,
+and it continues from its own checkpoint. See
 [`docs/prd/04-catalog-bootstrap.md`](docs/prd/04-catalog-bootstrap.md).
 
 ```bash
-uv run usher bootstrap                     # every phase
-uv run usher bootstrap --phase imdb        # one at a time: imdb | tmdb-ids | crosswalk | movielens | all
-uv run usher bootstrap --phase movielens   # the MovieLens tag genome (M7), ~335 MB, ~10 min
-uv run usher bootstrap-status              # progress per dataset, and catalog size
+uv run usher bootstrap                       # every phase, in the order below
+uv run usher bootstrap --phase imdb          # one at a time: imdb | credit-names | aliases
+uv run usher bootstrap --phase credit-names  #              | tmdb-ids | crosswalk | movielens | all
+uv run usher bootstrap --phase aliases       # IMDb title.akas -> searchable aliases, ~487 MB
+uv run usher bootstrap --phase movielens     # the MovieLens tag genome (M7), ~335 MB, ~10 min
+uv run usher bootstrap-status                # progress per dataset, and catalog size
 ```
+
+**`credit-names` and `aliases` are the two IMDb phases M9 added, and they cost
+no API call at all.** `credit-names` joins `name.basics` to
+`title.principals` in the importer and fills `titles.credit_names`, which is
+weight class B of the search document — **1,192,217 of 1,271,138 titles
+(93.8%)** gain a mean of 9.11 names. `aliases` reads `title.akas` and fills
+the `alias` half of `title_search_names` — **1,663,364** aliases over
+**399,046 titles (31.4%)**, each with its `region` and `language`. Both refuse
+an empty catalog and say which phase to run first, both are resumable from
+their own checkpoint, and together they add **1.49 GiB** to what a
+`--phase all` downloads. Neither writes a `people` or a `credits` row: that
+design measured 2.702 GB against a 2.0 GB ceiling and was refused
+([`04`](docs/prd/04-catalog-bootstrap.md)).
+
+⚠️ **Run `credit-names` before the TMDb enrichment crawl, not after.** It
+writes only where `enrichment_state = 'skeleton'`, so TMDb keeps every title
+it has already reached — and because filling the column rewrites
+`search_document`, running it afterwards stales the embeddings of the tier you
+just paid to crawl. Measured: **0 of 1,271,138** embeddings on a fresh
+bootstrap (nothing is embedded before enrichment), against **203,969 of the
+204,335 titles with ≥100 votes (99.82%)** if the same work is done after the
+priority tier lands.
+
+**After either phase, re-index — and here is the measured number of
+embeddings it invalidates.** `usher index --backfill`, then `usher similar
+--rebuild` once the index jobs have run; this is the same freshness gap
+`usher similar` documents below, arriving at a much larger population. On a
+freshly bootstrapped catalog the count of newly-stale embeddings is
+**zero** — every title `credit-names` can touch is a `skeleton`, and skeletons
+are never embedded — so the obligation is real but the bill is nil until the
+catalog has been enriched. `usher index` prints the stale count either way, so
+the number is checkable rather than taken on trust.
 
 `movielens` runs **last** under `--phase all`, and refuses outright against an
 empty catalog: the genome joins `titles` on `imdb_id`, so there is nothing to

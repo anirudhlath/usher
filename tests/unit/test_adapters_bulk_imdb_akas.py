@@ -18,6 +18,7 @@ plan drifting into the tree.
 import ast
 import gzip
 import inspect
+from collections import Counter
 from pathlib import Path
 
 import httpx
@@ -372,3 +373,88 @@ def test_the_malformed_error_names_the_row_and_never_carries_the_line() -> None:
         parse_akas_row(line)
     assert exc_info.value.detail == "tt99000020"
     assert "an unusually wide alias" not in str(exc_info.value)
+
+
+async def test_a_titles_aliases_are_never_split_across_two_batches(tmp_path: Path) -> None:
+    """A batch is a transaction and `replace_aliases` is a **scoped delete
+    followed by an insert**, so a title split across two batches loses the
+    aliases in the first: the second call's scope names that title again and
+    the delete takes the rows the first call wrote.
+
+    **The port cannot detect it** -- its `ValueError` guard fires only for a
+    row whose `imdb_id` is outside the scope, and both halves of a split title
+    are perfectly in scope in their own call. Nothing raises, nothing counts
+    it, and the title is left holding whichever half arrived last.
+    `IMDbCreditNamesDataset` closes a title's run before it closes a batch for
+    the identical reason; this is the same rule one file over.
+
+    Measured over the whole pinned `title.akas.tsv.gz`
+    (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`, 2026-08-11): at the shipped
+    `bulk_batch_size` of 50,000 a full import flushes 924 batches, **every one
+    of the 924 boundaries lands inside a title**, and **3,867 retained rows**
+    are deleted after being written. The bias is the bad part -- a boundary is
+    likelier to land inside a title with many aliases than one with two.
+
+    The premise is asserted rather than assumed: with one retained row per
+    title in the slice, no batch size could split anything and the case would
+    pass against the defect.
+    """
+    per_title = Counter(imdb_id for imdb_id, _, _ in _kept())
+    assert max(per_title.values()) > 1, "the premise: some title has more than one alias"
+
+    cache = _stage(tmp_path, "title.akas.slice.tsv", "title.akas.tsv.gz")
+    async with httpx.AsyncClient(transport=_local(cache)) as client:
+        batches = [batch async for batch in IMDbAkaDataset(client, cache, batch_size=1).batches()]
+
+    seen: list[str] = []
+    for batch in batches:
+        titles = list(dict.fromkeys(row.imdb_id for row in batch.rows))
+        assert not set(titles) & set(seen), (
+            f"title(s) {sorted(set(titles) & set(seen))} reach the writer in two batches; "
+            "the second scoped replace deletes what the first wrote"
+        )
+        seen += titles
+    assert seen == ["tt99000020", "tt99000030", "tt99000010"]
+
+
+async def test_the_cursor_advances_to_a_title_boundary_and_a_resume_loses_nothing(
+    tmp_path: Path,
+) -> None:
+    """`position` counts lines consumed **through the end of the last
+    completed title**, not lines read: a title's last line is only knowable
+    once the first line of the next one has been consumed, so a cursor built
+    from `position` would resume mid-title and the resumed half's scoped
+    replace would delete the committed half.
+
+    The premise -- that the first batch's cursor stops *before* the second
+    title's first **retained** line -- is asserted directly, because a cursor
+    one line too far still resumes and still yields rows, and only the count
+    says which.
+
+    **That boundary is line 6 and not line 5, which is the off-by-one this
+    assertion caught in its own first draft.** `tt99000020`'s last line is 5,
+    but line 6 is `tt99000030`'s `isOriginalTitle` row: a filtered line
+    produces no record, so it cannot close a group, and the boundary
+    therefore lands on the last line before the next title's first retained
+    row. Nothing is lost by that -- skipping line 6 on resume skips a row the
+    parser drops anyway -- and the alternative, letting a filtered line close
+    the open group, would move the cursor past rows no writer has seen.
+    """
+    cache = _stage(tmp_path, "title.akas.slice.tsv", "title.akas.tsv.gz")
+    async with httpx.AsyncClient(transport=_local(cache)) as client:
+        first = await anext(IMDbAkaDataset(client, cache, batch_size=1).batches())
+        assert first.cursor.position == 6, "the premise: the boundary is inside the title's run"
+        assert [row.imdb_id for row in first.rows] == ["tt99000020", "tt99000020"]
+        resumed = [
+            row
+            async for batch in IMDbAkaDataset(client, cache, batch_size=10).batches(
+                resume_from=first.cursor
+            )
+            for row in batch.rows
+        ]
+    assert [row.imdb_id for row in resumed] == [
+        "tt99000030",
+        "tt99000030",
+        "tt99000010",
+        "tt99000010",
+    ]

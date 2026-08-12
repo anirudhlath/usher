@@ -532,13 +532,45 @@ messages a night. **A document with no markers is not a document with no gaps;
 it is a document nobody has audited.** All five are corrected in place, and
 each says what happened to the sentence it replaces.
 
-**Two obligations that are M7's and belong to nobody.** `alternative_titles`
-stays **unassigned** — it needs an `append_to_response` change plus a re-crawl
-of the whole enriched tier, and it is the blocker on call 6's other half; and
-`Person`'s four `/person/{id}` fields (call 4) are unassigned for the same
-shape of reason. Both are named in [03](03-sources-and-sync.md) rather than
-left implied by the deferrals they block, because that is the failure this
-roadmap has now recorded twice.
+**Two obligations that were M7's and belonged to nobody. One now has an owner
+and a mechanism; the other is restated as unassigned with its reason.**
+
+- **`alternative_titles` is answered, and not by TMDb.** It stayed unassigned
+  because it needs an `append_to_response` change plus a re-crawl of the whole
+  enriched tier — and that is still true of *TMDb's* `alternative_titles`,
+  which nothing plans. What M9 shipped instead is **IMDb's `title.akas` as the
+  alias source**, through `usher bootstrap --phase aliases`
+  ([04](04-catalog-bootstrap.md)'s Phase 0b): no API call, no change to the
+  crawl's request shape, and it fills the `alias` half of
+  `title_search_names` for **399,046 of 1,271,138 titles (31.4%)** with
+  **1,663,364** rows carrying a `region` and a `language`. So call 6's other
+  half is discharged by a different source, and the blocker it was waiting on
+  is no longer on anyone's critical path. TMDb's own alternative titles remain
+  unassigned and are now a *duplicate* of a capability rather than the only
+  route to one.
+- **`Person`'s four `/person/{id}` fields (call 4) stay unassigned, and the
+  reason has hardened.** They are `imdb_id`, `birth_year`, `death_year` and
+  `biography`, none of which is on a `credits.cast[]`/`crew[]` entry, so
+  filling them is one request per person over ~200k people. The obvious
+  cheaper route — take them from IMDb's `name.basics`, which carries a birth
+  and death year for 15.5M people — **does not exist**: a TMDb credit entry
+  carries no `nconst` and IMDb carries no TMDb id, so the only merge key the
+  two sources share for a person is the name, and by
+  [ADR-0003](decisions/0003-own-uuid-identity.md) a name is not identity. M9
+  reads both files and deliberately writes **no person row** from them (see
+  below), so nothing here changed except that the alternative is now measured
+  rather than assumed.
+
+**What M9's IMDb expansion deliberately did not build.** `titles.credit_names`
+is filled from `title.principals` × `name.basics` with **no `people` and no
+`credits` row written from IMDb at all** — the entity design was measured at
+**2.702 GB against a 2.0 GB ceiling** and refused, so the two bulk sources
+never own one entity and the provenance question that design raised does not
+arise. There is no new table and no new migration for either phase: aliases
+land in `m09a`'s `title_search_names` and credit names in a `text[]` column
+M7 already added. `title.crew` and `title.episode` are still not imported and
+still have nowhere to land. Full evidence, including the bar written before
+the download, is in `.claude/rules/bootstrap-and-datasets.md`.
 
 **M8's boundary was ambiguous in eight places, and each was decided
 deliberately rather than drifted into.** The plan states each with its reason

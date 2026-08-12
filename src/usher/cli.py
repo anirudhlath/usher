@@ -25,7 +25,12 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.adapters.bulk.imdb import IMDbRatingDataset, IMDbTitleDataset
+from usher.adapters.bulk.imdb import (
+    IMDbAkaDataset,
+    IMDbCreditNamesDataset,
+    IMDbRatingDataset,
+    IMDbTitleDataset,
+)
 from usher.adapters.bulk.movielens import GENOME_BATCH_SIZE, MovieLensGenomeDataset
 from usher.adapters.bulk.tmdb_ids import TMDbIdDataset
 from usher.adapters.bulk.wikidata import WikidataCrosswalkDataset
@@ -60,7 +65,7 @@ from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.source import Source
 from usher.domain.sync import SyncRunKind
-from usher.ports.bulk import GenomeVector, ImdbTitle
+from usher.ports.bulk import GenomeVector, ImdbAka, ImdbCreditNames, ImdbTitle
 from usher.ports.errors import (
     PortAuthFailed,
     PortDataMalformed,
@@ -86,11 +91,25 @@ from usher.telemetry import (
     register_search_gauges,
 )
 
-# `movielens` runs **last** in `--phase all`: the genome joins to `titles` on
-# `imdb_id`, and an empty catalog joins to nothing. After `crosswalk` too --
-# it costs nothing and keeps the tuple in execution order, which is what an
-# operator reads it as.
-PHASES = ("imdb", "tmdb-ids", "crosswalk", "movielens", "all")
+# `--phase all` runs this tuple in order, so the tuple *is* the execution
+# order an operator reads it as, and three of its edges are measured rather
+# than stylistic:
+#
+# - `credit-names` and `aliases` follow `imdb`, because both join to `titles`
+#   on `imdb_id` and an empty catalog joins to nothing. Same argument
+#   `movielens` already makes for itself.
+# - `credit-names` comes **before** everything that enriches a title.
+#   `fill_credit_names` writes only where `enrichment_state = 'skeleton'`, so
+#   every title TMDb has already reached is deferred rather than filled -- and
+#   the fill re-writes `search_document`, which invalidates the embedding of
+#   every title it touches. Measured (T3, `.claude/rules/bootstrap-and-
+#   datasets.md`): on a pure bootstrap it invalidates **0 of 1,271,138**, and
+#   after a priority-tier crawl it would invalidate **203,969 of the 204,335
+#   titles with >=100 votes (99.82%)**. That is the whole reason it is a
+#   bootstrap phase rather than a step in the crawl.
+# - `movielens` runs last: the genome joins on `imdb_id` too, and it is the
+#   only phase whose deliverable is a coverage report.
+PHASES = ("imdb", "credit-names", "aliases", "tmdb-ids", "crosswalk", "movielens", "all")
 # The two lanes `ReconcileService` walks `list_items` for. `watch_state` is a
 # real `SyncRunKind` and is deliberately absent: `sync` always runs it after
 # the item walk, so offering it as an *alternative* would let an operator ask
@@ -221,6 +240,10 @@ async def _bootstrap(settings: Settings, phase: str) -> None:
                         ),
                         catalog.apply_ratings,
                     )
+            if phase in ("credit-names", "all"):
+                await _credit_names(settings, client, catalog, service)
+            if phase in ("aliases", "all"):
+                await _aliases(settings, client, catalog, service)
             if phase in ("tmdb-ids", "all"):
                 for kind in (TitleKind.MOVIE, TitleKind.SERIES):
                     await service.import_dataset(
@@ -249,6 +272,176 @@ async def _bootstrap(settings: Settings, phase: str) -> None:
     finally:
         await client.aclose()
         await engine.dispose()
+
+
+async def _credit_names(
+    settings: Settings,
+    client: httpx.AsyncClient,
+    catalog: BulkCatalogRepository,
+    service: BootstrapService,
+) -> None:
+    """`name.basics` x `title.principals` -> `titles.credit_names`, and the
+    report that says how much of the catalog gained a name.
+
+    **This phase is why weight class B of `search_document` has anything in
+    it for a title TMDb has never reached**, and it makes **no API call at
+    all**. T3 measured the `people` + `credits` entity design at 2.702 GB
+    against a 2.0 GB ceiling and refused it, so no person and no credit row is
+    written here: the join is resolved in the adapter and what lands is a
+    `text[]` on a column that already exists.
+
+    **Run it before the TMDb crawl, not after, and that is measured rather
+    than tidy.** `fill_credit_names` writes only where `enrichment_state =
+    'skeleton'`, so TMDb owns every title it has reached and this phase defers
+    on it -- and the fill re-writes `search_document`, which stales the
+    embedding of every title it touches. On a pure bootstrap that is **0 of
+    1,271,138** embeddings, because nothing is enriched yet; run after a
+    priority-tier crawl it would stale **203,969 of the 204,335 titles with
+    >=100 votes (99.82%)** and 161,486 of the 161,519 movies among them. The
+    report says so on the operator's own terminal rather than only in a PRD.
+
+    **The precondition is checked before the dataset is constructed**, for
+    `_movielens`' reason and against a much larger download: 308 MB of
+    `name.basics` plus 778 MB of `title.principals`. Against an empty catalog
+    every row would match nothing, the run would checkpoint `COMPLETED`, and
+    every later `--phase all` would find that checkpoint and do nothing -- a
+    permanent, invisible failure. No `ImportRun` is created, because the
+    absence of a row is what `bootstrap-status` renders as "this phase has not
+    run".
+
+    **What a resume costs is not free and is worth knowing before killing
+    one:** `BulkCursor.position` is a line offset into `title.principals`
+    only, and the `nconst -> primaryName` index is rebuilt from the whole of
+    `name.basics` on every run, resumed or not -- a measured **19.5 s and
+    345 MiB** before the first batch, with the `title.principals` pass a
+    further 157 s.
+    """
+    if await catalog.count_titles() == 0:
+        print(
+            "credit-names needs a catalog to join against: title.principals is "
+            "keyed on imdb_id and titles is empty. Run --phase imdb first."
+        )
+        return
+
+    tally = {"filled": 0, "unmatched": 0, "deferred": 0}
+
+    async def write(rows: Sequence[ImdbCreditNames]) -> int:
+        result = await catalog.fill_credit_names(rows)
+        tally["filled"] += result.filled
+        tally["unmatched"] += result.unmatched
+        tally["deferred"] += result.deferred
+        return result.filled
+
+    await service.import_dataset(
+        IMDbCreditNamesDataset(client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size),
+        write,
+    )
+    _report_credit_names(tally, await catalog.count_titles())
+
+
+def _report_credit_names(tally: dict[str, int], titles: int) -> None:
+    """Three lines: what changed, against what, and when to have run it.
+
+    `filled` counts titles whose array actually changed **on this run**, not
+    titles seen -- a resumed run reports its own half, and a replay over an
+    unchanged dump reports 0 rather than re-reporting the catalog. The
+    denominator is the catalog, printed as a count beside the percentage
+    because a bare percentage is `0/0` on an empty database and says nothing
+    on a small one either.
+    """
+    print(
+        f"credit_names: {tally['filled']} titles filled this run "
+        f"({tally['unmatched']} credited titles this catalog does not hold, "
+        f"{tally['deferred']} deferred to TMDb)"
+    )
+    print(f"  {_percent(tally['filled'], titles)} of {titles} titles in the catalog")
+    print(
+        "  run this BEFORE the TMDb crawl: the fill rewrites search_document, and "
+        "on an enriched priority tier it would stale 99.82% of that tier's embeddings"
+    )
+    if tally["filled"]:
+        print("  then: usher index --backfill, and usher similar --rebuild after it")
+
+
+async def _aliases(
+    settings: Settings,
+    client: httpx.AsyncClient,
+    catalog: BulkCatalogRepository,
+    service: BootstrapService,
+) -> None:
+    """`title.akas` -> the `alias` half of `title_search_names`.
+
+    **This is the alias source M6 refused that table for the lack of**, and
+    like `credit-names` it costs no API call: TMDb's `alternative_titles` is
+    in neither `append_to_response` list, so aliases are in `raw_payloads` at
+    all only if the crawl's request shape changes, and this dump needs no such
+    change.
+
+    **The scope handed to `replace_aliases` is the batch's own titles**, in
+    first-seen order, and the port asks for it as a separate argument for a
+    reason this caller cannot fully honour: a title whose akas IMDb has
+    *withdrawn* contributes no row, so no batch names it and its stale aliases
+    stand. A streaming importer has no other scope available -- the
+    alternative is one call naming all 1.27M titles, which is not a batch --
+    and the withdrawal is repaired by a re-import only for titles that still
+    have at least one aka. Worth knowing before reading a stale alias as a
+    bug in the writer.
+
+    **A title's rows all reach one call**, which is `IMDbAkaDataset.group_of`'s
+    whole job: `replace_aliases` deletes by scope before it inserts, so a
+    split title would have its first half deleted by its second half's call --
+    silently, because both halves are inside their own call's scope. Measured
+    over the pinned dump: **924 of 924 batch boundaries** would land inside a
+    title and **3,867 rows** would be written and then deleted.
+
+    The empty-catalog precondition is `_credit_names`' and `_movielens`', for
+    the same reason and against a 486 MiB download.
+    """
+    if await catalog.count_titles() == 0:
+        print(
+            "aliases needs a catalog to compare against: title.akas is keyed on "
+            "imdb_id and titles is empty. Run --phase imdb first."
+        )
+        return
+
+    tally = {"written": 0, "unmatched": 0, "canonical": 0, "duplicate": 0, "read": 0}
+
+    async def write(rows: Sequence[ImdbAka]) -> int:
+        result = await catalog.replace_aliases(
+            rows, imdb_ids=list(dict.fromkeys(row.imdb_id for row in rows))
+        )
+        tally["read"] += len(rows)
+        tally["written"] += result.written
+        tally["unmatched"] += result.unmatched
+        tally["canonical"] += result.canonical
+        tally["duplicate"] += result.duplicate
+        return result.written
+
+    await service.import_dataset(
+        IMDbAkaDataset(client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size),
+        write,
+    )
+    _report_aliases(tally, await catalog.count_titles())
+
+
+def _report_aliases(tally: dict[str, int], titles: int) -> None:
+    """What was stored, against what was read, and where the rest went.
+
+    **Three rows in four are not aliases at all** and a report that printed
+    only `written` would look like a broken import. `canonical` is the
+    dominant term -- 5,693,570 of 7,536,366 retained rows (75.5%) restate the
+    title's own name under `lower()` -- and an operator watching it sit at ~0
+    is watching the comparison miss, which looks exactly like a dump full of
+    genuine aliases.
+    """
+    print(
+        f"aliases: {tally['written']} stored this run of {tally['read']} rows read "
+        f"({tally['canonical']} restate the title's own name, "
+        f"{tally['duplicate']} repeat one already kept, "
+        f"{tally['unmatched']} scoped ids matched no title)"
+    )
+    print(f"  {_percent(tally['written'], tally['read'], noun='rows')} of the rows read")
+    print(f"  the catalog holds {titles} titles")
 
 
 async def _movielens(
@@ -394,8 +587,17 @@ async def _movielens(
 _GENOME_TALLY = {"unmatched": 0}
 
 
-def _percent(part: int, whole: int) -> str:
-    return "n/a (0 titles)" if whole == 0 else f"{100.0 * part / whole:.2f}%"
+def _percent(part: int, whole: int, *, noun: str = "titles") -> str:
+    """A percentage, or a sentence when the denominator is zero.
+
+    `noun` names what the denominator counts, because the zero branch prints
+    it and this helper now serves three reports over two different
+    populations -- `0/0` rendered as *"n/a (0 titles)"* under a line about
+    rows read is a wrong sentence rather than a missing one. Defaulted rather
+    than required only because the three existing call sites really are
+    counting titles.
+    """
+    return f"n/a (0 {noun})" if whole == 0 else f"{100.0 * part / whole:.2f}%"
 
 
 def _report_coverage(coverage: GenomeCoverage, unmatched: int, tags: int) -> None:
@@ -1711,7 +1913,28 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("serve", help="run the HTTP server (the default with no arguments)")
     bootstrap = sub.add_parser("bootstrap", help="import bulk catalog datasets")
-    bootstrap.add_argument("--phase", choices=PHASES, default="all")
+    bootstrap.add_argument(
+        "--phase",
+        choices=PHASES,
+        default="all",
+        # The ordering warning is on the *option*, not only in the report,
+        # because an operator scheduling `credit-names` reads `--help` before
+        # they ever see a report -- and getting this order wrong is not
+        # recoverable by re-running the phase. `PHASES` is in execution order
+        # and `cli.PHASES`' own comment carries the measurement.
+        #
+        # `%%`, not `%`: argparse interpolates a help string against its own
+        # parameter dict, so a bare `%` raises `TypeError` from `--help` and
+        # from nothing else. Found by running it -- ruff, mypy and every
+        # existing case pass against the broken spelling, because none of them
+        # renders help.
+        help=(
+            "which bulk datasets to import; the choices are in execution order. "
+            "Run credit-names BEFORE the TMDb enrichment crawl: it rewrites "
+            "search_document, so afterwards it stales ~100%% of the priority "
+            "tier's embeddings, and before it stales none"
+        ),
+    )
     sub.add_parser("bootstrap-status", help="report import progress and catalog size")
 
     sync = sub.add_parser("sync", help="walk a source into the catalog")
