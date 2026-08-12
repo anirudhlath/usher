@@ -960,3 +960,72 @@ measured 969 against a different pin, and **the number moves with the pin
 because the dumps are not one snapshot**. 12,637,249 credits stored from
 12,638,471 retained principals; the 1,222-row difference is credits naming one
 of the 996 unusable `nconst`.
+
+### T4R, second pass — `/find` works, and the yield is what settles the merge (2026-08-12)
+
+🔴 **The first pass wrote that branch (c) was "removed by a mechanism, not a
+cost" because `/find/{nconst}?external_source=imdb_id` was unverified. It
+works.** The uncertainty was flagged rather than asserted, but the conclusion
+drawn from it was still an overstatement — **an unverified "cannot" doing the
+work of a measured "does not pay"**, which is the same error that withdrew
+this task the first time, one scale down. Caught in review. If a credential
+exists on the box, probe the endpoint; do not reason about it.
+
+Verified live against the real API, 240 requests over three bursts, driven
+from a throwaway script outside the tree reading the operator's `.env` and
+redacting the key from everything printed:
+
+```
+GET /find/{nconst}?external_source=imdb_id  ->  200
+person_results[0] keys: adult, gender, id, known_for, known_for_department,
+                        media_type, name, original_name, popularity, profile_path
+```
+
+**It carries `name`, non-empty** — with `id`, `known_for_department`,
+`popularity` and `profile_path`, i.e. **every field `Person` stores**, so the
+IMDb→TMDb direction needs **no follow-up `/person/{id}` call**. A key list
+circulated in review omitted four of the ten; read the response, not a
+summary of it.
+
+**No rate-limit differential between `/find` and `/person/{id}/external_ids`.**
+Neither exposes any `x-ratelimit-*` or `Retry-After` header (`NONE` on both),
+neither returned a 429 at concurrency 8, and observed throughput was
+27.8–32.4 req/s for both — inside the variation of samples this size.
+ADR-0005's policy ceiling governs both equally.
+
+🔴 **Both merge directions have a low yield, and that is a better argument
+than any reversibility tie-break.** Uniform samples, live:
+
+| direction | sample | resolved | rate |
+|---|---|---|---|
+| `/person/{id}/external_ids` over stored TMDb people | 200 of 887,161 | 100 | **50.0%** (CI ≈ 43–57%) |
+| `/find/{nconst}` over retained IMDb people | 200 of 3,215,476 | 41 | **20.5%** (CI ≈ 15–27%) |
+
+**Half the TMDb people this catalog stores carry no IMDb id at all**, so
+887,161 requests buy ~444,000 resolvable people — **at most 13.8% of the
+3,215,476 IMDb person rows**. Four in five IMDb people are unknown to TMDb, so
+the other direction costs ~5 requests per successful merge. **Two rows per
+human is irreducible for most people whichever branch is bought.**
+
+**Sample the whole file, not its head.** `name.basics` is sorted by `nconst`,
+so the first N rows are the oldest and best-documented people on IMDb. The
+first pass shuffled only the first 40,000 lines; a reservoir over the whole
+slice is what makes 20.5% a rate rather than a flattering one.
+
+**Live cost of `m09d` itself, separated from T6's predicted cost — measured by
+cloning a real catalog at `m09c`, probing, migrating, and probing again.**
+`PeopleProvider`'s join goes **10.04 → 10.37 ms p95 (+3.2%)** and every other
+route's worst measurable delta is **+0.0%**. So the **+586% regression is not
+live at this revision** — it is T6's data load priced ahead of time on a table
+built for the dedup probe and dropped. What *is* live is the migration's own
+cost: **50.4 s** at 2,877,486 credits, and **+637,034,496 B (+80.2%)
+transient** on `credits` (794,050,560 → 1,431,085,056) because one `UPDATE` of
+2.88M rows leaves a dead tuple per live one. `VACUUM FULL` settles it at
+**740,130,816 B — 53,919,744 B *below* baseline** despite a new column and two
+indexes, because the vacuum rebuilds every index by sort while the baseline's
+btrees were built incrementally by `COPY`. **The migration does not run that
+vacuum**, so budget the peak. Same confound, same framing, as T3's
+`credit_names` figures.
+
+**Both new indexes are empty at this revision** (8,192 B each) — every row is
+`source = 'tmdb'` and the natural key is partial on `source <> 'tmdb'`.

@@ -609,6 +609,7 @@ MB)**, at `m09c`, with 130,647 embeddings, 3,266,225 `title_neighbors`,
 |---|---|
 | Postgres, catalog + indexes | **~5 GB at 1.27M titles with 10% enriched**, and the enriched fraction is what moves it: `raw_payloads` is 995 MB of that, `title_embeddings` 298 MB, `title_neighbors` 572 MB. A fully-enriched catalog is several times larger. |
 | Postgres, + the IMDb people/credits load | **+3.4 GB** — 12,637,249 credits over 3,215,476 people, measured after `VACUUM FULL` ([ADR-0036](decisions/0036-the-imdb-tmdb-provenance-rule.md)). Not loaded by default. |
+| **Running the `m09d` migration** | **+637 MB transient on `credits`, and 50 s**, at 2,877,486 credits: `UPDATE credits SET source = 'tmdb'` leaves a dead tuple per live one (794 MB → 1,431 MB), and `SET NOT NULL` then scans the table. `VACUUM FULL` settles it at **740 MB, 54 MB *below* baseline** — but the migration does not run one, so **budget the peak**. Both scale with the enriched tier. |
 | Postgres, + `titles.credit_names` | **+624 MB settled, +1,368 MB transient** before a vacuum — the peak is what an operator's disk sees |
 | HNSW (`halfvec`) | ~1.5 GB at full embedding coverage |
 | Image cache | Grows with use; capped by a configurable LRU ceiling |

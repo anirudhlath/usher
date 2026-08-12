@@ -37,6 +37,11 @@ numbers.
    category, ordering)`. `category` is IMDb's 13-value vocabulary, which folds
    into `CreditKind`'s two and is not stored. `person_id` is redundant.
    Measured, `(title_id, ordering)` is already unique.
+5. 🔴 **And one of this document's own claims was wrong: `/find/{nconst}` was
+   called mechanically impossible on an unverified reading.** It works, it is
+   one request, and it returns `name`. Corrected below, and the correction
+   matters more than the conclusion it changes — an unverified "cannot" is
+   what withdrew this task the first time, and the second one was mine.
 
 ## Context
 
@@ -115,16 +120,69 @@ dedicated batched fetcher is bound by policy instead:
 TMDb's "somewhere in the 40 requests per second range" is guidance with no
 headroom left for the enrich lane running beside it.
 
-🔴 **(c) as posed resolves the wrong population, and this is the finding that
-removes it.** Under decision 3 an IMDb person only ever surfaces on a title
-TMDb does *not* cover. But `/person/{id}/external_ids` is keyed by **TMDb**
-id, so it can only be triggered by a TMDb person — who surfaces exactly on the
-titles where TMDb already wins and the merge is invisible. Resolving in the
-direction that matters needs `/find/{nconst}?external_source=imdb_id`, a
-different endpoint. ⚠️ *That endpoint's shape is stated from TMDb's published
-API and was **not** verified live in this run; no TMDb credential exists in
-this worktree.* So (c) is not a cheaper (a) — it is an unmeasured design
-against an unverified endpoint.
+**(c) resolves a different population from (a), and it is possible — this
+paragraph previously said it was mechanically removed, and that was wrong.**
+
+Under decision 3 an IMDb person only ever surfaces on a title TMDb does *not*
+cover. `/person/{id}/external_ids` is keyed by **TMDb** id, so it can only be
+triggered by a TMDb person — who surfaces exactly on the titles where TMDb
+already wins and the merge is invisible. Resolving in the direction that
+matters needs `/find/{nconst}?external_source=imdb_id`.
+
+🔴 **An earlier revision of this ADR called that endpoint unverified and
+concluded (c) was "removed by a mechanism, not a cost". The uncertainty was
+flagged rather than asserted, but the conclusion drawn from it was still an
+overstatement, and it is the same error in miniature that withdrew this whole
+task: an unverified "cannot" doing the work of a measured "does not pay".** It
+was caught in review. **`/find` works**, verified live here against the real
+API on 2026-08-12, 240 requests over three bursts:
+
+```
+GET /find/{nconst}?external_source=imdb_id  ->  200
+person_results[0] keys: adult, gender, id, known_for, known_for_department,
+                        media_type, name, original_name, popularity, profile_path
+```
+
+**And it carries `name`** — non-empty, alongside `id`, `known_for_department`,
+`popularity` and `profile_path`. That is **every field `Person` stores**, so
+(c) needs **no follow-up `/person/{id}` call**; one request per person is the
+whole cost. (A key list circulated in review omitted `name`, `original_name`,
+`popularity` and `profile_path`; the ten keys above are what the endpoint
+actually returned.)
+
+**No rate-limit differential was observable between the two endpoints.**
+Neither exposes any `x-ratelimit-*` or `Retry-After` header (`NONE` on both),
+and neither returned a 429 at concurrency 8. Observed throughput was 27.8–32.4
+req/s for both, well inside the variation of samples this size — so **there is
+no evidence `/find` is cheaper or dearer per request than `/person`**, and
+ADR-0005's policy ceiling governs both.
+
+### What actually settles the merge is the yield, and it is low in both directions
+
+Measured live, uniform samples, 2026-08-12:
+
+| branch | direction | sample | resolved | rate |
+|---|---|---|---|---|
+| **(a)** | `/person/{id}/external_ids` over **stored TMDb people** | 200 of 887,161 | 100 | **50.0%** (95% CI ≈ 43–57%) |
+| **(c)** | `/find/{nconst}` over **retained IMDb people** | 200 of 3,215,476 | 41 | **20.5%** (95% CI ≈ 15–27%) |
+
+The (c) sample is a reservoir over the whole `name.basics` slice rather than a
+head slice, deliberately: that file is sorted by `nconst`, so the first N rows
+are the oldest and best-documented people on IMDb and would have flattered the
+rate.
+
+🔴 **So the merge is not merely expensive — it is incomplete in both
+directions, and that is a stronger argument for (b) than the reversibility
+tie-break this decision was originally made on.** Half the TMDb people this
+catalog stores have **no IMDb id on file at all**, so branch (a)'s 887,161
+requests buy roughly **444,000** resolvable people — at most **13.8% of the
+3,215,476 IMDb person rows**. Four in five IMDb people are unknown to TMDb, so
+branch (c) spends about **five requests per successful merge**. **Two rows per
+human is irreducible for the large majority of people whichever branch is
+bought**, which means (b) is not deferring a fix; it is declining to buy a
+partial one. The name-match proxy above (534,412) sits in the same range as
+0.205 × 3,215,476 ≈ 659,000, which is weak independent corroboration of the
+ceiling.
 
 **(b) is chosen because the merge changes no rendered credit list.** That
 follows from decision 3 and is worth stating plainly: arbitration is
@@ -163,6 +221,9 @@ hedge:
 1. **The person-scoped surface acquires a measured user.** `search_queries`
    growing rows whose click lands on `GET /people/{id}`, or a report of a
    split filmography. That is the evidence this decision is waiting on.
+   ⚠️ Note what it would have to overcome: at a 50.0% / 20.5% yield the merge
+   cannot remove the split for most people, so the observation would need to
+   be that the *merged minority* matters, not that duplication exists.
 2. **The crawl stops costing its own requests.** If TMDb ever serves a
    person's external ids inside a title's `append_to_response` — it does not
    today; the append namespaces are per-resource and the 20-item ceiling is
@@ -275,7 +336,45 @@ A duplicate `(title_id, source, billing_order)` is rejected naming
 firing, which a plain `UNIQUE` would have waved through silently. That is the
 careless/careful pair measured rather than argued.
 
-**Latency, and 🔴 the bar I pre-registered is what let it pass.** Nine probes
+### What is live at this revision, and what is priced ahead of it
+
+**This revision ships schema only. No IMDb rows exist and nothing writes
+them**, so the 6.9× regression below is **a predicted cost of T6's data load,
+measured in advance on a table built for the dedup probe and then dropped** —
+not something a user experiences today. Measured directly rather than
+reasoned, by cloning a real 1,272,367-title catalog at `m09c`, probing it,
+applying this migration, and probing again:
+
+| probe | `m09c` | `m09d` | delta |
+|---|---|---|---|
+| home: `PeopleProvider`'s recurring-people join | 10.04 ms | 10.37 ms | +3.2% |
+| every other route | — | — | worst measurable **+0.0%** |
+
+**Two costs of this revision *are* live, and both are the migration's own.**
+
+- **It takes 50.4 s** on 2,877,486 credits. `UPDATE credits SET source =
+  'tmdb'` rewrites every row, and `ALTER TABLE ... SET NOT NULL` then scans
+  it. On a fully-enriched catalog it is proportionally longer. This is the
+  concrete meaning of *land the column before the volume*: the same statement
+  after an IMDb load is 10⁷ rows.
+- **`credits` peaks at +637,034,496 B (+80.2%)** — 794,050,560 →
+  1,431,085,056 — because a single `UPDATE` of 2.88M rows leaves a dead tuple
+  for every live one. **That peak is the number to budget**, and it is what an
+  operator's disk sees. After `VACUUM FULL` the table settles at
+  **740,130,816 B, 53,919,744 B *smaller* than before (−6.8%)** despite
+  gaining a column and two indexes — because the vacuum rebuilds every index
+  by sort while the baseline's btrees were built incrementally. ⚠️ **The
+  migration does not run that vacuum**, so the settled figure is a saving an
+  operator collects only if they ask for it. Same confound, and the same
+  honest framing, as T3's `credit_names` measurement.
+
+**Both new indexes are empty at this revision** (8,192 B each): every row is
+`source = 'tmdb'`, and `ix_credits_source_natural_key` is partial on
+`source <> 'tmdb'`. They cost a predicate evaluation per insert and nothing
+else until T6 writes.
+
+**Latency under T6's load, and 🔴 the bar I pre-registered is what let it
+pass.** Nine probes
 before and after the load on one catalog, 30 reps each, probe values fixed
 first, quiet-check clean (an earlier run was discarded because that check
 caught a sibling worktree's `pytest`). Eight routes moved within ±5.4%.
