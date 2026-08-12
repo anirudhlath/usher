@@ -635,29 +635,60 @@ async def adversarial_probes(session: AsyncSession, top: int = 5) -> list[tuple[
 _PROBE_BUDGET_MS = 3_000.0
 _MIN_REPS = 3
 
+# **W3's second configuration, and the reason it exists is that the first one
+# flatters the union.** The worst-case plan is a Gather with two workers
+# (`loops=3`), so a one-character union probe is being timed *with two spare
+# cores thrown at it on an otherwise idle box* -- and a type-ahead surface is
+# concurrent by definition. The cores that make the parallel figure what it is
+# are exactly the cores that will not be free when many people are typing. Left
+# alone, this harness would have produced a best case for the union and labelled
+# it the union's cost.
+#
+# `SET LOCAL`, never `SET`, for the reason `PostgresSuggestIndex` gives about
+# `pg_trgm.similarity_threshold`: the other spelling writes the pooled session
+# and one probe's setting would govern the next unrelated one. It is issued
+# *outside* the timed region but inside the same transaction, so the round trip
+# is not charged to the query and the rollback after each execution discards it.
+#
+# **W3 only.** W1 and W2 are not Gather-shaped at their sub-millisecond
+# latencies, they are what bars (1) and (2) are scored on, and widening this
+# would put two variables in one window.
+_NO_PARALLEL = "SET LOCAL max_parallel_workers_per_gather = 0"
+
 
 async def _time_statement(
-    session: AsyncSession, statement: str, probe: str, limit: int, reps: int
+    session: AsyncSession,
+    statement: str,
+    probe: str,
+    limit: int,
+    reps: int,
+    *,
+    serial: bool = False,
 ) -> list[float]:
     """Timed executions in milliseconds, after one discarded warm-up.
 
     The warm-up is discarded *and* read: it is what decides how many
     repetitions the probe can afford, so a slow probe is measured fewer times
     rather than a fast probe being measured too few.
+
+    `serial=True` forbids parallel workers for the duration of each execution's
+    own transaction -- the floor a busy box gives you, against the ceiling an
+    idle one does.
     """
     parameters = {"pattern": prefix_module._pattern(probe.lower()), "limit": limit}
-    started = time.perf_counter()
-    (await session.execute(text(statement), parameters)).all()
-    warmup = (time.perf_counter() - started) * 1000.0
-    await session.rollback()
-    affordable = int(_PROBE_BUDGET_MS // max(warmup, 0.001))
-    samples: list[float] = []
-    for _ in range(max(_MIN_REPS, min(reps, affordable))):
+
+    async def _once() -> float:
+        if serial:
+            await session.execute(text(_NO_PARALLEL))
         started = time.perf_counter()
         (await session.execute(text(statement), parameters)).all()
-        samples.append((time.perf_counter() - started) * 1000.0)
+        elapsed = (time.perf_counter() - started) * 1000.0
         await session.rollback()
-    return samples
+        return elapsed
+
+    warmup = await _once()
+    affordable = int(_PROBE_BUDGET_MS // max(warmup, 0.001))
+    return [await _once() for _ in range(max(_MIN_REPS, min(reps, affordable)))]
 
 
 async def _time_cold(
@@ -674,8 +705,12 @@ async def _time_cold(
     return samples
 
 
-async def _explain(session: AsyncSession, statement: str, probe: str, limit: int) -> str:
+async def _explain(
+    session: AsyncSession, statement: str, probe: str, limit: int, *, serial: bool = False
+) -> str:
     parameters = {"pattern": prefix_module._pattern(probe.lower()), "limit": limit}
+    if serial:
+        await session.execute(text(_NO_PARALLEL))
     rows = (
         await session.execute(text(f"EXPLAIN (ANALYZE, BUFFERS) {statement}"), parameters)
     ).all()
@@ -805,20 +840,50 @@ async def measure_tier1(
 
     worst: dict[str, Any] = {}
     adversarial = await adversarial_probes(session)
-    _say(f"tier1 {label}: W3, {len(adversarial)} worst-case probes")
+    _say(f"tier1 {label}: W3, {len(adversarial)} worst-case probes, parallel and serial")
     for probe, title_rows, name_rows in adversarial:
         samples = await _time_statement(session, statement, probe, 10, reps)
+        serial_samples = await _time_statement(session, statement, probe, 10, reps, serial=True)
+        parallel = asdict(Timing.of(f"W3 {probe!r} ({label})", samples))
+        serial = asdict(Timing.of(f"W3 {probe!r} serial ({label})", serial_samples))
         worst[probe] = {
             "matched_titles": title_rows,
             "matched_search_names": name_rows,
-            **asdict(Timing.of(f"W3 {probe!r} ({label})", samples)),
+            **parallel,
+            "serial": serial,
+            "serial_over_parallel": (
+                round(serial["p95"] / parallel["p95"], 3) if parallel["p95"] else None
+            ),
         }
     out["w3"] = worst
     if worst:
         slowest = max(worst, key=lambda one: worst[one]["p95"])
+        parallel_plan = await _explain(session, statement, slowest, 10)
+        serial_plan = await _explain(session, statement, slowest, 10, serial=True)
+        # **The knob is verified to have landed, not assumed.** `SET LOCAL` on a
+        # GUC that does not exist raises, but one that exists and is scoped to
+        # the wrong transaction succeeds and changes nothing -- and a serial
+        # figure that is really a second parallel figure is indistinguishable
+        # from a finding that parallelism does not matter here. A plant that did
+        # not land looks exactly like a check that passed, so the two plans are
+        # read: `Gather` must be in the first and absent from the second.
+        gather_parallel = "Gather" in parallel_plan
+        gather_serial = "Gather" in serial_plan
+        if gather_parallel and gather_serial:
+            raise MeasurementRefused(
+                f"`{_NO_PARALLEL}` did not take -- the serial plan for {slowest!r} still "
+                "contains a Gather, so the serial column would be a second parallel column."
+            )
         log.plans[f"w3_worst_{label}"] = {
             "probe": slowest,
-            "plan": await _explain(session, statement, slowest, 10),
+            "plan": parallel_plan,
+            "serial_plan": serial_plan,
+            "gather_in_parallel_plan": gather_parallel,
+            "gather_in_serial_plan": gather_serial,
+            # Said rather than implied: if the planner never chose a Gather for
+            # this probe, the two columns are two measurements of one thing and
+            # the parallel-assist question is answered "it does not arise here".
+            "parallelism_was_in_play": gather_parallel,
         }
     return out
 
@@ -994,7 +1059,19 @@ def _verdicts(log: RunLog) -> dict[str, Any]:
             "verdict": "PASS" if scored <= 10.0 else "FAIL",
             "w2_p95_ms": round(source["w2_all"]["p95"], 3),
             "w2_len1_p95_ms": round(source["w2"]["1"]["p95"], 3),
-            "w3_worst_p95_ms": round(max(one["p95"] for one in source["w3"].values()), 3),
+            # **Both, side by side, never one replacing the other.** The
+            # parallel figure is true of an idle box and is the honest ceiling;
+            # the serial figure is the floor a busy box gives you. The W3
+            # judgement -- which is *not* bar (1) or (2), both of which are
+            # scored on W1 -- is read against the **serial** number, because the
+            # question W3 asks is whether this can serve a keystroke on a box
+            # that is also serving other people's keystrokes, and spare workers
+            # are precisely what a concurrent type-ahead surface does not have.
+            "w3_worst_p95_parallel_ms": round(max(one["p95"] for one in source["w3"].values()), 3),
+            "w3_worst_p95_serial_ms": round(
+                max(one["serial"]["p95"] for one in source["w3"].values()), 3
+            ),
+            "w3_scored_on": "serial",
             "note": f"scored on W1 only; W2/W3 reported separately for {key}",
         }
 
