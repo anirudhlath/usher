@@ -462,16 +462,34 @@ rather than squared, because `coverage²` would have said 1.14% and a real pool
 is not an independent draw. See [05](05-search-and-similarity.md) for what that
 does to the term's weight.
 
-⏳ **Still not measured: coverage against a genuinely *enriched* tier.** That
-run had no TMDb key, so its "owned" titles are name-shaped skeletons and its
-candidate pools are name-selected — which weakens exactly the correlation being
-measured, making 1.81% a conservative floor rather than an estimate. **The
-population is half the number and the arithmetic recovers it**: 502,000
-candidate pairs over a 100-title pool is exactly **5,020 seeds**, and those
-5,020 were the household's owned titles, moved onto the enriched tier by a
-direct `UPDATE` that changed the label and not the document. So 1.81% is a
+**That run had no TMDb key**, so its "owned" titles are name-shaped skeletons
+and its candidate pools are name-selected — which weakens exactly the
+correlation being measured, making 1.81% a conservative floor rather than an
+estimate. **The population is half the number and the arithmetic recovers it**:
+502,000 candidate pairs over a 100-title pool is exactly **5,020 seeds**, and
+those 5,020 were the household's owned titles, moved onto the enriched tier by
+a direct `UPDATE` that changed the label and not the document. So 1.81% is a
 floor over 5,020 owned, name-shaped seeds and is **not a baseline** for a run
 over a larger or differently-selected population.
+
+✅ **Measured against a genuinely enriched tier on 2026-08-12 (M9's S5), and it
+is a second measurement rather than a rise.** M9 enriched and embedded 130,647
+priority-tier titles, then walked the pool `SimilarityService.rebuild()` draws
+once, read-only: **323,297 of 13,064,700 candidate pairs — 2.4746% — over
+130,647 seeds, 15,525 of them carrying a vector (11.883% single-side)**. The
+genome's 15,565 stored rows reconcile to those 15,525 with no residue (7 still
+`skeleton`, 33 outside the frozen tier). `coverage²` would have predicted
+1.412%, so the measurement is **1.75×** the independent-draw prediction —
+pool membership and genome membership are positively correlated, and this is
+the first time this project has had the correction factor rather than the
+warning. The conservative-floor argument was therefore right in direction and
+the result is still **four times below the 10% floor the 0.25 weight assumed**:
+[05](05-search-and-similarity.md) and
+[ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md) record
+the term's removal. The ceiling is in this document's own dataset table —
+`ml-latest` scores **16,376** movies, **18.9%** of its own 86,537-movie list,
+movies-only and frozen at 2023-07-20 — so no amount of further enrichment moves
+the numerator.
 
 **Two physical properties of this snapshot the importer verifies rather than
 assumes.** Both were measured for M7 and neither is documented by GroupLens

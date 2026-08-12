@@ -946,15 +946,25 @@ async def _similar(
             report = await pipeline.similar.rebuild()
             print(f"rebuilt {report.seeds} seeds, wrote {report.rows} neighbour rows")
             # **The genome's coverage, with its denominators, printed by the
-            # thing that consumed the vectors.** PRD 05 promised "~7%" since
+            # path that reads the vectors.** PRD 05 promised "~7%" since
             # before an importer existed and never said of what; these are the
             # two numbers that answer it, and the second is the one that
-            # decides whether the term can promote anything.
+            # decided whether the term could promote anything.
+            #
+            # **Past tense, since M9's S7: the genome is no longer a term in
+            # the blend** -- 2.4746% of candidate pairs carried one on both
+            # sides over an enriched population, against the 10% floor the 0.25
+            # weight assumed, so the weight came out and the *measurement*
+            # stayed. This report is now the only consumer of the pair read,
+            # and it is what a later milestone would re-open the decision on,
+            # which is why the wording says a pair *carried* a vector rather
+            # than that it scored anything.
             #
             # The pair rate is *measured*, never squared: genome membership
             # and candidate-pool membership both correlate with popularity and
             # with enrichment, so `coverage ** 2` is wrong in an unknown
-            # direction.
+            # direction -- S5 measured the correction factor at **1.75x** for
+            # the genome over 13,064,700 pairs.
             if report.seeds:
                 share = 100.0 * report.seeds_with_genome / report.seeds
                 print(
@@ -965,7 +975,8 @@ async def _similar(
                 pair_share = 100.0 * report.pairs_with_tags / report.candidate_pairs
                 print(
                     f"{report.pairs_with_tags} of {report.candidate_pairs} candidate pairs "
-                    f"scored a genome cosine ({pair_share:.2f}%)"
+                    f"carried a genome vector on both sides ({pair_share:.2f}%) "
+                    "-- measured, not blended"
                 )
             if report.without_embedding:
                 # Excluded *and* counted. A rebuild that silently skipped a

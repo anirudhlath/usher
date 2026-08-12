@@ -662,7 +662,7 @@ async def test_the_seed_page_reports_which_titles_carry_a_genome(
     assert flags[plain] is False
 
 
-async def test_a_pair_scores_a_genome_cosine_only_when_both_sides_have_one(
+async def test_a_pair_carries_a_genome_cosine_only_when_both_sides_have_one(
     session: AsyncSession,
 ) -> None:
     """The `None`-not-zero rule, asserted against the real join rather than
@@ -678,6 +678,14 @@ async def test_a_pair_scores_a_genome_cosine_only_when_both_sides_have_one(
     `COALESCE`d the absent side to zero would be indistinguishable from a
     correct one on these rows. With it, the two states are both present and
     genuinely different.
+
+    **"Carries", not "scores", since M9's S7.** Nothing blends this value any
+    more, so the distinction the case pins now has exactly one consumer:
+    `NeighborRebuild.pairs_with_tags`, which counts `tags is not None`. A join
+    that answered 0.0 for a half-covered pair would report the genome as fully
+    covering a catalog it barely touches -- making a dead signal look live,
+    which is the wrong direction for the number a later milestone would re-open
+    the decision on.
     """
     seed_vector, near = planted_pair(math.pi / 3)
     seed_id = await _seed(session, vector=seed_vector, name="Harbour Nine")

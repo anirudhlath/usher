@@ -6,37 +6,44 @@ is exactly right: what "similar" *means* is a decision about meaning, and it
 must not be able to reach a `halfvec`, an operator class or an index. The
 database computes distances; this module decides what to do with them.
 
-**Three of PRD 05's four signals exist as of M7.** The MovieLens tag genome is
-the third and landed in this milestone; `Person`/`Credit` now exist but feed
-the *search document*'s weight class B rather than this blend, so the fourth
-PRD 05 signal -- a credit-overlap term -- is still unbuilt.
+**Two of PRD 05's four signals are terms, and the genome is measured rather
+than blended.** M7 landed the MovieLens tag genome as the third term at 0.25;
+**M9's S7 took it back out**, because S5 measured its candidate-pair rate at
+**2.4746%** (323,297 of 13,064,700 pairs, 130,647 seeds) over a genuinely
+enriched population, against the **10%** floor PRD 09 records the weight as
+assuming. The vectors, the port field, the statement and `rebuild`'s counter
+all stay -- what a later milestone re-opens this on is the same number,
+reported by the same path. `Person`/`Credit` exist but feed the *search
+document*'s weight class B rather than this blend, so PRD 05's fourth signal --
+a credit-overlap term -- is still unbuilt.
 
-**M6 promised what a third signal would cost, and the promise was slightly
-optimistic. Corrected here rather than quoted.** It read: *"landing a third
-signal is one `_WEIGHTS` entry, one accessor and one case -- not a rewritten
-scorer."* Measured by doing it:
+**M6 promised what a third signal would cost, M7 corrected it, and S7 measured
+the promise in the other direction.** It read: *"landing a third signal is one
+`_WEIGHTS` entry, one accessor and one case -- not a rewritten scorer."*
 
-- **True of the scorer, exactly.** `_blend(**signals)` iterates `_WEIGHTS`, so
-  `tags=...` at the call site in `_neighbors_for` was the whole of the change
-  here. `_blend` itself is untouched, and no consumer of `title_neighbors`
+- **True of the scorer, in both directions.** `_blend(**signals)` iterates
+  `_WEIGHTS`, so `tags=...` at the call site in `_neighbors_for` was the whole
+  of M7's change here and removing the same two lines was the whole of S7's.
+  `_blend` is untouched by either, and no consumer of `title_neighbors`
   changed.
-- **Understated everywhere else.** The value has to *come from* somewhere, and
+- **Understated everywhere else, and that half is what makes the removal
+  cheap.** The value has to *come from* somewhere, and
   `NeighborSeed`/`NeighborCandidate` are in `ports/repository.py`, not in
-  `services/`. So the real bill is **one `_WEIGHTS` entry, one accessor, two
+  `services/`. M7's real bill was **one `_WEIGHTS` entry, one accessor, two
   port DTO fields, two widened statements, both fakes, and the contract
-  suite** -- a port change, which is a fake change and a contract-suite change
-  by construction.
-
-The promise's *spirit* holds and that is why the sentence is corrected rather
-than deleted: the signal list really is the extension point, and nothing about
-the scorer was rewritten. PRD 05 and PRD 09 carry the same correction.
+  suite** -- and S7 pays none of it back, deliberately: the port half is what
+  keeps the coverage measurable now that nothing scores it.
+- **And neither direction is free at the artefact.** A weight change moves
+  `blend_fingerprint()`, so every stored `title_neighbors` row is stale until
+  `usher similar --rebuild` runs. That is the real cost of both edits and it is
+  a *query* rather than an inference -- `stale_neighbors()` counts it.
 
 **A pairwise signal cannot ride on a per-candidate statement.** `_TAGS_FOR`
 answers "what genres and keywords does this candidate have"; a genome cosine is
 a property of the *pair*, so it has no expression there at all. That is a
 structural fact about the signal rather than a preference about SQL, and it is
 what makes the second widened statement a genuinely different shape from the
-first.
+first. It is still read, for the counter.
 
 **This module was M6's one acknowledged freshness gap, and M7 closes half of
 it.** Two things make a neighbour row stale and they are not the same:
@@ -97,46 +104,65 @@ _tracer = trace.get_tracer("usher.similar")
 # closed set of roughly nineteen values with two to four per title means any
 # two dramas score 0.33 or better against each other regardless of subject.
 #
-# `tags` 0.25: the MovieLens tag genome, landed in M7. The same weight
-# `keywords` used to carry, because it is the same *kind* of claim -- a topical
-# vocabulary over the work's content -- made better: 1,128 dimensions of
-# human-scored relevance against a sparse editorial keyword list, dense where
-# keywords are long-tail. Not higher than `cosine`, which is the only term
-# computed over the actual prose and the only one present on *every* embedded
-# pair. Not lower than `keywords`, because if a human-scored 1,128-dimension
-# relevance vector is worth less than a keyword set it is not worth landing.
+# **`tags` -- the MovieLens tag genome -- was the fourth entry here at 0.25
+# from M7 until M9's S7, and it is gone rather than zeroed.** PRD 09 recorded
+# the weight as assuming a **10%** candidate-pair floor and deferred the choice
+# to M9 pending a measurement over a genuinely enriched tier. S5 took it: one
+# read-only walk of the whole embedded population, **130,647 seeds,
+# 13,064,700 candidate pairs, 323,297 carrying a genome vector on both sides --
+# 2.4746%**, over documents that finally carry `overview`, `tagline`, `genres`
+# and `keywords`. Four times below the floor, so the term comes out.
 #
-# **The term is not saturated, and that was measured before the weight was
-# chosen.** The bar was written down first -- saturated if mean >= 0.70, or
-# p1 >= 0.50, or sd < 0.05, or the top-10 neighbour gap < 0.15 -- and over all
-# 16,376 vectors and all **268,157,000** ordered off-diagonal pairs the genome
-# measures **mean 0.6101, sd 0.0913, min 0.2556, p1 0.4075, p99 0.8165, top-10
-# gap 0.2456**. No clause fired, so the vectors ship raw rather than
-# mean-centred. For comparison, this repository already ships a signal that is
-# *more* crowded: real embeddings over name-only skeletons are mean 0.5867 /
-# sd 0.055, recorded as "crowded, but ordered".
+# **A second measurement, never a delta against M7's 1.81%** -- S1 settled that
+# that figure came from 5,020 owned, name-selected, pre-TMDb seeds in a
+# database that no longer exists. Both numbers stay in the record with their
+# populations attached. **ADR-0024** (`docs/prd/decisions/`, the dated
+# 2026-08-12 amendment) carries the reasoning and the ceiling no enrichment can
+# move: `ml-latest` is movies-only, frozen 2023-07-20, and scores 16,376 of its
+# own 86,537 movies.
 #
-# **Re-weighting is the decision; the addition is the easy half.** `_blend`
-# renormalises over *present* signals, so a pair with a genome vector and a
-# pair without are scored on different denominators -- by design, and it is
-# also what makes "did the weights change the ordering" hard to see, because
-# the two populations are not comparable by construction. The three
-# carried-over weights therefore sum to **0.75**, and that is the whole
-# argument for these numbers rather than round ones: on a pair with no genome
-# the renormalised cosine share is **0.45 / 0.75 = 0.600, unchanged to three
-# decimal places**, while keywords and genres move by +0.0167 and -0.0167. So
-# such a pair's score moves by `0.0167 x (keywords - genres)`, bounded by
-# **+/-0.0167**, and two of them can only swap if they were already within
-# 0.033 of each other. That is an arithmetic bound with a real residual, not a
-# claim that the ordering is preserved. Pinned by
-# `test_a_pair_with_no_genome_is_scored_within_the_reweighting_bound`.
+# **Removed, not set to 0.0, and the difference is not stylistic.** `_blend`
+# adds `_WEIGHTS[name] * value` to `total` and `_WEIGHTS[name]` to `applied`,
+# so a 0.0-weighted signal is *arithmetically the same program* as an absent
+# one -- while still entering `blend_fingerprint()`, declaring every stored row
+# stale and buying a full rebuild for a table whose every score is unchanged.
+# The key and the `tags=` argument at the call site move together: `_blend`
+# looks up `_WEIGHTS[name]` for every signal it is handed, so removing one
+# alone is a `KeyError` on the first pair.
+# `test_a_zero_weight_signal_is_arithmetically_identical_to_an_absent_one` and
+# `test_every_signal_the_blend_is_handed_has_a_weight_and_no_weight_is_zero`
+# hold both halves.
 #
-# **And 0.25 is chosen with an argument, not measured.** Nothing in this
-# project measures similarity *relevance*, and M7 does not change that. The
-# measurement above is of the signal's **spread**, which is a property of the
-# data and decides whether the term is inert; it says nothing about whether
-# 0.25 beats 0.20. The two claims are kept apart deliberately -- a weight with
-# a measurement beside it that measures something else is worse than a weight
+# **The three surviving weights are left exactly where M7 put them**, which
+# means the removal changes **no score at all** on the ~97.5% of pairs that
+# carry no genome: `_blend` renormalises over present signals, so 0.45/0.20/
+# 0.10 is the same ranking as any positive multiple of it, and it is precisely
+# the ratio those pairs were already scored under. Restoring M6's 0.60/0.25/
+# 0.15 would be a *second*, unevidenced decision -- about keywords against
+# genres, which nothing here measures -- riding on the first, and it would move
+# every score in the table rather than only the ones the evidence is about.
+#
+# `cosine` 0.45: the only signal computed over the *text* -- overview and
+# tagline -- which is where "about the same thing" lives and the only one that
+# can tell two horror films apart. Measured support at this scale: an enriched
+# document retrieves its own skeleton at 0.7638 against a 0.4751 cross-title
+# mean, so the signal is crowded but ordered.
+#
+# `keywords` 0.20: a long-tail vocabulary, so an overlap of three is evidence
+# rather than a coincidence. Its weakness is coverage, which is exactly why
+# absence excludes the term instead of scoring it zero.
+#
+# `genres` 0.10: a guard, not a driver -- it stops the vector pairing a war
+# documentary with a war film's trailer. Smallest because it *saturates*: a
+# closed set of roughly nineteen values with two to four per title means any
+# two dramas score 0.33 or better against each other regardless of subject.
+#
+# **Chosen with an argument, not measured.** Nothing in this project measures
+# similarity *relevance*, and neither S5's walk nor M7's spread study changes
+# that: a candidate-pair rate is a statement about **membership**, so it can
+# say a term fires too rarely to be worth its weight and cannot say 0.20 beats
+# 0.25. The two claims are kept apart deliberately -- a weight with a
+# measurement beside it that measures something else is worse than a weight
 # with no measurement at all.
 #
 # **Two terms rather than one Jaccard over the union**, for that same reason:
@@ -148,11 +174,11 @@ _tracer = trace.get_tracer("usher.similar")
 # amended.** A weight is not an operator knob: changing it changes what
 # "similar" means, and every row of the precomputed artefact was written under
 # the old meaning. A setting invites a table half-computed under each
-# definition with nothing to tell them apart -- the state this milestone exists
-# to eliminate. Changing one here is a code change *plus a rebuild*.
+# definition with nothing to tell them apart -- the state M7 built
+# `blend_fingerprint` to eliminate. Changing one here is a code change *plus a
+# rebuild*.
 _WEIGHTS: dict[str, float] = {
     "cosine": 0.45,
-    "tags": 0.25,
     "keywords": 0.20,
     "genres": 0.10,
 }
@@ -417,14 +443,14 @@ def _neighbors_for(
                 cosine=max(0.0, candidate.cosine),
                 genres=_jaccard(seed.genres, candidate.genres),
                 keywords=_jaccard(seed.keywords, candidate.keywords),
-                # **`None` stays `None`** -- a pair where either side has no
-                # genome vector drops the term rather than scoring it zero
-                # (ADR-0014). Clamped for the same reason `cosine` is, and to
-                # both ends: real data cannot leave `[0, 1]` because every
-                # genome component is positive, but a port implementation can,
-                # and the clamp has to hold for every implementation rather
-                # than for the one that remembered.
-                tags=_clamped(candidate.tags),
+                # **`candidate.tags` is deliberately not passed.** The genome
+                # cosine is still read, still carried on the port DTO and still
+                # counted by `rebuild` -- it is no longer *blended*, because
+                # S5 measured its candidate-pair rate at 2.4746% against the
+                # 10% floor the 0.25 weight assumed. `_WEIGHTS` above has the
+                # evidence. A `tags=` here without a `_WEIGHTS["tags"]` is a
+                # `KeyError` inside `_blend`, so the two only ever move
+                # together.
             ),
             candidate.title_id,
         )
@@ -451,18 +477,6 @@ def _neighbors_for(
     ]
 
 
-def _clamped(value: float | None) -> float | None:
-    """A signal held inside `[0, 1]`, with `None` passing straight through.
-
-    The `None` arm is the whole reason this is a function rather than a
-    `max`/`min` at the call site: `min(1.0, max(0.0, None))` raises, and the
-    obvious repair -- `max(0.0, value or 0.0)` -- silently turns "no genome
-    vector" into "these two films share no tags", which is precisely the
-    ADR-0014 collapse `NeighborCandidate.tags` exists to refuse.
-    """
-    return None if value is None else min(1.0, max(0.0, value))
-
-
 def _jaccard(left: Sequence[str], right: Sequence[str]) -> float | None:
     """Set overlap, or `None` when one of the sets has nothing to say.
 
@@ -487,13 +501,27 @@ def _blend(**signals: float | None) -> float:
 
     The same skeleton `SearchService._blend` uses, deliberately: an absent
     signal leaves the numerator *and* the denominator. Dividing by
-    `sum(_WEIGHTS.values())` unconditionally would score an untagged pair at
-    0.60x its true cosine agreement, putting every thinly-tagged enriched title
-    below every richly-tagged one however close the vectors are -- against
-    boundary call 4's premise that the embedded population is the tier where
-    the text is the good signal. Iterating a mapping rather than adding three
-    named terms is what makes boundary call 8's promise true: landing
-    tag-genome cosine is one entry in `_WEIGHTS` and one accessor above.
+    `sum(_WEIGHTS.values())` unconditionally would score a pair carrying only a
+    cosine at `0.45 / 0.75 = 0.60x` its true agreement, putting every thin
+    enriched title below every richly-described one however close the vectors
+    are -- against boundary call 4's premise that the embedded population is
+    the tier where the text is the good signal. (That multiplier read 0.60
+    under M6's three weights, **0.45 under M7's four**, and 0.60 again now: it
+    is `_WEIGHTS["cosine"] / sum(_WEIGHTS.values())` and it moves whenever the
+    table does. It was left at M6's value through M7, which is why it is spelled
+    as the arithmetic here rather than as a number.)
+
+    **Iterating a mapping rather than adding named terms is what made both
+    directions of boundary call 8's promise cheap**, and M9 measured the second
+    one: landing the tag-genome cosine in M7 was one `_WEIGHTS` entry and one
+    accessor above, and removing it in S7 was the same two lines back out. What
+    the promise never covered is the port -- the value has to come from
+    somewhere -- which is why `NeighborCandidate.tags` and its statement stay
+    where they are.
+
+    **A weight of 0.0 is not how a term is turned off here.** It moves `total`
+    by nothing and `applied` by nothing, so it is this same function with the
+    signal absent -- while still reaching `blend_fingerprint()`.
     """
     total = 0.0
     applied = 0.0
