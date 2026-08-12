@@ -126,6 +126,7 @@ from usher.services.handlers import (
     index_handler,
     match_handler,
     watch_history_handler,
+    watch_writeback_handler,
 )
 from usher.services.images import ImageProxyService
 from usher.services.index import IndexService
@@ -680,6 +681,21 @@ def build_worker(
     worker.register(JobKind.MATCH, match_handler(pipeline.matcher, pipeline.media_items, resolve))
     worker.register(
         JobKind.WATCH_HISTORY, watch_history_handler(pipeline.watch, resolve, user_id=user_id)
+    )
+    # Unconditional, joining `MATCH` and `WATCH_HISTORY`: nothing about a
+    # write-back is optional. The four guarded registrations below each rest
+    # on a collaborator a deployment may not have -- a TMDb key, an embedding
+    # model, an LLM endpoint -- and this one needs only the session's own
+    # repositories and the resolver every source-scoped kind already takes.
+    # A guard here would leave a client's own watch write pending forever on
+    # the shipped default deployment -- M4's "a job kind whose handler is a
+    # stub is a queue that grows forever", arriving as a registration rather
+    # than as a missing function.
+    worker.register(
+        JobKind.WATCH_WRITEBACK,
+        watch_writeback_handler(
+            pipeline.watch_states, pipeline.media_items, resolve, user_id=user_id
+        ),
     )
     if provider is not None:
         worker.register(

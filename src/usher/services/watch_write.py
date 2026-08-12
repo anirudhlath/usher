@@ -326,9 +326,9 @@ class WatchWriteService:
         Retracted copies are told too. `list_for_title` returns them with
         `available = false` rather than dropping them (PRD 02: soft-delete
         availability), the common cause is a temporarily unmounted drive, and
-        D8's handler completes rather than parks for an item a source no
-        longer has -- so including one costs a job that completes, and
-        excluding it costs a write that never arrives.
+        `handlers.watch_writeback_handler` completes rather than parks for an
+        item a source no longer has -- so including one costs a job that
+        completes, and excluding it costs a write that never arrives.
 
         `dict.fromkeys` rather than `set`, and **it is a measured equivalent
         mutant rather than a correctness step** -- recorded here so the next
