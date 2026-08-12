@@ -767,44 +767,64 @@ Retrieval is separated from ranking, deliberately:
 Owned titles are boosted but not exclusive: searching should surface things you
 don't have, clearly marked, because that feeds discovery.
 
-**Three of those six terms ship in M6 and three are M7's, each for a named
-reason** (`services/search.py`). Relevance, popularity and owned-vs-not have
-data behind them today. **Watch state** needs a user and `SearchRequest`
-carries none — `SearchFilters` is a closed vocabulary that deliberately has no
-user field, and M7 is the first milestone whose calls hold a user identity by
-construction. **Recency** has data (`year` across the catalog, `release_date`
-on the enriched tier) and no way to choose a decay constant: nothing in M6
-measures ranking, so a half-life picked here would read like a measurement and
-be a guess. There is also a double-counting argument, recorded as an argument
-rather than a measurement — TMDb's `popularity` is a rolling engagement figure
-and already leans recent. **Taste-centroid proximity** has no centroid; PRD 06
-owns the taste model and nothing computes one.
+**Five of those six terms ship, and the sixth is named rather than implied**
+(`services/search.py`). Relevance, popularity and owned-vs-not shipped in M6;
+**watch state and recency landed in M9**, each with the seam it was waiting on
+now filled. **Taste-centroid proximity is the one still absent**, and absent
+rather than zeroed — a term with no data is a weight that reads like a signal.
 
-⏳ **M7 built the centroid and wired none of the three into ranking, and
-saying so is the point of this paragraph.** `TasteService` and `user_taste`
-exist ([06](06-rows-and-recommendations.md)), so *"nothing computes one"* has
-stopped being true — but wiring it into ranking is a `SearchService` change no
-M7 task makes, and leaving the sentence above unqualified would claim a
-capability that does not exist. What actually changed, term by term:
+**`SearchService.search` takes a household** (`user_id`), which is the seam
+watch state was blocked on for three milestones. It is a keyword on the method
+and **`SearchFilters` remains a closed vocabulary with no user field**: every
+field of `SearchFilters` is a flag on `usher search` and a query parameter on
+`GET /search`, so a user there is a household any caller could name. Both
+shipped callers resolve one before they search — the route through
+`DefaultUserIdDep`, the CLI through `ensure_default_user` — so until PRD 01's
+authentication seam is filled the household is the singleton default user and
+no request is unpersonalised. Nothing on the wire reports which household
+answered, deliberately: unlike a `fused` request degraded to full text, there
+is no reachable alternative for a field to distinguish.
 
-- **Taste-centroid proximity** — the centroid *table* exists and **is not a
-  ranking term**; in fact `TasteService.centroid` has no caller anywhere in
-  `src/` as of M7, so nothing writes `user_taste` either. Two things stand in
-  the way beyond the wiring: `SearchRequest` carries no user, and on the
-  request path the centroid is structurally `None`
-  anyway, because it needs an embedder and the route deliberately holds none
-  ([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)).
-  So a naive wiring would ship a term that is inert on the default deployment
-  — the failure [06](06-rows-and-recommendations.md) already corrected once,
-  for `GenreAffinityProvider`. **Owner: M9**, with the user identity the
-  authentication seam owes.
-- **Watch state** — still no user on `SearchRequest`. M7's calls hold a user
-  identity, but they are *row* calls, not search calls; nothing narrowed the
-  gap. **Owner: M9.**
-- **Recency** — unchanged, and still blocked on the same thing: nothing
-  measures ranking, so there is no evidence to pick a decay constant from.
-  M9's `search_queries` ([10](10-telemetry-and-dashboards.md)) is what would
-  supply it. **Owner: M9.**
+**Watch state is a small boost, never a demotion, and the direction is a
+product judgement this PRD had left open.** A search is overwhelmingly a
+re-find intent, so demoting what the household has finished buries the film
+they just typed the name of; `RediscoverProvider` already treats a finished
+title as re-offerable. It reads `WatchStateRepository.played_title_ids`, which
+rolls a watched episode up to its series, so a television household is not
+answered films-only. The opposite reading is defensible for *discovery* and
+renders identically, which is why the choice is written down at the constant.
+
+🔶 **Recency's constant is chosen with an argument, not measured.** The term is
+`1 / (1 + age / 25 years)` over `release_date` where the enriched tier has one
+and `year` otherwise, **absent and never zero when both are null**
+([ADR-0014](decisions/0014-absence-is-not-zero.md), in a fifth place). Twenty-
+five years is where the curve should be steepest for a distinction a viewer
+would recognise; nothing measures it. **The double-counting caveat stands
+unresolved beside it** — TMDb's `popularity` is a rolling engagement figure
+that already leans recent, so the two terms are not independent — and what
+would settle both is `search_queries`
+([10](10-telemetry-and-dashboards.md)), which has no rows until after M9
+ships. The term ships anyway rather than leaving "three ranking terms" at two,
+and it is bounded so a wrong constant moves a score by at most its weight.
+
+**The weights are constrained rather than chosen freely, and the constraint is
+stateable.** The non-relevance weights sum below half the relevance weight, so
+no combination of ownership, popularity, watch state and recency can displace
+an exact match — 0.70 against 0.35 + 0.15 + 0.15 + 0.02 + 0.02. The three M6
+weights keep their exact ratio, so a hit with no popularity, no year and no
+household scores what M6 scored it; the blend renormalises over present
+signals, so adding a term moves only the rows that term is present on.
+
+⏳ **The taste centroid is still not a ranking term.** `TasteService` and
+`user_taste` exist ([06](06-rows-and-recommendations.md)), and the household
+seam that blocked watch state is now filled for it too — what remains is that
+on the request path the centroid is structurally `None`, because it needs an
+embedder and the route deliberately holds none
+([ADR-0022](decisions/0022-the-embedder-is-optional-and-its-contract-is-measured.md)).
+A naive wiring would ship a term that is inert on the default deployment — the
+failure [06](06-rows-and-recommendations.md) already corrected once, for
+`GenreAffinityProvider`. **Owner: M9**, and it needs a read that lets a request
+serve a centroid it cannot compute.
 
 **Relevance enters the blend as a rank, never as a raw score.** A `ts_rank` is
 around 0.06, an RRF score around 0.016–0.033 and a cosine is in [-1, 1];

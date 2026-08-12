@@ -20,8 +20,12 @@ Every title below is invented; `test_no_dataset_row_is_committed_anywhere`
 scans this file.
 """
 
+import ast
+import dataclasses
+import pathlib
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -32,10 +36,12 @@ from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.title_repository import FakeTitleRepository
+from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import TitleKind
 from usher.domain.title import Title
 from usher.ports.errors import PortUnavailable
-from usher.ports.ingest import MediaItemUpsert
+from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
+from usher.ports.rows import RowContext
 from usher.ports.search import (
     SearchDocument,
     SearchFilters,
@@ -62,7 +68,17 @@ _NO_POP = uuid.UUID(int=0x06)
 _LOW_ID = uuid.UUID(int=0x07)
 _HIGH_ID = uuid.UUID(int=0x08)
 _DELETED = uuid.UUID(int=0x09)
+# `_UNPLAYED < _PLAYED` and `_OLD < _UNDATED`, on the same rule as the four
+# pairs above: a term whose weight went to zero ties the two rows, and the
+# tiebreak then puts the *wrong* one first rather than leaving the order to
+# whichever row the fixture happened to seed second.
+_UNPLAYED = uuid.UUID(int=0x0A)
+_PLAYED = uuid.UUID(int=0x0B)
+_OLD = uuid.UUID(int=0x0C)
+_UNDATED = uuid.UUID(int=0x0D)
 _SOURCE = uuid.UUID(int=0xFF)
+_HOUSEHOLD = uuid.UUID(int=0xA1)
+_OTHER_HOUSEHOLD = uuid.UUID(int=0xA2)
 
 # A `ts_rank` lands around 0.06 and an RRF score around 0.016-0.033. The two
 # scores below are on that scale rather than on [0, 1], and the difference is
@@ -76,6 +92,14 @@ _WEAK = 0.02
 
 _SEEN_AT = datetime(2026, 8, 2, tzinfo=UTC)
 
+# The instant the recency term is measured against, injected rather than read
+# off the wall clock. A case that asserted an age against `datetime.now(UTC)`
+# would assert something slightly different every day and something quite
+# different in five years -- and the ordering it is really about (an undated
+# title against a dated old one) would go on passing while the arithmetic
+# under it drifted.
+_NOW = datetime(2026, 8, 11, tzinfo=UTC)
+
 _CATALOG: dict[uuid.UUID, tuple[str, float | None]] = {
     _QUIET: ("The Quiet Vacuum", 0.5),
     _POPULAR: ("Vacuum Sales Quarterly", 1000.0),
@@ -85,7 +109,18 @@ _CATALOG: dict[uuid.UUID, tuple[str, float | None]] = {
     _NO_POP: ("Vacuum, Undescribed", None),
     _LOW_ID: ("Vacuum Alpha", None),
     _HIGH_ID: ("Vacuum Omega", None),
+    _UNPLAYED: ("Vacuum, Unwatched", None),
+    _PLAYED: ("Vacuum, Finished", None),
+    _OLD: ("Vacuum Antique", None),
+    _UNDATED: ("Vacuum, Undated", None),
 }
+
+# Release years, defaulting to the 2019 every case above was written against.
+# Only the recency cases vary it, and `_UNDATED` is the one with **no** year:
+# `Title.year` is nullable across the whole catalog, so an absent year is the
+# ordinary state of a row rather than a corner.
+_DEFAULT_YEAR = 2019
+_YEARS: dict[uuid.UUID, int | None] = {_OLD: 1970, _UNDATED: None}
 
 
 class _ScriptedIndex(SearchIndex):
@@ -135,7 +170,7 @@ def _title(title_id: uuid.UUID) -> Title:
         kind=TitleKind.MOVIE,
         name=name,
         sort_name=name.casefold(),
-        year=2019,
+        year=_YEARS.get(title_id, _DEFAULT_YEAR),
         popularity=popularity,
     )
 
@@ -166,6 +201,27 @@ def _copy(title_id: uuid.UUID) -> MediaItemUpsert:
     )
 
 
+def _finished(title_id: uuid.UUID, *, user_id: uuid.UUID) -> WatchStateMerge:
+    """One `played` watch state for a title, not for one of its episodes.
+
+    `played=True` rather than merely "a row exists": a sync writes a row per
+    item it observed, so "has a state" is the owned library, and a fixture
+    built that way would make the played term agree with the owned one on
+    every case in this file.
+    """
+    return WatchStateMerge(
+        user_id=user_id,
+        title_id=title_id,
+        episode_id=None,
+        position_seconds=0,
+        played=True,
+        runtime_seconds=7200,
+        observed_at=_SEEN_AT,
+        play_count=1,
+        last_played_at=_SEEN_AT,
+    )
+
+
 class _Expander:
     """A real `QueryExpansionService` over a scripted client, plus the two
     things a case asserts on: how many completions were bought, and what landed
@@ -192,35 +248,115 @@ class _Expander:
         self.commits += 1
 
 
+class _CountingTitles(FakeTitleRepository):
+    """`FakeTitleRepository`, counting the one read `_rank` makes of it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    async def list_by_ids(self, title_ids: Sequence[uuid.UUID]) -> list[Title]:
+        self.reads += 1
+        return await super().list_by_ids(title_ids)
+
+
+class _CountingMediaItems(FakeMediaItemRepository):
+    """The same, for the ownership read. `FakeMediaItemRepository.calls` exists
+    already and does **not** cover `owned_title_ids`, so counting through it
+    would be a count of writes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    async def owned_title_ids(self, title_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+        self.reads += 1
+        return await super().owned_title_ids(title_ids)
+
+
+class _CountingWatchStates(FakeWatchStateRepository):
+    """The same, for the household read this task adds.
+
+    Counted rather than merely observed for its answer: *"exactly one read per
+    ranked search, and none at all without a household"* is a property no
+    assertion about the returned order can carry -- a service that asked the
+    port once per hit would answer identically and cost a statement a hit.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+        self.asked: list[tuple[uuid.UUID, tuple[uuid.UUID, ...]]] = []
+
+    async def played_title_ids(
+        self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        self.reads += 1
+        self.asked.append((user_id, tuple(title_ids)))
+        return await super().played_title_ids(user_id, title_ids)
+
+
+@dataclass(slots=True)
+class _Ports:
+    """The three repositories `_rank` reads, so a case can count them.
+
+    Held together rather than passed one at a time because the acceptance is
+    about the *set* of reads one search makes, and a case that could only see
+    one of the three would report two reads as three or three as two.
+    """
+
+    titles: _CountingTitles = field(default_factory=_CountingTitles)
+    media_items: _CountingMediaItems = field(default_factory=_CountingMediaItems)
+    watch_states: _CountingWatchStates = field(default_factory=_CountingWatchStates)
+
+    @property
+    def reads(self) -> int:
+        return self.titles.reads + self.media_items.reads + self.watch_states.reads
+
+
 async def _service(
     index: SearchIndex,
     *,
     embedder: FakeEmbedder | None = None,
     owned: frozenset[uuid.UUID] = frozenset(),
+    played: frozenset[uuid.UUID] = frozenset(),
+    played_by: uuid.UUID = _HOUSEHOLD,
     suggestions: SuggestIndex | None = None,
     result_limit: int = 50,
     expander: _Expander | None = None,
+    ports: _Ports | None = None,
+    now: datetime | None = None,
 ) -> SearchService:
     """The service over fakes, with the whole invented catalog already stored.
 
     Seeding every title rather than only the ones a case names keeps the
     hydration read honest: an implementation that returned rows the index never
     mentioned would have somewhere to get them from.
+
+    **`now` is fixed rather than read from the wall clock**, because the
+    recency term is a function of it: a case pinning an age against
+    `datetime.now(UTC)` would say something slightly different every day it
+    ran, and something quite different in five years.
     """
-    titles = FakeTitleRepository()
-    media_items = FakeMediaItemRepository()
+    kit = _Ports() if ports is None else ports
     for title_id in _CATALOG:
-        await titles.add(_title(title_id))
+        await kit.titles.add(_title(title_id))
     if owned:
-        await media_items.upsert_many([_copy(title_id) for title_id in sorted(owned)])
+        await kit.media_items.upsert_many([_copy(title_id) for title_id in sorted(owned)])
+    if played:
+        await kit.watch_states.merge_from_source(
+            [_finished(title_id, user_id=played_by) for title_id in sorted(played)]
+        )
     return SearchService(
         index,
         _ScriptedSuggest() if suggestions is None else suggestions,
-        titles,
-        media_items,
+        kit.titles,
+        kit.media_items,
+        kit.watch_states,
         result_limit=result_limit,
         embedder=embedder,
         expander=None if expander is None else expander.service,
+        now=(lambda: _NOW) if now is None else (lambda: now),
     )
 
 
@@ -627,6 +763,220 @@ async def test_an_unknown_popularity_is_not_a_popularity_of_zero() -> None:
     assert [result.title_id for result in answer.results] == [_NO_POP, _ZERO_POP]
 
 
+async def test_a_played_title_outranks_an_unplayed_one_at_equal_relevance() -> None:
+    """PRD 05's watch-state term, and **the direction is the decision**: played
+    is a small boost, never a demotion.
+
+    A search is overwhelmingly a re-find intent -- somebody typing a title's
+    name usually wants that title -- so a demotion buries the exact film they
+    just named. Fails: no watch-state term at all (the two rows tie and the
+    tiebreak puts `_UNPLAYED` first, because `_UNPLAYED < _PLAYED`), a term
+    whose weight is zero, and a term with the sign the other way round.
+
+    **Its premise is asserted first**: the two hits carry *equal index scores*,
+    so `_dense_ranks` gives them one rank and the relevance term cancels
+    exactly. Under a strict positional rank no two candidates ever tie and this
+    property would be unassertable -- which is the trap `_dense_ranks`'
+    docstring already records by name for the owned boost.
+    """
+    hits = (
+        SearchHit(title_id=_UNPLAYED, score=_STRONG),
+        SearchHit(title_id=_PLAYED, score=_STRONG),
+    )
+    assert {hit.score for hit in hits} == {_STRONG}, (
+        "the premise: equal index scores, so the relevance term cancels and the "
+        "watch-state term is the only thing left that can separate the two"
+    )
+    ports = _Ports()
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(hits=hits)), played=frozenset({_PLAYED}), ports=ports
+    )
+
+    answer = await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    assert await ports.watch_states.played_title_ids(_HOUSEHOLD, [_PLAYED]) == {_PLAYED}, (
+        "the premise: the household really has finished this one"
+    )
+    assert [result.title_id for result in answer.results] == [_PLAYED, _UNPLAYED]
+
+
+async def test_two_households_that_disagree_about_one_title_get_different_orders() -> None:
+    """The point of the parameter, and the trap it invites.
+
+    Two households, one query, one candidate set -- and they must come back in
+    *different* orders, because they disagree about the one signal this task
+    adds. Fails: a `user_id` accepted and dropped, and a `played_title_ids`
+    read whose `user_id` argument is ignored (the fake's own scope is asserted
+    by its contract; what this pins is that the service passes the household it
+    was given).
+
+    **A case that seeded two households which happened to agree would pass
+    against every one of those**, which is why the premise here is the
+    disagreement itself rather than the two answers.
+    """
+    hits = (
+        SearchHit(title_id=_UNPLAYED, score=_STRONG),
+        SearchHit(title_id=_PLAYED, score=_STRONG),
+    )
+    ports = _Ports()
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(hits=hits)), played=frozenset({_PLAYED}), ports=ports
+    )
+    candidates = [_UNPLAYED, _PLAYED]
+    mine = await ports.watch_states.played_title_ids(_HOUSEHOLD, candidates)
+    theirs = await ports.watch_states.played_title_ids(_OTHER_HOUSEHOLD, candidates)
+    assert mine != theirs, (
+        "the premise: the two households genuinely differ on the signal under "
+        f"test -- both answered {mine}, so any difference in the two orders "
+        "below would be coming from somewhere else"
+    )
+
+    ours = await service.search("vacuum", user_id=_HOUSEHOLD)
+    yours = await service.search("vacuum", user_id=_OTHER_HOUSEHOLD)
+
+    assert [result.title_id for result in ours.results] == [_PLAYED, _UNPLAYED]
+    assert [result.title_id for result in yours.results] == [_UNPLAYED, _PLAYED]
+
+
+async def test_a_ranked_search_with_a_household_makes_exactly_three_reads() -> None:
+    """`list_by_ids`, `owned_title_ids`, `played_title_ids` -- one each, whatever
+    the hit count.
+
+    Fails: a per-hit `played_title_ids`, which is the N+1 the batch read exists
+    to delete and which no assertion about the answer can see. Counted against
+    fakes because a count is the only thing a fake can carry honestly here.
+    """
+    hits = tuple(SearchHit(title_id=title_id, score=_STRONG) for title_id in sorted(_CATALOG)[:6])
+    assert len(hits) == 6, "the premise: more hits than reads, or a count proves nothing"
+    ports = _Ports()
+    service = await _service(_ScriptedIndex(SearchOutcome(hits=hits)), ports=ports)
+
+    await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    assert (ports.titles.reads, ports.media_items.reads, ports.watch_states.reads) == (1, 1, 1)
+    assert ports.reads == 3
+
+
+async def test_a_ranked_search_with_no_household_makes_exactly_two() -> None:
+    """The other side, and it is not tidiness: `played_title_ids` needs a
+    `user_id`, so a service that asked anyway would have to invent one.
+
+    Fails: a household read issued with a placeholder id, which costs a
+    statement per search on every caller that has no household and answers
+    about a user nobody is.
+    """
+    hits = tuple(SearchHit(title_id=title_id, score=_STRONG) for title_id in sorted(_CATALOG)[:6])
+    ports = _Ports()
+    service = await _service(_ScriptedIndex(SearchOutcome(hits=hits)), ports=ports)
+
+    await service.search("vacuum")
+
+    assert (ports.titles.reads, ports.media_items.reads, ports.watch_states.reads) == (1, 1, 0)
+    assert ports.reads == 2
+
+
+async def test_the_household_read_is_bounded_by_the_hits() -> None:
+    """`played_title_ids` is asked about the candidates and nothing else.
+
+    Fails: a read of the household's whole history, which is unbounded in the
+    one dimension a search cannot bound -- and which answers correctly, so only
+    the argument says which was written.
+    """
+    hits = (SearchHit(title_id=_PLAYED, score=_STRONG),)
+    ports = _Ports()
+    service = await _service(
+        _ScriptedIndex(SearchOutcome(hits=hits)),
+        played=frozenset({_PLAYED, _UNPLAYED}),
+        ports=ports,
+    )
+
+    await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    assert ports.watch_states.asked == [(_HOUSEHOLD, (_PLAYED,))]
+
+
+async def test_a_search_that_matched_nothing_asks_no_household_anything() -> None:
+    """The empty-candidate guard, on the read this task adds. Fails: a `_rank`
+    that reads before it checks, which is a statement per keystroke on a search
+    box whose query has not matched yet -- most keystrokes."""
+    ports = _Ports()
+    service = await _service(_ScriptedIndex(SearchOutcome()), ports=ports)
+
+    answer = await service.search("vacuum", user_id=_HOUSEHOLD)
+
+    assert answer.results == ()
+    assert ports.reads == 0
+
+
+async def test_an_undated_title_outranks_a_measured_old_one_at_equal_relevance() -> None:
+    """ADR-0014 in a fifth place, after `_popularity_term`'s fourth.
+
+    `Title.year` is null across most of a bootstrap catalog, and
+    `year or 0` -- or any spelling that scores the absence -- would put every
+    undated row at maximum age and bury the un-enriched catalog beneath the
+    enriched tier while looking like arithmetic. Fails that, and fails a
+    `_blend` that renormalised by the full weight sum instead of by the present
+    one.
+
+    `_OLD < _UNDATED` as ids, so both wrong implementations tie or invert the
+    pair and the tiebreak puts the measured old one first.
+    """
+    hits = (
+        SearchHit(title_id=_OLD, score=_STRONG),
+        SearchHit(title_id=_UNDATED, score=_STRONG),
+    )
+    assert _YEARS[_OLD] is not None and _YEARS[_UNDATED] is None, (
+        "the premise: one row carries a measured year and the other carries none"
+    )
+    service = await _service(_ScriptedIndex(SearchOutcome(hits=hits)))
+
+    answer = await service.search("vacuum")
+
+    assert [result.title_id for result in answer.results] == [_UNDATED, _OLD]
+
+
+async def test_a_newer_title_outranks_an_older_one_at_equal_relevance() -> None:
+    """The other half, without which a recency term of **zero** passes the case
+    above -- absence would still beat a measured zero and nothing would say the
+    term does any work between two dated rows.
+
+    Both rows are dated, unowned and unmeasured for popularity, so recency is
+    the only signal that can separate them.
+    """
+    hits = (
+        SearchHit(title_id=_OLD, score=_STRONG),
+        SearchHit(title_id=_LOW_ID, score=_STRONG),
+    )
+    assert _YEARS[_OLD] < _YEARS.get(_LOW_ID, _DEFAULT_YEAR), (  # type: ignore[operator]
+        "the premise: the second row really is the newer one"
+    )
+    service = await _service(_ScriptedIndex(SearchOutcome(hits=hits)))
+
+    answer = await service.search("vacuum")
+
+    assert [result.title_id for result in answer.results] == [_LOW_ID, _OLD]
+
+
+async def test_with_no_household_and_no_year_the_score_is_the_one_m6_computed() -> None:
+    """The numeric pin, and it is numeric rather than an ordering on purpose: a
+    re-weighting that reordered nothing would pass every case above and change
+    every score on the wire.
+
+    A hit with no popularity, no year and no household has exactly two present
+    signals -- relevance and owned -- and `_blend` renormalises over those two,
+    so the answer has to be M6's to the last bit. **Both literals below are
+    written out rather than read from `_WEIGHTS`**: a case whose expectation is
+    derived from the constant under test pins that the constant is in force and
+    cannot pin its value.
+    """
+    hits = (SearchHit(title_id=_UNDATED, score=_STRONG),)
+    service = await _service(_ScriptedIndex(SearchOutcome(hits=hits)))
+
+    answer = await service.search("vacuum")
+
+    assert answer.results[0].score == (0.70 * 1.0 + 0.15 * 0.0) / (0.70 + 0.15)
+
+
 async def test_equal_scores_are_broken_by_id_so_two_searches_agree() -> None:
     """Determinism, which is a pagination property before it is a tidiness
     one. Fails: falling back to whatever order the index returned -- and this
@@ -735,3 +1085,60 @@ async def test_suggest_clamps_its_limit_too() -> None:
     )
     await service.suggest("vac", limit=10_000)
     assert suggestions.calls == [("vac", 20)]
+
+
+# --- the home screen reaches none of this ----------------------------------
+
+_SERVICES = pathlib.Path(__file__).parents[2] / "src" / "usher" / "services"
+
+#: Every name a row provider would have to write down to reach the blend. The
+#: module is in the list as well as the symbols, because
+#: `import usher.services.search` needs none of them.
+_RANKING_NAMES = frozenset(
+    {
+        "usher.services.search",
+        "SearchService",
+        "SearchAnswer",
+        "_WEIGHTS",
+        "_blend",
+        "_dense_ranks",
+        "_popularity_term",
+        "_recency_term",
+    }
+)
+
+
+def test_the_home_screen_and_its_providers_reach_no_ranking_term() -> None:
+    """The claim that makes `GET /home`'s measured budget cheap to hold.
+
+    Five ranking terms now, three repository reads with a household, and a
+    clock -- none of which the home screen pays for, because no row provider
+    and no composer can reach any of it. Asserted structurally rather than by
+    re-measuring the 5,200-copy household's figures: a timing run proves the
+    cost is absent today, and this proves there is no path by which it could
+    arrive.
+
+    `RowContext` is the other half. It carries thirteen collaborators and
+    **no `search` field**, so a provider that wanted a blended score would have
+    to be handed one first.
+    """
+    modules = [_SERVICES / "home.py", *sorted((_SERVICES / "rows").glob("*.py"))]
+    # The premise, because a glob that matched nothing passes exactly like a
+    # scan that found nothing to report: ten providers, their base and their
+    # registry, plus the composer.
+    assert len(modules) >= 12, f"the scan found only {len(modules)} modules: {modules}"
+
+    for path in modules:
+        named: set[str] = set()
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                named.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                named.add(node.module or "")
+                named.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.Attribute | ast.Name):
+                named.add(node.attr if isinstance(node, ast.Attribute) else node.id)
+        reachable = named & _RANKING_NAMES
+        assert not reachable, f"{path.name} names {sorted(reachable)}"
+
+    assert "search" not in {one.name for one in dataclasses.fields(RowContext)}
