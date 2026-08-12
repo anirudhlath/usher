@@ -10,6 +10,50 @@ from usher.domain.base import DomainModel
 from usher.domain.ids import new_id
 
 
+class BootstrapPhase(StrEnum):
+    """What one bulk-import run does, and **the members are in execution
+    order** (PRD 04's phased import).
+
+    One vocabulary rather than two, and that is the whole reason it is here
+    rather than a tuple in `usher.cli`. Until M9 the set lived as
+    `cli.PHASES` behind `argparse`'s `choices=`, which is unreachable from
+    anything else -- so `POST /admin/bootstrap/{phase}` would have had to
+    restate it, `/openapi.json` would have described a bare string, and an
+    unknown phase would have been whatever the route's own membership test
+    chose to answer. As a path-parameter *type* it is a 422 in V1's envelope,
+    the CLI's `choices` are derived from the same members, and the two cannot
+    drift because there is nothing to drift from.
+
+    **The order is measured, not stylistic, and three edges carry evidence
+    (`.claude/rules/bootstrap-and-datasets.md`).** `credit-names`, `aliases`
+    and `movielens` all join to `titles` on `imdb_id`, so all three follow
+    `imdb` and an empty catalog joins to nothing -- each refuses before its
+    own download rather than checkpointing a vacuous `COMPLETED`.
+    `credit-names` comes before **everything that enriches a title**: the
+    fill re-writes `search_document` and so stales the embedding of every
+    title it touches, which on a pure bootstrap is **0 of 1,271,138** and
+    after a priority-tier crawl would be **203,969 of the 204,335 titles with
+    >=100 votes (99.82%)**, at a cost of +624 MB settled / +1,368 MB
+    transient and a GIN index 4.54x its previous size. That is an ordering
+    constraint on an *operator*, which is why it is stated in the CLI's own
+    report, in PRD 04 and here rather than enforced -- nothing in this
+    system knows when a crawl is about to start.
+
+    `ALL` is a member rather than a `None`: it is what an operator types, it
+    is a legitimate `Job.key` (a `--phase all` job is one unit of work, the
+    longest in this system), and a nullable path parameter would make the
+    route's own vocabulary a different set from the CLI's.
+    """
+
+    IMDB = "imdb"
+    CREDIT_NAMES = "credit-names"
+    ALIASES = "aliases"
+    TMDB_IDS = "tmdb-ids"
+    CROSSWALK = "crosswalk"
+    MOVIELENS = "movielens"
+    ALL = "all"
+
+
 class ImportRunStatus(StrEnum):
     """Terminal state of one dataset's import.
 

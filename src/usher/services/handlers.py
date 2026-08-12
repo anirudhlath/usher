@@ -6,15 +6,16 @@ module is the only place the two vocabularies meet, which is what keeps
 `usher.services.jobs` a generic claim/run/park loop rather than a switch
 statement over the pipeline.
 
-**One column, four kinds of identifier.** `Job.key` is a string so that one
+**One column, five kinds of identifier.** `Job.key` is a string so that one
 column serves every kind without a polymorphic payload, and what it names
 depends entirely on the kind: a `Title.id` for `enrich`, `index` and
 `derive`; a source's own `external_id` for `match`, `watch_history` and
-`watch_writeback`; a `User.id` for `curate`; and a composite
+`watch_writeback`; a `User.id` for `curate`; a composite
 `"{source_id}:{lane}"` for `sync`, the one kind whose key names two things
-rather than one. The conversion is what makes that legible, and it is why
-`_uuid_key` takes the *expected* thing as an argument — the failure a
-handler writes into `jobs.last_error` has to say which of the four the key
+rather than one; and a `BootstrapPhase` for `bootstrap`, the one kind whose
+key names no row at all. The conversion is what makes that legible, and it
+is why `_uuid_key` takes the *expected* thing as an argument — the failure a
+handler writes into `jobs.last_error` has to say which of the five the key
 failed to be.
 
 **A key that does not parse is `PortDataMalformed`, never a `ValueError`.**
@@ -46,6 +47,7 @@ from dataclasses import dataclass
 
 from loguru import logger
 
+from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.jobs import Job
 from usher.domain.source import MediaItem, Source
 from usher.domain.sync import SyncRunKind
@@ -67,6 +69,13 @@ from usher.services.watch_sync import WatchStateSyncService
 #: sync, run by `sync_handler` itself immediately after the item lane. A key
 #: naming it is exactly as malformed as one naming no lane at all.
 _TRIGGERABLE_SYNC_LANES = frozenset({SyncRunKind.FULL, SyncRunKind.DELTA})
+
+#: One bulk-import phase, run to completion. `usher.composition.
+#: run_bootstrap` bound to a session's ports is the only production
+#: spelling; the alias exists so this module can name the collaborator
+#: without importing the composition root, exactly as `AdapterOpener`
+#: does for `sync_handler`.
+BootstrapRunner = Callable[[BootstrapPhase], Awaitable[None]]
 
 #: The adapter factory a `sync` job's handler is closed over. Bound by the
 #: composition root (`composition.open_adapter`, with the pipeline already
@@ -355,6 +364,61 @@ def sync_handler(
     return handle
 
 
+def bootstrap_handler(run: BootstrapRunner) -> Handler:
+    """`bootstrap` jobs key on a `BootstrapPhase`, and this handler is the
+    thinnest one in the module because everything it would otherwise hold is
+    a composition-root concern.
+
+    **The dispatch is not here and cannot be.** A bulk phase constructs
+    `BulkDataset`s and a `BootstrapService`, and it opens an outbound HTTP
+    client -- so it lives in `usher.composition`, the module both roots share
+    and the only one permitted to import `usher.adapters`. What crosses into
+    `services/` is one callable taking a phase, injected exactly as
+    `AdapterOpener` is for `sync_handler` one function down. `run_bootstrap`
+    is that callable's only production spelling and both roots call it, which
+    is what makes "the CLI and the worker run the same phases in the same
+    order" a property rather than a convention.
+
+    **Nothing is re-checked here, and that is a decision rather than an
+    omission.** `sync_handler` re-reads `source.enabled` because its route
+    checked the same thing at enqueue time and a source can be parked in the
+    minutes a head-of-line-blocking walk holds the queue. Asking the same
+    question here -- *what changed between the enqueue and the claim, and may
+    this handler still do the work?* -- gives a different answer, because the
+    route checks nothing that can change: a `BootstrapPhase` is a phase
+    forever. What genuinely moves is the *catalog*, and every phase whose
+    right to run depends on it already asks at the moment it runs:
+    `credit-names`, `aliases` and `movielens` each refuse an empty catalog
+    before their own download, and `bulk_load_window()` engages only while
+    `titles` is empty. A second copy of any of those, here, would be a
+    point-in-time answer to a question the phase itself asks correctly.
+
+    **The other concurrent writer is another *process*, not another job.**
+    `(kind, key)` is unique, so a second press of one phase coalesces; but
+    `usher bootstrap` in a terminal and this handler in the server can hold
+    the same dataset at once, and that race is owned one layer down by
+    `ImportRunRepository.start()`'s `RepositoryConflict` and
+    `BootstrapService._concede_to_other_owner` -- which touches nothing (*"no
+    `save`, no `commit`... the durable record itself is left alone"*) and
+    returns the winner's row. This route is what makes that path reachable in
+    anger for the first time, so it has a case of its own.
+
+    **Nothing is caught here**, for `curate_handler`'s reason: `JobWorker`
+    parks a `PortDataMalformed` and backs everything else off, and it can only
+    do that with an exception it is allowed to see. It does not follow that a
+    failed *phase* fails the job -- `import_dataset` records a `FAILED`
+    `ImportRun` and returns normally, so the job completes and `import_runs`
+    is where the failure is durable. That is `sync_handler`'s shape exactly,
+    one kind over, and it is why `GET /admin/bootstrap/status` reads the
+    checkpoints rather than the queue.
+    """
+
+    async def handle(job: Job) -> None:
+        await run(_bootstrap_phase(job))
+
+    return handle
+
+
 def watch_writeback_handler(
     watch_states: WatchStateRepository,
     media_items: MediaItemRepository,
@@ -464,6 +528,30 @@ def watch_writeback_handler(
     return handle
 
 
+def _bootstrap_phase(job: Job) -> BootstrapPhase:
+    """`job.key` as a `BootstrapPhase`, or `PortDataMalformed`.
+
+    A `ValueError` from a `StrEnum` lookup is not a `UsherPortError`, so an
+    unparseable key would take the worker down rather than park its one job --
+    `_uuid_key`'s argument, arriving at the one key that is not a UUID and not
+    an opaque adapter string. It is reachable only from a row somebody wrote
+    by hand or from a member deleted between the enqueue and the claim, since
+    `POST /admin/bootstrap/{phase}` types the path parameter as this very enum
+    and `usher bootstrap --phase` derives its `choices` from it.
+
+    The message names the vocabulary rather than only the offending value: an
+    operator reading `jobs.last_error` on a parked row can act on
+    *"not one of imdb, credit-names, ..."* and cannot act on *"not a phase"*.
+    """
+    try:
+        return BootstrapPhase(job.key)
+    except ValueError as exc:
+        offered = ", ".join(phase.value for phase in BootstrapPhase)
+        raise PortDataMalformed(
+            f"bootstrap job key is not one of {offered}", detail=job.key
+        ) from exc
+
+
 def _sync_key(job: Job) -> tuple[uuid.UUID, SyncRunKind]:
     """`job.key` as `(source id, lane)`, or `PortDataMalformed`.
 
@@ -566,8 +654,10 @@ def _uuid_key(job: Job, expected: str) -> uuid.UUID:
 
 __all__ = [
     "AdapterOpener",
+    "BootstrapRunner",
     "SourceBinding",
     "SourceResolver",
+    "bootstrap_handler",
     "curate_handler",
     "derive_handler",
     "enrich_handler",

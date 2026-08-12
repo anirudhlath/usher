@@ -48,7 +48,7 @@ than argued -- without the flag that real chain reports BROKEN.
 
 import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -57,17 +57,28 @@ import httpx
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from usher.adapters.bulk.imdb import (
+    IMDbAkaDataset,
+    IMDbCreditNamesDataset,
+    IMDbRatingDataset,
+    IMDbTitleDataset,
+)
+from usher.adapters.bulk.movielens import GENOME_BATCH_SIZE, MovieLensGenomeDataset
+from usher.adapters.bulk.tmdb_ids import TMDbIdDataset
+from usher.adapters.bulk.wikidata import WikidataCrosswalkDataset
 from usher.adapters.factory import ConfiguredSourceAdapterFactory
 from usher.adapters.images import DiskImageBlobStore, ProviderCdnImageFetcher
 from usher.adapters.llm import OpenAICompatibleClient
 from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestIndex
 from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
 from usher.config import Settings
+from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.episode import PostgresEpisodeRepository
 from usher.db.repositories.image import PostgresImageRepository
+from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.llm_call import PostgresLLMCallRepository
 from usher.db.repositories.matching import PostgresTitleMatchRepository
@@ -84,9 +95,12 @@ from usher.db.repositories.taste import PostgresTasteRepository
 from usher.db.repositories.title import PostgresTitleRepository
 from usher.db.repositories.watch_state import PostgresWatchStateRepository
 from usher.db.users import ensure_default_user
+from usher.domain.bootstrap import BootstrapPhase, ImportRunStatus
+from usher.domain.enums import TitleKind
 from usher.domain.jobs import JobKind
 from usher.domain.source import Source
 from usher.domain.watch import User
+from usher.ports.bulk import GenomeVector, ImdbAka, ImdbCreditNames, ImdbTitle
 from usher.ports.credentials import CredentialStore
 from usher.ports.embedding import Embedder
 from usher.ports.events import EventPublisher, NullEventPublisher
@@ -95,11 +109,14 @@ from usher.ports.jobs import JobQueue
 from usher.ports.llm import LLMClient
 from usher.ports.metadata import MetadataProvider
 from usher.ports.repository import (
+    BulkCatalogRepository,
     CollectionRepository,
     CreditRepository,
     CuratedRowRepository,
     EpisodeRepository,
+    GenomeCoverage,
     ImageRepository,
+    ImportRunRepository,
     LLMCallRepository,
     MediaItemRepository,
     PersonRepository,
@@ -116,12 +133,14 @@ from usher.ports.repository import (
 )
 from usher.ports.rows import RowContext, RowProvider
 from usher.ports.source import SourceAdapter, SourceAdapterFactory
+from usher.services.bootstrap import BootstrapService
 from usher.services.curation import CurationService
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
 from usher.services.handlers import (
     SourceBinding,
+    bootstrap_handler,
     curate_handler,
     derive_handler,
     enrich_handler,
@@ -204,6 +223,22 @@ class Pipeline:
     watch_states: WatchStateRepository
     payloads: RawPayloadStore
     runs: SyncRunRepository
+    # M2's two bulk-import ports, on the pipeline since M9's E5 for the
+    # reason every other port here is: `run_bootstrap` is one dispatch two
+    # roots call, and `build_worker` sees a `Pipeline` and nothing else. The
+    # names are `bulk`/`import_runs` rather than `catalog`/`runs` because
+    # `runs` above is already `sync_runs` and two fields called `runs` on one
+    # dataclass is exactly how a caller reaches the wrong table.
+    #
+    # ⚠️ `BulkCatalogRepository.bulk_load_window` **commits the caller's
+    # session** -- the port's one documented exception -- and asks for a
+    # session with no unrelated pending work on it. That holds for both
+    # callers today: `usher bootstrap` opens a session for the command, and
+    # `JobWorker` commits a claim before it runs a handler (ADR-0033). A
+    # third caller that shared this session with a half-written unit of work
+    # would have it committed underneath.
+    bulk: BulkCatalogRepository
+    import_runs: ImportRunRepository
     queue: JobQueue
     embeddings: TitleEmbeddingRepository
     neighbors: TitleNeighborRepository
@@ -401,6 +436,8 @@ def build_pipeline(
         episodes=episodes,
         watch_states=watch_states,
         payloads=payloads,
+        bulk=PostgresBulkCatalogRepository(session),
+        import_runs=PostgresImportRunRepository(session),
         runs=runs,
         queue=queue,
         embeddings=embeddings,
@@ -748,6 +785,31 @@ def build_worker(
             pipeline.watch,
             lambda source: open_adapter(pipeline, source),
             user_id=user_id,
+        ),
+    )
+    # Unconditional, joining `MATCH`, `WATCH_HISTORY` and `SYNC`, and in the
+    # *same commit* as `JobKind.BOOTSTRAP` itself -- a member with no claimant
+    # is the queue that grows forever M4 forbade. There is no optional process
+    # resource behind a bulk import: `USHER_BULK_DATA_DIR` and an outbound
+    # client are things every deployment has, and whether the directory is
+    # *writable* is a run-time answer recorded on `import_runs`, not a
+    # build-time absence like a TMDb key or an embedding model.
+    #
+    # **The sink is `logger.info`, never `print`.** `usher bootstrap` renders
+    # the same sentences to a terminal; a worker inside the server process
+    # renders them to the log, which is the only difference between the two
+    # roots and the reason `run_bootstrap` takes a sink at all.
+    worker.register(
+        JobKind.BOOTSTRAP,
+        bootstrap_handler(
+            lambda phase: run_bootstrap(
+                pipeline.bulk,
+                pipeline.import_runs,
+                pipeline.commit,
+                settings,
+                phase,
+                report=_log_bootstrap_line,
+            )
         ),
     )
     # Unconditional, joining `MATCH`, `WATCH_HISTORY` and `SYNC`: nothing
@@ -1405,8 +1467,545 @@ class SearchGauges:
         )
 
 
+# ---------------------------------------------------------------------------
+# The bulk bootstrap, as one dispatch both roots call (PRD 04, M9's E5).
+# ---------------------------------------------------------------------------
+
+#: Where a phase's own report goes. `usher bootstrap` passes `print`; the
+#: `bootstrap` job handler passes a loguru sink, because a worker inside the
+#: server process writing to stdout is not a report, it is noise in a log
+#: aggregator.
+#:
+#: A sink rather than a returned structure, deliberately: every one of these
+#: lines is a *sentence* an operator reads -- "run this BEFORE the TMDb crawl",
+#: "MIXED RELEASES -- get_pair refuses to compare across these" -- and a
+#: structure would mean each root re-rendering the same prose, which is the
+#: second copy this whole extraction exists to prevent. What a machine reads is
+#: `import_runs`, through `GET /admin/bootstrap/status`.
+BootstrapReporter = Callable[[str], None]
+
+
+def _log_bootstrap_line(line: str) -> None:
+    """The worker's sink. One `logger.info` per report line, and `{}` in a
+    dataset name or a tag cannot become a loguru placeholder because the line
+    is passed as an argument rather than as the format string.
+    """
+    logger.info("{line}", line=line)
+
+
+def bulk_client(settings: Settings) -> httpx.AsyncClient:
+    """One client for a whole bootstrap run.
+
+    Module-level rather than inline in `run_bootstrap` so a case can observe
+    that exactly one is built for a `--phase all` run and that it is closed
+    however the run ends. **A client per phase would defeat connection reuse
+    across seven datasets, and a client per worker *pass* would be built
+    ~17,280 times a day** -- `build_worker`'s own docstring records that
+    arithmetic for the same lane, at the same 5 s floor.
+    """
+    return httpx.AsyncClient(timeout=60.0, headers={"User-Agent": settings.bulk_user_agent})
+
+
+async def run_bootstrap(
+    catalog: BulkCatalogRepository,
+    runs: ImportRunRepository,
+    commit: Callable[[], Awaitable[None]],
+    settings: Settings,
+    phase: BootstrapPhase,
+    *,
+    report: BootstrapReporter,
+) -> None:
+    """PRD 04's phased import, run once, for whichever phases `phase` names.
+
+    **One dispatch, two callers.** `usher bootstrap` held the whole of this
+    from M2 until M9, and `POST /admin/bootstrap/{phase}` needs the same
+    thing: a handler that re-implemented it would be a second dispatch that
+    drifts, which `api/deps.py` already argues in the other direction (*"a
+    composition root is the thing that has to agree with the other one"*).
+    This module is the one both roots already share and the one permitted to
+    import `usher.db` and `usher.adapters`; no router names it, so the eighth
+    import contract is untouched.
+
+    **It takes ports and a `commit`, not a session and not an engine.** The
+    engine, the `session_factory` and the process lifetime stay with the
+    caller -- `cli._bootstrap` owns one session per command and
+    `composition.unit_of_work` owns one per unit of work -- which is the same
+    line every other factory in this module draws. It also means the whole
+    dispatch is drivable over fakes, which is what makes "the CLI and the
+    handler run the same phases in the same order" a case rather than a
+    claim.
+
+    **The order is `BootstrapPhase`'s order and three of its edges are
+    measured**; the enum's own docstring carries the evidence, and the one
+    that costs an operator real money is that `credit-names` belongs *before*
+    a TMDb crawl. Two structural facts here are load-bearing for the same
+    reason and are asserted rather than trusted:
+
+    - **`bulk_load_window()` wraps *both* IMDb passes, not each.** The ratings
+      pass writes to the same table, so rebuilding `ix_titles_sort_name` and
+      `ix_titles_name_lower_year` between them pays for the rebuild twice --
+      measured at 35.8 s suspended against 40.2 s kept (**11.0% faster**) with
+      a rebuilt pair **~24% smaller** (97 MB against 127 MB),
+      `.claude/rules/bootstrap-and-datasets.md`.
+    - **`link_crosswalk()` runs after the crosswalk import and only after
+      it.** The import writes the pairs; the link is what attaches them to
+      `titles`, and a crosswalk phase that skipped it stores rows nothing
+      reads.
+
+    🔴 **`bulk_load_window()` engages only on an empty `titles`, and on a
+    *serving* process that guard is now load-bearing rather than incidental.**
+    It drops two indexes and rebuilds them under a `SHARE` lock, so on a live
+    catalog the no-op is what keeps `POST /admin/bootstrap/imdb` from taking
+    browse ordering away from every reader for the length of a rebuild.
+    Asserted in `tests/integration/test_admin_bootstrap.py`, not assumed.
+
+    Nothing here raises for an upstream failure: `BootstrapService.
+    import_dataset` records a `FAILED` `ImportRun` and returns, which is what
+    lets `--phase all` continue past one dead upstream and what makes
+    `import_runs` -- not the queue -- the durable record of a bootstrap. A
+    `bootstrap` job therefore *completes* even when its phase failed, exactly
+    as a `sync` job does when `ReconcileService` records a `FAILED` `SyncRun`.
+    """
+    client = bulk_client(settings)
+    service = BootstrapService(runs, catalog, commit)
+    try:
+        if phase in (BootstrapPhase.IMDB, BootstrapPhase.ALL):
+            # The window wraps both IMDb passes, not each separately: the
+            # ratings pass writes to the same table, and rebuilding the two
+            # ordering indexes between them would pay the cost twice.
+            async with catalog.bulk_load_window():
+                await service.import_dataset(
+                    IMDbTitleDataset(
+                        client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size
+                    ),
+                    _titles_writer(catalog),
+                )
+                await service.import_dataset(
+                    IMDbRatingDataset(
+                        client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size
+                    ),
+                    catalog.apply_ratings,
+                )
+        if phase in (BootstrapPhase.CREDIT_NAMES, BootstrapPhase.ALL):
+            await _credit_names(settings, client, catalog, service, report)
+        if phase in (BootstrapPhase.ALIASES, BootstrapPhase.ALL):
+            await _aliases(settings, client, catalog, service, report)
+        if phase in (BootstrapPhase.TMDB_IDS, BootstrapPhase.ALL):
+            for kind in (TitleKind.MOVIE, TitleKind.SERIES):
+                await service.import_dataset(
+                    TMDbIdDataset(
+                        client,
+                        settings.bulk_data_dir,
+                        kind=kind,
+                        batch_size=settings.bulk_batch_size,
+                    ),
+                    catalog.upsert_tmdb_ids,
+                )
+        if phase in (BootstrapPhase.CROSSWALK, BootstrapPhase.ALL):
+            await service.import_dataset(
+                WikidataCrosswalkDataset(
+                    client,
+                    user_agent=settings.bulk_user_agent,
+                    endpoint=settings.wikidata_endpoint,
+                    batch_size=settings.bulk_batch_size,
+                ),
+                catalog.upsert_crosswalk,
+            )
+            await service.link_crosswalk()
+        if phase in (BootstrapPhase.MOVIELENS, BootstrapPhase.ALL):
+            await _movielens(settings, client, catalog, service, commit, report)
+        logger.info("catalog now holds {count} titles", count=await catalog.count_titles())
+    finally:
+        # In a `finally`, so a phase that raises still gives the connection
+        # pool back. One client for every dataset is the whole reason each
+        # adapter's own `aclose` is a no-op: closing a shared client from
+        # inside one dataset would break its siblings.
+        await client.aclose()
+
+
+def _titles_writer(
+    catalog: BulkCatalogRepository,
+) -> Callable[[Sequence[ImdbTitle]], Awaitable[int]]:
+    """Adapts `upsert_titles`' BulkWriteResult to the `-> int` the service
+    wants. The other three repository methods already return `int`, so only
+    this one needs a wrapper."""
+
+    async def write(rows: Sequence[ImdbTitle]) -> int:
+        result = await catalog.upsert_titles(rows)
+        return result.inserted + result.updated
+
+    return write
+
+
+async def _credit_names(
+    settings: Settings,
+    client: httpx.AsyncClient,
+    catalog: BulkCatalogRepository,
+    service: BootstrapService,
+    report: BootstrapReporter,
+) -> None:
+    """`name.basics` x `title.principals` -> `titles.credit_names`, and the
+    report that says how much of the catalog gained a name.
+
+    **This phase is why weight class B of `search_document` has anything in
+    it for a title TMDb has never reached**, and it makes **no API call at
+    all**. T3 measured the `people` + `credits` entity design at 2.702 GB
+    against a 2.0 GB ceiling and refused it, so no person and no credit row is
+    written here: the join is resolved in the adapter and what lands is a
+    `text[]` on a column that already exists.
+
+    **Run it before the TMDb crawl, not after, and that is measured rather
+    than tidy.** `fill_credit_names` writes only where `enrichment_state =
+    'skeleton'`, so TMDb owns every title it has reached and this phase defers
+    on it -- and the fill re-writes `search_document`, which stales the
+    embedding of every title it touches. On a pure bootstrap that is **0 of
+    1,271,138** embeddings, because nothing is enriched yet; run after a
+    priority-tier crawl it would stale **203,969 of the 204,335 titles with
+    >=100 votes (99.82%)** and 161,486 of the 161,519 movies among them. The
+    report says so on the operator's own terminal rather than only in a PRD.
+
+    **The precondition is checked before the dataset is constructed**, for
+    `_movielens`' reason and against a much larger download: 308 MB of
+    `name.basics` plus 778 MB of `title.principals`. Against an empty catalog
+    every row would match nothing, the run would checkpoint `COMPLETED`, and
+    every later `--phase all` would find that checkpoint and do nothing -- a
+    permanent, invisible failure. No `ImportRun` is created, because the
+    absence of a row is what `bootstrap-status` renders as "this phase has not
+    run".
+
+    **What a resume costs is not free and is worth knowing before killing
+    one:** `BulkCursor.position` is a line offset into `title.principals`
+    only, and the `nconst -> primaryName` index is rebuilt from the whole of
+    `name.basics` on every run, resumed or not -- a measured **19.5 s and
+    345 MiB** before the first batch, with the `title.principals` pass a
+    further 157 s.
+    """
+    if await catalog.count_titles() == 0:
+        report(
+            "credit-names needs a catalog to join against: title.principals is "
+            "keyed on imdb_id and titles is empty. Run --phase imdb first."
+        )
+        return
+
+    tally = {"filled": 0, "unmatched": 0, "deferred": 0}
+
+    async def write(rows: Sequence[ImdbCreditNames]) -> int:
+        result = await catalog.fill_credit_names(rows)
+        tally["filled"] += result.filled
+        tally["unmatched"] += result.unmatched
+        tally["deferred"] += result.deferred
+        return result.filled
+
+    await service.import_dataset(
+        IMDbCreditNamesDataset(client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size),
+        write,
+    )
+    _report_credit_names(tally, await catalog.count_titles(), report)
+
+
+def _report_credit_names(tally: dict[str, int], titles: int, report: BootstrapReporter) -> None:
+    """Three lines: what changed, against what, and when to have run it.
+
+    `filled` counts titles whose array actually changed **on this run**, not
+    titles seen -- a resumed run reports its own half, and a replay over an
+    unchanged dump reports 0 rather than re-reporting the catalog. The
+    denominator is the catalog, printed as a count beside the percentage
+    because a bare percentage is `0/0` on an empty database and says nothing
+    on a small one either.
+    """
+    report(
+        f"credit_names: {tally['filled']} titles filled this run "
+        f"({tally['unmatched']} credited titles this catalog does not hold, "
+        f"{tally['deferred']} deferred to TMDb)"
+    )
+    report(f"  {_percent(tally['filled'], titles)} of {titles} titles in the catalog")
+    report(
+        "  run this BEFORE the TMDb crawl: the fill rewrites search_document, and "
+        "on an enriched priority tier it would stale 99.82% of that tier's embeddings"
+    )
+    if tally["filled"]:
+        report("  then: usher index --backfill, and usher similar --rebuild after it")
+
+
+async def _aliases(
+    settings: Settings,
+    client: httpx.AsyncClient,
+    catalog: BulkCatalogRepository,
+    service: BootstrapService,
+    report: BootstrapReporter,
+) -> None:
+    """`title.akas` -> the `alias` half of `title_search_names`.
+
+    **This is the alias source M6 refused that table for the lack of**, and
+    like `credit-names` it costs no API call: TMDb's `alternative_titles` is
+    in neither `append_to_response` list, so aliases are in `raw_payloads` at
+    all only if the crawl's request shape changes, and this dump needs no such
+    change.
+
+    **The scope handed to `replace_aliases` is the batch's own titles**, in
+    first-seen order, and the port asks for it as a separate argument for a
+    reason this caller cannot fully honour: a title whose akas IMDb has
+    *withdrawn* contributes no row, so no batch names it and its stale aliases
+    stand. A streaming importer has no other scope available -- the
+    alternative is one call naming all 1.27M titles, which is not a batch --
+    and the withdrawal is repaired by a re-import only for titles that still
+    have at least one aka. Worth knowing before reading a stale alias as a
+    bug in the writer.
+
+    **A title's rows all reach one call**, which is `IMDbAkaDataset.group_of`'s
+    whole job: `replace_aliases` deletes by scope before it inserts, so a
+    split title would have its first half deleted by its second half's call --
+    silently, because both halves are inside their own call's scope. Measured
+    over the pinned dump: **924 of 924 batch boundaries** would land inside a
+    title and **3,867 rows** would be written and then deleted.
+
+    The empty-catalog precondition is `_credit_names`' and `_movielens`', for
+    the same reason and against a 486 MiB download.
+    """
+    if await catalog.count_titles() == 0:
+        report(
+            "aliases needs a catalog to compare against: title.akas is keyed on "
+            "imdb_id and titles is empty. Run --phase imdb first."
+        )
+        return
+
+    tally = {"written": 0, "unmatched": 0, "canonical": 0, "duplicate": 0, "read": 0}
+
+    async def write(rows: Sequence[ImdbAka]) -> int:
+        result = await catalog.replace_aliases(
+            rows, imdb_ids=list(dict.fromkeys(row.imdb_id for row in rows))
+        )
+        tally["read"] += len(rows)
+        tally["written"] += result.written
+        tally["unmatched"] += result.unmatched
+        tally["canonical"] += result.canonical
+        tally["duplicate"] += result.duplicate
+        return result.written
+
+    await service.import_dataset(
+        IMDbAkaDataset(client, settings.bulk_data_dir, batch_size=settings.bulk_batch_size),
+        write,
+    )
+    _report_aliases(tally, await catalog.count_titles(), report)
+
+
+def _report_aliases(tally: dict[str, int], titles: int, report: BootstrapReporter) -> None:
+    """What was stored, against what was read, and where the rest went.
+
+    **Three rows in four are not aliases at all** and a report that printed
+    only `written` would look like a broken import. `canonical` is the
+    dominant term -- 5,693,570 of 7,536,366 retained rows (75.5%) restate the
+    title's own name under `lower()` -- and an operator watching it sit at ~0
+    is watching the comparison miss, which looks exactly like a dump full of
+    genuine aliases.
+    """
+    report(
+        f"aliases: {tally['written']} stored this run of {tally['read']} rows read "
+        f"({tally['canonical']} restate the title's own name, "
+        f"{tally['duplicate']} repeat one already kept, "
+        f"{tally['unmatched']} scoped ids matched no title)"
+    )
+    report(f"  {_percent(tally['written'], tally['read'], noun='rows')} of the rows read")
+    report(f"  the catalog holds {titles} titles")
+
+
+async def _movielens(
+    settings: Settings,
+    client: httpx.AsyncClient,
+    catalog: BulkCatalogRepository,
+    service: BootstrapService,
+    commit: Callable[[], Awaitable[None]],
+    report: BootstrapReporter,
+) -> None:
+    """The MovieLens tag genome, its tag vocabulary, and the coverage report
+    that is the actual deliverable of this phase.
+
+    **The precondition is checked before the dataset is constructed, and the
+    outcome it prevents is the worst one available here.** Run against an
+    empty catalog, `import_dataset` would download 350,896,731 B, stream
+    18,472,128 rows, write 0, checkpoint `COMPLETED`, and `bootstrap-status`
+    would show a green phase. Every later `--phase all` would then find a
+    completed checkpoint at the file's end and do nothing, so the failure
+    would be **permanent and invisible**. PRD 08 says every operator command
+    has to work against an empty database -- and "work" means saying why, not
+    succeeding vacuously.
+
+    Three properties of the refusal, each deliberate:
+
+    - **It refuses before the download.** 335 MiB is the cost of finding out
+      late.
+    - **It creates no `ImportRun`.** A `FAILED` row would be a lie -- nothing
+      failed upstream -- and a `COMPLETED` one would be worse. The absence of
+      a row is the honest state, and it is what `bootstrap-status` already
+      renders as "this phase has not run".
+    - **It refuses only on an *empty* catalog.** A non-empty catalog whose
+      join still matches nothing is not an error, it is a *number*, and the
+      coverage report below is where it becomes visible. Refusing on a
+      coverage threshold would be inventing a policy; 1.82% of movies is the
+      expected shape rather than a fault.
+
+    In `--phase all` the precondition is unreachable in the normal case; it
+    exists for the operator who runs `--phase movielens` alone against a
+    fresh database.
+
+    **Measured end to end on 2026-08-04** against a real
+    `pgvector/pgvector:pg17` holding a real `--phase imdb` bootstrap
+    (1,271,570 titles): 16,376 movie runs consumed, **15,565 vectors stored,
+    811 unmatched**, in **23.8 s** wall clock with the archive already
+    cached. The 811 are genome movies whose IMDb id the catalog does not
+    hold -- 5.0% of the genome -- because M2 retains only four `titleType`s
+    and MovieLens carries some it drops. That is the join's miss count doing
+    exactly the job it exists for.
+
+    **A re-run does NOT report updates, and the plan predicted it would.**
+    The first run checkpoints at `position = 16376`, so the second resumes
+    from a *completed* cursor, skips every run, yields no batch, and writes
+    nothing -- 14.7 s of re-parsing to do nothing, and `0 unmatched` because
+    the writer is never called. That is correct and is the same shape
+    `--phase imdb` already has; the insert-vs-update distinction lives in the
+    repository and is covered there, not through a second CLI invocation.
+
+    **The tag vocabulary is written after the drain and only on a COMPLETED
+    run, and both halves are decisions.**
+
+    *After*, because before it would have to `ensure_local` outside
+    `import_dataset`'s `except UsherPortError`. Afterwards the archive is
+    already local and the only failures left are a parse and the database --
+    which still matters, because the parse failure is a `PortDataMalformed`
+    and that family is deliberately **not** in `OPERATOR_ERRORS` (ADR-0026's
+    2026-08-07 amendment put the transport half in and left the content half
+    to keep its stack). The download half of the original argument no longer
+    applies: an unreachable `files.grouplens.org` raises `PortUnavailable`,
+    which is now a sentence wherever it is raised.
+
+    *Only on COMPLETED*, because a vocabulary is what explains the vectors and
+    a failed drain has not finished writing them. The run that eventually
+    completes writes it.
+
+    **This is also the upgrade path, and it is the reason "after" is not a
+    problem.** A catalog bootstrapped under M7 has a *completed*
+    `movielens.genome` checkpoint and no vocabulary at all: re-running the
+    phase resumes from that cursor, yields no batch, writes no vector -- and
+    still reaches this, because the run it returns is `COMPLETED`.
+
+    **`run.rows_written` is the wrong predicate, and not for the reason it
+    looks like.** It is *cumulative across resumes*:
+    `PostgresImportRunRepository.start()` keeps it when the revision has not
+    moved, `BootstrapService._drain` adds each batch's count to the stored
+    one, and an archive that *has* moved resets it to 0 and then re-imports
+    every row. So on the upgrade path above it reads truthy and writes the
+    vocabulary anyway -- measured 2026-08-07, `if run.rows_written:` in place
+    of this line passes all 2,883 unit and all 899 integration cases. The two
+    spellings differ only for a *completed* run that has never written a
+    vector, which is a catalog holding no genome movie at all, and there a
+    vocabulary explains nothing. `COMPLETED` is the honest predicate because
+    "the drain finished" is the question being asked; the defect worth
+    guarding against is a **per-run** tally, which does leave the M7 upgrade
+    without a vocabulary and which
+    `test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_vocabulary`
+    fails on.
+    """
+    if await catalog.count_titles() == 0:
+        report(
+            "movielens needs a catalog to join against: the genome is keyed "
+            "on imdb_id and titles is empty. Run --phase imdb first."
+        )
+        return
+
+    dataset = MovieLensGenomeDataset(
+        client,
+        settings.bulk_data_dir,
+        # NOT `settings.bulk_batch_size`. That default is 50,000, sized for
+        # ~100-byte rows; a GenomeVector carries 1,128 Python floats (~36 kB),
+        # and the whole dataset is 16,376 rows, so 50,000 would yield exactly
+        # one ~590 MB batch, committed once, checkpointing nothing -- and a
+        # killed run would restart from zero every time.
+        batch_size=GENOME_BATCH_SIZE,
+    )
+    revision = await dataset.revision()
+
+    async def write(rows: Sequence[GenomeVector]) -> int:
+        result = await catalog.upsert_genome_vectors(rows, revision=revision)
+        _GENOME_TALLY["unmatched"] += result.unmatched
+        return result.inserted + result.updated
+
+    _GENOME_TALLY["unmatched"] = 0
+    run = await service.import_dataset(dataset, write, revision=revision)
+    tags = 0
+    if run.status is ImportRunStatus.COMPLETED:
+        # The same `revision` the vectors were stamped with, resolved once
+        # above -- which is the whole of what makes `genome_tags` and
+        # `genome_scores` comparable rather than merely both present.
+        vocabulary = await dataset.tag_vocabulary(revision)
+        tags = await catalog.replace_genome_tags(vocabulary, revision=revision)
+        # `import_dataset` commits its own last batch and then returns, so
+        # this write is alone in a fresh transaction and needs its own commit.
+        await commit()
+    _report_coverage(await catalog.genome_coverage(), _GENOME_TALLY["unmatched"], tags, report)
+
+
+# The `unmatched` count has nowhere else to go: `BootstrapService.import_dataset`
+# takes a writer returning `int` (rows written) and knows nothing about a
+# join's misses. A module-level tally rather than a wider port change, because
+# a join's miss count is this one phase's report and not a property of every
+# bulk import -- and the alternative, widening the writer's return type, would
+# touch all four existing call sites for one caller's benefit.
+_GENOME_TALLY = {"unmatched": 0}
+
+
+def _percent(part: int, whole: int, *, noun: str = "titles") -> str:
+    """A percentage, or a sentence when the denominator is zero.
+
+    `noun` names what the denominator counts, because the zero branch prints
+    it and this helper now serves three reports over two different
+    populations -- `0/0` rendered as *"n/a (0 titles)"* under a line about
+    rows read is a wrong sentence rather than a missing one. Defaulted rather
+    than required only because the three existing call sites really are
+    counting titles.
+    """
+    return f"n/a (0 {noun})" if whole == 0 else f"{100.0 * part / whole:.2f}%"
+
+
+def _report_coverage(
+    coverage: GenomeCoverage, unmatched: int, tags: int, report: BootstrapReporter
+) -> None:
+    """Four fractions, the enriched-tier one last because it is the one that
+    matters.
+
+    PRD 05 promised "~7% coverage" and PRD 04 repeated it as "~7% of the
+    priority tier", and that figure has never had a denominator. Three of
+    these are ceilings the *dataset* can reach; the fourth is what the join
+    actually did against this operator's catalog.
+
+    `tags` is how many vocabulary rows this run wrote, `0` when the drain did
+    not complete and no vocabulary was loaded. Printed on the same line as the
+    vector count because the two are one artefact and a vocabulary that
+    silently did not land is the thing an operator most needs to see.
+    **Required rather than defaulted to `0`**, so a caller that forgets it is a
+    type error rather than a report that quietly says no vocabulary landed --
+    the `limit: int = 200` finding in `.claude/rules/testing-discipline.md`,
+    one signature over.
+    """
+    report(f"movielens: {coverage.with_vector} vectors stored ({unmatched} unmatched), {tags} tags")
+    report(f"  {_percent(coverage.with_vector, coverage.titles)} of {coverage.titles} titles")
+    report(f"  {_percent(coverage.with_vector, coverage.movies)} of {coverage.movies} movies")
+    report(
+        f"  {_percent(coverage.enriched_with_vector, coverage.enriched)} of the enriched "
+        f"tier ({coverage.enriched_with_vector} of {coverage.enriched} titles)"
+    )
+    # Only when there is more than one. A single-revision table is the normal
+    # case and a line reading "revisions: 1" is noise; a table carrying two is
+    # a correctness problem `GenomeRepository.get_pair` is already refusing to
+    # blend across, and the fix is a re-import.
+    if len(coverage.revisions) > 1:
+        report("  MIXED RELEASES -- get_pair refuses to compare across these; re-import:")
+        for name, count in coverage.revisions:
+            report(f"    {name}: {count}")
+
+
 __all__ = [
     "NO_CREDENTIALS",
+    "BootstrapReporter",
     "DefaultUserId",
     "Pipeline",
     "QueueGauges",
@@ -1420,11 +2019,13 @@ __all__ = [
     "build_push_applier",
     "build_row_context",
     "build_worker",
+    "bulk_client",
     "embedder",
     "llm_client",
     "metadata_provider",
     "nothing",
     "open_adapter",
+    "run_bootstrap",
     "selected_sources",
     "unit_of_work",
 ]

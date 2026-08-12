@@ -15,6 +15,7 @@ from usher.api.errors import (
 )
 from usher.api.lanes import LaneSupervisor
 from usher.api.routers import (
+    bootstrap,
     collections,
     events,
     health,
@@ -212,6 +213,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # app for the reason above: a route added later inherits the shape
     # instead of having to remember it.
     app.add_exception_handler(StarletteHTTPException, http_error_as_a_problem_document)
+    app.include_router(bootstrap.router)
     app.include_router(collections.router)
     app.include_router(events.router)
     app.include_router(health.router)

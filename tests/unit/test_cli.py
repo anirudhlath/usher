@@ -6,10 +6,13 @@ wiring nothing checks.
 """
 
 import argparse
+import ast
 import asyncio
 import contextlib
 import dataclasses
 import gzip
+import inspect
+import pathlib
 import re
 import uuid
 import zipfile
@@ -20,6 +23,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import usher.cli
 from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.genome_repository import FakeGenomeRepository
 from tests.fakes.import_run_repository import FakeImportRunRepository
@@ -29,22 +33,27 @@ from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.cli import (
     PHASES,
     SYNC_KINDS,
-    _aliases,
     _as_uuid,
-    _credit_names,
+    _bootstrap,
     _filters_from,
-    _movielens,
-    _percent,
     _print_search_answer,
-    _report_coverage,
     _run_lanes,
     _search,
     _vocabulary_line,
     build_parser,
     parse_args,
 )
+from usher.composition import (
+    _aliases,
+    _credit_names,
+    _movielens,
+    _percent,
+    _report_coverage,
+)
 from usher.config import Settings
-from usher.domain.bootstrap import ImportRunStatus
+from usher.db.repositories.bulk import PostgresBulkCatalogRepository
+from usher.db.repositories.import_run import PostgresImportRunRepository
+from usher.domain.bootstrap import BootstrapPhase, ImportRunStatus
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.search import SearchResult
 from usher.ports.bulk import GENOME_TAG_COUNT, ImdbTitle
@@ -455,7 +464,7 @@ async def test_the_genome_phase_refuses_an_empty_catalog_before_downloading(
     )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
-        await _movielens(settings, client, catalog, service, _no_commit)
+        await _movielens(settings, client, catalog, service, _no_commit, print)
 
     assert await catalog.count_titles() == 0
     assert await runs.list_runs() == []
@@ -555,7 +564,7 @@ async def test_the_genome_phase_stores_the_tag_vocabulary_beside_the_vectors(
     service = BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
-        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit)
+        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
 
     stored = catalog.genome_tags()
     assert len(stored) == GENOME_TAG_COUNT
@@ -605,7 +614,7 @@ async def test_the_vocabulary_is_stamped_with_the_token_the_vectors_were_stamped
     service = BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit)
+        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
         # The premise, asserted against the transport rather than against the
         # run: one more resolution really does hand back a different token, so
         # an implementation that resolved a second time would have stamped
@@ -656,7 +665,7 @@ async def test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_voca
     settings = _genome_settings(cache)
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
-        await _movielens(settings, client, catalog, service, _no_commit)
+        await _movielens(settings, client, catalog, service, _no_commit, print)
         assert len(catalog.genome_tags()) == GENOME_TAG_COUNT
         # An M7-era catalog has no vocabulary. Both stores are emptied rather
         # than just the vocabulary, so the assertions below can distinguish
@@ -665,7 +674,7 @@ async def test_a_completed_checkpoint_that_writes_no_vector_still_loads_the_voca
         # replayed every batch reaches the same position.
         catalog._genome_tags.clear()
         catalog._genome.clear()
-        await _movielens(settings, client, catalog, service, _no_commit)
+        await _movielens(settings, client, catalog, service, _no_commit, print)
 
     checkpoint = await runs.get("movielens.genome")
     assert checkpoint is not None
@@ -697,7 +706,7 @@ async def test_an_import_that_failed_writes_no_vocabulary(
     service = BootstrapService(runs, catalog, _no_commit)
 
     async with httpx.AsyncClient(transport=_local_archive(cache)) as client:
-        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit)
+        await _movielens(_genome_settings(cache), client, catalog, service, _no_commit, print)
 
     stored_run = await runs.get("movielens.genome")
     assert stored_run is not None and stored_run.status is ImportRunStatus.FAILED
@@ -798,6 +807,7 @@ def test_the_coverage_report_survives_an_enriched_tier_of_zero(
         ),
         unmatched=0,
         tags=GENOME_TAG_COUNT,
+        report=print,
     )
     printed = capsys.readouterr().out
     assert "1.29% of 1271138 titles" in printed
@@ -827,6 +837,7 @@ def test_the_coverage_report_names_every_release_when_there_is_more_than_one(
         ),
         unmatched=4,
         tags=GENOME_TAG_COUNT,
+        report=print,
     )
     printed = capsys.readouterr().out
     assert "3 vectors stored (4 unmatched)" in printed
@@ -1346,7 +1357,7 @@ async def test_the_credit_names_phase_reads_name_basics_before_title_principals(
     asked: list[str] = []
 
     async with httpx.AsyncClient(transport=_recording_local(cache, asked)) as client:
-        await _credit_names(_expansion_settings(cache), client, catalog, service)
+        await _credit_names(_expansion_settings(cache), client, catalog, service, print)
 
     assert asked, "the premise: the phase reached the transport at all"
     assert asked.index("name.basics.tsv.gz") < asked.index("title.principals.tsv.gz")
@@ -1393,7 +1404,7 @@ async def test_the_alias_phase_stores_every_alias_even_when_a_title_straddles_a_
     catalog, service = await _seeded_catalog()
 
     async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
-        await _aliases(_expansion_settings(cache, batch_size=1), client, catalog, service)
+        await _aliases(_expansion_settings(cache, batch_size=1), client, catalog, service, print)
 
     stored = {
         imdb_id: tuple(name for _, name, _, _ in catalog.search_names(imdb_id))
@@ -1422,7 +1433,7 @@ async def test_the_alias_phase_writes_region_and_language_and_leaves_person_rows
     catalog.seed_person_search_name("tt99000020", "Ada Synthetic")
 
     async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
-        await _aliases(_expansion_settings(cache), client, catalog, service)
+        await _aliases(_expansion_settings(cache), client, catalog, service, print)
 
     assert catalog.search_names("tt99000020") == (
         ("alias", '"A Quoted Synthetic Alias"', "GB", None),
@@ -1451,7 +1462,7 @@ async def test_the_credit_names_phase_refuses_an_empty_catalog_before_downloadin
     service = BootstrapService(runs, catalog, _no_commit)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
-        await _credit_names(_expansion_settings(tmp_path), client, catalog, service)
+        await _credit_names(_expansion_settings(tmp_path), client, catalog, service, print)
 
     assert await runs.list_runs() == []
     printed = capsys.readouterr().out
@@ -1475,7 +1486,7 @@ async def test_the_alias_phase_refuses_an_empty_catalog_before_downloading(
     service = BootstrapService(runs, catalog, _no_commit)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
-        await _aliases(_expansion_settings(tmp_path), client, catalog, service)
+        await _aliases(_expansion_settings(tmp_path), client, catalog, service, print)
 
     assert await runs.list_runs() == []
     printed = capsys.readouterr().out
@@ -1512,7 +1523,7 @@ async def test_the_credit_names_report_carries_a_denominator_and_the_crawl_order
     service = BootstrapService(FakeImportRunRepository(), catalog, _no_commit)
 
     async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
-        await _credit_names(_expansion_settings(cache), client, catalog, service)
+        await _credit_names(_expansion_settings(cache), client, catalog, service, print)
 
     printed = capsys.readouterr().out
     assert "credit_names: 1 titles filled this run" in printed
@@ -1550,7 +1561,7 @@ async def test_the_alias_report_says_where_the_rows_that_are_not_aliases_went(
     catalog, service = await _seeded_catalog()
 
     async with httpx.AsyncClient(transport=_recording_local(cache, [])) as client:
-        await _aliases(_expansion_settings(cache), client, catalog, service)
+        await _aliases(_expansion_settings(cache), client, catalog, service, print)
 
     printed = capsys.readouterr().out
     assert "aliases: 1 stored this run of 4 rows read" in printed
@@ -1597,3 +1608,74 @@ def test_every_subcommands_help_renders() -> None:
         with pytest.raises(SystemExit) as exit_info:
             parser.parse_args([name, "--help"])
         assert exit_info.value.code == 0, name
+
+
+async def test_the_cli_reaches_the_shared_dispatch_and_holds_no_second_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`usher bootstrap` is `composition.run_bootstrap` plus an engine, and
+    both halves of that sentence are asserted.
+
+    The behavioural proof that the two roots run the *same* phases in the
+    same order is
+    `tests/unit/test_composition.py::test_the_cli_and_the_handler_run_the_
+    same_phase_dispatch`, which needs a `Pipeline` and so lives beside the
+    helper that builds one. What can only be seen from here is the two facts
+    that make that proof about the CLI at all: this command calls the shared
+    function with the phase it was given and `print` as the sink, and this
+    module can no longer spell a dispatch of its own.
+
+    **The structural half is not decoration.** *"The CLI calls
+    `run_bootstrap`"* is satisfied by a module that calls it and then does
+    something else beside it, which is exactly the drift the extraction
+    exists to prevent -- so `usher.cli` is asserted to name no `BulkDataset`
+    and no `BootstrapService`, the way `test_api_bootstrap.py` asserts it of
+    the router.
+
+    No connection is opened: `create_async_engine` is lazy, an `AsyncSession`
+    that issues no statement never connects, and `run_bootstrap` is replaced
+    before it could.
+    """
+    seen: list[tuple[object, ...]] = []
+
+    async def record(*args: object, **kwargs: object) -> None:
+        seen.append((*args, kwargs.get("report")))
+
+    monkeypatch.setattr(usher.cli, "run_bootstrap", record)
+    settings = Settings(database_url="postgresql+asyncpg://u:p@localhost/db", secret_key="0" * 32)
+
+    await _bootstrap(settings, BootstrapPhase.CREDIT_NAMES)
+
+    assert len(seen) == 1
+    catalog, runs, _commit, passed_settings, phase, report = seen[0]
+    assert isinstance(catalog, PostgresBulkCatalogRepository)
+    assert isinstance(runs, PostgresImportRunRepository)
+    assert passed_settings is settings
+    assert phase is BootstrapPhase.CREDIT_NAMES
+    assert report is print
+
+    source = pathlib.Path(inspect.getfile(usher.cli)).read_text()
+    named: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            named.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            named.add(node.module)
+    assert named, "the import scan found nothing, so it proves nothing"
+    assert [one for one in named if one.startswith("usher.adapters.bulk")] == []
+    assert "usher.services.bootstrap" not in named
+
+
+def test_the_phase_choices_are_the_vocabulary_and_not_a_second_copy_of_it() -> None:
+    """`--phase`'s `choices` and `BootstrapPhase` are one set, asserted as an
+    equality between two derivations rather than as two spelled-out lists.
+
+    Two lists would let `usher bootstrap --phase aliases` succeed against a
+    route that rejects it, or the reverse -- and a case that spelled both out
+    would go stale in exactly the same commit the drift arrived in. The
+    *order* is pinned separately, below, because a set says nothing about
+    execution order and the order is the measured part.
+    """
+    assert set(PHASES) == {phase.value for phase in BootstrapPhase}
+    assert set(build_parser().parse_args(["bootstrap"]).__dict__) >= {"phase"}
+    assert build_parser().parse_args(["bootstrap"]).phase == BootstrapPhase.ALL.value

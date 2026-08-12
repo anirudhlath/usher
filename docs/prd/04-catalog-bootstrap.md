@@ -546,6 +546,26 @@ is clamped rather than rejected, and a caller may not read an exhausted feed
 as proof that nothing older changed — the full recovery path is a
 re-enrichment sweep over `titles`, not this feed.
 
+**A phase can be started over HTTP since M9.** `POST /admin/bootstrap/{phase}`
+enqueues `JobKind.BOOTSTRAP` keyed on the phase and answers **202**; the work
+runs on the single `JobWorker` lane, through the *same* dispatch
+`usher bootstrap` runs (`composition.run_bootstrap`), so the two roots cannot
+disagree about which phases exist or in what order they run. `{phase}` is
+typed as `BootstrapPhase`, so the seven members above are what `/openapi.json`
+describes and an unknown phase is a 422 rather than a 404. **Nothing
+schedules it** — there is still no scheduler anywhere in `src/`, so a nightly
+re-import is an operator's press or a cron entry
+([09](09-roadmap.md)), and the daily cadence in the table above is a
+recommendation rather than a behaviour. Three consequences are worth stating
+where an operator will read them: a bootstrap is the longest unit of work in
+this system and holds the lane for its duration
+([08](08-operations.md)); the *server* process now writes to
+`USHER_BULK_DATA_DIR`, which in the shipped container is a bind mount; and the
+ordering constraint above is unenforced by design — **run `credit-names`
+before a TMDb crawl, not after**, because the fill re-writes
+`search_document` and would stale 203,969 of the 204,335 ≥100-vote titles'
+embeddings if run the other way round.
+
 ## Licensing — ship importers, never data
 
 Usher's MIT license is unaffected by any of these sources, because Usher never

@@ -35,6 +35,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import SecretStr
 
+from tests.fakes.bulk_catalog_repository import FakeBulkCatalogRepository
 from tests.fakes.collection_repository import FakeCollectionRepository
 from tests.fakes.credential_store import FakeCredentialStore
 from tests.fakes.credit_repository import FakeCreditRepository
@@ -43,6 +44,7 @@ from tests.fakes.embedding import FakeEmbedder
 from tests.fakes.episode_repository import FakeEpisodeRepository
 from tests.fakes.event_publisher import FakeEventPublisher
 from tests.fakes.image_repository import FakeImageRepository
+from tests.fakes.import_run_repository import FakeImportRunRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient
@@ -276,6 +278,8 @@ def _pipeline(
         episodes=episodes,
         watch_states=watch_states,
         payloads=FakeRawPayloadStore(),
+        bulk=FakeBulkCatalogRepository(),
+        import_runs=FakeImportRunRepository(),
         runs=runs,
         queue=queue,
         embeddings=embeddings,

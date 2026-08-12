@@ -29,6 +29,7 @@ from tests.fakes.sync_run_repository import FakeSyncRunRepository
 from tests.fakes.title_match_repository import FakeTitleMatchRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
+from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.enums import EnrichmentState, MatchMethod, SourceKind, TitleKind
 from usher.domain.jobs import Job, JobKind
 from usher.domain.source import Source
@@ -49,6 +50,7 @@ from usher.services.curation import CurationReport, CurationService
 from usher.services.enrich import EnrichService
 from usher.services.handlers import (
     SourceBinding,
+    bootstrap_handler,
     curate_handler,
     enrich_handler,
     match_handler,
@@ -1065,3 +1067,75 @@ def _upsert(
         added_at=None,
         last_seen_at=_OBSERVED,
     )
+
+
+# ---------------------------------------------------------------------------
+# `bootstrap` -- the phase, and the key that is not a UUID (M9's E5).
+# ---------------------------------------------------------------------------
+
+
+async def test_a_bootstrap_job_runs_the_phase_its_key_names() -> None:
+    """The whole handler: one key, converted once, handed to the runner.
+
+    Parametrised over the enum rather than over one member, because the
+    conversion is the only logic here and a handler that hard-coded `ALL` --
+    the plausible mistake, since `all` is the CLI's default -- would satisfy
+    a case that only ever posted `all`.
+    """
+    for phase in BootstrapPhase:
+        ran: list[BootstrapPhase] = []
+
+        async def run(one: BootstrapPhase, ran: list[BootstrapPhase] = ran) -> None:
+            ran.append(one)
+
+        await bootstrap_handler(run)(Job(kind=JobKind.BOOTSTRAP, key=phase.value))
+
+        assert ran == [phase]
+
+
+async def test_a_bootstrap_key_outside_the_vocabulary_parks_rather_than_kills() -> None:
+    """`BootstrapPhase("embeddings")` is a `ValueError`, which `JobWorker`
+    lets propagate on purpose -- so an unparseable key would take the process
+    down instead of parking one row.
+
+    The same argument `_uuid_key` makes for the four UUID-keyed kinds,
+    arriving at the one key that is neither a UUID nor an opaque adapter
+    string. Reachable only from a hand-written row or a member deleted
+    between the enqueue and the claim, since both writers of this key derive
+    it from the enum.
+
+    The message names the vocabulary rather than only the offending value: an
+    operator reading `jobs.last_error` can act on the list and cannot act on
+    "not a phase".
+    """
+    ran: list[BootstrapPhase] = []
+
+    async def run(one: BootstrapPhase) -> None:
+        ran.append(one)
+
+    with pytest.raises(PortDataMalformed) as caught:
+        await bootstrap_handler(run)(Job(kind=JobKind.BOOTSTRAP, key="embeddings"))
+
+    assert ran == []
+    assert "imdb" in str(caught.value)
+    assert "movielens" in str(caught.value)
+    assert caught.value.detail == "embeddings"
+
+
+async def test_a_bootstrap_handler_absorbs_nothing_its_runner_raises() -> None:
+    """`curate_handler`'s argument, one kind over: `JobWorker` parks a
+    `PortDataMalformed` and backs everything else off, and it can only do
+    that with an exception it is allowed to see.
+
+    A *failed phase* is a different thing and does not reach here at all --
+    `BootstrapService.import_dataset` records a `FAILED` `ImportRun` and
+    returns normally, so the job completes and `import_runs` is the durable
+    record. What this case is about is the runner itself failing, which means
+    a bug or an unwritable `USHER_BULK_DATA_DIR`.
+    """
+
+    async def run(_: BootstrapPhase) -> None:
+        raise PortUnavailable("USHER_BULK_DATA_DIR is not writable")
+
+    with pytest.raises(PortUnavailable):
+        await bootstrap_handler(run)(Job(kind=JobKind.BOOTSTRAP, key="imdb"))
