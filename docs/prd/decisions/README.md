@@ -38,6 +38,7 @@ otherwise be lost and re-litigated in six months.
 | [0028](0028-the-pool-is-the-contract.md) | The pool is the contract: candidates are indices, and the validator does not trust the schema | Accepted — settles PRD 06's validation step |
 | [0029](0029-the-playback-ticket-changes-the-artifact-not-the-grant.md) | The playback ticket changes the artifact, not the grant | Accepted — the M9 successor ADR-0012 named |
 | [0030](0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md) | The problem-code vocabulary is designed once, against a real 503, and its closure is encoded | Accepted — settles PRD 07's `### Errors` |
+| [0031](0031-the-two-tier-suggest.md) | The two-tier suggest: one route, two indexes, and a minimum prefix length | Accepted — amends ADR-0002 and discharges its failed gate's follow-up |
 | [0032](0032-the-image-proxy-clamps-to-a-ladder.md) | The image proxy clamps to a ladder of provider rungs, and no decoder is taken | Accepted — corrects PRD 02, 07 and 08 |
 | [0033](0033-an-event-is-a-statement-about-committed-state.md) | An event is a statement about committed state — an ordering rule, not a durability one | Accepted — corrects PRD 09's carried-debt entry |
 | [0034](0034-the-cursor-carries-a-position.md) | The cursor carries a sort position and nothing else, and no port takes one | Accepted — settles PRD 07's `### Pagination` |

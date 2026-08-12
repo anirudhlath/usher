@@ -184,6 +184,7 @@ async def _service(
     return SearchService(
         index,
         _ScriptedSuggest(),
+        _ScriptedSuggest(),
         titles,
         media_items,
         households,

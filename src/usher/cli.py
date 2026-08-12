@@ -73,7 +73,7 @@ from usher.services.curation_validate import DropReason
 from usher.services.home import ComposeReport, HomeService
 from usher.services.rows import ROW_PROVIDERS, enabled_row_providers, row_provider_settings
 from usher.services.rows.cache import RowCache
-from usher.services.search import SearchAnswer, SemanticSearchUnavailable
+from usher.services.search import SearchAnswer, SemanticSearchUnavailable, SuggestTier
 from usher.telemetry import (
     configure_telemetry,
     register_queue_gauges,
@@ -861,21 +861,38 @@ def _print_search_answer(answer: SearchAnswer) -> None:
         )
 
 
-async def _suggest(settings: Settings, *, prefix: str, limit: int) -> None:
-    """Type-ahead, at a terminal.
+async def _suggest(settings: Settings, *, prefix: str, limit: int, tier: str) -> None:
+    """Type-ahead, at a terminal, from whichever of the two tiers is asked for.
 
     **No embedder in either direction.** `SuggestIndex` is its own port
-    (🔶 2) and `PostgresSuggestIndex` queries `titles` through a trigram index
-    and writes nothing, so this command starts in 0.13 s on any deployment --
-    including one with no embedding extra installed at all, which is PRD 05's
+    (🔶 2) and neither implementation loads a model -- one queries `titles`
+    through a trigram index and the other through a btree, and both write
+    nothing -- so this command starts in 0.13 s on any deployment, including
+    one with no embedding extra installed at all, which is PRD 05's
     catalog-lookup tier serving all 1.27M titles with no model.
 
     No coverage line, and that is not an omission: there is no semantic lane
     here to have degraded.
+
+    **`--tier` defaults to `fuzzy` where `GET /search/suggest?tier=` defaults
+    to `prefix`, and the two defaults disagree on purpose** (ADR-0031). This
+    command has been the typo-tolerant one since M6 and CLAUDE.md documents it
+    as such; a route is driven per keystroke and a command is typed once, so
+    the number that decides the route's default -- 2,707 ms p95 at one
+    character -- is a cost this caller pays once and can afford. Making them
+    agree would have to break one of the two, and `SearchService.suggest`
+    therefore takes `tier` as a **required keyword with no default at all**, so
+    neither boundary can inherit the other's answer by accident.
+
+    **And no minimum prefix length here, for the same reason.** The route
+    refuses tier 1 below four characters because a keystroke path cannot afford
+    the short end of B3's curve; refusing it here would take a capability away
+    from the one caller that can, and diagnosing tier 1 at one character is
+    exactly what an operator would open this command to do.
     """
     async with _session_for(settings) as session:
         pipeline = build_pipeline(session, settings)
-        results = await pipeline.search.suggest(prefix, limit=limit)
+        results = await pipeline.search.suggest(prefix, limit=limit, tier=SuggestTier(tier))
     for result in results:
         year = f" ({result.year})" if result.year else ""
         print(f"{result.score:6.4f}  {result.name}{year}  {result.title_id}")
@@ -1604,6 +1621,15 @@ def build_parser() -> argparse.ArgumentParser:
     suggest = sub.add_parser("suggest", help="type-ahead over titles")
     suggest.add_argument("prefix")
     suggest.add_argument("--limit", type=int, default=10)
+    # **Defaults to `fuzzy`, where the route defaults to `prefix`.** Stated in
+    # `_suggest`'s docstring and in ADR-0031: this command has been the
+    # typo-tolerant one since M6, and a command typed once can afford a cost a
+    # keystroke path cannot.
+    suggest.add_argument(
+        "--tier",
+        choices=[tier.value for tier in SuggestTier],
+        default=SuggestTier.FUZZY.value,
+    )
 
     similar = sub.add_parser("similar", help="titles like this one, or rebuild the table")
     # Optional because `--rebuild` is the write form of the same command. Two
@@ -1870,7 +1896,7 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> None:
             )
         )
     elif args.command == "suggest":
-        asyncio.run(_suggest(settings, prefix=args.prefix, limit=args.limit))
+        asyncio.run(_suggest(settings, prefix=args.prefix, limit=args.limit, tier=args.tier))
     elif args.command == "similar":
         asyncio.run(
             _similar(

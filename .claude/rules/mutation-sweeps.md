@@ -3875,3 +3875,132 @@ cover `ports/`, `services/curation*`, `services/jobs.py`,
 them reads `services/handlers.py`** — the same measurement D8's entry records,
 re-checked rather than inherited. The two scans this task itself adds parse
 `api/routers/bootstrap.py`'s and `usher/cli.py`'s **imports**, not their prose.
+
+## M9 Task B5 — `GET /search/suggest`'s two tiers, and a CLI default nothing pinned (2026-08-12)
+
+**19 plants over `api/routers/search.py`, `api/dto/search.py`,
+`services/search.py` and `cli.py` — 16 behavioural targets of which 15 were
+killed on the first pass and **1 was a real coverage gap since closed**, plus 3
+equivalent-mutant controls surviving all five gate steps. 1 PLANT-DID-NOT-LAND
+re-spelled and then killed; 0 BAD-ANCHOR, 0 BROKEN-MUTATION, 0 DID-NOT-RUN, 0
+HUNG.** The three-way split is the one that says something: "16 killed" would
+hide the round's whole yield.
+
+Harness at `/var/tmp/m9-B5/plants.py`, **outside the working tree** for V1's
+reason and under `/var/tmp` rather than `/tmp`, which is tmpfs on this host.
+Plant list and **expected verdicts** written to `/var/tmp/m9-B5/PLANTS.md`
+before the first run. Tree committed at `026509f` first, so `git status` is the
+verification — clean afterwards, with `git diff -- src/ docs/ tests/fakes
+tests/integration` empty. `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept
+under **both** `src/` and `tests/` before every run, `compile()` as the dry
+run, an exact anchor count (`count(old) == 1`) asserted before each plant, the
+landing spelled `old not in landed and new in landed` **inside** the `try`, a
+900 s per-plant timeout reporting `HUNG` as its own verdict, `md5sum`-verified
+restore, and no second `-q`.
+
+**Selection:** `test_api_suggest.py`, `test_services_search.py`,
+`test_api_search.py`, `test_decision_register.py` (unit) and
+`test_search_route.py`, `test_pipeline_deps.py` (integration) — ~35 s a run,
+green before and after. Scoped rather than whole-suite for B2's and D4's
+reason: `tests/integration/test_sse_end_to_end.py` is intermittent on this tree
+and predates M9, and **a sweep scored on "did the run fail" cannot run against
+a suite holding a flaky case**.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 `_MIN_CHARS_FOR_TIER` gives the fuzzy tier the prefix tier's minimum | KILLED | 2 |
+| T2 the tier parameter ignored at selection | KILLED | 8 |
+| T3 the tier map wires the fuzzy index into both slots | KILLED | 12 |
+| T4 the tier echo hard-coded | KILLED | 2 |
+| T5 the suggest hits re-ranked after hydration | KILLED | 2 — the no-re-rank case on both arms |
+| T6 `_MIN_PREFIX_CHARS` 4 → 3 | KILLED | 4 |
+| T7 `_MIN_PREFIX_CHARS` 4 → 1 | KILLED | 5 |
+| T8 `len(q.strip())` → `len(q)` | KILLED | **1 — the padding case alone** |
+| T9 the bound applied to the answer rather than in front of the call | KILLED | 5 |
+| T10 the refusal misreports the bound it applied | KILLED | 3 |
+| T11 `?tier=` defaults to `fuzzy` | KILLED | 4 |
+| T12 the query echoed stripped | KILLED | 2 |
+| T13 the hydration duplicated per tier | KILLED | **1 — only the structural case** |
+| T14 `SearchService.suggest`'s blank guard deleted | KILLED | 2 |
+| T15 the route drops `limit` | KILLED | 1 |
+| **T16 `usher suggest --tier` defaults to `prefix`** | **SURVIVED, then closed** | 0, then 1 |
+
+**T16 is the round's yield and it is a survivor of the *suite*, not of the
+selection — which is why it was re-measured before being written up.** The
+plant list predicted it would survive *this* selection, because the CLI arm is
+not in it; the honest check is what the wider suite does, and flipping that
+default **passed all 3,923 unit cases and the whole of
+`tests/integration/test_cli_pipeline.py`**. It is not an equivalent mutant. The
+route defaults to `prefix` and this command defaults to `fuzzy` **on purpose**
+(ADR-0031: a route is driven per keystroke and pays 2,707 ms p95 at one
+character; a command is typed once), `usher suggest` has been the typo-tolerant
+one since M6, and CLAUDE.md's Commands section documents it as *"type-ahead,
+typo-tolerant"*. Under the mutant `usher suggest "the quie"` answers `no match`
+for a misspelt name — quiet, correct-looking, and the exact capability the
+command exists for. Closed by
+`test_suggest_defaults_to_the_tier_that_tolerates_a_typo`, which asserts
+through the **enum** rather than against the string, for `SuggestTier`'s own
+reason; re-planted, it fails **that case alone** out of 3,893.
+
+**The general form, and it is a shape this file does not yet hold: when one
+capability has two boundaries whose defaults deliberately disagree, each
+default needs its own case, and the one that is not the headline is the one
+nobody writes.** Fifteen plants covered the route's default from four angles
+(T11 alone fails four cases). The CLI's default — the *other* half of the same
+decision, and the half with a documented promise behind it — had nothing at
+all. Nearest relative is D4's `TICKET_TTL_SECONDS` and B9's `CAST_LIMIT`, where
+the constant was pinned as *in force* and not as a *value*; here it was not
+pinned at all, because the argument for it lives in a docstring and a
+docstring is not a check.
+
+**Two results worth carrying beyond the survivor.**
+
+- **T8 and T13 each fail exactly one case, and they are the two cases that
+  would not have existed without writing the plant list first.** `len(q)` for
+  `len(q.strip())` is invisible to every assertion about the response body — a
+  padded prefix runs a query that matches nothing, which renders identically to
+  a refusal — and is caught only by the arm asserting the **port call**. And
+  the per-tier duplication of the hydration answers identically on both tiers
+  today, by construction: it is caught only by
+  `test_the_hydration_is_written_once_rather_than_once_per_tier`, which parses
+  the module and counts the two reads in `suggest`'s body. C4's move for a
+  defect whose only symptom was which thread ran, arriving at a defect whose
+  only symptom is *when the two arms diverge*, which is a date rather than a
+  state.
+- **T3's blast radius (12) is not evidence and T2's (8) is.** Wiring the fuzzy
+  index into both slots breaks the *prefix* arm of every parametrised suggest
+  case, so most of those twelve are collateral from a fixture that can no
+  longer find its own row; the two that say something are the two-armed route
+  case and `test_the_search_service_the_graph_resolves_holds_both_suggest_tiers`,
+  which is the only thing in the repository that can see the **types** the
+  composition root handed over.
+
+**The PLANT-DID-NOT-LAND is the landing check earning its spelling for the
+third time in this milestone**, after E2's and T7's. T10's first draft
+(`min_query_length` reported from a new local) was **additive** — `old` is a
+prefix of `new`, so `old not in landed` is false after a plant that landed
+perfectly — and the harness refused it rather than scoring it. Re-spelled as a
+substitution on the refusing return (`min_query_length=minimum` →
+`min_query_length=1`) it lands and kills three. The assertion sits inside the
+`try`, so the raise still restored the tree; `git status` was clean
+immediately afterwards, which is the check the A6 entry asks for.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest tests/unit` |
+|---|---|---|---|---|---|
+| C1 `_MIN_CHARS_FOR_TIER`'s two entries in the other written order | PASS | PASS | PASS | PASS | PASS |
+| C2 `SuggestResultResponse.of`'s `year=`/`popularity=` arguments in the other written order | PASS | PASS | PASS | PASS | PASS |
+| C3 one sentence of `SuggestResponse`'s docstring reworded | PASS | PASS | PASS | PASS | PASS |
+
+C1 and C2 are facts about the *code* rather than about what the tools look at:
+a `dict` literal with two distinct, independent enum keys read only by
+`_MIN_CHARS_FOR_TIER[tier]`, neither value referencing the other — the
+`_CODE_FOR_STATUS` / `_PLAY_FAILURES` / `ARTWORK_FOR_HINT` precedent; and
+keyword arguments bound by name over two side-effect-free attribute reads on
+one frozen dataclass, which is `_ledger_row`'s. **C2 is deliberately not a
+reorder of a positional call**, which A5's entry is the reason for checking
+rather than assuming, and neither control is an `__all__` reorder, which
+`RUF022` rejects. C3 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`: twenty-seven
+files scan source, **none of them reads `api/dto/search.py`**, and the one that
+reads `api/routers/search.py` (`test_api_search.py`'s result-ceiling case)
+walks `ast.Attribute` nodes, which a docstring is not.

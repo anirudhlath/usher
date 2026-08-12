@@ -1043,6 +1043,16 @@ def get_search_service(session: SessionDep, settings: SettingsDep) -> SearchServ
     watch-state sync, similarity, ten row providers, the curation pool -- to
     reach one of its fields, once per request.
 
+    **One dependency serves two routes and three indexes.** `GET /search` and
+    `GET /search/suggest` share this provider, and the suggest half is two
+    `SuggestIndex` implementations rather than one (ADR-0031): the btree prefix
+    probe and the trigram path, selected per request by `?tier=`. Both are
+    built inside `build_search_service` and neither is conditional, so there is
+    no deployment on which `?tier=prefix` has no honest answer. A second
+    provider for the suggest route would be a second wiring of the same
+    session-scoped objects -- and, worse, one that could disagree with this one
+    about which index is which while both returned a working `SearchService`.
+
     **No embedder, and it is the same call `get_taste_service` and
     `get_home_service` make.** `create_app`'s lifespan builds a model only
     when `worker_enabled` and does not put it on `app.state`, so a dependency

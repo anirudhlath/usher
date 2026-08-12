@@ -70,6 +70,7 @@ from usher.adapters.factory import ConfiguredSourceAdapterFactory
 from usher.adapters.images import DiskImageBlobStore, ProviderCdnImageFetcher
 from usher.adapters.llm import OpenAICompatibleClient
 from usher.adapters.search.postgres import PostgresSearchIndex, PostgresSuggestIndex
+from usher.adapters.search.prefix import PostgresPrefixSuggestIndex
 from usher.adapters.tmdb import TmdbClient, TmdbMetadataProvider
 from usher.config import Settings
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
@@ -574,14 +575,25 @@ def build_search_service(
     would construct a matcher, a reconciler, a watch-state syncer, a
     similarity service, ten row providers and a candidate pool -- for every
     keystroke-adjacent request -- to reach one field of the result. This
-    builds four objects.
+    builds eight objects.
 
-    **The two indexes are built here rather than being handed in**, for the
+    **The indexes are built here rather than being handed in**, for the
     reason `build_pipeline` gave when it held this code: nothing outside
     `SearchService` has any business holding a `SearchIndex`. PRD 05's split
     is retrieve-then-rank, and a caller that could reach the generator
     directly would get unranked hits with no `owned` flag and no
     `SearchAnswer` to say what ran.
+
+    **Three indexes rather than two since M9's B5**, because the suggest path
+    is two of them: `PostgresPrefixSuggestIndex` is tier 1 and
+    `PostgresSuggestIndex` is tier 2, and `GET /search/suggest?tier=` picks
+    between them per request (ADR-0031). Both are built here and neither is
+    conditional -- `m09a` creates the two `text_pattern_ops` btrees
+    unconditionally, so there is no deployment where one tier exists and the
+    other does not, and an optional one would be a `?tier=prefix` request with
+    no honest answer. This is the *one* assembly of them: a route wiring its
+    own would be a second wiring that returns a working `SearchService`, which
+    is the silent drift this function exists to prevent.
 
     **The household reaches `search` as an argument, never as a collaborator
     bound here.** What this function wires is the *repository* the watch-state
@@ -614,6 +626,11 @@ def build_search_service(
             ef_search=settings.search_hnsw_ef_search,
             rrf_k=settings.search_rrf_k,
         ),
+        # Tier 1 first, matching `SuggestTier`'s own order and the route's.
+        # Two adjacent arguments of one type, so the names on the other side
+        # are what stop a swap -- swapped, the keystroke tier becomes the
+        # 33.6 ms one and both still answer.
+        PostgresPrefixSuggestIndex(session),
         PostgresSuggestIndex(
             session,
             threshold=settings.search_trigram_threshold,

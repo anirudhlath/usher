@@ -1,4 +1,5 @@
-"""`GET /search` — PRD 07's `### Screens`, over the retrieval M6 finished.
+"""`GET /search` and `GET /search/suggest` — PRD 07's `### Screens`, over the
+retrieval M6 finished.
 
 **Why a route only now.** M6 built `SearchService`, `PostgresSearchIndex`, RRF
 fusion and the ranking blend and deliberately added **no HTTP route**,
@@ -53,6 +54,62 @@ error on the wire for every viewer who selected their query and typed over it.
 503 to give a code to and cannot 500 on a push-only deployment. It is
 `GET /home`'s property, one route over, and it is what makes `?mode=semantic`
 the only failure below.
+
+## `GET /search/suggest` — two tiers on one route (ADR-0031)
+
+**The server does not debounce; the client does.** ADR-0002's typo-tolerance
+gate failed and what it bought is two indexes rather than one tuned index, so
+this route's whole job is to make the two *separately askable* and to say which
+one answered. Nothing here holds a timer, coalesces a request, or drops one:
+a debounce is a decision about a keyboard, the server has never seen one, and a
+server-side one would add latency to the tier whose entire purpose is not to
+have any. The gate's own conclusion is the design — *"btree prefix on every
+keystroke, the trigram path debounced behind it"* — and both halves of that
+sentence name the client.
+
+**Tier 2's latency is the cost the split exists to keep off a keystroke**, and
+it is unchanged by this route: the gate measured the shipped configuration at
+**p50 33.6 ms / p95 211 ms / max 730 ms** against a 50 ms as-you-type budget —
+over by 4x — and M9's B3 reproduced it at **p50 39.59 ms** on a different draw
+of the same 2,993 cases against the same catalog. This route adds a parameter
+and a DTO; it changes no statement, no floor and no cap.
+
+⚠️ **But "tier 2's latency is what the split buys" is only true from seven
+characters up, and stating it as a single p50 gets the short end exactly
+backwards.** B3 measured tier 1 *per prefix length*, which is the workload a
+keystroke actually is — the gate's 0.6 ms figure was over whole mutated names,
+which are long and selective. p95, on the 1,271,138-title catalog with a
+10,896,525-row `title_search_names` arm:
+
+| characters typed | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| tier 1, `titles` only | 291 ms | 51 ms | 15 ms | 5 ms | 19 ms | 14 ms | 2.0 ms | 2.3 ms |
+| tier 1, union | **2,707 ms** | 809 ms | 303 ms | 112 ms | 100 ms | 86 ms | 2.3 ms | 2.6 ms |
+
+**Below seven characters tier 1 is the slower tier**, by up to two orders of
+magnitude at the first keystroke — so at the short end the split's cost and its
+benefit are the other way round from the sentence above, and a reader given one
+p50 would conclude the opposite of what was measured. Both arms miss a 10 ms
+budget below seven characters, which is why B3 declined to narrow the union: it
+would have moved a 291 ms first keystroke to where a 2,707 ms one had been. The
+mechanism is not the sort (a 26 kB top-N heapsort) but the `UNION`'s
+de-duplication spilling 47 MB and a lossy bitmap heap recheck. ADR-0031 carries
+the full argument and the alternatives.
+
+**Hence `_MIN_PREFIX_CHARS`, which is this route's answer and the only lever a
+request boundary has.** See its own comment for why four.
+
+**No household, unlike `GET /search`.** `SearchService.suggest` takes no
+`user_id` — the suggest path runs no blend, so there is no watch-state term, no
+taste term and nothing for a household to change. A `DefaultUserIdDep` here
+would be a `SELECT` (and, on a first run, an `INSERT`) **per keystroke** to
+resolve an id nothing downstream reads.
+
+**No completion is ever bought on this path, on either tier**, and that is
+structural rather than a rule to remember: `QueryExpansionService.expand` is
+called from exactly one line in `SearchService.search`, immediately in front of
+the semantic embed, and `suggest` has no embed at all. So the surface a client
+drives per keystroke cannot reach an LLM even with every switch on.
 """
 
 from typing import Annotated, Any, Final
@@ -61,12 +118,63 @@ from fastapi import APIRouter, Query, status
 
 from usher.api.deps import DefaultUserIdDep, SearchServiceDep
 from usher.api.dto.problem import ProblemCode, ProblemResponse
-from usher.api.dto.search import SearchResponse
+from usher.api.dto.search import SearchResponse, SuggestResponse
 from usher.api.errors import ProblemException
 from usher.ports.search import SearchMode
-from usher.services.search import SemanticSearchUnavailable
+from usher.services.search import SemanticSearchUnavailable, SuggestTier
 
 router = APIRouter(tags=["search"])
+
+#: The shortest `q`, in characters after stripping, that this route will run
+#: **tier 1** for. Below it the answer is `200` with no results and no query
+#: issued at all.
+#:
+#: **Four, and it is derived from B3's curve rather than chosen.** The rule is
+#: *the shortest prefix at which tier 1's measured p95 is below tier 2's* —
+#: because the one thing the two-tier split rests on is that tier 1 is the
+#: cheap tier, and wherever that is false the split is upside down. Tier 2's
+#: shipped p95 is 211 ms; tier 1's union p95 is 303 ms at three characters and
+#: **112 ms at four**, so four is where tier 1 stops being slower than the tier
+#: it exists to be cheaper than. It also removes the three worst probes on the
+#: curve (2,707 / 809 / 303 ms), which is where essentially all of the cost is.
+#:
+#: **Not the 10 ms keystroke bar, deliberately.** That bar is met only from
+#: seven characters up, and a minimum of seven would leave the tier that exists
+#: to answer every keystroke answering nothing for most of a typed word — worse
+#: for a viewer than a 112 ms box, and it would make tier 1 useless on the
+#: short one-word names (`Dune`, `Alien`) that are the entire reason ADR-0002's
+#: gate failed.
+#:
+#: **Not a `Settings` field.** The number is a property of catalog size, not of
+#: an operator's preference — at the 10,000-title enriched tier the same
+#: one-character probe is 489 ms and four characters is 5.5 ms — and PRD 05's
+#: own note puts the decision at the request boundary. A knob here would be a
+#: latency budget expressed as a character count, which is a number nobody can
+#: set correctly without re-running B3.
+#:
+#: **Measured on the stripped string.** `len(q)` would let four spaces past a
+#: bound that exists to keep a one-character probe off the database: leading
+#: whitespace contributes no selectivity to `LIKE 'q%'`, so it must not count
+#: toward the length that stands in for selectivity.
+_MIN_PREFIX_CHARS: Final = 4
+
+#: Per tier, so the response can report the rule that actually applied.
+#:
+#: **Tier 2 is bounded at one character and not at four, and the asymmetry is
+#: honest rather than tidy.** Nobody has measured the trigram statement's
+#: latency *per prefix length* — B3's tier-2 figures are over whole mutated
+#: names — so a bound here would be a number with no measurement under it, and
+#: this repository's own rule is that a refusal justified by "this cannot be
+#: expensive" is one measurement away from being wrong. Tier 2's defence is the
+#: client's debounce, which is the design; tier 1's is this table, because a
+#: debounce cannot defend the tier that runs on every keystroke by definition.
+#: One character rather than zero: a blank or whitespace-only `q` is the state
+#: of every page load and of every backspace to zero, and it answers 200 with
+#: no results on **both** tiers through this same rule.
+_MIN_CHARS_FOR_TIER: Final[dict[SuggestTier, int]] = {
+    SuggestTier.PREFIX: _MIN_PREFIX_CHARS,
+    SuggestTier.FUZZY: 1,
+}
 
 #: What `?mode=semantic` answers on a deployment with no embedding model, and
 #: it names the remedy because the remedy is the whole content of the failure.
@@ -194,3 +302,77 @@ async def search(
     # and hands back what it ran, so echoing the parameter is the one spelling
     # that cannot accidentally echo the rewrite.
     return SearchResponse.of(q, answer)
+
+
+@router.get(
+    "/search/suggest",
+    response_model=SuggestResponse,
+    summary="Type-ahead candidates, from the prefix tier or the fuzzy one",
+)
+async def suggest(
+    search_service: SearchServiceDep,
+    q: Annotated[
+        str,
+        Query(
+            description=(
+                "The prefix as typed. Blank, whitespace-only, or shorter than the answering "
+                "tier's `min_query_length` answers 200 with no results."
+            )
+        ),
+    ],
+    tier: Annotated[
+        SuggestTier,
+        Query(
+            description=(
+                "`prefix` is the btree probe that answers every keystroke and has no typo "
+                "tolerance (1.9% measured); `fuzzy` is the trigram path that has it, at "
+                "p50 33.6 ms, and is meant to be debounced behind the first. Neither is a "
+                "fallback for the other."
+            )
+        ),
+    ] = SuggestTier.PREFIX,
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            description=(
+                "Ceiling on candidates. Clamped by `USHER_SEARCH_RESULT_LIMIT`, which is why "
+                "this declares no maximum of its own."
+            ),
+        ),
+    ] = 10,
+) -> SuggestResponse:
+    """Answer one tier, and say which one.
+
+    **The short-`q` arm returns before the service, not inside it**, and that
+    placement is the whole point: what a one-character prefix costs is 2,707 ms
+    *of database work*, so a bound applied after the port call would save
+    nothing at all. It is also why this lives here rather than in
+    `SearchService` — `usher suggest` is a command typed once, not a keystroke,
+    and refusing it a three-character prefix would take a capability away from
+    the one caller that can afford it (ADR-0031).
+
+    **`min_query_length` is reported on every response, not only the refused
+    ones.** A client that can read the rule can apply it and never send the
+    request, which is the only place this cost can actually be removed rather
+    than moved; and on a full answer the same field is what says the box is
+    complete rather than truncated by a bound.
+
+    **No `try`, because this route has no failure to catch.**
+    `SemanticSearchUnavailable` is raised in front of an embed and `suggest`
+    has none — no model, no lane to narrow, no capability an operator may not
+    have installed. Both tiers are btree/GIN reads over tables `m09a` creates
+    unconditionally.
+    """
+    minimum = _MIN_CHARS_FOR_TIER[tier]
+    if len(q.strip()) < minimum:
+        return SuggestResponse.of(q, tier=tier, min_query_length=minimum)
+    return SuggestResponse.of(
+        q,
+        tier=tier,
+        min_query_length=minimum,
+        # `tier=tier` and not a tier the service chose: the echo has to be the
+        # parameter that selected the index, or a response could report a tier
+        # that did not run.
+        results=await search_service.suggest(q, limit=limit, tier=tier),
+    )

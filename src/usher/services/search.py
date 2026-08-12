@@ -63,6 +63,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from enum import StrEnum
 
 from opentelemetry import metrics
 from pydantic import AwareDatetime
@@ -207,6 +208,32 @@ def compose_document(title: Title, *, credits: Sequence[str] = ()) -> EmbeddingD
         # an empty title is five newlines rather than the empty string.
         is_degenerate=not text.strip(),
     )
+
+
+class SuggestTier(StrEnum):
+    """Which of the two `SuggestIndex` implementations answers a keystroke.
+
+    ADR-0002's typo-tolerance gate failed and ADR-0031 is what it bought: two
+    indexes, one port, and a caller that says which. `PREFIX` is the btree
+    `lower(name) text_pattern_ops` probe with **1.9% measured typo recall**;
+    `FUZZY` is the trigram + `levenshtein_less_equal` path at **p50 33.6 ms**.
+    Neither is a better version of the other and neither is a fallback for the
+    other -- the split is a division of labour, and the whole reason this enum
+    exists rather than a `typo_tolerant: bool` is that a bool invites reading
+    one as a degraded form of the other.
+
+    **Here rather than in `ports/search.py`, unlike `SearchMode`.** That one is
+    a field of `SearchRequest`, so the port genuinely carries it; **no port
+    method anywhere takes a tier**, because a tier *is* the choice of
+    implementation and an implementation cannot be told which implementation it
+    is. Filed in `ports/` it would be a vocabulary the ports layer declares and
+    never reads. `api/dto/search.py` already imports `SearchAnswer` from this
+    module, so the wire reaching in here for a service type is the established
+    direction rather than a new one.
+    """
+
+    PREFIX = "prefix"
+    FUZZY = "fuzzy"
 
 
 class SemanticSearchUnavailable(Exception):
@@ -456,7 +483,8 @@ class SearchService:
     def __init__(
         self,
         index: SearchIndex,
-        suggestions: SuggestIndex,
+        prefix_suggestions: SuggestIndex,
+        fuzzy_suggestions: SuggestIndex,
         titles: TitleRepository,
         media_items: MediaItemRepository,
         watch_states: WatchStateRepository,
@@ -469,7 +497,25 @@ class SearchService:
         now: Callable[[], AwareDatetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._index = index
-        self._suggestions = suggestions
+        # **Two `SuggestIndex` implementations, both required, and neither
+        # optional.** The argument `embedder` and `expander` make one parameter
+        # over -- a capability an operator may not have installed -- does not
+        # transfer: both indexes are btree/GIN reads over tables `m09a` creates
+        # unconditionally, so "built or not built" has no state left to
+        # express. An optional prefix tier would mean a `?tier=prefix` request
+        # with no honest answer on a deployment that has the index anyway.
+        #
+        # **Named for the tiers rather than positioned.** Two adjacent
+        # parameters of one type is a swap nothing catches: swapped, tier 1
+        # becomes the 33.6 ms typo-tolerant path a client drives per keystroke
+        # and tier 2 becomes prefix-only, both answer plausibly, and only a case
+        # asserting that a typo is *absent* from tier 1 can tell. The names are
+        # the wire's own (`?tier=prefix|fuzzy`) so the three surfaces read
+        # alike.
+        self._tiers: dict[SuggestTier, SuggestIndex] = {
+            SuggestTier.PREFIX: prefix_suggestions,
+            SuggestTier.FUZZY: fuzzy_suggestions,
+        }
         self._titles = titles
         self._media_items = media_items
         # Not optional, unlike the two collaborators below it: a deployment
@@ -637,19 +683,40 @@ class SearchService:
         _search_results.record(len(answer.results), labels)
         return answer
 
-    async def suggest(self, prefix: str, limit: int = 10) -> tuple[SearchResult, ...]:
-        """Type-ahead candidates, hydrated and **not re-ranked**.
+    async def suggest(
+        self, prefix: str, limit: int = 10, *, tier: SuggestTier
+    ) -> tuple[SearchResult, ...]:
+        """Type-ahead candidates from one tier, hydrated and **not re-ranked**.
 
-        `PostgresSuggestIndex` already ordered by edit distance and then by
-        popularity inside its capped candidate set. Applying the search blend
-        here would count popularity twice -- once inside the cap and once
-        outside it -- and reorder the box away from the ordering the narrow
-        path exists to produce. Which is also the practical half of why
-        `SuggestIndex` is its own port.
+        Both tiers already ordered their own answer -- tier 2 by edit distance
+        and then popularity inside its capped candidate set, tier 1 by
+        popularity and vote count over an exact-prefix set where every distance
+        is zero. Applying the search blend here would count popularity twice,
+        once inside the tier and once outside it, and reorder the box away from
+        the ordering the narrow path exists to produce. It would also make the
+        two tiers *disagree* about a row they both matched, which is the one
+        thing a client painting tier 1 and replacing it with tier 2 cannot
+        absorb. Which is also the practical half of why `SuggestIndex` is its
+        own port.
+
+        **`tier` is a required keyword with no default, and the absence of a
+        default is the decision.** The two callers want opposite ones --
+        `GET /search/suggest` defaults to `prefix` because it is a keystroke
+        path, `usher suggest` defaults to `fuzzy` because it is a command typed
+        once and has been typo-tolerant since M6 -- so a default here would be
+        one of the two silently serving the other. Each boundary states its own.
+
+        **The hydration is written once and is the same two reads for both
+        tiers**, `list_by_ids` then `owned_title_ids`, **regardless of hit
+        count**. Spelled per tier it would answer identically today and drift
+        the first time either tier grew a field, so
+        `test_the_hydration_is_written_once_rather_than_once_per_tier` asserts
+        it structurally as well as by count -- a duplicated body passes any
+        count assertion.
         """
         if not prefix.strip():
             return ()
-        hits = await self._suggestions.suggest(prefix, limit=min(limit, self._result_limit))
+        hits = await self._tiers[tier].suggest(prefix, limit=min(limit, self._result_limit))
         by_id = {
             title.id: title
             for title in await self._titles.list_by_ids([hit.title_id for hit in hits])
@@ -950,5 +1017,6 @@ __all__ = [
     "SearchAnswer",
     "SearchService",
     "SemanticSearchUnavailable",
+    "SuggestTier",
     "compose_document",
 ]

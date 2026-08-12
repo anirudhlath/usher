@@ -53,7 +53,11 @@ from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.row_provider import FakeRow, FakeRowProvider
 from tests.fakes.row_provider_settings_repository import FakeRowProviderSettingsRepository
-from tests.fakes.search_index import FakeSearchIndex, FakeSuggestIndex
+from tests.fakes.search_index import (
+    FakePrefixSuggestIndex,
+    FakeSearchIndex,
+    FakeSuggestIndex,
+)
 from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.sync_run_repository import FakeSyncRunRepository
@@ -320,6 +324,7 @@ def _pipeline(
         # without this file noticing.
         search=SearchService(
             FakeSearchIndex(),
+            FakePrefixSuggestIndex(),
             FakeSuggestIndex(),
             titles,
             fakes.media_items,

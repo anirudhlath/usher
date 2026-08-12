@@ -37,7 +37,7 @@ be added if a client turns out to need flexible field selection.
 |---|---|
 | `GET /home` | Ordered, hydrated rows with reasons and display hints |
 | `GET /search?q=&mode=&limit=` | Unified results across catalog and library |
-| `GET /search/suggest?q=` | Type-ahead — the cheap narrow path from [05](05-search-and-similarity.md) |
+| `GET /search/suggest?q=&tier=&limit=` | Type-ahead — the two tiers from [05](05-search-and-similarity.md), separately askable ([ADR-0031](decisions/0031-the-two-tier-suggest.md)) |
 | `GET /browse?genre=&year=&sort=&owned=&cursor=` | Faceted paging with facet counts |
 
 > **Built in M7: `GET /home`.** ✅ Ordered, hydrated rows — `slug`, `title`,
@@ -137,7 +137,7 @@ be added if a client turns out to need flexible field selection.
 > corrected to name what ships rather than exporting the same measurement
 > twice under a `usher.` prefix.
 
-> ✅ **`GET /search` ships; ⏳ `GET /search/suggest` is still M9's.** M6 built everything
+> ✅ **`GET /search` and `GET /search/suggest` both ship.** M6 built everything
 > behind them — `SearchService`, `PostgresSearchIndex`, `PostgresSuggestIndex`,
 > RRF fusion and the ranking blend — and **added no HTTP route**, delivering
 > the whole capability through `usher search` and `usher suggest` on the
@@ -192,6 +192,34 @@ be added if a client turns out to need flexible field selection.
 > vocabulary means "this deployment lacks a capability"** and this route mints
 > none; if a later one needs to distinguish *malformed* from *unserviceable
 > here*, that is an amendment to ADR-0030.
+
+> ✅ **`GET /search/suggest` as shipped**, and the three things a client writes
+> against. **`?tier=`** is the `SuggestTier` enum in `/openapi.json` —
+> `prefix` (the default) / `fuzzy` — and it is an enum rather than a
+> `typo_tolerant=` boolean because neither tier is a degraded form of the
+> other: `prefix` is a btree probe with **1.9% measured typo recall** and
+> `fuzzy` is the trigram + `levenshtein_less_equal` path that carries the
+> tolerance at 33.6 ms p50. The body carries `query`, `tier`,
+> `min_query_length` and `results`. **`tier` is the echo**, on
+> `requested_mode`'s argument minus the second field: a tier request is always
+> served by the tier it named, so there is nothing for a `requested_tier` to
+> differ from — but `?tier=` has a *default*, and the two tiers give different
+> answers to the same `q`, so a response that did not say which would be
+> uninterpretable beside another one. **`min_query_length` is the refusal made
+> legible**: this route runs no query at all for a `q` shorter than the
+> answering tier's minimum (**four characters on `prefix`, one on `fuzzy`**),
+> and without the field an empty box would be indistinguishable from *"no title
+> starts with that"*. **A blank or whitespace-only `q` is `200` with no results
+> on both tiers**, by the same rule, and **neither tier ever buys an LLM
+> completion** — structurally, since `QueryExpansionService.expand` sits in
+> front of the semantic embed and this path has none. `?limit=` declares a
+> floor and no ceiling, exactly as `GET /search` does. **The server does not
+> debounce and the client does.** ⚠️ **This route has no failure of its own**:
+> no embedder, no `SourceAdapter`, no household — a `DefaultUserIdDep` here
+> would be a `SELECT` per keystroke for an id nothing downstream reads — so the
+> only non-200 it can answer is a `422` from parameter validation. Why four
+> characters, why not seven, and why tier 2 is bounded differently:
+> [ADR-0031](decisions/0031-the-two-tier-suggest.md).
 
 ### Resources
 
