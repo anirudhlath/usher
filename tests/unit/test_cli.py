@@ -1464,12 +1464,17 @@ def test_the_imdb_expansion_phases_follow_imdb_and_credit_names_comes_first() ->
     than a 335 MiB one.
 
     **`credit-names` before everything that enriches a title.**
-    `fill_credit_names` writes only where `enrichment_state = 'skeleton'` and
-    the fill rewrites `search_document`, so it stales the embedding of every
-    title it touches: **0 of 1,271,138** on a pure bootstrap, against
-    **203,969 of the 204,335 titles with >=100 votes (99.82%)** if it is run
-    after a priority-tier crawl. Ordering is the whole mitigation and there is
-    no other one.
+    `fill_credit_names` writes only where `enrichment_state = 'skeleton'`, so
+    a title an enrichment crawl has already reached is deferred to TMDb -- on
+    that run and on every later one. **203,969 of the 204,335 titles with
+    >=100 votes (99.82%)** gain a `credit_names` in this order and none of
+    them in the other, and no re-run repairs it. Ordering is the whole
+    mitigation and there is no other one.
+
+    It stales **no** embedding in either order, and this docstring said
+    otherwise until 2026-08-12: the embedded population is
+    `enrichment_state <> 'skeleton'`, the exact complement of what the fill
+    writes.
 
     Kills a tidy-up that alphabetises `PHASES` -- which would put `aliases`
     and `credit-names` before `imdb` and produce two phases that download
@@ -1664,8 +1669,16 @@ async def test_the_credit_names_report_carries_a_denominator_and_the_crawl_order
 
     The ordering line is here rather than only in a PRD because getting it
     wrong is not recoverable by re-running anything: run after a priority-tier
-    crawl, the fill stales 99.82% of that tier's embeddings and the repair is
-    a re-index of the whole tier.
+    crawl and every enriched title is deferred to TMDb on this run and on
+    every later one, so 99.82% of that tier never gains IMDb names at all.
+
+    **This case is the proof of what the line must not say**, which is why it
+    now asserts the absence as well as the presence. `:1699`-equivalent below
+    reads back `()` for the *enriched* fixture title and the counter says
+    "1 deferred to TMDb" -- i.e. the case demonstrates the skip -- while the
+    printed sentence claimed until 2026-08-12 that an enriched tier gets
+    rewritten and staled. One case cannot both show a title being skipped and
+    assert that it is written.
     """
     cache = _stage_slices(
         tmp_path,
@@ -1700,6 +1713,11 @@ async def test_the_credit_names_report_carries_a_denominator_and_the_crawl_order
     assert "1 deferred to TMDb" in printed
     assert catalog.credit_names("tt99000030") == ()
     assert "BEFORE the TMDb crawl" in printed
+    assert "deferred to TMDb for good" in printed
+    # The two assertions above prove the enriched title was *skipped*, so the
+    # report may not tell an operator its embedding was invalidated. A
+    # re-index they cannot need is a re-index we sent them to run.
+    assert "stale" not in printed
     assert "usher index --backfill" in printed
 
 

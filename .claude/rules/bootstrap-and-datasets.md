@@ -384,16 +384,25 @@ The first pass measured the same quantities through a `psql` pipe and differed
 in the third significant figure — 872,759,296 vs 873,177,088 at baseline, a
 0.05% page-level wobble — while `+624 MB`, `×4.54` and every row count below
 are identical to both. Nothing built against the first pass needs revisiting.*
-**And the embedding blast radius of that fill is zero today and ~100% tomorrow,
-which is an ordering constraint rather than a reassurance.**
-`db/repositories/search.py:180` pins the embedded population to
-`t.enrichment_state <> 'skeleton'`, and on this catalog that population is
-**0 of 1,271,138** — a pure bootstrap has no enriched title, so filling
-`credit_names` first invalidates no embedding at all. Run it *after* a priority
-tier lands and it invalidates nearly all of one: of the **204,335 titles with
-≥100 votes** (161,519 of them movies — the tier group S is sized on),
-**203,969 (99.82%)** would gain a `credit_names`, and 161,486 of the 161,519
-movies (99.98%). **Backfill `credit_names` before the TMDb crawl, not after.**
+**The embedding blast radius of that fill is zero in every ordering, and the
+ordering constraint is about coverage instead.** `db/repositories/search.py:180`
+pins the embedded population to `t.enrichment_state <> 'skeleton'`, and
+`fill_credit_names` writes only where that expression is *false* — the two sets
+are complements, so the fill cannot invalidate a vector whenever it is run.
+What the ordering decides is whether the names arrive at all: of the **204,335
+titles with ≥100 votes** (161,519 of them movies — the tier group S is sized
+on), **203,969 (99.82%)** would gain a `credit_names`, and 161,486 of the
+161,519 movies (99.98%) — *while they are still skeletons*. After a
+priority-tier crawl those titles are deferred to TMDb permanently, on that run
+and every later one, and re-running the phase does not repair it.
+**Backfill `credit_names` before the TMDb crawl, not after.**
+
+*Corrected 2026-08-12.* This paragraph read "zero today and ~100% tomorrow"
+and said the late ordering "invalidates nearly all of" the tier. That is
+refused by the `AND m.ours` predicate in `fill_credit_names` itself, which
+skips every non-skeleton — the counts and the recommendation stand, the
+mechanism was wrong, and it had propagated to five other statements including
+two an operator reads.
 
 **No timing figure was taken.** Every number above is a count or a byte size,
 and neither moves with host load — which is the whole reason this measurement

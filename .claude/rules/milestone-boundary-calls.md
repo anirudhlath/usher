@@ -106,12 +106,18 @@ rule) and T6-as-a-credits-writer are withdrawn with it.
    own answer for a title it derived no cast for. It is also what makes the
    fill unable to stale an embedding **by construction** rather than by
    measurement, since the embedded population is exactly the complement.
-3. **The backfill belongs before the TMDb crawl and the ordering is
-   measured.** Filling the column costs **+624 MB settled, +1,368 MB
-   transient, GIN ×4.54**, and **203,969 of 204,335 ≥100-vote titles would
-   gain a `credit_names`** — so run after a priority-tier crawl it invalidates
-   ~100% of that tier's embeddings, and run before it invalidates **0 of
-   1,271,138**. Stated in the CLI's own report and in PRD 04, not only here.
+3. **The backfill belongs before the TMDb crawl, and the reason is call 2
+   rather than staleness.** Filling the column costs **+624 MB settled,
+   +1,368 MB transient, GIN ×4.54**, and **203,969 of 204,335 ≥100-vote
+   titles would gain a `credit_names`** — but only while they are still
+   skeletons. Run after a priority-tier crawl and call 2's predicate defers
+   every one of them to TMDb, on that run and on every later one, so the
+   coverage is never obtained and re-running does not repair it. It
+   invalidates **no** embedding in either order; a claim that it stales ~100%
+   of the tier contradicts call 2 directly, and **this entry made exactly
+   that claim four lines below the call that refutes it** until an audit
+   found it on 2026-08-12. Stated in the CLI's own report and in PRD 04, not
+   only here.
 4. **`replace_aliases` is scoped by `imdb_ids` *and* `kind = 'alias'`**, so
    B1's `person` rows survive an alias re-import; and the caller's scope is
    necessarily the batch's own titles, which means a title whose akas IMDb has

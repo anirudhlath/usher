@@ -1740,15 +1740,29 @@ async def _credit_names(
     written here: the join is resolved in the adapter and what lands is a
     `text[]` on a column that already exists.
 
-    **Run it before the TMDb crawl, not after, and that is measured rather
-    than tidy.** `fill_credit_names` writes only where `enrichment_state =
-    'skeleton'`, so TMDb owns every title it has reached and this phase defers
-    on it -- and the fill re-writes `search_document`, which stales the
-    embedding of every title it touches. On a pure bootstrap that is **0 of
-    1,271,138** embeddings, because nothing is enriched yet; run after a
-    priority-tier crawl it would stale **203,969 of the 204,335 titles with
-    >=100 votes (99.82%)** and 161,486 of the 161,519 movies among them. The
-    report says so on the operator's own terminal rather than only in a PRD.
+    **Run it before the TMDb crawl, not after, and the reason is precedence
+    rather than staleness.** `fill_credit_names` writes only where
+    `enrichment_state = 'skeleton'`, so TMDb owns every title it has reached
+    and this phase defers on it. That same guard is why the fill **cannot
+    stale an embedding**: `db/repositories/search.py:180` pins the embedded
+    population to `enrichment_state <> 'skeleton'`, the exact complement of
+    what this writes, so the two sets are disjoint by construction and a
+    title this phase touches has no vector to invalidate.
+
+    What running it late costs is **coverage, and it is not recoverable by
+    re-running the phase** -- which is why it still earns a line on the
+    operator's own terminal. Every title the crawl enriches is one this phase
+    then declines, on that run and on every future one, so the names simply
+    never arrive: of the **204,335 titles with >=100 votes**, the **203,969
+    (99.82%)** that would have gained a `credit_names` are left with whatever
+    `DeriveService` extracted from TMDb's own payload and no IMDb fallback at
+    all. Run first, nothing is lost either way -- a later derivation
+    overwrites IMDb's names with TMDb's for exactly the titles TMDb covers.
+
+    **This paragraph said the opposite until 2026-08-12**, and so did five
+    other statements including the two an operator reads. An audit caught it
+    against the `AND m.ours` predicate one file over; the ordering was right
+    and the argument for it was not.
 
     **The precondition is checked before the dataset is constructed**, for
     `_movielens`' reason and against a much larger download: 308 MB of
@@ -1805,9 +1819,12 @@ def _report_credit_names(tally: dict[str, int], titles: int, report: BootstrapRe
         f"{tally['deferred']} deferred to TMDb)"
     )
     report(f"  {_percent(tally['filled'], titles)} of {titles} titles in the catalog")
+    # Precedence, not staleness: the fill writes only skeletons and only
+    # non-skeletons are embedded, so it cannot invalidate a vector. What it
+    # cannot do is come back for a title TMDb has taken.
     report(
-        "  run this BEFORE the TMDb crawl: the fill rewrites search_document, and "
-        "on an enriched priority tier it would stale 99.82% of that tier's embeddings"
+        "  run this BEFORE the TMDb crawl: afterwards every title the crawl "
+        "enriched is deferred to TMDb for good and never gains IMDb names"
     )
     if tally["filled"]:
         report("  then: usher index --backfill, and usher similar --rebuild after it")

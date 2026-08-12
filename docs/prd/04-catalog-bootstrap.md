@@ -82,11 +82,12 @@ Each phase is independently runnable, resumable, and checkpointed.
 **The order below is the order `usher bootstrap --phase all` runs, and three
 of its edges are constraints rather than presentation.** Phase 0 first,
 because every later phase joins to `titles` on `imdb_id` and an empty catalog
-joins to nothing. **Phase 0b before Phase 3**, because filling
-`titles.credit_names` rewrites `search_document` and therefore stales the
-embedding of every title it touches — 0 of 1,271,138 on a fresh bootstrap, and
-**203,969 of the 204,335 titles with ≥100 votes (99.82%)** if the same work is
-done after the crawl. And Phase 4's genome last, for Phase 0's reason.
+joins to nothing. **Phase 0b before Phase 3**, because the fill
+writes only where `enrichment_state = 'skeleton'` — so a title Phase 3 has
+enriched is deferred to TMDb permanently, and **203,969 of the 204,335 titles
+with ≥100 votes (99.82%)** gain a `credit_names` in this order and none of
+them in the other. It stales no embedding in either order: the embedded
+population is the exact complement of what the fill writes. And Phase 4's genome last, for Phase 0's reason.
 
 `--phase` names them `imdb`, `credit-names`, `aliases`, `tmdb-ids`,
 `crosswalk`, `movielens` and `all`; the tuple in `usher.cli.PHASES` is in
@@ -580,9 +581,10 @@ this system and holds the lane for its duration
 ([08](08-operations.md)); the *server* process now writes to
 `USHER_BULK_DATA_DIR`, which in the shipped container is a bind mount; and the
 ordering constraint above is unenforced by design — **run `credit-names`
-before a TMDb crawl, not after**, because the fill re-writes
-`search_document` and would stale 203,969 of the 204,335 ≥100-vote titles'
-embeddings if run the other way round.
+before a TMDb crawl, not after**, because the fill defers to TMDb on every
+enriched title, so run the other way round the 203,969 of 204,335 ≥100-vote
+titles that would have gained names never do, and re-running does not repair
+it.
 
 **And a phase's progress can be read over HTTP since M9's E6.**
 `GET /admin/bootstrap/status` ([07](07-client-api.md)) answers every
