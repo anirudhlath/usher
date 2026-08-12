@@ -99,11 +99,14 @@ the rest of it with nothing to say so.
 
 **Three groups write keyset SQL independently this milestone, and the predicate
 is not shared even though the codec is.** So the spelling is written down here,
-where all three will read it. For a nullable sort column, NULL sorts last, the
-key is `(key IS NOT NULL, key, id)`, and the comparison is **strict**:
+where all three will read it. For a nullable sort column the keyset is
+*conceptually* `(key IS NOT NULL, key, id)` — NULLs last, then the key, then
+the primary key — and the comparison is **strict**. Note that neither clause
+below spells that triple literally, and both of those are measurements rather
+than style; the two warnings after the snippet are what each cost:
 
 ```sql
-ORDER BY (key IS NOT NULL) DESC, key <ASC|DESC>, id ASC
+ORDER BY key <ASC|DESC> NULLS LAST, id ASC
 
 -- resuming from a keyed position
 WHERE key IS NULL                                   -- NULLs sort last
@@ -116,6 +119,34 @@ WHERE key IS NULL AND id > :after_id
 
 Relaxed from `>` to `>=` on the tail, it re-serves one row at every page
 boundary — and a test whose pages do not abut cannot see it.
+
+> ⚠️ **The `ORDER BY`, corrected 2026-08-12 by B7's measurement and B6's
+> repair: it is `NULLS LAST` and must not be "clarified" into
+> `(key IS NOT NULL) DESC, key <dir>`, which is the same order and costs
+> 317×.** This section carried the written-out form for one day, on the
+> good-faith argument that it lines the clause up with the predicate's first
+> disjunct term for term. It supersedes only the `ORDER BY`; the three-arm
+> `WHERE` below is untouched and is why the block under this one still
+> stands. B7 measured it against a real 1,272,367-title
+> catalog: `sort=name` is **299.21 ms p50 written out and 0.92 ms as `NULLS
+> LAST`**, on a page proved byte-identical (0 mismatched positions of 25).
+> `titles.sort_name` is `NOT NULL` and `ix_titles_sort_name` exists, but
+> **Postgres does not simplify `sort_name IS NOT NULL` to `true` and matches an
+> index by the sort-key *expression*** — so the written-out form has a leading
+> key no index carries and the page becomes a 95,000-buffer Parallel Seq Scan.
+> Pinned as a plan, not as a number:
+> `tests/integration/test_title_repository.py::
+> test_the_written_out_order_cannot_use_the_index_that_nulls_last_can` forces
+> `enable_seqscan = off` and observes the refused plan come back at the
+> disabled-node penalty of 1e10 — *unchoosable*, not merely not chosen.
+>
+> **So the `ORDER BY` and the `WHERE` no longer read as one rule, and that is
+> paid for with a test rather than with prose.** `NULLS LAST` is where
+> `key IS NULL` sorts; the two spellings are compared position for position,
+> for every sort, over a population carrying NULLs and ties in every key, both
+> unpaged and as a keyset walk. **The general form, which is the part that
+> generalises past this ADR: two spellings of one order are two different sort
+> keys, and a legibility decision about SQL text can be a plan decision.**
 
 > ⚠️ **Corrected 2026-08-11 by measurement, and the spelling this replaces is
 > the one a reader reaches for first.** This section shipped the predicate as

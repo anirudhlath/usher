@@ -618,11 +618,20 @@ class TitleRepository(ABC):
           have a NULL key, resuming from the first NULL-keyed row, the
           row-comparison spelling returns the two *keyed* rows and neither of
           the two unkeyed ones. ADR-0034 carries the table.
-        - **NULLs sort last**, so the leg is `(key IS NOT NULL) DESC` and the
-          `ORDER BY` and the predicate share one spelling. Written out rather
-          than as `nulls_last(...)` — which is the same order — because the
-          predicate has to agree with it term for term, and two spellings of
-          one rule is how they stop agreeing.
+        - **NULLs sort last, and the `ORDER BY` says so as `NULLS LAST` while
+          the predicate says so as `key IS NULL`.** The two are the same rule
+          in two spellings, which is a thing this port originally refused: the
+          clause was written out as `(key IS NOT NULL) DESC, key <dir>` so a
+          reader could line the two up term for term. B7 measured what that
+          costs — **299.21 ms p50 against 0.92 ms, 317x**, because an index is
+          matched by the *sort-key expression* and no index carries
+          `sort_name IS NOT NULL`, so the legible form turns an indexed page
+          into a 95,000-buffer sequential scan. The order is byte-identical
+          either way; only one of the two is indexable. So the agreement is
+          now a test rather than a reading —
+          `test_the_shipped_order_is_byte_identical_to_the_written_out_one`,
+          every sort, unpaged and paged — and `_browse_order`'s docstring
+          carries what the legibility was worth.
         - **Strict `>`.** Relaxed to `>=` the walk re-serves the boundary row
           at every page break, and a test whose pages do not abut cannot see
           it.
