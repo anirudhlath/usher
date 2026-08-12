@@ -817,20 +817,24 @@ async def test_artwork_the_proxy_cannot_serve_never_reaches_the_detail(
     provider-shaped inference in the layer PRD 01's no-source-concept rule is
     about.
 
-    `/svg-poster.jpg` and `/A-LOGO.SVG` are the two adversarial paths C4
-    measured the wrong spellings of a suffix test against: a substring `in`
-    drops the first, and a test that does not lower-case keeps the second.
-    Each dies on exactly one parameter out of that task's 325, so an ordinary
-    `.jpg`/`.svg` pair here would ratify both."""
+    `/svg-poster.jpg`, `/.svg.jpg` and `/A-LOGO.SVG` are the three adversarial
+    paths C4 measured the wrong spellings of a suffix test against: `"svg" in
+    path` drops the first, `".svg" in path` drops the second, and a test that
+    does not lower-case keeps the third. Each wrong implementation dies on
+    exactly one parameter out of that task's 325, so an ordinary `.jpg`/`.svg`
+    pair here would ratify all three -- and a version of this case carrying
+    only the first two ratified the middle one, measured."""
     title = await _seed_title(titles, EnrichmentState.ENRICHED)
     poster = _image(title.id)
-    decoy = _image(title.id, path="/svg-poster.jpg", is_primary=False)
+    contains = _image(title.id, path="/svg-poster.jpg", is_primary=False)
+    infixed = _image(title.id, path="/.svg.jpg", is_primary=False)
     await _seed_images(
         images,
         title.id,
         [
             poster,
-            decoy,
+            contains,
+            infixed,
             _image(title.id, kind=ImageKind.LOGO, path="/a-logo.svg", is_primary=False),
             _image(title.id, kind=ImageKind.LOGO, path="/A-LOGO.SVG", is_primary=False),
         ],
@@ -839,7 +843,7 @@ async def test_artwork_the_proxy_cannot_serve_never_reaches_the_detail(
     detail = await service.detail(title.id, user_id=USER_ID)
 
     assert detail is not None
-    assert {one.id for one in detail.images} == {poster.id, decoy.id}
+    assert {one.id for one in detail.images} == {poster.id, contains.id, infixed.id}
     assert await images.list_for_title(title.id) != list(detail.images), (
         "the premise: the repository still holds every row, so this is a read-side "
         "filter rather than a write the derivation declined to make"

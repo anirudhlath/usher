@@ -579,23 +579,38 @@ async def test_an_unservable_logo_is_dropped_rather_than_rendered_as_a_broken_li
     deliberately, and a client renders a broken image with nothing anywhere
     reporting the cause.
 
-    **The two other paths are the adversarial ones, and they are here rather
-    than only in `is_servable_path`'s own parameter table.** `/svg-poster.jpg`
-    kills a substring `in` spelling of the suffix test and `/A-LOGO.SVG` kills
-    one that does not lower-case first -- C4 measured that each of those wrong
-    implementations dies on exactly one parameter out of 325. Seeded here so
-    that a future author who inlines `endswith(".svg")` into this layer is
-    caught at this layer too, rather than only where the definition lives."""
+    **The three other paths are the adversarial ones, and they are here rather
+    than only in `is_servable_path`'s own parameter table.** `/A-LOGO.SVG`
+    kills a spelling that does not lower-case first, `/svg-poster.jpg` kills a
+    `"svg" in path` spelling, and `/.svg.jpg` kills a `".svg" in path` one --
+    C4 measured that each wrong implementation dies on exactly one parameter
+    out of 325. Seeded here so a future author who inlines the predicate into
+    this layer is caught at this layer too.
+
+    🔴 **`/.svg.jpg` was missing from the first version of this case and the
+    plant list is what found it.** With only the first two seeded, the
+    `".svg" in one.provider_path.lower()` spelling **survived** the whole
+    selection -- `/svg-poster.jpg` contains no `.svg` at all, so it discriminates
+    a different wrong implementation from the one it was seeded for. Choosing a
+    predicate's negatives against "an ordinary path" is what leaves a
+    complete-looking table both mutants pass."""
     logo = _image(seeded.title_id, kind=ImageKind.LOGO, path="/a-logo.svg", is_primary=False)
     shouty = _image(seeded.title_id, kind=ImageKind.LOGO, path="/A-LOGO.SVG", is_primary=False)
-    decoy = _image(seeded.title_id, kind=ImageKind.POSTER, path="/svg-poster.jpg", is_primary=False)
+    contains = _image(
+        seeded.title_id, kind=ImageKind.POSTER, path="/svg-poster.jpg", is_primary=False
+    )
+    infixed = _image(seeded.title_id, kind=ImageKind.POSTER, path="/.svg.jpg", is_primary=False)
     poster = _image(seeded.title_id)
-    await _seed_images(images, seeded.title_id, [poster, logo, shouty, decoy])
+    await _seed_images(images, seeded.title_id, [poster, logo, shouty, contains, infixed])
 
     response = await client.get(f"/titles/{seeded.title_id}")
     body = response.json()
 
-    assert {entry["id"] for entry in body["images"]} == {str(poster.id), str(decoy.id)}
+    assert {entry["id"] for entry in body["images"]} == {
+        str(poster.id),
+        str(contains.id),
+        str(infixed.id),
+    }
     assert "logo" not in {entry["kind"] for entry in body["images"]}
     assert ".svg" not in response.text.lower()
 
