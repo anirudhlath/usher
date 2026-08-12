@@ -27,10 +27,12 @@ from usher.adapters.search.postgres import PostgresSearchIndex, _predicates
 from usher.db.repositories.media_item import PostgresMediaItemRepository
 from usher.db.repositories.source import PostgresSourceRepository
 from usher.db.repositories.title import PostgresTitleRepository
+from usher.db.repositories.watch_state import PostgresWatchStateRepository
+from usher.db.users import ensure_default_user
 from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.source import Source
 from usher.domain.title import Title
-from usher.ports.ingest import MediaItemUpsert
+from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
 from usher.ports.search import SearchFilters, SearchMode
 from usher.services.search import SearchService
 
@@ -69,6 +71,7 @@ def _service(session: AsyncSession) -> SearchService:
         FakeSuggestIndex(),
         PostgresTitleRepository(session),
         PostgresMediaItemRepository(session),
+        PostgresWatchStateRepository(session),
         result_limit=100,
     )
 
@@ -125,13 +128,17 @@ async def _seed_copy(
 
 async def _seed_episode_copy(
     session: AsyncSession, *, source_id: uuid.UUID, series_id: uuid.UUID, external_id: str
-) -> None:
+) -> uuid.UUID:
     """One `media_items` row shaped the way `IngestService` writes an episode:
     the *series'* `title_id` **and** the episode's own `episode_id`.
 
     Written through raw SQL rather than through `upsert_many` because
     `media_items.episode_id` is a real foreign key and this case does not care
     which episode it points at -- only that the row is not the series' own.
+
+    Answers the episode's id, which the watch-state roll-up case writes against:
+    a watch state on the *series* would make that case pass against the
+    title-keyed read it exists to refuse.
     """
     season_id = uuid.uuid4()
     episode_id = uuid.uuid4()
@@ -165,6 +172,7 @@ async def _seed_episode_copy(
             "seen": SEEN_AT,
         },
     )
+    return episode_id
 
 
 @contextmanager
@@ -344,6 +352,111 @@ async def test_a_hydrated_result_carries_the_row_and_not_just_an_id(
     assert answer.results[0].owned is True
     assert answer.mode is SearchMode.FULL_TEXT
     assert answer.degraded is False
+
+
+@pytest.mark.integration
+async def test_a_household_costs_exactly_one_more_statement_and_it_is_the_watch_read(
+    session: AsyncSession,
+) -> None:
+    """The read count, against real SQL rather than against a counter.
+
+    Three statements with a household -- the retrieval, `list_by_ids`,
+    `owned_title_ids` -- plus **one** for `played_title_ids`, whatever the hit
+    count. Fails: a per-hit household read, which is the N+1 the batch port
+    exists to delete and which answers identically; and fails a household read
+    issued when there is no household, which costs a statement per search on
+    every caller that has none.
+
+    `_record_statements` captures off `before_cursor_execute` and nothing is
+    transcribed, so the count is the count Postgres saw. The `watch_states`
+    assertion is what says the *extra* statement is the one this task added
+    rather than a second hydration read that happens to make the arithmetic
+    work.
+    """
+    for index in range(8):
+        await _seed_title(session, f"Vacuum Study {index:02d}")
+    await session.flush()
+    service = _service(session)
+    household = uuid.uuid4()
+
+    without: list[str] = []
+    with _record_statements(session, without):
+        anonymous = await service.search("vacuum", limit=8)
+    with_one: list[str] = []
+    with _record_statements(session, with_one):
+        theirs = await service.search("vacuum", limit=8, user_id=household)
+
+    assert len(anonymous.results) == 8, "the premise: there are more hits than statements"
+    assert len(theirs.results) == 8
+    assert len(without) == 3, f"three statements without a household: {without}"
+    assert len(with_one) == 4, f"four statements with one: {with_one}"
+    assert [one for one in without if "watch_states" in one] == []
+    assert len([one for one in with_one if "watch_states" in one]) == 1
+
+
+@pytest.mark.integration
+async def test_a_watched_episode_lifts_its_series_in_a_search(
+    session: AsyncSession, source: Source
+) -> None:
+    """The roll-up, and it is the trap a fake cannot see.
+
+    `played_title_ids` reaches a series through
+    `COALESCE(ws.title_id, e.title_id)`, so a household that has finished an
+    *episode* has played the series. Fails: a title-keyed read, which returns a
+    films-only answer -- correct-looking, correctly ordered, and silently
+    unpersonalised for every television household there is.
+
+    The premise is asserted twice over: the two hits carry equal index scores,
+    so the relevance term cancels and the watch-state term is the only thing
+    left; and the watch state written is against the **episode**, never against
+    the series row the assertion is about.
+    """
+    series = await _seed_title(session, "Vacuum Chamber Diaries", kind=TitleKind.SERIES)
+    film = await _seed_title(session, "The Quiet Vacuum")
+    episode_id = await _seed_episode_copy(
+        session, source_id=source.id, series_id=series.id, external_id="episode-1"
+    )
+    household = await ensure_default_user(session)
+    watch_states = PostgresWatchStateRepository(session)
+    await watch_states.merge_from_source(
+        [
+            WatchStateMerge(
+                user_id=household,
+                title_id=None,
+                episode_id=episode_id,
+                position_seconds=0,
+                played=True,
+                runtime_seconds=2700,
+                observed_at=SEEN_AT,
+                play_count=1,
+                last_played_at=SEEN_AT,
+            )
+        ]
+    )
+    await session.flush()
+    assert await watch_states.played_title_ids(household, [series.id, film.id]) == {series.id}, (
+        "the premise: the roll-up sees the episode, and the film is genuinely unplayed"
+    )
+
+    service = _service(session)
+    anonymous = {
+        one.title_id: one.score for one in (await service.search("vacuum", limit=10)).results
+    }
+    theirs = {
+        one.title_id: one.score
+        for one in (await service.search("vacuum", limit=10, user_id=household)).results
+    }
+
+    assert set(anonymous) == {series.id, film.id} == set(theirs)
+    # Scores rather than positions, because the two names do not tie on
+    # `ts_rank` and a rank-0/rank-1 gap is 0.35 against a watch-state weight of
+    # 0.02 -- an ordering assertion here would be an assertion about full-text
+    # scoring. What the household changes is the *gap*, and it changes it in
+    # both directions at once: the series gains the boost, and the film gains a
+    # present-and-zero signal that renormalises its score down.
+    assert theirs[series.id] > anonymous[series.id]
+    assert theirs[film.id] < anonymous[film.id]
+    assert theirs[series.id] - theirs[film.id] > anonymous[series.id] - anonymous[film.id]
 
 
 @pytest.mark.integration

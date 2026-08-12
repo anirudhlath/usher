@@ -165,12 +165,18 @@ def test_region_and_language_are_kept_and_backslash_n_becomes_none() -> None:
 
 
 def test_a_name_over_the_btree_bound_is_dropped_here_not_refused_in_a_batch() -> None:
-    """`SearchNameRepository`'s contract refuses an over-long name for the
-    **whole call**, so one such row would take a ten-thousand-row batch with
-    it. Measured on the pinned file: **33 of 58,906,368 rows exceed 512
+    """`BulkCatalogRepository.replace_aliases` refuses an over-long name for
+    the **whole call**, so one such row would take a ten-thousand-row batch
+    with it. Measured on the pinned file: **33 of 58,906,368 rows exceed 512
     characters and the longest is 831** -- and none of the 33 is in today's
     catalog, so this filter is unreachable today and exists because the
     catalog grows while the refusal stays per-call.
+
+    *This docstring named a `SearchNameRepository` until T7 landed the writer,
+    and there has never been a port of that name in this repository.* The
+    refusal is real and is now asserted where it happens, against a real
+    database, by `tests/integration/test_bulk_repository.py::
+    test_an_over_long_alias_is_refused_for_the_whole_call_and_names_the_constraint`.
 
     Both sides of the boundary are asserted: 512 is stored, 513 is not.
     """

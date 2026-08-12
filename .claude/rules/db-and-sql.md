@@ -722,3 +722,59 @@ output needs somewhere to name it. `select(func.unnest(TitleRow.genres)
 lateral join is needed. A title whose `genres` is `'{}'` unnests to no rows and
 is in no bucket, which is the same statement the `years` read makes with
 `IS NOT NULL`.
+
+## The review queue's keyset, and the index that does not carry its sort (2026-08-11, M9 E4)
+
+`GET /admin/unmatched` pages `media_items WHERE title_id IS NULL` by keyset
+rather than by `OFFSET`. Measured with `EXPLAIN (ANALYZE, BUFFERS)` on
+`pgvector/pgvector:pg17` against **200,000 items of which 70,000 are unmatched
+and 23,333 of those undated**, on the statements imported from
+`db/repositories/media_item.py` rather than transcribed, `ANALYZE`d first,
+`limit = over_fetch(50) = 51`:
+
+| statement | scanned → served | buffers | sort | time |
+|---|---|---|---|---|
+| keyset, page 1 | 70,000 → 51 | 966 | top-N heapsort, 36 kB | **16.4 ms** |
+| keyset, resuming from a **dated** boundary at depth ~35,000 | 34,999 → 51 | 966 | top-N heapsort, 36 kB | **23.0 ms** |
+| keyset, resuming from an **undated** boundary 100 from the end | 99 → 51 | 328 | quicksort, 38 kB | **1.9 ms** |
+| offset, page 1 | 70,000 → 51 | 966 | top-N heapsort, 36 kB | 17.4 ms |
+| offset, `OFFSET 69,900` | 69,951 → 51 | 966 + `temp read=690 written=691` | **external merge, 3,264 kB + a worker's 2,256 kB, on disk** | **57.3 ms** |
+
+**Three things, and the second is the one this milestone did not own.**
+
+- **The keyset's page cost is flat in depth and the offset's is not.** At
+  70,000 unmatched rows the deep offset is 3.3× page 1, spills its sort to disk
+  and recruits a parallel worker; the keyset's deepest page is its *cheapest*.
+  That is the same defect as the production figure this project already carries
+  (43.7 ms at offset 0, 388.9 ms at offset 1,126,574), reproduced at a
+  sixteenth of the scale — so the shape is the finding, not the milliseconds.
+- **The sort dominates the keyset page too, and the index is why.**
+  `ix_media_items_unmatched` is `Index("ix_media_items_unmatched", "source_id",
+  postgresql_where=text("title_id IS NULL"))` (`db/models/source.py:122-126`) —
+  it carries **neither `added_at` nor `id`**, so every page is a top-N heapsort
+  over the whole *unmatched population* (966 buffers, 70,000 rows). Bounded by
+  the queue rather than by the table, which is what makes it survivable; but on
+  a library that has bootstrapped and never run a match pass, the unmatched
+  population **is** the library. A covering
+  `(added_at DESC NULLS LAST, id DESC) WHERE title_id IS NULL` would remove the
+  sort entirely. **That is a migration E4 does not own and did not mint.** The
+  M9 plan named `m09c` as the spare to *request*; C2 has since minted `m09c` for
+  the `images` natural key, so the spare named in the plan no longer exists —
+  `m09b` is unallocated and is what a request would be for. Recorded either way,
+  which is what the plan asks for.
+- **Only the undated resume gets an index-narrowed plan, and that asymmetry is
+  worth expecting.** `added_at IS NULL AND id < :after_id` is a `BitmapAnd` over
+  `pk_media_items` and `ix_media_items_unmatched` — the primary key can serve
+  the `id` bound. The dated arm is a three-way disjunction, which no index here
+  can serve, so it lands as a `Filter` on the same scan page 1 does. Both are
+  the same 966 buffers; the difference between 16.4 ms and 23.0 ms is the filter
+  being evaluated per row.
+
+**And the predicate is spelled as three arms rather than as a row comparison,
+for the reason ADR-0034 was corrected**: `added_at` is nullable here and the
+undated group is the population an operator is reviewing, so the row form's
+NULL-not-false answer would drop the whole tail with every page still full.
+Contrast `db/repositories/episode.py`, where both sort columns are
+`nullable=False` and B12 *measured* the two-arm spelling equivalent — the
+difference between the two reads is a fact about their columns, and each says so
+in its own docstring.

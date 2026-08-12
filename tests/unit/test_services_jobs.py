@@ -12,8 +12,10 @@ claim disjoint halves of one batch. The fake's own module docstring lists
 the code that depends on it most.
 """
 
+import inspect
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from opentelemetry import trace
@@ -23,7 +25,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from tests.fakes.job_queue import FakeJobQueue
 from usher.domain.jobs import Job, JobKind, JobPriority, JobStatus
-from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
+from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable, UsherPortError
 from usher.ports.jobs import JobRequest
 from usher.services.jobs import JobWorker, _links_for
 from usher.telemetry import current_traceparent
@@ -293,6 +295,32 @@ async def test_every_port_error_backs_off_rather_than_escaping(fixture: _Fixture
     assert (await fixture.queue.depth())[JobKind.ENRICH] == 1
 
 
+async def test_a_429_carrying_a_retry_after_backs_off_no_sooner_than_the_upstream_asked(
+    fixture: _Fixture,
+) -> None:
+    """The carried debt this task closes: `PortRateLimited.retry_after` has
+    been assigned in six places since M4 and read nowhere in `src/` -- an
+    upstream that said exactly when to come back was answered with the
+    queue's own jittered guess instead. Fails today at ~1 s, the fixture's
+    `backoff_seconds`, which is the whole of the debt expressed as a number.
+
+    Positive control that the failure path actually ran (`attempts == 1`,
+    `last_error` names the failure), then the number that matters: the job is
+    not claimable again for at least the 300 s the upstream asked for.
+    """
+    fixture.worker.register(JobKind.ENRICH, fixture.raising(PortRateLimited(retry_after=300.0)))
+    await fixture.given("t1")
+    before = datetime.now(UTC)
+    await fixture.worker.run_once()
+    outcome = fixture.queue.jobs_of(JobKind.ENRICH)[0]
+    assert outcome.attempts == 1
+    assert outcome.last_error is not None and "rate limited" in outcome.last_error
+    assert outcome.run_after is not None
+    assert outcome.run_after - before >= timedelta(seconds=300), (
+        f"backed off only {outcome.run_after - before} against a 300 s hint"
+    )
+
+
 async def test_a_claim_requeued_out_from_under_the_worker_does_not_crash(
     fixture: _Fixture,
 ) -> None:
@@ -457,6 +485,28 @@ def test_the_service_never_imports_a_storage_or_transport_library() -> None:
     for forbidden in ("httpx", "sqlalchemy", "asyncpg", "usher.db"):
         assert f"import {forbidden}" not in text
         assert f"from {forbidden}" not in text
+
+
+def test_no_temporary_marker_survives_in_this_module() -> None:
+    """A 🔴 that says "for exactly one commit" and survives that commit is
+    worse than one that was never written.
+
+    `registered_kinds`' docstring carried one between M9's D7 and D8: the
+    member `WATCH_WRITEBACK` existed, four routes enqueued it, and no build
+    registered a handler for it -- which is precisely the queue that grows
+    forever M4 refused to ship. The marker was the branch advertising that
+    state, and striking it is how the advertisement ends. This assertion is
+    what stops a revert re-introducing the sentence while the registration
+    stays, which is the contradiction nobody re-reads a docstring to notice.
+
+    The same shape as `test_ports_metadata.py`'s surviving-🔶 scan, over the
+    whole module rather than one docstring: a marker moved to a neighbouring
+    method is the same defect and a scan pointed at one surface reads as
+    coverage.
+    """
+    import usher.services.jobs as module
+
+    assert "🔴" not in inspect.getsource(module)
 
 
 def test_the_worker_holds_no_reference_to_a_job_id_it_did_not_claim() -> None:

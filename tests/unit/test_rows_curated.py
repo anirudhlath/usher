@@ -81,6 +81,7 @@ from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.unit.rows import NOW, USER, Library
 from usher.domain.curation import SLUG_PREFIX, CuratedRow
+from usher.domain.enums import ImageKind
 from usher.domain.ids import new_id
 from usher.domain.rows import DisplayHint, RowFamily
 from usher.domain.title import Title
@@ -91,7 +92,13 @@ from usher.domain.title import Title
 # asserts the composer's order has to name the composer's order.
 from usher.services.home import HomeService, _Candidate, _ranking
 from usher.services.rows.cache import RowCache
-from usher.services.rows.curated import CURATED_SCORE, MAX_CURATED_ROWS, CuratedProvider, LLMRow
+from usher.services.rows.curated import (
+    CURATED_SCORE,
+    MAX_CURATED_ROWS,
+    CuratedProvider,
+    LLMRow,
+    _Family,
+)
 
 # The instant a generation ran. A fixed literal rather than `datetime.now`:
 # nothing in this file reads it, and a stored row whose timestamp moves per run
@@ -866,6 +873,126 @@ async def test_a_family_of_shelves_hydrates_in_two_statements_rather_than_two_pe
         assert [card.title_id for card in row.cards] == list(one.card_title_ids), (
             "a shelf rendered the family's cards rather than its own"
         )
+
+
+async def test_a_family_of_shelves_reads_artwork_once_rather_than_once_per_shelf() -> None:
+    """**The third read of the same shape, and the third `4 -> 1`.**
+
+    M9's C6 gives every card an `artwork` id, read once per shelf off
+    `ImageRepository.primary_for_titles`. Four curated shelves come out of one
+    `list_for_user`, so without `LLMRow._artwork` the family would issue four
+    `primary_for_titles` for one set of ~22 ids -- and, with the catalog and
+    ownership reads beside it, take one generation from three statements to
+    twelve.
+
+    **This is the plant the plan predicted would survive the suite and be
+    caught by the gate.** Deleting `LLMRow._artwork` is behaviourally
+    invisible: every card gets the same id, in the same order, because
+    `_Family` holds the *union* and `hydrate` looks each id up. Only a count
+    can see it, which is what this case is. Recorded here rather than in a
+    commit message because "the suite holds it" and "the gate holds it" are
+    different claims and this is the case that makes the first one true.
+
+    The second half is the one a count alone cannot make: each shelf's cards
+    must carry *its own* titles' artwork. A family memo handed to the wrong
+    shelf is a populated row nobody would call broken by looking at it.
+    """
+    library, _, _ = await _counted()
+    stored = [await _shelf(library, position, cards=4) for position in range(4)]
+    by_position = sorted(stored, key=lambda one: one.position)
+    posters = {
+        title_id: await library.artwork(title_id, kind=ImageKind.POSTER)
+        for one in by_position
+        for title_id in one.card_title_ids
+    }
+    ctx = library.context()
+
+    library.images.reset_calls()
+    proposed = await CuratedProvider().propose(ctx)
+    built = [await one.row.build(ctx) for one in proposed]
+
+    assert len(built) == 4, "the premise: four shelves really were built"
+    assert library.images.calls == 1, "the family read artwork once per shelf"
+    for row, one in zip(built, by_position, strict=True):
+        assert [card.artwork for card in row.cards] == [
+            posters[title_id] for title_id in one.card_title_ids
+        ], "a shelf rendered the family's artwork rather than its own"
+
+
+async def test_a_generation_whose_titles_have_no_artwork_is_still_read_only_once() -> None:
+    """**A memo that tests its answer for truth re-reads whenever the answer is
+    empty**, and empty is the *common* answer here: a catalog that has been
+    synced and never derived holds no `images` row at all, so the households
+    this memo saves the most for are exactly the ones a falsy check would
+    charge four times.
+
+    `_Family.owned` states the same rule one read over (`is None`, never
+    falsiness) because a household owning none of a generation reads back
+    `set()`. Artwork is worse, because `{}` is not an edge case there -- it is
+    the default state of the whole table before `usher derive` runs.
+
+    Found by planting `if not self._artwork.get(kind)` in place of the
+    membership test and watching it survive all 3,497 cases: every other
+    artwork case seeds a poster for every card, so the empty answer was a state
+    the suite had never been in. Nearest relative is *"has any fixture,
+    anywhere, ever set this to the other value?"*.
+
+    The premise is the second half: the same fixture with artwork seeded, which
+    must also read once. Without it `== 1` is satisfied by a family that never
+    consults the memo at all.
+    """
+    library, _, _ = await _counted()
+    for position in range(4):
+        await _shelf(library, position, cards=4)
+    ctx = library.context()
+
+    library.images.reset_calls()
+    for one in await CuratedProvider().propose(ctx):
+        built = await one.row.build(ctx)
+        assert all(card.artwork is None for card in built.cards), "the premise: no artwork seeded"
+
+    assert library.images.calls == 1, "an empty answer was re-read once per shelf"
+
+
+async def test_the_family_memo_is_keyed_by_kind_and_not_by_whether_it_has_read() -> None:
+    """`_Family.artwork` answers the kind it is *asked* for, and the memo has
+    one slot per kind rather than one slot.
+
+    **Unreachable through `LLMRow` today and pinned anyway**, which is the
+    distinction worth stating rather than hiding: `LLMRow.display_hint` is a
+    hard-coded `PORTRAIT`, so every shelf in a family asks the same question and
+    a single-slot memo is behaviourally identical -- measured, that mutation
+    survives all 3,497 cases through the provider. What makes it a gap rather
+    than an equivalent mutant is that `kind` is a **parameter**: the
+    collaborator that falsifies the promise is already injected, so the case
+    costs four lines, which is this repository's own test for when a survivor is
+    coverage (`.claude/rules/mutation-sweeps.md`).
+
+    The damage a single slot does is the one artwork defect that renders
+    perfectly: the day any curated shelf carries a `landscape` hint, every shelf
+    in that generation is served whichever kind the *first* one asked for --
+    16:9 painted into a 2:3 slot, or the reverse, with nothing reporting an
+    error. Asserted as **which ids** and not merely as a count, because a memo
+    with one slot answers a full, correctly-shaped mapping either way.
+    """
+    library = Library()
+    title_id = await library.title("A Film With Both")
+    poster = await library.artwork(title_id, kind=ImageKind.POSTER)
+    backdrop = await library.artwork(title_id, kind=ImageKind.BACKDROP)
+    family = _Family([title_id])
+    ctx = library.context()
+
+    assert poster != backdrop, "the premise: the two kinds are two rows"
+
+    library.images.reset_calls()
+    first = await family.artwork(ctx, ImageKind.POSTER)
+    second = await family.artwork(ctx, ImageKind.BACKDROP)
+    again = await family.artwork(ctx, ImageKind.POSTER)
+
+    assert first[title_id].id == poster
+    assert second[title_id].id == backdrop
+    assert again[title_id].id == poster
+    assert library.images.calls == 2, "the memo is one slot, or it is not a memo at all"
 
 
 async def test_a_shelf_the_composer_never_builds_costs_nothing() -> None:

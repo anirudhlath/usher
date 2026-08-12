@@ -112,14 +112,22 @@ class JobQueue(ABC):
         """
 
     @abstractmethod
-    async def fail(self, job_id: uuid.UUID, *, error: str, retryable: bool) -> Job | None:
+    async def fail(
+        self,
+        job_id: uuid.UUID,
+        *,
+        error: str,
+        retryable: bool,
+        retry_after_seconds: float | None = None,
+    ) -> Job | None:
         """The work raised. Back it off, or park it.
 
         `retryable=False` **parks immediately**, whatever the attempt count.
         That is `PortDataMalformed`'s contract in queue form: "the upstream
         answered, and the answer was wrong. Retrying does not help." Backing
         it off five times first is five identical failures and a five-times
-        longer wait before a human sees it.
+        longer wait before a human sees it. `retry_after_seconds` is not
+        consulted on this arm -- there is no backoff to floor.
 
         `retryable=True` increments `attempts` and sets `run_after` to an
         exponentially-backed-off, jittered instant -- **unless** `attempts`
@@ -131,6 +139,19 @@ class JobQueue(ABC):
         attempt count. A whole batch of jobs that failed against the same
         upstream in the same second otherwise retries in the same second,
         which is a thundering herd against something already struggling.
+
+        `retry_after_seconds` is a **floor added to** the jittered backoff,
+        not a replacement for it: an upstream's own `Retry-After` (seconds, or
+        an HTTP-date already resolved to seconds by the caller -- see
+        `PortRateLimited`) must never be answered *sooner* than it asked, but
+        a whole batch rate-limited by the same upstream in the same second
+        must still not retry in the identical instant. `None` means the
+        upstream gave no hint, and is equivalent to `0.0`. A hint that has
+        already elapsed (a negative value, e.g. from an HTTP-date already in
+        the past) must not pull the retry *earlier* than the ordinary
+        schedule would have -- the job must still not be instantly
+        re-claimable. Keyword-only with a default, so it does not change any
+        existing call site.
 
         Returns the job as it now stands, so a caller can log or count the
         park, or `None` if the id is unknown (a worker whose claim was

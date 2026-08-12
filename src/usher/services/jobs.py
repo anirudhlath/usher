@@ -42,7 +42,7 @@ from opentelemetry.trace import Link
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from usher.domain.jobs import Job, JobKind
-from usher.ports.errors import PortDataMalformed, UsherPortError
+from usher.ports.errors import PortDataMalformed, PortRateLimited, UsherPortError
 from usher.ports.jobs import JobQueue
 
 Handler = Callable[[Job], Awaitable[None]]
@@ -81,19 +81,13 @@ class JobWorker:
         `composition.build_worker` -- `ENRICH` and `DERIVE` on a TMDb key,
         `INDEX` on an embedder, `CURATE` on an `LLMClient` -- so "this
         deployment cannot run that kind" is wiring a test has to be able to
-        see, and only `MATCH`, `WATCH_HISTORY` and `SYNC` are in every build.
-        `SYNC` joined them in M9's E3: there is no optional process resource
-        behind a triggered sync, only the adapter factory every root already
-        builds, so it is registered exactly as unconditionally as the two it
-        joins.
-        🔴 `WATCH_WRITEBACK` is in **no** build: M9's D7 minted the member so
-        its four routes could enqueue, and D8 -- which depends on D7 -- adds
-        the handler and the unconditional registration. Whoever lands D8
-        strikes this paragraph and adds `WATCH_WRITEBACK` to the list of
-        kinds in every build; the conditional four do not change. A
-        mutable dict handed out would let a caller register a handler the
-        worker never knew about, which is the same silent gap the other way
-        round.
+        see, and `MATCH`, `WATCH_HISTORY`, `WATCH_WRITEBACK` and `SYNC` are the
+        four in every build. `SYNC` joined them in M9's E3: there is no
+        optional process resource behind a triggered sync, only the adapter
+        factory every root already builds, so it is registered exactly as
+        unconditionally as the other three. A mutable dict handed out would
+        let a caller register a handler the worker never knew about, which is
+        the same silent gap the other way round.
         """
         return frozenset(self._handlers)
 
@@ -160,7 +154,16 @@ class JobWorker:
         # `str(exc)`, never the exception object and never a payload: PRD 08's
         # credentials-are-never-logged rule applies to a column an operator
         # reads and to this log line alike.
-        outcome = await self._queue.fail(job.id, error=str(exc), retryable=retryable)
+        #
+        # `isinstance`, not `getattr(exc, "retry_after", None)`: the latter is
+        # how a future exception member accidentally opts into a behaviour
+        # nobody chose. `PortRateLimited` is the one member of the taxonomy
+        # that carries the attribute; naming it is what keeps that true
+        # tomorrow rather than only today.
+        retry_after_seconds = exc.retry_after if isinstance(exc, PortRateLimited) else None
+        outcome = await self._queue.fail(
+            job.id, error=str(exc), retryable=retryable, retry_after_seconds=retry_after_seconds
+        )
         await self._commit()
         logger.warning(
             "{kind} job {key} failed ({attempts} attempts, {disposition}): {error}",

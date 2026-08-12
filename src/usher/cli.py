@@ -1007,7 +1007,19 @@ async def _search(
             pipeline = build_pipeline(session, settings, embedder=model, llm=client)
             try:
                 answer = await pipeline.search.search(
-                    query, mode=requested, limit=limit, filters=filters
+                    query,
+                    mode=requested,
+                    limit=limit,
+                    filters=filters,
+                    # `ensure_default_user`, not `default_user`: this command
+                    # needs an id and nothing else, exactly as `usher curate`
+                    # does, and PRD 01's authentication seam is a singleton row
+                    # until a request has one to carry. Not committed, for the
+                    # same reason `usher curate` does not commit it -- a search
+                    # is a read, and on the one run where the row does not
+                    # exist yet the household it would create has no watch
+                    # history for the term to find anyway.
+                    user_id=await ensure_default_user(session),
                 )
             except SemanticSearchUnavailable as exc:
                 # Not narrowed to full-text, and the service is right to refuse
@@ -1260,6 +1272,7 @@ async def _home(settings: Settings, *, limit: int, repeat: int) -> None:
             collections=pipeline.collections,
             affinities=lambda: pipeline.taste.genre_affinity(user.id),
             curated=pipeline.curated_rows,
+            images=pipeline.images,
         )
         cache = RowCache(clock=lambda: datetime.now(UTC))
         # **The same table `GET /home` filters against, read by the same join.**

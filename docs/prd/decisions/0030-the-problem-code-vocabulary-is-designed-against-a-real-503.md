@@ -103,11 +103,11 @@ directions, so the two cannot drift apart without a red suite.
 
 | code | status | emitted by |
 |---|---|---|
-| `not_found` | 404 | `GET /titles/{title_id}`, `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play`, `GET /admin/sources/{source_id}/status`, `DELETE /admin/sources/{source_id}`, and every unrouted path — Starlette's router raises it before any handler runs |
+| `not_found` | 404 | `GET /titles/{title_id}`, `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play`, `GET /admin/sources/{source_id}/status`, `DELETE /admin/sources/{source_id}`, `GET /images/{image_id}`, and every unrouted path — Starlette's router raises it before any handler runs |
 | `validation_failed` | 422 | every route, through FastAPI's request validation and `api/errors.py`'s stripping handler; `GET /events` raises it directly for a malformed `?titles=`, and `GET /search` for a `?mode=semantic` this deployment has no embedding model to serve |
 | `method_not_allowed` | 405 | every route, through Starlette's router |
 | `invalid_cursor` | 400 | `api/cursor.py`, on any cursor that does not match the query it is replayed against. **The one member with no route yet** — see Consequences |
-| `source_unavailable` | 503 | `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play` — **beyond the benchmark; forced by** the first route in Usher that holds a `SourceAdapter` |
+| `source_unavailable` | 503 | `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play` — **beyond the benchmark; forced by** the first route in Usher that holds a `SourceAdapter`. Also `GET /images/{image_id}`, on **both** of its upstream arms — see the amendment below |
 | `not_playable` | 409 | `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play`, `POST /admin/sources/{source_id}/sync` (M9's E3, a reuse — see Amendment) — **beyond the benchmark; forced by** the first two, for a title the household owns and no source can play |
 | `ticket_invalid` | 404 | `GET /stream/{ticket}` — **beyond the benchmark; forced by** the redeem route, which has no other way to say "re-ask `/play`" |
 
@@ -244,6 +244,60 @@ are not taste:
 The naming rule therefore binds **new** members and does not re-open a shipped
 one. The asymmetry is recorded here so the next reader does not read
 `invalid_cursor` as a precedent for adjective-first spellings.
+
+### Amendment 2026-08-11 — `GET /images/{image_id}` has a second upstream arm, its honest status is 502, and no member names one
+
+**This is a request, not a mint.** The rule this record states is that a
+fan-out task needing a member it was not given amends this record in the same
+commit; the rule the M9 plan's wave brief adds is that a task must **stop and
+ask** rather than write the member itself. Both are honoured here: the fact is
+recorded, the member is not added, and the route ships inside the vocabulary as
+it stands.
+
+The image proxy's upstream failures are **three**, and only the third has no
+name here:
+
+- **`PortUnavailable`** — the CDN timed out, refused the connection,
+  rate-limited or answered 5xx. Transient. `503 source_unavailable` is exactly
+  right and the route ships it with a `Retry-After`.
+- **`MediaTypeNotServable`** — a subclass of `PortDataMalformed` that C4 added
+  for exactly this: the provider answered *correctly* about artwork this
+  deployment declines to carry, which today is an `image/svg+xml` logo, roughly
+  **one title in seventeen** (`.claude/rules/ports-and-error-taxonomy.md` has
+  the sample). That is an absence and not a fault, so it is a `404 not_found` —
+  a member this record already has, on the reading rule 2 gives: `instance`
+  carries the resource and a client renders the same fallback it would for a
+  title with no logo. **No new member is wanted for it and none is requested.**
+- **A residual `PortDataMalformed`** — a 4xx from the CDN (a rung withdrawn
+  from a kind, which
+  [ADR-0032](0032-the-image-proxy-clamps-to-a-ladder.md)'s Uncertainty names), a
+  body past `USHER_IMAGE_MAX_BYTES`, or a captive portal's HTML login page
+  under a 200. **Not transient**: the same request produces the same unusable
+  answer, and a client told to retry will retry forever.
+
+502 is the status RFC 9110 §15.6.3 gives that, and **no member here names a
+502**. `source_unavailable` cannot be raised at one: the stability rule above
+says a code carries one status everywhere, and
+`test_every_code_carries_one_status_everywhere_it_is_raised` enforces it. So
+the route ships **both arms as `503 source_unavailable`** and carries the
+distinction in `Retry-After` — present on the transient arm, absent on the
+other — which is standard, machine-readable, and needs nothing from this
+record.
+
+**What a member would have to clear, written here so the next reader is not
+starting from scratch.** Rule 1 is met: there is an emitter in
+`src/usher/api/routers/images.py` at this commit. The naming rule gives
+`<subject>_<state>`, so `upstream_unusable` fits and `bad_gateway` does not.
+The bar this record applies is *"does an existing member already carry this
+meaning, and would a client branch differently on it?"* — and the honest answer
+to the second half is that **an image client probably would not**: it paints a
+placeholder either way. That is the argument against minting one, and it is why
+this is a request rather than a fait accompli. The argument *for* is that the
+two arms differ in whether retrying can ever work, which is the one thing a
+cache or a retry layer in front of a client does branch on.
+
+Until it is settled, `Retry-After` is the contract and
+`docs/prd/08-operations.md`'s degradation table carries both arms.
 
 ### Declined — members with no emitter, each with the fact that kills it
 

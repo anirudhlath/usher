@@ -129,6 +129,7 @@ _NEVER_EXISTED_IN_PUBLIC = {
     "stg_collections",  # M7
     "stg_genome",  # M7
     "stg_credit_names",  # M9 T6
+    "stg_akas",  # M9 T7
 }
 
 

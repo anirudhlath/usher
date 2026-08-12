@@ -916,15 +916,23 @@ cannot be deduplicated on an IMDb load at all — its only unique key is
 The name *text* is the part of a person weight class B indexes, so the names
 are written and the entities are not.
 
-⏳ **`alternative_titles` is not derived, because it is not in the cache**, and
-this is named here rather than left implied by the deferral it blocks.
-It appears in neither `append_to_response` list above, so aliases are not in
-`raw_payloads` at all — landing them changes the crawl's *request shape* and
-re-fetches the whole enriched tier, i.e. it is a metadata-provider change
-wearing a search table's name. It is the blocker on
-[05](05-search-and-similarity.md)'s `title_search_names`, and it is
-**unassigned**: M9 owns the people half of that table and nothing owns this
-one.
+✅ **`alternative_titles` is still not derived and no longer blocks anything,
+because M9 took the aliases from IMDb instead.** It appears in neither
+`append_to_response` list above, so aliases are not in `raw_payloads` at all —
+landing them there would change the crawl's *request shape* and re-fetch the
+whole enriched tier, i.e. it is a metadata-provider change wearing a search
+table's name, and that argument is unchanged. What changed is that it is no
+longer the only route: IMDb's `title.akas` is an alias source needing **no API
+call at all**, and `BulkCatalogRepository.replace_aliases` fills
+[05](05-search-and-similarity.md)'s `title_search_names` from it —
+**1,663,364 deduplicated aliases over 399,046 of 1,271,138 titles (31.4%)**,
+with `region` and `language`, at no cost to this crawl.
+
+**So this paragraph is now a statement about TMDb's payload and not a
+deferral.** If `alternative_titles` is ever wanted it is for what IMDb does not
+supply (a TMDb-side `type` vocabulary, and coverage for titles with no IMDb
+id), and that is a metadata-provider decision with its own re-fetch cost —
+not an obligation this table is waiting on.
 
 ## Watch state
 

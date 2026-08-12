@@ -6,13 +6,15 @@ module is the only place the two vocabularies meet, which is what keeps
 `usher.services.jobs` a generic claim/run/park loop rather than a switch
 statement over the pipeline.
 
-**One column, three kinds of identifier.** `Job.key` is a string so that one
+**One column, four kinds of identifier.** `Job.key` is a string so that one
 column serves every kind without a polymorphic payload, and what it names
 depends entirely on the kind: a `Title.id` for `enrich`, `index` and
-`derive`; a source's own `external_id` for `match` and `watch_history`; a
-`User.id` for `curate`. The conversion is what makes that legible, and it is
-why `_uuid_key` takes the *expected* thing as an argument — the failure a
-handler writes into `jobs.last_error` has to say which of the three the key
+`derive`; a source's own `external_id` for `match`, `watch_history` and
+`watch_writeback`; a `User.id` for `curate`; and a composite
+`"{source_id}:{lane}"` for `sync`, the one kind whose key names two things
+rather than one. The conversion is what makes that legible, and it is why
+`_uuid_key` takes the *expected* thing as an argument — the failure a
+handler writes into `jobs.last_error` has to say which of the four the key
 failed to be.
 
 **A key that does not parse is `PortDataMalformed`, never a `ValueError`.**
@@ -21,7 +23,7 @@ lets anything that is not a `UsherPortError` propagate — a bug in a handler
 is not an upstream failure. So a corrupted `enrich` key would take the worker
 process down instead of parking one job. Every key is converted here, once.
 
-**The two source-scoped kinds key on a source's own `external_id`**
+**The three source-scoped kinds key on a source's own `external_id`**
 (`usher.domain.jobs.Job`), which is not a `MediaItem.id` and carries no
 source. A handler therefore has to find *which* configured source addresses
 that string, and it does so through an injected `SourceResolver` rather than
@@ -45,11 +47,12 @@ from dataclasses import dataclass
 from loguru import logger
 
 from usher.domain.jobs import Job
-from usher.domain.source import Source
+from usher.domain.source import MediaItem, Source
 from usher.domain.sync import SyncRunKind
+from usher.domain.watch import WatchState
 from usher.ports.errors import PortDataMalformed
-from usher.ports.repository import MediaItemRepository, SourceRepository
-from usher.ports.source import SourceAdapter
+from usher.ports.repository import MediaItemRepository, SourceRepository, WatchStateRepository
+from usher.ports.source import SourceAdapter, WatchStateUpdate
 from usher.services.curation import CurationService
 from usher.services.derive import DeriveService
 from usher.services.enrich import EnrichService
@@ -352,6 +355,115 @@ def sync_handler(
     return handle
 
 
+def watch_writeback_handler(
+    watch_states: WatchStateRepository,
+    media_items: MediaItemRepository,
+    resolve: SourceResolver,
+    *,
+    user_id: uuid.UUID,
+) -> Handler:
+    """`watch_writeback` jobs key on a source's own `external_id`, carry no
+    payload, and push whatever the household's row holds **now**.
+
+    PRD 03's outbound half, as a queued job. `WatchWriteService` writes
+    locally, commits, publishes and enqueues one of these per source *copy*;
+    this is the only place in `src/` where a client's watch write reaches a
+    server.
+
+    **The absent payload is the design, not an economy.** `(kind, key)` is
+    unique, so five `PUT`s during one minute of playback coalesce into one
+    row -- and because the state is re-read here rather than replayed, the
+    write that lands is the newest and a retry after a backoff is idempotent
+    by construction. A job carrying the state it was enqueued with would have
+    neither property: the queue would hold five stale positions and a backoff
+    would eventually push an old one over a newer one.
+
+    **`user_id` is bound at construction**, exactly as `watch_history_handler`
+    binds it and for the same reason -- M4 has one user (PRD 01's
+    authentication seam), and the key is a source's `external_id` with no
+    household in it. Mapping a source's own user ids onto Usher's would settle
+    that question here.
+
+    **Two ways for the work to have become impossible, and both complete
+    rather than park.** No configured source addresses the key (the household
+    removed that server, or the copy was never ours), and the source no longer
+    has the item. Parking either fills the review list with things that are
+    simply gone, and a parked job needs a human to release it. The second
+    costs one `get_item` per write-back, which is the honest price of the
+    branch: `EmbySession.ok` raises `PortUnavailable` for **every** status at
+    or above 400, so a push at an item Emby has deleted is retried five times
+    and then parked -- which is exactly what `WatchWriteService` promises does
+    not happen when it enqueues a retracted copy on purpose.
+
+    **A household with no row for this target sends nothing**, rather than
+    sending zeroes. `WatchStateUpdate` has no "leave it alone" spelling, so a
+    push assembled from an absent row would report position 0 and
+    `Played: false` -- and on Emby that body is applied verbatim, so it would
+    erase the source's own state on behalf of a household that never wrote
+    one.
+
+    **Nothing is caught here**, for the reason `curate_handler`'s docstring
+    gives: `JobWorker` parks `PortDataMalformed` and backs everything else
+    off, and it can only do that with an exception it is allowed to see. A
+    handler that absorbed one would `complete()` the job, delete its row and
+    lose the write silently -- which is the failure PRD 03's "best effort"
+    is most often misread as licensing.
+
+    🔴 **Marking played diverges by one field on the round trip, and the
+    divergence is in live Emby rather than in this code.** `POST
+    /PlayedItems` clears the resume position as it marks the item played
+    (measured against 4.9.5.0), while the local write keeps
+    `position_seconds`. So after a successful write-back the source holds `0`
+    and Usher holds N, and the next walk can merge the zero back. Named here
+    so a live run *observes* it rather than discovering it, and so a later
+    reader does not read the difference as a bug in the merge. Nothing here
+    chases it: the local rule is M3's own finding and the source's rule is the
+    source's.
+    """
+
+    async def handle(job: Job) -> None:
+        binding = await resolve(job.key)
+        if binding is None:
+            logger.debug(
+                "write-back job {key} names no configured source; nothing to do", key=job.key
+            )
+            return
+        copy = await media_items.get_by_external_id(binding.source.id, job.key)
+        if copy is None:
+            logger.debug(
+                "write-back job {key} names no copy on {source}",
+                key=job.key,
+                source=binding.source.name,
+            )
+            return
+        state = await _local_watch_state(watch_states, user_id, copy)
+        if state is None:
+            logger.debug(
+                "write-back job {key} has no local watch state to send",
+                key=job.key,
+                source=binding.source.name,
+            )
+            return
+        if await binding.adapter.get_item(job.key) is None:
+            logger.debug(
+                "write-back job {key} names an item {source} no longer has",
+                key=job.key,
+                source=binding.source.name,
+            )
+            return
+        await binding.adapter.push_watch_state(
+            job.key,
+            WatchStateUpdate(position_seconds=state.position_seconds, played=state.played),
+        )
+        logger.info(
+            "wrote watch state back to {source} for {key}",
+            key=job.key,
+            source=binding.source.name,
+        )
+
+    return handle
+
+
 def _sync_key(job: Job) -> tuple[uuid.UUID, SyncRunKind]:
     """`job.key` as `(source id, lane)`, or `PortDataMalformed`.
 
@@ -387,6 +499,30 @@ def _sync_key(job: Job) -> tuple[uuid.UUID, SyncRunKind]:
             detail=job.key,
         ) from exc
     return source_id, lane
+
+
+async def _local_watch_state(
+    watch_states: WatchStateRepository, user_id: uuid.UUID, copy: MediaItem
+) -> WatchState | None:
+    """The household's row for whatever this copy is matched to.
+
+    An episode's `media_items` row holds its series' `title_id` **and** its
+    `episode_id`, and `watch_states` permits exactly one
+    (`num_nonnulls(title_id, episode_id) = 1`), so the pair collapses here
+    with the episode winning -- the same rule `watch_sync._watch_target`
+    applies to the inbound direction, for the same reason. Reading the title's
+    row for an episode's copy would push one series' progress onto every one
+    of its 999,927 episode files.
+
+    An unmatched copy is matched to nothing and there is no row to read, which
+    is a real state rather than a defensive one: `MediaItem.title_id` is
+    deliberately nullable and the review queue is where those sit.
+    """
+    if copy.episode_id is not None:
+        return await watch_states.get_for_episode(user_id, copy.episode_id)
+    if copy.title_id is not None:
+        return await watch_states.get_for_title(user_id, copy.title_id)
+    return None
 
 
 def _title_id(job: Job) -> uuid.UUID:
@@ -439,4 +575,5 @@ __all__ = [
     "match_handler",
     "sync_handler",
     "watch_history_handler",
+    "watch_writeback_handler",
 ]

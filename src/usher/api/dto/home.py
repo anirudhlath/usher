@@ -1,13 +1,28 @@
 """`GET /home` — [ADR-0006](../../../../docs/prd/decisions/0006-server-composed-home.md),
 PRD 06 and PRD 07.
 
-**A card carries no artwork, and the absence is documented rather than filled
-with a null** -- the same choice `dto/title.py` makes for `images`, `credits`,
-`similar` and the season hierarchy, and for the sentence M5 wrote for it: an
-always-null field is a client-side branch that never takes its other arm, and
-the day M9 lands the image proxy and its table, every client that shipped
-against the null already renders without it. There is no `Image` table, no
-`images` column and not even a `poster_path` on `titles` (M7 boundary call 3).
+**A card carries one artwork reference, and it is an `images.id` -- resolvable
+through `GET /images/{id}` and nothing else.** M7 shipped no such field at all,
+absent rather than null, on the argument M5 wrote for `GET /titles/{id}`'s
+absent `images` key: an always-null field is a client-side branch that never
+takes its other arm, and *"the day M9 lands the image proxy and its table,
+every client that shipped against the null already renders without it."* That
+day is this one -- the table, the derivation and the proxy are all M9's -- so
+the field arrives with values in it and a client written against its absence is
+untouched.
+
+**Never a URL and never a path.** A URL would put this deployment's CDN base
+and ADR-0032's ladder rung inside a screen a client caches for thirty seconds;
+a path is provider vocabulary a client would have to know how to assemble.
+`GET /images/{id}` is the one place either is decided, which is also what makes
+the reference survive a re-derivation (`m09c`'s natural key).
+
+**One id, chosen against the row's `display_hint`** -- a poster for
+`portrait`/`square`, a backdrop for `landscape`/`wide`. A list would be the
+client re-deciding a question ADR-0006 puts on the server, and it could not
+decide it anyway: the hint lives on the *row*, one level above the card.
+`null` means the catalog holds no image of that kind for the title, which is
+the ordinary state of a title nothing has derived yet.
 
 **No cursor.** ADR-0006 composes a *screen*, and PRD 07's endpoint table gives
 `/browse` a cursor and gives `/home` none. Paging through rows would be a
@@ -59,6 +74,13 @@ class RowCardResponse(BaseModel):
     card playable rather than merely navigable; `episode_label` is composed on
     the server so the zero-padding is decided once instead of by each client.
     Both are `null` on every card of the other seven rows.
+
+    `artwork` is an **image id**, not a URL and not a path: a client renders it
+    by asking `GET /images/{id}`, which is where the CDN base, the ladder rung
+    and the cache headers live. `null` is a real answer -- no poster (or, on a
+    `landscape` row, no backdrop) is known for the title -- and unlike the
+    fields above it is the *common* answer on a catalog nothing has derived,
+    which is why the branch is a branch and not decoration.
     """
 
     title_id: uuid.UUID
@@ -72,6 +94,7 @@ class RowCardResponse(BaseModel):
     played: bool
     episode_id: uuid.UUID | None
     episode_label: str | None
+    artwork: uuid.UUID | None
 
     @classmethod
     def of(cls, card: RowCard) -> "RowCardResponse":
@@ -87,6 +110,7 @@ class RowCardResponse(BaseModel):
             played=card.played,
             episode_id=card.episode_id,
             episode_label=card.episode_label,
+            artwork=card.artwork,
         )
 
 

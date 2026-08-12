@@ -14,6 +14,7 @@ deployment with no TMDb key produced a `WARNING` every `IDLE_SLEEP_SECONDS`
 that the information is still surfaced rather than merely quieted.
 """
 
+import inspect
 import io
 import os
 import uuid
@@ -36,10 +37,12 @@ from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient, usage
+from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.metadata_provider import FakeMetadataProvider
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.raw_payload_store import FakeRawPayloadStore
 from tests.fakes.row_provider_settings_repository import FakeRowProviderSettingsRepository
+from tests.fakes.source_adapter import FakeSourceAdapter
 from tests.fakes.taste_repository import FakeTasteRepository
 from tests.fakes.title_embedding_repository import FakeTitleEmbeddingRepository
 from tests.fakes.title_repository import FakeTitleRepository
@@ -56,23 +59,28 @@ from usher.composition import (
 )
 from usher.config import Settings
 from usher.domain.curation import LLMPurpose
-from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.enums import EnrichmentState, SourceKind, TitleKind
 from usher.domain.ids import new_id
 from usher.domain.jobs import JobKind, JobStatus
+from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.embedding import Embedder
 from usher.ports.errors import PortUnavailable
 from usher.ports.events import NullEventPublisher
+from usher.ports.ingest import MediaItemUpsert, WatchStateWrite
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.repository import (
     CuratedRowRepository,
     LLMCallRepository,
+    MediaItemRepository,
     TitleRepository,
     WatchStateRepository,
 )
+from usher.ports.source import SourceItem, SourceItemKind
 from usher.services.curation_pool import CandidatePoolService
 from usher.services.curation_validate import ITEM_IDS_KEY, REASON_KEY, ROWS_KEY, TITLE_KEY
 from usher.services.handlers import SourceBinding
+from usher.services.jobs import JobWorker
 from usher.services.rows import ROW_PROVIDERS
 from usher.services.taste import TasteService
 
@@ -94,6 +102,7 @@ def _pipeline_over_fakes(
     curated: CuratedRowRepository | None = None,
     ledger: LLMCallRepository | None = None,
     watch_states: WatchStateRepository | None = None,
+    media_items: MediaItemRepository | None = None,
     commit: Callable[[], Awaitable[None]] | None = None,
 ) -> Pipeline:
     """A `Pipeline` carrying the fields `build_worker`'s factories read.
@@ -138,7 +147,7 @@ def _pipeline_over_fakes(
         credentials=unused,
         titles=titles,
         matching=unused,
-        media_items=unused,
+        media_items=unused if media_items is None else media_items,
         episodes=FakeEpisodeRepository(),
         watch_states=history,
         payloads=FakeRawPayloadStore(),
@@ -351,9 +360,9 @@ def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
     The `ENRICH` and `CURATE` halves are asserted alongside it, so the three
     guards cannot drift into "two guarded, one not", and `MATCH` is asserted
     so an implementation registering *nothing* cannot pass. This is the
-    default deployment -- no key, no extra, no model -- and its three
-    claimable kinds (`match`, `watch_history`, `sync`) are the whole of what
-    it can do.
+    default deployment -- no key, no extra, no model -- and its four
+    claimable kinds (`match`, `watch_history`, `watch_writeback`, `sync`) are
+    the whole of what it can do.
     """
     worker = build_worker(
         _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
@@ -366,8 +375,170 @@ def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
     )
 
     assert worker.registered_kinds == frozenset(
-        {JobKind.MATCH, JobKind.WATCH_HISTORY, JobKind.SYNC}
+        {JobKind.MATCH, JobKind.WATCH_HISTORY, JobKind.WATCH_WRITEBACK, JobKind.SYNC}
     )
+
+
+def test_a_write_back_handler_is_registered_in_every_build() -> None:
+    """The kind a client's own press enqueues, so no deployment may lack it.
+
+    M4's rule -- *"a job kind whose handler is a stub is a queue that grows
+    forever"* -- and this is the shape it takes when the handler exists but
+    the registration is guarded: `run_once` claims `list(self._handlers)`, so
+    a `WATCH_WRITEBACK` behind any condition leaves the shipped default
+    deployment enqueueing a job on every `PUT /watch/...` that nothing ever
+    claims. That is not the benign "leave it for a worker that can run it"
+    bargain `INDEX` makes, because there is no such worker: the handler needs
+    a TMDb key, an embedder and an LLM endpoint exactly as much as `match`
+    does, which is not at all.
+
+    Asserted against the **bare** build -- no provider, no embedder, no
+    client -- because that is the configuration every guard would exclude it
+    from, with the fully-equipped build beside it as the control that stops
+    the case passing against a registration nothing reaches.
+    """
+    bare = build_worker(
+        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _settings(),
+        provider=None,
+        embedder=None,
+        client=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+    equipped = build_worker(
+        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _settings(),
+        provider=FakeMetadataProvider(),
+        embedder=FakeEmbedder(),
+        client=FakeLLMClient(),
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+
+    assert JobKind.WATCH_WRITEBACK in bare.registered_kinds
+    assert JobKind.WATCH_WRITEBACK in equipped.registered_kinds
+
+
+async def test_a_write_back_job_reaches_the_source_through_the_pipelines_own_repositories() -> None:
+    """The registration end to end: a real job, claimed by a real worker,
+    arriving at a real adapter.
+
+    Two things only this shape can say. `mypy` holds the *types* of the two
+    repositories `build_worker` hands the handler and says nothing about them
+    being the **pipeline's** -- a second `FakeMediaItemRepository` built here
+    would type-check and would answer `None` for every key, so the case reads
+    the state back through the objects the pipeline holds. And the `user_id`
+    is the one the root bound, which is the half `watch_history` already
+    depends on: a handler reading some other household's row would push a
+    position this household never set.
+
+    `run_once() == 1` is the premise, not the result -- a worker that never
+    claimed the kind returns 0 and every later assertion would be about an
+    empty ledger.
+    """
+    source = Source(
+        kind=SourceKind.EMBY,
+        name="Living Room",
+        base_url="https://emby.example",
+        credentials_ref="ref",
+        device_id="device",
+    )
+    adapter = FakeSourceAdapter(source)
+    adapter.seed(
+        SourceItem(external_id="emby-1", name="A Film", kind=SourceItemKind.MOVIE),
+        datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    media_items = FakeMediaItemRepository()
+    title_id = new_id()
+    await media_items.upsert_many(
+        [
+            MediaItemUpsert(
+                source_id=source.id,
+                external_id="emby-1",
+                title_id=title_id,
+                episode_id=None,
+                container=None,
+                video_codec=None,
+                audio_codec=None,
+                width=None,
+                height=None,
+                hdr_format=None,
+                audio_channels=None,
+                file_size_bytes=None,
+                runtime_seconds=None,
+                added_at=None,
+                last_seen_at=datetime(2026, 8, 11, tzinfo=UTC),
+            )
+        ]
+    )
+    watch_states = FakeWatchStateRepository()
+    household = new_id()
+    await watch_states.set_from_client(
+        WatchStateWrite(
+            user_id=household,
+            title_id=title_id,
+            episode_id=None,
+            position_seconds=613,
+            played=False,
+        )
+    )
+    queue = FakeJobQueue()
+    pipeline = _pipeline_over_fakes(
+        titles=FakeTitleRepository(),
+        queue=queue,
+        watch_states=watch_states,
+        media_items=media_items,
+    )
+
+    async def resolve(external_id: str) -> SourceBinding | None:
+        return SourceBinding(source=source, adapter=adapter)
+
+    worker = build_worker(
+        pipeline,
+        _settings(),
+        provider=None,
+        embedder=None,
+        client=None,
+        resolve=resolve,
+        user_id=household,
+    )
+    await queue.enqueue([JobRequest(kind=JobKind.WATCH_WRITEBACK, key="emby-1", priority=80)])
+
+    assert await worker.run_once() == 1, "the worker never claimed the write-back job"
+
+    assert adapter.recorded("emby-1") == (613, False)
+    assert queue.jobs_of(JobKind.WATCH_WRITEBACK) == [], "a successful job kept its row"
+
+
+def test_every_kind_a_bare_build_registers_is_named_by_the_docstring_that_lists_them() -> None:
+    """`JobWorker.registered_kinds`' docstring names which kinds are in every
+    build, and that sentence was written deliberately to be falsified here --
+    M8's trap 2 in a new location, where updating it silently is the failure
+    it exists to prevent.
+
+    Derived from the bare build rather than from a literal list, so a sixth
+    unconditional kind cannot be added without the prose moving with it. The
+    claim is pinned rather than the prose: a verbatim assertion on the
+    sentence would fail every future copy-edit that left the claim intact,
+    which is the change-detector this repository has already been bitten by
+    once.
+    """
+    doc = inspect.getdoc(JobWorker.registered_kinds)
+    assert doc is not None
+    bare = build_worker(
+        _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
+        _settings(),
+        provider=None,
+        embedder=None,
+        client=None,
+        resolve=_never_resolves,
+        user_id=uuid.uuid4(),
+    )
+    assert bare.registered_kinds, "the premise: a bare build registers something"
+
+    unnamed = sorted(kind.name for kind in bare.registered_kinds if kind.name not in doc)
+    assert unnamed == [], f"in every build and unmentioned by the docstring: {unnamed}"
 
 
 def test_a_worker_with_an_embedder_registers_the_index_handler() -> None:

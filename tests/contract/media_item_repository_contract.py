@@ -23,7 +23,7 @@ import pytest
 from usher.domain.enums import HdrFormat
 from usher.domain.ids import new_id
 from usher.ports.ingest import AvailabilitySweepRefused, MediaItemTarget, MediaItemUpsert
-from usher.ports.repository import MediaItemRepository
+from usher.ports.repository import MediaItemRepository, UnmatchedCursorPosition
 
 RUN_AT = datetime(2026, 7, 31, 3, 0, tzinfo=UTC)
 EARLIER = RUN_AT - timedelta(days=1)
@@ -390,6 +390,155 @@ class MediaItemRepositoryContract:
         default has to be every source rather than none."""
         await repository.upsert_many([item(source_id, "a"), item(other_source_id, "b")])
         assert len(await repository.list_unmatched()) == 2
+
+    async def test_the_keyset_page_and_the_offset_page_are_one_order(
+        self, repository: MediaItemRepository, source_id: uuid.UUID
+    ) -> None:
+        """`GET /admin/unmatched` pages by cursor and `usher unmatched` pages
+        by offset, over the same queue. Two reads with two `ORDER BY`s is how
+        an operator resolving from the CLI and an operator resolving from the
+        API stop seeing the same backlog -- so the orders are one definition,
+        and this is the case that says so from the outside.
+
+        Seeded with both dated and undated items, because `NULLS LAST` is the
+        half of the order the two forms could most plausibly disagree about.
+        """
+        await repository.upsert_many(
+            [
+                item(source_id, "dated-old", added_at=datetime(2025, 1, 1, tzinfo=UTC)),
+                item(source_id, "dated-new", added_at=datetime(2025, 6, 1, tzinfo=UTC)),
+                item(source_id, "undated-a", added_at=None),
+                item(source_id, "undated-b", added_at=None),
+            ]
+        )
+        offset_form = await repository.list_unmatched(source_id, limit=3, offset=0)
+        keyset_form = await repository.list_unmatched_page(source_id, limit=3)
+        # The premise: the limit really bit, so this compares a *page* rather
+        # than two reads of a population smaller than the page size.
+        assert len(offset_form) == 3
+        assert len(await repository.list_unmatched(source_id)) == 4
+        assert [one.id for one in keyset_form] == [one.id for one in offset_form]
+
+    async def test_a_page_boundary_inside_the_undated_group_does_not_drop_the_rest_of_it(
+        self, repository: MediaItemRepository, source_id: uuid.UUID
+    ) -> None:
+        """ADR-0034's third arm, and the one the refuted spelling loses
+        silently.
+
+        Two dated items and three undated ones at `limit=3` puts the first
+        page's boundary on an **undated** row. Resuming from there, the row
+        comparison `((added_at IS NOT NULL), added_at, id) > (...)` evaluates
+        to NULL rather than false in Postgres and answers *nothing* from the
+        undated group -- while every page it served looked full. The premise
+        below is that the boundary really is undated; without it this case
+        would silently become a test of the dated arm the day the fixture
+        changed.
+        """
+        await repository.upsert_many(
+            [
+                item(source_id, "dated-old", added_at=datetime(2025, 1, 1, tzinfo=UTC)),
+                item(source_id, "dated-new", added_at=datetime(2025, 6, 1, tzinfo=UTC)),
+                *(item(source_id, f"undated-{index}", added_at=None) for index in range(3)),
+            ]
+        )
+        first = await repository.list_unmatched_page(source_id, limit=3)
+        boundary = first[-1]
+        assert boundary.added_at is None, "the premise: the page boundary is an undated item"
+        rest = await repository.list_unmatched_page(
+            source_id,
+            limit=3,
+            after=UnmatchedCursorPosition(added_at=boundary.added_at, id=boundary.id),
+        )
+        assert {one.external_id for one in rest} == {
+            "undated-0",
+            "undated-1",
+            "undated-2",
+        } - {boundary.external_id}
+        # And in the order the queue claims, which a set assertion cannot see.
+        assert [one.id for one in rest] == sorted((one.id for one in rest), reverse=True)
+        assert rest[0].id < boundary.id, "the premise: the tail really is behind the boundary"
+
+    async def test_resuming_from_a_dated_boundary_still_reaches_the_undated_tail(
+        self, repository: MediaItemRepository, source_id: uuid.UUID
+    ) -> None:
+        """The `added_at IS NULL` disjunct of the *dated* arm, which is a
+        separate clause from the undated branch above and fails separately.
+
+        Undated items sort last, so every one of them follows every dated one
+        -- and a predicate that compared only `added_at < :boundary` would
+        answer nothing for them, because a NULL is not less than anything.
+        This is the review queue's most damaging shape: an item a source could
+        not date is the item an operator most needs to see.
+        """
+        await repository.upsert_many(
+            [
+                item(source_id, "dated-old", added_at=datetime(2025, 1, 1, tzinfo=UTC)),
+                item(source_id, "dated-new", added_at=datetime(2025, 6, 1, tzinfo=UTC)),
+                item(source_id, "undated-a", added_at=None),
+                item(source_id, "undated-b", added_at=None),
+            ]
+        )
+        first = await repository.list_unmatched_page(source_id, limit=2)
+        boundary = first[-1]
+        assert boundary.added_at is not None, "the premise: the page boundary is a dated item"
+        rest = await repository.list_unmatched_page(
+            source_id,
+            limit=2,
+            after=UnmatchedCursorPosition(added_at=boundary.added_at, id=boundary.id),
+        )
+        assert {one.external_id for one in rest} == {"undated-a", "undated-b"}
+
+    async def test_the_keyset_page_does_not_re_serve_its_boundary_row(
+        self, repository: MediaItemRepository, source_id: uuid.UUID
+    ) -> None:
+        """Strict, not `<=`. A source that imported a thousand files in one
+        second gives them all the same `added_at`, so the tiebreak is what
+        decides the boundary -- and relaxed, the walk re-serves that row at
+        every page break. Two items sharing one instant and `limit=1` makes
+        the two pages abut, which is the only arrangement that can see it.
+        """
+        same_instant = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
+        await repository.upsert_many(
+            [item(source_id, f"orphan-{index}", added_at=same_instant) for index in range(2)]
+        )
+        first = await repository.list_unmatched_page(source_id, limit=1)
+        second = await repository.list_unmatched_page(
+            source_id,
+            limit=1,
+            after=UnmatchedCursorPosition(added_at=first[0].added_at, id=first[0].id),
+        )
+        # Both premises, because this is an ordering case: the two share an
+        # instant (so the tiebreak is what is under test) and their ids really
+        # do differ in the direction the order claims.
+        assert first[0].added_at == same_instant
+        assert len(second) == 1
+        assert second[0].added_at == same_instant
+        assert first[0].id > second[0].id
+        assert second[0].id != first[0].id
+
+    async def test_a_keyset_page_is_scoped_to_its_source_and_holds_nothing_matched(
+        self,
+        repository: MediaItemRepository,
+        source_id: uuid.UUID,
+        other_source_id: uuid.UUID,
+        title_id: uuid.UUID,
+    ) -> None:
+        """The two predicates `list_unmatched` already carries, asserted on the
+        keyset form as well: they are a second statement, not a second clause
+        on the first one. Unscoped it spans every source, which is what
+        `GET /admin/unmatched` -- no source in its path -- asks for.
+        """
+        await repository.upsert_many(
+            [
+                item(source_id, "mine"),
+                item(source_id, "resolved", title_id=title_id),
+                item(other_source_id, "theirs"),
+            ]
+        )
+        scoped = await repository.list_unmatched_page(source_id, limit=10)
+        assert [one.external_id for one in scoped] == ["mine"]
+        unscoped = await repository.list_unmatched_page(limit=10)
+        assert {one.external_id for one in unscoped} == {"mine", "theirs"}
 
     async def test_attaching_a_title_removes_an_item_from_the_review_queue(
         self, repository: MediaItemRepository, source_id: uuid.UUID, title_id: uuid.UUID

@@ -44,6 +44,46 @@ merely rationed. The spread is what breaks a thundering herd, and a
 half-interval floor keeps all of it while making "a failed job is not
 instantly re-claimable" a property rather than a probability.
 
+**`retry_after_seconds` is a floor added *inside* that same expression, not a
+second `CASE` arm and not a replacement for the jitter.** Six sites across
+four adapter modules construct `PortRateLimited(retry_after=...)` from a real
+upstream hint (TMDb's 429, Emby's, an HTTP `Retry-After` header more
+generally) and, until this parameter existed, nothing in `src/` ever read the
+attribute -- an upstream that said exactly when to come back was answered
+with this queue's own jittered guess instead. `GREATEST(:retry_after_seconds,
+0)` is not decoration: the hint may carry RFC 9110's HTTP-date form, and a
+date already in the past parses to a negative number, which would otherwise
+pull a rate-limited job's backoff *earlier* than the ordinary schedule --
+instantly re-claimable, the exact hot loop this module's jitter exists to
+prevent. Widening the existing `ELSE` arm rather than adding a new `CASE` arm
+means the two parking arms (`NOT :retryable`, `attempts + 1 >= :max_attempts`)
+are textually untouched, so "a rate limit at the attempt ceiling still parks
+with a NULL `run_after`" cannot regress by ordering. `None` is normalised to
+`0.0` in Python, at the one place that binds the parameter
+(`PostgresJobQueue.fail`), rather than wrapped in a SQL `COALESCE`: Postgres's
+`GREATEST` already ignores a NULL input, so a `COALESCE` would be a redundant
+second spelling of a guard that already holds.
+
+**A second reason for the Python normalisation was written here and measured
+false, and the correction is worth keeping over the claim.** The draft this
+was built from expected a bare `None` bound to `:retry_after_seconds` to fail
+with asyncpg's "could not determine data type of parameter" -- the general
+shape `db-and-sql.md` already documents for an untyped parameter with nothing
+around it to type against. Measured directly, on a connection that had never
+run any other statement (so no prepared-statement cache could be priming a
+type): it does not fail. `GREATEST(:retry_after_seconds, 0)` gives Postgres a
+concrete sibling literal to resolve the parameter's type against, which a bare
+`:retry_after_seconds` elsewhere in the statement would not, and
+`GREATEST(NULL, 0)` does evaluate to `0` exactly as documented, not to `NULL`
+propagating through the rest of the expression. So the mutation this was meant
+to guard against (a raw `None` bind in place of the Python normalisation)
+**survives** on this exact SQL shape. The normalisation is kept anyway: it is
+one line, and it stops the floor's correctness depending on a literal `0`
+staying textually adjacent to the parameter inside `GREATEST(...)` -- move the
+parameter, or change the literal to `0.0`, and the inference this measurement
+relies on may not reproduce. `.claude/rules/mutation-sweeps.md`'s D9 ledger
+entry carries the measurement.
+
 `ck_jobs_key_not_empty` and `ck_jobs_priority_range` fire at the
 `INSERT ... SELECT`, not during the `COPY`: `usher.db.staging`'s staging
 tables are deliberately unconstrained, so a violation reaches SQLAlchemy and
@@ -176,9 +216,13 @@ UPDATE jobs SET
         -- Postgres, so a batch of twenty failures against the same upstream
         -- gets twenty different instants instead of one thundering herd.
         -- `attempts` here is the pre-increment value, so the first retry
-        -- waits one base interval rather than two.
+        -- waits one base interval rather than two. The GREATEST(...) term
+        -- below is the floor a server-supplied retry-after hint adds --
+        -- never sooner than the upstream asked, and still spread by the
+        -- jittered draw beside it. See the module docstring.
         ELSE clock_timestamp() + make_interval(
-            secs => :backoff_seconds * power(2, attempts) * (0.5 + random() / 2)
+            secs => GREATEST(:retry_after_seconds, 0)
+                  + :backoff_seconds * power(2, attempts) * (0.5 + random() / 2)
         )
     END,
     updated_at = clock_timestamp()
@@ -290,7 +334,14 @@ class PostgresJobQueue(JobQueue):
         with self._session.no_autoflush:
             await self._session.execute(text("DELETE FROM jobs WHERE id = :id"), {"id": job_id})
 
-    async def fail(self, job_id: uuid.UUID, *, error: str, retryable: bool) -> Job | None:
+    async def fail(
+        self,
+        job_id: uuid.UUID,
+        *,
+        error: str,
+        retryable: bool,
+        retry_after_seconds: float | None = None,
+    ) -> Job | None:
         with self._session.no_autoflush:
             row = (
                 (
@@ -302,6 +353,12 @@ class PostgresJobQueue(JobQueue):
                             "retryable": retryable,
                             "max_attempts": self._max_attempts,
                             "backoff_seconds": self._backoff_seconds,
+                            # Normalised here, not by a SQL COALESCE -- see the
+                            # module docstring for why a bare `None` cannot
+                            # reach `:retry_after_seconds` at all.
+                            "retry_after_seconds": (
+                                0.0 if retry_after_seconds is None else retry_after_seconds
+                            ),
                         },
                     )
                 )

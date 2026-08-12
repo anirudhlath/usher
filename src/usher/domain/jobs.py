@@ -154,6 +154,15 @@ class JobKind(StrEnum):
     1,126,789 items are episodes -- so the unbounded read would put 20,000
     jobs on the queue for one press of a 20,000-episode series.
 
+    **Its registration is unconditional**, which puts it with `match` and
+    `watch_history` rather than with `curate` two paragraphs up: nothing about
+    a write-back is optional. `composition.build_worker` withholds `enrich`,
+    `derive`, `index` and `curate` from a deployment that lacks the
+    collaborator each needs -- a TMDb key, an embedding model, an LLM
+    endpoint -- and this one needs only the session's own repositories, so
+    every build claims it and no household's own write is left to a process
+    that never arrives.
+
     `sync` is `POST /admin/sources/{id}/sync`, as an enqueue -- M4 deferred
     the route to M9 with the capability already delivered through
     `usher.cli`, and M8 ratified the shape a triggered walk has to take:
@@ -171,9 +180,9 @@ class JobKind(StrEnum):
     lane is not a thing an operator triggers on its own -- it is the second
     half of every triggered sync, run by the handler immediately after the
     item lane, exactly as `usher sync` already runs it. Registered
-    unconditionally, the way `match` and `watch_history` are: there is no
-    optional process resource behind it, only the adapter factory every
-    composition root already builds.
+    unconditionally, the way `match`, `watch_history` and `watch_writeback`
+    are: there is no optional process resource behind it, only the adapter
+    factory every composition root already builds.
 
     **Adding a member here needs no migration**, verified rather than
     assumed: `db/models/jobs.py` declares `kind` through `enum_column`, whose

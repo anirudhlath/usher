@@ -28,6 +28,7 @@ from tests.fakes.collection_repository import FakeCollectionRepository, SeededMe
 from tests.fakes.credit_repository import FakeCreditRepository
 from tests.fakes.curated_row_repository import FakeCuratedRowRepository
 from tests.fakes.episode_repository import FakeEpisodeRepository
+from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import (
     FakePersonRepository,
@@ -39,9 +40,10 @@ from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.collection import Collection
 from usher.domain.curation import SLUG_PREFIX, CuratedRow
-from usher.domain.enums import EnrichmentState, TitleKind
+from usher.domain.enums import EnrichmentState, ImageKind, TitleKind
 from usher.domain.episode import Episode, Season
 from usher.domain.ids import new_id
+from usher.domain.image import Image
 from usher.domain.people import Credit, CreditKind, Person
 from usher.domain.taste import GenreAffinity
 from usher.domain.title import Title
@@ -94,11 +96,21 @@ class Library:
         self.credits = FakeCreditRepository(self.people, self.titles)
         self.collections = FakeCollectionRepository()
         self.curated_rows = FakeCuratedRowRepository()
+        # Artwork, seeded through `poster()`/`backdrop()` below. Empty by
+        # default and deliberately so: **most cards in this suite carry no
+        # artwork**, which is the state a real catalog is in before its first
+        # `usher derive` and the state every pre-C6 case in these files was
+        # written against. A `Library` that minted a poster per title would
+        # make `artwork is None` unreachable and hide the ADR-0014 arm.
+        self.images = FakeImageRepository()
         # `replace_for_titles` is a replace, so incremental seeding has to hold
         # the accumulated set per title and re-send it. Keeping the accumulator
         # here rather than reaching into the fake's private list is what makes
         # `credit()` go through the port the way a derivation does.
         self._credits: dict[uuid.UUID, list[Credit]] = {}
+        # `ImageRepository.replace_for_titles` is a replace on the same terms,
+        # so artwork accumulates here and is re-sent whole. See `artwork()`.
+        self._images: dict[uuid.UUID, list[Image]] = {}
         # `replace_for_user` is the same shape one table over, and it refuses a
         # batch carrying two `generation_id`s -- so incremental seeding holds
         # the accumulated generation per household and re-sends it.
@@ -360,6 +372,43 @@ class Library:
             )
         )
 
+    async def artwork(
+        self,
+        title_id: uuid.UUID,
+        *,
+        kind: ImageKind = ImageKind.POSTER,
+        path: str | None = None,
+        is_primary: bool = True,
+    ) -> uuid.UUID:
+        """One artwork reference, written through the port a derivation uses.
+
+        Returns the minted `Image.id`, which is what a card carries, so a case
+        can name the id it expects at a card without reaching into the fake.
+
+        **`replace_for_titles` is a replace**, so incremental seeding holds the
+        accumulated set per title and re-sends it -- `credit()`'s shape one
+        table over. Going through the port rather than the fake's dict is what
+        keeps the seeder honest about the natural key: a second call for a path
+        already stored keeps the first id, exactly as a re-derivation does.
+
+        `path` defaults to one derived from the kind and the count already
+        stored for this title, because the path *is* the natural key: two
+        seeded posters sharing a literal would be one row, and a case asserting
+        on two ids would then be asserting on one.
+        """
+        held = self._images.setdefault(title_id, [])
+        one = Image(
+            id=new_id(),
+            title_id=title_id,
+            kind=kind,
+            provider="tmdb",
+            provider_path=f"/{kind.value}-{len(held)}.jpg" if path is None else path,
+            is_primary=is_primary,
+        )
+        held.append(one)
+        await self.images.replace_for_titles([title_id], held)
+        return one.id
+
     async def collection(self, name: str, title_ids: Sequence[uuid.UUID]) -> uuid.UUID:
         one = Collection(id=new_id(), tmdb_id=None, name=name)
         await self.collections.upsert_many([one])
@@ -466,4 +515,5 @@ class Library:
             collections=self.collections,
             curated=self.curated_rows,
             affinities=affinities_of,
+            images=self.images,
         )

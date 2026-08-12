@@ -38,6 +38,7 @@ from starlette.routing import BaseRoute
 import usher.api.errors
 from tests.fakes.credential_store import FakeCredentialStore
 from tests.fakes.credit_repository import FakeCreditRepository
+from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.source_repository import FakeSourceRepository
@@ -109,6 +110,7 @@ def app(sources: FakeSourceRepository) -> FastAPI:
         FakeWatchStateRepository(),
         FakeJobQueue(),
         FakeCreditRepository(),
+        FakeImageRepository(),
     )
     built.dependency_overrides[get_title_read_service] = lambda: titles
     built.dependency_overrides[get_default_user_id] = lambda: USER_ID

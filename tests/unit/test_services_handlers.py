@@ -35,10 +35,16 @@ from usher.domain.source import Source
 from usher.domain.sync import SyncRun, SyncRunKind, SyncRunStatus
 from usher.domain.title import Title
 from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
-from usher.ports.ingest import MediaItemUpsert
+from usher.ports.ingest import MediaItemUpsert, WatchStateWrite
 from usher.ports.llm import LLMUsage
 from usher.ports.metadata import MetadataCandidate
-from usher.ports.source import SourceAdapter, SourceItem, SourceItemKind, SourceWatchState
+from usher.ports.source import (
+    SourceAdapter,
+    SourceItem,
+    SourceItemKind,
+    SourceWatchState,
+    WatchStateUpdate,
+)
 from usher.services.curation import CurationReport, CurationService
 from usher.services.enrich import EnrichService
 from usher.services.handlers import (
@@ -48,10 +54,12 @@ from usher.services.handlers import (
     match_handler,
     sync_handler,
     watch_history_handler,
+    watch_writeback_handler,
 )
 from usher.services.matching import MatchService
 from usher.services.reconcile import ReconcileService
 from usher.services.watch_sync import WatchStateSyncService
+from usher.services.watch_write import WatchWriteService
 
 _OBSERVED = datetime(2026, 7, 31, 12, 0, tzinfo=UTC)
 _USER = uuid.UUID("0197a5b0-0000-7000-8000-0000000000ff")
@@ -743,14 +751,308 @@ async def test_the_sync_handler_completes_when_the_credential_row_has_gone(sourc
     assert opener.calls == [source.id]
 
 
+# -- the outbound write-back -----------------------------------------------
+
+
+class _RecordingAdapter(FakeSourceAdapter):
+    """`FakeSourceAdapter` plus a ledger of the writes it was asked to make.
+
+    Every case below asserts on `pushes` rather than on `recorded(...)`,
+    because the fake's own `push_watch_state` *stores* the state it was
+    given -- so "the source's state is unchanged" is satisfied by a push
+    that happened to write what was already there, and "the adapter was not
+    called" is the claim these cases are actually making. `raises` is here
+    for the two propagation cases, which need the failure to come out of
+    `push_watch_state` itself rather than out of `_ready()`: an offline
+    adapter raises from `get_item` first, which would pass a propagation
+    assertion having never reached the write.
+    """
+
+    def __init__(self, source: Source, *, raises: BaseException | None = None) -> None:
+        super().__init__(source)
+        self.pushes: list[tuple[str, WatchStateUpdate]] = []
+        self._raises = raises
+
+    async def push_watch_state(self, external_id: str, state: WatchStateUpdate) -> None:
+        self.pushes.append((external_id, state))
+        if self._raises is not None:
+            raise self._raises
+        await super().push_watch_state(external_id, state)
+
+
+def _write_service(
+    watch_states: FakeWatchStateRepository,
+    media_items: FakeMediaItemRepository,
+    queue: FakeJobQueue,
+) -> WatchWriteService:
+    return WatchWriteService(
+        watch_states=watch_states,
+        media_items=media_items,
+        queue=queue,
+        events=FakeEventPublisher(),
+        commit=_noop,
+    )
+
+
+async def test_a_write_back_pushes_the_state_the_row_holds_now_not_the_one_that_enqueued_it(
+    source: Source,
+) -> None:
+    """The property that makes coalescing true rather than merely claimed.
+
+    `(kind, key)` is unique, so five `PUT`s during one minute of playback
+    are **one** row on the queue -- and the row carries no payload, so the
+    handler re-reads the household's current state when it runs. Two writes
+    here, and the second is what has to arrive.
+
+    Fails against any implementation that carries the state on the job: the
+    queue would hold the first write's position and the source would be told
+    60 seconds after the household had reached 900. It is also what makes a
+    retry idempotent, because the handler replays nothing.
+    """
+    adapter = _RecordingAdapter(source)
+    adapter.seed(
+        SourceItem(external_id="emby-1", name="A Film", kind=SourceItemKind.MOVIE), _OBSERVED
+    )
+    titles = FakeTitleRepository()
+    title = Title(kind=TitleKind.MOVIE, name="A Film", sort_name="A Film")
+    await titles.add(title)
+    media_items = FakeMediaItemRepository()
+    await media_items.upsert_many([_upsert(source.id, "emby-1", title_id=title.id)])
+    watch_states = FakeWatchStateRepository()
+    queue = FakeJobQueue()
+    service = _write_service(watch_states, media_items, queue)
+
+    await service.set_for_title(user_id=_USER, title_id=title.id, position_seconds=60, played=False)
+    await service.set_for_title(user_id=_USER, title_id=title.id, position_seconds=900, played=True)
+
+    claimed = await queue.claim([JobKind.WATCH_WRITEBACK], limit=10)
+    # The premise, and the reason the case can say anything at all: two
+    # presses left one job, so what the handler is handed cannot distinguish
+    # them and only the row can.
+    assert [job.key for job in claimed] == ["emby-1"]
+
+    await watch_writeback_handler(
+        watch_states,
+        media_items,
+        _resolver(SourceBinding(source=source, adapter=adapter)),
+        user_id=_USER,
+    )(claimed[0])
+
+    assert adapter.pushes == [("emby-1", WatchStateUpdate(position_seconds=900, played=True))]
+
+
+async def test_a_write_back_for_an_episode_sends_the_episodes_own_row(source: Source) -> None:
+    """An episode's `media_items` row carries its series' `title_id` *and*
+    its `episode_id`, and `watch_states` permits exactly one -- so the pair
+    has to collapse with the episode winning.
+
+    Fails against a handler that reads `get_for_title`: it would push the
+    series' progress, which on this library is one row standing in for up to
+    20,000 episode files. Both rows are seeded and they disagree, so the
+    assertion cannot be satisfied by reading either at random.
+    """
+    adapter = _RecordingAdapter(source)
+    adapter.seed(
+        SourceItem(external_id="emby-ep", name="An Episode", kind=SourceItemKind.EPISODE), _OBSERVED
+    )
+    title_id, episode_id = uuid.uuid4(), uuid.uuid4()
+    media_items = FakeMediaItemRepository()
+    await media_items.upsert_many(
+        [_upsert(source.id, "emby-ep", title_id=title_id, episode_id=episode_id)]
+    )
+    watch_states = FakeWatchStateRepository()
+    await watch_states.set_from_client(
+        WatchStateWrite(
+            user_id=_USER, title_id=title_id, episode_id=None, position_seconds=11, played=False
+        )
+    )
+    await watch_states.set_from_client(
+        WatchStateWrite(
+            user_id=_USER, title_id=None, episode_id=episode_id, position_seconds=222, played=True
+        )
+    )
+
+    await watch_writeback_handler(
+        watch_states,
+        media_items,
+        _resolver(SourceBinding(source=source, adapter=adapter)),
+        user_id=_USER,
+    )(Job(kind=JobKind.WATCH_WRITEBACK, key="emby-ep"))
+
+    assert adapter.pushes == [("emby-ep", WatchStateUpdate(position_seconds=222, played=True))]
+
+
+async def test_a_write_back_completes_when_no_configured_source_addresses_its_key(
+    source: Source,
+) -> None:
+    """`(kind, key)` is unique across sources, so a worker cannot assume the
+    job it claimed belongs to a server this household still has.
+
+    Completing rather than parking: a removed server is not work a human has
+    to look at. The assertion is that **nothing was written**, because "it
+    did not raise" is also what a handler pushing to the wrong server
+    produces.
+    """
+    adapter = _RecordingAdapter(source)
+    seen: list[str] = []
+
+    await watch_writeback_handler(
+        FakeWatchStateRepository(), FakeMediaItemRepository(), _resolver(None, seen), user_id=_USER
+    )(Job(kind=JobKind.WATCH_WRITEBACK, key="emby-1"))
+
+    assert seen == ["emby-1"]
+    assert adapter.pushes == []
+
+
+async def test_a_write_back_completes_for_an_item_the_source_no_longer_has(
+    source: Source,
+) -> None:
+    """`WatchWriteService` enqueues retracted copies on purpose -- an
+    unmounted drive is the common cause and the copy usually comes back -- and
+    that bargain only holds if the handler completes for one that has really
+    gone.
+
+    Fails against a handler that pushes anyway: `EmbySession.ok` raises
+    `PortUnavailable` for every status at or above 400, so a write at a
+    deleted item is five backed-off attempts and then a parked job, for work
+    that will never become possible.
+    """
+    adapter = _RecordingAdapter(source)  # seeded with no items: the source has none
+    title_id = uuid.uuid4()
+    media_items = FakeMediaItemRepository()
+    await media_items.upsert_many([_upsert(source.id, "emby-gone", title_id=title_id)])
+    watch_states = FakeWatchStateRepository()
+    await watch_states.set_from_client(
+        WatchStateWrite(
+            user_id=_USER, title_id=title_id, episode_id=None, position_seconds=42, played=False
+        )
+    )
+
+    await watch_writeback_handler(
+        watch_states,
+        media_items,
+        _resolver(SourceBinding(source=source, adapter=adapter)),
+        user_id=_USER,
+    )(Job(kind=JobKind.WATCH_WRITEBACK, key="emby-gone"))
+
+    assert adapter.pushes == []
+
+
+async def test_a_write_back_with_no_local_row_sends_nothing_rather_than_zeroes(
+    source: Source,
+) -> None:
+    """`WatchStateUpdate` has no "leave it alone" spelling, so a push
+    assembled from an absent row reports position 0 and `Played: false` --
+    and Emby's `UserData` route applies that body verbatim, which is the
+    finding behind `Played` being named even when it is not changing.
+
+    So the wrong implementation here does not fail loudly; it erases the
+    household's progress on the server on behalf of a household that never
+    wrote any.
+    """
+    adapter = _RecordingAdapter(source)
+    adapter.seed(
+        SourceItem(external_id="emby-1", name="A Film", kind=SourceItemKind.MOVIE), _OBSERVED
+    )
+    media_items = FakeMediaItemRepository()
+    await media_items.upsert_many([_upsert(source.id, "emby-1", title_id=uuid.uuid4())])
+
+    await watch_writeback_handler(
+        FakeWatchStateRepository(),
+        media_items,
+        _resolver(SourceBinding(source=source, adapter=adapter)),
+        user_id=_USER,
+    )(Job(kind=JobKind.WATCH_WRITEBACK, key="emby-1"))
+
+    assert adapter.pushes == []
+
+
+async def test_a_write_back_for_an_unmatched_copy_sends_nothing(source: Source) -> None:
+    """`MediaItem.title_id` is deliberately nullable -- the review queue is
+    where unmatched copies sit -- so "matched to nothing" is an ordinary
+    state and there is no row to send."""
+    adapter = _RecordingAdapter(source)
+    adapter.seed(
+        SourceItem(external_id="emby-1", name="A Film", kind=SourceItemKind.MOVIE), _OBSERVED
+    )
+    media_items = FakeMediaItemRepository()
+    await media_items.upsert_many([_upsert(source.id, "emby-1")])
+
+    await watch_writeback_handler(
+        FakeWatchStateRepository(),
+        media_items,
+        _resolver(SourceBinding(source=source, adapter=adapter)),
+        user_id=_USER,
+    )(Job(kind=JobKind.WATCH_WRITEBACK, key="emby-1"))
+
+    assert adapter.pushes == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        PortUnavailable("the server is down"),
+        PortDataMalformed("the server answered something else"),
+    ],
+    ids=["unavailable-backs-off", "malformed-parks"],
+)
+async def test_a_failed_write_back_propagates_rather_than_being_swallowed(
+    source: Source, failure: UsherPortError
+) -> None:
+    """Nothing is caught in the handler, for the reason `curate_handler`'s
+    docstring gives: `JobWorker` parks `PortDataMalformed` and backs
+    everything else off, and it can only do either with an exception it is
+    allowed to see.
+
+    A handler that absorbed one would `complete()` the job, delete its row
+    and lose the write silently -- which is what PRD 03's *"best effort"* is
+    most often misread as licensing. Both arms, because a bare
+    `except UsherPortError: return` swallows the two the worker treats
+    differently and one arm alone cannot see that.
+
+    The failure comes out of `push_watch_state` itself rather than out of an
+    offline adapter's `_ready()`, so the assertion is about the write and not
+    about the read in front of it -- and `pushes` records the attempt, which
+    is what makes "it reached the source and failed" distinguishable from
+    "it never got there".
+    """
+    adapter = _RecordingAdapter(source, raises=failure)
+    adapter.seed(
+        SourceItem(external_id="emby-1", name="A Film", kind=SourceItemKind.MOVIE), _OBSERVED
+    )
+    title_id = uuid.uuid4()
+    media_items = FakeMediaItemRepository()
+    await media_items.upsert_many([_upsert(source.id, "emby-1", title_id=title_id)])
+    watch_states = FakeWatchStateRepository()
+    await watch_states.set_from_client(
+        WatchStateWrite(
+            user_id=_USER, title_id=title_id, episode_id=None, position_seconds=7, played=False
+        )
+    )
+
+    with pytest.raises(type(failure)):
+        await watch_writeback_handler(
+            watch_states,
+            media_items,
+            _resolver(SourceBinding(source=source, adapter=adapter)),
+            user_id=_USER,
+        )(Job(kind=JobKind.WATCH_WRITEBACK, key="emby-1"))
+
+    assert [key for key, _ in adapter.pushes] == ["emby-1"]
+
+
 def _upsert(
-    source_id: uuid.UUID, external_id: str, *, title_id: uuid.UUID | None = None
+    source_id: uuid.UUID,
+    external_id: str,
+    *,
+    title_id: uuid.UUID | None = None,
+    episode_id: uuid.UUID | None = None,
 ) -> MediaItemUpsert:
     return MediaItemUpsert(
         source_id=source_id,
         external_id=external_id,
         title_id=title_id,
-        episode_id=None,
+        episode_id=episode_id,
         container=None,
         video_codec=None,
         audio_codec=None,
