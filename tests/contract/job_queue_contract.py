@@ -35,6 +35,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -349,6 +350,91 @@ class JobQueueContract:
         assert job.status is JobStatus.PARKED
         assert job.attempts == 1
         assert job.last_error == "TMDb returned a list"
+
+    async def test_a_retry_after_hint_pushes_the_backoff_out_past_the_usual_schedule(
+        self, queue: JobQueue
+    ) -> None:
+        """The carried debt: `PortRateLimited.retry_after` is a server's own
+        answer to "when should I come back", and until this the queue
+        answered every 429 with its own jittered guess instead -- see
+        `JobWorker._fail`. `retry_after_seconds` is a **floor added to** the
+        existing backoff, not a replacement for it, so a hint far larger than
+        the queue's own `backoff_seconds` must still dominate."""
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        claimed = await queue.claim([JobKind.ENRICH])
+        before = datetime.now(UTC)
+        job = await queue.fail(
+            claimed[0].id, error="rate limited", retryable=True, retry_after_seconds=300.0
+        )
+        assert job is not None
+        assert job.run_after is not None
+        assert job.run_after - before >= timedelta(seconds=299), (
+            f"backed off only {job.run_after - before} against a 300 s hint"
+        )
+
+    @pytest.mark.parametrize("hint", [0.0, -999.0])
+    async def test_a_non_positive_hint_never_pulls_the_backoff_earlier_than_now(
+        self, queue: JobQueue, hint: float
+    ) -> None:
+        """A `Retry-After` hint can carry RFC 9110's HTTP-date form, and a
+        date already in the past parses to a negative number -- which must
+        not make a rate-limited job instantly re-claimable, the exact hot
+        loop the backoff exists to prevent. `GREATEST(retry_after_seconds,
+        0)` is what this pins; deleting it fails this case alone."""
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        claimed = await queue.claim([JobKind.ENRICH])
+        before = datetime.now(UTC)
+        job = await queue.fail(
+            claimed[0].id, error="rate limited", retryable=True, retry_after_seconds=hint
+        )
+        assert job is not None
+        assert job.run_after is not None
+        assert job.run_after > before, f"a hint of {hint} pulled the retry earlier than now"
+
+    async def test_a_rate_limit_at_the_attempt_ceiling_still_parks_with_no_run_after(
+        self, queue: JobQueue, clear_backoff: ClearBackoff
+    ) -> None:
+        """A hint does not exempt a job from PRD 08's attempt ceiling. The two
+        parking arms in `_FAIL`'s `CASE` are untouched by the floor widening
+        this task made to the retryable arm beside them, and this is the case
+        that says so: a rate-limited job that keeps failing still parks with
+        no backoff pending."""
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        job = None
+        for _ in range(10):
+            claimed = await queue.claim([JobKind.ENRICH], limit=1)
+            if not claimed:
+                await clear_backoff()
+                claimed = await queue.claim([JobKind.ENRICH], limit=1)
+            if not claimed:
+                break
+            job = await queue.fail(
+                claimed[0].id, error="rate limited", retryable=True, retry_after_seconds=1.0
+            )
+        assert job is not None
+        assert job.status is JobStatus.PARKED
+        assert job.attempts == self.max_attempts
+        assert job.run_after is None, "a parked job is not also waiting on a hinted backoff"
+
+    async def test_malformed_data_still_parks_immediately_and_ignores_any_hint(
+        self, queue: JobQueue
+    ) -> None:
+        """`PortDataMalformed` never carries a `retry_after` in practice --
+        the two are different upstream signals -- but a caller could pass one
+        by accident, and the non-retryable arm must not consult it: there is
+        no backoff to floor when the job parks on its first attempt."""
+        await queue.enqueue([JobRequest(kind=JobKind.ENRICH, key="t1", priority=JobPriority.NEW)])
+        claimed = await queue.claim([JobKind.ENRICH])
+        job = await queue.fail(
+            claimed[0].id,
+            error="TMDb returned a list",
+            retryable=False,
+            retry_after_seconds=300.0,
+        )
+        assert job is not None
+        assert job.status is JobStatus.PARKED
+        assert job.attempts == 1
+        assert job.run_after is None
 
     async def test_a_parked_job_is_not_claimed(
         self, queue: JobQueue, clear_backoff: ClearBackoff

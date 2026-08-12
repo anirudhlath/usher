@@ -28,6 +28,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator, Sequence
+from datetime import timedelta
 
 import pytest
 import pytest_asyncio
@@ -298,7 +299,19 @@ async def test_backoff_is_jittered(session: AsyncSession) -> None:
     """A fixed backoff makes every job that failed in the same batch retry at
     the same instant -- a thundering herd against the upstream that was
     already struggling. The fake's schedule is unjittered and cannot catch
-    this; only the real one is asserted on."""
+    this; only the real one is asserted on.
+
+    **`len(instants) > 1` alone is not this assertion, and it was measured
+    rather than assumed.** Twenty sequential `fail()` calls are twenty
+    separate round trips, and `clock_timestamp()` genuinely advances between
+    them even with the jitter term deleted outright -- planting that deletion
+    still produces twenty *distinct* microsecond-precision timestamps, spread
+    over single-digit milliseconds of real network and scheduling drift.
+    Jitter's own band at `backoff_seconds=60.0` is 30 s wide, so the range
+    (max - min) is the number that tells the two apart: ~8 ms of drift-only
+    spread measured against ~400 ms with the jitter term removed and ~30 s
+    with it present is nowhere close to `>= 1s`, which is the threshold below.
+    """
     queue = PostgresJobQueue(session, max_attempts=5, backoff_seconds=60.0)
     await queue.enqueue(
         [
@@ -314,6 +327,63 @@ async def test_backoff_is_jittered(session: AsyncSession) -> None:
         assert failed is not None and failed.run_after is not None
         instants.add(failed.run_after)
     assert len(instants) > 1, "every retry landed on the same instant"
+    spread = max(instants) - min(instants)
+    assert spread >= timedelta(seconds=1), (
+        f"the twenty instants span only {spread} -- real clock drift between "
+        "sequential statements can produce that on its own; jitter's own "
+        "band is 30 s wide"
+    )
+
+
+async def test_a_retry_after_hint_still_spreads_across_a_batch(session: AsyncSession) -> None:
+    """The floor and the jitter are the same expression, not competing ones --
+    `GREATEST(:retry_after_seconds, 0) + <the existing jittered term>` -- so
+    twenty jobs rate-limited by the same upstream in the same second, all
+    carrying the identical hint, must still not retry in the identical
+    instant. An implementation that used the hint *alone* (dropping the
+    jittered term, or a `CASE` arm that returns the hint outright) produces
+    twenty identical values and cannot pass this; only the spread test
+    exercises that mutation, which is why it is asserted here and not just
+    that every value respects the floor.
+
+    **The spread has to be a magnitude, not a count, for the same reason
+    `test_backoff_is_jittered` above does.** Twenty sequential round trips
+    land on twenty distinct `clock_timestamp()` reads regardless of jitter --
+    measured at ~8 ms of spread with the jitter term deleted outright, against
+    ~400-440 ms across four runs with it present. `backoff_seconds=1.0`'s
+    jitter band is only 0.5 s wide (attempts=0), so the threshold below is
+    picked with a wide margin on both sides rather than merely "more than
+    one instant".
+    """
+    queue = PostgresJobQueue(session, max_attempts=5, backoff_seconds=1.0)
+    await queue.enqueue(
+        [
+            JobRequest(kind=JobKind.ENRICH, key=f"t-{index}", priority=JobPriority.NEW)
+            for index in range(20)
+        ]
+    )
+    claimed = await queue.claim([JobKind.ENRICH], limit=20)
+    assert len(claimed) == 20
+    floor = (
+        await session.execute(
+            text("SELECT clock_timestamp() + make_interval(secs => 250) AS floor")
+        )
+    ).scalar_one()
+    instants = set()
+    for job in claimed:
+        failed = await queue.fail(
+            job.id, error="rate limited", retryable=True, retry_after_seconds=250.0
+        )
+        assert failed is not None and failed.run_after is not None
+        assert failed.run_after >= floor, f"{failed.run_after} is earlier than the 250 s hint"
+        instants.add(failed.run_after)
+    assert len(instants) > 1, "every hinted retry landed on the same instant"
+    spread = max(instants) - min(instants)
+    assert spread >= timedelta(milliseconds=100), (
+        f"the twenty hinted instants span only {spread} -- real clock drift "
+        "between sequential statements can produce ~8 ms on its own; the "
+        "hint-alone mutation this case exists to catch produces exactly that"
+    )
 
 
 async def test_the_backoff_never_draws_zero(session: AsyncSession) -> None:

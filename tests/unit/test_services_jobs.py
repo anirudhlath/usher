@@ -15,6 +15,7 @@ the code that depends on it most.
 import inspect
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from opentelemetry import trace
@@ -24,7 +25,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from tests.fakes.job_queue import FakeJobQueue
 from usher.domain.jobs import Job, JobKind, JobPriority, JobStatus
-from usher.ports.errors import PortDataMalformed, PortUnavailable, UsherPortError
+from usher.ports.errors import PortDataMalformed, PortRateLimited, PortUnavailable, UsherPortError
 from usher.ports.jobs import JobRequest
 from usher.services.jobs import JobWorker, _links_for
 from usher.telemetry import current_traceparent
@@ -292,6 +293,32 @@ async def test_every_port_error_backs_off_rather_than_escaping(fixture: _Fixture
     await fixture.given("t1")
     assert await fixture.worker.run_once() == 1
     assert (await fixture.queue.depth())[JobKind.ENRICH] == 1
+
+
+async def test_a_429_carrying_a_retry_after_backs_off_no_sooner_than_the_upstream_asked(
+    fixture: _Fixture,
+) -> None:
+    """The carried debt this task closes: `PortRateLimited.retry_after` has
+    been assigned in six places since M4 and read nowhere in `src/` -- an
+    upstream that said exactly when to come back was answered with the
+    queue's own jittered guess instead. Fails today at ~1 s, the fixture's
+    `backoff_seconds`, which is the whole of the debt expressed as a number.
+
+    Positive control that the failure path actually ran (`attempts == 1`,
+    `last_error` names the failure), then the number that matters: the job is
+    not claimable again for at least the 300 s the upstream asked for.
+    """
+    fixture.worker.register(JobKind.ENRICH, fixture.raising(PortRateLimited(retry_after=300.0)))
+    await fixture.given("t1")
+    before = datetime.now(UTC)
+    await fixture.worker.run_once()
+    outcome = fixture.queue.jobs_of(JobKind.ENRICH)[0]
+    assert outcome.attempts == 1
+    assert outcome.last_error is not None and "rate limited" in outcome.last_error
+    assert outcome.run_after is not None
+    assert outcome.run_after - before >= timedelta(seconds=300), (
+        f"backed off only {outcome.run_after - before} against a 300 s hint"
+    )
 
 
 async def test_a_claim_requeued_out_from_under_the_worker_does_not_crash(
