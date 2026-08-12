@@ -60,7 +60,7 @@ from usher.ports.bulk import GENOME_TAG_COUNT, ImdbTitle
 from usher.ports.repository import GenomeCoverage
 from usher.ports.search import SearchFilters, SearchMode
 from usher.services.bootstrap import BootstrapService
-from usher.services.search import SearchAnswer
+from usher.services.search import SearchAnswer, SuggestTier
 
 
 def test_no_arguments_still_means_serve() -> None:
@@ -390,6 +390,39 @@ def test_suggest_takes_a_prefix_and_a_limit() -> None:
     assert parse_args(["suggest", "quie"]).prefix == "quie"
     assert parse_args(["suggest", "quie", "--limit", "5"]).limit == 5
     assert parse_args(["suggest", "quie"]).limit == 10
+
+
+def test_suggest_defaults_to_the_tier_that_tolerates_a_typo() -> None:
+    """**The route defaults to `prefix` and this command defaults to `fuzzy`,
+    and the disagreement is the decision** (ADR-0031): a route is driven per
+    keystroke and pays 2,707 ms p95 at one character, a command is typed once
+    and can afford it. `usher suggest` has been the typo-tolerant one since M6
+    and CLAUDE.md's Commands section documents it as such.
+
+    Asserted through the enum rather than against the string `"fuzzy"`,
+    because what the default has to be is *the tier that tolerates a typo* --
+    the same argument `SuggestTier`'s own docstring makes for being an enum
+    rather than a `typo_tolerant: bool`.
+
+    **Nothing else in this repository pins it**, measured rather than assumed:
+    flipping this default to `prefix` passed all 3,923 unit cases and the whole
+    of `tests/integration/test_cli_pipeline.py` before this case existed. The
+    damage is quiet -- `usher suggest "the quie"` answers `no match` for a
+    misspelt name instead of finding it, on a command whose documented purpose
+    is to find it.
+    """
+    assert SuggestTier(parse_args(["suggest", "quie"]).tier) is SuggestTier.FUZZY
+    assert SuggestTier(parse_args(["suggest", "quie", "--tier", "prefix"]).tier) is (
+        SuggestTier.PREFIX
+    )
+
+
+def test_suggest_refuses_a_tier_that_is_not_one_of_the_two() -> None:
+    """`argparse`'s `choices`, derived from the enum rather than written out,
+    so a third member cannot be reachable from the route and unreachable
+    here."""
+    with pytest.raises(SystemExit):
+        parse_args(["suggest", "quie", "--tier", "fuzy"])
 
 
 def test_suggest_refuses_a_limit_of_zero() -> None:

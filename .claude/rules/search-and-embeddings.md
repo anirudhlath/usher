@@ -805,3 +805,46 @@ any cosine gap. It overturns one relevance step only where
 and k ≥ 25 at a realistic 0.2. Where it decides is where the other five have
 tied — which `_dense_ranks` makes ordinary rather than rare, because equal
 index scores share a rank and the relevance term then cancels exactly.
+
+## The two-tier suggest reached a request boundary, and the boundary is where the keystroke defect is answered (2026-08-12, M9 B5)
+
+B3's curve above is the measurement; this is what was done with it, so that a
+reader who opens `services/search.py` or `adapters/search/` does not have to
+find [ADR-0031](../../docs/prd/decisions/0031-the-two-tier-suggest.md) to learn
+the shape. **No statement changed** — no floor, no cap, no index, no `UNION`.
+
+- **`GET /search/suggest?q=&tier=prefix|fuzzy&limit=`**, one route, defaulting
+  to `prefix`, echoing the tier that answered. `SearchService` holds **both**
+  `SuggestIndex` implementations as required collaborators, named
+  `prefix_suggestions`/`fuzzy_suggestions` rather than positioned — two
+  adjacent parameters of one type are a swap that answers plausibly either way,
+  and only a case asserting a typo is *absent* from tier 1 can tell.
+- **The route does not run tier 1 below a four-character prefix**, and four is
+  derived from the curve rather than chosen: it is the shortest length at which
+  tier 1's p95 (112 ms) is below tier 2's (211 ms), which is the property the
+  whole split rests on. At three characters tier 1 is **303 ms** and therefore
+  slower than the tier it exists to be cheaper than. Not the 10 ms bar, which
+  would set the minimum at seven; not a `Settings` field, because the number is
+  a function of catalog size rather than of an operator's preference.
+- **Tier 2 is bounded at one character only**, because nobody has measured the
+  trigram statement *per prefix length* — its 33.6 ms p50 / 211 ms p95 /
+  730 ms max are whole-name figures, exactly as tier 1's 0.6 ms was before B3
+  re-measured it per length. A bound with no measurement under it is the shape
+  `ports-and-error-taxonomy.md` records. Its defence is the client's debounce;
+  **the server debounces nothing**.
+- **`usher suggest --tier` defaults to `fuzzy` where the route defaults to
+  `prefix`**, and `SearchService.suggest` takes `tier` as a required keyword
+  with **no default at all**, so neither boundary inherits the other's answer.
+  A route is driven per keystroke and a command is typed once.
+- **The ordered inner per-arm cap is still not made and is the first thing a
+  follow-up should measure.** G7 is refuted (the sort is a 26 kB top-N
+  heapsort; the cost is the `UNION`'s de-duplication spilling 47 MB and a lossy
+  bitmap heap recheck), so it is far cheaper than B2 priced it — but changing
+  the statement would leave B3's per-length curve describing a query that no
+  longer exists, and B5 ships no SQL.
+- **What is still not measured**, beyond the list this file already carries:
+  tier 2 per prefix length; the four-character minimum against real typed
+  queries, which is `search_queries` and has no rows until after M9; and the
+  curve over a `title_search_names` that carries T7's **alias** rows as well as
+  the 10.9M person rows it was taken over — the shipped table is larger than
+  the measured one, so the curve is optimistic in the direction that matters.
