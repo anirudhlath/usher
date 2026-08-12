@@ -312,10 +312,17 @@ Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
   naming an item its source has since deleted, or one no configured source
   addresses, is not poison — parking it fills the review list with things that
   are simply gone, and a parked job needs a human to release it. Parking is
-  reserved for work a human has to look at. The three handlers
-  (`usher.services.handlers`) are where this is decided; a job whose *key* is
-  unparseable is the opposite case and does park, because that is a real
-  defect somebody has to see.
+  reserved for work a human has to look at. The handlers
+  (`usher.services.handlers`) are where this is decided — including `sync`'s
+  own three ways of finding nothing to do (M9's E3): a source deleted between
+  enqueue and claim; a source *disabled* between enqueue and claim, re-checked
+  in the handler rather than trusted from the route's own 409, because
+  head-of-line blocking (below) can hold the row behind another walk for
+  minutes — long enough for an operator to park a source that was healthy when
+  they pressed the button; and a source whose credential row has gone missing,
+  which `composition.open_adapter` already answers `None` for. A job whose
+  *key* is unparseable is the opposite case and does park, because that is a
+  real defect somebody has to see.
 - **Re-enqueueing does not un-park.** Poison a human has not looked at is not
   fixed by asking for it again, and a parked job's priority is not promoted
   behind their back either.
@@ -342,6 +349,22 @@ Postgres-backed queue, claimed with `SELECT … FOR UPDATE SKIP LOCKED`.
   is the thing worth engineering against; visible failure is fine.
 - Jobs are idempotent by construction, so redelivery is always safe.
 - Startup requeues anything left `in_progress` by an unclean shutdown.
+- **Head-of-line blocking is accepted, priced, and recorded — M9's E3, and the
+  one lane this queue has.** `POST /admin/sources/{id}/sync` (`JobKind.SYNC`)
+  and `POST /admin/bootstrap/{phase}` put the two longest units of work in
+  this system on the same single `JobWorker` lane every other kind shares —
+  `services/jobs.py`'s claim loop is strictly sequential — so `enrich`,
+  `index`, `derive`, `curate` and `match` are unavailable for the duration of
+  either, hours in the sync case, triggered by an unauthenticated route. The
+  queue is chosen anyway, for its dedup on `(kind, key)`, its durability
+  across a restart (`JobWorker.startup()` requeues everything `running`), and
+  the precedent `POST /admin/rows/regenerate` already ratified. It is bounded
+  rather than unbounded — both handlers commit per batch, so no transaction
+  spans the job — and `usher sync` / `usher bootstrap` remain the way to run
+  one off the queue, at the cost of a second process rather than a second
+  lane. No second lane is added to change this trade; a deployment large
+  enough to need one is a deployment large enough to need `usher work` run
+  from a second host instead.
 
 ## Observability
 

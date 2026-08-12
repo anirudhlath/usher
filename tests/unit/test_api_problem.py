@@ -440,6 +440,11 @@ def test_the_vocabulary_is_the_members_the_shipped_routes_emit() -> None:
     agree on something nobody meant, which is what a literal list is for. It
     is also the cheaper failure to read: `assert {..} == {..}` names the
     member, where the derived case names it and a document to go and amend.
+
+    **Still seven after M9's E3.** `POST /admin/sources/{id}/sync` answers
+    `409 not_playable` for a source an operator has disabled -- a second
+    emitter of an existing member, not an eighth one; see ADR-0030's
+    amendment for why `not_playable` covers it and no member was minted.
     """
     assert {code.value for code in ProblemCode} == {
         "not_found",

@@ -46,8 +46,9 @@ from loguru import logger
 
 from usher.domain.jobs import Job
 from usher.domain.source import Source
+from usher.domain.sync import SyncRunKind
 from usher.ports.errors import PortDataMalformed
-from usher.ports.repository import MediaItemRepository
+from usher.ports.repository import MediaItemRepository, SourceRepository
 from usher.ports.source import SourceAdapter
 from usher.services.curation import CurationService
 from usher.services.derive import DeriveService
@@ -55,7 +56,22 @@ from usher.services.enrich import EnrichService
 from usher.services.index import IndexService
 from usher.services.jobs import Handler
 from usher.services.matching import MatchService
+from usher.services.reconcile import ReconcileService
 from usher.services.watch_sync import WatchStateSyncService
+
+#: `SyncRunKind` has a third member, `WATCH_STATE`, which is never a lane an
+#: operator triggers on its own -- it is the second half of every triggered
+#: sync, run by `sync_handler` itself immediately after the item lane. A key
+#: naming it is exactly as malformed as one naming no lane at all.
+_TRIGGERABLE_SYNC_LANES = frozenset({SyncRunKind.FULL, SyncRunKind.DELTA})
+
+#: The adapter factory a `sync` job's handler is closed over. Bound by the
+#: composition root (`composition.open_adapter`, with the pipeline already
+#: applied) -- `services/` may not construct an adapter itself
+#: (`usher.adapters.factory`, PRD 01's layering rule 2), and `open_adapter`
+#: already logs the one thing this handler needs to say when it answers
+#: `None`: that the source's credential row has gone missing.
+AdapterOpener = Callable[[Source], Awaitable[SourceAdapter | None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +270,125 @@ def watch_history_handler(
     return handle
 
 
+def sync_handler(
+    sources: SourceRepository,
+    reconcile: ReconcileService,
+    watch: WatchStateSyncService,
+    open_adapter: AdapterOpener,
+    *,
+    user_id: uuid.UUID,
+) -> Handler:
+    """`sync` jobs key on `"{source_id}:{lane}"` -- the M4 boundary call that
+    deferred `POST /admin/sources/{id}/sync` to M9, landing here as an
+    enqueue rather than as a synchronous walk.
+
+    The body is `usher sync`'s, minus the printing: resolve the source by id,
+    open an adapter for it, walk the item lane and then the watch lane, and
+    close the adapter in a `finally` -- one adapter is one connection pool,
+    and a walk that raises would otherwise leak it for the rest of the
+    process. The watch lane runs *after* the item lane and never before it,
+    because `WatchStateSyncService.sync` resolves each state against a
+    `MediaItem`, and a watch lane that ran before the items existed would
+    count every state unmatched.
+
+    Neither service this handler drives ever raises a `UsherPortError` --
+    both catch one internally and record a `FAILED` `SyncRun` instead, PRD 08's
+    "a failed run leaves a durable, inspectable record rather than a
+    traceback" -- so what reaches `JobWorker` from here is never an upstream
+    failure. It is a bug in this handler or in one of the two services, and
+    `JobWorker` is right to let it propagate and back the job off rather than
+    recording it as a fault the upstream caused.
+
+    **Three ways this job can find nothing to do, and all three complete
+    rather than park.** A source deleted between enqueue and claim is simply
+    gone -- the same reasoning `match_handler` and `watch_history_handler`
+    apply to a deleted item. A source disabled between enqueue and claim is
+    re-checked *here*, not only at the route: the route's own 409 is a
+    point-in-time answer, and the queue can hold a job for minutes behind a
+    head-of-line-blocking full walk (PRD 08's job-reliability section prices
+    that wait) -- long enough for an operator to press "sync" on a healthy
+    source and then park it before the worker ever claims the row.
+    `SourceRegistry.resolve` already skips a disabled source for `match` and
+    `watch_history` (`composition.py`); this is the same guard for the third
+    kind that reaches a source by id, so the worker never walks a source the
+    route would have refused to enqueue for. And a source whose credential
+    row has gone missing is `open_adapter` answering `None`, which it
+    already logs a reason for (`composition.open_adapter`'s
+    `NO_CREDENTIALS`) -- an operator with three sources needs the second and
+    third to run when the first's credential has gone, and a parked `sync`
+    job would sit in the review list for a problem that is really the
+    credentials screen's.
+    """
+
+    async def handle(job: Job) -> None:
+        source_id, lane = _sync_key(job)
+        source = await sources.get(source_id)
+        if source is None:
+            logger.debug(
+                "sync job {key} names a source that no longer exists; nothing to do",
+                key=job.key,
+            )
+            return
+        if not source.enabled:
+            logger.debug(
+                "sync job {key} names a source disabled since it was enqueued; nothing to do",
+                key=job.key,
+            )
+            return
+        adapter = await open_adapter(source)
+        if adapter is None:
+            logger.debug(
+                "sync job {key} found no adapter for {source}; nothing to do",
+                key=job.key,
+                source=source.name,
+            )
+            return
+        try:
+            await reconcile.reconcile(source, lane, adapter)
+            await watch.sync(source, adapter, user_id=user_id)
+        finally:
+            await adapter.aclose()
+
+    return handle
+
+
+def _sync_key(job: Job) -> tuple[uuid.UUID, SyncRunKind]:
+    """`job.key` as `(source id, lane)`, or `PortDataMalformed`.
+
+    `(kind, key)` is unique, so a bare source id would coalesce a requested
+    *full* walk into a pending *delta* one and answer 202 for a walk that
+    never happens -- the composite is deliberate, not incidental, and is
+    documented on `JobKind.SYNC` itself.
+
+    `str.partition` rather than `str.split(":")`, so a source id that turned
+    out to embed a colon (none does today; nothing enforces it) would still
+    produce exactly two parts rather than three. `SyncRunKind.WATCH_STATE`
+    parses as a `SyncRunKind` and is refused anyway: the watch lane is never
+    a thing a client asks for on its own, only the second half of every
+    triggered sync.
+    """
+    source_id_part, separator, lane_part = job.key.partition(":")
+    try:
+        if not separator:
+            raise ValueError("missing lane")
+        source_id = uuid.UUID(source_id_part)
+    except ValueError as exc:
+        raise PortDataMalformed(
+            'sync job key is not "source id:lane" -- the source id half did not parse',
+            detail=job.key,
+        ) from exc
+    try:
+        lane = SyncRunKind(lane_part)
+        if lane not in _TRIGGERABLE_SYNC_LANES:
+            raise ValueError(f"{lane_part!r} is not a triggerable lane")
+    except ValueError as exc:
+        raise PortDataMalformed(
+            'sync job key is not "source id:lane" -- the lane half is not full or delta',
+            detail=job.key,
+        ) from exc
+    return source_id, lane
+
+
 def _title_id(job: Job) -> uuid.UUID:
     """`job.key` as a `Title.id`, or `PortDataMalformed`."""
     return _uuid_key(job, "a title id")
@@ -294,6 +429,7 @@ def _uuid_key(job: Job, expected: str) -> uuid.UUID:
 
 
 __all__ = [
+    "AdapterOpener",
     "SourceBinding",
     "SourceResolver",
     "curate_handler",
@@ -301,5 +437,6 @@ __all__ = [
     "enrich_handler",
     "index_handler",
     "match_handler",
+    "sync_handler",
     "watch_history_handler",
 ]

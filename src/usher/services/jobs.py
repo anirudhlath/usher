@@ -77,11 +77,15 @@ class JobWorker:
 
         A read-only view rather than a test reaching into `_handlers`, and
         the property that assertion needs is the one `run_once` relies on:
-        **four of the seven kinds are registered conditionally** by
+        **four of the eight kinds are registered conditionally** by
         `composition.build_worker` -- `ENRICH` and `DERIVE` on a TMDb key,
         `INDEX` on an embedder, `CURATE` on an `LLMClient` -- so "this
         deployment cannot run that kind" is wiring a test has to be able to
-        see, and only `MATCH` and `WATCH_HISTORY` are in every build.
+        see, and only `MATCH`, `WATCH_HISTORY` and `SYNC` are in every build.
+        `SYNC` joined them in M9's E3: there is no optional process resource
+        behind a triggered sync, only the adapter factory every root already
+        builds, so it is registered exactly as unconditionally as the two it
+        joins.
         🔴 `WATCH_WRITEBACK` is in **no** build: M9's D7 minted the member so
         its four routes could enqueue, and D8 -- which depends on D7 -- adds
         the handler and the unconditional registration. Whoever lands D8

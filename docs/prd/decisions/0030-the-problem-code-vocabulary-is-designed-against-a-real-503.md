@@ -108,7 +108,7 @@ directions, so the two cannot drift apart without a red suite.
 | `method_not_allowed` | 405 | every route, through Starlette's router |
 | `invalid_cursor` | 400 | `api/cursor.py`, on any cursor that does not match the query it is replayed against. **The one member with no route yet** — see Consequences |
 | `source_unavailable` | 503 | `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play` — **beyond the benchmark; forced by** the first route in Usher that holds a `SourceAdapter` |
-| `not_playable` | 409 | `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play` — **beyond the benchmark; forced by** the same two, for a title the household owns and no source can play |
+| `not_playable` | 409 | `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play`, `POST /admin/sources/{source_id}/sync` (M9's E3, a reuse — see Amendment) — **beyond the benchmark; forced by** the first two, for a title the household owns and no source can play |
 | `ticket_invalid` | 404 | `GET /stream/{ticket}` — **beyond the benchmark; forced by** the redeem route, which has no other way to say "re-ask `/play`" |
 
 <!-- vocabulary:end -->
@@ -388,3 +388,51 @@ the derivation function is not changed to avoid the question.
   own assertion line; a member added to the enum and not to this table fails
   the both-directions case naming the member; a per-resource 404 fails both the
   careless-spelling case and the careful-spelling one.
+
+## Amendment — 2026-08-11: `not_playable` gets a second emitter, and no member is minted
+
+**Status of the amendment:** Accepted, and it is a correction of this record's
+own first draft rather than new ground. `POST /admin/sources/{id}/sync` (M9's
+E3) answers `409 not_playable` for a source an operator has disabled
+(`enabled = false`) — `composition.selected_sources` already skips a disabled
+source even when named explicitly, so a 202 there would promise a walk
+`usher work` will never run.
+
+**The first draft of this task minted an eighth member, `source_disabled`,
+reasoning that `not_playable`'s own docstring names a title with no playable
+copy and that reusing it here would put a false sentence on an unrelated
+response.** That reasoning did not survive review against V1's own rule: the
+vocabulary is closed at seven, and rule 1's bar for an eighth member is not
+"a slightly better name exists" — it is a client that would act differently
+on the two causes. It would not. Both are RFC 9110 §15.5.10, word for word:
+*"the request could not be completed due to a conflict with the current state
+of the target resource."* A client meeting `409 not_playable` on
+`/admin/sources/{id}/sync` has exactly one correct action regardless of which
+of the two sentences produced it — stop retrying this request until something
+about the target's state changes — and `instance` already says which route
+answered, so there is no ambiguity about *what* is not playable versus not
+walkable. Reusing the member is the same move ruling 1 already made for 404:
+one code, disambiguated by the path a client already has.
+
+**What actually changes is `detail`, never `code`.** `code` carries the
+disposition the two causes share; `detail` carries the sentence that is true
+of the specific one — `"this source is disabled; enable it before requesting
+a sync"` here, and the title-specific sentence on `/play`. That split is the
+whole of ADR-0030's stability rule: *"nothing may parse `title` or `detail`;
+only `code` and `status` are the contract."* A client that switches on `code`
+gets the right disposition from either route; one that reads `detail` for a
+human-facing message gets the right sentence from either too.
+
+**Why not `SOURCE_UNAVAILABLE`, the other 409-adjacent candidate.** It is a
+503, not a 409, and its meaning is orthogonal: the upstream was asked and
+failed, a fault worth retrying once it clears. A disabled source is never
+asked at all — a deliberate, durable state that changes only when an
+operator re-enables it — so answering 503 would tell a client to retry a
+request that will fail identically until a human acts, which is the false
+promise `source_unavailable`'s own reasoning exists to avoid making.
+
+The vocabulary table above is amended to add `POST /admin/sources/{source_id}
+/sync` as `not_playable`'s second emitter. No member is added, no member is
+renamed, and `_CODE_FOR_STATUS` is unchanged (ruling 4's reasoning is
+unaffected — nothing in `src/` raises a bare `HTTPException(409)`;
+`ProblemException` carries its own code at every 409 site).

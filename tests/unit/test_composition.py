@@ -351,8 +351,9 @@ def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
     The `ENRICH` and `CURATE` halves are asserted alongside it, so the three
     guards cannot drift into "two guarded, one not", and `MATCH` is asserted
     so an implementation registering *nothing* cannot pass. This is the
-    default deployment -- no key, no extra, no model -- and its two claimable
-    kinds are the whole of what it can do.
+    default deployment -- no key, no extra, no model -- and its three
+    claimable kinds (`match`, `watch_history`, `sync`) are the whole of what
+    it can do.
     """
     worker = build_worker(
         _pipeline_over_fakes(titles=FakeTitleRepository(), queue=FakeJobQueue()),
@@ -364,7 +365,9 @@ def test_a_worker_without_an_embedder_registers_no_index_handler() -> None:
         user_id=uuid.uuid4(),
     )
 
-    assert worker.registered_kinds == frozenset({JobKind.MATCH, JobKind.WATCH_HISTORY})
+    assert worker.registered_kinds == frozenset(
+        {JobKind.MATCH, JobKind.WATCH_HISTORY, JobKind.SYNC}
+    )
 
 
 def test_a_worker_with_an_embedder_registers_the_index_handler() -> None:

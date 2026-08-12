@@ -276,6 +276,13 @@ def get_source_repository(session: SessionDep) -> SourceRepository:
     return PostgresSourceRepository(session)
 
 
+# `POST /admin/sources/{id}/sync` (M9's E3) reads through this and never
+# through `SourceServiceDep` below -- `SourceService.status` builds an
+# adapter and calls `verify()`, and a lookup that dials the upstream is not
+# a lookup a 404 refusal should be paying for.
+SourceRepositoryDep = Annotated[SourceRepository, Depends(get_source_repository)]
+
+
 def get_source_adapter_factory(settings: SettingsDep) -> SourceAdapterFactory:
     """The composition root's adapter registry.
 

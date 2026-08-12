@@ -471,12 +471,7 @@ be added if a client turns out to need flexible field selection.
 > corrected in place each time rather than dropped, because it is the sentence
 > that says *which* of these were M3's. `GET`/`POST`/`DELETE
 > /admin/sources` and `GET /admin/sources/{id}/status` are live
-> (`usher.api.routers.sources`). `POST /admin/sources/{id}/sync` is not —
-> **and the reason recorded here was wrong by M4 and is corrected**: it said
-> "there is no reconciler until M5", but M4 built `ReconcileService` and both
-> its lanes. The route is M9's, exactly as [09](09-roadmap.md)'s boundary
-> call 4 states, and M4's `usher sync` already delivers the capability. The
-> status
+> (`usher.api.routers.sources`). The status
 > route answers **200 for every state a configured source can be in** —
 > rejected credentials, an unreachable host, a credential row that has gone
 > missing, and one that no longer decrypts because `USHER_SECRET_KEY` was
@@ -486,6 +481,51 @@ be added if a client turns out to need flexible field selection.
 > `404` is reserved for a source id that does not exist.
 > `POST` accepts a username and password and returns neither — see
 > [08](08-operations.md).
+
+> **Built in M9's E3: `POST /admin/sources/{id}/sync`.** ✅ No longer *"not"* —
+> the reason recorded above it was already wrong by M4, which built
+> `ReconcileService` and both its lanes; `usher sync` delivered the capability
+> three milestones before this route existed to wire it, exactly as
+> [09](09-roadmap.md)'s boundary call 4 always said it would. **It enqueues
+> and returns 202. It does not reconcile** — the same shape M8 settled for
+> `POST /admin/rows/regenerate` below, for the identical reason: a reconcile
+> checkpoints and commits per batch, so a route that drove a six-hour walk
+> inside one request would be committing the request's session repeatedly
+> before the handler returned. The body is `{"kind": "sync", "key": "<source
+> id>:<lane>"}` — the queue's own identity, on the same two-field shape the
+> regenerate route answers with below, and for the same reason: neither
+> promises more than "this row is queued", because `status` and a row count
+> can both already be false by the time the response is read.
+>
+> **The key is `"{source id}:{lane}"`, never a bare source id.** `(kind, key)`
+> is unique, so a bare id would coalesce a requested `full` walk into a
+> pending `delta` one and answer 202 for a walk that never happens.
+> `?kind=full|delta` selects the lane and defaults to `delta`; `full` and
+> `delta` are two rows on the queue, never one collapsed into the other, and a
+> repeat of either writes zero — the ordinary promote-never-demote shape every
+> other kind already has.
+>
+> **Two refusals, both before anything is enqueued, both in this envelope.**
+> `404 not_found` for a source id that does not exist, read through a lookup
+> rather than through `status()`'s adapter-building one. `409 not_playable`
+> for a source an operator has parked (`enabled = false`) —
+> [03](03-sources-and-sync.md)'s `selected_sources` already skips a disabled
+> source even when named explicitly, so a 202 there would promise a walk the
+> worker will decline. **A reuse, not a minted `source_disabled`**: V1's
+> vocabulary is closed at seven
+> ([ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)),
+> and both this and a title with no playable copy are RFC 9110 §15.5.10's
+> identical claim — *conflict with the current state of the target resource,
+> stop asking* — so a client cannot act on the two differently; only `detail`
+> differs. See the ADR's amendment for the case against minting one.
+>
+> **Unauthenticated, like every route in this table** — named rather than
+> considered and dismissed; PRD 01's authentication seam owns the gap. And
+> **head-of-line blocking is a real cost of the design, priced in
+> [08](08-operations.md)'s job-reliability section**: a triggered sync shares
+> the one worker lane with `enrich`, `index`, `derive`, `curate` and `match`,
+> so a full walk can stall the others for the length of the walk. Accepted
+> for the queue's dedup and its durability across a restart, not solved here.
 
 > **Built in M8: `POST /admin/rows/regenerate`.** ✅ Shipped ahead of the admin
 > rows still outstanding above it by [09](09-roadmap.md)'s M7 boundary call 2,

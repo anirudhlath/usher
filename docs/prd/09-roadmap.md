@@ -55,7 +55,12 @@ deliberately rather than drifted into.**
    defined. M4 delivers the same capability through `usher.cli` — the
    project's established second composition root, exactly as M2 did for
    `bootstrap` — and every service is constructed identically by both roots,
-   so M9 adds routers over finished wiring.
+   so M9 adds routers over finished wiring. ✅ **`POST /admin/sources/{id}/sync`
+   shipped by M9's E3**, as `JobKind.SYNC` and an enqueue rather than a
+   synchronous walk — M8's `POST /admin/rows/regenerate` had already settled
+   that shape, and the reason first written down here ("there is no
+   reconciler until M5") was already wrong by M4 itself. The other two routes
+   in this item remain open.
 
 **What M4 leaves M5 to build on:** a queue with a real claim/park/backoff
 contract and a `traceparent` column, an `IngestService` that takes a `since`

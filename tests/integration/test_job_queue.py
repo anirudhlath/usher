@@ -732,3 +732,44 @@ async def test_a_claim_is_ordered_even_when_its_update_stage_hash_joins(
     assert claimed[0].key == "urgent", [job.key for job in claimed[:3]]
     keys = [(-job.priority, job.created_at) for job in claimed]
     assert keys == sorted(keys), "the claim came back out of order"
+
+
+# -- sync's composite key ---------------------------------------------------
+
+
+async def test_a_full_and_a_delta_sync_for_one_source_are_two_rows(
+    queue: PostgresJobQueue,
+) -> None:
+    """`usher.domain.jobs.JobKind.SYNC`'s whole argument, measured against
+    real Postgres rather than reasoned from the statement: `(kind, key)` is
+    unique over the **composite** string, so `"{source}:full"` and
+    `"{source}:delta"` are two rows for the same source, never one collapsed
+    into the other. A bare source id would coalesce a requested `full` walk
+    into a pending `delta` one and answer 202 for a walk that never happens
+    -- this is the case that would fail if the composite ever regressed to
+    a bare id, because both requests would then dedup onto one row and this
+    count would read 1.
+    """
+    source_id = uuid.uuid4()
+    full = JobRequest(kind=JobKind.SYNC, key=f"{source_id}:full", priority=JobPriority.DEMAND)
+    delta = JobRequest(kind=JobKind.SYNC, key=f"{source_id}:delta", priority=JobPriority.DEMAND)
+
+    assert await queue.enqueue([full]) == 1
+    assert await queue.enqueue([delta]) == 1
+    assert (await queue.depth())[JobKind.SYNC] == 2
+
+
+async def test_a_repeat_of_either_sync_lane_writes_zero(queue: PostgresJobQueue) -> None:
+    """The other half of the same claim: a repeat of a lane already at this
+    priority is `_ENQUEUE`'s ordinary promote-never-demote no-op, not a
+    second row -- pressing the sync button twice for the same lane must not
+    double the queue."""
+    source_id = uuid.uuid4()
+    full = JobRequest(kind=JobKind.SYNC, key=f"{source_id}:full", priority=JobPriority.DEMAND)
+    delta = JobRequest(kind=JobKind.SYNC, key=f"{source_id}:delta", priority=JobPriority.DEMAND)
+    await queue.enqueue([full])
+    await queue.enqueue([delta])
+
+    assert await queue.enqueue([full]) == 0
+    assert await queue.enqueue([delta]) == 0
+    assert (await queue.depth())[JobKind.SYNC] == 2

@@ -127,6 +127,7 @@ from usher.services.handlers import (
     enrich_handler,
     index_handler,
     match_handler,
+    sync_handler,
     watch_history_handler,
 )
 from usher.services.images import ImageProxyService
@@ -693,6 +694,22 @@ def build_worker(
     worker.register(JobKind.MATCH, match_handler(pipeline.matcher, pipeline.media_items, resolve))
     worker.register(
         JobKind.WATCH_HISTORY, watch_history_handler(pipeline.watch, resolve, user_id=user_id)
+    )
+    # Unconditional, exactly as MATCH and WATCH_HISTORY are: unlike ENRICH,
+    # INDEX, DERIVE and CURATE there is no optional process resource behind a
+    # triggered sync, only the adapter factory every root already builds.
+    # `open_adapter` is a module-level function rather than a method so it
+    # can be shared with `usher.cli._open_adapter`'s reporting wrapper; bound
+    # here to this pipeline the way `resolve` already is above.
+    worker.register(
+        JobKind.SYNC,
+        sync_handler(
+            pipeline.sources,
+            pipeline.reconcile,
+            pipeline.watch,
+            lambda source: open_adapter(pipeline, source),
+            user_id=user_id,
+        ),
     )
     if provider is not None:
         worker.register(
