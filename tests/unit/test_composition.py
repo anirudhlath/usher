@@ -1539,8 +1539,11 @@ async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
       one survived this case until the order was pinned against the enum, and
       the damage is the one Track 2 named -- `credit-names` joins to `titles`
       on `imdb_id`, so ahead of `imdb` it refuses an empty catalog and the
-      phase silently does nothing, while behind a TMDb crawl it stales
-      203,969 of the 204,335 >=100-vote titles' embeddings.
+      phase silently does nothing, while behind a TMDb crawl it defers every
+      enriched title to TMDb permanently and 203,969 of the 204,335
+      >=100-vote titles never gain a `credit_names` at all. (It stales no
+      embedding in either position; this sentence said it staled that tier
+      until an audit checked it against `fill_credit_names`' own predicate.)
     """
     through_cli = await _journal_of_a_full_bootstrap(
         monkeypatch, tmp_path, through_the_worker=False

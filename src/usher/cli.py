@@ -1566,9 +1566,9 @@ def build_parser() -> argparse.ArgumentParser:
         # renders help.
         help=(
             "which bulk datasets to import; the choices are in execution order. "
-            "Run credit-names BEFORE the TMDb enrichment crawl: it rewrites "
-            "search_document, so afterwards it stales ~100%% of the priority "
-            "tier's embeddings, and before it stales none"
+            "Run credit-names BEFORE the TMDb enrichment crawl: it defers to TMDb "
+            "on every enriched title, so afterwards 99.82%% of the priority tier "
+            "never gains IMDb names and re-running does not repair it"
         ),
     )
     sub.add_parser("bootstrap-status", help="report import progress and catalog size")
