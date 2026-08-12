@@ -295,6 +295,14 @@ _CPU_DRIFT_LIMIT = 0.10
 # own wake.
 _CPU_SETTLE_SECONDS = 5.0
 
+# Executables that are never the workload, only ever something watching for it
+# or sleeping between polls. A shell's `-c` string quotes whatever it is
+# waiting on, which is exactly how an idle waiter comes to look like a running
+# suite.
+_NOT_A_WORKLOAD = frozenset(
+    {"zsh", "bash", "sh", "fish", "dash", "sleep", "grep", "pgrep", "ps", "awk", "tail", "watch"}
+)
+
 
 def _cpu_counters() -> tuple[int, int]:
     """`/proc/stat`'s aggregate jiffies as (total, idle-including-iowait)."""
@@ -352,13 +360,31 @@ def _load_snapshot() -> dict[str, Any]:
         if not entry.name.isdigit():
             continue
         try:
-            command = (entry / "cmdline").read_bytes().decode("utf-8", "replace")
+            raw = (entry / "cmdline").read_bytes()
+            comm = (entry / "comm").read_text().strip()
         except OSError:
             continue
-        if not command:
+        if not raw:
             continue
+        # **A substring match counts the shell that mentions the word.**
+        # Caught with the window already open: `pgrep -f pytest` reported four
+        # processes on a box the coordinator had just measured as clear, and
+        # every one was an idle `zsh -c '... until pgrep pytest ...; sleep 5'`
+        # waiter -- 0.0% CPU and zero seconds of CPU time across twenty-four
+        # minutes, a sibling's leftover monitor whose *command line* holds the
+        # word it is waiting for. Left alone this would have scored a clean
+        # forty-five-minute run as not quiet and discarded it, which is the
+        # identical failure the load-average gate had: a guard that fires on
+        # the observer rather than the thing observed.
+        #
+        # So: argv *tokens*, not a substring, and never a shell or a `sleep`.
+        # A process running pytest has it as a token; a process waiting for one
+        # has it inside a `-c` string, and both look the same to `in`.
+        if comm in _NOT_A_WORKLOAD:
+            continue
+        tokens = raw.decode("utf-8", "replace").split("\0")
         for key in procs:
-            if key in command:
+            if any(one_token == key or one_token.endswith(f"/{key}") for one_token in tokens):
                 procs[key] += 1
     return {
         "loadavg": [one, five, fifteen],
