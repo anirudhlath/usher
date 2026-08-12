@@ -586,3 +586,113 @@ minutes and no API key.** `bootstrap --phase all` pulls IMDb's
 wall clock end to end. That is the catalog M4's match ladder has to be
 measured against — an empty one sends everything to tier 5 and measures
 nothing.
+
+**The two IMDb expansion phases were run end to end against real Postgres and
+the whole pinned dumps — 2026-08-11 (M9 T8), 22 min 26 s of wall clock for
+1,194,047 titles given a cast and 1,663,455 aliases stored.** Not a
+measurement script: `usher.cli._bootstrap` itself, driven with
+`CachedDatasetFile.revision` patched to answer the sidecar the cache already
+holds, so the run reads T3's *pinned* snapshots (`title.akas`
+`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`, `name.basics`
+`"a3b9681921c92e5917182d1ecc05bd2d-37"`, `title.principals`
+`"08ce60665889cb40c7371e1eab44a1f2-93"`) rather than whatever IMDb
+regenerated that morning, and transfers no byte. The catalog under it is a
+real `--phase imdb` over the cached `title.basics`
+`"128751cb2f3132bd73bdf08c7f4def5d-27"` — **1,272,367 titles** in 114.9 s,
+which is T5's join catalog exactly, so every prediction below is comparable
+against its own measurement rather than against one taken on a different
+snapshot.
+
+| phase | wall clock | rows read | result | predicted |
+|---|---|---|---|---|
+| `imdb` | 114.9 s | 12,707,541 lines | 1,272,367 titles, 539,780 rated | — |
+| `credit-names` | 826.1 s | 101,151,423 lines → 11,490,876 titles | **1,194,047 titles filled (93.84%)** | 93.8% (T3) |
+| `aliases` | 520.1 s | 58,906,369 lines → 46,202,631 retained | **1,663,455 aliases over 399,018 titles**, 313 MB | 1,663,323 (T5), ≤1.70M (T7) |
+
+*Wall clocks are from a shared box — a dozen sibling suites and testcontainers
+had it — so they are upper bounds on a quiet machine and are not comparable
+with each other at better than ±30%. Every count is exact.*
+
+**Three predictions landed, and the third settles T7's open bound to a
+number.** `credit-names`' 1,194,047 filled against T3's projected 1,192,217
+is the same figure on a catalog 1,229 titles larger. `aliases` read exactly
+**46,202,631** retained rows, which is T7's parser-level count to the row.
+And the shipped SQL-`lower()` rule stored **1,663,455** where T5's
+`casefold()` join over this same catalog predicted **1,663,323** — **+132**,
+against T7's bound of "at least 1,663,323 and at most that plus 32,223". So
+the direction T7 argued is confirmed and the real gap is **0.008%** of the
+population rather than the 1.9% the bound allowed. The canonical filter
+dropped 4,426,750 rows under `lower()` against T5's 4,426,783 under
+`casefold()` — 33 fewer, the same direction — and 179,017 were dropped as
+duplicates.
+
+**The batch-boundary bug T7 handed to T8 was real, and running it both ways
+priced it: 319 stored aliases, silently, on 46,202,631 rows.** With
+`IMDbAkaDataset.group_of` returning `None` — which is exactly the shipped
+`_ImdbDataset` row-count batching T5 left in place — the same run against the
+same catalog reports **1,663,458 written** and leaves **1,663,139** rows in
+`title_search_names`. The 319-row gap is titles delivered in two batches whose
+second call's scoped `DELETE` took the first call's rows, and **21 titles end
+with no alias at all**. Nothing anywhere reports it: each call really did
+write what it claimed, the port's `ValueError` guard is about rows outside the
+scope and both halves are inside their own, and the phase's own report sums
+the calls. With the fix, *written* and *stored* are the same number to the row
+— **1,663,455 = 1,663,455** — which is the invariant to check if this is ever
+touched again. The parser-level figure, measured separately over the whole
+file, is that **all 924** of a 50,000-row-batched import's boundaries land
+inside a title and **3,867 retained rows** cross one; 319 of those survive the
+canonical filter and the dedupe, which is why the stored loss is two orders of
+magnitude smaller than the rows-at-risk count and no less silent.
+
+**Grouping a batch by title is only sound because both dumps are contiguous by
+title, and that is measured, not assumed.** Over the whole pinned files:
+`title.akas`' `titleId` has **zero lexicographic descents in 58,906,368 rows**
+(12,703,713 runs, longest 300 rows, `tt0168366`) and `title.principals`'
+`tconst` has **zero in 101,151,422** (11,491,032 runs — T3's title count
+exactly — longest 75). Non-decreasing implies contiguous: a run reopening
+after some other id would have to descend to do it. The *integer* inside the
+id descends 1,250,830 times in `title.akas`, so these files are string-sorted
+in the same way `name.basics` is, and any check has to be on the string.
+**A guard refusing a dump whose order descends was declined**: it checks a
+strictly stronger property than the writer needs, and this repository's own
+`tests/fixtures/bulk/title.akas.slice.tsv` is contiguous and *not* sorted
+(`tt99000020`, `tt99000030`, `tt99000010`), so the guard would refuse a file
+that is fine. Contiguity itself cannot be checked without remembering 12.7M
+ids.
+
+**`credit-names` deferred to TMDb exactly 0 times, and that is the expected
+reading of a bootstrap-only catalog rather than a broken counter.** Every one
+of the 1,272,367 titles is `skeleton`, so `fill_credit_names`' precedence rule
+had nothing to defer on; the counter grows only as the crawl advances, which
+is what makes the ordering constraint visible in the report. 10,296,829 of the
+11,490,876 titles `title.principals` credits are not in this catalog — 89.6%,
+the shape T3 predicted, and the number that would look identical to a broken
+join if it were not printed.
+
+**A killed `--phase aliases` resumes at the identical final row count, which
+is the property M2 verified for `--phase imdb` at 700,000/1,271,138 and the
+one the boundary cursor most needed re-checking.** `SIGKILL` at
+**position 37,415,494 of 58,906,369 (63.5%)**, with 29,601,973 retained rows
+seen and 1,386,064 aliases written — and **1,386,064 rows in the table at that
+instant**, so the crash left no half-written title either. Re-running finished
+at `position=58906369 seen=46202631 written=1663455`, and the table holds
+**1,663,455 aliases over 399,018 titles** — the same two numbers, to the row,
+as the uninterrupted run above. `rows_seen` is *equal* to the uninterrupted
+total rather than larger, which is the boundary cursor showing its work: it
+points at the last line of a completed title, so a resume replays no retained
+row at all, where a mid-title cursor would have replayed some and destroyed
+the rest.
+
+**`--phase credit-names` resumes identically too, and its resume is the
+expensive one.** `SIGKILL` at **position 48,065,977 of 101,151,423 (47.5%)**,
+5,300,000 titles seen and **642,449** filled — matching the 642,449 titles
+then holding a non-empty `credit_names`. Re-running finished at
+`position=101151423 seen=11490876 written=1194047` with **1,194,047** titles
+filled, the uninterrupted run's number exactly, and `rows_seen` again equal
+rather than inflated. What it costs is the part worth planning around: the
+`nconst -> primaryName` index is rebuilt from the whole of `name.basics`
+before the first batch of **every** run, resumed or not — a fixed 19.5 s and
+345 MiB — so a resume pays the join's setup again and only the
+`title.principals` scan is skipped. `position` is a line offset into
+`title.principals` alone and says nothing about `name.basics`, which is
+correct precisely because the index is never partial.
