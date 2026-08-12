@@ -107,13 +107,10 @@ _meter = metrics.get_meter("usher.cache")
 # a cache. The description therefore names no cache in particular -- it did
 # say "Row/screen" until the proxy landed, which was accurate when this pair
 # had one caller and a lie the moment it had two.
-CACHE_HITS = _meter.create_counter(
-    "usher.cache.hits", description="Cache reads that found a live entry"
-)
-CACHE_MISSES = _meter.create_counter(
-    "usher.cache.misses",
-    description="Cache reads that found nothing or an expired entry",
-)
+# Declared in `usher.telemetry` and re-exported here, because
+# `services/images.py` also records through them and importing them from this
+# module made a cycle. See the note beside their definition.
+from usher.telemetry import CACHE_HITS, CACHE_MISSES  # noqa: E402
 
 # One household's row cache is `_MAX_ENTRIES` slugs. Ten providers propose
 # roughly a dozen rows a screen, so this is ~80 screens' worth of distinct

@@ -741,10 +741,22 @@ def test_the_proxy_records_through_the_row_caches_instruments_and_declares_none(
     }
 
     assert len(shared) == 2, "the scan found no instruments in services/rows/cache.py"
-    assert len(mine) == 2, (
-        "services/images.py holds no pair of instruments -- the scan is measuring nothing"
+    assert shared <= mine, (
+        "services/images.py does not hold the shared pair -- either the scan is measuring "
+        "nothing, or the proxy declared a parallel instrument instead of importing this one"
     )
-    assert mine <= shared, "services/images.py declared an instrument of its own"
+    # 🔴 This read `len(mine) == 2` and `mine <= shared` until 2026-08-11, written
+    # when the proxy held nothing but the shared pair. C7 then added
+    # `usher.images.references`, a genuinely different instrument with its own
+    # name, and the equality would have forbidden it. The property this case is
+    # actually about is *identity of the shared pair*, not the size of the set:
+    # what must never happen is a second `usher.cache.*` counter, not a second
+    # counter. The count of the module's own instruments is pinned separately so
+    # a third arrival is a decision rather than an accident.
+    assert len(mine - shared) == 1, (
+        "services/images.py declares exactly one instrument of its own "
+        "(`usher.images.references`); a new one is a deliberate change, not a drive-by"
+    )
 
 
 # ---------------------------------------------------------------------------

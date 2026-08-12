@@ -57,7 +57,7 @@ from usher.ports.images import (
     is_servable_path,
 )
 from usher.ports.repository import ImageRepository
-from usher.services.rows.cache import CACHE_HITS, CACHE_MISSES
+from usher.telemetry import CACHE_HITS, CACHE_MISSES
 
 __all__ = ["ImageProxyService", "servable_images"]
 
