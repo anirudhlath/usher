@@ -778,3 +778,152 @@ Contrast `db/repositories/episode.py`, where both sort columns are
 `nullable=False` and B12 *measured* the two-arm spelling equivalent — the
 difference between the two reads is a fact about their columns, and each says so
 in its own docstring.
+
+## M9 Task B7 — `/browse` priced at catalog scale: both bars failed, the sort is not the cost, and the `ORDER BY`'s spelling is worth 317× (2026-08-12)
+
+**Bar written, hashed and committed before the first probe** —
+`/var/tmp/m9-B7/BAR.md`,
+`sha256 256f28ba8102a47677acb3fe34afe8dc52787ab3d42c1f2ad2e88ef949cdfba9`,
+2026-08-12T06:31:44-05:00, restated verbatim in `scripts/measure_browse.py`'s
+docstring and re-hashed at run time so an edit after a number was seen shows up
+in the log. `/var/tmp` and not `/tmp`, which is tmpfs on this host.
+
+**Catalog, recorded with every number because a phase read as a catalog fact is
+how the last one went wrong:** 1,272,367 titles (1,141,720 skeleton / 0 basic /
+130,647 enriched), `alembic m09c`, autoanalyzed. NULL fractions of the four
+sort keys: `sort_name` **0**, `year` 147,848, `vote_count` 732,587,
+`popularity` **980,523** — so *"popularity is NULL on all 1,271,138 rows"* is
+now false on a partly-enriched catalog and 77% is the right figure to carry.
+118,856 titles carry no genre. `media_items` is **empty**, so every `owned`
+number here is an `EXISTS` against an empty table and is **not** the filter
+that ships. `work_mem` 4 MB, `shared_buffers` 128 MB,
+`max_parallel_workers_per_gather` 2, jit on. Genre vocabulary 30 members,
+Drama 386,689 down to Adult 1; probes drawn by **rank** — low = Drama,
+median = Fantasy (30,034), high = Adult.
+
+### Both bars failed
+
+| probe | p50 | p95 | bar |
+|---|---|---|---|
+| `browse_facets()` unfiltered | 320.52 | **330.81** | 200 — FAIL |
+| — its genre arm alone | — | 204.55 | — |
+| — its year arm alone | — | 123.14 | — |
+| `browse_facets(genre=Drama)` | 328.68 | 344.62 | FAIL |
+| `browse_facets(genre=Fantasy)` | 317.79 | 324.43 | FAIL |
+| `browse_facets(genre=Adult)` — **one** title | 316.61 | 321.93 | FAIL |
+| `browse_facets(year=1999)` | 195.66 | **201.12** | FAIL, by 1.12 ms |
+| `browse_facets(genre=Fantasy, year=1999)` | 184.44 | **194.92** | **PASS** |
+| `browse(genre=Fantasy)`, pooled over 4 sorts × 2 pages | 128.59 | **139.92** | 50 — FAIL |
+| `browse(genre=Drama)` | — | 206.31 | FAIL |
+| `browse(genre=Adult)` | — | 125.74 | FAIL |
+| `browse()` unfiltered | — | **321.29** | FAIL — the slowest |
+| `browse(year=1999)`, best probe anywhere | 61.18 | 70.69 | FAIL |
+
+🔴 **The plan's own named fallback is refuted as a remedy.** *"Facets are
+served only for a predicated browse"* assumes a predicate makes them
+affordable. It does not: a genre-predicated request is 324.43 ms against an
+unfiltered 330.81, and a genre matching **one** title is 321.93. The mechanism
+is in `browse_facets`' own design — each facet is computed over the filtered
+population **minus its own predicate**, so a request whose only filter is a
+genre computes the genre facet over the whole catalog *by construction*. Only
+`year` moves the number, because the aggregate's cost is the `unnest` and
+`GROUP BY` over ~2.9M genre rows rather than the scan. **The general form: when
+a facet drops its own predicate, predicating on that facet cannot reduce its
+cost, and any fallback of the form "compute facets only when filtered" has to
+name which filter.** What shipped is opt-in (`?facets=true`) *and* predicated,
+with an explicit `computed` flag and absent maps — PRD 07's Screens row and its
+note are corrected in the same commit as these numbers.
+
+### G7's shape holds a second time, and the lossy bitmap is refuted structurally
+
+Every browse plan is the same: `Limit → Gather Merge → Sort → Parallel Seq Scan
+on titles`, ~95,000 buffers (≈79,000 read), `width=736`.
+**`Sort Method: top-N heapsort  Memory: 39–59 kB`** in every one — so the sort
+is trivial and **the cost is the scan**, which is B3's G7 refutation arriving in
+a second family. The marginal cost above a ~118 ms scan floor is rows fed to the
+heapsort: Adult keeps 0/worker at 118 ms, Fantasy 10,011 at 122, Drama ~129,000
+at 190, unfiltered 424,122 at 315.
+
+**B3's lossy-bitmap hazard cannot arise here, and the obvious fix would create
+it.** There is no GIN index on `titles.genres`, so `genres @> '{Fantasy}'` is a
+`Filter:` on a sequential scan (`Rows Removed by Filter: 414,111` per worker;
+424,122 for Adult) and there is no bitmap to be lossy. The prediction's
+*direction* held — low selectivity is worse — and its *mechanism* did not.
+A GIN index on `genres` is what would introduce the 66,188-lossy-block recheck
+B3 measured one subsystem over.
+
+### The `ORDER BY`'s spelling, not the missing index, is what makes a `name` page a sequential scan
+
+Measured **after** both bars were scored, as a diagnostic, changing one
+variable: the leading `(key IS NOT NULL) DESC` term replaced by the
+`NULLS LAST` it was written out from, nothing else moved.
+
+| sort | column NOT NULL | shipped p50 | `NULLS LAST` p50 | plan under `NULLS LAST` |
+|---|---|---|---|---|
+| `name` | **yes** | 299.21 | **0.92** | `Index Scan using ix_titles_sort_name` + Incremental Sort, **29 buffers**, 0.080 ms |
+| `year` | no | 277.13 | 235.55 | Parallel Seq Scan (no index exists) |
+| `popularity` | no | 269.96 | 229.50 | Parallel Seq Scan |
+| `vote_count` | no | 276.48 | 231.21 | Parallel Seq Scan |
+
+**317× on `name`, for a page proved byte-identical** — the two spellings were
+run side by side and matched on **0 mismatched positions over 25**.
+`titles.sort_name` is declared `NOT NULL` and `ix_titles_sort_name` already
+exists; Postgres 17 does **not** simplify `sort_name IS NOT NULL` to `true`
+even so, and an index is matched by the **sort key expression**, so the
+written-out form is unindexable while the `NULLS LAST` form that produces the
+identical row order is not.
+
+`db/repositories/title.py` writes the term out deliberately — *"the keyset
+predicate has to agree with this term for term and two spellings of one rule is
+how they stop agreeing"* — and that argument is about **correctness**, which it
+gets right. What nobody had measured is that it also costs the index.
+**The general form: `(key IS NOT NULL) DESC, key <dir>` and `key <dir> NULLS
+LAST` are the same *order* and different *sort keys*, and only one of them an
+index can serve. A legibility decision about SQL text can be a plan decision.**
+
+**The recommendation, which is bar 2's named output and is not applied here**
+— B6 owns that statement and `ix_titles_popularity` is the precedent for adding
+an index on a guess:
+
+1. Spell the `ORDER BY` as `NULLS LAST`. Free, no DDL, and it alone puts
+   `sort=name` at 0.92 ms — 51× *under* bar 2.
+2. Then, and only then, a btree per nullable sort key
+   (`(year DESC NULLS LAST, id)`, and the same for `popularity` and
+   `vote_count`) can be matched at all. Under the written-out spelling such an
+   index is unusable and would be `ix_titles_popularity` a second time.
+3. A genre predicate needs a GIN index on `titles.genres` to stop being a
+   1.27M-row scan — and that is what would create B3's lossy recheck, so it is
+   a measurement rather than a foregone conclusion.
+
+### Harness notes, all of them failures the discipline caught
+
+🔴 **The first spelling of the diagnostic's surgery did not land, and the check
+written to catch that could not fire.** The anchor was guessed as
+`ORDER BY (col IS NOT NULL) DESC, ...`; SQLAlchemy emits
+`ORDER BY titles.col IS NOT NULL DESC, ...` — no parentheses, table-qualified —
+so `str.replace` matched nothing, and the guard `"IS NOT NULL) DESC" in variant`
+was spelled against the *same absent parenthesis* and was vacuously false. The
+run timed **two copies of one statement** (299 vs 298 ms) and the write-up would
+have reported the 317× finding as refuted. Repaired to byte inequality against
+the text it was derived from — F3's landing-check repair, and the reason it
+generalises: a guard derived from the same guess as the edit fails together
+with it.
+
+**The statement measured is the shipped object, not a copy.** Timings drive
+`PostgresTitleRepository.browse`/`.browse_facets` through a **recording
+session** that keeps the SQLAlchemy statement the repository built, and the
+`EXPLAIN` is compiled from that object — so there is no second spelling of B6's
+SQL to drift. `verify_harness` re-executes each recorded statement and refuses
+the run unless it answers the same row count.
+
+**No plan-shape assertion is made anywhere**, for B3's reason: a plan-shape
+guard is vacuous below the scale at which the planner chooses that shape. Plans
+are captured verbatim and every shape named above carries the row count it was
+observed at.
+
+**Quiet, by B3's metric reused rather than re-derived** (imported from
+`measure_suggest_tiers`, one definition): foreign process census on argv tokens
+plus two-sided ±0.10 idle-sampled CPU drift. Bars run: drift **−0.0147**,
+foreign 0. Diagnostic run: **−0.0019**, foreign 0. The one-minute load average
+went **1.30 → 3.71** across the bar run and decides nothing — that is the run's
+own work, and a load-average gate would have condemned it.

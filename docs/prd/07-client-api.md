@@ -38,7 +38,7 @@ be added if a client turns out to need flexible field selection.
 | `GET /home` | Ordered, hydrated rows with reasons and display hints |
 | `GET /search?q=&mode=&limit=` | Unified results across catalog and library |
 | `GET /search/suggest?q=&tier=&limit=` | Type-ahead — the two tiers from [05](05-search-and-similarity.md), separately askable ([ADR-0031](decisions/0031-the-two-tier-suggest.md)) |
-| `GET /browse?genre=&year=&sort=&owned=&cursor=` | Faceted paging with facet counts |
+| `GET /browse?genre=&year=&sort=&owned=&facets=&cursor=` | Keyset paging; facet counts on request, for a predicated browse only |
 
 > **Built in M7: `GET /home`.** ✅ Ordered, hydrated rows — `slug`, `title`,
 > `reason`, `display_hint` and cards — composed server-side and rendered in
@@ -136,6 +136,42 @@ be added if a client turns out to need flexible field selection.
 > and status code, on every request including this one — PRD 10's row is
 > corrected to name what ships rather than exporting the same measurement
 > twice under a `usher.` prefix.
+
+> ✅ **`GET /browse` ships, and its Screens row above is corrected by the
+> measurement rather than by taste.** It read *"Faceted paging with facet
+> counts"* until 2026-08-12, when M9's B7 priced the two reads at catalog
+> scale against a bar written down and hashed before the first probe
+> (`scripts/measure_browse.py` carries it verbatim). **Unfiltered facet counts
+> are 330.81 ms p95 over 1,272,367 titles against a 200 ms bar**, so they are
+> not computed by default.
+>
+> **A genre predicate does not make them affordable, and that refutes the
+> fallback this document would otherwise have adopted.** A genre-predicated
+> facet request measures **324.43 ms** — indistinguishable from unfiltered —
+> because each facet is computed over the filtered population *minus its own
+> predicate*, so a request whose only filter is a genre counts genres over the
+> whole catalog by construction. `year` alone is 201.12 ms and still fails;
+> `genre` **and** `year` together, at 194.92 ms, is the only configuration
+> measured under the bar.
+>
+> So facets are **opt-in and predicated**: `?facets=true` *and* at least one of
+> `genre`, `year`, `owned`. The response **always** carries a `facets` object
+> with a `computed` flag, and when nothing was counted the `genres`/`years`
+> maps are **absent** rather than empty, with a `reason` of `not_requested` or
+> `unpredicated` — an empty map and "the server did not count these" are two
+> different facts about the catalog and a client cannot tell them apart. The
+> two reasons are separate because they have two different fixes.
+>
+> ⚠️ **A browse page is itself over budget and this document does not yet
+> promise otherwise.** The same run put a predicated page at **139.92 ms p95**
+> at the median-selectivity genre against a 50 ms bar, and the unfiltered page
+> at **321.29 ms** — the slowest of all, which refutes the expectation that an
+> unpredicated browse is the cheap one. Every plan is a ~95,000-buffer Parallel
+> Seq Scan with a 39–59 kB top-N heapsort, so **the sort is not the cost**, and
+> there is no lossy bitmap because there is no GIN index on `titles.genres` to
+> produce one. `.claude/rules/db-and-sql.md` carries the table, the plans and
+> the index recommendation; B6 shipped no index deliberately and named this
+> measurement as the decider.
 
 > ✅ **`GET /search` and `GET /search/suggest` both ship.** M6 built everything
 > behind them — `SearchService`, `PostgresSearchIndex`, `PostgresSuggestIndex`,
