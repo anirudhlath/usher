@@ -651,10 +651,12 @@ as stale until `usher similar --rebuild` runs — a **query**, answered by
 `SimilarityService.stale_neighbors()`, not an inference
 ([ADR-0020](decisions/0020-derived-state-carries-its-fingerprint.md)). At
 130,647 embedded titles that rebuild is a full quadratic walk measured at
-**85.4 minutes**, so it is a scheduled operation. **It has not been run**: the
-table holds 0 rows on every catalog on this host, which is why the acceptance
-that discharges this obligation has to record `title_neighbors`' row count
-beside the verdict — "no stale rows" is satisfied by an empty table.
+**85.4 minutes**, so it is a scheduled operation. ✅ **It was run on
+2026-08-12 by M9's H7** — 88.3 minutes over the whole embedded population,
+`stale_neighbors()` **0**, and **3,266,175 rows** (130,647 seeds × 25) every
+one of them stamped `78f3ecd20e654c0f6aa4bdf646ec099b`. The row count is
+recorded beside the verdict because *"no stale rows"* is satisfied by an empty
+table, and an empty table is exactly what this one was until that run.
 
 ⏳ **Cast/crew Jaccard and collection membership are still not terms, and M7 is
 the milestone where the distinction between "the data landed" and "the term
@@ -999,8 +1001,11 @@ when there is no centroid or no vector under that model**
 ([ADR-0014](decisions/0014-absence-is-not-zero.md), in a sixth place). A zero
 cosine is a real orthogonality claim about two vectors; "no worker has run" and
 "the backfill has not reached this title" are not claims about a title at all,
-and `title_embeddings` is currently empty on every catalog this project holds,
-so the absent case is the population rather than a corner. **What 0.005 can
+and the absent case is the population rather than a corner — that sentence read
+*"`title_embeddings` is currently empty on every catalog this project holds"*
+until M9's S3/S4 filled the priority tier, and it is still the population
+afterwards: **130,647 of 1,272,367 titles (10.3%)** carry a vector, so nine
+titles in ten reach this term with nothing under that model. **What 0.005 can
 move is small and is stated rather than implied**: it cannot overturn `owned`
 or `played` at any cosine gap, and it overturns one step of relevance only from
 about rank 11 downward even at an impossible cosine gap of 1.0. Where it
