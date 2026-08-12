@@ -2339,3 +2339,100 @@ Gate green before and after on the fully restored tree (`md5sum`-verified
 byte-identical to the pre-sweep digest): **3488 unit passed / 4 skipped** and
 **1067 integration passed / 22 skipped**, `ruff check`, `ruff format --check`,
 `mypy` over 535 files, `lint-imports` 9 kept / 0 broken.
+
+## M9 Task D8 — the watch write-back handler and its registration (2026-08-11)
+
+**12 plants over `services/handlers.py`, `composition.py`, `services/jobs.py`
+and `services/watch_write.py` — 9 behavioural targets, all KILLED; 3
+equivalent-mutant controls, all SURVIVED and all passing every gate step
+separately; 1 BAD-ANCHOR re-spelled and then killed; 0 BROKEN-MUTATION, 0
+DID-NOT-RUN, 0 HUNG.** Run in place with the plant list and its **expected
+verdict** written to `/var/tmp/m9-D8-plants.md` before the first run (`/var/tmp`,
+because `/tmp` is tmpfs on this host), the harness at `/tmp/m9-D8-sweep/`
+**outside the tree** for V1's reason, `PYTHONDONTWRITEBYTECODE=1` and a
+`__pycache__` sweep under **both** `src/` and `tests/` before every run,
+`compile()` as the dry run, an exact anchor count asserted before every plant,
+a read-back that the replacement landed, and every restore verified by `md5sum`
+against a pre-plant digest of all four files.
+
+**Selection:** `test_services_handlers.py`, `test_composition.py`,
+`test_services_jobs.py`, `test_domain_jobs.py`, `test_services_watch_write.py`
+and `test_api_watch.py` — 132 cases, ~2.0 s a run, green before and after.
+Scoped rather than whole-suite for B2's reason: `tests/integration/
+test_sse_end_to_end.py` is intermittent on this tree and predates M9, and a
+sweep scored on "did the run fail" cannot include a flaky case.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the state carried on the job (encoded into `Job.key`) rather than re-read | KILLED | 16 |
+| P9 the push sends what the **source** already holds rather than the household's row | KILLED | 3 |
+| P2 `except UsherPortError: return` around the push | KILLED | 2 — both propagation arms |
+| P3 the registration moved behind `if provider is not None:` | KILLED | 3 |
+| P4 enqueue priority `VISIBLE` → `BACKFILL` | KILLED | 1 |
+| P5 the `get_item` guard deleted | KILLED | 1 |
+| P6 an absent local row pushes zeroes instead of nothing | KILLED | 2 |
+| P7 `_local_watch_state` reads the title's row before the episode's | KILLED | 1 |
+| P8 the struck 🔴 restored to `JobWorker.registered_kinds` | KILLED | 1 — the marker scan |
+
+**P1 is the plan's own headline mutation and it dies on the *premise*, which is
+the finding.** The plan asks for *"the handler reading a carried payload rather
+than the current row"*, and `Job` has no payload column at all — one `key`
+string, three kinds of identifier — so the only way to spell a carried payload
+is to put it **in the key**. Doing that destroys the coalescing before it
+reaches the push: two presses become two rows, and the headline case fails on
+`assert [job.key for job in claimed] == ["emby-1"]` with
+`['emby-1|60|0', 'emby-1|900|1']`. That is a *stronger* result than the one
+predicted — the payload and the dedup are the same decision, and `(kind, key)`
+being the dedup target is what makes "no payload" structural rather than
+frugal — but it is **not** the assertion the plan was asking about, and a
+summary reading "KILLED, 16 cases" would have hidden that. Its blast radius is
+16 for the same reason: every D7 case that reads `job.key` back sees the new
+spelling.
+
+**So the assertion was measured with a second plant.** P9 keeps the key intact
+and changes only where the state comes from — `adapter.get_watch_state` instead
+of the household's row, which is a plausible copy-paste from
+`watch_history_handler` one function up. The headline case then fails on its
+own push assertion, `WatchStateUpdate(position_seconds=0, played=False)`
+against `(900, True)`. **The general form, which this file already holds in the
+other direction: when a plan names a mutation, check that the type it has to be
+spelled against can express it — a defect the data model makes unreachable is a
+design result, and the plant that reaches the named assertion may have to be a
+different plant.** Nearest relative is B6's *"a port that takes
+`after: BrowseCursorPosition` cannot express the defect PRD 07 refuses"*,
+arriving at a domain model instead of a port signature.
+
+**The BAD-ANCHOR is the anchor rule doing its job.** P1's first handler anchor
+was `async def handle(job: Job) -> None:\n        binding = await resolve(job.key)`
+— which is the **first two lines of all three source-scoped handlers**
+(`match`, `watch_history`, `watch_writeback` all resolve the key first). Three
+occurrences, so the harness refused rather than mutating whichever one
+`str.replace` reached; re-spelled through the debug line that names the
+write-back, it plants once and kills.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `WatchStateUpdate(position_seconds=…, played=…)`'s two keyword arguments in the other order | PASS | PASS | PASS | PASS | PASS (132) |
+| C2 one sentence of `watch_writeback_handler`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (132) |
+| C3 `build_worker`'s `WATCH_HISTORY` and `WATCH_WRITEBACK` `register` calls swapped | PASS | PASS | PASS | PASS | PASS (132) |
+
+C1 and C3 are facts about the *code* rather than about what the tools look at:
+keyword arguments bind by name and both expressions are side-effect-free
+attribute reads on one local; and `register` writes a dict while
+`registered_kinds` answers a `frozenset` and `run_once` hands
+`list(self._handlers)` to a `claim` spelled `kind = ANY(:kinds)` in Postgres and
+`set(kinds)` in the fake, so no layer below the registration can observe the
+order — the M8 entry's own control, re-measured against a fifth registration.
+C2 was checked first against the docstring-scan grep this file records: the
+twenty-three files it finds scan `ports/`, `services/curation*`,
+`services/home_sequential.py`, `services/jobs.py`, `services/watch_write.py`,
+`adapters/` and several `api/` modules, and **none of them reads
+`services/handlers.py`** — which is why the docstring control went in the
+handler rather than in `services/jobs.py`, whose source *is* scanned by the
+marker case this task adds.
+
+Gate green before and after on the fully restored tree (`git status` clean,
+`md5sum` byte-identical to the pre-sweep digests): **3,613 unit passed / 4
+skipped**, **1,101 integration passed / 22 skipped**, `ruff check`,
+`ruff format --check`, `mypy` over 551 files, `lint-imports` 9 kept / 0 broken,
+PRD link check `OK`.
