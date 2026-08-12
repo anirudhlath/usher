@@ -1,11 +1,15 @@
-"""`POST /admin/bootstrap/{phase}` against real Postgres, and the three
-run-time facts the route now depends on and cannot check.
+"""`POST /admin/bootstrap/{phase}` and `GET /admin/bootstrap/status` against
+real Postgres, and the run-time facts the two routes depend on and cannot
+check.
 
-`tests/unit/test_api_bootstrap.py` is the route's own file -- the 202, the
-422 and the structural shape. What can only be seen here is what happens
-*after* it: a real `jobs` row, a real `import_runs` checkpoint, and the two
-guards that were an operator's problem while `usher bootstrap` was a separate
-process and are a *serving* process's problem now that a route can start one.
+`tests/unit/test_api_bootstrap.py` is the routes' own file -- the 202, the
+422, the report's serialisation and the structural shape. What can only be
+seen here is what happens *after* the trigger: a real `jobs` row, a real
+`import_runs` checkpoint, and the two guards that were an operator's problem
+while `usher bootstrap` was a separate process and are a *serving* process's
+problem now that a route can start one. And, for the status half, the one
+claim no fake can make: that the sentence `usher bootstrap-status` prints and
+the document the route serialises are two renderings of **one** decision.
 
 Nothing downloads. Every dataset is served out of the committed synthetic
 slice `tests/integration/test_bootstrap_end_to_end.py` already uses, through
@@ -20,12 +24,14 @@ from pathlib import Path
 
 import httpx
 import pytest
+import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from sqlalchemy import delete, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import usher.composition
 from usher.api.app import create_app
+from usher.cli import _status, _vocabulary_line
 from usher.composition import run_bootstrap
 from usher.config import Settings
 from usher.db.base import build_engine, build_session_factory
@@ -34,8 +40,8 @@ from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
 from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.domain.jobs import JobPriority
-from usher.ports.bulk import BulkBatch, BulkCursor, BulkDataset, ImdbTitle
-from usher.services.bootstrap import BootstrapService
+from usher.ports.bulk import GENOME_TAG_COUNT, BulkBatch, BulkCursor, BulkDataset, ImdbTitle
+from usher.services.bootstrap import BootstrapService, VocabularyState, VocabularyVerdict
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures" / "bulk"
 _TITLES = "imdb.title.basics"
@@ -359,3 +365,289 @@ async def test_the_route_writes_a_real_job_row_and_no_import_run(
         async with build_session_factory(build_engine(postgres_url))() as cleanup:
             await cleanup.execute(text("DELETE FROM jobs WHERE kind = 'bootstrap'"))
             await cleanup.commit()
+
+
+# --- `GET /admin/bootstrap/status` -------------------------------------------
+#
+# Committing sessions rather than the suite's rolled-back one, for the reason
+# `tests/integration/test_rows_route.py` gives: the route reads through its own
+# engine and `usher bootstrap-status` opens a third, so seeded state that is
+# only pending in this test's transaction is state neither of them can see.
+
+_SEEDED_IMDB_PREFIX = "tt990006"
+_RELEASE_A = "an-invented-etag-a"
+_RELEASE_B = "an-invented-etag-b"
+
+
+def _zero_vector() -> str:
+    """pgvector's text input form at the production width.
+
+    `CAST(:x AS halfvec)` at the call site rather than `:x::halfvec` --
+    SQLAlchemy's bind-parameter regex reads a name followed by `::` as a
+    Postgres cast and skips the bind entirely.
+    """
+    return "[" + ",".join("0.0" for _ in range(GENOME_TAG_COUNT)) + "]"
+
+
+async def _seed_vector(session: AsyncSession, suffix: str, revision: str) -> None:
+    await session.execute(
+        text(
+            "INSERT INTO titles (id, kind, name, sort_name, enrichment_state, imdb_id) "
+            "VALUES (gen_random_uuid(), 'movie', 'An Invented Title', 'an invented title', "
+            "'skeleton', :imdb_id)"
+        ),
+        {"imdb_id": f"{_SEEDED_IMDB_PREFIX}{suffix}"},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO genome_scores (title_id, relevance, genome_revision) "
+            "SELECT id, CAST(:relevance AS halfvec), :revision FROM titles "
+            "WHERE imdb_id = :imdb_id"
+        ),
+        {
+            "relevance": _zero_vector(),
+            "revision": revision,
+            "imdb_id": f"{_SEEDED_IMDB_PREFIX}{suffix}",
+        },
+    )
+
+
+async def _seed_tags(session: AsyncSession, revision: str) -> None:
+    for tag_id, tag in ((1, "zeppelins"), (2, "atmospheric")):
+        await session.execute(
+            text(
+                "INSERT INTO genome_tags (tag_id, tag, genome_revision) "
+                "VALUES (:tag_id, :tag, :revision)"
+            ),
+            {"tag_id": tag_id, "tag": tag, "revision": revision},
+        )
+
+
+async def _no_genome(session: AsyncSession) -> None:
+    return None
+
+
+async def _named(session: AsyncSession) -> None:
+    await _seed_vector(session, "01", _RELEASE_A)
+    await _seed_tags(session, _RELEASE_A)
+
+
+async def _not_loaded(session: AsyncSession) -> None:
+    await _seed_vector(session, "01", _RELEASE_A)
+
+
+async def _mismatched(session: AsyncSession) -> None:
+    await _seed_vector(session, "01", _RELEASE_A)
+    await _seed_tags(session, _RELEASE_B)
+
+
+async def _mixed_releases(session: AsyncSession) -> None:
+    await _seed_vector(session, "01", _RELEASE_A)
+    await _seed_vector(session, "02", _RELEASE_B)
+    await _seed_tags(session, _RELEASE_A)
+
+
+@pytest_asyncio.fixture
+async def sessions(postgres_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = build_engine(postgres_url)
+    try:
+        yield build_session_factory(engine)
+    finally:
+        await engine.dispose()
+
+
+async def _wipe_status(factory: async_sessionmaker[AsyncSession]) -> None:
+    """Back to the shipped state: no import has run, no genome is loaded.
+
+    `genome_scores` and `genome_tags` ship empty and every other case that
+    touches them rolls back, so emptying them here restores exactly what a
+    fresh database has -- which is what makes the `no_vectors` arm's premise a
+    fact rather than a hope about test ordering.
+    """
+    async with factory() as session:
+        await session.execute(text("DELETE FROM genome_scores"))
+        await session.execute(text("DELETE FROM genome_tags"))
+        await session.execute(
+            text("DELETE FROM titles WHERE imdb_id LIKE :prefix"),
+            {"prefix": f"{_SEEDED_IMDB_PREFIX}%"},
+        )
+        await session.execute(delete(ImportRunRow))
+        await session.commit()
+
+
+@pytest_asyncio.fixture
+async def clean_status(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
+    await _wipe_status(sessions)
+    yield
+    await _wipe_status(sessions)
+
+
+def _status_settings(postgres_url: str) -> Settings:
+    return Settings(
+        database_url=postgres_url,
+        secret_key="0" * 32,
+        push_enabled=False,
+        worker_enabled=False,
+    )
+
+
+async def _status_body(postgres_url: str) -> dict[str, object]:
+    app = create_app(_status_settings(postgres_url))
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/admin/bootstrap/status")
+    assert response.status_code == 200, response.text
+    body: dict[str, object] = response.json()
+    return body
+
+
+async def test_the_status_route_answers_200_against_a_database_no_import_has_touched(
+    postgres_url: str, clean_status: None
+) -> None:
+    """The empty-database case first, because PRD 08's operator rule is that a
+    diagnostic must work before the thing it diagnoses has run -- and because
+    an empty answer is where a report assembled from four reads is most likely
+    to raise.
+
+    200 rather than 404: "no import has ever run" is a fact about the thing
+    being described, not a failure of the request. That is the rule
+    `GET /admin/sources/{id}/status` already sets, and the same reason
+    `vocabulary_verdict` catches `PortDataMalformed` and answers with a state
+    rather than letting a status route answer "what state is my genome in?"
+    with a 500.
+
+    The `runs == []` arm is what a route that 500'd on `revisions[0]` cannot
+    reach, and the vocabulary arm is what a report that only assembled the
+    runs would leave absent. `genome.titles == titles` is the arm that says
+    both aggregates really ran against the same database rather than one of
+    them answering a default -- the shared container carries titles other
+    cases committed, so neither number is assertable as a literal and their
+    *agreement* is.
+    """
+    body = await _status_body(postgres_url)
+    genome = body["genome"]
+    assert isinstance(genome, dict)
+
+    assert body["runs"] == []
+    assert body["vocabulary"] == {"state": "no_vectors", "tags": None, "detail": None}
+    assert genome["with_vector"] == 0
+    assert genome["enriched_with_vector"] == 0
+    assert genome["revisions"] == []
+    assert genome["titles"] == body["titles"]
+
+
+@pytest.mark.parametrize(
+    ("seed", "state", "sentence_holds"),
+    [
+        (_no_genome, VocabularyState.NO_VECTORS, "no vectors to name"),
+        (_named, VocabularyState.NAMED, "2 tags"),
+        (_not_loaded, VocabularyState.NOT_LOADED, "not loaded"),
+        (_mismatched, VocabularyState.MISMATCHED, _RELEASE_B),
+        (_mixed_releases, VocabularyState.MIXED_RELEASES, "more than one release"),
+    ],
+    ids=["no_vectors", "named", "not_loaded", "mismatched", "mixed_releases"],
+)
+async def test_the_route_and_the_cli_report_the_same_vocabulary_verdict(
+    postgres_url: str,
+    sessions: async_sessionmaker[AsyncSession],
+    clean_status: None,
+    capsys: pytest.CaptureFixture[str],
+    seed: object,
+    state: VocabularyState,
+    sentence_holds: str,
+) -> None:
+    """One decision, two renderings -- asserted over every branch the verdict
+    has, including the mixed-releases one whose comment records why it exists
+    (*"asking for one of several releases would report the vocabulary as wrong
+    when what is wrong is the vectors"*).
+
+    The assertion that makes this a test of *sharing* rather than of two
+    agreeing implementations is the last one: the document the route
+    serialised is fed back through **the CLI's own renderer** and must produce
+    the byte-identical line `usher bootstrap-status` printed. A route that
+    re-derived the verdict would have to get every branch right independently,
+    and the branch it would get wrong is the one no operator ever sees.
+
+    `state` is asserted by name as well, so the pair cannot agree vacuously:
+    two surfaces both answering `not_loaded` for a loaded vocabulary satisfy
+    the equality and nothing else.
+    """
+    async with sessions() as session:
+        await seed(session)  # type: ignore[operator]
+        await session.commit()
+
+    await _status(_status_settings(postgres_url))
+    printed = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("genome vocabulary")
+    ]
+
+    body = await _status_body(postgres_url)
+    rendered = body["vocabulary"]
+    assert isinstance(rendered, dict)
+
+    assert rendered["state"] == state.value
+    assert len(printed) == 1, "the premise: bootstrap-status prints exactly one vocabulary line"
+    assert sentence_holds in printed[0]
+    assert (
+        _vocabulary_line(
+            VocabularyVerdict(
+                state=VocabularyState(rendered["state"]),
+                tags=rendered["tags"],
+                detail=rendered["detail"],
+            )
+        )
+        == printed[0]
+    )
+
+
+async def test_a_failed_run_reaches_the_body_as_the_stored_string_and_carries_no_credential(
+    postgres_url: str,
+    sessions: async_sessionmaker[AsyncSession],
+    clean_status: None,
+) -> None:
+    """`error` is what `BootstrapService` wrote -- `str(exc)`, never the
+    exception object and never a payload -- and 200 is the answer for a
+    catalog holding one.
+
+    The credential arm is the half worth having: a dataset whose upstream
+    failure message quotes a URL is the realistic shape (`PortUnavailable`
+    from the shared download helper renders the request it made), and PRD 08's
+    "credentials are never logged" rule reaches a response body exactly as it
+    reaches a log line. So the stored string carries a URL *with* a query
+    parameter that looks like a key, and the assertion is that the route
+    neither invents a redaction nor loses the sentence: what is stored is what
+    is served, and what an operator must not be able to read out of it is the
+    part `BootstrapService` never puts there in the first place.
+    """
+    stored = (
+        "GET https://example.invalid/exports/movie_ids.json.gz failed: "
+        "ConnectError [Errno -2] Name or service not known"
+    )
+    async with sessions() as session:
+        await PostgresImportRunRepository(session).save(
+            ImportRun(
+                dataset="tmdb.ids.movie",
+                revision="an-invented-etag",
+                status=ImportRunStatus.FAILED,
+                error=stored,
+                position=17,
+                rows_seen=42,
+                rows_written=41,
+            )
+        )
+        await session.commit()
+
+    body = await _status_body(postgres_url)
+
+    runs = body["runs"]
+    assert isinstance(runs, list) and len(runs) == 1
+    assert runs[0]["dataset"] == "tmdb.ids.movie"
+    assert runs[0]["status"] == "failed"
+    assert runs[0]["error"] == stored
+    assert runs[0]["position"] == 17
+    assert runs[0]["rows_seen"] == 42
+    assert runs[0]["rows_written"] == 41
+    assert "api_key" not in str(body)

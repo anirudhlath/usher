@@ -4323,3 +4323,92 @@ source, and the only two that read `services/similar.py` are this task's own
 scan — which walks `ast.Call` nodes, and a docstring is not a Call — and
 `tests/unit/test_api_similar.py`, whose `ast.unparse` scan is over
 `api/routers/titles.py` and strips docstrings before reading it.
+
+## M9 Task E6 — `GET /admin/bootstrap/status`, and a report every fixture held one run of (2026-08-12)
+
+**12 plants over `services/bootstrap.py`, `api/dto/bootstrap.py`,
+`api/routers/bootstrap.py` and `cli.py` — 9 behavioural targets of which 8 were
+killed on the first pass and **1 was a real coverage gap since closed**, plus 3
+equivalent-mutant controls surviving all five gate steps. 0 BAD-ANCHOR, 0
+BROKEN-MUTATION, 0 PLANT-DID-NOT-LAND, 0 DID-NOT-RUN, 0 HUNG.** The three-way
+split is the one that says something: "9 killed" would hide the round's whole
+yield.
+
+Harness at `/var/tmp/m9-E6/plants.py`, **outside the working tree** for V1's
+reason, and under `/var/tmp` rather than `/tmp`, which is tmpfs on this host.
+Plant list and **expected verdicts** written to `/var/tmp/m9-E6/PLANTS.md`
+(`sha256 4f360261d4ce…`) before the first run. Tree committed first, so
+`git status` is the verification — clean after every plant and after the round.
+`PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept under **both** `src/` and
+`tests/` before every run, `compile()` as the dry run, an exact anchor count
+asserted before each plant, the landing read back **inside** the `try`,
+`md5sum`-verified restore, no second `-q`.
+
+**Selection:** `test_api_bootstrap.py`, `test_cli.py`, `test_api_dto.py` (unit)
+and `test_admin_bootstrap.py` (integration) — 112 cases, ~9 s a run, green
+before and after. Scoped rather than whole-suite for B2's and D4's reason:
+`tests/integration/test_sse_end_to_end.py` is intermittent on this tree and
+predates M9, and **a sweep scored on "did the run fail" cannot run against a
+suite holding a flaky case.**
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 `vocabulary_verdict`'s `not_loaded`/`mismatched` arms swapped | KILLED | 4 |
+| T2 its `no_vectors`/`mixed_releases` arms swapped | KILLED | 6 |
+| T3 `_vocabulary_line`'s mixed-releases and not-loaded sentences swapped | KILLED | 7 |
+| **T4 the runs list truncated to its first entry** | **SURVIVED, then closed** | 0, then 1 |
+| T5 `titles` fed `genome.with_vector` (the two counts transposed) | KILLED | 1 |
+| T6 `with_vector` fed the revision count | KILLED | 1 |
+| T7 the mixed-releases guard relaxed `> 1` → `>= 1` | KILLED | 6 |
+| T8 `ImportRunResponse.of` drops `error` | KILLED | 2 |
+| T9 an untouched database answered 404 rather than 200 | KILLED | 6 |
+
+**T4 is the round's yield, and it is *"has any fixture, anywhere, ever set this
+to the other value?"* arriving at a collection size.** `bootstrap_report` is a
+carrier — it adds no truncation, no re-sort, no status filter — and slicing its
+`runs` to `stored[:1]` survived all 112 cases. Not an equivalent mutant: a
+`--phase all` run leaves **seven** checkpoints, and a report listing one looks
+exactly like a catalog on which one dataset has ever been imported. Every case
+that could have seen it held one run: the integration case seeds one, and the
+route's unit case has two but **overrides `get_bootstrap_report`**, so
+`bootstrap_report` is never called at all. Closed by
+`test_the_status_report_carries_every_run_the_repository_holds_in_its_order`,
+asserted as an equality against `list_runs()`' own answer (so it pins order as
+well as membership) with `len(stored) == 2` as its premise; re-planted, the
+mutation fails **that case alone** out of 113. **The general form: a dependency
+override that makes a route testable also makes the function it replaces
+untested — so a value object's *assembly* needs a case that does not go through
+the route at all.** Nearest relative is `testing-discipline.md`'s *"a dependency
+every test overrides is a dependency no test covers"*, arriving at a pure
+function instead of a `Depends` graph.
+
+**Two smaller results worth carrying.** T7 — relaxing `> 1` to `>= 1` — fails
+**six** cases and not the mixed-releases one, because it makes the *ordinary*
+answer unreachable while leaving the mixed answer correct: a boundary mutation
+on a guard whose two sides are "one" and "more than one" is observed by every
+case on the common side and by none on the rare one. And T3's blast radius (7)
+is five parametrised arms of one case plus two behavioural ones — the
+parametrisation over `VocabularyState` is what makes a *new* member with no
+sentence of its own a red, since the fall-through renders
+`genome vocabulary: None tags`, which is grammatical, plausible, and about a
+state that did not occur.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `BootstrapReport`'s `runs`/`titles` field declaration order swapped | PASS | PASS | PASS | PASS (9/0) | PASS (113) |
+| C2 one sentence of `vocabulary_verdict`'s docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (113) |
+| C3 `bootstrap_report`'s `stored`/`titles` local bindings swapped | PASS | PASS | PASS | PASS (9/0) | PASS (113) |
+
+C1 and C3 are facts about the *code* rather than about what the tools look at:
+every construction of `BootstrapReport` in `src/` and `tests/` binds by keyword
+and the only equality assertion over it is against another keyword-built
+instance, so a frozen dataclass's field *order* is unobservable — and it is
+deliberately **not** an `__all__` reorder, which `RUF022` rejects; and the two
+awaits are on two different ports with no shared state, neither result read
+before both have returned, so nothing below them can observe which ran first.
+C2 was checked first against `grep -rln "getdoc\|__doc__\|ast.unparse\|
+getsource" tests/`: the scans it finds cover `ports/`, `services/curation*`,
+`services/jobs.py`, `services/watch_write.py`, `adapters/` and several `api/`
+modules, and **none reads `services/bootstrap.py`** — the one scan this task
+itself adds parses `usher.cli` for the name `BootstrapService` over a
+docstring-stripped tree, which a docstring in another module is not.

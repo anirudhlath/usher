@@ -18,6 +18,7 @@ import uuid
 import zipfile
 from collections import Counter
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -53,13 +54,20 @@ from usher.composition import (
 from usher.config import Settings
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.import_run import PostgresImportRunRepository
-from usher.domain.bootstrap import BootstrapPhase, ImportRunStatus
+from usher.domain.bootstrap import BootstrapPhase, ImportRun, ImportRunStatus
 from usher.domain.enums import EnrichmentState, TitleKind
 from usher.domain.search import SearchResult
 from usher.ports.bulk import GENOME_TAG_COUNT, ImdbTitle
 from usher.ports.repository import GenomeCoverage
 from usher.ports.search import SearchFilters, SearchMode
-from usher.services.bootstrap import BootstrapService
+from usher.services.bootstrap import (
+    BootstrapReport,
+    BootstrapService,
+    VocabularyState,
+    VocabularyVerdict,
+    bootstrap_report,
+    vocabulary_verdict,
+)
 from usher.services.search import SearchAnswer, SuggestTier
 
 
@@ -764,14 +772,19 @@ async def test_the_status_report_says_when_the_vocabulary_names_the_stored_vecto
     passes every one of them."""
     genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-a"), 2: ("atmospheric", "etag-a")})
 
-    assert await _vocabulary_line(genome, _coverage(("etag-a", 5))) == "genome vocabulary: 2 tags"
+    verdict = await vocabulary_verdict(genome, _coverage(("etag-a", 5)))
+
+    assert verdict == VocabularyVerdict(state=VocabularyState.NAMED, tags=2)
+    assert _vocabulary_line(verdict) == "genome vocabulary: 2 tags"
 
 
 async def test_the_status_report_says_a_vocabulary_that_was_never_loaded_is_missing() -> None:
     """Every catalog bootstrapped before `m08b` is in this state, so it has to
     read as a thing to do rather than as a fault -- and the line names the
     command that fixes it, which is PRD 08's rule for an operator command."""
-    line = await _vocabulary_line(FakeGenomeRepository(), _coverage(("etag-a", 5)))
+    line = _vocabulary_line(
+        await vocabulary_verdict(FakeGenomeRepository(), _coverage(("etag-a", 5)))
+    )
 
     assert "not loaded" in line
     assert "--phase movielens" in line
@@ -790,7 +803,7 @@ async def test_the_status_report_renders_a_mismatched_vocabulary_rather_than_rai
     """
     genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-b")})
 
-    line = await _vocabulary_line(genome, _coverage(("etag-a", 5)))
+    line = _vocabulary_line(await vocabulary_verdict(genome, _coverage(("etag-a", 5))))
 
     assert "etag-a" in line
     assert "etag-b" in line
@@ -807,7 +820,9 @@ async def test_the_status_report_declines_to_judge_a_vocabulary_against_mixed_ve
     """
     genome = FakeGenomeRepository(tags={1: ("zeppelins", "etag-a")})
 
-    line = await _vocabulary_line(genome, _coverage(("etag-a", 5), ("etag-b", 2)))
+    line = _vocabulary_line(
+        await vocabulary_verdict(genome, _coverage(("etag-a", 5), ("etag-b", 2)))
+    )
 
     assert "more than one release" in line
 
@@ -817,9 +832,94 @@ async def test_the_status_report_says_nothing_is_named_when_there_are_no_vectors
     operator command to work against one. Kills an implementation that reports
     a missing vocabulary as a problem on a catalog that has nothing for it to
     explain."""
-    assert await _vocabulary_line(FakeGenomeRepository(), _coverage()) == (
+    assert _vocabulary_line(await vocabulary_verdict(FakeGenomeRepository(), _coverage())) == (
         "genome vocabulary: no vectors to name"
     )
+
+
+@pytest.mark.parametrize("state", list(VocabularyState))
+def test_every_vocabulary_state_the_report_can_carry_has_a_sentence_of_its_own(
+    state: VocabularyState,
+) -> None:
+    """A member added to `VocabularyState` and forgotten in the renderer falls
+    through to the `named` branch and prints `genome vocabulary: None tags` --
+    a sentence that is grammatical, plausible and about a state that did not
+    occur.
+
+    Parametrised over the enum rather than over the five branches, so the
+    coverage grows with the vocabulary and nobody has to remember. The
+    distinctness assertion is what has teeth: `len(set(...)) == len(...)` over
+    every member's rendering fails the moment two states render alike, which
+    is exactly what a fall-through produces.
+    """
+    verdict = VocabularyVerdict(state=state, tags=2, detail="a stored diagnosis")
+    sentences = {
+        one: _vocabulary_line(VocabularyVerdict(state=one, tags=2, detail="a stored diagnosis"))
+        for one in VocabularyState
+    }
+
+    assert sentences[state].startswith("genome vocabulary: ")
+    assert _vocabulary_line(verdict) == sentences[state]
+    assert len(set(sentences.values())) == len(VocabularyState)
+
+
+async def test_the_status_report_is_one_value_and_survives_an_untouched_database() -> None:
+    """`bootstrap_report` against a database no import has run, which is where
+    a report assembled from four reads is most likely to raise -- PRD 08's
+    rule that a diagnostic must work before the thing it diagnoses has.
+
+    This is the seam the whole report rests on: it takes **ports**, so the
+    five vocabulary branches and the empty case are unit-testable, while
+    `cli._status` opens its own engine and is not. A report that took a
+    session would have moved every one of the cases above into
+    `tests/integration/`.
+    """
+    report = await bootstrap_report(
+        FakeImportRunRepository(), FakeBulkCatalogRepository(), FakeGenomeRepository()
+    )
+
+    assert report == BootstrapReport(
+        runs=(),
+        titles=0,
+        genome=GenomeCoverage(
+            with_vector=0, titles=0, movies=0, enriched=0, enriched_with_vector=0, revisions=()
+        ),
+        vocabulary=VocabularyVerdict(state=VocabularyState.NO_VECTORS),
+    )
+
+
+async def test_the_status_report_carries_every_run_the_repository_holds_in_its_order() -> None:
+    """The report is a *carrier* for `list_runs()` and adds no policy of its
+    own -- no truncation, no re-sort, no filter on status.
+
+    Found by planting rather than by design: with every other case reaching
+    the report through a database or a fake holding **one** run, slicing it to
+    `stored[:1]` survived all 112 cases in this task's sweep selection. The
+    damage is the quiet kind -- a report that lists one dataset looks exactly
+    like a catalog on which one dataset has ever been imported, which on a
+    `--phase all` run is six datasets short and says nothing about it.
+
+    Asserted as an equality against the repository's *own* answer rather than
+    against a literal, so it pins the order as well as the membership and
+    keeps saying something if `list_runs()`' ordering is ever changed. The
+    premise guard is what stops the equality being trivially true against a
+    one-element list -- the exact condition under which the plant survived.
+    """
+    runs = FakeImportRunRepository()
+    await runs.save(ImportRun(dataset="imdb.title.basics", revision="an-invented-etag"))
+    await runs.save(
+        ImportRun(
+            dataset="wikidata.crosswalk",
+            revision="an-invented-etag",
+            heartbeat_at=datetime(2020, 1, 1, tzinfo=UTC),
+        )
+    )
+    stored = await runs.list_runs()
+    assert len(stored) == 2, "the premise: a one-run repository cannot see a truncation"
+
+    report = await bootstrap_report(runs, FakeBulkCatalogRepository(), FakeGenomeRepository())
+
+    assert report.runs == tuple(stored)
 
 
 def test_the_coverage_report_survives_an_enriched_tier_of_zero(
@@ -1643,6 +1743,24 @@ def test_every_subcommands_help_renders() -> None:
         assert exit_info.value.code == 0, name
 
 
+def _without_docstrings(tree: ast.Module) -> str:
+    """`ast.unparse` with every docstring removed, so a text scan reads code
+    and not prose.
+
+    A blanket `"BootstrapService" not in source` is the cheaper spelling and
+    it cannot be used here: the case below argues about the class it must not
+    hold, by name, in its own docstring. Identifiers and string annotations
+    both survive `unparse`, which is the half that matters -- a string
+    annotation is the one form needing no import at all.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                node.body = body[1:] or [ast.Pass()]
+    return ast.unparse(tree)
+
+
 async def test_the_cli_reaches_the_shared_dispatch_and_holds_no_second_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1664,6 +1782,17 @@ async def test_the_cli_reaches_the_shared_dispatch_and_holds_no_second_one(
     exists to prevent -- so `usher.cli` is asserted to name no `BulkDataset`
     and no `BootstrapService`, the way `test_api_bootstrap.py` asserts it of
     the router.
+
+    ⚠️ **The `BootstrapService` half is asserted on the *name*, not on the
+    module, and that narrowing is E6's rather than a weakening.** E5 spelled it
+    as `"usher.services.bootstrap" not in named` because at the time that
+    module held one public class. It now also holds `BootstrapReport` and the
+    two pure functions both surfaces call, and `usher bootstrap-status` reads
+    them -- so a module-level ban would forbid exactly the sharing E6 exists
+    to create. The claim the docstring above always made is the one now
+    checked: no *driver*. Read off `ast.unparse` of a docstring-stripped tree,
+    so a string annotation and an attribute access are both caught and this
+    paragraph is not.
 
     No connection is opened: `create_async_engine` is lazy, an `AsyncSession`
     that issues no statement never connects, and `run_bootstrap` is replaced
@@ -1688,15 +1817,16 @@ async def test_the_cli_reaches_the_shared_dispatch_and_holds_no_second_one(
     assert report is print
 
     source = pathlib.Path(inspect.getfile(usher.cli)).read_text()
+    tree = ast.parse(source)
     named: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             named.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             named.add(node.module)
     assert named, "the import scan found nothing, so it proves nothing"
     assert [one for one in named if one.startswith("usher.adapters.bulk")] == []
-    assert "usher.services.bootstrap" not in named
+    assert "BootstrapService" not in _without_docstrings(tree)
 
 
 def test_the_phase_choices_are_the_vocabulary_and_not_a_second_copy_of_it() -> None:

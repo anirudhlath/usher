@@ -749,3 +749,33 @@ holds at all on a live catalog
 (`tests/integration/test_admin_bootstrap.py::test_the_load_window_declines_on_a_
 live_catalog_and_keeps_both_indexes`), which is the half that stops an
 unauthenticated route taking browse ordering away from every reader.
+
+## `bootstrap-status`' two aggregates cost a third of a second at catalog scale (2026-08-12, M9 E6)
+
+**Measured, not estimated**, because `GET /admin/bootstrap/status` makes the
+same four reads on every request and the alternative to stating the number was
+a cache nobody had measured either. Against a real **1,272,367-title** catalog
+with a **15,565-vector** genome and a 1,128-row vocabulary (`usher-m9-pg`, the
+T8 catalog), through `psql \timing`, median of five, on a **busy** box — a
+dozen containers and sibling suites had it — so every figure is an upper bound:
+
+| read | median | range |
+|---|---|---|
+| `count_titles()` — `SELECT count(*) FROM titles` | **80.6 ms** | 79.9–95.3 |
+| `genome_coverage()` — the five-way aggregate | **248.6 ms** | 242.0–260.4 |
+| `genome_coverage()` — `genome_revision GROUP BY` | **2.0 ms** | 2.0–2.5 |
+
+`list_runs()` is six rows and is not worth a figure. So one report is **~331
+ms**, and the shape of the cost is the part that matters: **three of
+`_GENOME_COVERAGE`'s five terms are themselves full scans of `titles`**
+(`count(*)`, `kind = 'movie'`, `enrichment_state <> 'skeleton'`), so the report
+scales with the catalog rather than with what is on the screen and re-reading
+`titles` four times per request is where the quarter-second goes.
+
+**No cache was added and the number is stated instead.** A cache here would be
+an unmeasured mechanism on the one page an operator opens precisely because
+they do not trust what they last saw, and it would have to be invalidated by a
+writer in another process — the `bootstrap` job runs on the worker lane. The
+consequence to carry: **this shape is an admin page's and nothing else's.** A
+client route assembling `BootstrapReport` would be paying a full-catalog scan
+per request.

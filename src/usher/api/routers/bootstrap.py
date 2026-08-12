@@ -24,22 +24,57 @@ where it is true: `composition.run_bootstrap` refuses an empty catalog per
 phase, and `BootstrapService._concede_to_other_owner` answers the ownership
 race by touching the winner's checkpoint not at all.
 
-This module names no `BulkDataset` and no `BootstrapService`, asserted on its
-own imports in `tests/unit/test_api_bootstrap.py` rather than left to review
--- the same shape `test_the_watch_router_and_its_service_hold_no_source_
-adapter` uses two routers over.
+`GET /admin/bootstrap/status` is M9's E6 and it is the *reading* half: the
+same four reads `usher bootstrap-status` has made since M2, assembled once as
+`services.bootstrap.BootstrapReport` and serialised here. It answers **200
+for every state a database can be in** -- no import ever run, a `FAILED` run
+with its error string, a genome vocabulary that disagrees with the vectors --
+because each of those is a fact about the thing being described rather than a
+failure of the request, which is the rule `GET /admin/sources/{id}/status`
+already sets.
+
+This module names no `BulkDataset`, no `BootstrapService` and no
+`usher.services.bootstrap` at all, asserted on its own imports in
+`tests/unit/test_api_bootstrap.py` rather than left to review -- the same
+shape `test_the_watch_router_and_its_service_hold_no_source_adapter` uses two
+routers over. That is why the report arrives as `BootstrapReportDep`:
+`api/deps.py` is the composition root and holds the three repositories, and
+this module holds an alias and a DTO.
 """
 
 from fastapi import APIRouter, status
 
-from usher.api.deps import JobQueueDep
-from usher.api.dto.bootstrap import BootstrapTriggerResponse
+from usher.api.deps import BootstrapReportDep, JobQueueDep
+from usher.api.dto.bootstrap import BootstrapStatusResponse, BootstrapTriggerResponse
 from usher.domain.bootstrap import BootstrapPhase
 from usher.domain.jobs import JobKind, JobPriority
 from usher.ports.jobs import JobRequest
 from usher.telemetry import current_traceparent
 
 router = APIRouter(prefix="/admin/bootstrap", tags=["admin"])
+
+
+@router.get("/status", response_model=BootstrapStatusResponse)
+async def bootstrap_status(report: BootstrapReportDep) -> BootstrapStatusResponse:
+    """What every dataset's import has done, the catalog's size, the genome's
+    coverage, and whether the stored tag vocabulary can name its lanes.
+
+    **Declared before `POST /{phase}` and safe either way.** The two differ by
+    method, so no request can match both; the order here is for a reader.
+
+    **One report, two surfaces.** `usher bootstrap-status` prints the same
+    `BootstrapReport` this serialises, and the vocabulary verdict crosses the
+    wire as a `VocabularyState` member rather than as the CLI's sentence --
+    what moves into the report is the *decision*, or this route ends up
+    serialising English and a client ends up parsing it.
+
+    ⚠️ **Two aggregate reads, roughly a third of a second on a real
+    1.27M-title catalog** (`BootstrapReport`'s docstring carries the
+    measurement). That is priced for an admin screen an operator opens on
+    purpose. There is no cache, deliberately, and no other route should copy
+    this shape.
+    """
+    return BootstrapStatusResponse.of(report)
 
 
 @router.post(

@@ -64,10 +64,14 @@ from usher.ports.errors import (
 )
 from usher.ports.events import NullEventPublisher
 from usher.ports.jobs import JobRequest
-from usher.ports.repository import GenomeCoverage, GenomeRepository
 from usher.ports.rows import RowContext
 from usher.ports.search import SearchFilters, SearchMode
 from usher.ports.source import SourceAdapter
+from usher.services.bootstrap import (
+    VocabularyState,
+    VocabularyVerdict,
+    bootstrap_report,
+)
 from usher.services.curation import CurationReport
 from usher.services.curation_validate import DropReason
 from usher.services.home import ComposeReport, HomeService
@@ -209,68 +213,63 @@ async def _bootstrap(settings: Settings, phase: BootstrapPhase) -> None:
         await engine.dispose()
 
 
-async def _vocabulary_line(genome: GenomeRepository, coverage: GenomeCoverage) -> str:
-    """One line saying whether the stored tag vocabulary can name the lanes of
-    the stored vectors.
+def _vocabulary_line(verdict: VocabularyVerdict) -> str:
+    """One line for the decision `services.bootstrap.vocabulary_verdict` made.
 
-    **This is `GenomeRepository.vocabulary`'s operator surface**, and it is
-    here rather than in `_movielens` because `_movielens` would only be
-    reading back what it had just written. The condition worth reporting is
-    the one that appears *later*: an interrupted re-import against a new
-    upload, or an M7-era catalog whose vectors have no vocabulary at all.
-    It sits beside the `MIXED RELEASES` line `_report_coverage` prints for the
-    sibling condition on `genome_scores`.
+    **The sentence stays here and the decision does not**, which is the whole
+    shape of `BootstrapReport`: `GET /admin/bootstrap/status` serialises the
+    same `VocabularyVerdict` this renders, so the two surfaces cannot disagree
+    about what *"not loaded"* means, and the route never ends up serialising
+    English. `tests/integration/test_admin_bootstrap.py::test_the_route_and_
+    the_cli_report_the_same_vocabulary_verdict` feeds the route's own document
+    back through this function and requires the byte-identical line.
 
-    Takes the port rather than a session, so the three branches are unit-
-    testable against `FakeGenomeRepository` -- `_status` itself opens an
-    engine and is not.
-
-    The refusal is *caught and printed*, not raised: `PortDataMalformed` is
-    deliberately not in `OPERATOR_ERRORS` -- the three `UsherPortError`
-    subclasses ADR-0026's amendment added are the transport ones, and this is
-    a content one -- so letting it out of a status command would answer "what
-    state is my genome in?" with a stack trace about the answer being bad.
-    Task 18's `usher curate` makes the same call for the same family.
+    Pure and synchronous — every read it used to make is `vocabulary_verdict`'s
+    now. It sits beside the `MIXED RELEASES` line
+    `composition._report_coverage` prints for the sibling condition on
+    `genome_scores`, and the reason the mixed case
+    reads *"not checked"* rather than a verdict is recorded on
+    `VocabularyState` itself.
     """
-    if not coverage.revisions:
+    if verdict.state is VocabularyState.NO_VECTORS:
         return "genome vocabulary: no vectors to name"
-    if len(coverage.revisions) > 1:
-        # `_report_coverage`'s MIXED RELEASES branch is about `genome_scores`
-        # and is not printed here; asking for one of several releases would
-        # report the vocabulary as wrong when what is wrong is the vectors.
+    if verdict.state is VocabularyState.MIXED_RELEASES:
         return "genome vocabulary: not checked -- genome_scores holds more than one release"
-    try:
-        names = await genome.vocabulary(coverage.revisions[0][0])
-    except PortDataMalformed as exc:
-        return f"genome vocabulary: {exc}"
-    if names is None:
+    if verdict.state is VocabularyState.MISMATCHED:
+        # The port's own message, which names *both* release tokens: "the
+        # vocabulary is wrong" without saying what is stored is not something
+        # an operator can act on.
+        return f"genome vocabulary: {verdict.detail}"
+    if verdict.state is VocabularyState.NOT_LOADED:
         return "genome vocabulary: not loaded -- run bootstrap --phase movielens"
-    return f"genome vocabulary: {len(names)} tags"
+    return f"genome vocabulary: {verdict.tags} tags"
 
 
 async def _status(settings: Settings) -> None:
-    engine = build_engine(settings.database_url.get_secret_value())
-    factory = build_session_factory(engine)
-    try:
-        async with factory() as session:
-            runs = await PostgresImportRunRepository(session).list_runs()
-            catalog = PostgresBulkCatalogRepository(session)
-            catalog_size = await catalog.count_titles()
-            # A phase whose deliverable is coverage has to be visible in the
-            # command an operator runs to see coverage.
-            genome = await catalog.genome_coverage()
-            vocabulary = await _vocabulary_line(PostgresGenomeRepository(session), genome)
-    finally:
-        await engine.dispose()
+    """`usher bootstrap-status`, printed from the report the route serialises.
+
+    One `BootstrapReport` and four prints, rather than four reads and a
+    rendering: the report is what makes this command and
+    `GET /admin/bootstrap/status` two views of one answer instead of two
+    answers. The reads it makes cost about a third of a second on a real
+    1.27M-title catalog — `BootstrapReport`'s own docstring carries the
+    numbers and the reason they are not cached.
+    """
+    async with _session_for(settings) as session:
+        report = await bootstrap_report(
+            PostgresImportRunRepository(session),
+            PostgresBulkCatalogRepository(session),
+            PostgresGenomeRepository(session),
+        )
     # Printed, not logged: this is a report an operator asked for, and routing
     # it through the JSON log sink would make it unreadable at a terminal.
-    print(f"titles in catalog: {catalog_size}")
-    print(f"genome vectors: {genome.with_vector}")
-    print(vocabulary)
-    if not runs:
+    print(f"titles in catalog: {report.titles}")
+    print(f"genome vectors: {report.genome.with_vector}")
+    print(_vocabulary_line(report.vocabulary))
+    if not report.runs:
         print("no import has been run yet")
         return
-    for run in runs:
+    for run in report.runs:
         print(
             f"{run.dataset:<24} {run.status.value:<10} "
             f"position={run.position} seen={run.rows_seen} written={run.rows_written}"
