@@ -2250,3 +2250,128 @@ which it does not. The *quiet* direction — a suffix with no matching declined
 media type — is what row four covers through the coverage assertion, and that
 assertion needs its own premise for the reason every set-based guard in this
 file does: an empty set is disjoint from, and a subset of, everything.
+
+## M9 Task T7 — `title.akas` into `title_search_names` (2026-08-11)
+
+**26 plants over `db/repositories/bulk.py`, `ports/repository/bulk.py` and
+`tests/fakes/bulk_catalog_repository.py` — 22 behavioural targets of which 21
+were killed and **1 is a measured survivor reported rather than fixed**, plus
+**1 real coverage gap since closed**, plus 3 equivalent-mutant controls
+surviving all five gate steps. 0 DID-NOT-RUN, 0 HUNG.** Four rounds, because
+four plants were mis-spelled and each mis-spelling is a different one of this
+file's own traps arriving in a new place — that is the round's real yield and
+it is written up below. Harness at `/tmp/m9-t7/sweep*.py`, **outside the tree**
+(V1's finding), plant list and expected verdicts at `/tmp/m9-t7/PLANTS.md`
+written before the first run, `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` swept
+under **both** `src/` and `tests/` before every run, `compile()` as the dry
+run, every restore `md5sum`-verified.
+
+**Selection:** `test_bulk_repository_contracts.py`, `test_ports_repository_bulk.py`,
+`test_ports_repository_package.py`, `test_staging_ddl.py`,
+`test_adapters_bulk_imdb_akas.py` and `tests/integration/test_bulk_repository.py`
+— 184 cases, 9–24 s a run. Scoped rather than whole-suite because
+`grep -rln` finds nothing outside these files (plus three PRD documents) naming
+`replace_aliases`, `AliasWriteResult` or either affordance — T8 is the change
+that will alter that — and because `tests/integration/test_sse_end_to_end.py`
+is intermittent on this tree and predates M9: **a sweep scored on "did the run
+fail" cannot run against a suite holding a flaky case.**
+
+**The real coverage gap, and it is about the function a measurement was taken
+with rather than about a line of code.** `replace_aliases` compares and
+deduplicates under SQL `lower()`; T3 and T5 measured the alias population with
+Python `str.casefold()`. Planting `casefold()` into the fake **survived all 182
+cases**, because every fixture in the file was ASCII or accented Latin, where
+the two agree. It is not an equivalent mutant: measured over the whole pinned
+`title.akas.tsv.gz`, **32,223 of 46,202,631 retained rows (0.070%) fold
+differently**, in two families — German `ß` and Greek final sigma — and
+`casefold()` folds strictly *more*, so the two rules disagree about whether a
+row is a restatement of the title's own name. Closed by
+`test_the_fold_is_lower_and_not_casefold`, in the **shared contract** because
+Python's `str.lower()` and Postgres's `lower()` agree on `ß`; the Greek half is
+integration-only, because they do **not** agree on final sigma (Python applies
+the contextual rule and the database does not) and that is now the fake's ninth
+recorded divergence. Re-planted, the mutation fails **that case alone**.
+
+**The four mis-spellings, each a trap this file already holds arriving
+somewhere new.**
+
+- **A plant that produces a *statement* error reads as a very wide kill.**
+  *"The DELETE loses its `kind` scope"* was first spelled by replacing
+  `kind = CAST(:kind AS text)` with `(:kind IS NOT NULL)` — which asyncpg
+  cannot type (`could not determine data type of parameter`), so the run
+  reported **14 failures** including cases about the prefix index and the
+  btree bound. Deleting the clause outright is the change the plan names and
+  it fails **exactly one**, the B1-mirror case. **A kill whose blast radius is
+  much wider than the plan predicted is a mis-spelling until proved
+  otherwise** — the same shape as the `NameError`-in-an-`except` entry above,
+  with SQL in place of Python.
+- **A plant that changes only one side of a comparison is not the change the
+  plan names, and it manufactures a *survivor*.** The `casefold()` plant above
+  first folded only the alias side, leaving the title side on `lower()` — so
+  the two stopped agreeing, the mutant answered a third thing, and it survived
+  for a reason unrelated to the defect. Both sides is the spelling; it dies at
+  once.
+- **`ruff format` moves the anchor.** *"The out-of-scope guard deleted"* was
+  written against a three-line `raise ValueError(...)` the formatter had since
+  collapsed onto one line — `BAD-ANCHOR (count=0)`, caught by the count check
+  rather than scored as a kill.
+- **An *additive* plant cannot satisfy `old not in landed`, and a *move* plant
+  cannot either.** B6's substring-immune landing check (`old not in landed and
+  new in landed`) is right for a substitution and wrong for both of these: in
+  an additive plant `old` is a prefix of `new`, and in a two-anchor move the
+  deleted text legitimately reappears further down. **Both were re-spelled as
+  single-anchor substitutions rather than by weakening the check.** The first
+  of the two raised *after writing the plant and before the restore* — the
+  harness's landing assertion sat outside its `try/finally` — and left the fake
+  mutated; the `cp` backup recovered it, byte-verified against
+  `git show HEAD:`, exactly as the SIGTERM entry above predicts. The harness
+  now runs the landing check **inside** the `try`.
+
+**The measured survivor, and its twin one arm over is what makes it
+interpretable.** Moving the out-of-scope `ValueError` guard to *after* the
+DELETE **survives** on the Postgres arm, because `refusals_as_conflict`'s
+SAVEPOINT rolls the delete back with the raise — the "a mutation whose damage a
+rollback undoes is unobservable against a transactional arm" entry in
+`testing-discipline.md`, arriving at a `ValueError` rather than at argument
+validation. Planted in the **fake**, which has no transaction, the identical
+move is **KILLED** by the identical case. So *"refused before anything is
+written"* is a property the unit arm demonstrates and Postgres cannot, the
+source comment says so where the guard is, and neither is reported as coverage
+of the other.
+
+The other twenty targets and what each cost: the DELETE losing its title scope
+fails 1; the DELETE deleted entirely fails 2 (the withdrawal and replay cases);
+`WHERE NOT canonical` deleted fails 4; the canonical test comparing `name` only
+fails 1; it dropping `lower()` fails 2; `IS NOT DISTINCT FROM` narrowed to `=`
+fails 2 — including the scoping case, whose title has a NULL `original_name`,
+which is the three-valued-logic hazard that clause exists for; `DISTINCT ON`
+deleted fails 1 and its `ordering` key deleted fails 1; `unmatched` counted
+from the *rows* rather than from the scope fails 1 (and needed a third scoped
+id, in scope with no rows and no title, before any case could see it —
+**every other batch shape gives the two spellings the same number**);
+`region`/`language` swapped in the INSERT fails 1; `_ALIAS_NAME_KIND` bound to
+`PERSON` fails 9; `refusals_as_conflict` replaced by a bare `begin_nested()`
+fails 1, on the exception *type*, which is the whole of what that wrapper buys;
+and the four fake-side plants (its delete losing `kind`, its dedupe losing
+`ordering`, its canonical test losing the `original_name` arm, its `unmatched`
+counted from rows) each fail exactly one unit case.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| `AliasWriteResult(...)`'s four keyword arguments' written order swapped | PASS | PASS | PASS | PASS (9/0) | PASS (184) |
+| one sentence of the port's `replace_aliases` docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (184) |
+| the two `IS NOT DISTINCT FROM` disjuncts of the canonical test swapped | PASS | PASS | PASS | PASS (9/0) | PASS (184) |
+
+The first is a fact about the *code* rather than about what the tools look at:
+keyword arguments bind by name regardless of written order and all four
+right-hand sides are side-effect-free `int()` calls on distinct locals. The
+third is a **SQL-text** control, B2's `UNION`-arm precedent one operator over,
+and its equivalence has two legs: `IS NOT DISTINCT FROM` never answers NULL, so
+the `OR` is two-valued and commutative, and both operands are side-effect-free
+reads of a staged column and a joined one. The docstring reword was checked
+first against the docstring-scan grep this file records — the nineteen files it
+finds scan `ports/embedding.py`, `ports/metadata.py`, `services/`, `api/`,
+`adapters/images/`, `adapters/search/prefix.py` and `adapters/bulk/imdb.py`,
+and the one that *does* read `usher.ports.repository`
+(`test_ports_repository_package.py`) checks a docstring's **presence** and
+walks the module for `ast.ImportFrom` nodes, neither of which sees prose.

@@ -92,6 +92,22 @@ SLEEPER = ImdbTitle(
 )
 
 
+SHARP_S = ImdbTitle(
+    imdb_id="tt99000160",
+    kind=TitleKind.MOVIE,
+    # `ß`, because it is the one character where `lower()` and `casefold()`
+    # disagree in the direction *both* implementations of this port can see.
+    # See `test_the_fold_is_lower_and_not_casefold` for why that matters and
+    # for the Greek half, which they cannot.
+    name="Eine Synthetische Straße",
+    original_name=None,
+    year=1961,
+    end_year=None,
+    runtime_minutes=94,
+    genres=("Drama",),
+)
+
+
 GENOME_RELEASE_A = "an-invented-etag-a"
 GENOME_RELEASE_B = "an-invented-etag-b"
 
@@ -1200,6 +1216,48 @@ class BulkCatalogRepositoryContract:
         assert (result.written, result.canonical) == (0, 1)
         assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == ()
 
+    async def test_the_fold_is_lower_and_not_casefold(self, repo: BulkCatalogRepository) -> None:
+        """**The measurement this write was taken with is not the rule this
+        write applies, and one character in the dump can tell them apart.**
+        T3 and T5 measured the alias population with Python `str.casefold()`;
+        `replace_aliases` compares under `lower()`, because that is the
+        function `ix_titles_name_lower_prefix` is built over and therefore the
+        only one that answers *"does this alias reach anything `titles` does
+        not"*.
+
+        `casefold()` folds `ß` to `ss` and neither `lower()` does, so
+        `Eine Synthetische STRASSE` restates `Eine Synthetische Straße` under
+        the measured rule and is a genuine, separately-reachable index entry
+        under the shipped one.
+        Measured over the whole pinned `title.akas.tsv.gz`
+        (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`), **32,223 of 46,202,631
+        retained rows (0.070%) fold differently under the two** — this family
+        and Greek final sigma — so the direction is what settles bar (B): the
+        shipped rule stores *more* than the 1,663,364 that was measured.
+
+        This case is in the shared contract because Python's `str.lower()` and
+        Postgres's `lower()` **agree** on `ß`. They disagree on Greek final
+        sigma, which is why that half is integration-only and is enumerated in
+        the fake's divergence list rather than asserted here.
+
+        The premise is carried: the two names must fold together under
+        `casefold()` and apart under `lower()`, or the case is about nothing.
+        """
+        shouted = "Eine Synthetische STRASSE"
+        assert shouted.casefold() == SHARP_S.name.casefold(), "the premise: casefold folds these"
+        assert shouted.lower() != SHARP_S.name.lower(), "and lower does not"
+        await repo.upsert_titles([SHARP_S])
+
+        result = await repo.replace_aliases(
+            [_aka(SHARP_S.imdb_id, 1, shouted, region="DE", language="de")],
+            imdb_ids=[SHARP_S.imdb_id],
+        )
+
+        assert (result.written, result.canonical) == (1, 0)
+        assert await self.search_names_of(repo, SHARP_S.imdb_id) == (
+            ("alias", shouted, "DE", "de"),
+        )
+
     async def test_region_and_language_are_stored_rather_than_dropped(
         self, repo: BulkCatalogRepository
     ) -> None:
@@ -1325,6 +1383,13 @@ class BulkCatalogRepositoryContract:
         `CreditNamesFillResult.unmatched` and `GenomeWriteResult.unmatched`
         are: a join that matched almost nothing must not look identical to one
         that matched everything.
+
+        **`unmatched` counts the scope and not the rows**, which is a real
+        distinction rather than a spelling: the third id here is in scope, has
+        no rows *and* has no title — a title IMDb withdrew every aka for and
+        the catalog never held. Counted from the rows it is invisible, and for
+        every *other* shape a batch can take the two answers are the same
+        number, which is why it is written into this case rather than assumed.
         """
         await repo.upsert_titles([SHAWSHANK])
 
@@ -1333,10 +1398,10 @@ class BulkCatalogRepositoryContract:
                 _aka(SHAWSHANK.imdb_id, 1, "Un Long Métrage Synthétique", region="FR"),
                 _aka("tt99000900", 1, "An Alias Of Nothing", region="FR"),
             ],
-            imdb_ids=[SHAWSHANK.imdb_id, "tt99000900"],
+            imdb_ids=[SHAWSHANK.imdb_id, "tt99000900", "tt99000910"],
         )
 
-        assert (result.written, result.unmatched) == (1, 1)
+        assert (result.written, result.unmatched) == (1, 2)
         assert await self.search_names_of(repo, SHAWSHANK.imdb_id) == (
             ("alias", "Un Long Métrage Synthétique", "FR", None),
         )

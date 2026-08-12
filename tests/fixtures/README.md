@@ -79,6 +79,7 @@ can be matched up by eye.
 | `tt99000110` / TVDb `91000110` | `emby/episode_item.json` |
 | `tt99000120` / TMDb `90000120` | `emby/multi_version_movie.json` |
 | `tt99000150` | the Greek-final-sigma title, where Postgres `lower()`, Python `str.lower()` and `str.casefold()` disagree |
+| `tt99000160` | the `ß` title, where both `lower()`s agree and `casefold()` does not |
 | `tt99001000` | the 8-digit-tconst validation case |
 | TMDb `90000550` / `90001399` | `tmdb/movie.json` / `tmdb/series.json` |
 | TMDb `96000000`/`96000001` | seasons; `97000001`/`97000002` episodes |
