@@ -127,7 +127,7 @@ from fastapi.responses import Response
 
 from usher.api.caching import conditional_bytes_response
 from usher.api.deps import ImageProxyServiceDep
-from usher.api.dto.problem import ProblemCode
+from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.errors import ProblemException
 from usher.ports.errors import PortDataMalformed, PortUnavailable
 from usher.ports.images import (
@@ -162,6 +162,31 @@ _IMAGE_CONTENT: Final[dict[str, dict[str, Any]]] = {
 }
 
 
+#: The three failures this route can answer, and the two 503s are one status
+#: on purpose: ADR-0030's stability rule gives `source_unavailable` exactly one
+#: status everywhere, and no member names a 502, so the transient arm and the
+#: non-transient one are told apart by `Retry-After` rather than by code. That
+#: distinction is a header and lives outside the schema -- ADR-0030's amendment
+#: carries it and names an `upstream_unusable`-shaped member as a request this
+#: task did not mint. The `422` is declared rather than left to FastAPI, whose
+#: automatic one names `HTTPValidationError` while `api/errors.py` answers an
+#: RFC 9457 document. `tests/unit/test_api_openapi.py` holds all of it.
+_IMAGE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    404: {
+        "model": ProblemResponse,
+        "description": "No such image, or one this proxy declines to serve.",
+    },
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+    503: {
+        "model": ProblemResponse,
+        "description": (
+            "The provider image CDN did not answer, or answered with something this proxy "
+            "cannot serve. `Retry-After` is present on the first and absent on the second."
+        ),
+    },
+}
+
+
 @router.get(
     "/images/{image_id}",
     response_class=Response,
@@ -174,6 +199,7 @@ _IMAGE_CONTENT: Final[dict[str, dict[str, Any]]] = {
             ),
         },
         304: {"description": "The client's `If-None-Match` matches the stored bytes."},
+        **_IMAGE_FAILURES,
     },
 )
 async def get_image(

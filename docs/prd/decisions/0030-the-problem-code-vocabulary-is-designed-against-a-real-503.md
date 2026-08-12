@@ -371,24 +371,39 @@ the derivation function is not changed to avoid the question.
 
 ## Consequences
 
-- **The vocabulary is complete before the fan-out, which inverts rule 1 for one
-  milestone, on purpose.** A member may sit with no emitting *route* for the
-  length of M9. **`invalid_cursor` is that case today and the only one**:
-  `api/cursor.py` emits it, no route calls the codec yet, and the paged read
-  routes are what will. The closure case is therefore written as
+- **The vocabulary is complete before the fan-out, which inverted rule 1 for one
+  milestone, on purpose.** A member was allowed to sit with no emitting *route*
+  for the length of M9. **`invalid_cursor` was that case and the only one**:
+  `api/cursor.py` emitted it, no route called the codec, and the paged read
+  routes were what would. The closure case was therefore written as
   `emitted ⊆ declared` rather than as equality.
-- **Group H discharges that inversion.** When H2 pins the problem documents
-  into `/openapi.json` it upgrades the closure check to `declared == emitted`
-  and **deletes any member still without an emitter**. Named here so it is an
-  obligation rather than a hope: without it the milestone ships dead members
-  and nothing notices.
+- ✅ **Group H discharged that inversion on 2026-08-12, and deleted nothing.**
+  Three routes call `decode_cursor` — `GET /browse` (B7),
+  `GET /admin/unmatched` (E4) and `GET /seasons/{id}/episodes` (B12) — so
+  `invalid_cursor` has emitters and no member is dead. H2 upgraded the closure
+  check to `declared == emitted` in both directions, and added a second,
+  stronger case beside it:
+  `tests/unit/test_api_openapi.py::test_every_member_of_the_vocabulary_has_a_route_that_can_emit_it`
+  walks each route's own call graph (through `api/cursor.py`, and through the
+  `_not_found`/`_rejected` helpers three routers raise via) and requires every
+  member to be reachable from a route or to be one of `_CODE_FOR_STATUS`'s
+  machinery-raised three. The two say different things and neither subsumes the
+  other: an AST harvest of `src/usher/api/` cannot tell a code a *route* can
+  produce from one a helper merely names.
 - **A fan-out task that needs a member this design did not give it must amend
   this record in the same commit.** That is the whole mechanism: growth becomes
   a recorded amendment rather than silent drift, and the amendment is visible
   in review because it is a decision record rather than a line in an enum.
 - **A route raising a status with no member here silently opts out of the
   envelope** (ruling 4). Group H's per-route declaration scan is what closes
-  it.
+  it, and ✅ it landed on 2026-08-12 as
+  `tests/unit/test_api_openapi.py`. It found fifteen routes whose failures
+  `/openapi.json` did not describe at all — including the three
+  `400 invalid_cursor` arms above — and, in the other direction, **26
+  operations whose `422` the document described as FastAPI's
+  `HTTPValidationError` while `api/errors.py` answers this envelope**. That
+  second number is the point of scanning both ways: a status that is present
+  and wrong is present, so no completeness check can see it.
 - **Nothing may parse `title` or `detail`.** Both are free to be reworded in
   any release; only `code` and `status` are the contract.
 - **Seven members against a benchmark of four.** Three are beyond it and all

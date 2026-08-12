@@ -27,7 +27,7 @@ refusal with nothing behind it.
 """
 
 import uuid
-from typing import Annotated, cast
+from typing import Annotated, Any, Final, cast
 
 from fastapi import APIRouter, Query
 
@@ -39,9 +39,22 @@ from usher.api.dto.browse import (
     BrowseResponse,
     FacetsOmitted,
 )
+from usher.api.dto.problem import ProblemResponse
 from usher.ports.repository.title import BrowseCursorPosition, BrowseSort
 
 router = APIRouter(tags=["browse"])
+
+#: What `/openapi.json` says this route answers when it fails. The `400` is
+#: `decode_cursor`'s, raised inside `api/cursor.py` rather than here -- a
+#: cursor minted for another filter or sort is refused rather than served as a
+#: plausible, complete, wrong page. The `422` is declared rather than left to
+#: FastAPI, whose automatic one names `HTTPValidationError` while
+#: `api/errors.py` answers an RFC 9457 document carrying the same error list
+#: under `errors`. `tests/unit/test_api_openapi.py` holds both halves.
+_BROWSE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    400: {"model": ProblemResponse, "description": "The cursor is malformed or not this query's."},
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+}
 
 #: A browse grid is a multiple of six on every breakpoint a client renders, so
 #: 24 fills one and 48 fills two. The ceiling is what stops a client asking for
@@ -122,6 +135,7 @@ def _after(cursor: str | None, *, spec: CursorSpec) -> BrowseCursorPosition | No
     "/browse",
     response_model=BrowseResponse,
     response_model_exclude_unset=True,
+    responses=_BROWSE_FAILURES,
     summary="One keyset page of the catalog, filtered and sorted",
 )
 async def browse_catalog(

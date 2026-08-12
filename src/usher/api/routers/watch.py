@@ -60,6 +60,11 @@ _WATCH_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
         "model": ProblemResponse,
         "description": "No such title or episode.",
     },
+    # FastAPI's rather than this module's, and declared rather than left
+    # automatic: automatic it is documented as `HTTPValidationError`, and
+    # `api/errors.py` answers an RFC 9457 document carrying the same error list
+    # under `errors`. `tests/unit/test_api_openapi.py` holds both halves.
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
 }
 
 _TITLE_NOT_FOUND: Final = "title not found"

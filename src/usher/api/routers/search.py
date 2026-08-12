@@ -216,6 +216,15 @@ _SEARCH_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
 }
 
 
+#: Suggest's own, and the two are not the same set: a `q` below its tier's
+#: minimum is answered `200` with an empty list and `min_query_length`, not
+#: refused, so the only failure here is a parameter FastAPI will not parse --
+#: an unknown `?tier=`, a `?limit=` outside its bounds.
+_SUGGEST_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+}
+
+
 @router.get(
     "/search",
     response_model=SearchResponse,
@@ -307,6 +316,7 @@ async def search(
 @router.get(
     "/search/suggest",
     response_model=SuggestResponse,
+    responses=_SUGGEST_FAILURES,
     summary="Type-ahead candidates, from the prefix tier or the fuzzy one",
 )
 async def suggest(

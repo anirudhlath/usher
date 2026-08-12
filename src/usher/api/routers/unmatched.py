@@ -64,14 +64,14 @@ that lies about its own subject.
 
 import datetime as dt
 import uuid
-from typing import Annotated, cast
+from typing import Annotated, Any, Final, cast
 
 from fastapi import APIRouter, Query, status
 
 from usher.api.cursor import CursorSpec, CursorType, decode_cursor, over_fetch, paginate
 from usher.api.deps import EpisodeRepositoryDep, MediaItemRepositoryDep, TitleRepositoryDep
 from usher.api.dto.page import Page
-from usher.api.dto.problem import ProblemCode
+from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.unmatched import (
     ResolvedItemResponse,
     ResolveUnmatchedRequest,
@@ -81,6 +81,26 @@ from usher.api.errors import ProblemException
 from usher.ports.repository import UnmatchedCursorPosition
 
 router = APIRouter(prefix="/admin/unmatched", tags=["admin"])
+
+#: What `/openapi.json` says the paged read answers when it fails. The `400` is
+#: `decode_cursor`'s, raised inside `api/cursor.py` rather than here. The `422`
+#: is declared rather than left to FastAPI, whose automatic one names
+#: `HTTPValidationError` while `api/errors.py` answers an RFC 9457 document
+#: carrying the same error list under `errors`.
+#: `tests/unit/test_api_openapi.py` holds both halves.
+_QUEUE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    400: {"model": ProblemResponse, "description": "The cursor is malformed or not this query's."},
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+}
+
+#: The resolve route takes a body and a path id instead of a cursor, so its
+#: refusals are a missing row and a rejected request -- both of which it raises
+#: itself, and the second of which it raises for a title or episode the
+#: deployment does not hold as well as for a body pydantic would not parse.
+_RESOLVE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    404: {"model": ProblemResponse, "description": "No such unmatched item."},
+    422: {"model": ProblemResponse, "description": "The resolution was rejected."},
+}
 
 #: `usher unmatched`'s own default, so an operator moving from the CLI to the
 #: API sees the same page. The ceiling is what stops a client asking for a
@@ -161,7 +181,12 @@ def _rejected(detail: str) -> ProblemException:
     )
 
 
-@router.get("", response_model=Page[UnmatchedItemResponse], summary="One page of the review queue")
+@router.get(
+    "",
+    response_model=Page[UnmatchedItemResponse],
+    responses=_QUEUE_FAILURES,
+    summary="One page of the review queue",
+)
 async def list_unmatched_items(
     media_items: MediaItemRepositoryDep,
     source_id: Annotated[uuid.UUID | None, Query()] = None,
@@ -202,6 +227,7 @@ async def list_unmatched_items(
 @router.post(
     "/{media_item_id}/resolve",
     response_model=ResolvedItemResponse,
+    responses=_RESOLVE_FAILURES,
     summary="Resolve one unmatched item by hand",
 )
 async def resolve_unmatched_item(

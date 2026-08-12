@@ -533,7 +533,7 @@ be added if a client turns out to need flexible field selection.
 |---|---|
 | `POST /titles/{id}/play?search_id=` · `POST /episodes/{id}/play?search_id=` ✅ | Resolve ranked `StreamTarget`s. The same optional, opaque `search_id` records **that a result was played** ([10](10-telemetry-and-dashboards.md)'s `played`) — only when a target was actually handed out, so a `409` and a `503` record nothing. It never writes `clicked_title_id`: that column names the result the household *opened*, and one writer setting both would collapse two facts into one |
 | `PUT /watch/titles/{id}` · `PUT /watch/episodes/{id}` | Set position / played |
-| `POST /watch/titles/{id}/played` · `DELETE …` | Mark played / unplayed |
+| `POST /watch/titles/{id}/played` · `DELETE /watch/titles/{id}/played` | Mark played / unplayed |
 
 > **Built in M9: the four watch-write rows.** ✅ They answer, and the service
 > behind them does four things in a fixed order — **write locally, invalidate
@@ -561,6 +561,13 @@ be added if a client turns out to need flexible field selection.
 > playback. Both are offered only after the write has committed
 > ([ADR-0033](decisions/0033-an-event-is-a-statement-about-committed-state.md)).
 >
+> **The unplayed route is spelled out in the table above rather than elided.**
+> It read `` `DELETE …` `` until M9's H2, and an ellipsis is a cell no machine
+> can read: the extractor behind `tests/unit/test_api_openapi.py` yields the
+> literal `('DELETE', '…')` and the conformance check then fails on a path no
+> app could serve. A table this document's own check cannot parse is a table
+> that documents nothing.
+>
 > **`DELETE …/played` clears the played flag and nothing else** — not the
 > resume position, not `play_count`, not `last_played_at`. Emby's own
 > `DELETE /Users/{u}/PlayedItems/{item}` clears all three, measured against
@@ -577,7 +584,7 @@ be added if a client turns out to need flexible field selection.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET·POST·DELETE /admin/sources` | Configure sources |
+| `GET·POST /admin/sources` · `DELETE /admin/sources/{id}` | Configure sources |
 | `GET /admin/sources/{id}/status` | Connection, push availability, last sync |
 | `POST /admin/sources/{id}/sync` | Trigger reconcile |
 | `GET /admin/unmatched` · `POST /admin/unmatched/{id}/resolve` | Review queue |
@@ -620,6 +627,15 @@ be added if a client turns out to need flexible field selection.
 > `404` is reserved for a source id that does not exist.
 > `POST` accepts a username and password and returns neither — see
 > [08](08-operations.md).
+>
+> **The delete's path is corrected in the table above, by M9's H2 and by a
+> machine rather than by a reading.** That cell compressed three methods onto
+> one path as `GET·POST·DELETE /admin/sources`, and the delete has always been
+> `DELETE /admin/sources/{id}` — so `/admin/sources/{id}` was a route this
+> document spelled nowhere, which is exactly what
+> `tests/unit/test_api_openapi.py`'s second direction (*the app's routes ⊆
+> every endpoint PRD 07 spells anywhere*) exists to find. It found it on its
+> first run.
 
 > **Built in M9's E3: `POST /admin/sources/{id}/sync`.** ✅ No longer *"not"* —
 > the reason recorded above it was already wrong by M4, which built

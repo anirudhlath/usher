@@ -156,6 +156,8 @@ rather than a parameter; and a `force` flag would be a request to defeat
 `(kind, key)`, which is the deduplication the milestone's cost claim rests on.
 """
 
+from typing import Any, Final
+
 from fastapi import APIRouter, status
 
 from usher.api.deps import (
@@ -164,7 +166,7 @@ from usher.api.deps import (
     RowCacheDep,
     RowProviderSettingsRepositoryDep,
 )
-from usher.api.dto.problem import ProblemCode
+from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.rows import RegenerateResponse, RowProviderResponse, RowProviderUpdate
 from usher.api.errors import ProblemException
 from usher.domain.jobs import JobKind, JobPriority
@@ -173,6 +175,18 @@ from usher.services.rows import ROW_PROVIDERS, row_provider_settings
 from usher.telemetry import current_traceparent
 
 router = APIRouter(prefix="/admin/rows", tags=["admin"])
+
+#: What `/openapi.json` says the toggle answers when it fails. The `404` is a
+#: slug the **registry** does not hold, which is a 404 about a provider that
+#: does not exist rather than about a row nobody has written yet -- absence
+#: from `row_provider_settings` means enabled. The `422` is declared rather
+#: than left to FastAPI, whose automatic one names `HTTPValidationError` while
+#: `api/errors.py` answers an RFC 9457 document carrying the same error list
+#: under `errors`. `tests/unit/test_api_openapi.py` holds both halves.
+_TOGGLE_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    404: {"model": ProblemResponse, "description": "No provider is registered under that slug."},
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+}
 
 
 @router.post(
@@ -250,7 +264,7 @@ async def list_row_providers(
     ]
 
 
-@router.put("/providers/{slug}", response_model=RowProviderResponse)
+@router.put("/providers/{slug}", response_model=RowProviderResponse, responses=_TOGGLE_FAILURES)
 async def set_row_provider_enabled(
     slug: str,
     update: RowProviderUpdate,

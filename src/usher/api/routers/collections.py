@@ -29,18 +29,33 @@ about carrying no `user_id`.
 """
 
 import uuid
+from typing import Any, Final
 
 from fastapi import APIRouter, status
 
 from usher.api.deps import CollectionRepositoryDep, TitleRepositoryDep
 from usher.api.dto.collection import CollectionResponse
-from usher.api.dto.problem import ProblemCode
+from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.errors import ProblemException
 
 router = APIRouter(tags=["collections"])
 
+#: What `/openapi.json` says this route answers when it fails. The `422` is
+#: declared rather than left to FastAPI, whose automatic one names
+#: `HTTPValidationError` while `api/errors.py` answers an RFC 9457 document
+#: carrying the same error list under `errors`.
+#: `tests/unit/test_api_openapi.py` holds both halves.
+_COLLECTION_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
+    404: {"model": ProblemResponse, "description": "No such collection."},
+    422: {"model": ProblemResponse, "description": "The request was rejected."},
+}
 
-@router.get("/collections/{collection_id}", response_model=CollectionResponse)
+
+@router.get(
+    "/collections/{collection_id}",
+    response_model=CollectionResponse,
+    responses=_COLLECTION_FAILURES,
+)
 async def get_collection(
     collection_id: uuid.UUID,
     collections: CollectionRepositoryDep,
