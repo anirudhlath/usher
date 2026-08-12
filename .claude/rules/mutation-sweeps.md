@@ -4629,3 +4629,74 @@ media type in would fork `test_api_playback.py`'s and `test_api_watch.py`'s
 assertions, which read `content["application/json"]`, and buys a client nothing
 it cannot read off the `type` member. The scan therefore asserts the **shape**
 and not the media type, and says so where a reader will find it.
+
+## M9 Task H6 — the tenth import contract, and a contract whose list can drift while the gate says 10 kept (2026-08-12)
+
+**3 plants, no sweep** — this task is a documentation reconciliation and its one
+code change is a `pyproject.toml` contract, so the round is a *verification in
+both directions* rather than a survivor census. It is recorded anyway, for the
+reason E1's entry above exists: a plant round whose result lives only in a chat
+message is a result nobody can check. `cp` backups, every restore verified by
+`md5sum` against the pre-plant digest, `git status` clean afterwards.
+
+**Defences, stated honestly rather than claimed.** The three `.pyc` defences
+were **not** in force and did not need to be, which is a judgement this entry
+has to justify rather than assume: two plants are scored by `lint-imports` and
+`mypy`, neither of which reads assertion-rewritten bytecode, and the third is
+scored by `test_no_aggregate_module_imports_another_aggregate_module`, which
+reads the mutated file with `Path.read_text()` and parses it — so a stale `.pyc`
+of that module cannot reach the verdict. **A plant round can skip the defences
+only when the verdict does not come from executing the mutated code**, and that
+is the check to make before skipping them, not the run's speed.
+
+| plant | ruff | format | mypy | lint-imports | pytest |
+|---|---|---|---|---|---|
+| P1 the **careless** inversion — `collection.py` imports `BulkWriteResult` from `bulk` | PASS | PASS | **rc=1** `attr-defined` | **BROKEN** (names the edge) | — |
+| P2 the **careful** inversion — the same, plus `BulkWriteResult` added to `bulk.__all__` | PASS | PASS | **PASS** (578 files) | **BROKEN** (names the edge) | **1 failed** |
+| P3 `usher.ports.repository.title` deleted from the contract's `modules` list | PASS | PASS | PASS | **10 kept, 0 broken** | **1 failed** |
+
+**P1/P2 are CLAUDE.md's careless/careful rule at a new tool, and the pairing is
+the whole argument for the contract.** A1's sweep had already measured that this
+inversion passes ruff, format, mypy and all *nine* contracts; what it could not
+say is which of those checks the careful spelling actually escapes. Measured
+here: the careless spelling dies on **mypy**, because `no_implicit_reexport`
+refuses an attribute `bulk.py` does not declare — so the version an author
+writes by accident is caught and the version that ships is not, until the tenth
+contract. Both spellings now report BROKEN naming
+`usher.ports.repository.collection -> usher.ports.repository.bulk`.
+
+🔴 **P3 is the finding, and it is about the contract rather than about the
+code.** `independence` takes a list of modules, and **the list is the whole
+contract** — `pyproject.toml` already records that failure mode one contract up,
+about its own `forbidden_modules`. Dropping one module from the list leaves
+`lint-imports` reporting a confident **10 kept, 0 broken** with that module
+entirely unconstrained: a green gate over a hole the gate created. Closed by
+`test_the_independence_contract_names_every_aggregate_port_module`, which reads
+the list out of `pyproject.toml` with `tomllib` and compares it to what
+`_aggregate_modules()` walks, so the membership is *derived* rather than
+maintained. **The general form: a static-analysis contract configured by an
+enumeration needs a test that the enumeration is complete, because the tool
+reports on what it was given and cannot report on what it was not.** Nearest
+relative is *"never hand-write the members of a taxonomy a case is about to make
+a claim over"* in the M8 Task 18 entry, arriving at a config file instead of a
+`__subclasses__()` call.
+
+**And a refinement to A1's P2, measured while spelling P1, stated narrowly
+because the wide version of it is not what was run.** A1 recorded that the
+inversion *"does not raise at all"*, correcting the plan's prediction of a
+load-time cycle — true of the `from X import Y` spelling, which is the one that
+matters because it is the one an author writes. A fourth plant spelled it as
+`import usher.ports.repository.bulk` **plus a module-level attribute read** (a
+bare `import` is `F401`, so the careful spelling has to use the name) and that
+one **does** raise: `AttributeError` at collection, against a partially
+initialised module, i.e. BROKEN-MUTATION rather than a survivor. **The raise
+belongs to the module-level *use*, not to the import statement**, so the honest
+claim is narrow: there exists a plain-import spelling that fails loudly, and it
+says nothing about one whose use is inside a function.
+
+What the fourth plant does settle is that the two checks are not redundant. The
+contract reported BROKEN either way — a graph property does not care which
+statement form produced the edge — while the AST scan walks `ast.ImportFrom`
+only, so an `ast.Import` node is outside it by construction. **Keep both**: the
+scan sees a module the contract's list has forgotten, and the contract sees a
+statement form and an indirect chain the scan does not.

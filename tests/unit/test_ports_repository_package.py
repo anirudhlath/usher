@@ -26,6 +26,7 @@ import ast
 import importlib
 import inspect
 import pkgutil
+import tomllib
 from abc import ABC
 from pathlib import Path
 from types import ModuleType
@@ -184,6 +185,46 @@ def test_the_package_re_exports_every_public_object_its_modules_declare() -> Non
     )
     dangling = exported - set(declared)
     assert not dangling, f"__all__ names objects no module declares: {sorted(dangling)}"
+
+
+def test_the_independence_contract_names_every_aggregate_port_module() -> None:
+    """The tenth `import-linter` contract holds the same invariant as the case
+    below, as a graph property rather than as one file's AST scan -- and **its
+    module list is the whole contract**, so a port module that lands unlisted is
+    a port module nothing constrains while the gate still reports 10 kept.
+
+    `pyproject.toml` already records that failure mode about its own
+    `forbidden_modules` list one contract up (*"a seventh adapter package left
+    out is a package the contract silently stops covering"*). The repair there
+    is a sentence; the repair here is this case, because the membership is
+    derivable: it is exactly what `_aggregate_modules()` walks.
+
+    `_results` is deliberately absent from both sides. It is the shared private
+    module every aggregate may import, and `_aggregate_modules()` drops it for
+    the same reason -- so the two lists agree by construction rather than by
+    two people remembering the same exception.
+    """
+    with (Path(__file__).parents[2] / "pyproject.toml").open("rb") as handle:
+        contracts = tomllib.load(handle)["tool"]["importlinter"]["contracts"]
+
+    named = [one for one in contracts if one["type"] == "independence"]
+    assert len(named) == 1, (
+        "expected exactly one independence contract; the assertion below is "
+        f"about a list, so two of them would silently check the wrong one: {named!r}"
+    )
+    listed = set(named[0]["modules"])
+    walked = {module.__name__ for module in _aggregate_modules()}
+
+    assert walked, "the port-module scan found nothing, so it proves nothing"
+    assert "usher.ports.repository.title" in walked, (
+        "the port-module scan ran but found no title module, "
+        "so it is walking something other than usher.ports.repository"
+    )
+    assert listed == walked, (
+        "the independence contract's module list has drifted from the package. "
+        f"unlisted (unconstrained): {sorted(walked - listed)}; "
+        f"listed but gone: {sorted(listed - walked)}"
+    )
 
 
 def test_no_aggregate_module_imports_another_aggregate_module() -> None:

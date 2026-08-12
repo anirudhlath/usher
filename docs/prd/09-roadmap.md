@@ -1,8 +1,15 @@
 # 09 — Roadmap
 
-> 🔶 **Provisional.** Sequencing is sound but will be refined once
-> [07](07-client-api.md) and [08](08-operations.md) are brainstormed and the
-> implementation plan is written.
+> 🔶 **Provisional — and the reason it says so is not the reason it used to.**
+> This marker read *"will be refined once [07](07-client-api.md) and
+> [08](08-operations.md) are brainstormed and the implementation plan is
+> written"* until 2026-08-12. All three happened: both documents are ✅ agreed,
+> nine plans exist in [`docs/plans/`](../plans/), and M1–M9 are complete and
+> refined against what they measured. What is still provisional is **M10 and
+> everything after it** — M10 has no plan, and *Post-v1 candidates* below is a
+> list of things deliberately not committed to. The marker stays; its stated
+> condition was discharged and leaving the old sentence would have been a
+> "verified" fact that stopped being one.
 
 ## v1 — the abstraction works end to end
 
@@ -19,7 +26,7 @@ direct Emby access, for both movies and television.
 | **M6 — Search** ✅ | **The `index` stage of [03](03-sources-and-sync.md)'s pipeline**; a weighted full-text document as a generated column, a typo-tolerant autocomplete path on its own port, optional embeddings with a fingerprint that makes staleness a query, RRF fusion reporting its own coverage, similarity, and a precomputed neighbour table. **Adds no HTTP route and no new client event, both deliberately** — see the boundary calls below. **[ADR-0002](decisions/0002-postgres-first-search.md)'s Meilisearch gate ran against a real 1,271,138-title catalog on 2026-08-03 and failed for short names and for latency**; the follow-up is the two-tier suggest, owned by M9 |
 | **M7 — Rows** ✅ | `Row`/`RowProvider` as ports and **nine registered providers**, `HomeService`'s propose→score→diversify→build, in-process row and screen caches, the taste centroid and genre affinity, `GET /home` and `usher home`, `row.invalidated`. **Plus the MovieLens tag-genome importer** — five documents specified it and nothing built it, and it is now the similarity blend's third live signal. Plus `Person`/`Credit`/`Collection` re-derived from `raw_payloads` with no second network call (`usher derive`), search weight class B filled, and two measurements the milestone owed: the sequential build's cost, and `titles.popularity`/genome coverage with their denominators |
 | **M8 — Curation** ✅ | LLM row generation, validation, persistence, regeneration job — `OpenAICompatibleClient` over httpx ([ADR-0027](decisions/0027-the-llm-client-is-one-http-call.md), litellm declined), `curated_rows` + `llm_calls` (migration `m08a`), `CandidatePoolService`, `CurationService`'s assemble→call→validate→persist with the validator as its own module, `RowFamily.CURATED` + `LLMRow` + `CuratedProvider` as **the tenth row provider**, `JobKind.CURATE` + handler, `POST /admin/rows/regenerate` (202), and `usher curate`. **Its eight boundary calls are below**, and 🔴 **the product finding is below them**: 88% of one live run's headings were the genre labels the prompt forbids. **Inherits from M7:** `curated_rows`, `LLMRow`, `CuratedProvider`, `RowFamily.CURATED` and `POST /admin/rows/regenerate` as one family (call 2); M6's query expansion (its call 6) — ✅ **shipped by Task 20 and then measured**: against a local `gemma-4-26b-a4b` it moved MRR **0.733 → 0.373**, so it ships behind `USHER_QUERY_EXPANSION_ENABLED`, off by default and independent of `USHER_LLM_ENABLED` ([05](05-search-and-similarity.md)); and the genome's **tag vocabulary**, which M7 deliberately did not store — a prompt that wants to say "atmospheric, thought-provoking" needs the words, and `genome_revision` is what made loading them later safe. ✅ **Shipped by Task 19**: `genome_tags(tag_id, tag, genome_revision)`, migration `m08b`, 1,128 rows loaded by the same `bootstrap --phase movielens`, with `GenomeRepository.vocabulary(revision)` refusing a release mismatch ([02](02-data-model.md), [04](04-catalog-bootstrap.md), [ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md)) |
-| **M9 — API surface** | Full HTTP surface, image proxy, playback resolution, **the playback ticket that succeeds [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)**, **outbound watch state (`PUT /watch/titles/{id}` and the source write-back retry job)**, **[07](07-client-api.md)'s RFC 9457 error envelope**, `GET /titles/{id}/similar` over M6's precomputed table, **the `search_queries` analytics table whole** ([10](10-telemetry-and-dashboards.md)), **the two-tier suggest [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges** (see below), attribution. **Inherits from M7:** artwork on `RowCard` with the `Image` table and `GET /images/{id}` (call 3); `title_search_names`' *people* half, with M6's condition **restated rather than renewed** (call 6); row provider enable/disable via the admin API (call 9); the RFC 9457 envelope `GET /home` deliberately ships without (call 1), plus `usher.http.server.duration`, `usher.cache.hits`/`.misses` and serve-stale-while-refreshing; `credits` as a key on `GET /titles/{id}`; the three ranking terms M7 built data for and did not wire — taste-centroid proximity, watch state and recency ([05](05-search-and-similarity.md)); and **the tag-genome weight M7 left at 0.25 on coverage that does not support it** — ✅ **settled 2026-08-12 by S7 and the answer is the revert**: the priority tier was enriched and embedded so the pair rate could be measured over a population whose documents carry weight classes C and D, S5's one pool walk put it at **2.4746%** (323,297 of 13,064,700 pairs over 130,647 seeds) against the **10%** floor, and the term is removed from `SimilarityService._WEIGHTS` while the vectors, the pair read and the rebuild's coverage counters stay ([ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md)). It is a **second measurement, not a rise from 1.81%** — S1 established M7's figure came from 5,020 name-selected seeds in a database that no longer exists. **The blend change obliges one `usher similar --rebuild`, which S7 does not run**: 85.4 minutes at this population, and `title_neighbors` is empty everywhere on this host, so whatever closes it must record that table's row count beside `blend_fingerprint`'s verdict |
+| **M9 — API surface** ✅ | Full HTTP surface, image proxy, playback resolution, **the playback ticket that succeeds [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)**, **outbound watch state (`PUT /watch/titles/{id}` and the source write-back retry job)**, **[07](07-client-api.md)'s RFC 9457 error envelope**, `GET /titles/{id}/similar` over M6's precomputed table, **the `search_queries` analytics table whole** ([10](10-telemetry-and-dashboards.md)), **the two-tier suggest [ADR-0002](decisions/0002-postgres-first-search.md)'s failed gate obliges** (see below), attribution. **Inherits from M7:** artwork on `RowCard` with the `Image` table and `GET /images/{id}` (call 3); `title_search_names`' *people* half, with M6's condition **restated rather than renewed** (call 6); row provider enable/disable via the admin API (call 9); the RFC 9457 envelope `GET /home` deliberately ships without (call 1), plus `usher.http.server.duration`, `usher.cache.hits`/`.misses` and serve-stale-while-refreshing; `credits` as a key on `GET /titles/{id}`; the three ranking terms M7 built data for and did not wire — taste-centroid proximity, watch state and recency ([05](05-search-and-similarity.md)); and **the tag-genome weight M7 left at 0.25 on coverage that does not support it** — ✅ **settled 2026-08-12 by S7 and the answer is the revert**: the priority tier was enriched and embedded so the pair rate could be measured over a population whose documents carry weight classes C and D, S5's one pool walk put it at **2.4746%** (323,297 of 13,064,700 pairs over 130,647 seeds) against the **10%** floor, and the term is removed from `SimilarityService._WEIGHTS` while the vectors, the pair read and the rebuild's coverage counters stay ([ADR-0024](decisions/0024-the-genome-is-one-dense-vector-per-title.md)). It is a **second measurement, not a rise from 1.81%** — S1 established M7's figure came from 5,020 name-selected seeds in a database that no longer exists. **The blend change obliges one `usher similar --rebuild`, which S7 does not run**: 85.4 minutes at this population, and `title_neighbors` is empty everywhere on this host, so whatever closes it must record that table's row count beside `blend_fingerprint`'s verdict. **Complete 2026-08-12 on `milestone/m9-api-surface`: 74 tasks planned across two tracks, migrations `m09a` and `m09c`, six ADRs (0029–0032, 0034, 0035).** T4 was withdrawn when the IMDb entity design failed its own pre-registered size bar. 🔴 **H4 and H5 — the live Emby verification of `/play` → ticket → `302` → a real 206, and of the watch write-back round trip read back from Emby — did not run**, because no Emby credentials exist on this host; see *M9's boundary calls* below, which records it as a gap rather than as a pass. **M9's eight boundary calls are below** |
 | **M10 — Hardening** | Observability, failure modes, backup/restore, docs, public release |
 
 TV is in scope throughout, not deferred — series/season/episode modelling,
@@ -685,6 +692,87 @@ rows at full price — and 🔴 `USHER_CURATION_POOL_SIZE`'s `le=1000` is a boun
 the reference endpoint cannot serve (measured: 600 works, 700 and 1,000 both
 return HTTP 400), because nothing couples it to `USHER_LLM_MAX_OUTPUT_TOKENS`.
 
+### M9's boundary calls
+
+**Eight things M9 deliberately does not build**, each with its reason, recorded
+here and in `.claude/rules/milestone-boundary-calls.md` and nowhere else — this
+milestone's own plan states them once and every task that touched one points
+back here rather than restating it.
+
+1. **Authentication.** `current_user` keeps returning the singleton default
+   user and [01](01-architecture.md)'s seam is still filled by replacing one
+   dependency. Designing authorization against routes that land in the same
+   milestone is the mistake [07](07-client-api.md) avoided four times with the
+   error envelope — and M9 is where that particular deferral is finally cashed,
+   by designing the envelope against routes that already exist.
+2. **The GIN → GiST swap for tier-2 suggest.** The 2.8-point recall gain is
+   measured against synthetically mutated real titles, not against anything a
+   person typed; `search_queries` is the evidence that would settle it, M9
+   builds that table, and it has no rows until after M9 ships. The two indexes
+   also cannot coexist — a GiST trigram index beside the GIN one makes the
+   planner take GiST for `%` and costs the shipped path **4.3× on p50 for
+   identical recall**. Deferred, not rejected, and
+   [ADR-0031](decisions/0031-the-two-tier-suggest.md) says which.
+3. **Meilisearch.** Unchanged from M6, and still a *justified* candidate rather
+   than a hypothetical one — see *Post-v1 candidates* below.
+4. **Byte proxying for playback.** The ticket is a `302`; the client fetches the
+   target directly. **Images *are* proxied**, and the distinction is the
+   subsystem rather than an inconsistency: an image is small, cacheable and
+   reusable across households, a video stream is none of the three.
+5. **Per-client scoped tokens** — [ADR-0012](decisions/0012-playback-urls-carry-a-source-token.md)'s
+   option 2. It needs a client identity that does not exist until
+   authentication does, which is call 1.
+6. **A scheduler.** The write-back retry rides the existing Postgres job queue
+   with `run_after`. Building a scheduler for one retry would be a second
+   unplanned milestone inside this one, exactly as M8 argued for the nightly
+   curation run — and every periodic thing in this project is still an
+   operator's cron line.
+7. **Query expansion stays off by default.** M8 measured it *worse* and M9 does
+   not re-litigate a measurement by flipping a default. What would settle it is
+   the carried-debt entry below: a real evaluation set out of `search_queries`.
+8. **The 45 columns that leak a raw driver exception.** 31 of the 45 are
+   written through `copy_records_to_table` on the raw asyncpg connection, where
+   an out-of-range int raises a bare `OverflowError` with **no SQLSTATE** — so
+   there is nothing to map to a problem `code` without wrapping the bulk path
+   itself, and no widening of `except IntegrityError` reaches them. Left in the
+   carried-debt list below with that reason attached.
+
+🔴 **And one thing M9 intended to do and did not: the live Emby verification.**
+M9's H4 (`POST /titles/{id}/play` → a minted ticket → `302` → a real `206` from
+the source) and H5 (the watch write-back round trip, read back **from Emby**)
+are both live runs against a real Emby 4.9.5.0, and **neither ran**. The reason
+is not a scheduling one: **no Emby credentials exist on this host** — verified
+rather than assumed, `.env` holds `USHER_SECRET_KEY` and `USHER_TMDB_API_KEY`
+only, `sources` is empty in every catalog on the box, and nothing outside the
+tree names an Emby host. `CLAUDE.md`'s live-verification rule requires driving
+such a run from *"the operator's own secrets file"*, and there is no such file
+here.
+
+**This is recorded as a gap and not as a pass, and the distinction is the whole
+reason the entry exists.** The entire product of H4 and H5 *is* the live
+evidence; there is no fake substitute, because the argument for running them at
+all is that M3's, M4's and M5's live runs each found something the fakes could
+not — including Emby's watch-state write-back route simply being **wrong** in
+code that every fake agreed with. Recording an unrunnable live verification as
+done would be *"a run that did not run is not a pass"* in its most expensive
+spelling.
+
+What is affected and what is not, stated so nobody re-derives it:
+
+- **One thing H5 was specifically meant to observe is already carried as a
+  standing 🔴 risk rather than measured** — the `POST /PlayedItems`
+  position-clearing divergence, recorded on D8's write-back handler.
+- **H2's conformance pin, H6's reconciliation and H7's gate are unaffected.**
+  None of the three depends on H4 or H5 landing, only on their disposition
+  being honest.
+- **The playback path is not unverified in every sense.** D5 pins all four
+  `StreamTarget` leak surfaces — one of them against a **real loopback socket**,
+  because `HTTPXClientInstrumentor` cannot see an `httpx.MockTransport` — and C5
+  proved image id stability across a real re-derivation.
+- **It is dispatchable unchanged.** With an Emby base URL and API key in a
+  secrets file outside the tree, both tasks run exactly as written. **It needs
+  the operator, not a plan.**
+
 ### The follow-up the gate obliges: a two-tier suggest, owned by M9
 
 **Owner: M9**, alongside the HTTP surface and the `search_queries` table,
@@ -710,6 +798,31 @@ and M6 deliberately adds no route (boundary call 1).
   [10](10-telemetry-and-dashboards.md)'s `search_queries` table, also M9's.
   Every case in the gate is a synthetically mutated real title; nobody has
   yet measured what this catalog's users actually type.
+
+✅ **Discharged on 2026-08-12 by M9, and closed here rather than deleted** —
+this subsection is the record of an obligation that survived three milestones,
+and the useful thing about it is that it was written down before anyone knew
+what it would cost. [ADR-0031](decisions/0031-the-two-tier-suggest.md) is the
+decision: **one route with `?tier=`** rather than two, a `SuggestTier` enum
+reaching `/openapi.json` and defaulting to `prefix`, both indexes as required
+collaborators of `SearchService`, and a minimum prefix length per tier. M9's B2
+built tier 1, B3 measured it at catalog scale, B5 put both on the wire.
+
+**Two of B3's four pre-registered bars failed, and the ADR says so at the top
+rather than at the bottom.** Both failures are attributed away from the shipped
+code by *measurement* rather than by argument, and the bar that passed does not
+cover the defect the ADR is mostly about. Two consequences for a later reader:
+**bullet 1's "p50 0.6 ms" is a per-query figure and not a per-request one** —
+B3's own `SELECT 1` through the same path measures p50 0.557 ms, so the
+overhead floor is the size of the measurement — and **the union at a
+one-character prefix is 2,707 ms p95**, which is what the minimum prefix length
+exists for and is the number ADR-0031 narrows ADR-0002's *"the only thing
+measured that fits inside a keystroke"* against.
+
+**Boundary call 2 above is what is left of this subsection.** The GIN → GiST
+choice bullet 2 describes is *not* taken, for the reason stated there, and the
+evidence that would settle it is bullet 3's — `search_queries` now exists and
+still has no rows.
 
 **The MovieLens tag genome has no owner, and now it has one: M7.** This is
 the one item in this section that is not about M6 at all, and it is the most
@@ -865,6 +978,17 @@ suspicion.
   **infinity** — `float('inf') >= 0` is `True`, Postgres 17's unbounded `NUMERIC`
   stores it, verified round-trip, reachable via `json.loads('1e400')` from a TMDb
   payload. `community_rating` is safe only by accident of its `le=10`.
+  **Still needs a scoped decision before an owner, and M9 looked at it and said
+  no with the reason attached** — it is M9's boundary call 8. M9 is the
+  milestone that built the problem vocabulary a leak like this would have to map
+  onto, so it is the milestone where "widen the `except`" was cheapest to try:
+  the measurement above is what stops it, because **31 of the 45 never reach a
+  SQLAlchemy `except` at all**. Mapping them means wrapping the COPY path
+  itself, which is a change to the bulk loader rather than to the error
+  taxonomy, and [ADR-0030](decisions/0030-the-problem-code-vocabulary-is-designed-against-a-real-503.md)
+  closed the vocabulary at seven members on the evidence of routes that exist.
+  The candidate is unchanged: declare staging columns wide (`bigint`, `text`) so
+  the refusal moves to the `INSERT … SELECT`.
 - **`PortRateLimited.retry_after` reaches no consumer** — an M4 gap found by M8.
   Seven raise sites across five modules produce it; `git grep retry_after src/`
   finds **zero** consumers. `JobWorker._fail` passes only `retryable=True`, and
@@ -873,6 +997,24 @@ suspicion.
   prose in `jobs.last_error`. Affects every job kind. **M9-sized** — it needs a
   `run_after` argument on `JobQueue.fail` and a change to `_FAIL`'s `CASE`, which
   is a port every kind shares.
+  ✅ **Paid by M9's D9 on 2026-08-11**, exactly as sized: a keyword-only
+  `retry_after_seconds` on `JobQueue.fail`, `GREATEST(:retry_after_seconds, 0)`
+  inside `_FAIL`'s `make_interval`, and `JobWorker._fail` reading the hint
+  through `isinstance(exc, PortRateLimited)` rather than a `getattr`. The grep
+  in this entry now finds **one** consumer, which is what closes it.
+  **Two things the closing measured that this entry did not predict.** The plan
+  argued that binding a raw `None` would fail on asyncpg as an untyped
+  parameter; it does not — `GREATEST(…, 0)`'s sibling literal resolves the type
+  and `GREATEST(NULL, 0)` is `0` — so the Python-side normalisation is kept for
+  a *different* reason (the floor's correctness should not depend on a literal
+  staying textually adjacent) and the docstring saying otherwise was corrected.
+  And the pre-existing `test_backoff_is_jittered`, carried since M4, asserted
+  `len(distinct) > 1` over twenty round trips, which **real `clock_timestamp()`
+  drift satisfies on its own** (~8 ms measured with the jitter term deleted,
+  against ~410–440 ms with it): both that case and D9's new one now assert a
+  *magnitude*. ⚠️ The field this closes has still never been exercised by a real
+  429 from TMDb — T2's 393-request live run saw none — so its behaviour is
+  pinned by one case and by no observation.
 - **`test_sse_end_to_end.py::test_opening_a_stub_promotes_it…` is flaky, and the
   second reading has now been evaluated and is largely refuted** — measured by
   M9 (G1) on 2026-08-11 and recorded in
@@ -981,8 +1123,22 @@ suspicion.
   **The ports themselves were correctly sized and this was not a redesign.**
   Every class, docstring and signature crossed verbatim, `__init__.py`
   re-exports the lot, and **not one of the 99 importers changed** — the
-  `import-linter` contracts are stated at `usher.ports` and still report 9 kept,
-  0 broken (the analysed-file count rises 160 → 177).
+  `import-linter` contracts were stated at `usher.ports` and still reported
+  9 kept, 0 broken at A1 (the analysed-file count rises 160 → 177).
+  ✅ **There is a tenth now, added by M9's H6, and the reason it is worth an
+  entry here is that A1's own sweep measured the hole.** All nine of those
+  contracts are stated at a **top-level package**, so an import *between two
+  submodules of `usher.ports.repository`* is invisible to every one of them:
+  inverting `_results.py` into `bulk.py` and importing it back the other way
+  passes ruff, `ruff format --check`, `mypy` and all nine, and was caught only
+  by one bespoke AST scan in one test file. The tenth is an `independence`
+  contract over the nineteen aggregate modules — `testing-discipline.md`'s own
+  *prefer a graph property wherever one is expressible* — and **its module list
+  is the whole contract**, so
+  `test_the_independence_contract_names_every_aggregate_port_module` derives the
+  membership from the package rather than trusting the list. Measured: with
+  `title` dropped from the list, `lint-imports` still reports **10 kept, 0
+  broken** and only that case notices.
   **What made it finally happen is the part worth keeping**, because "owned by
   whoever adds the next port" had been true and inert for a milestone: pure
   churn with no behavioural claim never competes with work that has one. Four M9
@@ -998,6 +1154,62 @@ suspicion.
   ports (13 found against 32) while every control on it stayed green.
   `test_ports.py::test_every_port_abc_is_registered_in_all_ports` uses
   `walk_packages` for that reason.
+- **A worker that dies on an unhandled `MissingGreenlet` orphans its claims in
+  `running` for good, and at more than one worker there is no recovery** —
+  found by M9's S3, in a 1.98-hour live TMDb enrichment of 130,647 titles, and
+  it is the one finding of that run that is a defect in **shipped** code rather
+  than a number. One of three workers crashed 78 minutes in; its **20 claimed
+  jobs stayed `running` and nothing requeued them**. The mechanism is a pair of
+  defaults that are each right alone: only `JobWorker.startup()` requeues a
+  `running` row, and it calls `requeue_running()` with
+  `older_than_seconds=0.0`, which is correct for the single-worker deployment
+  M4 shipped and **steals the other workers' live claims** the moment there are
+  two. So restarting the dead worker to recover its twenty jobs cancels the
+  survivors' work, and not restarting it leaves the twenty parked forever —
+  a dead end at N > 1. **No M9 task owned it** and it is not fixable inside a
+  milestone's slack: the honest fix is a claim lease (a `claimed_by` or a
+  heartbeat column, so `requeue_running` can name *whose* claims are stale),
+  which is a migration, a port change and a change to every composition root.
+  The cheap mitigation, which is documentation rather than code: run one worker,
+  or accept that a crash costs a manual `UPDATE`.
+- **`usher unmatched --resolve` stack-traces on an unknown `--title`** — found
+  by M9's E4, which fixed the *route* and could not fix the CLI because
+  `cli.py` is not that task's file. The route now reads the title first and
+  answers a problem document; the command hands the id straight to
+  `attach_title`, and against Postgres that is a foreign-key violation
+  translated to `RepositoryConflict` — which is **not** in
+  `cli.OPERATOR_ERRORS` (verified: no member of that tuple is a base of it), so
+  an operator who mistypes a UUID gets sixty frames instead of a sentence.
+  [ADR-0026](decisions/0026-the-cli-boundary-names-families.md)'s amendment
+  family, one member short. It is a one-line change and it is carried rather
+  than taken because the family is an argued taxonomy, not a list — the
+  question ADR-0026 asks before adding a member is how often an operator hits
+  it, and answering that for a *refusal* type whose other raise sites are
+  genuine conflicts is the work.
+- **A covering index for `GET /admin/unmatched` is measured, requested, and
+  declined** — M9's E4, over 200,000 items / 70,000 unmatched / 23,333 undated.
+  `ix_media_items_unmatched` is `(source_id) WHERE title_id IS NULL` and carries
+  **neither sort key**, so every page top-N sorts the whole unmatched
+  population: keyset page 1 is **16.4 ms / 966 buffers / a top-N heapsort**, the
+  deepest keyset page **1.9 ms**, and the offset spelling the route does not use
+  runs 17.4 ms at page 1 and **57.3 ms at `OFFSET 69,900`, spilling to disk**.
+  So **the keyset fixed the depth and not the page** — which is worth knowing
+  before anyone reads ADR-0034 as having fixed both. A covering
+  `(added_at DESC NULLS LAST, id DESC) WHERE title_id IS NULL` removes the sort.
+  Not authorised in M9: 16.4 ms on an admin review queue is acceptable and a
+  fourth migration for it is not worth the milestone.
+- **`/openapi.json` describes every problem response at `application/json`
+  while the wire sends `application/problem+json`** — measured by M9's H2 and
+  reported rather than closed, which is the disposition to keep. FastAPI renders
+  `responses={404: {"model": ProblemResponse}}` under the *route's* response
+  media type, so the document is wrong about the one header RFC 9457 makes
+  load-bearing. Spelling the media type in would fork `test_api_playback.py`'s
+  and `test_api_watch.py`'s assertions, which read `content["application/json"]`,
+  and buys a client nothing it cannot read off the `type` member — so H2's
+  conformance check asserts the response **shape** and not the media type, and
+  says so in its own docstring. The honest statement is that a generated client
+  will annotate these responses with the wrong content type until somebody takes
+  it.
 
 ## Post-v1 candidates
 

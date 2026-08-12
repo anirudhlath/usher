@@ -166,6 +166,22 @@ Every configuration measured, same 2,993 cases:
   and `test_a_high_trigram_floor_destroys_fuzzy_recall` "proves" 0.1 rescues a
   case that at 1.27M rows it does not rescue. The comment is corrected; both
   values stay, each with its measured reason.
+  **Read "in `SuggestIndexContract`" as the class hierarchy since M9's B2, not
+  as one class.** That contract split in two when the prefix tier arrived: the
+  typo cases moved down to `TypoTolerantSuggestIndexContract`, which subclasses
+  it, so the sentence above is still true in the is-a sense and no longer names
+  where to look. The three typo cases are on the subclass, and the two
+  implementations that sign it are `PostgresSuggestIndex` and `FakeSuggestIndex`;
+  `PostgresPrefixSuggestIndex` signs the base only, on purpose. **This divergence
+  is therefore narrower than it was and the narrowing is not an improvement to
+  it** — tier 1 has no trigram floor to be wrong about, and the whole of the
+  0.1-versus-0.3 gap still sits on the tier that is now debounced behind it.
+  Leaving the typo cases on the base and skipping them for tier 1 was considered
+  and refused for a reason this file should carry: **a skipped case reads as
+  coverage in the summary line and asserts nothing**, and a tier whose entire
+  design is the *absence* of typo tolerance would then be described by three
+  permanent skips rather than by one integration case that asserts the absence
+  and proves the path ran first.
 **Confirmed, and worth the numbers.** Short names are the weak band and the
 curve is monotone in length (27.8 → 68.3 → 95.5 → 99.8 → 99.5). Transposition
 is the weakest class overall at 66.1% — and *within the 2–4 band it is

@@ -110,13 +110,41 @@ hashable.
 `field_provenance` exists so a second metadata provider can be added later
 without ambiguity about which source won a given field.
 
-🔶 **Deferred to M9:** a GIN index on `genres` for faceted `/browse`
-([07](07-client-api.md)) facet counts at catalog scale. Measured at 300k
-rows: a facet count seq-scans in 78.7 ms, projecting to ~3.3 s at IMDb's
+🔶 **Deferred to M9** *(and M9 reached it, measured it, and still did not add
+it — see the paragraph after this one)***:** a GIN index on `genres` for faceted
+`/browse` ([07](07-client-api.md)) facet counts at catalog scale. Measured at
+300k rows: a facet count seq-scans in 78.7 ms, projecting to ~3.3 s at IMDb's
 full 12.7M. Not added in M1 because `CREATE INDEX CONCURRENTLY` can add it
 online with no table rewrite whenever M9 lands — there is no cost to
 waiting and a real cost (write overhead through M2's bulk load, and every
-write after) to adding it before anything queries by facet. The same
+write after) to adding it before anything queries by facet.
+
+❌ **M9 shipped `GET /browse` with no such index, deliberately, and the
+projection above is not what a real catalog does.** Measured 2026-08-12 by M9's
+B7 over 1,272,367 titles against a bar written and hashed before the first
+probe: unfiltered facet counts are **330.81 ms p95** — not ~3.3 s — and every
+browse plan is the same `Parallel Seq Scan on titles`, ~95,000 buffers, with a
+**39–59 kB top-N heapsort**, so **the sort is not the cost and the scan is**.
+Two findings decided it, and both are reasons the index would not have been the
+fix this row assumed:
+
+- **A predicate does not make facets affordable**, because each facet is
+  computed over the filtered population *minus its own predicate* — a
+  genre-predicated request is 324.43 ms against an unfiltered 330.81, and a
+  genre matching **one** title is 321.93. So facets ship **opt-in and
+  predicated** (`?facets=true` plus at least one of `genre`/`year`/`owned`),
+  with a `computed` flag and *absent* rather than empty maps.
+- **The GIN index would introduce a hazard that does not exist today.** With no
+  index, `genres @> '{Fantasy}'` is a `Filter:` on a sequential scan and there
+  is no bitmap to be lossy; a GIN index on `genres` is precisely what would
+  create the 66,188-lossy-block recheck M9's B3 measured one subsystem over.
+
+The unindexed cost is real and this row is **not** closed as "no longer wanted":
+a browse page is over its own 50 ms bar at 139.92 ms predicated and 321.29 ms
+unfiltered. What changed is that the remedy is no longer obvious. The plans, the
+bar and the one accidental 317× finding beside them — `(key IS NOT NULL) DESC,
+key <dir>` and `key <dir> NULLS LAST` are the same *order* and different *sort
+keys*, and only the second is indexable — are in `.claude/rules/db-and-sql.md`. The same
 applied to indexes on `media_items.added_at`/`last_seen_at`/`available` and
 `titles.collection_id`. Three of those five have since landed:
 `ix_media_items_sweep` covers `last_seen_at`/`available` for the availability

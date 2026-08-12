@@ -27,11 +27,22 @@ def test_every_adr_file_is_listed_in_the_decisions_register() -> None:
     relaxed to 22: twenty-two files, twenty-two rows, both directions
     clean. So this case starts from a register that was in fact correct,
     rather than from one it would have to be loosened to accommodate.
+
+    **The floor moved 23 -> 35 once, at M9's close, and the timing is the
+    point.** M9 wrote six ADRs (0030-0035) across five groups, and a floor
+    each of them bumped would have been five merge conflicts about a
+    non-emptiness control -- so the milestone's documentation-reconciliation
+    task moves it exactly once, at the last moment an ADR can land, to the
+    count measured on the tree. It stays a **floor** rather than an equality
+    for the reason the register itself exists: an equality is a number people
+    raise until the suite is green, and what this assertion is for is proving
+    the glob found something, not counting ADRs. The two set comparisons below
+    are what actually check the register, in both directions.
     """
     register = (_DECISIONS / "README.md").read_text()
     files = {path.name for path in _DECISIONS.glob("0*.md")}
 
-    assert len(files) >= 23, f"the register scan found only {len(files)} ADRs"
+    assert len(files) >= 35, f"the register scan found only {len(files)} ADRs"
     assert "0001-abc-over-protocol.md" in files
 
     linked = set(re.findall(r"\]\((0\d{3}-[a-z0-9-]+\.md)\)", register))

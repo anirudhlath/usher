@@ -11,6 +11,61 @@ later reader would otherwise re-litigate — each was stated with its reason in
 that milestone's plan and in [PRD 09](../../docs/prd/09-roadmap.md), and is
 repeated here because the plans are long and this is the part that gets lost.
 
+## M9's eight boundary calls
+
+**Eight things M9 deliberately did not build**, each stated with its reason in
+the M9 plan's *Boundary calls* section and in
+[PRD 09](../../docs/prd/09-roadmap.md), and repeated here because that plan is
+8,868 lines. Track 2's separate refusals — the IMDb entity design that failed
+its own size bar, and the five smaller calls that followed from it — are the
+section below this one.
+
+1. **Authentication is not built** and `current_user` still returns the
+   singleton default user, because designing authorization against routes that
+   land in the same milestone is the mistake PRD 07 avoided four times with the
+   error envelope. M9 is where *that* deferral is finally cashed, by designing
+   the envelope against routes that already exist — which is the argument for
+   not repeating it one layer up.
+2. **The GIN → GiST swap for tier-2 suggest is deferred, not rejected, and
+   ADR-0031 says which.** The 2.8-point recall gain was measured against
+   synthetically mutated real titles rather than anything a person typed;
+   `search_queries` is the evidence that would settle it, M9 built that table,
+   and it has no rows until after M9 ships. The two indexes also **cannot
+   coexist** — a GiST trigram index beside the GIN one makes the planner take
+   GiST for `%` and costs the shipped path 4.3× on p50 for identical recall — so
+   this is a *replacement* decision, not an addition.
+3. **No Meilisearch, unchanged from M6's call 7.**
+4. **No byte proxying for playback.** The ticket is a `302` and the client
+   fetches the target directly. **Images *are* proxied**, and the asymmetry is
+   the subsystem rather than an inconsistency: an image is small, cacheable and
+   reusable across households; a video stream is none of the three.
+5. **No per-client scoped tokens** — ADR-0012's option 2 needs a client identity
+   that does not exist until authentication does, which is call 1.
+6. **No scheduler.** The write-back retry rides the existing Postgres job queue
+   with `run_after`, so the one periodic thing this milestone added needed no
+   new mechanism. Building a scheduler for it would be a second unplanned
+   milestone inside this one — M8's call 8, unchanged.
+7. **Query expansion stays off by default.** M8 measured it worse and a
+   milestone does not re-litigate a measurement by flipping a default. What
+   would settle it is a real evaluation set out of `search_queries`, which is
+   carried debt rather than a boundary call.
+8. **The 45 columns that leak a raw driver exception are still not translated.**
+   M9 is the milestone that built the problem-code vocabulary such a leak would
+   map onto, so it is where "widen the `except`" was cheapest to try — and the
+   measurement is what stops it: **31 of the 45 are written through
+   `copy_records_to_table` on the raw asyncpg connection**, where an
+   out-of-range int raises a bare `OverflowError` with **no SQLSTATE**, so no
+   widening of `except IntegrityError` reaches them and there is nothing to map.
+   Mapping them means wrapping the COPY path, which is a bulk-loader change.
+   Left in PRD 09's carried debt with the candidate fix named.
+
+⚠️ **One thing M9 intended to do and did not, and it is not a boundary call:**
+the live Emby verification of playback and watch write-back (H4/H5) **did not
+run**, because no Emby credentials exist on the development host. That is a
+*gap*, deliberately not written into this list, because this file holds calls
+that were decided and PRD 09 holds the one that was not. The evidence half is
+in `emby-push-and-ingest.md`, per this file's own convention.
+
 ## M9 Track 2 — the IMDb bulk expansion, and the bar that failed
 
 **The headline call is a measured refusal and it is the one a later reader

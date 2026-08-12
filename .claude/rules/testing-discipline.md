@@ -565,6 +565,42 @@ worst case is cosmetic, was already pinned. **Ask of a prompt sentence whether
 it is one arm of a conditional and whether a validator will discard anything
 over it, before asking whether it is prose somebody might tune.**
 
+**A third of the five is now pinned too, and it is the *role sentence* — the
+one the list above names first and calls framing prose with the most
+confidence.** Corrected 2026-08-11 by M9's G3. The sentence was not framing: it
+asserted that the candidates below it are *"one household's **own** film and
+television library"*, and the pool the prompt is handed **is not filtered by
+ownership** — a measured fact (`owned DESC` is only a sort key, so a 200-title
+pool is 0.0%–10.0% owned for a household owning 0–20 unwatched titles). So the
+opening line made a claim about the data that the code contradicts, which is a
+third category the "is this framing prose?" test does not have: **a sentence can
+be neither a constant, nor a rendered number, nor a conditional arm, and still
+be a *claim some other component has to honour*.** G3 corrected the line and
+pinned the claim.
+
+**How it is pinned matters more than that it is, and the first spelling was
+wrong.** `==` against the whole 47-word rendered line reads as thorough and is a
+change-detector: ADR-0028 prices that sentence at +26 prompt tokens, so it is a
+standing candidate for cost tuning, and every future copy-edit that kept the
+claim intact would have failed. It also made the sweep *coarse* — all four
+plants died on the same equality, so the verdict could not tell a restored
+defect from a rewording. Narrowed to two literal substrings (the ownership claim
+absent, an explicit not-all-owned statement present), the same four still die and
+now on two different axes, and the control that proves the narrowing is real is a
+**harmless copy-edit that keeps the claim** — which the `==` spelling would have
+killed. **The general form, and it points the opposite way to the `one_line`
+rule two entries down: when a rendered sentence is a claim some other component
+has to honour, pin the claim and not the prose; when the rendering itself is the
+defence, pin the line.** Ask which of the two the artefact is before choosing.
+This repository has now been bitten by each.
+
+So of the five, **three are pinned and two are still deliberately alive** — the
+non-empty history header, and the *"Group by something a person would
+recognise"* rule, which is the one M8's own live run measured the model ignoring
+88% of the time and which nothing in this system checks. The line the entry
+above draws still holds; what has moved three times is where it falls, and each
+move was a *plant*, never a re-reading of the sentence.
+
 **An assertion whose subject is fixed by a model validator cannot fail, and
 `assert x.error` next to `assert x.ok is False` is the shape.**
 `LLMCall._ok_and_error_must_agree` refuses `ok=False` beside a falsy `error` —

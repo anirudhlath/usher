@@ -621,6 +621,13 @@ class PostgresSearchIndex(SearchIndex):
 # deployment uses. The comment that used to sit here asserted the opposite
 # and was simply wrong.
 #
+# Since M9 those typo cases live on `TypoTolerantSuggestIndexContract`, which
+# subclasses `SuggestIndexContract` -- so the sentence above is still true in
+# the is-a sense and no longer says where to look. They are signed by this
+# class and by `FakeSuggestIndex`; `PostgresPrefixSuggestIndex` signs the base
+# alone and has no trigram floor to be wrong about. The divergence below is
+# therefore narrower than it was, and entirely on this tier.
+#
 # Both values are kept, and the reason each is what it is, is measured.
 #
 # **Why the contract needs 0.1.** On the very fixtures it seeds:

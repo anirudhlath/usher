@@ -1072,6 +1072,14 @@ every scan (`assert pairs, "the repository scan found nothing"` plus a named anc
 - `from usher.ports.repository import <anything>` resolves for all 19 ABCs and all 19 non-ABC public
   types; `git diff --name-only` names only the ports package, the two test files, PRD 09's carried-debt
   bullet and `CLAUDE.md` — **none of the 99 importers is touched**.
+  ⚠️ **This sentence was false as shipped and is corrected here rather than left standing** (H6,
+  2026-08-12). A1's diff also carries `.claude/rules/mutation-sweeps.md`, because its sweep needed a
+  ledger entry and the standing convention requires one — `M1`'s own Files list names that file
+  explicitly, so the entry is right and the *acceptance sentence* is what was wrong. The claim worth
+  keeping is the one after the semicolon: none of the 99 importers changed. **The general form, which
+  is why this is corrected instead of deleted: an acceptance criterion that enumerates a diff goes
+  stale the moment the task obeys a convention the criterion did not think of, and a criterion nobody
+  re-reads after the merge is one that quietly becomes a false claim about what shipped.**
 - 19 ABCs, 107 abstract methods, zero missing docstrings after the move — asserted permanently by a
   new case (verified true at HEAD *before* it is written, so it is a guard rather than a discovery),
   and additionally by a one-off script comparing `inspect.getsource` for each of the 38 public
@@ -1096,7 +1104,14 @@ every scan (`assert pairs, "the repository scan found nothing"` plus a named anc
   clean including `RUF022` on the sorted `__all__`.
 - Sweep targets, expected verdict written first: deleting one name from `__init__.__all__` must fail
   the mirror case *and* mypy; moving `BulkWriteResult` from `_results.py` into `bulk.py` and importing
-  it back the other way must raise at load time as a cycle; the equivalent-mutant control is
+  it back the other way must raise at load time as a cycle — ⚠️ **measured, and it does not raise at
+  all**: it passes ruff, format, mypy and (then) all nine contracts, and is caught only by
+  `test_no_aggregate_module_imports_another_aggregate_module`. This bullet and the risk paragraph one
+  page below predicted opposite outcomes and the sweep settled the pessimistic one, which is the whole
+  argument for the tenth `import-linter` contract H6 added. **A refinement measured at H6, because it
+  is one word of difference:** the `from X import Y` spelling resolves silently, and the plain
+  `import usher.ports.repository.bulk` spelling *is* a load-time `AttributeError`, so "it would be a
+  cycle" is true of the spelling nobody writes and false of the one they do; the equivalent-mutant control is
   reordering two independent module imports in `__init__.py` — a fact about the code, since the module
   bodies are pure class definitions with no import-time side effects — which must pass all five gate steps.
 
@@ -5521,6 +5536,21 @@ than schema ones:
    (`docs/prd/10-telemetry-and-dashboards.md:489-498`). `user_id` keeps its
    foreign key, as `watch_states.user_id` has, and neither key may cascade a
    delete onto the analytics row.
+   ⚠️ **This ruling is stale and the shipped schema is the other way round**
+   (recorded by H6, 2026-08-12; F1 wrote against the schema at the time and
+   said so, and this is the plan text catching up). `m09a` ships
+   `fk_search_queries_clicked_title_id_titles` **with `ON DELETE SET NULL`**,
+   and PRD 10:440-441 — written by M1 in the same commit — argues for exactly
+   that. F1's own Risks section pre-authorised the reversal in advance: *"if M1
+   overruled any of the three rulings above, the port changes and this plan is
+   the stale document."* It did, and it is.
+   **The ambiguity the ruling names is real and is not resolved by the foreign
+   key; it is relocated.** With no key, a deleted title leaves a dangling id
+   that reads as *"clicked X"* about a title that no longer exists; with
+   `SET NULL`, the same row reads as *"clicked nothing"*. Neither spelling can
+   distinguish a click on a since-deleted title from no click at all, because
+   nothing in the row records which of the two happened — so anybody re-opening
+   this should be adding a discriminator, not moving the key back.
 2. **Outcome columns are `UPDATE`d in place** on the row written at query
    time, keyed by its id (M1's open question 3). First write wins, so no row
    is ever re-written — the table therefore needs **no `updated_at` column and
@@ -7343,6 +7373,68 @@ stops the third occurrence of a drift measured twice.
   transcribe verbatim. Do not narrow it while touching these files.
 - A restated fact nobody re-reads is this project's most common documentation
   defect. Prefer a test to a sentence wherever the claim is checkable.
+
+#### H6's PRD census — which group edited which document, and what nobody touched
+
+Recorded here and **not** in the PRD, per H6's acceptance. Computed rather than
+recalled: for every merge commit on `milestone/m9-api-surface` since the M8 base
+`095818e`, the files it brought under `docs/prd/` are attributed to the task ids
+in its subject (branch-into-task merges excluded, since those bring the whole
+milestone and would attribute every document to one task).
+
+| document | edited by |
+|---|---|
+| `01-architecture.md` | A6 |
+| `02-data-model.md` | B9, C1, C2, C3, E4, S2 — **plus H6**, see the gap below |
+| `03-sources-and-sync.md` | C3, E3, T1, T2, T6, T7 |
+| `04-catalog-bootstrap.md` | C6, E5, E6, H1, S1, S2, S3, S7, T1, T2, T3, T5, T7, T8 |
+| `05-search-and-similarity.md` | B1, B2, B3, B5, F4, F5, S4, S6, S7, T6, T7 |
+| `06-rows-and-recommendations.md` | A6, C6, C7, E2, G3, G4, S1 |
+| `07-client-api.md` | A2, A3, A4, B4, B5, B7, B8, B9, B10, B11, B12, C1, C5, C6, C7, D1, D4, D7, E2, E3, E4, E5, E6, F3, G2, H1, H2, V1 — **28 tasks, and it is the milestone's subject document** |
+| `08-operations.md` | C1, C4, C5, C6, D9, E2, E3, E6 |
+| `09-roadmap.md` | C6, E2, E3, G1, G3, G4, S1, S7, T1, T8, **H6** |
+| `10-telemetry-and-dashboards.md` | A5, A6, C6, C7, F1, F2, F3 |
+| `decisions/` | six new ADRs (0030 V1, 0031 B5, 0032 C1, 0033 G1, 0034 A3/B6, 0035 S6) and seven amended (0002 B3/B5, 0006 C6, 0012 D5/H3, 0014 S7, 0024 S1/S7, 0028 G3, 0029 D1) |
+
+**Untouched by M9, and each is a decision rather than an omission.**
+`00-overview.md` — M9 added no domain concept; the vocabulary it introduced
+(problem document, cursor, ticket, tier) is API-surface language and lives in
+PRD 07. `docs/prd/README.md` — the index, which by construction only this task
+edits. And **twenty-four ADRs**, of which the one worth naming is
+**ADR-0026** (*the CLI boundary names families*): M9's E4 found a member missing
+from `cli.OPERATOR_ERRORS` and correctly carried it as debt rather than widening
+an argued taxonomy in a task that owns a route, so the ADR is unamended *because*
+the decision was not taken. That is consistent, not a gap.
+
+**Three gaps the census found, all in documents whose owning task had already
+merged and been reviewed — so they are closed here under the standing rule
+rather than routed forward.**
+
+1. **PRD 09's `PortRateLimited.retry_after` carried-debt entry still read
+   "M9-sized — it needs a `run_after` argument"** after **D9** shipped exactly
+   that. Closed here with D9's two refutations attached (the raw-`None` bind
+   does *not* fail on asyncpg, and `test_backoff_is_jittered` had been satisfied
+   by clock drift since M4).
+2. **PRD 02:113's *"🔶 Deferred to M9: a GIN index on `genres`"*** was left
+   standing after **B6/B7** reached it, measured it and shipped no index. The
+   row's own projection (~3.3 s at 12.7M rows) is also refuted by the real
+   measurement (330.81 ms p95 over 1,272,367). Closed with B7's numbers and
+   B6's two reasons, and explicitly **not** closed as "no longer wanted" — a
+   browse page is still over its 50 ms bar.
+3. **PRD 06:241's *"cross-process invalidation is M9's"*** is inside a preserved
+   M8 blockquote and is **left standing deliberately**: M9 did not build it.
+   `RowCache.clear()` is in-process and E2's toggle clears the API's cache from
+   inside the API; a curation job under `usher work` still cannot invalidate the
+   server's screen cache. Reported here rather than edited, because the sentence
+   is true about what is missing and the milestone that owns it does not exist.
+
+**The one number this census is a claim about**, and it is checkable: `07`'s 28
+editing tasks against `01`'s one. A document twenty-eight tasks edit is where a
+merge conflict per pair is the expectation rather than the surprise, which is
+what the group preamble's *"declare the exact heading it edits in every file"*
+rule was written for — and it held: the two textual conflicts this milestone hit
+were both in append-at-EOF files (`decisions/README.md`,
+`.claude/rules/mutation-sweeps.md`), neither in PRD 07.
 
 ---
 
