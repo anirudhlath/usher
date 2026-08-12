@@ -8,8 +8,11 @@ reading.
 
 **Four claims, deliberately at different scopes.**
 
-1. **PRD's endpoint tables ⊆ the app's routes.** Narrow on purpose: a table is
-   a promise to a client, so every spelling in one has to answer.
+1. **PRD's endpoint tables ⊆ the app's routes**, compared as `(method, path)`
+   pairs. Narrow on purpose, twice over: a table is a promise to a client, so
+   every spelling in one has to answer, and the *method* is half of what a cell
+   promises. Path granularity was measured to be too weak -- see
+   `test_every_endpoint_prd_07_promises_is_in_the_schema`.
 2. **The app's routes ⊆ every endpoint PRD 07 spells anywhere.** Wider on
    purpose, and the width is not laxity -- three M9 routes are documented
    outside the tables (`GET /images/{image_id}` under `## Images`,
@@ -65,7 +68,7 @@ from fastapi.routing import APIRoute
 # whole reason it exists is that the obvious walk is silently wrong.
 from tests.unit.test_api_problem import _api_routes as api_routes
 from usher.api.app import create_app
-from usher.api.dto.problem import ProblemCode
+from usher.api.dto.problem import PROBLEM_EXEMPTIONS, ProblemCode
 from usher.api.errors import _CODE_FOR_STATUS
 from usher.config import Settings
 
@@ -202,6 +205,14 @@ def _served(document: Mapping[str, Any]) -> set[str]:
     return {_normalise(path) for path in document["paths"]}
 
 
+def _served_pairs(document: Mapping[str, Any]) -> set[tuple[str, str]]:
+    return {
+        (method.upper(), _normalise(path))
+        for path, item in document["paths"].items()
+        for method in item
+    }
+
+
 _TREES: dict[str, ast.Module] = {}
 
 
@@ -313,6 +324,17 @@ def test_every_endpoint_prd_07_promises_is_in_the_schema(
     normalisation carries its own control too: `("GET", "/titles/{}")` is only
     in the extraction if `{id}` was emptied, which is the whole difference
     between checking coverage and checking spelling.
+
+    **The comparison is over `(method, path)` pairs and that is a measurement
+    rather than a preference.** Spelled over paths alone it is too weak, and
+    the sweep found the case: PRD 07's Admin table compressed three methods
+    onto `/admin/sources` while the delete has always been
+    `DELETE /admin/sources/{id}`, and replanting that cell **survived both
+    directions** -- direction 1 because `/admin/sources` is served by *some*
+    method, direction 2 because the blockquote under that table now spells the
+    real path in prose and direction 2 reads prose by design. A method is half
+    of what a table cell promises, and comparing pairs is not comparing
+    spellings: the parameter names are still emptied on both sides.
     """
     tabled = _tabled()
     assert len(tabled) >= _ENDPOINTS_IN_THE_TABLES, (
@@ -332,10 +354,11 @@ def test_every_endpoint_prd_07_promises_is_in_the_schema(
         "the schema and the route walk disagree about what this app serves"
     )
 
-    promised = {path for _, path in tabled} - {_SCHEMA_PATH}
-    assert promised <= served, (
-        f"PRD 07's endpoint tables promise paths the app does not serve: "
-        f"{sorted(promised - served)}"
+    promised = tabled - {("GET", _SCHEMA_PATH)}
+    answering = _served_pairs(document)
+    assert promised <= answering, (
+        f"PRD 07's endpoint tables promise endpoints the app does not serve: "
+        f"{sorted(promised - answering)}"
     )
 
 
@@ -478,6 +501,25 @@ def test_every_exemption_names_a_real_response_and_the_shape_it_keeps(
     body, or one that stopped existing.
     """
     assert len(_NOT_A_PROBLEM_DOCUMENT) >= 2, "the exemption tuple is too small to be a set"
+
+    # PRD 07 promises that the "every route declares its problem responses"
+    # check *imports* `dto/problem.py`'s reasoned map rather than re-deriving
+    # it. This is that import, and the relationship is the assertion: exactly
+    # one entry here is a route whose **handler** declines the envelope, and it
+    # has to be one A2 recorded. The other two are statuses that carry no body
+    # at all -- a fact about 302 and 304 rather than a decision about a
+    # handler -- so they must *not* be in that map.
+    by_handler = {path for path, _, model, _ in _NOT_A_PROBLEM_DOCUMENT if model is not None}
+    assert by_handler == {"/health/ready"}, sorted(by_handler)
+    assert by_handler <= set(PROBLEM_EXEMPTIONS), (
+        f"{sorted(by_handler - set(PROBLEM_EXEMPTIONS))} is exempt here and is not in "
+        "`PROBLEM_EXEMPTIONS`, so the two records of the same decision disagree"
+    )
+    bodyless = {path for path, _, model, _ in _NOT_A_PROBLEM_DOCUMENT if model is None}
+    assert bodyless.isdisjoint(PROBLEM_EXEMPTIONS), (
+        f"{sorted(bodyless & set(PROBLEM_EXEMPTIONS))} is exempt here for carrying no body and "
+        "is exempt there for what its handler answers; those are different claims"
+    )
     for path, status, model, reason in _NOT_A_PROBLEM_DOCUMENT:
         item = document["paths"].get(path)
         assert item is not None, f"{path} is exempt and is not a path"
