@@ -590,9 +590,27 @@ exactly the reason it is not listed here yet.
 
 ### Resource envelope
 
+**What this table is for, stated because its absence caused a real mistake.**
+These are **sizing estimates for an operator provisioning a disk**. Nothing in
+this project reads them, no host enforces them, and no policy is derived from
+them. 🔴 M9's Track 2 treated the Postgres row as a *budget*, derived a 2.0 GB
+ceiling from it, measured a design at 2.702 GB and **withdrew the design** —
+against a number with no forcing function behind it. See
+[ADR-0036](decisions/0036-the-imdb-tmdb-provenance-rule.md). A figure here is
+a thing to buy a disk against, never a thing to refuse a design against.
+
+**And the Postgres row was stale.** `~8–12 GB` described a database this
+project no longer has. Measured 2026-08-12 on a real 1,272,367-title catalog
+with 130,647 titles enriched — `pg_database_size` **5,025,650,355 B (4,793
+MB)**, at `m09c`, with 130,647 embeddings, 3,266,225 `title_neighbors`,
+2,877,486 `credits` and 129,131 cached payloads:
+
 | | |
 |---|---|
-| Postgres | ~8–12 GB catalog + indexes; ~1.5 GB HNSW (`halfvec`) |
+| Postgres, catalog + indexes | **~5 GB at 1.27M titles with 10% enriched**, and the enriched fraction is what moves it: `raw_payloads` is 995 MB of that, `title_embeddings` 298 MB, `title_neighbors` 572 MB. A fully-enriched catalog is several times larger. |
+| Postgres, + the IMDb people/credits load | **+3.4 GB** — 12,637,249 credits over 3,215,476 people, measured after `VACUUM FULL` ([ADR-0036](decisions/0036-the-imdb-tmdb-provenance-rule.md)). Not loaded by default. |
+| Postgres, + `titles.credit_names` | **+624 MB settled, +1,368 MB transient** before a vacuum — the peak is what an operator's disk sees |
+| HNSW (`halfvec`) | ~1.5 GB at full embedding coverage |
 | Image cache | Grows with use; capped by a configurable LRU ceiling |
 | Usher process | ~500 MB–1 GB, plus ~200 MB for the embedding model |
 | Embedding model | ~130 MB on disk |

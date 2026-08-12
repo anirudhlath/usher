@@ -34,7 +34,7 @@ import uuid
 from abc import ABC, abstractmethod
 
 from usher.domain.ids import new_id
-from usher.domain.people import Credit, CreditKind
+from usher.domain.people import Credit, CreditKind, CreditSource
 from usher.ports.repository import CreditRepository, TitleRepository
 
 # A sentinel, because `None` is a **meaningful** value for `tmdb_credit_id`
@@ -51,14 +51,26 @@ def credit(
     person_id: uuid.UUID,
     *,
     kind: CreditKind = CreditKind.CAST,
+    source: CreditSource = CreditSource.TMDB,
     **changes: object,
 ) -> Credit:
+    """One credit, TMDb-sourced unless a case says otherwise.
+
+    **`source` is defaulted here and required on the model, and the asymmetry
+    is deliberate.** `Credit.source` has no default precisely so that a
+    *writer* cannot inherit `tmdb` by forgetting -- there is exactly one such
+    writer in `src/` and it names the value. A fixture builder is not a
+    writer: every row this suite seeds stands in for a TMDb derivation, so
+    defaulting it here keeps ~25 call sites from restating one constant, and
+    a case about provenance passes `source=` explicitly.
+    """
     given = changes.pop("tmdb_credit_id", _UNSET)
     return Credit.model_validate(
         {
             "title_id": title_id,
             "person_id": person_id,
             "kind": kind,
+            "source": source,
             # A fresh id per constructed credit unless one was named, so the
             # natural key never collides by accident between two cases
             # sharing one database.

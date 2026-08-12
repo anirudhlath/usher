@@ -41,7 +41,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from usher.db.base import Base, enum_column
-from usher.domain.people import CreditKind
+from usher.domain.people import CreditKind, CreditSource
 
 
 class PersonRow(Base):
@@ -49,6 +49,12 @@ class PersonRow(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     tmdb_id: Mapped[int | None] = mapped_column(Integer)
+    # IMDb's `nconst`. `Text` rather than a bounded string for the reason
+    # `titles.imdb_id` is: the id is somebody else's format and a width is a
+    # claim about it. Nullable and partially unique -- see `ix_people_imdb_id`
+    # below, and `domain/people.py` for why the *pair* being nullable is the
+    # merge design rather than laxity.
+    imdb_id: Mapped[str | None] = mapped_column(Text)
 
     name: Mapped[str] = mapped_column(Text, nullable=False)
     sort_name: Mapped[str] = mapped_column(Text, nullable=False)
@@ -94,6 +100,25 @@ class PersonRow(Base):
             unique=True,
             postgresql_where=text("tmdb_id IS NOT NULL"),
         ),
+        # The IMDb half of the same key, and partial for the same reason
+        # `ix_titles_imdb_id` is: NULL never collides with NULL, and the
+        # explicit WHERE is what lets Postgres use the index for the
+        # IS NOT NULL lookups an importer's resolve step makes.
+        #
+        # Two partial unique indexes rather than one composite: the two id
+        # spaces are independent, a person may carry either or both, and a
+        # composite `(tmdb_id, imdb_id)` would constrain neither -- every row
+        # missing one of the two would be unique on the pair by virtue of the
+        # NULL. That is the same trap `ix_credits_tmdb_credit_id`'s own
+        # comment records one table over, arriving at a composite instead of
+        # at a nullable column.
+        Index(
+            "ix_people_imdb_id",
+            "imdb_id",
+            unique=True,
+            postgresql_where=text("imdb_id IS NOT NULL"),
+        ),
+        CheckConstraint("imdb_id IS NULL OR imdb_id <> ''", name="ck_people_imdb_id_not_empty"),
         # No index on sort_name. `titles` has one and earns it (catalog
         # ordering); nothing in M7 orders people by name -- PeopleProvider
         # orders by watched-title count, and GET /people/{id} plus the
@@ -136,6 +161,15 @@ class CreditRow(Base):
         PGUUID(as_uuid=True), ForeignKey("titles.id", ondelete="CASCADE"), nullable=False
     )
     kind: Mapped[CreditKind] = mapped_column(enum_column(CreditKind, length=8), nullable=False)
+    # NOT NULL and no server default, backfilled by the migration to the TMDb
+    # member because every row this table held when the column landed came
+    # from `DeriveService` reading `raw_payloads`. A nullable `source` makes
+    # "unknown provenance" representable, which is the state ADR-0036 exists
+    # to abolish; a *server* default makes a writer that forgets it silently
+    # wrong, which is the same state wearing a valid value.
+    source: Mapped[CreditSource] = mapped_column(
+        enum_column(CreditSource, length=8), nullable=False
+    )
 
     tmdb_credit_id: Mapped[str | None] = mapped_column(Text)
 
@@ -190,6 +224,58 @@ class CreditRow(Base):
             "tmdb_credit_id",
             unique=True,
             postgresql_where=text("tmdb_credit_id IS NOT NULL"),
+        ),
+        # **The dedup key for every source that is not TMDb**, and the reason
+        # it has to exist is that the index above is partial over
+        # `tmdb_credit_id IS NOT NULL`, i.e. over *none* of an IMDb load. So
+        # before this index, `credits` could not dedupe a bulk IMDb import at
+        # all, and a redelivered batch doubled a title's credits silently.
+        # Demonstrated rather than argued: on the pre-index shape a second
+        # load of the identical pinned bytes takes 12,637,432 rows to
+        # 25,274,864.
+        #
+        # **`(title_id, source, billing_order)`, and the three columns the
+        # obvious spellings add are measured redundant.** Over the 12,638,471
+        # principals rows this catalog retains from the pinned
+        # `title.principals`:
+        #
+        #   (title_id, ordering)                    12,638,471 distinct  UNIQUE
+        #   (title_id, nconst, category, ordering)  12,638,471 distinct  UNIQUE
+        #   (title_id, nconst, category)            12,276,307 distinct  362,164 collide
+        #   (title_id, nconst, kind)                11,294,913 distinct  1,343,558 collide
+        #
+        # So the M9 plan's proposed `(title_id, person_id, category,
+        # ordering)` is correct and two columns wider than it needs to be --
+        # and `category` is not a column on this table at all, since IMDb's 13
+        # categories fold into `CreditKind`'s two. `person_id` is redundant
+        # because `ordering` is already unique within a title, and the
+        # 1,343,558-row collision on `(title_id, person_id, kind)` is what
+        # says a person-based key cannot work: a director who also wrote a
+        # film is two crew credits on one title.
+        #
+        # `NULLS NOT DISTINCT` (`m09c`'s own precedent, one table over) is
+        # what makes this a guard rather than a suggestion. Every IMDb row has
+        # an `ordering` -- 0 of 101,170,912 rows in the pinned file lack one --
+        # so on today's data the clause never fires. It fires for a *future*
+        # source with no per-title ordering, which would otherwise write
+        # unlimited `(title_id, source, NULL)` rows that a plain UNIQUE waves
+        # through, and it fires loudly at the first duplicate instead of
+        # quietly at every one.
+        #
+        # Partial on `source <> 'tmdb'` rather than `= 'imdb'`: it means "every
+        # source that does not carry its own credit id", so the two unique
+        # indexes on this table partition it rather than overlapping. TMDb is
+        # excluded because its crew rows legitimately share a NULL
+        # `billing_order` by the dozen, which `NULLS NOT DISTINCT` would read
+        # as a collision.
+        Index(
+            "ix_credits_source_natural_key",
+            "title_id",
+            "source",
+            "billing_order",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+            postgresql_where=text("source <> 'tmdb'"),
         ),
         # No index on `kind`: two values, on a table whose every read already
         # filters on title_id or person_id. Postgres seq-scans a majority

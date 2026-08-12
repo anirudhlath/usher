@@ -816,3 +816,147 @@ is what makes deferring these frames behind `DeferredEventPublisher` a
 where every other registration gets `worker.events`. A `--phase all` run adds
 `credit-names`, `aliases`, both TMDb id exports, the crosswalk and MovieLens on
 top.
+
+## T4R — the IMDb/TMDb provenance design, re-measured against a bar that means something (2026-08-12)
+
+**T3's refusal is reversed, and two of its three reasons did not survive
+scrutiny.** The entry above stands as a measurement; what follows is what
+changed. Bar written to `/var/tmp/t4r/BAR.md`
+(`sha256 fbb9ced3f33840989d81841c48b51dcaeefb1d4ada5bfb2ad5df157ded223e30`,
+2026-08-12T14:49:10-05:00) **before the first byte was downloaded**, and
+`scripts/measure_people_provenance.py` re-hashes it at the start of every
+phase and refuses to run if it has moved. Catalog: **1,272,367 titles**,
+130,647 enriched, at `m09c`. Pin: `title.principals.tsv.gz`
+`"f4422fc329ee8db79fb20dc7e3b64775-93"`, `name.basics.tsv.gz`
+`"77f3a29e65e01ccaedb639e4d83e6db5-37"` — `Last-Modified` a day apart, so
+**the seven dumps are still not one snapshot**, reconfirmed on a new pin.
+
+🔴 **The 2.0 GB ceiling was not a constraint and the refusal it produced was
+false.** It was derived from PRD 08's `~8–12 GB`, which is one row of a table
+headed *Resource envelope* — a sizing estimate for an operator that no code,
+host or policy reads. Re-measured against 25 GB (~3% of this host's free
+disk): the whole design is **3,374,514,176 B = 3.375 GB = 3.143 GiB**, 13.5%
+of the ceiling, for 12,637,249 credits over 3,215,476 people after
+`VACUUM (FULL, ANALYZE)`. **A bar with nothing behind it turns a correct
+measurement into a false refusal**, and PRD 08's row now says what it is for.
+
+🔴 **`(title_id, ordering)` is UNIQUE over the whole `title.principals`, and
+the M9 plan's proposed key is two columns wider than it needs to be.** Over
+**101,170,912 data rows** (0 at a wrong column count): **0 rows lack an
+`ordering` and 0 repeat one within a `tconst`.** Over the 12,638,471 rows this
+catalog retains (12.49%):
+
+| candidate | distinct | verdict |
+|---|---|---|
+| `(title_id, ordering)` | 12,638,471 | **UNIQUE** |
+| `(title_id, nconst, category, ordering)` | 12,638,471 | UNIQUE, redundant |
+| `(title_id, nconst, category)` | 12,276,307 | 362,164 collide |
+| `(title_id, nconst, kind)` | 11,294,913 | 1,343,558 collide |
+
+The plan named `(title_id, person_id, category, ordering)`. `category` is not
+a column on `credits` at all — IMDb's 13 categories fold into `CreditKind`'s
+two — and `person_id` is redundant once `ordering` is in the key. T3 measured
+1,341,798 collisions on `(title_id, person_id, kind)` against a different
+pin; 1,343,558 is the same fact one snapshot later. **Measure the key over the
+whole file and not only the retained slice**: a key unique on one catalog's
+slice and not on the file breaks on somebody else's catalog.
+
+**The dedup bar, demonstrated in both directions rather than asserted.** The
+shipped shape — `tmdb_credit_id` its only unique key, NULL on every IMDb row —
+loaded twice from the identical pinned bytes goes **12,637,249 → 25,274,498**,
+exactly 2×. The design's scoped delete plus `(title_id, source,
+billing_order)` leaves the count and the key-set md5 unchanged. **The failing
+arm is the half that matters**: a dedup key never shown to be load-bearing is
+a key nobody measured.
+
+🔴 **The blast-radius correction is confirmed at catalog scale, and the
+denominator is the point.** The fill would write a non-empty `credit_names`
+to **1,063,418 of 1,272,367 titles**, all of them among the 1,141,720
+skeletons the `AND m.ours` predicate permits. **0 of them carry an
+embedding** — the embedded population is 130,647 of 130,647 non-skeleton
+titles, and `embedded_skeletons` is **0**. So the intersection is empty by
+measurement as well as by construction, and the ten sites that claimed the
+fill "stales ~100% of the priority tier" were stating an arithmetically
+impossible number.
+
+🔴 **887,161 requests, not 1,536,654 — and the larger figure is real, it is
+just counting something else.** `raw_payloads`' `credits.cast[]`/`crew[]`
+arrays hold **5,614,150 entries over 1,536,654 distinct person ids**, both
+reproduced exactly. But `adapters/tmdb/mapping._CAST_LIMIT` stores at most 50
+cast per title, so the catalog **holds** 2,877,486 credits over **887,161**
+people. Resolving the people that exist is **1.73× cheaper** than resolving
+the people a payload mentions. **A count taken off the cache and a count taken
+off the table are different numbers, and the request budget wants the second.**
+
+**Do not price a TMDb crawl from M9's 18.3 rps.** That rate is an artifact of
+`JobWorker.run_once`'s `for job in claimed: await self._run(job)` with a
+commit per iteration — in-flight HTTP requests per process is exactly 1, and
+the token bucket was never binding on any worker. Price from a policy ceiling:
+887,161 requests is **6.2 h** at TMDb's stated ~40 rps, **8.2 h** at the
+shipped 30 rps default, **9.9 h** at ADR-0005's self-imposed ~25 rps. 9.9 h is
+the number to quote, because 25 rps is Usher's own policy and leaves headroom
+for the enrich lane.
+
+**The ≤6-month cache term applies to `raw_payloads` and not to derived
+columns, and where the `nconst` lands therefore decides whether a crawl
+recurs.** `RawPayloadStore`'s own docstring says `fetched_at` *is* the
+compliance clock and `oldest_fetched_at(provider)` *is* the compliance query
+(ADR-0016; PRD 10's dashboard-5 panel plots it). A cached person payload is on
+that clock and expires; `people.imdb_id` is a derived column, in the same
+class as `titles.imdb_id` and every other TMDb-derived field this project has
+stored permanently for nine milestones. **Cache the response and the crawl is
+recurring; store the derived id and it is not.**
+
+**And `_UPSERT_PEOPLE` cannot blank it — by virtue of a column list, which is
+why it is now pinned by a test.** The statement names
+`(id, tmdb_id, name, sort_name, known_for_department)` and its `DO UPDATE SET`
+names three columns, none of them `imdb_id`. So `usher derive` cannot discard
+a crawl. That is an accident of a list somebody could extend without thinking.
+
+🔴 **The latency bar passed and the carve-out I pre-registered is what let it,
+which is the finding rather than a caveat.** Nine probes before and after the
+load, on one catalog, 30 reps each, probe values fixed first, on a box the
+quiet-check confirmed idle (drift −0.001, no foreign workload — an earlier
+run was discarded because the same check caught a sibling worktree's
+`pytest`). Eight routes moved within ±5.4%. **`PeopleProvider`'s
+recurring-people join went 11.08 → 76.08 ms p95, +586%**, and my bar excused
+it: I had written *"for any probe whose baseline p95 is < 20 ms, treat a
+regression as unproven"* to stop a 0.6 ms wobble reading as a failure, and it
+swallowed a **65 ms** one. **A noise floor expressed as a percentage of a
+small baseline is not a noise floor; express it as an absolute.**
+
+**The regression is recoverable and needs both halves — measured, because
+neither alone does it.** `credits` grows 2,877,486 → 15,514,735 (5.4×), and
+the join walks it:
+
+| configuration | p95 |
+|---|---|
+| baseline, before the load | 11.08 ms |
+| after the load, as shipped | 76.08 ms |
+| + `AND source = 'tmdb'` at the read | 59.4 ms |
+| + `(title_id, source)` composite index, no filter | 81.0 ms |
+| **+ both** | **11.71 ms** |
+
+So the read-side arbitration is load-bearing for *performance* and not only
+for correctness, and the index is useless without it. The index is
+deliberately **not** shipped: nothing filters on `source` yet, and an index
+with no reader is write cost this repository has already paid once
+(`ix_titles_popularity`, dropped in `ffc`).
+
+**The overlap, which is what the merge decision turns on.** 130,436 titles
+carry TMDb credits, 1,194,003 carry IMDb credits, and **130,402 carry both —
+99.97% of the TMDb-covered titles.** So the wholesale arbitration rule fires
+on essentially every enriched title rather than in a corner. 887,161 TMDb
+people against 3,215,476 IMDb people, **0 carrying both ids** (nothing merges
+today). **534,412 lower-cased names appear in both sets** — a proxy with error
+in *both* directions, not a count of duplicated humans: two people sharing a
+name inflate it and one spelled differently across sources is missed. ADR-0003
+is the reason it can only ever be a proxy.
+
+**Denominators.** 1,194,030 of 1,272,367 titles (93.84%) have ≥1 principal;
+3,216,472 distinct `nconst` referenced, 3,215,476 (99.97%) carrying a
+`primaryName`, 1 nameless and 995 absent from that day's `name.basics` — T3
+measured 969 against a different pin, and **the number moves with the pin
+because the dumps are not one snapshot**. 12,637,249 credits stored from
+12,638,471 retained principals; the 1,222-row difference is credits naming one
+of the 996 unusable `nconst`.

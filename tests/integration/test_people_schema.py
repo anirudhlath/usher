@@ -77,9 +77,10 @@ async def _credit(
     credit_id = new_id()
     await session.execute(
         text(
-            "INSERT INTO credits (id, person_id, title_id, kind, tmdb_credit_id, billing_order) "
+            "INSERT INTO credits "
+            "(id, person_id, title_id, kind, source, tmdb_credit_id, billing_order) "
             "VALUES (CAST(:id AS uuid), CAST(:person_id AS uuid), CAST(:title_id AS uuid), "
-            "'cast', :tmdb_credit_id, :billing_order)"
+            "'cast', 'tmdb', :tmdb_credit_id, :billing_order)"
         ),
         {
             "id": credit_id,

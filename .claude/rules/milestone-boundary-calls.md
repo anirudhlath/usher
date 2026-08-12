@@ -68,6 +68,23 @@ in `emby-push-and-ingest.md`, per this file's own convention.
 
 ## M9 Track 2 — the IMDb bulk expansion, and the bar that failed
 
+🔴 **Superseded 2026-08-12 by
+[ADR-0036](../../docs/prd/decisions/0036-the-imdb-tmdb-provenance-rule.md), and
+read that before acting on anything in this section.** Two of the three reasons
+below do not survive scrutiny. **The 2.0 GB ceiling was not a constraint** — it
+was derived from PRD 08's `~8–12 GB`, one row of a table headed *Resource
+envelope*, which no code, host or policy reads; against a bar with a forcing
+function the design measures 3.375 GB, 13.5% of a 25 GB ceiling. **And "people
+cannot be merged across the two sources" was an overstatement** of a correctly
+qualified fact: `GET /person/{id}/external_ids` answers a person's `nconst`, so
+the merge costs one request each (887,161 of them, ~9.9 h) rather than being
+impossible. What survives is the third reason — `credits` could not dedupe an
+IMDb load — and that is now closed by `m09d`'s natural key rather than by a
+refusal. **T4's provenance rule is built; the `m09b` withdrawal stands, but
+because `m09c` took its position, not because the design failed.** The
+measurements are in `bootstrap-and-datasets.md`; what follows is the record as
+it stood.
+
 **The headline call is a measured refusal and it is the one a later reader
 will otherwise re-open: (A) failed on 2.702 GB against a 2.0 GB ceiling, so
 there is no `people`/`credits` bulk load and no `m09b`.** The bar was written

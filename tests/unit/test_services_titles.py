@@ -33,7 +33,7 @@ from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.domain.enums import EnrichmentState, HdrFormat, ImageKind, SourceKind, TitleKind
 from usher.domain.image import Image
 from usher.domain.jobs import JobKind, JobPriority, JobStatus
-from usher.domain.people import Credit, CreditKind, Person, person_sort_name
+from usher.domain.people import Credit, CreditKind, CreditSource, Person, person_sort_name
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
@@ -275,6 +275,7 @@ async def _seed_cast(
                 person_id=person.id,
                 title_id=title_id,
                 kind=CreditKind.CAST,
+                source=CreditSource.TMDB,
                 character=f"Role {index}",
                 billing_order=size - 1 - index,
             )
@@ -284,7 +285,13 @@ async def _seed_cast(
         person = Person(name=f"Crew {index}", sort_name=person_sort_name(f"Crew {index}"))
         await people.upsert_many([person])
         entries.append(
-            Credit(person_id=person.id, title_id=title_id, kind=CreditKind.CREW, job=f"Job {index}")
+            Credit(
+                person_id=person.id,
+                title_id=title_id,
+                kind=CreditKind.CREW,
+                source=CreditSource.TMDB,
+                job=f"Job {index}",
+            )
         )
         names.append(person.name)
     await credits.replace_for_titles([title_id], entries, credit_names={title_id: names})

@@ -109,9 +109,10 @@ class PostgresPersonHistorySeeder(PersonHistorySeeder):
     ) -> None:
         await self._session.execute(
             text(
-                'INSERT INTO credits (id, person_id, title_id, kind, job, "character") '
+                "INSERT INTO credits "
+                '(id, person_id, title_id, kind, source, job, "character") '
                 "VALUES (CAST(:id AS uuid), CAST(:person_id AS uuid), "
-                "CAST(:title_id AS uuid), :kind, :job, :character)"
+                "CAST(:title_id AS uuid), :kind, 'tmdb', :job, :character)"
             ),
             {
                 "id": new_id(),
