@@ -24,12 +24,33 @@ avoid. Precedent for one migration carrying unrelated tables is `m08a`, which
 shipped `curated_rows` and `llm_calls` together — two tables sharing no column,
 no foreign key and no lifetime.
 
-So this is M9's only migration on this track, and there is exactly one head.
-`m09b` carries the IMDb provenance schema on the other track; **`m09c` is spare
-and must be requested, never minted.** Two consumer questions are already known
-to be beyond this revision — a cached-derivative table for the image proxy, and
-`title_tags` if the genome gate clears its bar — and the answer to either is a
-request, not a second head.
+So this is the *first* of M9's migrations on this track, and there is exactly
+one head.
+
+**What the two paragraphs that used to end here predicted, and what M9 actually
+shipped** — corrected 2026-08-12 at the milestone's close, because this file is
+the copy nearest the code and it was the last one still wrong. The plan reserved
+`m09b` for the IMDb provenance schema on the other track and held `m09c` spare,
+*"requested, never minted"*. Both moved:
+
+- **`m09b` is unallocated.** Track 2's T3 measured the IMDb entity design
+  against a bar written before the numbers and it **failed on size** — 2.702 GB
+  of relation against a 2.0 GB ceiling — so T4 was withdrawn and its migration
+  grant with it. Track 2 mints nothing. Anyone reading the id sequence should
+  know the spare id is `m09b`, not the next letter.
+- **`m09c` was requested and minted** — `m09c_image_natural_key.py`, in this
+  directory. It is the image natural key ADR-0032 assumed this revision would
+  carry and it does not: the column here is `remote_url`, there is no unique
+  constraint at all, and `Cache-Control: immutable` is only honest once an image
+  has a stable id. The request-not-mint rule was honoured — C1 wrote the request
+  and C2 minted it under an explicit authorisation — which is the rule working,
+  not an exception to it.
+
+`alembic heads` is therefore `m09c`, still a single head, and the chain is
+linear. One consumer question stayed beyond both revisions and was answered the
+same way the rule intends: `title_tags` was never created, because the genome
+gate **failed** its 10% floor at 2.4746% and the term came out instead
+(ADR-0035).
 
 ## What this revision deliberately does not deliver: behaviour
 

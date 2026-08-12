@@ -149,8 +149,11 @@ have reported a 4x improvement that did not happen.
 **Re-measured 2026-08-12 at M9's close: `359 MB`** (`docker build -t usher:m9-h6 .`
 off the M9 lock, `docker images` reporting `DISK USAGE 359MB` against
 `CONTENT SIZE 84.9MB`). M9's C1 read **358 MB** off the lock ten days earlier, so
-the milestone's whole HTTP surface — five routers, the image proxy, the playback
-ticket — cost **+3 MB / +0.8%** and no new runtime distribution. **The
+the milestone's whole HTTP surface — **eleven new routers, seventeen in all**,
+the image proxy, the playback ticket — cost **+3 MB / +0.8%** and no new runtime
+distribution. (*"Five routers"* stood here for one commit and was wrong: the
+count at the M9 plan commit was **6** and it is **17** at the close, measured as
+`ls src/usher/api/routers/*.py` minus `__init__.py`, not recalled.) **The
 methodology finding is the durable half and it is unchanged**: the two numbers on
 that line still differ by 4.2×, so a reader taking the smaller one is still off
 by a factor of four. What *has* changed is that Docker 29.6 labels the columns

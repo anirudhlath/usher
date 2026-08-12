@@ -259,17 +259,25 @@ working configuration into HTTP 400. **A per-item prompt decoration is priced
 per candidate and paid at the pool ceiling; check it against the ceiling, not
 against the default pool.**
 
-⚠️ **`.claude/rules/testing-discipline.md` names the prompt's role sentence as
-the archetype of framing prose deliberately left unpinned** ("The five left
-alive are framing prose … the role sentence, the two history headers …", the
-2026-08-06 sweep). **That claim is superseded**: the opening line was a claim
-about the pool's *membership*, so a `WHERE` clause would have had to honour it,
-and it is now pinned by
-`test_the_opening_line_does_not_claim_the_household_owns_every_candidate`.
-Recorded here because G3's file set does not include that file. **The test a
-prompt sentence has to pass to be "framing" is not how it reads — it is whether
-any query, constant or validator in the system would have to be true for the
-sentence to be.**
+⚠️ **The prompt's role sentence is pinned, and `.claude/rules/testing-discipline.md`
+used to name it as the archetype of framing prose deliberately left unpinned**
+("The five left alive are framing prose … the role sentence, the two history
+headers …", the 2026-08-06 sweep). The opening line was a claim about the pool's
+*membership*, so a `WHERE` clause would have had to honour it, and it is pinned
+by `test_the_opening_line_does_not_claim_the_household_owns_every_candidate`.
+**The test a prompt sentence has to pass to be "framing" is not how it reads —
+it is whether any query, constant or validator in the system would have to be
+true for the sentence to be.**
+
+**That file is now corrected at the source and this stays as the
+cross-reference.** It was left as a cross-reference alone from 2026-08-11 to
+2026-08-12, because G3's file set did not include it — and that was the wrong
+call for a reason worth keeping: **`testing-discipline.md`'s `paths:`
+frontmatter is what loads for a test author, and `curation-and-llm.md`'s does
+not.** The reader who needs the corrected rule was the one reader guaranteed to
+get the false one. A finding filed only in the file whose author happened to
+have it open is a finding routed by *authorship* rather than by *audience*; when
+they differ, edit the file the audience loads and cross-reference the other way.
 
 **Evidence (c), named rather than implied:** the 2026-08-07 run recorded
 `media_items = 0`, so **no real ownership distribution has ever been observed
