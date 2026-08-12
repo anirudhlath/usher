@@ -84,7 +84,7 @@ committed state inside a window where the code has not yet produced it.
    and discards it in a `finally`. **A handler that publishes writes no line to
    get the ordering, and a handler that fails cannot keep it.**
 
-   ⚠️ **Amended by [0036](0036-the-worker-is-a-bounded-pool-of-scopes.md),
+   ⚠️ **Amended by [0037](0037-the-worker-is-a-bounded-pool-of-scopes.md),
    2026-08-12: the buffer is the scope's rather than the worker's, and that is
    a correctness change, not a refactor.** This paragraph read *"It is now a
    property of `JobWorker`. A worker holds a `DeferredEventPublisher`"* — one

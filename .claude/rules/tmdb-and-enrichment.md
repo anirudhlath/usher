@@ -1025,7 +1025,7 @@ doing nothing*:
   `QueuePool` waits `pool_timeout` per checkout rather than failing fast.
 
 Full argument in
-[ADR-0036](../../docs/prd/decisions/0036-the-worker-is-a-bounded-pool-of-scopes.md).
+[ADR-0037](../../docs/prd/decisions/0037-the-worker-is-a-bounded-pool-of-scopes.md).
 
 ### 🔴 Refuted: the shared-session explanation for S3's `MissingGreenlet`
 

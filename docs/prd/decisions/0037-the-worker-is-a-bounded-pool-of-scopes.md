@@ -1,4 +1,4 @@
-# ADR-0036 — The job worker is a bounded pool, and a job's scope is a session
+# ADR-0037 — The job worker is a bounded pool, and a job's scope is a session
 
 **Status:** Accepted — corrects [01](../01-architecture.md)'s concurrency table
 and [08](../08-operations.md)'s recovery rule

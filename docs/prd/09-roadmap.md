@@ -1255,7 +1255,7 @@ suspicion.
   `claimed_by` column would have named whose claims are stale; a beat makes
   that question unnecessary, because a claim nobody is renewing is stale
   whoever holds it. The port change and the composition-root change were both
-  real. [ADR-0036](decisions/0036-the-worker-is-a-bounded-pool-of-scopes.md).
+  real. [ADR-0037](decisions/0037-the-worker-is-a-bounded-pool-of-scopes.md).
 
   ⚠️ **The `MissingGreenlet` itself is not fixed and is not claimed to be.**
   This entry's opening clause — *"a worker that dies on an unhandled
