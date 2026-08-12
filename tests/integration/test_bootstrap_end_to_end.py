@@ -17,7 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from usher.adapters.bulk.imdb import IMDbRatingDataset, IMDbTitleDataset
+from usher.adapters.bulk.imdb import IMDbAkaDataset, IMDbRatingDataset, IMDbTitleDataset
 from usher.adapters.bulk.movielens import MovieLensGenomeDataset
 from usher.db.repositories.bulk import PostgresBulkCatalogRepository
 from usher.db.repositories.genome import PostgresGenomeRepository
@@ -29,6 +29,7 @@ from usher.ports.bulk import (
     GenomeTag,
     GenomeVector,
     IdCrosswalkPair,
+    ImdbAka,
     ImdbTitle,
     TmdbId,
 )
@@ -226,6 +227,75 @@ class _Stop(Exception):
 async def _written(catalog: PostgresBulkCatalogRepository, rows: Sequence[ImdbTitle]) -> int:
     result = await catalog.upsert_titles(rows)
     return result.inserted + result.updated
+
+
+# --- the IMDb expansion phases, end to end -------------------------------
+
+
+async def test_a_titles_aliases_survive_a_batch_boundary_against_real_postgres(
+    session: AsyncSession, cache: Path
+) -> None:
+    """The alias phase's dataset and its writer, composed, against the
+    statement that actually does the deleting.
+
+    `replace_aliases` is `DELETE ... WHERE title_id = ANY(:ids) AND kind =
+    'alias'` followed by an insert, so a title split across two batches has
+    its first half deleted by its second half's call -- and **nothing
+    raises**, because the port's `ValueError` guard is about a row outside the
+    scope and both halves are inside their own. `batch_size=1` over a slice
+    whose every title carries two aliases is the shape that does it.
+
+    **This case is here as well as in `tests/unit/test_cli.py` because only
+    this arm runs the DELETE.** `FakeBulkCatalogRepository` models the scope
+    with a list comprehension; a defect in the statement's `= ANY(...)` or in
+    its `kind` predicate is invisible from the fake, and a defect in the
+    dataset's batching is visible from both. Two arms, two different things
+    each can see.
+    """
+    for source, name in (("title.akas.slice.tsv", "title.akas.tsv.gz"),):
+        (cache / name).write_bytes(gzip.compress((_FIXTURES / source).read_bytes()))
+    catalog = PostgresBulkCatalogRepository(session)
+    service = BootstrapService(PostgresImportRunRepository(session), catalog, session.flush)
+
+    async with httpx.AsyncClient(transport=_local(cache)) as client:
+        await service.import_dataset(
+            IMDbTitleDataset(client, cache, batch_size=10), lambda rows: _written(catalog, rows)
+        )
+
+        batches: list[int] = []
+
+        async def write(rows: Sequence[ImdbAka]) -> int:
+            batches.append(len(rows))
+            result = await catalog.replace_aliases(
+                rows, imdb_ids=list(dict.fromkeys(row.imdb_id for row in rows))
+            )
+            return result.written
+
+        run = await service.import_dataset(IMDbAkaDataset(client, cache, batch_size=1), write)
+
+    assert run.status is ImportRunStatus.COMPLETED
+
+    stored = await session.execute(
+        text(
+            "SELECT t.imdb_id, n.name, n.region, n.language FROM title_search_names n "
+            "JOIN titles t ON t.id = n.title_id WHERE n.kind = 'alias' "
+            "ORDER BY t.imdb_id, n.name"
+        )
+    )
+    assert [tuple(row) for row in stored.all()] == [
+        ("tt99000010", "A Synthetic Festival Title", "XWW", None),
+        ("tt99000010", "A Synthetic Working Title", None, None),
+        ("tt99000020", '"A Quoted Synthetic Alias"', "GB", None),
+        ("tt99000020", "Un Long Métrage Synthétique", "FR", "fr"),
+        ("tt99000030", "Uma Série Sintética", "BR", "pt"),
+        ("tt99000030", "Une Série Synthétique", "FR", "fr"),
+    ]
+    # The damage first, the mechanism second, in that order deliberately:
+    # against `group_of -> None` this file reports six one-row calls, which is
+    # *why* three aliases went missing, and the missing aliases are *what*
+    # went wrong. A case that asserts the mechanism first reports a batching
+    # detail for a defect whose subject is lost rows.
+    assert batches == [2, 2, 2], "each title reached the writer whole, in one call"
 
 
 # --- the movielens phase, end to end over a synthetic archive --------------

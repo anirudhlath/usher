@@ -605,6 +605,47 @@ class _ImdbDataset[RowT](BulkDataset[RowT]):
     def parse(self, line: str) -> RowT | None:
         """Parse one line, or return None for a header or filtered row."""
 
+    def group_of(self, row: RowT) -> str | None:
+        """The id whose rows must reach one writer call together, or `None`
+        when any batch boundary is safe.
+
+        **`None` is the answer for a writer that is row-scoped**, which is
+        what `upsert_titles` and `apply_ratings` are: each row is upserted on
+        its own key, so splitting a file anywhere costs at most a replayed
+        upsert. `IMDbAkaDataset` answers the `imdb_id`, because
+        `BulkCatalogRepository.replace_aliases` is a *scoped delete* followed
+        by an insert -- two calls naming one title replace each other's rows,
+        and the port's own docstring says a caller batching a line-oriented
+        dump has to close a title's run before it closes a batch.
+
+        **The loss a non-`None` answer prevents is silent.** The port's
+        `ValueError` guard fires for a row outside the scope, and both halves
+        of a split title are inside their own call's scope, so nothing raises
+        and nothing counts it. Measured over the whole pinned
+        `title.akas.tsv.gz` (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`,
+        58,906,368 data rows, 2026-08-11): at the shipped `bulk_batch_size` of
+        50,000, **all 924 batch boundaries land inside a title** and **3,867
+        retained rows** are deleted after being written.
+
+        Grouping is only sound if the dump keeps a title's rows **contiguous**,
+        and that is measured rather than assumed: the `titleId` column of
+        `title.akas` is non-decreasing over all 58,906,368 rows (**zero**
+        lexicographic descents, against 1,250,830 descents in the *integer*
+        inside it -- these files are string-sorted, exactly as `name.basics`
+        is), and so is `title.principals`' `tconst` over all 101,151,422.
+        Non-decreasing implies contiguous, because a run reopening after some
+        other id would have to descend to do it.
+
+        **A guard refusing a file whose order descends was measured and
+        declined.** It is one variable and no memory, but it checks a strictly
+        stronger property than the writer needs: this repository's own
+        `title.akas.slice.tsv` is contiguous and *not* sorted
+        (`tt99000020`, `tt99000030`, `tt99000010`), so the guard would refuse
+        a file that is fine. Contiguity itself cannot be checked without
+        remembering 12.7M ids.
+        """
+        return None
+
     @property
     def attribution(self) -> str:
         return IMDB_ATTRIBUTION
@@ -636,6 +677,13 @@ class _ImdbDataset[RowT](BulkDataset[RowT]):
 
         batch: list[RowT] = []
         position = skip
+        # Lines consumed through the last point a batch may safely end at. For
+        # an ungrouped dataset that is every kept row, so this tracks
+        # `position` and the arithmetic below is what it always was; for a
+        # grouped one it lags until the open group closes, which is only
+        # visible once the *next* group's first line has been consumed.
+        boundary = skip
+        group: str | None = None
         for line in self._file.lines(skip=skip):
             # position counts *lines consumed*, not rows kept, because that is
             # what `skip` replays against. Incremented before the filter so a
@@ -643,20 +691,54 @@ class _ImdbDataset[RowT](BulkDataset[RowT]):
             position += 1
             parsed = self.parse(line)
             if parsed is None:
+                # A filtered line belongs to no group, so it can only extend
+                # the boundary while none is open -- inside an open group it
+                # would move the cursor past rows not yet handed to a writer.
+                if group is None:
+                    boundary = position
                 continue
+            key = self.group_of(parsed)
+            if key is None:
+                batch.append(parsed)
+                boundary = position
+                if len(batch) >= self._batch_size:
+                    rows_seen += len(batch)
+                    yield BulkBatch(
+                        rows=tuple(batch),
+                        cursor=BulkCursor(
+                            revision=resolved, position=boundary, rows_seen=rows_seen
+                        ),
+                    )
+                    batch = []
+                continue
+            if key != group:
+                if group is not None:
+                    boundary = position - 1
+                    # Checked here rather than after the append: a full batch
+                    # is only allowed out at a group boundary, so a group
+                    # larger than `batch_size` overshoots it rather than
+                    # splitting. `title.akas`' largest run is 300 rows and
+                    # `title.principals`' is 75, against a 50,000 default.
+                    if len(batch) >= self._batch_size:
+                        rows_seen += len(batch)
+                        yield BulkBatch(
+                            rows=tuple(batch),
+                            cursor=BulkCursor(
+                                revision=resolved, position=boundary, rows_seen=rows_seen
+                            ),
+                        )
+                        batch = []
+                group = key
             batch.append(parsed)
-            if len(batch) >= self._batch_size:
-                rows_seen += len(batch)
-                yield BulkBatch(
-                    rows=tuple(batch),
-                    cursor=BulkCursor(revision=resolved, position=position, rows_seen=rows_seen),
-                )
-                batch = []
+        # End of file closes whatever group was open, so the boundary is every
+        # line consumed -- including a trailing run of filtered ones, which is
+        # what keeps a resume from re-reading them.
+        boundary = position
         if batch:
             rows_seen += len(batch)
             yield BulkBatch(
                 rows=tuple(batch),
-                cursor=BulkCursor(revision=resolved, position=position, rows_seen=rows_seen),
+                cursor=BulkCursor(revision=resolved, position=boundary, rows_seen=rows_seen),
             )
 
     async def aclose(self) -> None:
@@ -715,6 +797,14 @@ class IMDbAkaDataset(_ImdbDataset[ImdbAka]):
     position` stays a plain integer line number, bounded by 58,906,369 here,
     which round-trips through `ImportRun.position`'s `Integer` with three
     orders of magnitude to spare.
+
+    **What this class does change in `_ImdbDataset` is where a batch may
+    end.** `replace_aliases` is a scoped delete followed by an insert, so a
+    title whose rows straddle a batch boundary has the first half deleted by
+    the second half's call -- silently, since both halves are inside their own
+    call's scope and the port's `ValueError` guard never fires. `group_of`
+    answers the `imdb_id` and the batching closes a title's run first, the
+    same rule `IMDbCreditNamesDataset` already keeps for `title.principals`.
     """
 
     @property
@@ -727,6 +817,9 @@ class IMDbAkaDataset(_ImdbDataset[ImdbAka]):
 
     def parse(self, line: str) -> ImdbAka | None:
         return parse_akas_row(line)
+
+    def group_of(self, row: ImdbAka) -> str | None:
+        return row.imdb_id
 
 
 # `name.basics=<etag>;title.principals=<etag>`. Spelled out rather than
