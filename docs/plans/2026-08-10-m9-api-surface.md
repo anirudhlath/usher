@@ -7428,6 +7428,18 @@ rather than routed forward.**
    server's screen cache. Reported here rather than edited, because the sentence
    is true about what is missing and the milestone that owns it does not exist.
 
+**Two milestone counts, corrected here because both circulated wrong and both
+are one command.** The branch is **236 commits**, measured as
+`git rev-list --count 1b54ffd..116a5f4` — base `1b54ffd`, the M8 merge, head
+`116a5f4`, H7's merge — and **0 of the 236 carry a trailer**. It ships **17
+routers**, `ls src/usher/api/routers/*.py` minus `__init__.py`, against **6** at
+the M9 plan commit `095818e`, so M9 added **eleven**. The figures in circulation
+during execution were 232 and 13. Neither was a measurement, and both are
+recorded with their base and their command so the next reader re-runs them
+rather than quoting them: **a count with no base is not a count**, which is the
+same rule this milestone applied to the tag-genome pair rate and to every
+"5,020 seeds" figure S1 had to retire.
+
 **The one number this census is a claim about**, and it is checkable: `07`'s 28
 editing tasks against `01`'s one. A document twenty-eight tasks edit is where a
 merge conflict per pair is the expectation rather than the surprise, which is

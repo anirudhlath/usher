@@ -540,10 +540,28 @@ through the door that rule does not cover.
 
 **Closed 2026-08-06.** 42 cases (from 35), and the prompt sweep re-run at
 **26 mutations — 20 killed, 5 deliberately unpinned, 1 control surviving as
-designed**. The five left alive are framing prose with no constant, no rendered
-number and no `DropReason` behind them: the role sentence, the two history
-headers, the *"Group by something a person would recognise"* rule and the
-`reason` bullet's wording. Named here rather than pinned, because a verbatim
+designed**. Five were left alive as framing prose with no constant, no rendered
+number and no `DropReason` behind them — **and three of the five have since been
+pinned, so read the list with its outcomes rather than as it stood**:
+
+- **the role sentence — PINNED** by M9's G3, 2026-08-11. It was never framing:
+  it claimed the candidates are *"one household's **own** library"* and the pool
+  carries no ownership filter, so it is a claim another component would have had
+  to honour.
+- **`"This household has not finished anything yet."` — PINNED** 2026-08-07.
+  A **branch**, not framing: one arm of `if history:`, and the arm most fixtures
+  actually render.
+- **the non-empty history header — still unpinned**, and still genuinely framing.
+- **the *"Group by something a person would recognise"* rule — still
+  unpinned**, and the one M8's live run measured the model ignoring 88% of the
+  time. Nothing in this system checks it, which is a finding rather than a gap
+  in this list.
+- **the `reason` bullet's *"one sentence"* — PINNED** 2026-08-07. A **bound**:
+  `MAX_REASON_CHARS = 1000` and `validate_curation` drops the whole row as
+  `row_unusable` rather than truncating.
+
+**Two left, not five, and the corrections are worked through below.** Named
+rather than pinned, in the two cases that remain, because a verbatim
 assertion on the sentences most likely to be *tuned* is a change-detector, and
 the line drawn is: **every constant and every rendered number in a prompt gets
 a case, and so does every rule a validator will drop a row for** (ADR-0028
@@ -565,9 +583,15 @@ worst case is cosmetic, was already pinned. **Ask of a prompt sentence whether
 it is one arm of a conditional and whether a validator will discard anything
 over it, before asking whether it is prose somebody might tune.**
 
-**A third of the five is now pinned too, and it is the *role sentence* — the
-one the list above names first and calls framing prose with the most
-confidence.** Corrected 2026-08-11 by M9's G3. The sentence was not framing: it
+**A third of the five is now pinned too, and it is the *role sentence* — which
+the list above carried as the archetype of framing prose until this correction,
+and which is now marked ❌ there.** Corrected 2026-08-11 by M9's G3, and the
+list itself was rewritten to say so on 2026-08-12: the annotation had been added
+down here while the sentence up there still named the role sentence among the
+unpinned five, so a test author arriving through this file's `paths:`
+frontmatter — which is what binds them — read the false version and never
+reached the correction. **A correction filed below the claim it corrects is not
+a correction; it is a second claim.** The sentence was not framing: it
 asserted that the candidates below it are *"one household's **own** film and
 television library"*, and the pool the prompt is handed **is not filtered by
 ownership** — a measured fact (`owned DESC` is only a sort key, so a 200-title

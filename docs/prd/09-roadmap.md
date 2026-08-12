@@ -1020,8 +1020,65 @@ suspicion.
   *magnitude*. ⚠️ The field this closes has still never been exercised by a real
   429 from TMDb — T2's 393-request live run saw none — so its behaviour is
   pinned by one case and by no observation.
-- **`test_sse_end_to_end.py::test_opening_a_stub_promotes_it…` is flaky, and the
-  second reading has now been evaluated and is largely refuted** — measured by
+- 🔴 **`test_rows_refresh.py::test_the_route_serves_stale_and_the_refresh_runs_on_a_session_of_its_own`
+  is intermittent under whole-suite load, and this list is where that belongs** —
+  **1 failure in 5 whole-`tests/integration` runs, 0 in 5 runs on its own**,
+  measured by M9's H7 on 2026-08-12 over the merged tree — and **it reproduced
+  again the same day during H6's rework, once in two runs, taking the observed
+  rate to 2 in 7.** Two things travel with that second reproduction and both
+  matter more than the rate. **The failing run had `ruff`, `mypy` and
+  `lint-imports` executing concurrently in another shell and the clean re-run
+  did not** — which is one more datum consistent with load and is *still* not a
+  mechanism, exactly as the two earlier attempts to explain a flake in this
+  project by load were not. And **the failing run captured only `tail -2`, so
+  which assertion lost was not recorded and is still unknown**; the re-run that
+  would have shown it passed. *A flake reproduced without its traceback
+  captured is a rate, not a mechanism* — whoever takes this should run it under
+  load with the full output redirected to a file, because the reproduction is
+  cheap and the diagnosis is the whole value. It is A6's
+  serve-stale feature asserted at the HTTP boundary, and **two of its three
+  claims are *ordering* claims** — the response arrived with the refresh still
+  queued (`row_refreshes.depth == 1`), and the refresh's session began strictly
+  after the request's ended. (H7's own write-up says all three; the first claim
+  is that the served screen is the stale one, which no clock decides. Corrected
+  here because *which* assertion is fragile is the whole content of this
+  entry.) A loaded box is precisely where the other two are fragile. That is a
+  property of the assertions, and **no run so far is evidence of a defect in
+  serve-stale** — nobody has isolated which of the two loses, and until somebody
+  does, "load" is a correlation and not a mechanism. That is the distinction
+  this milestone had to relearn three times: once when a contention theory was
+  relayed as settled and refuted by an isolated-copy bisect, once when a
+  non-`NULL` `xmin` was asserted to mean an uncommitted read and measured not
+  to, and once here.
+  ⚠️ **It is deselected by node id for a mutation sweep and by nothing else.**
+  `.github/workflows/ci.yml:46` runs `uv run pytest --cov=usher
+  --cov-report=term-missing` over the whole suite with no deselection, so the
+  first CI red it produces arrives with nothing anywhere saying it is known —
+  which is the exact failure this section exists to prevent, and the reason it
+  is recorded here rather than only in the sweep ledger and the plan.
+  **The honest fix is to make the two ordering premises facts rather than
+  races** — the case already stops the lane across the request, which is what
+  makes claim 2 solid, so the unheld one is claim 3's *"the refresh's session
+  began after the request's ended"*, observed through a session log rather than
+  forced. Not to deselect it in CI: a case deselected in CI is a feature nobody
+  checks.
+- ✅ **`test_sse_end_to_end.py::test_opening_a_stub_promotes_it…` was flaky and
+  is closed — do not inherit the deselection.** `.claude/rules/mutation-sweeps.md`
+  names it **four** times: one attribution note and **two deselections**, then
+  H7's entry retiring both. (H7's write-up says *"nine ledger entries"*;
+  `grep -c` says four. Counted rather than recalled, on the same rule as the
+  commit and router counts in the plan's census.) Every one of those was stale
+  by the end of M9: **G2 made the ordering structural**, publishing the frame after the
+  completing commit, and `test_sse_end_to_end.py:434-441` documents G1's
+  bounded `_job_xmin_settles` poll being *retired* rather than tidied —
+  restoring it would hide the regression the single read now catches. H7
+  measured the retirement: **5 of 5 whole-`tests/integration` runs, and absent
+  from all fifteen whole-suite sweep runs' failure lists.** **A deselection
+  inherited from a ledger is a deselection nobody measured**, and this one
+  would have carried a green case out of the suite while the genuinely
+  intermittent one above stayed in. The reading it produced is kept because it
+  is a fact about the code rather than about the case, and it is this:
+  second reading evaluated and largely refuted, measured by
   M9 (G1) on 2026-08-11 and recorded in
   [ADR-0033](decisions/0033-an-event-is-a-statement-about-committed-state.md).
   **All five `events.publish` sites in `src/` publish after their own subject
@@ -1042,8 +1099,8 @@ suspicion.
   version the reader *can* see, and at failure it is the claim's committed
   `status='running'`), and it reproduces **5 of 5** with a delay planted between
   the handler returning and `complete()`, against 6 of 13 unplanted under load.
-  **M9** — the ordering is made structural by M9's G2 as an ordering property,
-  not a durability one, and it needs no outbox table.
+  **Closed by M9's G2** — the ordering is structural now, as an ordering
+  property rather than a durability one, and it needed no outbox table.
 - **Query expansion is shipped off after measuring worse** — M8's live
   verification measured MRR 0.733 → 0.373 and recall@10 0.800 → 0.533, with a
   label-free control (query-to-query cosine 0.5417 → 0.5975 mean, 0.6328 →
@@ -1177,6 +1234,24 @@ suspicion.
   which is a migration, a port change and a change to every composition root.
   The cheap mitigation, which is documentation rather than code: run one worker,
   or accept that a crash costs a manual `UPDATE`.
+  🔴 **And the worse half, which the `usher work` description above understates:
+  the same fault inside the API server's own in-process worker lane orphans
+  claims with no process death at all.** `api/lanes.py:554-561` calls
+  `worker.startup()` **once per lane lifetime** and sets `requeued = True` —
+  correct on its own terms, and the comment says why (*"a second call would
+  steal this lane's own claims"*) — while `:573-578` catches `except Exception`,
+  logs a warning and continues, which is also correct on its own terms
+  (*"a database outage must slow the lane down, never end it"*). Composed, they
+  are a leak: a `MissingGreenlet` raised inside `run_once()` leaves that pass's
+  claims in `running`, the lane loops round and claims fresh work, **no
+  `startup()` ever runs again in that process**, and nothing appears in
+  `/health/ready` — the very thing the `except Exception` comment says a
+  returning lane would cause is what the surviving lane silently produces for
+  the abandoned claims. In the `usher work` case above an operator at least
+  sees a dead worker. Here the only symptom is a queue that never finishes some
+  rows, and a `logger.warning` in a stream nothing asserts on. **The claim lease
+  is the fix for both**; until then this path is the one to name first, because
+  it is the deployment shape `docker compose up` gives you by default.
 - **`usher unmatched --resolve` stack-traces on an unknown `--title`** — found
   by M9's E4, which fixed the *route* and could not fix the CLI because
   `cli.py` is not that task's file. The route now reads the title first and
@@ -1215,6 +1290,14 @@ suspicion.
   says so in its own docstring. The honest statement is that a generated client
   will annotate these responses with the wrong content type until somebody takes
   it.
+  ✅ **Both sites now say so where the fix would land** — the milestone's final
+  review found the two assertions reading `content["application/json"]` with no
+  comment naming why, so the *cost* of the fix was documented everywhere except
+  at the two places that have to change. Corrected 2026-08-12: each carries the
+  known-wrong marker and points at `tests/unit/test_api_openapi.py`. **A debt
+  recorded only in the roadmap is a debt the person editing the code does not
+  see** — the same shape as the curation role sentence corrected in
+  `testing-discipline.md` this same day, one subsystem over.
 
 ## Post-v1 candidates
 

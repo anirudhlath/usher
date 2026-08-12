@@ -95,8 +95,12 @@ milestone. That cost is stated rather than argued away: this is a refusal to
 **What the build would have cost, priced before the answer was chosen rather
 than after.** An importer for a member this project has never read
 (21,274,899 rows / 85 MB), a `title_tags` table, a **migration id that does not
-exist** (`m09a` is M1's, `m09b` is group T's, `m09c` is spare and must be
-*requested*), a `NeighborCandidate` field, two widened statements in
+exist** (`m09a` is M1's, and at the time this was priced `m09b` was group T's
+with `m09c` spare — by M9's close **both had moved**: T4 was withdrawn on its
+own failed size bar so `m09b` is unallocated, and `m09c` was requested and
+minted as the image natural key, leaving `alembic heads` at `m09c` on one linear
+chain; the pricing is unaffected, since a fourth revision is a fourth revision
+whichever letter it takes), a `NeighborCandidate` field, two widened statements in
 `db/repositories/search.py`, both fakes, the contract suite, and a full
 `usher similar --rebuild` because adding a term re-weights the other four and
 moves every stored score. None of that is proportional to a signal that fails

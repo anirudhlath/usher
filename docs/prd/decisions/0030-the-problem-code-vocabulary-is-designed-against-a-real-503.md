@@ -104,7 +104,7 @@ directions, so the two cannot drift apart without a red suite.
 | code | status | emitted by |
 |---|---|---|
 | `not_found` | 404 | `GET /titles/{title_id}`, `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play`, `GET /admin/sources/{source_id}/status`, `DELETE /admin/sources/{source_id}`, `GET /images/{image_id}`, and every unrouted path — Starlette's router raises it before any handler runs |
-| `validation_failed` | 422 | every route, through FastAPI's request validation and `api/errors.py`'s stripping handler; `GET /events` raises it directly for a malformed `?titles=`, and `GET /search` for a `?mode=semantic` this deployment has no embedding model to serve |
+| `validation_failed` | 422 | every route, through FastAPI's request validation and `api/errors.py`'s stripping handler; `GET /events` raises it directly for a malformed `?titles=`, and `GET /search` for a `?mode=semantic` this deployment has no embedding model to serve — that last arm, and the two `POST /admin/unmatched/{id}/resolve` refusals that copied it, carry **an open amendment below**: the member conflates "malformed" with "unserviceable here" |
 | `method_not_allowed` | 405 | every route, through Starlette's router |
 | `invalid_cursor` | 400 | `api/cursor.py`, on any cursor that does not match the query it is replayed against. **The one member with no route yet** — see Consequences |
 | `source_unavailable` | 503 | `POST /titles/{title_id}/play`, `POST /episodes/{episode_id}/play` — **beyond the benchmark; forced by** the first route in Usher that holds a `SourceAdapter`. Also `GET /images/{image_id}`, on **both** of its upstream arms — see the amendment below |
@@ -245,59 +245,17 @@ The naming rule therefore binds **new** members and does not re-open a shipped
 one. The asymmetry is recorded here so the next reader does not read
 `invalid_cursor` as a precedent for adjective-first spellings.
 
-### Amendment 2026-08-11 — `GET /images/{image_id}` has a second upstream arm, its honest status is 502, and no member names one
+### Two open amendments live at the bottom of this record, not here
 
-**This is a request, not a mint.** The rule this record states is that a
-fan-out task needing a member it was not given amends this record in the same
-commit; the rule the M9 plan's wave brief adds is that a task must **stop and
-ask** rather than write the member itself. Both are honoured here: the fact is
-recorded, the member is not added, and the route ships inside the vocabulary as
-it stands.
-
-The image proxy's upstream failures are **three**, and only the third has no
-name here:
-
-- **`PortUnavailable`** — the CDN timed out, refused the connection,
-  rate-limited or answered 5xx. Transient. `503 source_unavailable` is exactly
-  right and the route ships it with a `Retry-After`.
-- **`MediaTypeNotServable`** — a subclass of `PortDataMalformed` that C4 added
-  for exactly this: the provider answered *correctly* about artwork this
-  deployment declines to carry, which today is an `image/svg+xml` logo, roughly
-  **one title in seventeen** (`.claude/rules/ports-and-error-taxonomy.md` has
-  the sample). That is an absence and not a fault, so it is a `404 not_found` —
-  a member this record already has, on the reading rule 2 gives: `instance`
-  carries the resource and a client renders the same fallback it would for a
-  title with no logo. **No new member is wanted for it and none is requested.**
-- **A residual `PortDataMalformed`** — a 4xx from the CDN (a rung withdrawn
-  from a kind, which
-  [ADR-0032](0032-the-image-proxy-clamps-to-a-ladder.md)'s Uncertainty names), a
-  body past `USHER_IMAGE_MAX_BYTES`, or a captive portal's HTML login page
-  under a 200. **Not transient**: the same request produces the same unusable
-  answer, and a client told to retry will retry forever.
-
-502 is the status RFC 9110 §15.6.3 gives that, and **no member here names a
-502**. `source_unavailable` cannot be raised at one: the stability rule above
-says a code carries one status everywhere, and
-`test_every_code_carries_one_status_everywhere_it_is_raised` enforces it. So
-the route ships **both arms as `503 source_unavailable`** and carries the
-distinction in `Retry-After` — present on the transient arm, absent on the
-other — which is standard, machine-readable, and needs nothing from this
-record.
-
-**What a member would have to clear, written here so the next reader is not
-starting from scratch.** Rule 1 is met: there is an emitter in
-`src/usher/api/routers/images.py` at this commit. The naming rule gives
-`<subject>_<state>`, so `upstream_unusable` fits and `bad_gateway` does not.
-The bar this record applies is *"does an existing member already carry this
-meaning, and would a client branch differently on it?"* — and the honest answer
-to the second half is that **an image client probably would not**: it paints a
-placeholder either way. That is the argument against minting one, and it is why
-this is a request rather than a fait accompli. The argument *for* is that the
-two arms differ in whether retrying can ever work, which is the one thing a
-cache or a retry layer in front of a client does branch on.
-
-Until it is settled, `Retry-After` is the contract and
-`docs/prd/08-operations.md`'s degradation table carries both arms.
+Two fan-out routes reached this vocabulary wanting a member it does not
+have, and **neither minted one**. Both are recorded as *requests* under
+**Open amendments** below, in the same shape and each carrying its own
+`Status of the amendment` line: `GET /images/{image_id}`'s non-transient
+upstream arm, whose honest status is a 502 no member names, and
+`GET /search`'s `?mode=semantic` on a deployment with no embedding model.
+They are below rather than here because an unanswered request is not a
+decision, and filing one under `## Decision` is how it comes to be read as
+settled.
 
 ### Declined — members with no emitter, each with the fact that kills it
 
@@ -411,19 +369,15 @@ the derivation function is not changed to avoid the question.
   the project's first genuine upstream failure. Ten more members were requested
   by the queued fan-out and none of them survives rules 1 and 2.
 - **The first fan-out route to want an eighth member did not mint one, and the
-  question it raises is recorded rather than answered here.** `GET /search`
-  answers `?mode=semantic` on a deployment with no embedding model, and none of
-  the seven means *"the request is well formed and names a capability this
-  deployment does not have"*. `503 source_unavailable` is wrong twice — nothing
-  failed, and no retry reaches the state — and the route ships
-  `422 validation_failed`, whose axis is the closest true one: the remedy is to
-  change the request. **What that spelling cannot express is the difference
-  between a parameter that is malformed and one that is unserviceable *here*,
-  which is a real distinction for a client with more than one Usher
-  deployment.** The rule above holds — a member is minted by amending this
-  record, not by a route — so this is a candidate for that amendment (a
-  `capability_unavailable`-shaped 422 or 409) and deliberately not a decision
-  taken beside the route that noticed it.
+  question it raises is open.** `GET /search`'s `?mode=semantic` on a deployment
+  with no embedding model ships `422 validation_failed`, and *"this request is
+  malformed"* and *"this request is fine and this server is not configured for
+  it"* are two different things told to a client on one member. **It is written
+  up under *Open amendments* below, not here** — this bullet used to be the only
+  place the question existed, while the vocabulary table stated the answer
+  flatly and two other files already cited it as precedent, which is how an
+  unanswered question quietly becomes an answered one. Three emitters and the
+  bar the mint would have to clear are in that section.
 
 ## Evidence
 
@@ -457,6 +411,131 @@ the derivation function is not changed to avoid the question.
   own assertion line; a member added to the enum and not to this table fails
   the both-directions case naming the member; a per-resource 404 fails both the
   careless-spelling case and the careful-spelling one.
+
+## Open amendments — requests this record has not answered
+
+**Two of them, and they are here so they have the same shape as each other
+and as the accepted amendment below.** M9's final review found this record
+giving its amendments *three* treatments: one closed amendment as a `##`
+section with a `Status of the amendment` line, one open request as a `###`
+under `## Decision` with no status at all, and one open request living only
+as a Consequences bullet — while the vocabulary table above stated its answer
+flatly and two other files had already reused that answer as precedent. **An
+open question that is only legible in one bullet, and settled doctrine
+everywhere a reader actually looks, is a decision nobody took.** Both now
+carry a status, and both are `Open`.
+
+The rule they are both honouring: a fan-out task that needs a member it was
+not given **stops and asks** rather than writing one, and the request is
+recorded in this record in the same commit as the route that raised it. The
+route ships inside the vocabulary as it stands either way, which is what makes
+waiting cheap.
+
+### Amendment 2026-08-11 — `GET /images/{image_id}` has a second upstream arm, its honest status is 502, and no member names one
+
+**Status of the amendment: Open.** A request, not a mint; nothing in this
+record's vocabulary changes until it is answered, and `Retry-After` is the
+contract meanwhile. Raised by M9's C5.
+
+**This is a request, not a mint.** The rule this record states is that a
+fan-out task needing a member it was not given amends this record in the same
+commit; the rule the M9 plan's wave brief adds is that a task must **stop and
+ask** rather than write the member itself. Both are honoured here: the fact is
+recorded, the member is not added, and the route ships inside the vocabulary as
+it stands.
+
+The image proxy's upstream failures are **three**, and only the third has no
+name here:
+
+- **`PortUnavailable`** — the CDN timed out, refused the connection,
+  rate-limited or answered 5xx. Transient. `503 source_unavailable` is exactly
+  right and the route ships it with a `Retry-After`.
+- **`MediaTypeNotServable`** — a subclass of `PortDataMalformed` that C4 added
+  for exactly this: the provider answered *correctly* about artwork this
+  deployment declines to carry, which today is an `image/svg+xml` logo, roughly
+  **one title in seventeen** (`.claude/rules/ports-and-error-taxonomy.md` has
+  the sample). That is an absence and not a fault, so it is a `404 not_found` —
+  a member this record already has, on the reading rule 2 gives: `instance`
+  carries the resource and a client renders the same fallback it would for a
+  title with no logo. **No new member is wanted for it and none is requested.**
+- **A residual `PortDataMalformed`** — a 4xx from the CDN (a rung withdrawn
+  from a kind, which
+  [ADR-0032](0032-the-image-proxy-clamps-to-a-ladder.md)'s Uncertainty names), a
+  body past `USHER_IMAGE_MAX_BYTES`, or a captive portal's HTML login page
+  under a 200. **Not transient**: the same request produces the same unusable
+  answer, and a client told to retry will retry forever.
+
+502 is the status RFC 9110 §15.6.3 gives that, and **no member here names a
+502**. `source_unavailable` cannot be raised at one: the stability rule above
+says a code carries one status everywhere, and
+`test_every_code_carries_one_status_everywhere_it_is_raised` enforces it. So
+the route ships **both arms as `503 source_unavailable`** and carries the
+distinction in `Retry-After` — present on the transient arm, absent on the
+other — which is standard, machine-readable, and needs nothing from this
+record.
+
+**What a member would have to clear, written here so the next reader is not
+starting from scratch.** Rule 1 is met: there is an emitter in
+`src/usher/api/routers/images.py` at this commit. The naming rule gives
+`<subject>_<state>`, so `upstream_unusable` fits and `bad_gateway` does not.
+The bar this record applies is *"does an existing member already carry this
+meaning, and would a client branch differently on it?"* — and the honest answer
+to the second half is that **an image client probably would not**: it paints a
+placeholder either way. That is the argument against minting one, and it is why
+this is a request rather than a fait accompli. The argument *for* is that the
+two arms differ in whether retrying can ever work, which is the one thing a
+cache or a retry layer in front of a client does branch on.
+
+Until it is settled, `Retry-After` is the contract and
+`docs/prd/08-operations.md`'s degradation table carries both arms.
+
+### Amendment 2026-08-12 — `422 validation_failed` carries "well formed, but this deployment cannot serve it", and that is a second axis on one member
+
+**Status of the amendment: Open.** A request, not a mint. Raised by M9's B4 for
+`GET /search`, and **promoted out of a Consequences bullet into this section on
+2026-08-12**, because a bullet was the wrong shape for it — see below.
+
+`GET /search` answers `?mode=semantic` on a deployment with no embedding model,
+and none of the seven members means *"the request is well formed and names a
+capability this deployment does not have"*. `503 source_unavailable` is wrong
+twice — nothing failed, and no retry reaches the state — so the route ships
+`422 validation_failed`, whose axis is the closest true one: **the remedy is to
+change the request.** What that spelling cannot express is the difference
+between *"this request is malformed"* and *"this request is fine and this
+server is not configured for it"*, which are two different things for a client
+to tell a person.
+
+🔴 **The reason this needed a section rather than a bullet, and it is the part
+worth keeping.** The bullet said the question was *"recorded rather than
+answered here"* — while the vocabulary table above stated the answer flatly,
+and **the answer had already been reused as settled precedent twice**:
+`src/usher/api/routers/unmatched.py:170`, whose `_rejected` docstring cites
+*"the precedent ADR-0030's table already records for `GET /search`'s
+unservable `?mode=semantic`"*, and
+[PRD 07](../07-client-api.md)'s resolve-route blockquote, which reaches for
+*"the shape `GET /search` already uses"*. So by the end of the milestone the
+question was open in exactly one bullet and closed doctrine in every place a
+reader arrives from. **A precedent is how an unanswered question becomes an
+answered one without anybody deciding**, and the defence is that the record's
+own open items are as findable as its rulings — which is what this section is.
+
+**What a member would have to clear**, on the same bar the amendment above
+applies. Rule 1 is met: three emitters exist at this commit (`GET /search`, and
+both refusal arms of `POST /admin/unmatched/{id}/resolve`). The naming rule
+gives `<subject>_<state>`, so `mode_unsupported` or `capability_unavailable`
+fit. The bar is *"would a client branch differently on it?"* — and here, unlike
+the image case, the honest answer is **probably yes**: a client told its request
+is malformed should stop sending it, and a client told the server lacks a
+capability should offer the person a different mode, or the same request against
+a different deployment. That is a stronger argument for minting than the image
+arm has, and it is recorded as such rather than levelled to match.
+
+**What holds until it is settled**, so no third caller has to re-derive it:
+`422 validation_failed` is the answer, `instance` names the resource, and
+`detail` carries a **fixed sentence** — never an interpolation of client input,
+which `api/errors.py` exists to prevent one field to the left. Any fourth
+emitter reaching for this shape should add itself here rather than cite a
+sibling.
 
 ## Amendment — 2026-08-11: `not_playable` gets a second emitter, and no member is minted
 
