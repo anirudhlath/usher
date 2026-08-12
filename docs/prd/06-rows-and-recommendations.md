@@ -162,9 +162,21 @@ Three consequences worth stating, because each was a live alternative:
   falsy value being read as a measurement, and a UUID has no zero.
 
 A card also paints a poster or a backdrop and **never a logo**, which is why
-ADR-0032's refusal of `image/svg+xml` needs no discriminator here: the `kind`
-filter makes an unservable logo unreachable from a card, and *"no logo"* and
-*"a logo we will not serve"* would produce the identical rendering anyway.
+ADR-0032's refusal of `image/svg+xml` needs no discriminator here: *"no logo"*
+and *"a logo we will not serve"* would produce the identical rendering anyway.
+🔴 **That sentence read *"the `kind` filter makes an unservable logo
+unreachable from a card"* until 2026-08-11, and the clause is one measurement
+short.** The `kind` filter excludes *logos*; what excludes a **poster or a
+backdrop published as `.svg`** is only the provider's present habit, which is
+an empirical property of TMDb and not a guarantee this code holds. So the
+shelf read filters on `usher.ports.images.is_servable_path` exactly as
+`GET /titles/{id}`'s `images` key does ([07](07-client-api.md)) — two reads of
+one table disagreeing about what is servable is the drift that one definition
+exists to prevent. The degradation is stated rather than discovered: the shelf
+read has **already chosen one image**, so a title whose chosen poster is
+unservable renders `artwork: null` rather than falling through to its second
+poster — which is the same render the paragraph above is about, and which is
+the whole reason a card carries no discriminator instead.
 
 Two further fields an earlier draft of this sentence listed are **deliberately
 absent**, each for a stated reason:

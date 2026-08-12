@@ -211,6 +211,45 @@ async def test_a_title_whose_only_artwork_is_a_logo_carries_none() -> None:
     assert row.cards[0].artwork is None
 
 
+async def test_a_poster_the_proxy_cannot_serve_leaves_the_card_with_none() -> None:
+    """The state the case above says a `kind` filter makes unreachable, and
+    which nothing in this code actually excludes.
+
+    *"A card is never handed a logo"* is true and is not the whole claim. That
+    a **poster** is never published as `.svg` is an empirical property of the
+    provider today, not a guarantee: `images_from_payload` records whatever
+    `provider_path` the payload carried, for every kind, and servability is
+    otherwise only decided at serve time from a fetched `Content-Type`. So
+    this shelf read filters on `is_servable_path` exactly as
+    `GET /titles/{id}`'s `images` key does -- **two reads of one table
+    disagreeing about what is servable is the drift that predicate exists as
+    one definition to prevent.**
+
+    The degradation is the assertion: `primary_for_titles` has already chosen,
+    so this title's *second* poster is not fallen through to and the card
+    carries `None`. Deliberate, and it is why a card must not carry a
+    discriminator instead -- "no poster" and "a poster we will not serve" are
+    the same render, and both are the one a client wants.
+    """
+    library = Library()
+    title_id = await library.title("A Film With An SVG Poster")
+    unservable = await library.artwork(
+        title_id, kind=ImageKind.POSTER, path="/a-poster.svg", is_primary=True
+    )
+    second = await library.artwork(
+        title_id, kind=ImageKind.POSTER, path="/a-poster.jpg", is_primary=False
+    )
+    assert unservable < second, (
+        "the premise: the unservable poster is the one primary_for_titles picks, "
+        "so this case is about the filter rather than about the read order"
+    )
+    ctx = library.context()
+
+    row = await _Shelf([title_id], hint=DisplayHint.PORTRAIT).build(ctx)
+
+    assert row.cards[0].artwork is None
+
+
 async def test_the_flagged_image_wins_over_the_one_that_was_seen_first() -> None:
     """`(is_primary DESC, id)`, and the fixture is arranged so `ORDER BY id`
     disagrees.

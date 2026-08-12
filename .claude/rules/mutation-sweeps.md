@@ -2505,6 +2505,7 @@ Gate green before and after on the fully restored tree: **3,492 unit / 4
 skipped**, **1,063 integration / 22 skipped**, `ruff check`,
 `ruff format --check`, `mypy` over 532 files, `lint-imports` 9 kept / 0 broken,
 PRD link check `OK`.
+
 ## M9 Task E2 — `GET`/`PUT /admin/rows/providers`, and the toggle reaching the screen (2026-08-11)
 
 **14 plants over the four files E2 touches in `src/` — 12 targets all KILLED,
@@ -2957,3 +2958,164 @@ finds scan `ports/embedding.py`, `ports/metadata.py`, `services/`, `api/`,
 and the one that *does* read `usher.ports.repository`
 (`test_ports_repository_package.py`) checks a docstring's **presence** and
 walks the module for `ast.ImportFrom` nodes, neither of which sees prose.
+
+## M9 Task C7 — the `images` key on `GET /titles/{id}` (2026-08-11)
+
+**16 plants over `services/titles.py`, `api/dto/title.py`,
+`db/repositories/image.py` and `tests/fakes/image_repository.py` — 13
+behavioural targets of which 12 were killed on the first pass and **1 was a
+real coverage gap since closed**, plus 3 equivalent-mutant controls surviving
+all five gate steps. 1 BAD-ANCHOR (re-spelled and killed), 0
+BROKEN-MUTATION, 0 DID-NOT-RUN, 0 HUNG.** Harness at `/var/tmp/m9-C7/plants.py`
+— **outside the working tree**, for the reason V1's entry records — with the
+plant list and its **expected verdict** written down first, an exact anchor
+count asserted before every plant, the landing spelled `old not in landed and
+new in landed` (B6's substring-immune form), `compile()` as the dry run,
+`PYTHONDONTWRITEBYTECODE=1` with `__pycache__` swept under **both** `src/` and
+`tests/`, a 900 s per-plant timeout, no second `-q`, and every restore verified
+by `md5sum` **plus** a read-back of the original anchor.
+
+**Selection:** `test_api_titles.py`, `test_services_titles.py`,
+`test_api_dto.py`, `test_api_problem.py`,
+`tests/integration/test_services_titles.py` and
+`tests/integration/test_titles_route.py` — 93 cases, ~11 s a run, green before
+and after. Scoped rather than whole-suite for B2's and D4's reason:
+`tests/integration/test_sse_end_to_end.py` is intermittent on this tree and **a
+sweep scored on "did the run fail" cannot run against a suite holding a flaky
+case**. The last two files of the selection are in it because
+`TitleReadService` and `api/dto/title.py` are reached from outside this task's
+own files there.
+
+**The survivor is a predicate's negative parameters chosen against the wrong
+wrong-implementation, and it is C4's own warning arriving one task later.**
+`is_servable_path` is imported rather than re-spelled, so the plant that
+matters is somebody inlining it — and
+`".svg" not in one.provider_path.lower()` **survived all 93 cases**. The case
+had seeded `/svg-poster.jpg` and `/A-LOGO.SVG`, taken from C4's ledger entry as
+"the two adversarial paths"; but **`/svg-poster.jpg` contains no `.svg` at
+all** — it discriminates a `"svg" in path` spelling, and the `.svg`-substring
+spelling is discriminated by a third parameter, `/.svg.jpg`. C4's parameter
+table carries all three and its ledger entry names two, so a consumer reading
+the entry rather than the table seeds exactly the pair that ratifies the
+mutant. Closed by adding `/.svg.jpg` to both cases; re-planted, it fails **both
+of them** and nothing else.
+
+**The general form, and it is a strengthening of C4's rule rather than a
+restatement:** *"choose a predicate's negatives against the wrong
+implementations"* is only executable if the list of wrong implementations is
+the one being defended against — and a summary of a parameter table is not the
+parameter table. When a case is seeded from another task's prose, plant each
+wrong implementation the prose names and check that a *different* parameter
+dies for each; two mutants dying on one parameter means one of them is
+untested.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the fake's `(is_primary DESC, id)` loses `is_primary` | KILLED | 1 — the named unit ordering case |
+| P2 `_LIST_FOR_TITLE`'s `ORDER BY is_primary DESC, id` → `ORDER BY id` | KILLED | 2 — both integration ordering cases |
+| P3 the absent-key branch replaced by an unconditional set (`"images": []`) | KILLED | 4 |
+| P4 `kind` dropped from `ImageResponse` | KILLED | 4 |
+| P5 the servability filter deleted | KILLED | 4 |
+| P6 the filter inverted | KILLED | 4 |
+| **P7 the predicate inlined as `".svg" in …`** | **SURVIVED, then closed** | 0, then 2 |
+| P8 the predicate inlined without lower-casing | KILLED | 2 |
+| P9 the counter's `served` arm deleted (the drop count loses its denominator) | KILLED | 2 |
+| P10 the counter's `unservable` arm deleted | KILLED | 2 |
+| P11 both arms guarded by `if images:` (zeros suppressed) | KILLED | 1 |
+| P12 the images read never made | KILLED | 4 |
+| P13 `detail`'s docstring left at M9's previous read count | KILLED | 1 |
+
+**Two results worth carrying beyond the survivor.**
+
+- **P13 is a plant against a *sentence*, and it is the mechanism this task was
+  asked for instead of an ordinal.** The acceptance says explicitly that no
+  ordinal may be written into the plan, because which of B9 and C7 merges last
+  is not knowable when either is written — so `detail`'s docstring counts its
+  own reads in words and
+  `test_the_read_count_this_docstring_states_is_the_count_it_makes` parses
+  those words and counts the awaited calls against the fakes. Counted through a
+  **recording proxy** rather than through per-fake counters, because two of the
+  six fakes have no `calls` attribute and adding them would have made the case's
+  subject "which fakes count" rather than "how many reads happen". Same family
+  as T5's `AKAS_NAME_MAX_CHARS` binding assertion: a claim whose whole purpose
+  is that it agrees with something else needs an assertion on the agreement.
+- **P11 is the zeros, and only one case can see it.** Publishing
+  `served`/`unservable` only when a title has artwork passes every case that
+  seeds artwork — which is every images case except one. The counter exists
+  because *"this catalog has no logos"* and *"this proxy dropped all of them"*
+  are the same body, and a series absent from the export until the first drop
+  is the same silence one layer out; `test_a_title_with_no_artwork_publishes_
+  both_series_at_zero` is the whole of the coverage for it.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `TitleReadService.__init__`'s `self._credits` / `self._images` writes swapped | PASS | PASS | PASS | PASS (9/0) | PASS (93) |
+| C2 `_servable`'s two `_image_references.add` calls swapped | PASS | PASS | PASS | PASS (9/0) | PASS (93) |
+| C3 one sentence of `_servable`'s docstring reworded | PASS | PASS | PASS | PASS (9/0) | PASS (93) |
+
+C1 and C2 are facts about the *code* rather than about what the tools look at:
+two disjoint attribute writes on a freshly constructed object, neither
+right-hand side reading the other and nothing running between them; and two
+`Counter.add` calls whose attribute sets differ, so the SDK aggregates them
+into two independent time series that no ordering can reach — both arguments
+are side-effect-free reads of two locals bound before either call. **C2 is
+deliberately not the positional-argument reorder A5's entry corrects**: swapping
+`add`'s own two arguments is a `TypeError` from `math.isfinite`, i.e. a kill
+mistaken for a survivor, which is the inversion that entry exists to prevent.
+C3 was checked first against `grep -rln "getdoc\|__doc__\|ast.unparse\|
+getsource" tests/` — twenty-two files scan source, and the only one reading
+this module is **this task's own** `test_the_read_count_this_docstring_states_
+is_the_count_it_makes`, which reads `inspect.getdoc(TitleReadService.detail)`;
+the control is therefore planted in `_servable`'s docstring, a different
+method, which nothing scans. Checked rather than assumed, and it is the first
+entry in this file where the scan that constrains the docstring control was
+added by the same commit.
+
+Gate green before and after on the fully restored tree: **3,643 unit / 4
+skipped**, **1,123 integration / 22 skipped**, `ruff check`,
+`ruff format --check`, `mypy` over 555 files, `lint-imports` 9 kept / 0 broken,
+PRD link check `OK`.
+
+### C7 follow-up — the second unfiltered read, after C6 landed (2026-08-11)
+
+**1 plant over `services/rows/base.py::BaseRow._artwork`, KILLED, naming
+exactly the one case written for it.** C6 shipped `RowCard.artwork` through
+`ImageRepository.primary_for_titles` and left it **unfiltered**, on
+`is_servable_path`'s own argument that the measured gap is logo-only and a card
+is never handed a logo. That argument is true and one measurement short: the
+`kind` filter excludes logos, and what excludes a *poster or backdrop published
+as `.svg`* is only the provider's present habit — `images_from_payload` records
+whatever `provider_path` a payload carried, for every kind, and servability is
+otherwise decided at serve time from a fetched `Content-Type`.
+
+So both read surfaces now call one `servable_images` in
+`usher.services.images`, and the plant is the state before that: `_artwork`
+returning `primary_for_titles`' answer whole. Against
+`test_rows_artwork.py`, `test_api_home.py` and `test_rows_curated.py` (60
+cases) it fails **exactly**
+`test_a_poster_the_proxy_cannot_serve_leaves_the_card_with_none`, which is the
+case added with the filter. `cp` backup, `md5sum`-verified restore.
+
+**Two things worth carrying.**
+
+- **"Unreachable by construction" and "unreached by this provider's current
+  habits" read identically in a docstring, and only one of them is a
+  guarantee.** C6's case
+  `test_a_title_whose_only_artwork_is_a_logo_carries_none` pins the half that
+  *is* structural (a card asks for `POSTER` or `BACKDROP`); nothing pinned the
+  half that is empirical, because nothing could — no fixture had ever seeded a
+  `.svg` poster, and the state is invisible until a provider publishes one.
+  **The tell is a claim about what a third party does, stated in the same
+  sentence as a claim about what the code does.**
+- **The shelf's filter degrades and the detail's does not, and that is stated
+  rather than discovered.** `primary_for_titles` has already chosen one image,
+  so filtering afterwards yields `artwork: null` rather than the title's second
+  poster of that kind. Falling through would mean the predicate in SQL — a
+  second spelling of the fact `is_servable_path` owns — which is the trade this
+  filter exists to refuse. The degradation is the same render as "this title
+  has no poster", which is C6's own argument for why a card carries no
+  discriminator, so the two agree.
+
+Gate green after, on the merged tree: **3,690 unit / 4 skipped**, **1,130
+integration / 22 skipped**, `ruff check`, `ruff format --check`, `mypy` over
+557 files, `lint-imports` 9 kept / 0 broken, PRD link check `OK`.

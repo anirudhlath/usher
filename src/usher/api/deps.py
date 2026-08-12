@@ -504,6 +504,26 @@ def get_credit_repository(session: SessionDep) -> CreditRepository:
     return PostgresCreditRepository(session)
 
 
+# Declared here rather than in the M7 block below, because this is its first
+# user in the request graph -- `Depends(...)` is evaluated when the `def` under
+# it executes, so a provider appended after its consumer is a `NameError` at
+# import of this module. `get_row_context` is its second: C6's shelf artwork
+# and C7's `images` key read the same port, and this is the one provider.
+def get_image_repository(session: SessionDep) -> ImageRepository:
+    """Artwork references for the request that is rendering them.
+
+    The read half only, on `get_curated_row_repository`'s terms and for the
+    same reason: `replace_for_titles` is a *derivation* -- a scoped delete plus
+    an upsert over a title's whole artwork set -- and it belongs to
+    `usher derive` under `JobKind.DERIVE`. The port is handed over whole
+    because splitting a repository in two to express which half a caller uses
+    is a second port for one table; what keeps the write off this path is that
+    the two callers are `BaseRow.hydrate`, which calls `primary_for_titles`,
+    and `TitleReadService.detail`, which calls `list_for_title`.
+    """
+    return PostgresImageRepository(session)
+
+
 def get_title_read_service(
     titles: Annotated[TitleRepository, Depends(get_title_repository)],
     media_items: MediaItemRepositoryDep,
@@ -511,8 +531,9 @@ def get_title_read_service(
     watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
     queue: JobQueueDep,
     credits: Annotated[CreditRepository, Depends(get_credit_repository)],
+    images: Annotated[ImageRepository, Depends(get_image_repository)],
 ) -> TitleReadService:
-    """Five repositories and the queue, and deliberately no adapter factory.
+    """Six repositories and the queue, and deliberately no adapter factory.
 
     The absence is the design (PRD 08: "a degraded subsystem narrows
     functionality; it never fails a request local state can answer"), not an
@@ -522,12 +543,21 @@ def get_title_read_service(
     `tests/unit/test_services_titles.py` asserts it on the service's own
     imports so that adding one here would fail rather than pass review.
 
-    **`CreditRepository` is the fifth and it does not weaken that.** It is a
-    read of a table `usher derive` fills from `raw_payloads` with no second
-    network call, so it adds no way for this route to depend on anything being
-    up. It was four repositories until M9's `credits` key.
+    **`CreditRepository` and `ImageRepository` are the fifth and sixth and
+    neither weakens that.** Both read tables `usher derive` fills from
+    `raw_payloads` with no second network call, so neither adds a way for this
+    route to depend on anything being up. It was four repositories until M9's
+    `credits` key and five until its `images` key.
+
+    ⚠️ **`ImageRepository` in particular is not the image proxy.**
+    `GET /images/{id}` fetches bytes from a CDN and can fail because that CDN
+    is down; this route reads *rows*, which is why an unreachable CDN narrows
+    a client's screen to a missing picture and cannot touch this response's
+    status code. The two are a separate route with a separate failure mode by
+    construction, not by a caught exception -- `usher.ports.images` is not in
+    this function's graph at all.
     """
-    return TitleReadService(titles, media_items, sources, watch_states, queue, credits)
+    return TitleReadService(titles, media_items, sources, watch_states, queue, credits, images)
 
 
 TitleReadServiceDep = Annotated[TitleReadService, Depends(get_title_read_service)]
@@ -608,19 +638,6 @@ def get_row_provider_settings_repository(session: SessionDep) -> RowProviderSett
 RowProviderSettingsRepositoryDep = Annotated[
     RowProviderSettingsRepository, Depends(get_row_provider_settings_repository)
 ]
-def get_image_repository(session: SessionDep) -> ImageRepository:
-    """Artwork references for the request that is rendering them.
-
-    The read half only, on `get_curated_row_repository`'s terms and for the
-    same reason: `replace_for_titles` is a *derivation* -- a scoped delete plus
-    an upsert over a title's whole artwork set -- and it belongs to
-    `usher derive` under `JobKind.DERIVE`. The port is handed over whole
-    because splitting a repository in two to express which half a caller uses
-    is a second port for one table; what keeps the write off this path is that
-    `BaseRow.hydrate` is the only thing here that holds one and it calls
-    `primary_for_titles`.
-    """
-    return PostgresImageRepository(session)
 
 
 async def get_default_user(session: SessionDep) -> User:
