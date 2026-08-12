@@ -3699,3 +3699,116 @@ pre-sweep digest, `git diff --stat` empty, `ruff check .`, `ruff format
 --check .` (578 files), `mypy src tests` (565 files), `lint-imports` **9
 kept / 0 broken**, and the full suite **3792 unit / 4 skipped**, **1175
 integration / 22 skipped** — identical to the pre-sweep baseline.
+
+## M9 Task E5 — `POST /admin/bootstrap/{phase}`, and a parity assertion that cannot see a permutation (2026-08-12)
+
+**14 plant-runs over 12 plants: 9 behavioural targets, all KILLED (two after
+re-spelling, and one of those re-spellings found a real coverage gap since
+closed); 3 equivalent-mutant controls SURVIVED all five gate steps. 1
+PLANT-DID-NOT-LAND, 1 BROKEN-MUTATION, 0 BAD-ANCHOR, 0 DID-NOT-RUN, 0 HUNG.**
+Harness at `/var/tmp/m9-E5/plants.py` — **outside the working tree** for V1's
+reason and under `/var/tmp` rather than `/tmp`, which is tmpfs on this host —
+with the plant list and its **expected verdict** written down first,
+`PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under **both** `src/` and
+`tests/` before every run, `compile()` as the dry run, an exact anchor count
+asserted before each plant, the landing spelled `old not in landed and new in
+landed` **inside** the `try`, a 900 s per-plant timeout, no second `-q`, and
+every restore verified by `md5sum` against a pre-plant digest. Tree committed
+first, so `git status` is the verification; clean after.
+
+**Selection:** `test_composition.py`, `test_cli.py`, `test_api_bootstrap.py`,
+`test_services_handlers.py`, `test_domain_jobs.py` (unit) and
+`test_admin_bootstrap.py`, `test_bootstrap_end_to_end.py` (integration) — 181
+cases, 9–40 s a run, green before and after. Scoped rather than whole-suite for
+B2's and D4's reason: `tests/integration/test_sse_end_to_end.py` is intermittent
+on this tree and predates M9, and **a sweep scored on "did the run fail" cannot
+run against a suite holding a flaky case**.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| T1 the load window wraps each IMDb pass instead of both | KILLED | 1 — the dispatch-parity case |
+| **T2 the `credit-names` arm moved in front of the `imdb` one** | **SURVIVED, then closed** | 0, then 1 |
+| T3 `link_crosswalk()` dropped from the crosswalk arm | KILLED | 1 |
+| **T4 the client's `aclose()` out of the `finally`** | mis-spelled twice, then KILLED | 1 |
+| T5 the enqueued key replaced by a constant | KILLED | 2 (one unit, one integration) |
+| T6 the handler hard-codes `ALL` instead of reading the key | KILLED | 1 |
+| T7 the worker's report sink is `print` | KILLED | 2 |
+| T8 the route enqueues at `NEW` rather than `DEMAND` | KILLED | 2 |
+| T9 the `BOOTSTRAP` registration guarded on the metadata provider | KILLED | 3 |
+
+**T2 is the round's yield and it is a fact about *parity* assertions, which is
+a shape this file does not hold.** The whole point of E5 is that one dispatch
+serves two roots, and the case that proves it drives the CLI path and the
+worker path over the same fakes and compares the two journals. **A comparison
+between two callers of one function cannot see a change to that function**: a
+permuted phase order permutes both journals identically and they still match.
+The case's other assertions did not close it either — the window edges are
+unmoved by the permutation, and the ordering assertion it did carry was
+`credit-names` before `tmdb-ids`, which the permutation preserves. So moving
+`credit-names` in front of `imdb` **survived all 181 cases**, and it is not an
+equivalent mutant: `credit-names` joins to `titles` on `imdb_id`, so ahead of
+`imdb` it hits the empty-catalog refusal and the phase silently does nothing on
+a fresh install — the exact failure the enum's declared order exists to
+prevent. Closed by collapsing the journal to the phase each entry belongs to
+and asserting that sequence equals `[one for one in BootstrapPhase if one is
+not BootstrapPhase.ALL]`; re-planted, it fails **that case alone**. **The
+general form: when a case's expected value is *another run of the same code*,
+every defect in that code is invisible to it — a parity assertion pins that two
+callers agree and can never pin what they agree on, so it needs a literal or a
+derived-from-elsewhere expectation beside it.** Nearest relative is
+`test_a_bootstrap_phase...`'s cousin in `testing-discipline.md`, *"a fixture
+whose shape is self-inverse for the operation under test"*, arriving at a
+comparison instead of a permutation.
+
+**T4 was mis-spelled twice and each spelling is a different entry in this file
+firing.** First as an *addition* — `await client.aclose()` on the success path
+with the `finally` left in place — which **survived all 181 cases**, because
+`aclose()` is idempotent: A6's *"an added call to an idempotent method is the
+shape most likely to score a false survivor"*, verbatim, one resource over.
+Then as a *deletion of the whole `finally` clause*, which is a `SyntaxError`
+(`expected 'except' or 'finally' block`) and scored BROKEN-MUTATION. The
+spelling that is the defect keeps the clause and empties it (`finally: pass`)
+with the close on the success path, and it fails **exactly**
+`test_one_client_serves_the_whole_run_and_is_closed_however_it_ends`, on its
+raising arm. **A6's rule — "before recording a `finally` as unpinned, check
+that the plant can actually skip it" — needs a second half: check that the
+plant still compiles, because the syntactically obvious deletion of a `finally`
+is not a Python program.**
+
+**The PLANT-DID-NOT-LAND is the landing check earning its spelling for the
+second time in this milestone**, after E2's. T2's first draft prepended the
+`credit-names` arm while leaving the original in place, so `old` is a prefix of
+`new`, `old not in landed` is false after a plant that landed perfectly, and
+the harness refused it. Re-spelled as a genuine *swap* of the two blocks it
+lands — and, as it turned out, survives, which is the finding above. The
+additive draft would also have been the wrong mutation: a duplicated arm is not
+a permutation.
+
+**T9's blast radius is worth reading as a coverage statement.** Guarding the
+`BOOTSTRAP` registration on `provider is not None` fails 3 cases, and one of
+them is `test_a_worker_without_an_embedder_registers_no_index_handler` — the
+bare-build registered-kinds assertion, which is what makes "unconditional"
+structural rather than conventional. `JobKind.BOOTSTRAP`'s member, its handler,
+its registration and its enqueue site all land in one commit for M4's rule, and
+this is the plant that says the registration half is held.
+
+| control | `ruff check` | `format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `bulk_client`'s `timeout=`/`headers=` keyword arguments in the other order | PASS | PASS | PASS | PASS | PASS (181) |
+| C2 one sentence of `bootstrap_handler`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (181) |
+| C3 the IMDb arm's membership tuple written `(ALL, IMDB)` | PASS | PASS | PASS | PASS | PASS (181) |
+
+C1 and C3 are facts about the *code* rather than about what the tools look at:
+keyword arguments bind by name and both expressions are side-effect-free (a
+literal and a dict over one attribute read), which is `_ledger_row`'s
+precedent; and `in` over a two-element tuple of distinct enum members is a
+short-circuiting equality scan whose result no order can change, with both
+operands pure. Neither is an argument *reorder of a positional call*, which
+A5's entry is the reason for checking rather than assuming, and neither is an
+`__all__` reorder, which `RUF022` rejects. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/`: the scans it finds
+cover `ports/`, `services/curation*`, `services/jobs.py`,
+`services/watch_write.py`, `adapters/` and several `api/` modules, and **none of
+them reads `services/handlers.py`** — the same measurement D8's entry records,
+re-checked rather than inherited. The two scans this task itself adds parse
+`api/routers/bootstrap.py`'s and `usher/cli.py`'s **imports**, not their prose.

@@ -1425,6 +1425,37 @@ async def _nothing() -> None:
     return None
 
 
+#: Which phase each journal entry belongs to. The three catalog-dependent
+#: phases contribute a refusal *sentence* rather than a dataset name against
+#: an empty catalog, which is what makes all six visible in one run.
+_PHASE_OF = (
+    (BootstrapPhase.IMDB, ("window-", "imdb.title.")),
+    (BootstrapPhase.CREDIT_NAMES, ("credit-names", "imdb.credit_names")),
+    (BootstrapPhase.ALIASES, ("aliases", "imdb.title.akas")),
+    (BootstrapPhase.TMDB_IDS, ("tmdb.ids.",)),
+    (BootstrapPhase.CROSSWALK, ("wikidata.crosswalk", "link-crosswalk")),
+    (BootstrapPhase.MOVIELENS, ("movielens",)),
+)
+
+
+def _phases_in(journal: list[str]) -> list[BootstrapPhase]:
+    """The journal's entries collapsed to the phase each belongs to, in first
+    -sighting order, with an entry nothing claims raising rather than being
+    silently dropped -- a mapping that fell through would turn a reordered
+    phase into a missing one, which reads as a shorter list rather than as a
+    wrong one."""
+    seen: list[BootstrapPhase] = []
+    for entry in journal:
+        phase = next(
+            (one for one, prefixes in _PHASE_OF if entry.startswith(prefixes)),
+            None,
+        )
+        assert phase is not None, f"no phase claims the journal entry {entry!r}"
+        if phase not in seen:
+            seen.append(phase)
+    return seen
+
+
 async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
@@ -1450,10 +1481,16 @@ async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
       (`.claude/rules/bootstrap-and-datasets.md`).
     - **`link-crosswalk` immediately after the crosswalk import.** The import
       stores pairs; the link is what attaches them to `titles`.
-    - **`credit-names` before `tmdb-ids`**, which is the ordering constraint
-      Track 2 measured: filling `credit_names` re-writes `search_document`,
-      so run after a priority-tier crawl it stales 203,969 of 204,335
-      >=100-vote titles' embeddings and run before it stales 0 of 1,271,138.
+    - **Every phase in `BootstrapPhase`'s declared order**, asserted against
+      the enum rather than against the other driver. **A parity assertion
+      cannot see a permutation** -- both roots call one function, so a
+      reordered dispatch reorders both journals identically and they still
+      match. Measured: moving the `credit-names` arm in front of the `imdb`
+      one survived this case until the order was pinned against the enum, and
+      the damage is the one Track 2 named -- `credit-names` joins to `titles`
+      on `imdb_id`, so ahead of `imdb` it refuses an empty catalog and the
+      phase silently does nothing, while behind a TMDb crawl it stales
+      203,969 of the 204,335 >=100-vote titles' embeddings.
     """
     through_cli = await _journal_of_a_full_bootstrap(
         monkeypatch, tmp_path, through_the_worker=False
@@ -1472,8 +1509,9 @@ async def test_the_cli_and_the_handler_run_the_same_phase_dispatch(
     assert through_cli.count("window-close") == 1
 
     assert through_cli[through_cli.index("wikidata.crosswalk") + 1] == "link-crosswalk"
-    credit_names = next(i for i, one in enumerate(through_cli) if one.startswith("credit-names"))
-    assert credit_names < through_cli.index("tmdb.ids.movie")
+    assert _phases_in(through_cli) == [
+        one for one in BootstrapPhase if one is not BootstrapPhase.ALL
+    ]
 
 
 async def test_one_client_serves_the_whole_run_and_is_closed_however_it_ends(
