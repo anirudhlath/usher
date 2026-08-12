@@ -286,11 +286,32 @@ uv run python scripts/measure_bulk_load.py            # downloads the real dump
 uv run python scripts/measure_ingest.py --items 50000
 uv run python scripts/measure_ingest.py --scale 1126674
 uv run python scripts/measure_rows.py
+uv run python scripts/measure_suggest_tiers.py --all       # both suggest tiers
 
 set -a; . ./.env; set +a                              # never a literal credential
 uv run python scripts/capture_emby_fixture.py --type Episode > /tmp/shape.json
 uv run python scripts/capture_tmdb_fixture.py --kind movie --id <id> > /tmp/shape.json
 ```
+
+**`/tmp` on this host is tmpfs — RAM — so a pre-registered bar never goes
+there.** A throwaway shape dump above is fine in `/tmp`; a bar, a run log, or
+anything else whose value depends on *when it was written* is not, because the
+whole point of it is that it provably predates the numbers and a reboot erases
+the proof. Write those to `/var/tmp` (btrfs `@tmp`, durable) or into the repo,
+and record a `sha256` when you write them. M9's B3 wrote its bar to `/tmp`
+before noticing, and every pre-registered bar in that milestone had been going
+there.
+
+**A measurement harness needs its own quiet-check, and both obvious ones are
+wrong.** Comparing the one-minute load average before and after condemns every
+clean run, because a long run of continuous querying raises its own average —
+B3's went 1.34 → 2.82 on a box that was provably idle throughout. And a
+foreign-process census matching the whole command line counts *the shell that
+mentions the word*: `pgrep -f pytest` reported four processes on a box measured
+clear, and all four were idle `sleep 5` waiters watching for pytest. Match argv
+**tokens**, skip any process whose `comm` is a shell or `sleep`, and compare
+CPU **drift** between two moments when the harness itself is idle.
+`scripts/measure_suggest_tiers.py` has the working version.
 
 ### Live verification
 
