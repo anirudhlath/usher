@@ -105,9 +105,16 @@ Pruning that keeps this sane: retain `movie`, `tvMovie`, `tvSeries`, and
 > **`title.akas` now has somewhere to land** — `m09a` created
 > `title_search_names`, with a `region` and a `language` column — and
 > `usher.adapters.bulk.imdb.parse_akas_row` plus `IMDbAkaDataset` are the
-> parser and the dataset for it. Nothing in `usher.cli` constructs that
-> dataset yet, so no bootstrap phase reads the file and no operator pays its
-> **486.5 MiB** today; the phase is a separate change.
+> parser and the dataset for it, with
+> `BulkCatalogRepository.replace_aliases` the write. It stores an expected
+> **1,663,364 deduplicated aliases over 399,046 of 1,271,138 titles (31.4%)**,
+> because three retained akas rows in four restate the title's own name and
+> are dropped. Nothing in `usher.cli` constructs that dataset yet, so no
+> bootstrap phase reads the file and no operator pays its **486.5 MiB** today;
+> the phase is a separate change, and it owes one thing the parser and the
+> writer cannot supply between them — **a title's aliases have to reach the
+> writer in one call**, which `_ImdbDataset`'s row-count batching does not
+> guarantee (`IMDbCreditNamesDataset` shows the shape).
 >
 > **The other half hardened rather than lifted.** `title.principals` and
 > `name.basics` are now refused on a *measurement* rather than on a missing

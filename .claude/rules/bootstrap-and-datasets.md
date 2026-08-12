@@ -121,9 +121,15 @@ isOriginalTitle` — 8 columns, and **zero rows split to any other count**.
 - **33 rows exceed `SEARCH_NAME_MAX_CHARS` (512) and the longest title is 831
   characters.** T3 measured 0 among the retained rows and that still holds
   (0 of 7,541,357 on a re-run), so all 33 belong to titles outside the catalog
-  — *today*. `SearchNameRepository`'s contract refuses an over-long name for
-  the **whole call**, so the parser drops them rather than letting one row take
-  a ten-thousand-row batch with it.
+  — *today*. `BulkCatalogRepository.replace_aliases` refuses an over-long name
+  for the **whole call**, so the parser drops them rather than letting one row
+  take a ten-thousand-row batch with it. *(This sentence named a
+  `SearchNameRepository` until T7 landed the writer; no port of that name has
+  ever existed here. Measured on a real database once the writer did exist: the
+  refusal is a `RepositoryConflict` naming
+  `ck_title_search_names_name_within_btree_bound`, and it takes the whole call
+  including its DELETE — so a batch carrying one long alias leaves every title
+  in scope with the aliases it already had rather than with none.)*
 - **`title` is never empty and never `\N`** — 0 of 58,906,368. The empty-name
   drop is unreachable in this snapshot and exists because
   `ck_title_search_names_name_not_empty` is `name <> ''`.
@@ -168,6 +174,70 @@ M2. So `_ImdbDataset` was not changed to emit cursor-advancing empty batches:
 a trailing run of filtered lines costs a re-read on resume and never a lost
 row, because `position` counts lines consumed and every downstream write is an
 upsert.
+
+**The alias writer compares with SQL `lower()` and T3/T5 measured with Python
+`casefold()`, so the measured 1,663,364 is a *lower* bound on what ships —
+measured 2026-08-11 (M9 T7), and the gap is 0.070% of the file.**
+`BulkCatalogRepository.replace_aliases` drops an alias whose name equals the
+title's own `name` or `original_name` **under `lower()`**, and deduplicates on
+`(title_id, lower(name))`. That is not the same function `scripts/
+measure_imdb_people.py:353` used — it folds with Python's `str.casefold()` —
+and the three candidate foldings genuinely disagree on real IMDb names:
+
+| pair | Postgres `lower()` | Python `str.lower()` | Python `str.casefold()` |
+|---|---|---|---|
+| `ΟΔΟΣ` / `Οδος` (Greek final sigma) | **not equal** | equal | equal |
+| `STRASSE` / `Straße` | not equal | not equal | **equal** |
+
+Streamed through the shipped `parse_akas_row` over the whole pinned
+`title.akas.tsv.gz` (`"19810e3eb2b0f1fa774bf4e4af94d7c6-61"`, md5
+`b2ae74057227953a917e6d26f7a841d0`, 510,168,971 B on disk = the pin's own
+`Content-Length`, 58,906,369 lines, **46,202,631 retained rows**):
+**32,223 rows (0.070%) have `str.lower() != str.casefold()`**, in exactly two
+families — German `ß` (`Das große Finale`, 21 rows) and Greek final sigma
+(`Οθέλλος`, 25). `casefold()` folds strictly *more* pairs together, so every
+one of those is a row T3's script could classify as canonical or as a
+duplicate and the shipped writer keeps. **The direction is what matters
+against bar (B): the shipped rule stores at least 1,663,364 and at most
+1,663,364 + 32,223, i.e. under 1.70M against an 8,000,000-row ceiling**, so
+(B) passes with 4.7× headroom either way and no re-measurement is owed. *(The
+bound is over rows whose own name diverges; a second-order path exists where
+only the stored `Title`'s name diverges, and it is bounded by the same
+families because 75.5% of retained rows restate that name and would themselves
+be counted.)*
+
+**Postgres is authoritative here by construction, which is why the divergence
+is recorded and not repaired.** The whole test for keeping an alias is whether
+it reaches anything `ix_titles_name_lower_prefix` does not already answer, and
+that index is a btree over the *database's* `lower(name)` — so under the rule
+that matters, `Οδος` really is a distinct entry and the row really does add
+reachability. A `casefold()` comparison would drop it and lose recall for a
+claim about an index it does not describe. **The consequence is a fake/Postgres
+divergence** (Python's `str.lower()` applies the contextual final-sigma rule
+and the database does not) and it is enumerated in
+`tests/fakes/bulk_catalog_repository.py`'s own list, pinned by an
+integration-only case rather than by the shared contract.
+
+**No end-to-end run of `replace_aliases` over the whole file was taken, and
+this says so rather than implying one.** T7 writes no parser and reads no
+dataset; what it adds to T3's measurement is the folding function, which the
+count above bounds. What a full run *would* additionally settle is the
+relation size under the shipped rule (T3 measured 307,822,592 B at `m09a`'s
+exact shape for the `casefold()` population) and the batch-boundary question
+below.
+
+⚠️ **`IMDbAkaDataset` does not group by title and `replace_aliases` requires
+whole titles per call — T8 has to close that gap and nothing in T7 does.**
+`_ImdbDataset` batches on a row count, so a title straddling a batch boundary
+is delivered in two calls, and the second call's scoped replace **deletes the
+first call's rows**: the title keeps whichever aliases landed in the later
+batch and silently loses the rest. `IMDbCreditNamesDataset` already solves the
+identical problem, in the identical file, by closing a title's run before it
+closes a batch and carrying a `boundary` line number as the cursor rather than
+`position` — its comment says why in full. A caller of `replace_aliases`
+needs that shape, or a scope-and-rows accumulator of its own. The port
+docstring states the precondition and the write cannot check it: every row is
+in scope in both calls, so the `ValueError` guard does not fire.
 
 **`title.principals` + `name.basics` will not fit a `people`/`credits` design
 for this catalog, and the refusal is a size measurement rather than a row
