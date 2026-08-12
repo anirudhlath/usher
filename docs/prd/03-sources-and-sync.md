@@ -907,14 +907,34 @@ and never flapped back. That is what keeps the paragraph above true across a
 second writer that holds no `credits` row: a skeleton has no `raw_payloads`,
 so it has no `credits` for its array to disagree with.
 
-**No `people` and no `credits` row is bulk-loaded from IMDb**, and that is a
-measurement rather than a preference. The entity design measured **2.702 GB
-against a 2.0 GB ceiling** (2.395 GB stripped to five columns), `credits`
-cannot be deduplicated on an IMDb load at all — its only unique key is
-`tmdb_credit_id`, NULL on every such row — and TMDb's credits carry no
-`nconst`, so people cannot be merged across the two sources on an id at all.
-The name *text* is the part of a person weight class B indexes, so the names
-are written and the entities are not.
+**No `people` and no `credits` row is bulk-loaded from IMDb**, which is what
+M9 shipped. ⚠️ **Two of the three reasons this paragraph gave for it do not
+survive scrutiny, and they are corrected here rather than left standing.**
+
+- **The size measurement is real; the ceiling it failed was not.** The entity
+  design measured **2.702 GB** (2.395 GB stripped to five columns) against a
+  **2.0 GB** bar derived from [08](08-operations.md)'s `~8–12 GB` figure — one
+  row of a table titled *Resource envelope*, which is a sizing estimate for an
+  operator and not a constraint anything enforces. Measured on the host on
+  2026-08-12: **784 GB free**, so the design was refused at 0.34% of available
+  space. Pre-registering the bar was right; the number had nothing behind it.
+- **People *can* be merged across the two sources on an id.** This paragraph
+  previously said they could not, "at all". That overstates
+  `.claude/rules/bootstrap-and-datasets.md`, which states it correctly: a TMDb
+  `credits.cast[]`/`crew[]`/`created_by[]` entry carries no `nconst`, so people
+  cannot be merged **without a second request each**. The qualifier was dropped
+  one hop up and "expensive" became "impossible". Verified live 2026-08-12:
+  `GET /person/6193/external_ids` answers `imdb_id: nm0000138`. The cost is
+  **1,536,654 distinct TMDb person ids** across the 5,614,150 credit rows of
+  the 130,678 enriched titles — roughly **23 hours** at the 18.3 req/s the M9
+  enrichment sustained, one-time, batchable and resumable.
+- **The dedup gap is real and stands.** `credits`' only unique key is
+  `tmdb_credit_id`, NULL on every IMDb row, so the table cannot deduplicate an
+  IMDb load. That is a missing natural key rather than a property of the data.
+
+The name *text* is the part of a person weight class B indexes, so M9 wrote the
+names and not the entities, and that shipped state is unchanged by the above.
+Whether the entities follow is reopened, not settled here.
 
 ✅ **`alternative_titles` is still not derived and no longer blocks anything,
 because M9 took the aliases from IMDb instead.** It appears in neither
