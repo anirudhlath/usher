@@ -10,32 +10,104 @@ failing call is absent rather than caught.
 import ast
 import inspect
 import pathlib
+import re
 import uuid
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import pytest
-from opentelemetry import trace
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 
 from tests.fakes.credit_repository import FakeCreditRepository
+from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import FakePersonRepository
 from tests.fakes.source_repository import FakeSourceRepository
 from tests.fakes.title_repository import FakeTitleRepository
 from tests.fakes.watch_state_repository import FakeWatchStateRepository
-from usher.domain.enums import EnrichmentState, HdrFormat, SourceKind, TitleKind
+from usher.domain.enums import EnrichmentState, HdrFormat, ImageKind, SourceKind, TitleKind
+from usher.domain.image import Image
 from usher.domain.jobs import JobKind, JobPriority, JobStatus
 from usher.domain.people import Credit, CreditKind, Person, person_sort_name
 from usher.domain.source import Source
 from usher.domain.title import Title
 from usher.ports.ingest import MediaItemUpsert, WatchStateMerge
-from usher.ports.jobs import JobRequest
+from usher.ports.jobs import JobQueue, JobRequest
+from usher.ports.repository import (
+    CreditRepository,
+    ImageRepository,
+    MediaItemRepository,
+    SourceRepository,
+    TitleRepository,
+    WatchStateRepository,
+)
 from usher.services.titles import CAST_LIMIT, CREW_LIMIT, TitleReadService
 
 USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
 OTHER_USER_ID = uuid.UUID("00000000-0000-4000-8000-000000000002")
 OBSERVED_AT = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+
+#: `detail`'s docstring counts its reads in words, because it is prose first.
+#: Only the range a service of this shape could plausibly occupy -- a
+#: `KeyError` here is a docstring that grew past what this case understands,
+#: which is a louder failure than a silent re-parse.
+_NUMBER_WORDS = {"four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+
+class _Recording:
+    """Records every awaited call made through it and forwards it unchanged.
+
+    A proxy rather than a counter on each fake: two of the six fakes this
+    service takes have no `calls` attribute, and adding two would make the
+    case that reads them a case about which fakes count. `__getattr__` fires
+    only for names this class does not define, which is all of them."""
+
+    def __init__(self, wrapped: object, calls: list[str]) -> None:
+        self._wrapped = wrapped
+        self._calls = calls
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._wrapped, name)
+        if not callable(attribute):
+            return attribute
+
+        async def recorded(*args: Any, **kwargs: Any) -> Any:
+            self._calls.append(f"{type(self._wrapped).__name__}.{name}")
+            return await attribute(*args, **kwargs)
+
+        return recorded
+
+
+@pytest.fixture
+def meter_reader() -> Iterator[InMemoryMetricReader]:
+    """A real `MeterProvider` with an in-memory reader, installed for this
+    test alone -- `tests/conftest.py::reset_otel_meter_provider` is what makes
+    "for this test alone" true, since the API refuses a second
+    `set_meter_provider` in a process and every module-level instrument caches
+    the first real one it is handed."""
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    yield reader
+
+
+def _counted(reader: InMemoryMetricReader, name: str) -> dict[str, float]:
+    """One counter's points, keyed by its `outcome` label."""
+    data = reader.get_metrics_data()
+    points: dict[str, float] = {}
+    for resource in getattr(data, "resource_metrics", ()):
+        for scope in resource.scope_metrics:
+            for metric in scope.metrics:
+                if metric.name != name:
+                    continue
+                for point in metric.data.data_points:
+                    attributes = dict(point.attributes or {})
+                    points[str(attributes["outcome"])] = float(point.value)
+    return points
 
 
 @pytest.fixture
@@ -74,6 +146,11 @@ def credits(people: FakePersonRepository, titles: FakeTitleRepository) -> FakeCr
 
 
 @pytest.fixture
+def images() -> FakeImageRepository:
+    return FakeImageRepository()
+
+
+@pytest.fixture
 def service(
     titles: FakeTitleRepository,
     media_items: FakeMediaItemRepository,
@@ -81,8 +158,9 @@ def service(
     watch_states: FakeWatchStateRepository,
     queue: FakeJobQueue,
     credits: FakeCreditRepository,
+    images: FakeImageRepository,
 ) -> TitleReadService:
-    return TitleReadService(titles, media_items, sources, watch_states, queue, credits)
+    return TitleReadService(titles, media_items, sources, watch_states, queue, credits, images)
 
 
 async def _seed_source(sources: FakeSourceRepository, name: str = "Living Room Emby") -> Source:
@@ -697,6 +775,184 @@ async def test_a_title_with_no_credits_answers_with_two_empty_tuples(
     detail = await service.detail(title.id, user_id=USER_ID)
     assert detail is not None
     assert (detail.cast, detail.crew) == ((), ())
+
+
+def _image(
+    title_id: uuid.UUID,
+    *,
+    kind: ImageKind = ImageKind.POSTER,
+    path: str = "/a-poster.jpg",
+    is_primary: bool = True,
+) -> Image:
+    return Image(
+        title_id=title_id, kind=kind, provider="tmdb", provider_path=path, is_primary=is_primary
+    )
+
+
+async def _seed_images(
+    images: FakeImageRepository, title_id: uuid.UUID, entries: Sequence[Image]
+) -> None:
+    await images.replace_for_titles([title_id], entries)
+
+
+async def test_a_title_with_no_images_answers_with_an_empty_tuple(
+    service: TitleReadService, titles: FakeTitleRepository
+) -> None:
+    """Same shape as `cast`/`crew`: the service returns empty and the *wire*
+    turns empty into absent (`api/dto/title.py`), so the one place that
+    decides "absent rather than `[]`" is the DTO rather than a `None` every
+    reader of `TitleDetail` has to narrow."""
+    title = await _seed_title(titles, EnrichmentState.ENRICHED)
+    detail = await service.detail(title.id, user_id=USER_ID)
+    assert detail is not None
+    assert detail.images == ()
+
+
+async def test_artwork_the_proxy_cannot_serve_never_reaches_the_detail(
+    service: TitleReadService, titles: FakeTitleRepository, images: FakeImageRepository
+) -> None:
+    """**Filter, not annotate**, and it happens here rather than in the DTO so
+    that `is_servable_path` stays the single definition -- a
+    `provider_path.endswith(".svg")` written in `api/dto/` would be a
+    provider-shaped inference in the layer PRD 01's no-source-concept rule is
+    about.
+
+    `/svg-poster.jpg` and `/A-LOGO.SVG` are the two adversarial paths C4
+    measured the wrong spellings of a suffix test against: a substring `in`
+    drops the first, and a test that does not lower-case keeps the second.
+    Each dies on exactly one parameter out of that task's 325, so an ordinary
+    `.jpg`/`.svg` pair here would ratify both."""
+    title = await _seed_title(titles, EnrichmentState.ENRICHED)
+    poster = _image(title.id)
+    decoy = _image(title.id, path="/svg-poster.jpg", is_primary=False)
+    await _seed_images(
+        images,
+        title.id,
+        [
+            poster,
+            decoy,
+            _image(title.id, kind=ImageKind.LOGO, path="/a-logo.svg", is_primary=False),
+            _image(title.id, kind=ImageKind.LOGO, path="/A-LOGO.SVG", is_primary=False),
+        ],
+    )
+
+    detail = await service.detail(title.id, user_id=USER_ID)
+
+    assert detail is not None
+    assert {one.id for one in detail.images} == {poster.id, decoy.id}
+    assert await images.list_for_title(title.id) != list(detail.images), (
+        "the premise: the repository still holds every row, so this is a read-side "
+        "filter rather than a write the derivation declined to make"
+    )
+
+
+async def test_a_filtered_reference_is_counted_and_not_only_dropped(
+    service: TitleReadService,
+    titles: FakeTitleRepository,
+    images: FakeImageRepository,
+    meter_reader: InMemoryMetricReader,
+) -> None:
+    """⚠️ **A filter with no counter is invisible**, which is the requirement
+    `is_servable_path`'s docstring hands to this task by name: once these rows
+    are dropped, *"this catalog has no logos"* and *"this proxy dropped all of
+    them"* are the same body and the same empty space on a screen.
+
+    So the assertion is not "the metric exists" -- a `create_counter` nobody
+    records to would pass that -- but that a read of a title with one servable
+    and one declined reference publishes **both** series with the right
+    numbers. The `served` half is what gives the drop count a denominator:
+    4,000 unservable references is a broken deployment on a small catalog and
+    one title in seventeen on a large one, and a bare drop count cannot tell
+    those apart either.
+
+    Driven through the real service rather than by calling the counter, so an
+    instrument created at import and never recorded to fails here."""
+    title = await _seed_title(titles, EnrichmentState.ENRICHED)
+    await _seed_images(
+        images,
+        title.id,
+        [
+            _image(title.id),
+            _image(title.id, kind=ImageKind.LOGO, path="/a-logo.svg", is_primary=False),
+        ],
+    )
+
+    detail = await service.detail(title.id, user_id=USER_ID)
+    assert detail is not None and len(detail.images) == 1, "the premise: exactly one was dropped"
+
+    assert _counted(meter_reader, "usher.images.references") == {"served": 1.0, "unservable": 1.0}
+
+
+async def test_a_title_with_no_artwork_publishes_both_series_at_zero(
+    service: TitleReadService, titles: FakeTitleRepository, meter_reader: InMemoryMetricReader
+) -> None:
+    """The zeros are the point, and this is the half a counter usually skips.
+
+    A label absent from the export is indistinguishable from a label nobody
+    counts, so an instrument that only spoke when it fired would leave an
+    operator unable to read anything at all until the first drop -- which is
+    exactly the silence it exists to break. `usher.curation.dropped`'s rule,
+    arriving at a read path."""
+    title = await _seed_title(titles, EnrichmentState.ENRICHED)
+
+    assert await service.detail(title.id, user_id=USER_ID) is not None
+
+    assert _counted(meter_reader, "usher.images.references") == {"served": 0.0, "unservable": 0.0}
+
+
+async def test_the_read_count_this_docstring_states_is_the_count_it_makes(
+    titles: FakeTitleRepository,
+    media_items: FakeMediaItemRepository,
+    sources: FakeSourceRepository,
+    watch_states: FakeWatchStateRepository,
+    queue: FakeJobQueue,
+    credits: FakeCreditRepository,
+    images: FakeImageRepository,
+) -> None:
+    """`detail`'s docstring counts its own reads, and this is what keeps the
+    number honest.
+
+    **No ordinal is written into a plan for this**, deliberately: B9 added a
+    repository and C7 added another, and which of the two merges last is not
+    knowable when either is written -- so a sentence saying "six reads over
+    five repositories" is wrong for whichever order actually happened. The
+    acceptance is that the docstring's own words equal what the service does
+    **in the tree as it stands**, which only a case can check.
+
+    Counted through a proxy that records every awaited call rather than
+    through per-fake counters, because two of the six fakes have none and
+    adding them would make this case's subject "which fakes count" rather than
+    "how many reads happen". The title is `ENRICHED` so `_promote` enqueues
+    nothing and every recorded call is a read; that is asserted rather than
+    assumed."""
+    docstring = inspect.getdoc(TitleReadService.detail) or ""
+    stated = re.search(r"\*\*(\w+) reads over (\w+) repositories", docstring)
+    assert stated is not None, (
+        "the premise: detail's docstring states its own read count, which is the "
+        "sentence this case exists to hold to the code"
+    )
+    reads = _NUMBER_WORDS[stated.group(1).lower()]
+    repositories = _NUMBER_WORDS[stated.group(2).lower()]
+
+    calls: list[str] = []
+    service = TitleReadService(
+        cast(TitleRepository, _Recording(titles, calls)),
+        cast(MediaItemRepository, _Recording(media_items, calls)),
+        cast(SourceRepository, _Recording(sources, calls)),
+        cast(WatchStateRepository, _Recording(watch_states, calls)),
+        cast(JobQueue, _Recording(queue, calls)),
+        cast(CreditRepository, _Recording(credits, calls)),
+        cast(ImageRepository, _Recording(images, calls)),
+    )
+    title = await _seed_title(titles, EnrichmentState.ENRICHED)
+
+    assert await service.detail(title.id, user_id=USER_ID) is not None
+
+    assert not any(call.startswith("FakeJobQueue.") for call in calls), (
+        "the premise: an enriched title is not promoted, so every recorded call is a read"
+    )
+    assert len(calls) == reads, f"{docstring.splitlines()[2]!r} against {calls}"
+    assert len({call.split(".")[0] for call in calls}) == repositories
 
 
 async def test_reading_a_title_never_touches_a_source(service: TitleReadService) -> None:

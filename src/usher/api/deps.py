@@ -24,6 +24,7 @@ from usher.db.repositories.collection import PostgresCollectionRepository
 from usher.db.repositories.credentials import PostgresCredentialStore
 from usher.db.repositories.curation import PostgresCuratedRowRepository
 from usher.db.repositories.episode import PostgresEpisodeRepository
+from usher.db.repositories.image import PostgresImageRepository
 from usher.db.repositories.jobs import PostgresJobQueue
 from usher.db.repositories.matching import PostgresTitleMatchRepository
 from usher.db.repositories.media_item import PostgresMediaItemRepository
@@ -48,6 +49,7 @@ from usher.ports.repository import (
     CreditRepository,
     CuratedRowRepository,
     EpisodeRepository,
+    ImageRepository,
     MediaItemRepository,
     PersonRepository,
     RawPayloadStore,
@@ -499,6 +501,13 @@ def get_credit_repository(session: SessionDep) -> CreditRepository:
     return PostgresCreditRepository(session)
 
 
+# Declared here rather than with C5's proxy wiring, because this is its first
+# user in the request graph -- the same rule `get_credit_repository` above
+# follows, and the same `NameError` if it is appended after its consumer.
+def get_image_repository(session: SessionDep) -> ImageRepository:
+    return PostgresImageRepository(session)
+
+
 def get_title_read_service(
     titles: Annotated[TitleRepository, Depends(get_title_repository)],
     media_items: MediaItemRepositoryDep,
@@ -506,8 +515,9 @@ def get_title_read_service(
     watch_states: Annotated[WatchStateRepository, Depends(get_watch_state_repository)],
     queue: JobQueueDep,
     credits: Annotated[CreditRepository, Depends(get_credit_repository)],
+    images: Annotated[ImageRepository, Depends(get_image_repository)],
 ) -> TitleReadService:
-    """Five repositories and the queue, and deliberately no adapter factory.
+    """Six repositories and the queue, and deliberately no adapter factory.
 
     The absence is the design (PRD 08: "a degraded subsystem narrows
     functionality; it never fails a request local state can answer"), not an
@@ -517,12 +527,21 @@ def get_title_read_service(
     `tests/unit/test_services_titles.py` asserts it on the service's own
     imports so that adding one here would fail rather than pass review.
 
-    **`CreditRepository` is the fifth and it does not weaken that.** It is a
-    read of a table `usher derive` fills from `raw_payloads` with no second
-    network call, so it adds no way for this route to depend on anything being
-    up. It was four repositories until M9's `credits` key.
+    **`CreditRepository` and `ImageRepository` are the fifth and sixth and
+    neither weakens that.** Both read tables `usher derive` fills from
+    `raw_payloads` with no second network call, so neither adds a way for this
+    route to depend on anything being up. It was four repositories until M9's
+    `credits` key and five until its `images` key.
+
+    ⚠️ **`ImageRepository` in particular is not the image proxy.**
+    `GET /images/{id}` fetches bytes from a CDN and can fail because that CDN
+    is down; this route reads *rows*, which is why an unreachable CDN narrows
+    a client's screen to a missing picture and cannot touch this response's
+    status code. The two are a separate route with a separate failure mode by
+    construction, not by a caught exception -- `usher.ports.images` is not in
+    this function's graph at all.
     """
-    return TitleReadService(titles, media_items, sources, watch_states, queue, credits)
+    return TitleReadService(titles, media_items, sources, watch_states, queue, credits, images)
 
 
 TitleReadServiceDep = Annotated[TitleReadService, Depends(get_title_read_service)]

@@ -24,6 +24,7 @@ from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 
 from tests.fakes.credit_repository import FakeCreditRepository
+from tests.fakes.image_repository import FakeImageRepository
 from tests.fakes.job_queue import FakeJobQueue
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.person_repository import FakePersonRepository
@@ -34,7 +35,8 @@ from usher.api.app import create_app
 from usher.api.deps import get_default_user_id, get_title_read_service
 from usher.api.dto.title import TitleResponse
 from usher.config import Settings
-from usher.domain.enums import EnrichmentState, HdrFormat, SourceKind, TitleKind
+from usher.domain.enums import EnrichmentState, HdrFormat, ImageKind, SourceKind, TitleKind
+from usher.domain.image import Image
 from usher.domain.jobs import JobKind
 from usher.domain.people import Credit, CreditKind, Person, person_sort_name
 from usher.domain.source import Source
@@ -48,6 +50,14 @@ SEEN_AT = datetime(2026, 8, 1, 3, 0, tzinfo=UTC)
 # elsewhere in the response proves nothing. This is what an Emby item id
 # looks like on the wire, and no client has any use for one.
 EXTERNAL_ID = "emby-item-9f31a2"
+# The CDN base `Settings.image_cdn_base_url` defaults to, and the provider path
+# on the poster every images case seeds. Both are asserted *absent* from the
+# body: PRD 07's "clients never see provider image URLs and never need a
+# provider key" is a property of this response, not only of the proxy. The
+# host is what a client would need to build one itself; the path is the half
+# of it this row actually stores.
+CDN_HOST = "image.tmdb.org"
+POSTER_PATH = "/9f31a2-poster.jpg"
 
 
 @dataclass(frozen=True)
@@ -87,6 +97,11 @@ def people() -> FakePersonRepository:
 
 
 @pytest.fixture
+def images() -> FakeImageRepository:
+    return FakeImageRepository()
+
+
+@pytest.fixture
 def credits(people: FakePersonRepository, titles: FakeTitleRepository) -> FakeCreditRepository:
     """Wired to the *same* `people` and `titles` stores the assertions read
     through. `CreditedPerson` carries a name that the port joins in, so a fake
@@ -103,6 +118,7 @@ def service(
     watch_states: FakeWatchStateRepository,
     queue: FakeJobQueue,
     credits: FakeCreditRepository,
+    images: FakeImageRepository,
 ) -> TitleReadService:
     """The **real** service over fakes, not a stub.
 
@@ -110,7 +126,7 @@ def service(
     alone; this way the route, the DTO and the service's own narrowing all sit
     on the same path a request takes.
     """
-    return TitleReadService(titles, media_items, sources, watch_states, queue, credits)
+    return TitleReadService(titles, media_items, sources, watch_states, queue, credits, images)
 
 
 @pytest.fixture
@@ -224,6 +240,27 @@ async def _seed_credits(
     )
 
 
+async def _seed_images(
+    images: FakeImageRepository, title_id: uuid.UUID, entries: Sequence[Image]
+) -> None:
+    """One `replace_for_titles`, the way `usher derive` writes it -- scope and
+    rows together, because a scope derived from the rows is the defect
+    `ImageRepository.replace_for_titles`' docstring names."""
+    await images.replace_for_titles([title_id], entries)
+
+
+def _image(
+    title_id: uuid.UUID,
+    *,
+    kind: ImageKind = ImageKind.POSTER,
+    path: str = POSTER_PATH,
+    is_primary: bool = True,
+) -> Image:
+    return Image(
+        title_id=title_id, kind=kind, provider="tmdb", provider_path=path, is_primary=is_primary
+    )
+
+
 @pytest.fixture
 async def seeded(
     titles: FakeTitleRepository,
@@ -295,26 +332,31 @@ async def test_a_title_renders_its_metadata_and_availability(
     ]
 
 
-async def test_the_fields_prd_07_shows_that_are_still_unbuilt_are_absent(
-    client: httpx.AsyncClient, seeded: Seeded
+async def test_the_three_fields_m9_answered_with_a_route_are_not_keys_here(
+    client: httpx.AsyncClient, images: FakeImageRepository, seeded: Seeded
 ) -> None:
-    """`images` lands with M9's proxy, `similar` with M6's neighbours and its
-    own route, and the season hierarchy with M9's `GET /series/{id}/seasons`
-    (PRD 09's boundary call 2). An empty list would be worse than an absent
-    field: a client cannot tell "not derived yet" from "this film has no
-    cast", which is the response-shaped version of the empty-dashboard-panel
-    problem.
+    """This case was `..._still_unbuilt_are_absent` from M5 to M9 and asserted
+    four names. M9 answered all four and **only one of them became a key on
+    this response**, so the case is now about the other three and about the
+    fact that answering a field is not the same as inlining it.
 
-    **`credits` is off this list and `credits` is not a key.** M9 answers
-    PRD 07's outstanding shape decision as two keys, `cast` and `crew`, and
-    the same absence rule holds for each of them -- but its meaning changes
-    from "this milestone has not built it" to "this title has no derived
-    credits", which is
-    `test_a_title_with_no_derived_credits_carries_neither_key` and is a
-    different case with a different docstring. Asserting a key nobody will
-    ever emit would be an assertion that cannot fail."""
+    `credits` is two keys, `cast` and `crew`, because PRD 07's outstanding
+    shape decision was answered that way and "credits" names no field.
+    `similar` is `GET /titles/{title_id}/similar`: a neighbour list carries
+    staleness signals this body has nowhere to put and is refreshed on its own
+    schedule. The season hierarchy is `GET /series/{id}/seasons` and
+    `GET /seasons/{id}/episodes`, because one measured series holds 20,000
+    episodes and inlining the tree makes the length of a title response a
+    property of the show.
+
+    **Seeded *with* artwork on purpose.** The fourth name is a key now, and a
+    case asserting all four are absent would pass against a route that lost
+    `images` entirely -- which is exactly the regression the rest of this
+    file is about."""
+    await _seed_images(images, seeded.title_id, [_image(seeded.title_id)])
     body = (await client.get(f"/titles/{seeded.title_id}")).json()
-    assert not {"credits", "images", "similar", "seasons"} & set(body)
+    assert body["images"], "the premise: the one field M9 inlined is populated here"
+    assert not {"credits", "similar", "seasons"} & set(body)
 
 
 async def test_a_titles_cast_is_top_billed_first_and_crew_is_a_separate_key(
@@ -433,6 +475,155 @@ async def test_a_title_with_only_crew_carries_crew_and_not_an_empty_cast(
     assert [entry["name"] for entry in body["crew"]] == ["The Director"]
 
 
+async def test_the_images_key_is_present_and_names_no_provider_url(
+    client: httpx.AsyncClient, images: FakeImageRepository, seeded: Seeded
+) -> None:
+    """The key carries **ids and kinds**, and a client composes
+    `GET /images/{id}?w=` from an id.
+
+    PRD 07's *"clients never see provider image URLs and never need a provider
+    key"* is a property of this body rather than only of the proxy: the CDN
+    host and the provider's own path are both what a client would need to go
+    around Usher, and neither is on the wire. `is_primary` is absent for
+    `billing_order`'s reason one key over -- it *is* the order, and handing it
+    over invites a client to re-decide a question this response already
+    answered.
+
+    **The positive control comes first, and it is why.** `CDN_HOST not in
+    body` and `POSTER_PATH not in body` both pass against a route that
+    renders no `images` key at all, which is precisely the state this task
+    changes -- so the id assertion is what makes the two absence assertions
+    say anything.
+    """
+    poster = _image(seeded.title_id)
+    await _seed_images(images, seeded.title_id, [poster])
+
+    response = await client.get(f"/titles/{seeded.title_id}")
+    body = response.json()
+
+    assert body["images"] == [{"id": str(poster.id), "kind": "poster"}]
+
+    assert CDN_HOST not in response.text
+    assert POSTER_PATH not in response.text
+    assert "provider_path" not in response.text
+    assert "provider" not in response.text
+
+
+async def test_a_title_with_no_images_carries_no_key_for_the_reason_m5_chose_absence(
+    client: httpx.AsyncClient, seeded: Seeded
+) -> None:
+    """**The correction this task exists to carry.** M5's argument for absence
+    rather than `null` was that a client cannot tell "not derived yet" from
+    "this film has no cast" -- and **that argument does not expire on the day
+    the table lands.** An earlier draft of C7 shipped `"images": []` and it is
+    wrong for the same reason `"credits": []` was wrong in M5: an empty array
+    is this API stating a fact about the title, and the only fact it can
+    honestly state is that it has nothing to say.
+
+    So this is not a different rule from `cast`/`crew`'s -- it is the same
+    rule, which is why the assertion is spelled the same way and against the
+    **wire** rather than against the object: absent, `null` and `[]` are three
+    different bodies and only two of them are distinguishable on a
+    `TitleResponse`.
+    """
+    body = (await client.get(f"/titles/{seeded.title_id}")).json()
+    assert "images" not in body
+
+
+async def test_the_images_are_in_the_stored_order_and_not_id_order(
+    client: httpx.AsyncClient, images: FakeImageRepository, seeded: Seeded
+) -> None:
+    """`(is_primary DESC, id)`, and the premise is what makes this an ordering
+    test rather than a membership one.
+
+    The **backdrop is seeded first**, so its UUIDv7 id is the smaller of the
+    two and `ORDER BY id` alone would put it first -- which is the trap
+    `CLAUDE.md` names and which cost M7 five untested orderings. The guard
+    below states that, computed from the ids the fixture actually minted, so
+    a later fixture edit that re-aligns the two orders fails here rather than
+    silently ratifying a read with no sort key at all.
+
+    **`(is_primary DESC, sort_order, id)` is the plan's spelling and there is
+    no `sort_order` column.** ADR-0032's migration request deliberately left
+    it out and C2 did not smuggle it into a migration authorised for the key,
+    so `id` is first-sighting order and the one thing a re-ranking provider
+    can move in Usher's answer is which image is primary
+    (`usher.ports.repository.image` records the cost)."""
+    backdrop = _image(
+        seeded.title_id, kind=ImageKind.BACKDROP, path="/a-backdrop.jpg", is_primary=False
+    )
+    poster = _image(seeded.title_id)
+    assert backdrop.id < poster.id, (
+        "the premise: the unflagged image sorts first by id, so a read with no "
+        "is_primary key would answer in the wrong order"
+    )
+    await _seed_images(images, seeded.title_id, [backdrop, poster])
+
+    body = (await client.get(f"/titles/{seeded.title_id}")).json()
+
+    assert body["images"] == [
+        {"id": str(poster.id), "kind": "poster"},
+        {"id": str(backdrop.id), "kind": "backdrop"},
+    ]
+
+
+async def test_an_unservable_logo_is_dropped_rather_than_rendered_as_a_broken_link(
+    client: httpx.AsyncClient, images: FakeImageRepository, seeded: Seeded
+) -> None:
+    """The SVG filter, at the surface it exists for.
+
+    The provider publishes some logos as `.svg`, the proxy declines them
+    (`DECLINED_MEDIA_TYPES`), and `GET /images/{id}` for one can therefore
+    never answer. **Filter rather than annotate**: an entry whose fetch always
+    fails is not a reference, it is a broken link this API would be minting
+    deliberately, and a client renders a broken image with nothing anywhere
+    reporting the cause.
+
+    **The two other paths are the adversarial ones, and they are here rather
+    than only in `is_servable_path`'s own parameter table.** `/svg-poster.jpg`
+    kills a substring `in` spelling of the suffix test and `/A-LOGO.SVG` kills
+    one that does not lower-case first -- C4 measured that each of those wrong
+    implementations dies on exactly one parameter out of 325. Seeded here so
+    that a future author who inlines `endswith(".svg")` into this layer is
+    caught at this layer too, rather than only where the definition lives."""
+    logo = _image(seeded.title_id, kind=ImageKind.LOGO, path="/a-logo.svg", is_primary=False)
+    shouty = _image(seeded.title_id, kind=ImageKind.LOGO, path="/A-LOGO.SVG", is_primary=False)
+    decoy = _image(seeded.title_id, kind=ImageKind.POSTER, path="/svg-poster.jpg", is_primary=False)
+    poster = _image(seeded.title_id)
+    await _seed_images(images, seeded.title_id, [poster, logo, shouty, decoy])
+
+    response = await client.get(f"/titles/{seeded.title_id}")
+    body = response.json()
+
+    assert {entry["id"] for entry in body["images"]} == {str(poster.id), str(decoy.id)}
+    assert "logo" not in {entry["kind"] for entry in body["images"]}
+    assert ".svg" not in response.text.lower()
+
+
+async def test_a_title_whose_only_artwork_is_unservable_is_the_absent_case_too(
+    client: httpx.AsyncClient, images: FakeImageRepository, seeded: Seeded
+) -> None:
+    """The residual the filter creates, pinned so it is a decision rather than
+    a discovery: a title whose every image this proxy declines answers exactly
+    like a title with no artwork at all.
+
+    That is the correct *body* -- there is nothing here a client can fetch --
+    and it is the reason `usher.images.references` exists, because on the wire
+    the two are one answer and only the counter can tell an operator which
+    happened. `tests/unit/test_services_titles.py::
+    test_a_filtered_reference_is_counted_and_not_only_dropped` is the other
+    half of this case."""
+    await _seed_images(
+        images,
+        seeded.title_id,
+        [_image(seeded.title_id, kind=ImageKind.LOGO, path="/only-a-logo.svg", is_primary=True)],
+    )
+
+    body = (await client.get(f"/titles/{seeded.title_id}")).json()
+
+    assert "images" not in body
+
+
 async def test_a_credit_carries_the_role_and_no_provider_identifier(
     client: httpx.AsyncClient,
     credits: FakeCreditRepository,
@@ -503,26 +694,31 @@ async def test_a_credit_carries_the_role_and_no_provider_identifier(
 async def test_the_response_carries_every_field_of_its_own_model(
     client: httpx.AsyncClient,
     credits: FakeCreditRepository,
+    images: FakeImageRepository,
     people: FakePersonRepository,
     seeded: Seeded,
 ) -> None:
     """The guard that makes the absence *mechanism* safe.
 
-    `cast` and `crew` are absent because `TitleResponse.of` does not set them
-    and the route serialises with `exclude_unset`, which is a rule about every
-    field rather than about those two. So a field added to the model and
-    forgotten in `of` would vanish from the wire silently, and this is what
-    notices: with credits seeded the body carries the model's whole field set,
-    and without them it carries exactly that set less the two.
+    `cast`, `crew` and `images` are absent because `TitleResponse.of` does not
+    set them and the route serialises with `exclude_unset`, which is a rule
+    about every field rather than about those three. So a field added to the
+    model and forgotten in `of` would vanish from the wire silently, and this
+    is what notices: with all three seeded the body carries the model's whole
+    field set, and without them it carries exactly that set less the three.
 
     Derived from `model_fields` rather than written out, so it grows with the
-    model and there is no list to keep in step."""
+    model and there is no list to keep in step -- which is what made adding
+    `images` a one-word change to the premise rather than a hunt through this
+    file."""
     every = set(TitleResponse.model_fields)
-    assert {"cast", "crew"} < every, "the premise: the two absent-when-empty keys are model fields"
+    absent_when_empty = {"cast", "crew", "images"}
+    assert absent_when_empty < every, "the premise: the absent-when-empty keys are all model fields"
 
     without = (await client.get(f"/titles/{seeded.title_id}")).json()
-    assert set(without) == every - {"cast", "crew"}
+    assert set(without) == every - absent_when_empty
 
+    await _seed_images(images, seeded.title_id, [_image(seeded.title_id)])
     lead = await _seed_person(people, "The Lead")
     await _seed_credits(
         credits,
@@ -572,10 +768,19 @@ async def test_the_absent_keys_are_still_described_in_the_schema_and_never_as_nu
     assert {"id", "name", "availability", "watch_state"} <= set(properties), (
         "the premise: the response schema still describes its own fields"
     )
-    for key in ("cast", "crew"):
+    for key in ("cast", "crew", "images"):
         assert properties[key]["type"] == "array"
         assert key not in schema["required"]
         assert "anyOf" not in properties[key]
+
+    # And `kind` reaches a generated client as the enum rather than as a bare
+    # string -- the difference between a client that can switch on a poster
+    # and one that compares spellings. `ImageKind` has five members and M9
+    # emits three, which is `m09a`'s call and not this schema's, so the
+    # assertion is that the vocabulary is *there* rather than which members.
+    image = app.openapi()["components"]["schemas"]["ImageResponse"]
+    assert set(image["properties"]) == {"id", "kind"}
+    assert app.openapi()["components"]["schemas"]["ImageKind"]["enum"]
 
 
 async def test_an_unknown_title_is_a_404_in_prd_07s_envelope(

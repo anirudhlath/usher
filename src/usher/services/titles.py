@@ -33,23 +33,51 @@ wrote, measured, and deliberately left uncalled.
 """
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 
+from opentelemetry import metrics
+
 from usher.domain.enums import ENRICHMENT_RANK, EnrichmentState, HdrFormat
+from usher.domain.image import Image
 from usher.domain.jobs import JobKind, JobPriority
 from usher.domain.people import CreditKind
 from usher.domain.title import Title
 from usher.domain.watch import WatchState
+from usher.ports.images import is_servable_path
 from usher.ports.jobs import JobQueue, JobRequest
 from usher.ports.repository import (
     CreditedPerson,
     CreditRepository,
+    ImageRepository,
     MediaItemRepository,
     SourceRepository,
     TitleRepository,
     WatchStateRepository,
 )
 from usher.telemetry import current_traceparent
+
+_meter = metrics.get_meter("usher.images")
+
+# **A filter with no counter is invisible**, which is the requirement
+# `is_servable_path`'s own docstring hands to this task: once the unservable
+# rows are dropped, *"this catalog has no logos"* and *"this proxy dropped all
+# of them"* produce the identical body and the identical empty space on a
+# screen, and nothing anywhere reports which happened.
+#
+# **One counter with an `outcome` label rather than two counters**, on
+# `usher.ingest.items`' precedent, because the answer an operator needs is a
+# *ratio* and a bare drop count has no denominator: 4,000 unservable
+# references is a broken deployment on a small catalog and one title in
+# seventeen on a large one. **Both outcomes are recorded on every read,
+# zeros included** -- `usher.curation.dropped`'s rule, and it matters more
+# here than there, because a label absent from the export is exactly the
+# silence this instrument exists to break.
+_image_references = _meter.create_counter(
+    "usher.images.references",
+    unit="1",
+    description="Artwork references on a title read, by whether the proxy can serve them",
+)
 
 # What a copy on a source that has since been deleted renders as. A
 # `KeyError` here is a 500 on the screen an operator opens to find out what
@@ -115,6 +143,19 @@ class TitleDetail:
     # answer for such a title is empty.
     cast: tuple[CreditedPerson, ...]
     crew: tuple[CreditedPerson, ...]
+    # This title's artwork in `(is_primary DESC, id)`, **already filtered** to
+    # what `GET /images/{id}` can serve. Empty here, absent on the wire, on
+    # exactly `cast`/`crew`'s terms.
+    #
+    # The filtering happens in the service rather than in the DTO because
+    # `is_servable_path` is the proxy's own definition and a second copy of it
+    # in `api/dto/` would be a provider-shaped inference in the layer PRD 01's
+    # no-source-concept rule is about (`usher.ports.images` says so from the
+    # other side). It happens *here* rather than in the repository because
+    # `ImageRepository.list_for_title` is the faithful record of what the
+    # provider published, which is what an operator debugging a missing logo
+    # needs one `SELECT` to find.
+    images: tuple[Image, ...]
     # Whether this read moved an enrichment job to the front of the queue.
     # Returned rather than kept internal because it is what makes the
     # read-through path observable end to end -- PRD 10's "promotion latency
@@ -131,6 +172,7 @@ class TitleReadService:
         watch_states: WatchStateRepository,
         queue: JobQueue,
         credits: CreditRepository,
+        images: ImageRepository,
     ) -> None:
         self._titles = titles
         self._media_items = media_items
@@ -138,20 +180,28 @@ class TitleReadService:
         self._watch_states = watch_states
         self._queue = queue
         self._credits = credits
+        self._images = images
 
     async def detail(self, title_id: uuid.UUID, *, user_id: uuid.UUID) -> TitleDetail | None:
         """One title, everything local about it, and a promotion if it needs
         one. `None` when no such title exists -- the route turns that into a
         404, and a raise would make the common case travel an exception path.
 
-        **Six reads over five repositories, none of them per-copy, per-credit
-        or per-person**: the title, its media items, the source list (a
-        household has sources in the single digits, and one batched read
-        serves every badge), this user's watch state, and one
-        `CreditRepository.list_for_title` per `CreditKind`. It was four reads
-        over four repositories until M9's `credits` key; C7's `images` key is
-        the sixth repository and the seventh read, and whichever of the two
-        lands second corrects this sentence.
+        **Seven reads over six repositories, none of them per-copy,
+        per-credit, per-person or per-image**: the title, its media items, the
+        source list (a household has sources in the single digits, and one
+        batched read serves every badge), this user's watch state, one
+        `CreditRepository.list_for_title` per `CreditKind`, and this title's
+        artwork. It was four reads over four repositories until M9's `credits`
+        key and six over five until its `images` key.
+
+        **Those two numbers are asserted rather than described.**
+        `tests/unit/test_services_titles.py::
+        test_the_read_count_this_docstring_states_is_the_count_it_makes`
+        parses the words above and counts the awaited calls against the fakes,
+        because a plan cannot know which of two concurrent tasks merges last
+        and a sentence nothing checks is a sentence that goes stale on the
+        first one that does.
 
         The two credit reads are two rather than one because `list_for_title`
         applies its `limit` to the *ordered* result: a single `kind=None` read
@@ -160,7 +210,9 @@ class TitleReadService:
 
         There is no `PersonRepository` here and there must not be one --
         `CreditedPerson` carries the person's name joined in, which is what
-        keeps a cast list from being one read per credit.
+        keeps a cast list from being one read per credit. The images read is
+        the same shape from the other side: it returns whole rows, so nothing
+        here resolves an id into anything.
         """
         title = await self._titles.get(title_id)
         if title is None:
@@ -170,6 +222,7 @@ class TitleReadService:
         watch_state = await self._watch_states.get_for_title(user_id, title_id)
         cast = await self._credits.list_for_title(title_id, kind=CreditKind.CAST, limit=CAST_LIMIT)
         crew = await self._credits.list_for_title(title_id, kind=CreditKind.CREW, limit=CREW_LIMIT)
+        images = self._servable(await self._images.list_for_title(title_id))
         promoted = await self._promote(title)
         return TitleDetail(
             title=title,
@@ -198,8 +251,47 @@ class TitleReadService:
             watch_state=watch_state,
             cast=tuple(cast),
             crew=tuple(crew),
+            images=images,
             promoted=promoted,
         )
+
+    @staticmethod
+    def _servable(images: Sequence[Image]) -> tuple[Image, ...]:
+        """Drop the artwork `GET /images/{id}` can never answer for, and say
+        how much was dropped.
+
+        **Filter rather than annotate**, decided in `usher.ports.images` and
+        restated here because this is where it takes effect: a reference whose
+        fetch will always fail is not a reference, it is a broken link this API
+        would be minting deliberately, and the client renders a broken image
+        with nothing reporting the cause. There is no wire field for it -- a
+        `servable: false` entry is a discriminator whose only honest client
+        behaviour is to skip the entry, i.e. this filter relocated into every
+        client.
+
+        **The predicate is imported, never re-spelled.** `endswith(".svg")`
+        written out here would be a second definition of a fact the proxy owns,
+        and the two obvious wrong spellings of it -- a substring `in`, and a
+        test that does not lower-case -- each die on exactly one adversarial
+        path in `is_servable_path`'s own parameter table (`/svg-poster.jpg`,
+        `/.svg.jpg`, `/A-LOGO.SVG`). The cases below seed those paths anyway,
+        so a future inlining is caught here as well as there.
+
+        It is a *prediction from a filename* and `extension_for` stays the
+        authority, so a divergence is possible in both directions and quiet in
+        both: an unservable row that slips through is a broken image, and a
+        servable row filtered out is indistinguishable from a title that never
+        had one. The counter is what makes the second visible in aggregate.
+        """
+        kept = tuple(one for one in images if is_servable_path(one.provider_path))
+        # Recorded even when both are zero. A title with no artwork at all
+        # publishes `served=0, unservable=0`, which is what lets an operator
+        # tell an empty catalog from a filtered one; a counter that only spoke
+        # when it fired would leave the two series indistinguishable until the
+        # first drop, which is the state this whole instrument is about.
+        _image_references.add(len(kept), {"outcome": "served"})
+        _image_references.add(len(images) - len(kept), {"outcome": "unservable"})
+        return kept
 
     async def _promote(self, title: Title) -> bool:
         """Move this title's enrichment to the front of the queue.

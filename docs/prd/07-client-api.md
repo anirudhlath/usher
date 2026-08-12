@@ -150,9 +150,13 @@ be added if a client turns out to need flexible field selection.
 > `query`, `requested_mode`, `mode`, `semantic_coverage`, `expanded_query` and
 > `results`; **`expanded_query` is present-and-null** rather than absent, which
 > is deliberately not `GET /titles/{id}`'s absence convention — an absent
-> `images` says *this server has no such capability yet*, a null
-> `expanded_query` says *nothing was substituted on this search*, which is a
-> fact about the request a client acts on every time. **A blank or
+> `images` says *this title has no artwork to offer*, a null
+> `expanded_query` says *nothing was substituted on this search*, and the
+> difference is that the second is a fact about **this request** which a client
+> acts on every time, where the first is a fact about the resource.
+> (That clause read *"this server has no such capability yet"* until M9 filled
+> the key; the distinction it draws is unchanged and its example was one
+> milestone out of date.) **A blank or
 > whitespace-only `q` is `200` with no results and buys no completion** — a
 > search box sends one between keystrokes — and **`?limit=` declares a floor
 > and no ceiling**, because `USHER_SEARCH_RESULT_LIMIT` is the ceiling and
@@ -182,14 +186,30 @@ be added if a client turns out to need flexible field selection.
 | `GET /people/{id}` ✅ | Filmography grouped by role |
 | `GET /collections/{id}` ✅ | Franchise contents with ownership completeness |
 
-> **Built in M5: `GET /titles/{id}`, narrowed.** ✅ It carries metadata,
-> `enrichment_state`, `enrichment_error`, `availability` and `watch_state` —
-> every field backed by a table [M4](09-roadmap.md) fills. `credits`, `images`,
-> `similar` and the season/episode hierarchy are **absent rather than empty**:
-> `Person`/`Credit` land with M7 and `Image` with M9, each re-derived from
-> `raw_payloads` with no second network call ([09](09-roadmap.md)'s M4 boundary
-> call 2), and an empty list would be indistinguishable from a film with no
-> cast.
+> **Built in M5 narrowed, and M9 answered all four narrowings.** ✅ M5 shipped
+> metadata, `enrichment_state`, `enrichment_error`, `availability` and
+> `watch_state` — every field backed by a table [M4](09-roadmap.md) fills — and
+> left `credits`, `images`, `similar` and the season/episode hierarchy **absent
+> rather than empty** ([09](09-roadmap.md)'s M4 boundary call 2). This
+> paragraph named those four in the future tense for four milestones; it is
+> rewritten once, whole, now that all four are answered, because four M9 tasks
+> made it false in four different ways and a paragraph corrected a clause at a
+> time is one whose last clause is always wrong. **Two became keys on this
+> response and two became routes**: `credits` is `cast` and `crew` (below),
+> `images` is a list of ids and kinds (below), `similar` is
+> `GET /titles/{id}/similar`, and the hierarchy is `GET /series/{id}/seasons`
+> plus `GET /seasons/{id}/episodes`. Both tables are re-derived from
+> `raw_payloads` with no second network call ([ADR-0016](decisions/0016-raw-payloads-cache-providers-not-sources.md)).
+>
+> ⚠️ **The absence convention survives all four and its meaning has changed.**
+> An empty list would still be indistinguishable from a film with no cast, so a
+> title with no derived credits carries neither `cast` nor `crew` and a title
+> with no artwork carries no `images` — never `[]`, never `null`. What absence
+> said until M9 was *"this server has not built it"*; what it says now is
+> *"this title has nothing here"*. **An earlier draft of the `images` work
+> shipped `"images": []`** on the reasoning that the convention was a statement
+> about unbuilt milestones; it is not, and the correction is the sentence
+> above.
 >
 > **M9 answered the credits shape decision, and the answer is two keys.** ✅
 > M7 landed `Person`, `Credit` and `Collection` as tables and this route
@@ -209,7 +229,6 @@ be added if a client turns out to need flexible field selection.
 > spelling (`billing_order or 0`) puts an unbilled crew member above the lead.
 > `department` is absent for the weaker reason that this shape does not group
 > by it, and adding a field later is additive where removing one is not.
-> `Image` is unchanged and still M9's from both ends.
 >
 > ⚠️ **An underived title and a genuinely uncredited one are indistinguishable
 > on this route, and that is a recorded residual rather than a fix.** Both
@@ -223,6 +242,41 @@ be added if a client turns out to need flexible field selection.
 > nothing. Closing it is a column, a migration and a writer that M9 does not
 > contain; a `credits_derived` flag that nothing sets would be worse than the
 > silence.
+>
+> **`images` is a list of ids and kinds, and that is the whole entry.** ✅
+> `[{"id": "…", "kind": "poster"}, …]`, in the stored `(is_primary DESC, id)`,
+> present only when it has members. **A client composes
+> `GET /images/{id}?w=` from an id**, which is what makes *"clients never see
+> provider image URLs and never need a provider key"* a property of this
+> response body rather than only of the proxy: `provider` and `provider_path`
+> are exactly what a client would need to go around this API, and neither is on
+> the wire. There is no rendered `src` either — a URL built at serialisation
+> time fixes a width, and the width is the client's to choose through the
+> ladder ([ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)).
+> `is_primary` is absent for `billing_order`'s reason one key over: it *is* the
+> order, and it is a judgement Usher's derivation makes rather than something
+> the provider publishes, so a client re-sorting on it would be re-deciding on
+> a flag it cannot interpret. `width`/`height`/`language` are absent for the
+> weaker reason — the stored dimensions are the provider's originals rather
+> than the size of the bytes a rung will answer with — and adding them is
+> additive.
+>
+> ⚠️ **Artwork this deployment cannot serve is filtered out of the list rather
+> than annotated in it, and that filter is reported off the wire rather than
+> on it.** The provider publishes some logos as `.svg`; the proxy declines that
+> type because its width ladder cannot bound it (ADR-0032), so a reference to
+> one is a link `GET /images/{id}` can never answer. Rendering it anyway would
+> be this API minting a broken link deliberately, and a `servable: false` field
+> would be a discriminator whose only honest client behaviour is to skip the
+> entry — this filter relocated into every client. The residual is that **a
+> title whose only artwork is declined answers exactly like a title with
+> none** — roughly one title in seventeen has an SVG logo, measured across 51
+> popular and top-rated titles. Unlike the credits residual above this one is
+> *reported*: `usher.images.references` ([10](10-telemetry-and-dashboards.md))
+> counts every read's references `served` against `unservable`, because a
+> filter with no counter makes "this catalog has no logos" and "this proxy
+> dropped all of them" the same answer. The row itself is kept in `images`, so
+> an operator debugging a missing logo finds it with one `SELECT`.
 >
 > **`GET /titles/{id}/similar` is M9's, and it now ships.** ✅ This sentence
 > said "M6's" until M6 ran and added no HTTP route at all
@@ -584,10 +638,14 @@ does not carry a `failed` tier.
   "year": 2021,
   "enrichment_state": "stub",     // overview not yet fetched
   "overview": null,
-  // no "images" key, and no "cast" or "crew" -- absent, never null.
-  // The earlier draft of this example carried "images": {"poster": null},
-  // which is the exact shape the paragraph above refuses. "credits" is not
-  // a key at all: M9 answered that shape decision as two separate keys.
+  // no "images", "cast" or "crew" key -- absent, never null and never [].
+  // All three are built; this title simply has nothing for any of them, and
+  // that is the whole of what an absent key means since M9. Two earlier
+  // drafts of this example got it wrong in opposite directions: one carried
+  // "images": {"poster": null}, the shape the paragraph above refuses, and
+  // one carried "images": [] on the reasoning that the convention expired
+  // when the table landed. "credits" is not a key at all -- M9 answered that
+  // shape decision as two separate keys.
   "availability": [ { "source": "Emby", "quality": "2160p HDR10" } ],
   "watch_state": { "position_seconds": 1840, "played": false }
 }

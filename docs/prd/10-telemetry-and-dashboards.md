@@ -166,6 +166,7 @@ is maintained rather than aspirational.
 | `usher.embedding.duration` | histogram | — | ✅ M6 |
 | `usher.cache.hits` | counter | cache, freshness | ✅ M9 |
 | `usher.cache.misses` | counter | cache | ✅ M9 |
+| `usher.images.references` | counter | outcome | ✅ M9 |
 | `usher.search.embeddings.stale` | gauge | — | ✅ M6 |
 | `usher.search.embeddings.refused` | gauge | — | ✅ M6 |
 | `usher.similarity.neighbors.stale` | gauge | — | ✅ M7 |
@@ -268,8 +269,34 @@ written down here for the reason the paragraph above gives — `continue-watchin
   keeps the pair at four series and makes "what fraction of served screens were
   stale" a group-by rather than an inference.
 
+**`usher.images.references` exists because a filter with no counter is
+invisible.** `GET /titles/{id}`'s `images` key drops references the image
+proxy can never serve — the provider publishes some logos as `.svg` and
+[ADR-0032](decisions/0032-the-image-proxy-clamps-to-a-ladder.md)'s width
+ladder cannot bound that type — so without a counter *"this catalog has no
+logos"* and *"this proxy dropped all of them"* are the same body, the same
+empty space on a screen, and the same answer to an operator holding only the
+API. Three things a dashboard query has to know:
+
+- **`outcome` is two values, `served` and `unservable`**, and both are
+  recorded on **every** read, zeros included. A drop count with no denominator
+  cannot be read: 4,000 unservable references is a broken deployment on a small
+  catalog and roughly one title in seventeen on a large one (measured across 51
+  popular and top-rated titles). And a series absent from the export is
+  indistinguishable from a series nobody counts — `usher.curation.dropped`'s
+  rule below, and it matters more here, because silence is the exact condition
+  this instrument exists to break.
+- **It counts *references on a read*, not images in the catalog.** The
+  population is per request, so a popular title's artwork is counted once per
+  open; the ratio is the readable number and the absolute is proportional to
+  traffic.
+- **A rising `unservable` share is not by itself an incident.** It is the
+  provider publishing more SVG logos, and the reopening trigger for ADR-0032 is
+  a household needing those logos *rendered*, whose answer is a rasteriser
+  rather than a wider ladder.
+
 **`usher.curation.rows` and `usher.curation.dropped` are the milestone's only
-two metrics, and neither is about money.** This document's own first principle
+two curation metrics, and neither is about money.** This document's own first principle
 puts LLM spend on Postgres — `llm_calls` is the record — so there is no
 `usher.llm.*` series at all. What these two answer is the question no
 `llm_calls` row can: **whether the validator is eating the output.** A call
