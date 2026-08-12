@@ -31,8 +31,9 @@ from tests.fakes.llm_call_repository import FakeLLMCallRepository
 from tests.fakes.llm_client import FakeLLMClient
 from tests.fakes.media_item_repository import FakeMediaItemRepository
 from tests.fakes.title_repository import FakeTitleRepository
+from tests.fakes.watch_state_repository import FakeWatchStateRepository
 from usher.api.app import create_app
-from usher.api.deps import get_search_service
+from usher.api.deps import get_default_user_id, get_search_service
 from usher.api.dto.problem import PROBLEM_MEDIA_TYPE, ProblemCode
 from usher.config import Settings
 from usher.domain.enums import TitleKind
@@ -57,6 +58,11 @@ UNREACHABLE_DSN = "postgresql+asyncpg://usher:usher@127.0.0.1:1/usher"
 # wrong order visible rather than a coin flip.
 _FIRST = uuid.UUID(int=0x01)
 _SECOND = uuid.UUID(int=0x02)
+
+#: The household `get_default_user_id` is overridden to answer with. Fixed,
+#: so a case can assert the id that reached the port is the id the
+#: dependency resolved rather than merely that some id did.
+_VIEWER = uuid.UUID(int=0xA1)
 
 _CATALOG: dict[uuid.UUID, str] = {
     _FIRST: "A Vacuum in Winter",
@@ -127,15 +133,36 @@ class _Expander:
         return None
 
 
+class _RecordingWatchStates(FakeWatchStateRepository):
+    """`FakeWatchStateRepository`, recording the household it was asked about.
+
+    The route's household is invisible in a response body -- the same rows come
+    back either way -- so the only place it is observable is the argument that
+    crossed the port.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.households: list[uuid.UUID] = []
+
+    async def played_title_ids(
+        self, user_id: uuid.UUID, title_ids: Sequence[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        self.households.append(user_id)
+        return await super().played_title_ids(user_id, title_ids)
+
+
 async def _service(
     index: SearchIndex,
     *,
     embedder: FakeEmbedder | None = None,
     expander: _Expander | None = None,
     result_limit: int = 50,
+    watch_states: _RecordingWatchStates | None = None,
 ) -> SearchService:
     titles = FakeTitleRepository()
     media_items = FakeMediaItemRepository()
+    households = _RecordingWatchStates() if watch_states is None else watch_states
     for title_id, name in _CATALOG.items():
         await titles.add(
             Title(
@@ -151,6 +178,7 @@ async def _service(
         _ScriptedSuggest(),
         titles,
         media_items,
+        households,
         result_limit=result_limit,
         embedder=embedder,
         expander=None if expander is None else expander.service,
@@ -170,13 +198,19 @@ def _settings(**overrides: Any) -> Settings:
 
 
 def _app(service: SearchService, *, settings: Settings | None = None) -> FastAPI:
-    """The shipped app with one dependency replaced.
+    """The shipped app with two dependencies replaced.
 
-    `get_search_service` and nothing else -- the router, the DTO and the real
-    `SearchService` all stay on the path a request takes.
+    `get_search_service` and `get_default_user_id` -- the router, the DTO and
+    the real `SearchService` all stay on the path a request takes. The second
+    is substituted for the same reason as the first and not for a new one:
+    `get_default_user_id` runs a `SELECT` (and, on a first run, an `INSERT`),
+    and the app in this file points at a database nothing listens on. Which row
+    it resolves is `tests/integration/test_pipeline_deps.py`'s question; what
+    is asserted here is that whatever it resolves reaches the blend.
     """
     built = create_app(settings or _settings())
     built.dependency_overrides[get_search_service] = lambda: service
+    built.dependency_overrides[get_default_user_id] = lambda: _VIEWER
     return built
 
 
@@ -208,6 +242,53 @@ async def client(hits: _ScriptedIndex) -> AsyncIterator[httpx.AsyncClient]:
     deliberately."""
     async for connected in _client(_app(await _service(hits))):
         yield connected
+
+
+async def test_the_route_ranks_for_the_household_the_dependency_resolved(
+    hits: _ScriptedIndex,
+) -> None:
+    """The household reaches the blend, and it comes off `DefaultUserIdDep`
+    rather than off the query string.
+
+    Fails: a route that never resolves one, which renders **identically** --
+    the same rows in the same order with the same scores, no error and nothing
+    in the body to say the watch-state term never ran. That invisibility is the
+    whole reason this case asserts on the argument that crossed the port
+    instead of on the response.
+
+    Fails equally on a `?user_id=` parameter, which is the other way this could
+    have been built: `openapi.json`'s parameter list is asserted below to hold
+    exactly the three a client may choose, and a household is not one of them.
+    """
+    households = _RecordingWatchStates()
+    app = _app(await _service(hits, watch_states=households))
+    async for connected in _client(app):
+        answer = await connected.get("/search", params={"q": "vacuum"})
+
+    assert answer.status_code == 200
+    assert len(answer.json()["results"]) == 2, (
+        "the premise: the search ranked something, so the household read was reachable"
+    )
+    assert households.households == [_VIEWER]
+
+
+async def test_the_household_is_not_a_query_parameter(client: httpx.AsyncClient) -> None:
+    """PRD 05 keeps `SearchFilters` a closed vocabulary with no user field, and
+    this is that rule where a client could see it: `q`, `mode` and `limit` are
+    the whole of what a caller chooses.
+
+    Fails: a `user_id`/`user` query parameter, which would let any caller rank
+    a search against any household's watch history -- and which is the shape
+    the parameter would have taken if it had gone on `SearchFilters`, since
+    every field of that is a flag on `usher search` and a parameter here.
+    """
+    document = (await client.get("/openapi.json")).json()
+    declared = {
+        one["name"]
+        for one in document["paths"]["/search"]["get"]["parameters"]
+        if one["in"] in {"query", "path"}
+    }
+    assert declared == {"q", "mode", "limit"}
 
 
 async def test_a_fused_request_served_without_an_embedder_reports_both_modes(

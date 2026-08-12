@@ -59,7 +59,7 @@ from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Query, status
 
-from usher.api.deps import SearchServiceDep
+from usher.api.deps import DefaultUserIdDep, SearchServiceDep
 from usher.api.dto.problem import ProblemCode, ProblemResponse
 from usher.api.dto.search import SearchResponse
 from usher.api.errors import ProblemException
@@ -116,6 +116,15 @@ _SEARCH_FAILURES: Final[dict[int | str, dict[str, Any]]] = {
 )
 async def search(
     search_service: SearchServiceDep,
+    # **The household, and it is a dependency rather than a query parameter.**
+    # PRD 05 keeps `SearchFilters` a closed vocabulary with no user field, and
+    # the reason is exactly this route: anything on the query string is
+    # something a caller chooses, and "whose watch history ranks this" is not a
+    # client's to choose. Until PRD 01's authentication seam is filled it is
+    # the singleton default user, resolved the same way `PUT /watch/...`
+    # resolves it -- so the day a request carries an identity, one dependency
+    # changes and this line does not.
+    user_id: DefaultUserIdDep,
     q: Annotated[
         str,
         Query(
@@ -158,9 +167,18 @@ async def search(
     The `try` wraps the call and nothing else. `SemanticSearchUnavailable` is
     raised before any retrieval, so there is no partial answer to discard and
     no second failure mode hiding inside the block.
+
+    **The same `q` can answer differently for two households**, because the
+    blend now carries a watch-state term. Nothing in the response says which
+    household answered, and that is not the omission `requested_mode` beside
+    `mode` exists to prevent: a degraded mode is a deployment state a client
+    cannot otherwise observe, whereas every request to this route carries a
+    household by construction, so there is no unpersonalised answer for a field
+    to distinguish. `SearchService`'s own docstring records what changes when
+    authentication makes one reachable.
     """
     try:
-        answer = await search_service.search(q, mode=mode, limit=limit)
+        answer = await search_service.search(q, mode=mode, limit=limit, user_id=user_id)
     except SemanticSearchUnavailable as exc:
         # Not narrowed to full text here either, and the service is right to
         # refuse rather than answer: the caller asked the one question

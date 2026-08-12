@@ -3477,3 +3477,89 @@ after it survived. The one scan this task itself adds
 `api/routers/unmatched.py` with every docstring **stripped**, precisely so a
 module whose prose names `JobQueue` and `RowCache` on purpose can say why it
 holds neither.
+## M9 Task F4 — the watch-state and recency terms, and a `NameError` scored as a twelve-case kill (2026-08-11)
+
+**12 plants over `services/search.py`, `api/routers/search.py` and `cli.py` —
+10 behavioural targets, all KILLED; 2 equivalent-mutant controls, both
+SURVIVED and both passing every gate step separately; 1 BROKEN-MUTATION
+re-spelled and then killed. 0 BAD-ANCHOR, 0 DID-NOT-RUN, 0 HUNG.** Run in
+place from a harness at `/tmp/m9-exec/F4/plants.py`, **outside the tree** for
+V1's reason, with the plant list and its expected verdict written down first,
+`PYTHONDONTWRITEBYTECODE=1` and a `__pycache__` sweep under **both** `src/` and
+`tests/` before every run, `compile()` as the dry run, an exact anchor count
+asserted before each plant, the landing spelled `old not in landed and new in
+landed`, and every restore verified by `md5sum` against a pre-plant digest.
+Committed before sweeping, so `git status` is the verification.
+
+**Selection:** `test_services_search.py`, `test_api_search.py`, `test_cli.py`,
+`test_telemetry_search.py` (unit) and `test_services_search.py` (integration) —
+133 cases, 15–19 s a run, green before and after. Scoped rather than
+whole-suite for B2's reason: `tests/integration/test_sse_end_to_end.py` is
+intermittent on this tree and predates M9, and a sweep scored on "did the run
+fail" cannot include a flaky case.
+
+| plant | verdict | cases failed |
+|---|---|---|
+| P1 the watch-state term dropped from the blend, the household read intact | KILLED | 3 |
+| P2 the household read issued with a placeholder id when there is none | KILLED | 2 — both read-count cases, one per arm |
+| P3 the recency term deleted | KILLED | 1 |
+| P4 an absent year scored rather than excluded (`year or 1`) | KILLED | 2 |
+| P5 the watch-state term inverted into a demotion | KILLED | 3 |
+| P6 `owned` 0.15 → 0.10, breaking the M6 ratio and no ordering | KILLED | **1 — the numeric case alone** |
+| P7 the household read scoped to `list(_ALL)` | **BROKEN-MUTATION** | (12, on a `NameError`) |
+| P7b the household read scoped to `list(owned)` | KILLED | 5 |
+| P8 the route never resolves a household | KILLED | 1 |
+| P9 `usher search` never resolves one | KILLED | 1 |
+
+**P6 is the round's yield and it is a result about the *numeric* case.**
+Re-balancing `owned` against `relevance` reorders **nothing** — every ordering
+case in the file compares two rows whose owned-ness or popularity differs in
+the same direction under either weight — so all ten ordering cases stay green
+and exactly one assertion fails:
+`test_with_no_household_and_no_year_the_score_is_the_one_m6_computed`, whose
+expectation is two literals rather than a read of `_WEIGHTS`. **A weight table
+is not pinned by any number of ordering cases**; a re-weighting that reordered
+nothing would change every score on the wire and be invisible. Same family as
+D4's `TICKET_TTL_SECONDS` and B9's `CAST_LIMIT` — a constant whose value only a
+literal-valued case can hold — arriving at a *ratio* between two constants
+rather than at one constant's magnitude.
+
+🔴 **P7 is the recorded `NameError` trap, and the first spelling produced a
+plausible twelve-case kill across four files.** *"The household read unbounded
+by the hits"* was first spelled `played_title_ids(user_id, list(_ALL))` — and
+`_ALL` is defined nowhere, so the expression raised inside `_rank`, every
+ranked search in the selection errored, and the log named twelve cases
+including three that have nothing to do with the household. The existing rule
+covers an `except` clause; this is the same defect in an ordinary argument
+position, on the path *every* case reaches rather than only the failing ones,
+which is what makes the false kill so large and so plausible. **The wider form:
+check a plant's new identifiers are bound before believing any verdict, and
+treat a kill whose failing cases are far broader than the plant's subject as a
+tell.**
+
+**And the defect P7 named is only half spellable, which is the design result
+underneath it.** `played_title_ids` takes a `Sequence[uuid.UUID]`; the service
+holds the hydrated ids and nothing else, and the port has no "the household's
+whole history" call at all — so *unbounded* cannot be written here (B6's OFFSET
+finding, arriving at a port argument instead of a cursor). What *is* spellable
+is the read scoped to the **wrong** set the service happens to hold, and P7b —
+`list(owned)`, a plausible copy-paste from the line above — fails 5 cases
+including `test_the_household_read_is_bounded_by_the_hits`, which is the case
+written for it.
+
+| control | `ruff check` | `ruff format --check` | `mypy src tests` | `lint-imports` | `pytest` (selection) |
+|---|---|---|---|---|---|
+| C1 `_WEIGHTS`' `played` and `recency` entries in the other order | PASS | PASS | PASS | PASS | PASS (133) |
+| C2 one sentence of `_recency_term`'s docstring reworded | PASS | PASS | PASS | PASS | PASS (133) |
+
+C1 is a fact about the *code* rather than about what the tools look at:
+`_WEIGHTS` is a dict literal with two distinct, independent keys read only by
+`_WEIGHTS[name]` inside `_blend`, and a mapping's insertion order cannot reach
+a weighted sum. It is deliberately **not** an `__all__` reorder, which `RUF022`
+rejects, and it is not spellable as an argument reorder, which is A5's entry's
+reason for checking rather than assuming. C2 was checked first against
+`grep -rln "getdoc\|__doc__\|ast.unparse\|getsource" tests/` — the
+twenty-four files it finds scan `ports/`, `services/curation*`,
+`services/home_sequential.py`, `services/jobs.py`, `adapters/` and several
+`api/` modules, and **none of them reads `services/search.py`**; the one scan
+this task itself adds parses `services/home.py` and `services/rows/*.py`.
